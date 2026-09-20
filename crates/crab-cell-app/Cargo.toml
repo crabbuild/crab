@@ -15,6 +15,7 @@ crab-cell-runtime.workspace = true
 [dev-dependencies]
 crab-ltx = { workspace = true, features = ["replica"] }
 crab-storage.workspace = true
+ed25519-dalek.workspace = true
 object_store.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

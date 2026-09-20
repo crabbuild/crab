@@ -1171,6 +1171,17 @@ pub async fn serve(config: Config) -> Result<()> {
     )?;
     cell_node.install_owned_component(CELL_COMPONENT_RELEASE_STORE, Arc::clone(&release_store))?;
     cell_node.install_owned_component(CELL_COMPONENT_CAPACITY, Arc::new(cell_capacity.clone()))?;
+    cell_node.require_owned_components([
+        CELL_COMPONENT_REPOSITORY_ROUTER,
+        CELL_COMPONENT_PEER_RECEIVER,
+        CELL_COMPONENT_FOLLOWER_STORE,
+        CELL_COMPONENT_NODE_LOG_TRANSPORT,
+        CELL_COMPONENT_NODE_PUBLISHER,
+        CELL_COMPONENT_CATALOG,
+        CELL_COMPONENT_SCHEDULER_STATUS,
+        CELL_COMPONENT_RELEASE_STORE,
+        CELL_COMPONENT_CAPACITY,
+    ])?;
     let durability_application = startup.identity.application();
     let server = Arc::new(Server {
         repositories: repositories.into(),

@@ -575,15 +575,17 @@ infrastructure; it does not create a second receipt format or scheduler.
    mark any production-readiness row complete.
 
 Current boundary: 018–021 are implemented and verified. 022–023 now provide a
-handwritten full-primitive author contract plus fail-closed serving/maintenance
-host `start`/`status`, readiness, bounded ownership of the long-lived server
-coordination loops and the production router/peer/follower/transport
-components, admission-before-facility-drain ordering, and deadline-aware drain.
-024 provides bounded profile constructors, deterministic streaming execution,
+handwritten full-primitive author contract, a typed owner/source-loss takeover
+proof for SQL, KV, Blob, Queue, Cron, Workflow, Activity, and Effects, plus
+fail-closed serving/maintenance host `start`/`status`, readiness, bounded
+ownership of the long-lived server coordination loops and the production
+router/peer/follower/transport components, required component slots,
+admission-before-facility-drain ordering, and deadline-aware drain. 024
+provides bounded profile constructors, deterministic streaming execution,
 per-primitive verified-progress validation, measured run artifacts, preflight
 guards, pinned-signer validation, and fail-closed release packaging. These rows
-remain partial until full operator-facility ownership and protected
-provider/Kubernetes/scale receipts exist.
+remain partial until full operator-facility construction ownership and
+protected provider/Kubernetes/scale receipts exist.
 
 ### Shared release rule
 

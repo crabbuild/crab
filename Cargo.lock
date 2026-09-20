@@ -2193,6 +2193,7 @@ dependencies = [
  "crab-cell-runtime",
  "crab-ltx",
  "crab-storage",
+ "ed25519-dalek",
  "object_store",
  "tempfile",
  "tokio",

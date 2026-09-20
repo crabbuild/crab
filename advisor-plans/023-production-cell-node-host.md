@@ -16,7 +16,7 @@
 - **Depends on**: plan 022
 - **Category**: architecture / lifecycle / DX
 - **Planned at**: commit `892720ce6a6`, 2026-09-19
-- **Implementation status**: provider-neutral host owns serving and offline-maintenance runtime construction, exposes canonical `start`/`status` lifecycle calls, retains the signal/catalog/projection/durability/follower/heartbeat/lease/release/scheduler loops in its bounded task group, retains the production catalog, capacity report, router, peer receiver, follower store, node-log transport, publisher, and release store behind typed host-owned component slots, requires that supervisor before readiness, cancels node admission before reverse provider-facility drains, and serializes deadline-aware shutdown/drain callers; full operator-facility ownership and multi-process public-host qualification remain open
+- **Implementation status**: provider-neutral host owns serving and offline-maintenance runtime construction, exposes canonical `start`/`status` lifecycle calls, retains the signal/catalog/projection/durability/follower/heartbeat/lease/release/scheduler loops in its bounded task group, retains the production catalog, capacity report, router, peer receiver, follower store, node-log transport, publisher, and release store behind typed host-owned component slots, requires every declared production component before readiness, cancels node admission before reverse provider-facility drains, serializes deadline-aware shutdown/drain callers, and the typed full-primitive reference application now proves source-directory loss, owner fencing, exact-root takeover, and continued post-takeover operations; full operator-facility construction ownership and multi-process public-host qualification remain open
 
 ## Why this matters
 
@@ -243,7 +243,7 @@ the new host must delete comparable manual composition complexity from server.
 - [x] Server readiness occurs only after complete host validation/startup.
 - [x] Server drain/shutdown awaits work and returns resource ledgers to baseline.
 - [x] Node admission is cancelled before provider-facility drains, with a deadline regression test.
-- [ ] Full-primitive application provisions and survives owner/source loss through public APIs.
+- [x] Full-primitive application provisions and survives owner/source loss through public APIs.
 - [x] `crab-http-server` contains no parallel production composition path.
 - [x] Existing repository HTTP/auth/provider behavior remains unchanged.
 - [x] Host, runtime, LTX, server, architecture, Clippy, format, and cleanup gates pass.

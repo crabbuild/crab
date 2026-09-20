@@ -6,13 +6,14 @@ use crab_cell_runtime::{
     BlobCondition, BlobModule, BlobMutation, BlobMutationOutcome, BlobQuery, BlobQueryResult,
     BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellClient, CellHandle, CellModule,
     CellRuntime, CellStorageLayout, CellTarget, CronModule, CronMutation, CronQueryResult,
-    CronTarget, Digest, EffectClaimRequest, EffectLeaseOutcome, EffectModule, Error, IncarnationId,
-    KvAtomicRequest, KvModule, KvMutation, MaintenanceModule, ModuleDescriptor, MutationIdentity,
-    NamespaceDescriptor, NamespaceId, OperationDescriptor, Owner, QualificationExecution,
-    QualificationOperation, QualificationOperationExecutor, QualificationProfile,
-    QualificationWorkload, QueueClaimRequest, QueueDeadLetterTarget, QueueLeaseOutcome,
-    QueueModule, QueueSendRequest, Registry, RegistryBuilder, RequestId, Result, SqlBatch,
-    SqlModule, SqlStatement, SqlValue, SqlWorkerPool, TenantId, WorkflowAction,
+    CronTarget, Digest, EffectClaimRequest, EffectLeaseOutcome, EffectModule, Error,
+    FencedNodeSession, IncarnationId, KvAtomicRequest, KvModule, KvMutation, MaintenanceModule,
+    ModuleDescriptor, MutationIdentity, NamespaceDescriptor, NamespaceId, NodeAdvertisement,
+    NodeCapacity, NodeDirectory, NodeFailureDomain, NodeId, OperationDescriptor, Owner,
+    QualificationExecution, QualificationOperation, QualificationOperationExecutor,
+    QualificationProfile, QualificationWorkload, QueueClaimRequest, QueueDeadLetterTarget,
+    QueueLeaseOutcome, QueueModule, QueueSendRequest, Registry, RegistryBuilder, RequestId, Result,
+    SqlBatch, SqlModule, SqlStatement, SqlValue, SqlWorkerPool, TenantId, WorkflowAction,
     WorkflowActivityModule, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowModule,
     WorkflowStatus, install_blob_schema, install_cron_schema, install_kv_schema,
     install_queue_schema, install_workflow_schema, partition_for_shard, register_activity,
@@ -21,6 +22,7 @@ use crab_cell_runtime::{
 };
 use crab_ltx::{CellReplica, DiskBudget, Host, Limits};
 use crab_storage::Store;
+use ed25519_dalek::SigningKey;
 use object_store::memory::InMemory;
 
 const SQL_NAMESPACE: NamespaceId = NamespaceId::from_bytes([1; 16]);
@@ -771,6 +773,92 @@ fn reference_host() -> Host {
     Host::default().with_local_disk_budget(DiskBudget::new(1 << 30))
 }
 
+async fn seed_reference_session(layout: &CellStorageLayout, session: crab_cell_runtime::SessionId) {
+    let directory = NodeDirectory::new(
+        layout.clone(),
+        Digest::from_bytes([90; 32]),
+        Digest::from_bytes([91; 32]),
+        Digest::from_bytes([92; 32]),
+    );
+    let key = SigningKey::from_bytes(&[93; 32]);
+    directory
+        .create(
+            NodeAdvertisement::sign(
+                NodeId::from_bytes(*session.as_bytes()),
+                session,
+                "https://reference-expired.internal:8081".into(),
+                directory.fleet(),
+                Digest::from_bytes([94; 32]),
+                Digest::from_bytes([91; 32]),
+                Digest::from_bytes([92; 32]),
+                &key,
+                1,
+                1,
+                10_001,
+                vec![Digest::from_bytes([95; 32])],
+                vec![1],
+                NodeFailureDomain::default(),
+                NodeCapacity {
+                    free_memory_bytes: 1,
+                    free_disk_bytes: 1,
+                    job_credits: 1,
+                    ..NodeCapacity::default()
+                },
+            )
+            .unwrap(),
+            1,
+        )
+        .await
+        .unwrap();
+}
+
+async fn fence_reference_session(
+    layout: &CellStorageLayout,
+    session: crab_cell_runtime::SessionId,
+    claimant: crab_cell_runtime::SessionId,
+) -> FencedNodeSession {
+    let directory = NodeDirectory::new(
+        layout.clone(),
+        Digest::from_bytes([90; 32]),
+        Digest::from_bytes([91; 32]),
+        Digest::from_bytes([92; 32]),
+    );
+    let key = SigningKey::from_bytes(&[93; 32]);
+    directory
+        .create(
+            NodeAdvertisement::sign(
+                NodeId::from_bytes(*claimant.as_bytes()),
+                claimant,
+                "https://reference-claimant.internal:8081".into(),
+                directory.fleet(),
+                Digest::from_bytes([94; 32]),
+                Digest::from_bytes([91; 32]),
+                Digest::from_bytes([92; 32]),
+                &key,
+                10_000,
+                10_000,
+                20_000,
+                vec![Digest::from_bytes([95; 32])],
+                vec![1],
+                NodeFailureDomain::default(),
+                NodeCapacity {
+                    free_memory_bytes: 1,
+                    free_disk_bytes: 1,
+                    job_credits: 1,
+                    ..NodeCapacity::default()
+                },
+            )
+            .unwrap(),
+            10_000,
+        )
+        .await
+        .unwrap();
+    directory
+        .claim_expired(session, claimant, 10_001)
+        .await
+        .unwrap()
+}
+
 fn reference_identity(byte: u8, now_ms: i64) -> MutationIdentity {
     MutationIdentity {
         request_id: RequestId::from_bytes([byte; 16]),
@@ -1039,9 +1127,13 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
         .await
         .unwrap(),
     ];
-    let client = CellClient::local_many(registry, handles).unwrap();
-    let typed =
-        ApplicationHandle::<ReferenceApplication>::new(client, application, tenant, application_id);
+    let client = CellClient::local_many(registry.clone(), handles).unwrap();
+    let typed = ApplicationHandle::<ReferenceApplication>::new(
+        client,
+        Arc::clone(&application),
+        tenant,
+        application_id,
+    );
     let now_ms = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1342,7 +1434,218 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
             .any(|metric| { metric.name() == "p99_latency_ms" && metric.unit() == "ms" })
     );
 
-    runtime.shutdown().await.unwrap();
+    // Drop the first owner and its local SQLite sources. The next owner must
+    // recover every declared namespace from the published roots before the
+    // same typed application handle is allowed to continue.
+    drop(activity);
+    drop(effects);
+    drop(workflow);
+    drop(cron);
+    drop(queue);
+    drop(blob);
+    drop(kv);
+    drop(sql);
+    drop(typed);
+    drop(runtime);
+    drop(directory);
+
+    let restored_directory = tempfile::TempDir::new().unwrap();
+    let takeover_session = crab_cell_runtime::SessionId::from_bytes([70; 16]);
+    let takeover_runtime = CellRuntime::new_with_replica_host(
+        SqlWorkerPool::new(4, 32).unwrap(),
+        64 * 1024 * 1024,
+        takeover_session,
+        reference_host(),
+    )
+    .unwrap();
+    let authority = CellAuthority::new(layout.clone());
+    let catalog = crab_cell_runtime::CellCatalog::new(layout.clone(), tenant);
+    seed_reference_session(&layout, session).await;
+    let mut restored_handles = Vec::new();
+    for (namespace, module, incarnation_byte) in [
+        (SQL_NAMESPACE, SQL_MODULE, 40_u8),
+        (KV_NAMESPACE, KV_MODULE, 41_u8),
+        (BLOB_NAMESPACE, BLOB_MODULE, 42_u8),
+        (QUEUE_NAMESPACE, QUEUE_MODULE, 43_u8),
+        (DEAD_LETTER_NAMESPACE, DEAD_LETTER_MODULE, 44_u8),
+        (CRON_NAMESPACE, CRON_MODULE, 45_u8),
+        (WORKFLOW_NAMESPACE, WORKFLOW_MODULE, 46_u8),
+    ] {
+        let target =
+            CellTarget::new(tenant, application_id, namespace, &partition_for_shard(0)).unwrap();
+        let observed = authority.load(target.cell_id()).await.unwrap().unwrap();
+        let restored = takeover_runtime
+            .takeover_restored(
+                catalog.lookup(target.cell_id()).await.unwrap().unwrap(),
+                CellReplica::new(
+                    layout.clone(),
+                    *target.cell_id().as_bytes(),
+                    *IncarnationId::from_bytes([incarnation_byte; 16]).as_bytes(),
+                    Limits::default(),
+                )
+                .unwrap(),
+                authority.clone(),
+                observed,
+                fence_reference_session(&layout, session, takeover_session)
+                    .await
+                    .direct_takeover()
+                    .unwrap(),
+                crab_cell_runtime::RecoveryManifestStore::new(layout.clone(), Limits::default()),
+                restored_directory
+                    .path()
+                    .join(format!("{module}-takeover.sqlite")),
+                Owner {
+                    session: takeover_session,
+                    endpoint: "https://reference-takeover.internal:8081".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(restored.cell_id(), target.cell_id());
+        restored_handles.push(restored);
+    }
+    let restored_client = CellClient::local_many(registry.clone(), restored_handles).unwrap();
+    let restored = ApplicationHandle::<ReferenceApplication>::new(
+        restored_client,
+        application,
+        tenant,
+        application_id,
+    );
+    restored
+        .sql::<ReferenceSql>(sql_target.clone())
+        .unwrap()
+        .query(
+            None,
+            SqlBatch {
+                statements: vec![SqlStatement {
+                    sql: "SELECT 11".into(),
+                    parameters: Vec::new(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    restored
+        .kv::<ReferenceKv>(KV_NAMESPACE)
+        .unwrap()
+        .atomic(
+            reference_identity(100, now_ms),
+            KvAtomicRequest {
+                scope: b"qualification".to_vec(),
+                checks: Vec::new(),
+                mutations: vec![KvMutation::Put {
+                    key: b"after-recovery".to_vec(),
+                    value: b"ok".to_vec(),
+                    expires_at_ms: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        restored
+            .blob::<ReferenceBlob>()
+            .unwrap()
+            .query(
+                BlobQuery::Read {
+                    key: b"qualification/blob".to_vec(),
+                    offset: 0,
+                    limit: 128,
+                },
+                None,
+            )
+            .await
+            .unwrap()
+            .output,
+        BlobQueryResult::Read(Some(_))
+    ));
+    let restored_queue = restored.queue::<ReferenceQueue>().unwrap();
+    restored_queue
+        .send(
+            reference_identity(101, now_ms),
+            QueueSendRequest {
+                producer_id: [101; 16],
+                payload: b"after-recovery".to_vec(),
+                available_at_ms: now_ms,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(restored_queue.info(0, None).await.unwrap().output.ready >= 1);
+    restored
+        .cron::<ReferenceCron>()
+        .unwrap()
+        .get([58; 16], None)
+        .await
+        .unwrap();
+    let restored_workflow = restored.workflow::<ReferenceWorkflow>().unwrap();
+    let activity_workflow_id = b"activity-after-recovery".to_vec();
+    restored_workflow
+        .start(
+            reference_identity(102, now_ms),
+            activity_workflow_id.clone(),
+            b"activity".to_vec(),
+        )
+        .await
+        .unwrap();
+    let restored_activity = crab_cell_runtime::ActivitySupervisor::new(
+        restored.activities::<ReferenceWorkflow>().unwrap(),
+        5_000,
+    )
+    .unwrap();
+    assert!(matches!(
+        restored_activity.run_once(0, None).await.unwrap(),
+        ActivityRunOutcome::Completed { .. }
+    ));
+    assert_eq!(
+        restored_workflow
+            .state(activity_workflow_id, None)
+            .await
+            .unwrap()
+            .output
+            .unwrap()
+            .status,
+        WorkflowStatus::Completed
+    );
+    restored_workflow
+        .start(
+            reference_identity(103, now_ms),
+            b"effect-after-recovery".to_vec(),
+            b"effect".to_vec(),
+        )
+        .await
+        .unwrap();
+    let restored_effects = restored
+        .effects::<ReferenceWorkflow>(
+            CellTarget::new(
+                tenant,
+                application_id,
+                WORKFLOW_NAMESPACE,
+                &partition_for_shard(0),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let restored_claims = restored_effects
+        .claim(
+            reference_identity(104, now_ms),
+            EffectClaimRequest {
+                limit: 1,
+                lease_ms: 5_000,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(restored_claims.output.len(), 1);
+    restored_effects
+        .ack(
+            reference_identity(105, now_ms),
+            restored_claims.output[0].clone(),
+            b"recovered-effect".to_vec(),
+        )
+        .await
+        .unwrap();
+    takeover_runtime.shutdown().await.unwrap();
 }
 
 #[test]

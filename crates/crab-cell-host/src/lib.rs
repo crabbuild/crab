@@ -6,6 +6,7 @@
 
 use std::{
     any::Any,
+    collections::HashSet,
     future::Future,
     pin::Pin,
     sync::{
@@ -310,6 +311,7 @@ impl CellNodeBuilder {
             lease_installed: AtomicBool::new(false),
             shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
             facilities: Arc::new(Mutex::new(Vec::new())),
+            required_components: Arc::new(Mutex::new(Vec::new())),
             task_group: Arc::new(Mutex::new(None)),
         })
     }
@@ -328,6 +330,7 @@ impl CellNodeBuilder {
             lease_installed: AtomicBool::new(false),
             shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
             facilities: Arc::new(Mutex::new(Vec::new())),
+            required_components: Arc::new(Mutex::new(Vec::new())),
             task_group: Arc::new(Mutex::new(None)),
         })
     }
@@ -369,6 +372,7 @@ pub struct CellNode {
     lease_installed: AtomicBool,
     shutdown_lock: Arc<tokio::sync::Mutex<()>>,
     facilities: Arc<Mutex<Vec<CellNodeFacility>>>,
+    required_components: Arc<Mutex<Vec<&'static str>>>,
     task_group: Arc<Mutex<Option<Arc<CellNodeTaskGroup>>>>,
 }
 
@@ -441,6 +445,40 @@ impl CellNode {
         Ok(())
     }
 
+    /// Declares the typed production components that must be retained before
+    /// readiness can open. The declaration is immutable after startup begins;
+    /// this keeps a product adapter from accidentally starting a node with a
+    /// missing owner and discovering the gap only on its first request.
+    pub fn require_owned_components(
+        &self,
+        names: impl IntoIterator<Item = &'static str>,
+    ) -> crab_cell_runtime::Result<()> {
+        if self.state() != NodeState::Starting {
+            return Err(Error::CellDraining);
+        }
+        let mut required = self
+            .required_components
+            .lock()
+            .map_err(|_| Error::Control("CellNode required-component lock poisoned"))?;
+        let names = names.into_iter().collect::<Vec<_>>();
+        if names.is_empty() || names.len() > MAX_NODE_FACILITIES {
+            return Err(Error::Control(
+                "CellNode required component count is out of bounds",
+            ));
+        }
+        let mut seen = HashSet::with_capacity(names.len());
+        if names
+            .iter()
+            .any(|name| name.is_empty() || required.contains(name) || !seen.insert(*name))
+        {
+            return Err(Error::Control(
+                "CellNode required component names must be unique and non-empty",
+            ));
+        }
+        required.extend(names);
+        Ok(())
+    }
+
     /// Creates and retains the bounded coordination task group for this node.
     pub fn install_task_group(
         &self,
@@ -478,6 +516,7 @@ impl CellNode {
             .lock()
             .map_err(|_| Error::Control("CellNode lifecycle lock poisoned"))?;
         if *state == NodeState::Starting {
+            self.require_components_present()?;
             *state = NodeState::Ready;
             return Ok(());
         }
@@ -487,6 +526,30 @@ impl CellNode {
         Err(Error::Control(
             "CellNode cannot become ready after shutdown",
         ))
+    }
+
+    fn require_components_present(&self) -> crab_cell_runtime::Result<()> {
+        let required = self
+            .required_components
+            .lock()
+            .map_err(|_| Error::Control("CellNode required-component lock poisoned"))?
+            .clone();
+        if required.is_empty() {
+            return Ok(());
+        }
+        let facilities = self
+            .facilities
+            .lock()
+            .map_err(|_| Error::Control("CellNode facility lock poisoned"))?;
+        for name in required {
+            if !facilities
+                .iter()
+                .any(|facility| facility.name == name && facility.owner.is_some())
+            {
+                return Err(Error::Control("CellNode required component is missing"));
+            }
+        }
+        Ok(())
     }
 
     /// Returns one coherent lifecycle and admission snapshot.
@@ -520,13 +583,17 @@ impl CellNode {
 
     /// Attaches one provider-owned lifecycle component before node shutdown.
     pub fn install_facility(&self, facility: CellNodeFacility) -> crab_cell_runtime::Result<()> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| Error::Control("CellNode lifecycle lock poisoned"))?;
+        if !matches!(*state, NodeState::Starting | NodeState::Ready) {
+            return Err(Error::CellDraining);
+        }
         let mut facilities = self
             .facilities
             .lock()
             .map_err(|_| Error::Control("CellNode facility lock poisoned"))?;
-        if !matches!(self.state(), NodeState::Starting | NodeState::Ready) {
-            return Err(Error::CellDraining);
-        }
         if facilities.len() >= MAX_NODE_FACILITIES {
             return Err(Error::Capacity("CellNode facility limit reached"));
         }
@@ -1088,6 +1155,53 @@ mod tests {
         );
         node.shutdown().await.unwrap();
         assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn readiness_requires_declared_owned_components() {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([28; 16]))
+            .build()
+            .unwrap();
+        node.install_task_group(CancellationToken::new(), CancellationToken::new())
+            .unwrap();
+        node.install_node_lease_for_startup(NodeLeaseGuard::new(0, 60_000).unwrap())
+            .unwrap();
+        node.require_owned_components(["catalog", "router"])
+            .unwrap();
+        node.install_owned_component("catalog", Arc::new(1_u64))
+            .unwrap();
+
+        assert!(matches!(node.start(), Err(Error::Control(_))));
+        node.install_owned_component("router", Arc::new(2_u64))
+            .unwrap();
+        node.start().unwrap();
+        assert!(node.is_ready());
+        node.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn required_component_declaration_rejects_duplicates_and_late_changes() {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([29; 16]))
+            .build()
+            .unwrap();
+        assert!(
+            node.require_owned_components(["catalog", "catalog"])
+                .is_err()
+        );
+        node.require_owned_components(["catalog"]).unwrap();
+        node.install_task_group(CancellationToken::new(), CancellationToken::new())
+            .unwrap();
+        node.install_node_lease(NodeLeaseGuard::new(0, 60_000).unwrap())
+            .unwrap_err();
+        assert!(node.require_owned_components(["router"]).is_ok());
+        node.shutdown().await.unwrap();
+        assert!(node.require_owned_components(["late"]).is_err());
     }
 
     #[tokio::test]
