@@ -576,10 +576,11 @@ infrastructure; it does not create a second receipt format or scheduler.
 
 Current boundary: 018–021 are implemented and verified. 022–023 now provide a
 handwritten full-primitive author contract plus fail-closed serving/maintenance
-host readiness and deadline-aware drain, and 024 provides deterministic
-streaming execution, measured run artifacts, preflight guards, pinned-signer
-validation, and fail-closed release packaging. These rows remain partial until
-full operator ownership and protected provider/Kubernetes/scale receipts exist.
+host `start`/`status`, readiness, and deadline-aware drain, and 024 provides
+deterministic streaming execution, measured run artifacts, preflight guards,
+pinned-signer validation, and fail-closed release packaging. These rows remain
+partial until full operator ownership and protected provider/Kubernetes/scale
+receipts exist.
 
 ### Shared release rule
 

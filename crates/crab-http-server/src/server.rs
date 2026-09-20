@@ -1193,7 +1193,7 @@ pub async fn serve(config: Config) -> Result<()> {
     cell_tasks.spawn(release_watch)?;
     let scheduler_cancellation = cancellation.clone();
     cell_tasks.spawn(async move { cell_scheduler.run(scheduler_cancellation).await })?;
-    cell_node.mark_ready()?;
+    cell_node.start()?;
     server.node_healthy.store(true, Ordering::Release);
     let app = router(Arc::clone(&server));
     tracing::info!(address = %listener.local_addr()?, "public listener started");

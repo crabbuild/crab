@@ -175,6 +175,34 @@ pub enum NodeState {
     Stopped,
 }
 
+/// Point-in-time lifecycle and admission status for one [`CellNode`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NodeStatus {
+    state: NodeState,
+    shutting_down: bool,
+    stats: CellRuntimeStats,
+}
+
+impl NodeStatus {
+    /// Returns the lifecycle state observed for this status sample.
+    #[must_use]
+    pub const fn state(self) -> NodeState {
+        self.state
+    }
+
+    /// Returns whether runtime admission has been cancelled.
+    #[must_use]
+    pub const fn is_shutting_down(self) -> bool {
+        self.shutting_down
+    }
+
+    /// Returns the node-wide admission metrics observed for this sample.
+    #[must_use]
+    pub const fn stats(self) -> CellRuntimeStats {
+        self.stats
+    }
+}
+
 /// Required inputs for one provider-neutral node.
 pub struct CellNodeBuilder {
     application: Arc<CompiledApplication>,
@@ -350,12 +378,12 @@ impl CellNode {
     ) -> crab_cell_runtime::Result<()> {
         self.require_task_group()?;
         self.install_node_lease_for_startup(lease)?;
-        self.mark_ready()
+        self.start()
     }
 
     /// Installs the lease without opening readiness to the product boundary.
     ///
-    /// Servers use this during startup, then call [`Self::mark_ready`] only
+    /// Servers use this during startup, then call [`Self::start`] only
     /// after their listeners and owned facilities have been started.
     pub fn install_node_lease_for_startup(
         &self,
@@ -390,8 +418,8 @@ impl CellNode {
         Ok(task_group)
     }
 
-    /// Marks the node ready after all product startup probes have completed.
-    pub fn mark_ready(&self) -> crab_cell_runtime::Result<()> {
+    /// Opens readiness after all product startup probes have completed.
+    pub fn start(&self) -> crab_cell_runtime::Result<()> {
         if !self.lease_installed.load(Ordering::Acquire) {
             return Err(Error::Control(
                 "CellNode cannot become ready before its node lease is installed",
@@ -412,6 +440,16 @@ impl CellNode {
         Err(Error::Control(
             "CellNode cannot become ready after shutdown",
         ))
+    }
+
+    /// Returns one coherent lifecycle and admission snapshot.
+    #[must_use]
+    pub fn status(&self) -> NodeStatus {
+        NodeStatus {
+            state: self.state(),
+            shutting_down: self.is_shutting_down(),
+            stats: self.stats(),
+        }
     }
 
     fn require_task_group(&self) -> crab_cell_runtime::Result<()> {
@@ -659,7 +697,11 @@ mod tests {
             .unwrap();
         assert_eq!(node.state(), NodeState::Starting);
         assert!(!node.is_ready());
-        assert!(node.mark_ready().is_err());
+        let starting = node.status();
+        assert_eq!(starting.state(), NodeState::Starting);
+        assert!(!starting.is_shutting_down());
+        assert_eq!(starting.stats(), node.stats());
+        assert!(node.start().is_err());
         node.install_task_group(CancellationToken::new(), CancellationToken::new())
             .unwrap();
         node.install_node_lease(NodeLeaseGuard::new(0, 60_000).unwrap())
@@ -668,6 +710,9 @@ mod tests {
         assert!(node.is_ready());
         node.shutdown().await.unwrap();
         assert_eq!(node.state(), NodeState::Stopped);
+        let stopped = node.status();
+        assert_eq!(stopped.state(), NodeState::Stopped);
+        assert!(stopped.is_shutting_down());
         node.shutdown().await.unwrap();
     }
 
@@ -683,10 +728,10 @@ mod tests {
             .unwrap();
         assert_eq!(node.state(), NodeState::Starting);
         assert!(!node.is_ready());
-        assert!(node.mark_ready().is_err());
+        assert!(node.start().is_err());
         node.install_task_group(CancellationToken::new(), CancellationToken::new())
             .unwrap();
-        node.mark_ready().unwrap();
+        node.start().unwrap();
         assert!(node.is_ready());
         node.shutdown().await.unwrap();
     }
@@ -702,13 +747,13 @@ mod tests {
         node.install_node_lease_for_startup(NodeLeaseGuard::new(0, 60_000).unwrap())
             .unwrap();
 
-        let error = node.mark_ready().unwrap_err();
+        let error = node.start().unwrap_err();
         assert!(matches!(error, Error::Control(_)));
         assert_eq!(node.state(), NodeState::Starting);
 
         node.install_task_group(CancellationToken::new(), CancellationToken::new())
             .unwrap();
-        node.mark_ready().unwrap();
+        node.start().unwrap();
         assert!(node.is_ready());
         node.shutdown().await.unwrap();
     }
