@@ -4,7 +4,7 @@ use std::io;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as SyncMutex, RwLock as SyncRwLock};
+use std::sync::{Arc, RwLock as SyncRwLock};
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
@@ -16,7 +16,7 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
-use crab_cell_host::{CellNode, CellNodeBuilder, CellNodeFacility, FacilityResult};
+use crab_cell_host::{CellNode, CellNodeBuilder, CellNodeFacility, CellNodeTaskGroup};
 use crab_cell_runtime::{
     ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_NATIVE_BYTES, ACTIVE_CELL_PAGE_CACHE_BYTES,
     ApplicationIdentityStore, CellRuntime, Digest, NodeDirectory, Owner, PeerRoundTrip, PeerSigner,
@@ -31,7 +31,6 @@ use object_store::path::Path as ObjectPath;
 use serde::Serialize;
 use serde_json::json;
 use tokio::sync::{Mutex, Semaphore};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use uuid::Uuid;
@@ -736,85 +735,6 @@ pub(crate) struct Server {
     pub(crate) metrics: crate::metrics::Metrics,
 }
 
-struct CellTaskFacility {
-    cancellation: CancellationToken,
-    node_shutdown: CancellationToken,
-    tasks: SyncMutex<Vec<JoinHandle<FacilityResult>>>,
-}
-
-struct TaskBatch {
-    tasks: Vec<JoinHandle<FacilityResult>>,
-    abort_on_drop: bool,
-}
-
-impl Drop for TaskBatch {
-    fn drop(&mut self) {
-        if self.abort_on_drop {
-            for task in &self.tasks {
-                task.abort();
-            }
-        }
-    }
-}
-
-impl CellTaskFacility {
-    fn new(cancellation: CancellationToken, node_shutdown: CancellationToken) -> Self {
-        Self {
-            cancellation,
-            node_shutdown,
-            tasks: SyncMutex::new(Vec::new()),
-        }
-    }
-
-    fn spawn<F>(&self, task: F)
-    where
-        F: Future<Output = Result<()>> + Send + 'static,
-    {
-        let handle = tokio::spawn(async move {
-            task.await
-                .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
-        });
-        if let Ok(mut tasks) = self.tasks.lock() {
-            tasks.push(handle);
-        } else {
-            handle.abort();
-        }
-    }
-
-    async fn drain(&self) -> FacilityResult {
-        self.cancellation.cancel();
-        self.node_shutdown.cancel();
-        let tasks = self
-            .tasks
-            .lock()
-            .map(|mut tasks| std::mem::take(&mut *tasks))
-            .map_err(|_| {
-                Box::new(io::Error::other("Cell task facility lock poisoned"))
-                    as Box<dyn std::error::Error + Send + Sync>
-            })?;
-        let mut tasks = TaskBatch {
-            tasks,
-            abort_on_drop: true,
-        };
-        let mut first_error = None;
-        while let Some(index) = tasks.tasks.len().checked_sub(1) {
-            let result = (&mut tasks.tasks[index]).await;
-            tasks.tasks.pop();
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) if first_error.is_none() => first_error = Some(error),
-                Ok(Err(_)) => {}
-                Err(error) if first_error.is_none() => {
-                    first_error = Some(Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
-                }
-                Err(_) => {}
-            }
-        }
-        tasks.abort_on_drop = false;
-        first_error.map_or(Ok(()), Err)
-    }
-}
-
 impl Server {
     pub(crate) fn accepts_application_peers(&self) -> bool {
         self.node_healthy.load(Ordering::Acquire) && !self.cancellation.is_cancelled()
@@ -973,7 +893,7 @@ pub async fn serve(config: Config) -> Result<()> {
     let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
     let metrics = crate::metrics::Metrics::new()?;
     let node_shutdown = CancellationToken::new();
-    let cell_tasks = Arc::new(CellTaskFacility::new(
+    let cell_tasks = Arc::new(CellNodeTaskGroup::new(
         cancellation.clone(),
         node_shutdown.clone(),
     ));
@@ -1135,7 +1055,7 @@ pub async fn serve(config: Config) -> Result<()> {
             probe_storage_contract(&catalog, &server.transfer_admission).await?;
             node_publisher.publish_initial().await?;
             let node_lease = node_publisher.lease_guard()?;
-            cell_node.install_node_lease(node_lease.clone())?;
+            cell_node.install_node_lease_for_startup(node_lease.clone())?;
             Ok::<_, crate::Error>(node_lease)
         };
         tokio::pin!(startup);
@@ -1201,7 +1121,7 @@ pub async fn serve(config: Config) -> Result<()> {
             durability_cancellation,
         )
         .await
-    });
+    })?;
     let rotation_publisher = Arc::clone(&node_publisher);
     let rotation_runtime = server.cell_runtime.clone();
     let rotation_transport = Arc::clone(
@@ -1222,7 +1142,7 @@ pub async fn serve(config: Config) -> Result<()> {
             rotation_metrics,
         )
         .await
-    });
+    })?;
     let follower_collection_store = follower_store;
     let follower_collection_directory = directory.clone();
     let follower_collection_cancellation = cancellation.clone();
@@ -1233,7 +1153,7 @@ pub async fn serve(config: Config) -> Result<()> {
             follower_collection_cancellation,
         )
         .await
-    });
+    })?;
     let node_server = Arc::clone(&server);
     let heartbeat_shutdown = node_shutdown.clone();
     let heartbeat_publisher = Arc::clone(&node_publisher);
@@ -1241,7 +1161,7 @@ pub async fn serve(config: Config) -> Result<()> {
         heartbeat_publisher
             .run_shared(node_server, heartbeat_shutdown)
             .await
-    });
+    })?;
     let lease_server = Arc::clone(&server);
     let lease_cancellation = cancellation.clone();
     let lease_watch = async move {
@@ -1266,16 +1186,17 @@ pub async fn serve(config: Config) -> Result<()> {
                 lease_server.node_healthy.store(false, Ordering::Release);
             }
         }
-        Ok(())
+        Ok::<(), crate::Error>(())
     };
-    cell_tasks.spawn(lease_watch);
+    cell_tasks.spawn(lease_watch)?;
     let release_cancellation = cancellation.clone();
     let compiled_release = registry.release_digest();
     let release_watch =
         async move { watch_release(release_store, compiled_release, release_cancellation).await };
-    cell_tasks.spawn(release_watch);
+    cell_tasks.spawn(release_watch)?;
     let scheduler_cancellation = cancellation.clone();
-    cell_tasks.spawn(async move { cell_scheduler.run(scheduler_cancellation).await });
+    cell_tasks.spawn(async move { cell_scheduler.run(scheduler_cancellation).await })?;
+    cell_node.mark_ready()?;
     server.node_healthy.store(true, Ordering::Release);
     let app = router(Arc::clone(&server));
     tracing::info!(address = %listener.local_addr()?, "public listener started");
@@ -2514,14 +2435,16 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cell_task_facility_aborts_unfinished_tasks_when_deadline_expires() {
-        let facility = CellTaskFacility::new(CancellationToken::new(), CancellationToken::new());
+        let facility = CellNodeTaskGroup::new(CancellationToken::new(), CancellationToken::new());
         let dropped = Arc::new(AtomicBool::new(false));
         let signal = DropSignal(Arc::clone(&dropped));
-        facility.spawn(async move {
-            let _signal = signal;
-            std::future::pending::<()>().await;
-            Ok(())
-        });
+        facility
+            .spawn(async move {
+                let _signal = signal;
+                std::future::pending::<()>().await;
+                Ok::<(), crate::Error>(())
+            })
+            .unwrap();
 
         let result = tokio::time::timeout(Duration::from_millis(10), facility.drain()).await;
         assert!(result.is_err());

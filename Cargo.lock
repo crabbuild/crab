@@ -2205,6 +2205,7 @@ dependencies = [
  "crab-cell-app",
  "crab-cell-runtime",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

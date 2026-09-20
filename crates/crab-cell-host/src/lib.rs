@@ -18,8 +18,11 @@ use crab_cell_runtime::{
     ApplicationId, CellClient, CellRuntime, CellRuntimeStats, Error, ReplicaHost, SessionId,
     SqlWorkerPool, TenantId,
 };
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 const MAX_NODE_FACILITIES: usize = 64;
+const MAX_NODE_TASKS: usize = 256;
 
 /// Error returned by a provider-owned node facility during drain.
 pub type FacilityResult = std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -44,6 +47,102 @@ impl CellNodeFacility {
             name,
             drain: Arc::new(move || Box::pin(drain())),
         })
+    }
+}
+
+/// Bounded task supervisor owned by a [`CellNode`] facility.
+pub struct CellNodeTaskGroup {
+    cancellation: CancellationToken,
+    node_shutdown: CancellationToken,
+    tasks: Mutex<Vec<JoinHandle<FacilityResult>>>,
+}
+
+impl CellNodeTaskGroup {
+    /// Creates a task group whose cancellation tokens are controlled by the product host.
+    #[must_use]
+    pub fn new(cancellation: CancellationToken, node_shutdown: CancellationToken) -> Self {
+        Self {
+            cancellation,
+            node_shutdown,
+            tasks: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Spawns one bounded node task and retains its join handle for drain.
+    pub fn spawn<F, E>(&self, task: F) -> crab_cell_runtime::Result<()>
+    where
+        F: Future<Output = std::result::Result<(), E>> + Send + 'static,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let handle = tokio::spawn(async move {
+            task.await
+                .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
+        });
+        let mut tasks = match self.tasks.lock() {
+            Ok(tasks) => tasks,
+            Err(_) => {
+                handle.abort();
+                return Err(Error::Control("CellNode task group lock poisoned"));
+            }
+        };
+        if tasks.len() >= MAX_NODE_TASKS {
+            handle.abort();
+            return Err(Error::Capacity("CellNode task limit reached"));
+        }
+        tasks.push(handle);
+        Ok(())
+    }
+
+    /// Cancels admission and joins tasks in reverse registration order.
+    pub async fn drain(&self) -> FacilityResult {
+        self.cancellation.cancel();
+        self.node_shutdown.cancel();
+        let tasks = match self.tasks.lock() {
+            Ok(mut tasks) => std::mem::take(&mut *tasks),
+            Err(poisoned) => {
+                for task in poisoned.into_inner().drain(..) {
+                    task.abort();
+                }
+                return Err(Box::new(std::io::Error::other(
+                    "CellNode task group lock poisoned",
+                )));
+            }
+        };
+        let mut tasks = TaskBatch {
+            tasks,
+            abort_on_drop: true,
+        };
+        let mut first_error = None;
+        while let Some(index) = tasks.tasks.len().checked_sub(1) {
+            let result = (&mut tasks.tasks[index]).await;
+            tasks.tasks.pop();
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) if first_error.is_none() => first_error = Some(error),
+                Ok(Err(_)) => {}
+                Err(error) if first_error.is_none() => {
+                    first_error = Some(Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
+                }
+                Err(_) => {}
+            }
+        }
+        tasks.abort_on_drop = false;
+        first_error.map_or(Ok(()), Err)
+    }
+}
+
+struct TaskBatch {
+    tasks: Vec<JoinHandle<FacilityResult>>,
+    abort_on_drop: bool,
+}
+
+impl Drop for TaskBatch {
+    fn drop(&mut self) {
+        if self.abort_on_drop {
+            for task in &self.tasks {
+                task.abort();
+            }
+        }
     }
 }
 
@@ -222,9 +321,21 @@ impl CellNode {
         &self,
         lease: crab_cell_runtime::NodeLeaseGuard,
     ) -> crab_cell_runtime::Result<()> {
+        self.install_node_lease_for_startup(lease)?;
+        self.mark_ready()
+    }
+
+    /// Installs the lease without opening readiness to the product boundary.
+    ///
+    /// Servers use this during startup, then call [`Self::mark_ready`] only
+    /// after their listeners and owned facilities have been started.
+    pub fn install_node_lease_for_startup(
+        &self,
+        lease: crab_cell_runtime::NodeLeaseGuard,
+    ) -> crab_cell_runtime::Result<()> {
         self.runtime.install_node_lease(lease)?;
         self.lease_installed.store(true, Ordering::Release);
-        self.mark_ready()
+        Ok(())
     }
 
     /// Marks the node ready after all product startup probes have completed.
@@ -459,6 +570,74 @@ mod tests {
         node.shutdown().await.unwrap();
         assert_eq!(node.state(), NodeState::Stopped);
         node.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_lease_does_not_open_readiness_before_host_startup_finishes() {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([19; 16]))
+            .build()
+            .unwrap();
+        node.install_node_lease_for_startup(NodeLeaseGuard::new(0, 60_000).unwrap())
+            .unwrap();
+        assert_eq!(node.state(), NodeState::Starting);
+        assert!(!node.is_ready());
+        node.mark_ready().unwrap();
+        assert!(node.is_ready());
+        node.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_group_cancels_both_tokens_and_joins_tasks() {
+        let cancellation = CancellationToken::new();
+        let node_shutdown = CancellationToken::new();
+        let finished = Arc::new(AtomicBool::new(false));
+        let task_cancellation = cancellation.clone();
+        let task_shutdown = node_shutdown.clone();
+        let task_finished = Arc::clone(&finished);
+        let tasks = CellNodeTaskGroup::new(cancellation.clone(), node_shutdown.clone());
+        tasks
+            .spawn(async move {
+                task_cancellation.cancelled().await;
+                task_shutdown.cancelled().await;
+                task_finished.store(true, Ordering::Release);
+                Ok::<(), Error>(())
+            })
+            .unwrap();
+
+        tasks.drain().await.unwrap();
+
+        assert!(cancellation.is_cancelled());
+        assert!(node_shutdown.is_cancelled());
+        assert!(finished.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn task_group_rejects_tasks_above_bound() {
+        let cancellation = CancellationToken::new();
+        let node_shutdown = CancellationToken::new();
+        let tasks = CellNodeTaskGroup::new(cancellation, node_shutdown.clone());
+        for _ in 0..MAX_NODE_TASKS {
+            let node_shutdown = node_shutdown.clone();
+            tasks
+                .spawn(async move {
+                    node_shutdown.cancelled().await;
+                    Ok::<(), Error>(())
+                })
+                .unwrap();
+        }
+        let node_shutdown = node_shutdown.clone();
+        let error = tasks
+            .spawn(async move {
+                node_shutdown.cancelled().await;
+                Ok::<(), Error>(())
+            })
+            .unwrap_err();
+        assert!(matches!(error, Error::Capacity(_)));
+
+        tasks.drain().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

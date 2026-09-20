@@ -11,7 +11,8 @@ description = "Provider-neutral Cell node lifecycle facade"
 [dependencies]
 crab-cell-app.workspace = true
 crab-cell-runtime.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["rt", "sync"] }
+tokio-util = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
