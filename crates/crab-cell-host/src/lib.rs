@@ -158,11 +158,32 @@ impl CellNodeFacility {
     }
 }
 
+struct AbortOnDrop<T> {
+    handle: JoinHandle<T>,
+}
+
+impl<T> AbortOnDrop<T> {
+    fn new(handle: JoinHandle<T>) -> Self {
+        Self { handle }
+    }
+
+    async fn join(&mut self) -> std::result::Result<T, tokio::task::JoinError> {
+        (&mut self.handle).await
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
 /// Bounded task supervisor owned by a [`CellNode`] facility.
 pub struct CellNodeTaskGroup {
     cancellation: CancellationToken,
     node_shutdown: CancellationToken,
     tasks: Mutex<Vec<JoinHandle<FacilityResult>>>,
+    failed: Arc<AtomicBool>,
 }
 
 impl Drop for CellNodeTaskGroup {
@@ -190,7 +211,12 @@ impl CellNodeTaskGroup {
             cancellation,
             node_shutdown,
             tasks: Mutex::new(Vec::new()),
+            failed: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    fn is_healthy(&self) -> bool {
+        !self.failed.load(Ordering::Acquire)
     }
 
     /// Spawns one bounded node task and retains its join handle for drain.
@@ -206,9 +232,24 @@ impl CellNodeTaskGroup {
         if tasks.len() >= MAX_NODE_TASKS {
             return Err(Error::Capacity("CellNode task limit reached"));
         }
+        let failed = Arc::clone(&self.failed);
         let handle = tokio::spawn(async move {
-            task.await
-                .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
+            let mut task = AbortOnDrop::new(tokio::spawn(task));
+            match task.join().await {
+                Ok(result) => {
+                    let result = result.map_err(|error| {
+                        Box::new(error) as Box<dyn std::error::Error + Send + Sync>
+                    });
+                    if result.is_err() {
+                        failed.store(true, Ordering::Release);
+                    }
+                    result
+                }
+                Err(error) => {
+                    failed.store(true, Ordering::Release);
+                    Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
+                }
+            }
         });
         tasks.push(handle);
         Ok(())
@@ -226,7 +267,22 @@ impl CellNodeTaskGroup {
         if tasks.len() >= MAX_NODE_TASKS {
             return Err(Error::Capacity("CellNode task limit reached"));
         }
-        tasks.push(tokio::spawn(task));
+        let failed = Arc::clone(&self.failed);
+        tasks.push(tokio::spawn(async move {
+            let mut task = AbortOnDrop::new(tokio::spawn(task));
+            match task.join().await {
+                Ok(result) => {
+                    if result.is_err() {
+                        failed.store(true, Ordering::Release);
+                    }
+                    result
+                }
+                Err(error) => {
+                    failed.store(true, Ordering::Release);
+                    Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
+                }
+            }
+        }));
         Ok(())
     }
 
@@ -578,6 +634,12 @@ impl CellNode {
     #[must_use]
     pub fn is_ready(&self) -> bool {
         self.state() == NodeState::Ready
+            && self
+                .task_group
+                .lock()
+                .ok()
+                .and_then(|task_group| task_group.as_ref().map(|group| group.is_healthy()))
+                .unwrap_or(false)
     }
 
     /// Returns current shared runtime admission metrics.
@@ -701,6 +763,15 @@ impl CellNode {
             ));
         }
         self.require_task_group()?;
+        if !self
+            .task_group
+            .lock()
+            .map_err(|_| Error::Control("CellNode task group lock poisoned"))?
+            .as_ref()
+            .is_some_and(|task_group| task_group.is_healthy())
+        {
+            return Err(Error::Control("CellNode task group is unhealthy"));
+        }
         let mut state = self
             .state
             .lock()
@@ -1289,6 +1360,68 @@ mod tests {
                 .is_some()
         );
         node.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_node_task_removes_readiness_and_is_reported_during_drain() {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([30; 16]))
+            .build()
+            .unwrap();
+        let task_group = node
+            .install_task_group(CancellationToken::new(), CancellationToken::new())
+            .unwrap();
+        node.install_node_lease_for_startup(NodeLeaseGuard::new(0, 60_000).unwrap())
+            .unwrap();
+        node.start().unwrap();
+        assert!(node.is_ready());
+        task_group
+            .spawn(async { Err::<(), _>(std::io::Error::other("supervisor failed")) })
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        assert!(!node.is_ready());
+        let error = node.drain().await.unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Facility {
+                name: "cell-coordination-tasks",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn panicked_node_task_removes_readiness_and_is_reported_during_drain() {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([31; 16]))
+            .build()
+            .unwrap();
+        let task_group = node
+            .install_task_group(CancellationToken::new(), CancellationToken::new())
+            .unwrap();
+        node.install_node_lease_for_startup(NodeLeaseGuard::new(0, 60_000).unwrap())
+            .unwrap();
+        node.start().unwrap();
+        assert!(node.is_ready());
+        task_group
+            .spawn_boxed(async {
+                panic!("supervisor panicked");
+            })
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert!(!node.is_ready());
+        let error = node.drain().await.unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Facility {
+                name: "cell-coordination-tasks",
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

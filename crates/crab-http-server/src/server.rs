@@ -881,7 +881,9 @@ impl Server {
     }
 
     pub(crate) fn accepts_application_peers(&self) -> bool {
-        self.node_healthy.load(Ordering::Acquire) && !self.cancellation.is_cancelled()
+        self.node_healthy.load(Ordering::Acquire)
+            && !self.cancellation.is_cancelled()
+            && self.cell_node.as_ref().is_none_or(|node| node.is_ready())
     }
 
     pub(crate) async fn acquire_transfer(
