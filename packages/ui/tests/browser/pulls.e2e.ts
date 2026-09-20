@@ -10,6 +10,10 @@ const pathHex = "README.md"
   .split("")
   .map((character) => character.charCodeAt(0).toString(16).padStart(2, "0"))
   .join("");
+const encodePath = (path: string) =>
+  Array.from(new TextEncoder().encode(path), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
 
 test("pull request creation, discussion, and files follow the GitHub review flow", async ({
   page,
@@ -630,7 +634,7 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await expect(page.locator(".change-tree-header")).toContainText("1 file");
   await expect(page.locator(".diff-panel")).toContainText("New content");
   await expect(
-    page.getByRole("button", { name: "Open review thread #1" }),
+    page.getByRole("button", { name: "Open review thread #1", exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Jump to diff", exact: true }),
@@ -739,4 +743,265 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth),
   ).toBeLessThanOrEqual(360);
+});
+
+test("large pull review workspace keeps multi-file navigation and lazy diffs stable", async ({
+  page,
+}) => {
+  const base = "1".repeat(40);
+  const head = "2".repeat(40);
+  const changes = Array.from({ length: 64 }, (_, index) => {
+    const path = `src/features/file-${String(index).padStart(2, "0")}.txt`;
+    const path_hex = encodePath(path);
+    const old_oid = `${(index % 8) + 3}`.repeat(40);
+    const new_oid = `${(index % 8) + 9}`.repeat(40);
+    return {
+      path,
+      path_hex,
+      kind: "Modified",
+      old: { path, path_hex, kind: "Blob", oid: old_oid, mode: "100644" },
+      new: { path, path_hex, kind: "Blob", oid: new_oid, mode: "100644" },
+      old_oid,
+      new_oid,
+    };
+  });
+  const thread = (
+    number: number,
+    change: (typeof changes)[number],
+    outdated = false,
+  ) => ({
+    number,
+    pull: 2,
+    path: change.path,
+    path_hex: change.path_hex,
+    side: "new",
+    start_line: 1,
+    end_line: 1,
+    author: `Reviewer ${number}`,
+    body: `Review note ${number} for ${change.path}`,
+    suggested_text: null,
+    base_oid: outdated ? "3".repeat(40) : base,
+    head_oid: outdated ? "4".repeat(40) : head,
+    old_blob_oid: change.old_oid,
+    new_blob_oid: change.new_oid,
+    resolved: !outdated && number % 5 === 0,
+    outdated,
+    vanished: false,
+    resolved_by: null,
+    current: !outdated,
+    version: 1,
+    created_at: 1_700_000_060_000 + number,
+    updated_at: 1_700_000_060_000 + number,
+    can_edit: true,
+    can_reply: true,
+    can_resolve: true,
+  });
+  const activeThreads = Array.from({ length: 36 }, (_, index) =>
+    thread(index + 1, changes[index % 12]),
+  );
+  const outdatedThreads = Array.from({ length: 4 }, (_, index) =>
+    thread(100 + index, changes[index], true),
+  );
+  const diffRequests = new Set<string>();
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname;
+    if (path === "/api/session")
+      return route.fulfill({
+        json: { authenticated: true, mode: "local", user: null, csrf: null },
+      });
+    if (path === "/api/repos")
+      return route.fulfill({
+        json: {
+          repositories: [
+            {
+              owner: "team",
+              name: "project",
+              description: "A large repository fixture.",
+              access: "write",
+              can_admin: false,
+              archive_version: 0,
+              archived: false,
+              protection_version: 0,
+              protected_branches: [],
+            },
+          ],
+        },
+      });
+    if (path.endsWith("/refs"))
+      return route.fulfill({
+        json: {
+          head: { name: "refs/heads/main", oid: base },
+          unborn_head: null,
+          refs: [
+            { name: "refs/heads/main", oid: base },
+            { name: "refs/heads/feature/review", oid: head },
+          ],
+          generation: 2,
+        },
+      });
+    if (path.endsWith("/changes"))
+      return route.fulfill({
+        json: {
+          base,
+          commit: head,
+          changes: changes.map(
+            ({ old_oid: _old, new_oid: _new, ...change }) => change,
+          ),
+        },
+      });
+    if (path.endsWith("/diff")) {
+      const path_hex = url.searchParams.get("path_hex") ?? "";
+      const change = changes.find((item) => item.path_hex === path_hex);
+      if (!change) return route.fulfill({ status: 404 });
+      diffRequests.add(path_hex);
+      return route.fulfill({
+        json: {
+          base,
+          commit: head,
+          path: change.path,
+          old: {
+            oid: change.old_oid,
+            size: 20,
+            mode: "100644",
+            classification: "OrdinaryGit",
+            text: `old ${change.path}\n`,
+          },
+          new: {
+            oid: change.new_oid,
+            size: 20,
+            mode: "100644",
+            classification: "OrdinaryGit",
+            text: `new ${change.path}\n`,
+          },
+        },
+      });
+    }
+    if (path === "/api/repos/team/project/pulls/2")
+      return route.fulfill({
+        json: {
+          number: 2,
+          title: "Review many files",
+          body: "A large pull request fixture.",
+          state: "open",
+          author: "Alice",
+          base_ref: "refs/heads/main",
+          head_ref: "refs/heads/feature/review",
+          base_oid: base,
+          head_oid: head,
+          original_base_oid: base,
+          original_head_oid: head,
+          version: 1,
+          created_at: 1_700_000_000_000,
+          updated_at: 1_700_000_000_000,
+          labels: [],
+          assignees: [],
+          can_edit: true,
+          can_label: false,
+          can_assign: false,
+          can_manage: true,
+          can_decide: true,
+          can_merge: false,
+          branches_available: true,
+          merge: null,
+          merge_pending: null,
+          merge_requirements: {
+            protected: false,
+            required_approvals: 0,
+            approvals: 0,
+            changes_requested: 0,
+            checks_satisfied: true,
+            checks: [],
+            satisfied: true,
+          },
+        },
+      });
+    if (/\/pulls\/2\/threads$/.test(path)) {
+      const isOutdated = url.searchParams.get("outdated") === "true";
+      const source = isOutdated ? outdatedThreads : activeThreads;
+      const before = Number(url.searchParams.get("before"));
+      const maximum =
+        Number.isSafeInteger(before) && before > 0 ? before - 1 : Infinity;
+      const items = source
+        .filter((item) => item.number <= maximum)
+        .sort((left, right) => right.number - left.number)
+        .slice(0, 30);
+      return route.fulfill({
+        json: {
+          items,
+          next: items.length === 30 ? items[items.length - 1].number : null,
+        },
+      });
+    }
+    if (/\/pulls\/2\/threads\/\d+\/replies$/.test(path))
+      return route.fulfill({ json: { items: [], next: null } });
+    return route.fulfill({
+      status: 404,
+      json: { error: { message: "Large review fixture route unavailable" } },
+    });
+  });
+
+  await page.goto("/team/project?view=pulls&pull=2&pull_tab=files");
+  await selectDarkTheme(page);
+  await expect(
+    page.getByRole("heading", { name: "64 changed files" }),
+  ).toBeVisible();
+  await expect(page.locator(".change-tree-header")).toContainText("64 files");
+  await expect(page.locator(".inline-review-metrics")).toHaveAttribute(
+    "aria-label",
+    "24 open, 6 resolved, 4 outdated",
+  );
+
+  const tree = page.locator('file-tree-container[aria-label="Changed files"]');
+  const firstFile = tree.getByRole("treeitem", {
+    name: "file-00.txt",
+    exact: true,
+  });
+  await expect(firstFile).toContainText("3 threads");
+  await expect.poll(() => diffRequests.size).toBeGreaterThan(0);
+  expect(diffRequests.size).toBeLessThan(changes.length / 2);
+
+  await page
+    .getByRole("button", { name: "Load more threads", exact: true })
+    .click();
+  await expect(page.locator(".inline-review-metrics")).toHaveAttribute(
+    "aria-label",
+    "29 open, 7 resolved, 4 outdated",
+  );
+  await expect(firstFile).toContainText("4 threads");
+
+  const treeScroll = tree.locator('[data-file-tree-virtualized-scroll="true"]');
+  await treeScroll.evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  const lastFile = tree.getByRole("treeitem", {
+    name: "file-63.txt",
+    exact: true,
+  });
+  await expect(lastFile).toBeVisible();
+  await lastFile.click();
+  await expect(lastFile).toHaveAttribute("aria-selected", "true");
+  await expect.poll(() => diffRequests.has(changes[63].path_hex)).toBe(true);
+  await expect(
+    page.locator(`[data-change-path="${changes[63].path}"]`),
+  ).toContainText(`new ${changes[63].path}`);
+
+  await treeScroll.evaluate((node) => {
+    node.scrollTop = 0;
+  });
+  const reviewedFile = tree.getByRole("treeitem", {
+    name: "file-00.txt",
+    exact: true,
+  });
+  await expect(reviewedFile).toBeVisible();
+  await reviewedFile.click();
+  await expect(
+    page.getByRole("button", { name: "Open review thread #1", exact: true }),
+  ).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(390);
 });

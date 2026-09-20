@@ -701,6 +701,8 @@ function ChangeWorkspace({
   review?: DiffReviewState;
 }) {
   const diffPane = useRef<HTMLDivElement>(null);
+  const programmaticSelection = useRef<string | undefined>(undefined);
+  const unlockProgrammaticSelection = useRef<number | undefined>(undefined);
   const [selectedPath, setSelectedPath] = useState(changes[0]?.path);
 
   useEffect(() => {
@@ -714,6 +716,9 @@ function ChangeWorkspace({
     let frame = 0;
     const updateSelection = () => {
       frame = 0;
+      if (programmaticSelection.current) {
+        return;
+      }
       const paneTop = pane.getBoundingClientRect().top;
       let active = firstChange;
       for (const change of changes) {
@@ -734,6 +739,8 @@ function ChangeWorkspace({
     return () => {
       pane.removeEventListener("scroll", onScroll);
       if (frame) cancelAnimationFrame(frame);
+      if (unlockProgrammaticSelection.current !== undefined)
+        window.clearTimeout(unlockProgrammaticSelection.current);
     };
   }, [changes]);
 
@@ -742,6 +749,15 @@ function ChangeWorkspace({
     const panel = document.getElementById(changePanelId(change.path_hex));
     if (!pane || !panel) return;
     setSelectedPath(change.path);
+    programmaticSelection.current = change.path;
+    if (unlockProgrammaticSelection.current !== undefined)
+      window.clearTimeout(unlockProgrammaticSelection.current);
+    // Lazy diff layout can emit a burst of scroll events after bottom-clamped
+    // navigation; keep the explicit file selection stable while it settles.
+    unlockProgrammaticSelection.current = window.setTimeout(() => {
+      programmaticSelection.current = undefined;
+      unlockProgrammaticSelection.current = undefined;
+    }, 500);
     const top =
       pane.scrollTop +
       panel.getBoundingClientRect().top -
