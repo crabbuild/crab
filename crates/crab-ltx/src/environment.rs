@@ -1920,7 +1920,7 @@ mod tests {
         let host = Host::default()
             .with_clock(Arc::new(TestClock))
             .with_filesystem(filesystem.clone());
-        let mut db = crate::ManagedDb::open_with_host(
+        let mut db = crate::Db::open_with_host(
             &directory.path().join("db.sqlite"),
             crate::Limits::default(),
             host,

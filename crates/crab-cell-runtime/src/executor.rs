@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crab_ltx::{CaptureBatch, ManagedDb, TransactionError, rusqlite::OptionalExtension};
+use crab_ltx::{CaptureBatch, Db, TransactionError, rusqlite::OptionalExtension};
 
 use crate::{
     CatalogRole, CellId, Digest, Error, IncarnationId, PersistedWorkInventory, RequestId, Result,
@@ -225,7 +225,7 @@ pub enum CommandExecution {
 /// `confirm_published` releases retained files after an authoritative root
 /// matches the oldest local commit.
 pub struct CellExecutor {
-    db: ManagedDb,
+    db: Db,
     cell: CellId,
     incarnation: IncarnationId,
     schema: u32,
@@ -242,7 +242,7 @@ impl CellExecutor {
     }
 
     #[must_use]
-    pub fn new(db: ManagedDb, cell: CellId, incarnation: IncarnationId, schema: u32) -> Self {
+    pub fn new(db: Db, cell: CellId, incarnation: IncarnationId, schema: u32) -> Self {
         Self {
             db,
             cell,
@@ -257,7 +257,7 @@ impl CellExecutor {
     }
 
     pub(crate) fn bootstrap(
-        mut db: ManagedDb,
+        mut db: Db,
         cell: CellId,
         incarnation: IncarnationId,
         schema: u32,
@@ -291,7 +291,7 @@ impl CellExecutor {
     }
 
     pub(crate) fn from_restored(
-        mut db: ManagedDb,
+        mut db: Db,
         cell: CellId,
         incarnation: IncarnationId,
         schema: u32,
@@ -1130,7 +1130,7 @@ fn admission_error(error: crab_ltx::CrabError) -> Error {
     }
 }
 
-fn transaction_error_with_io(db: &ManagedDb, error: TransactionError<Error>) -> Error {
+fn transaction_error_with_io(db: &Db, error: TransactionError<Error>) -> Error {
     db.take_io_error()
         .map_or_else(|| transaction_error(error), ltx_error)
 }
@@ -1243,7 +1243,7 @@ mod tests {
         let mut connection = crab_ltx::rusqlite::Connection::open(&path).unwrap();
         crate::install_runtime_schema(&mut connection, cell, incarnation, 1).unwrap();
         drop(connection);
-        let mut db = ManagedDb::open(&path, crab_ltx::Limits::default()).unwrap();
+        let mut db = Db::open(&path, crab_ltx::Limits::default()).unwrap();
         db.transaction(|transaction| {
             transaction.execute("UPDATE sys_meta SET logical_time_ms = 1", [])?;
             Ok(())
@@ -1274,7 +1274,7 @@ mod tests {
         let mut connection = crab_ltx::rusqlite::Connection::open(&path).unwrap();
         crate::install_runtime_schema(&mut connection, cell, incarnation, 1).unwrap();
         drop(connection);
-        let db = ManagedDb::open(&path, crab_ltx::Limits::default()).unwrap();
+        let db = Db::open(&path, crab_ltx::Limits::default()).unwrap();
         let mut executor = CellExecutor::new(db, cell, incarnation, 1);
         let registry = code_only_registry();
         let target_code = registry.module_code(CODE_ONLY_MODULE).unwrap();

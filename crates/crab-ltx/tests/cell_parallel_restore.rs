@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use crab_ltx::CellStorageLayout;
 use crab_ltx::{
-    CaptureBatch, CaptureTiming, CellReplica, Host, Limits, LtxPhase, LtxReadOrigin,
-    LtxRequestOutcome, LtxTelemetry, ManagedDb, RootRef, VerifiedPlan, restore_exact,
+    CaptureBatch, CaptureTiming, CellReplica, Db, Host, Limits, LtxPhase, LtxReadOrigin,
+    LtxRequestOutcome, LtxTelemetry, RootRef, VerifiedPlan, restore_exact,
 };
 use crab_storage::Store;
 use futures_util::{StreamExt as _, stream::BoxStream};
@@ -275,7 +275,7 @@ struct Fixture {
 async fn fixture(extra_segments: usize) -> Fixture {
     let directory = tempfile::TempDir::new().unwrap();
     let source = directory.path().join("source.sqlite");
-    let mut writer = ManagedDb::open(&source, Limits::default()).unwrap();
+    let mut writer = Db::open(&source, Limits::default()).unwrap();
     writer
         .transaction(|transaction| {
             transaction.execute_batch(

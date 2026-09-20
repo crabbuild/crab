@@ -360,7 +360,7 @@ impl Db {
         };
         let post_checksum = checksums.checksum();
         // The checksum candidate remains isolated until the cut is durable. A
-        // failed local index update fences the owning ManagedDb, so partially
+        // failed local index update fences the owning Db, so partially
         // updated ephemeral state can never authorize another capture.
         checksums.persist()?;
         // The next verify reads exactly these fields back; caching them —

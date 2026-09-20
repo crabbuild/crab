@@ -168,7 +168,7 @@ fn later_production_code() {}
         self.assertFalse(
             self.check_source(
                 "#[cfg(test)]\nmod tests { use crab_ltx::CellReplica; }\n"
-                "use crab_ltx::ManagedDb;\n",
+                "use crab_ltx::Db;\n",
             )
         )
 

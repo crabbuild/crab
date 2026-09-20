@@ -33,7 +33,7 @@ route bypasses the actor.
 
 ## Why this plan exists
 
-`ManagedDb::hydrate_step` already verifies and materializes sparse content, but
+`Db::hydrate_step` already verifies and materializes sparse content, but
 its contract deliberately leaves scheduling/cancellation to the caller. No
 runtime caller promotes a restored sparse Cell to a fully resident local
 database. A “warm” SQL request can therefore still issue object-store ranges.
@@ -76,7 +76,7 @@ abandons the in-flight step according to the existing scratch-file contract.
 2. Add a typed background hydration effect to the pure kernel. Its inputs
    include current generation/root, a fixed internal work bound, and operation
    ID. Completion reports progress, complete, cancelled, or typed failure.
-3. Execute one bounded `ManagedDb::hydrate_step` per admitted background job.
+3. Execute one bounded `Db::hydrate_step` per admitted background job.
    Do not hold actor locks or a Tokio mutex across blocking SQLite/filesystem
    work. Foreground commands remain preferred.
 4. Before each step, reserve its declared memory/disk/job cost. Release every
@@ -110,7 +110,7 @@ git diff --check
 ## Acceptance criteria
 
 - [x] The runtime, not the HTTP router, owns hydration state and scheduling.
-- [x] Hydration uses `ManagedDb::hydrate_step`; no second page-fetch path exists.
+- [x] Hydration uses `Db::hydrate_step`; no second page-fetch path exists.
 - [x] Work per step and concurrent hydration jobs are statically bounded and
       represented in runtime resource accounting.
 - [x] Foreground work cannot be starved by hydration.

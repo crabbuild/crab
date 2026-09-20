@@ -861,10 +861,8 @@ mod tests {
     fn recovery_witness_splits_interleaved_cells_against_exact_bases() {
         let limits = crab_ltx::Limits::default();
         let directory = tempfile::TempDir::new().unwrap();
-        let mut left =
-            crab_ltx::ManagedDb::open(&directory.path().join("left.sqlite"), limits).unwrap();
-        let mut right =
-            crab_ltx::ManagedDb::open(&directory.path().join("right.sqlite"), limits).unwrap();
+        let mut left = crab_ltx::Db::open(&directory.path().join("left.sqlite"), limits).unwrap();
+        let mut right = crab_ltx::Db::open(&directory.path().join("right.sqlite"), limits).unwrap();
         for database in [&mut left, &mut right] {
             database
                 .transaction(|transaction| {
@@ -961,7 +959,7 @@ mod tests {
         let limits = crab_ltx::Limits::default();
         let directory = tempfile::TempDir::new().unwrap();
         let mut database =
-            crab_ltx::ManagedDb::open(&directory.path().join("source.sqlite"), limits).unwrap();
+            crab_ltx::Db::open(&directory.path().join("source.sqlite"), limits).unwrap();
         database
             .transaction(|transaction| {
                 transaction.execute_batch(

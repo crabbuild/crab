@@ -1,10 +1,8 @@
 use crab_ltx::rusqlite::Connection;
-use crab_ltx::{
-    CrabError, Limits, LocalSegment, ManagedDb, VerifiedPlan, compact_exact, restore_exact,
-};
+use crab_ltx::{CrabError, Db, Limits, LocalSegment, VerifiedPlan, compact_exact, restore_exact};
 use tempfile::TempDir;
 
-fn insert(db: &mut ManagedDb, value: &str) {
+fn insert(db: &mut Db, value: &str) {
     db.transaction(|tx| {
         tx.execute(
             "CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, body TEXT NOT NULL)",
@@ -36,7 +34,7 @@ fn committed_sql_survives_cold_restore_and_compaction() {
     let remote = TempDir::new().unwrap();
     let restore = TempDir::new().unwrap();
     let limits = Limits::default();
-    let mut db = ManagedDb::open(&source.path().join("repo.sqlite"), limits).unwrap();
+    let mut db = Db::open(&source.path().join("repo.sqlite"), limits).unwrap();
     let mut files = Vec::new();
     let mut position = Default::default();
     for text in ["initial", "second", "Unicode: 🦀 中文"] {
@@ -74,7 +72,7 @@ fn committed_sql_survives_cold_restore_and_compaction() {
 #[test]
 fn snapshot_matches_delta_restore_byte_for_byte() {
     let temp = TempDir::new().unwrap();
-    let mut db = ManagedDb::open(&temp.path().join("repo.sqlite"), Limits::default()).unwrap();
+    let mut db = Db::open(&temp.path().join("repo.sqlite"), Limits::default()).unwrap();
     insert(&mut db, "one");
     let mut batch = db.capture().unwrap();
     insert(&mut db, "two");
@@ -94,7 +92,7 @@ fn snapshot_matches_delta_restore_byte_for_byte() {
 #[test]
 fn rolled_back_sql_is_not_restored() {
     let temp = TempDir::new().unwrap();
-    let mut db = ManagedDb::open(&temp.path().join("repo.sqlite"), Limits::default()).unwrap();
+    let mut db = Db::open(&temp.path().join("repo.sqlite"), Limits::default()).unwrap();
     insert(&mut db, "keep");
     let result = db.transaction(|tx| {
         tx.execute("INSERT INTO messages(body) VALUES ('rollback')", [])?;
@@ -111,7 +109,7 @@ fn rolled_back_sql_is_not_restored() {
 #[test]
 fn checkpoint_threshold_captures_every_cut_and_growth_page() {
     let temp = TempDir::new().unwrap();
-    let mut db = ManagedDb::open(&temp.path().join("repo.sqlite"), Limits::default()).unwrap();
+    let mut db = Db::open(&temp.path().join("repo.sqlite"), Limits::default()).unwrap();
     let mut segments = Vec::new();
     let mut target = Default::default();
     for round in 0..4 {
@@ -151,7 +149,7 @@ fn checkpoint_threshold_captures_every_cut_and_growth_page() {
 fn exact_plan_rejects_gap_overlap_wrong_target_and_manifest_mutation() {
     let temp = TempDir::new().unwrap();
     let limits = Limits::default();
-    let mut db = ManagedDb::open(&temp.path().join("repo.sqlite"), limits).unwrap();
+    let mut db = Db::open(&temp.path().join("repo.sqlite"), limits).unwrap();
     let mut segments = Vec::new();
     let mut target = Default::default();
     for value in ["a", "b", "c"] {
@@ -183,7 +181,7 @@ fn exact_plan_rejects_gap_overlap_wrong_target_and_manifest_mutation() {
 #[test]
 fn verified_plan_owns_bytes_and_never_overwrites_destination() {
     let temp = TempDir::new().unwrap();
-    let mut db = ManagedDb::open(&temp.path().join("repo.sqlite"), Limits::default()).unwrap();
+    let mut db = Db::open(&temp.path().join("repo.sqlite"), Limits::default()).unwrap();
     insert(&mut db, "retained");
     let batch = db.capture().unwrap();
     let plan = VerifiedPlan::new(&batch.segments, batch.position, Limits::default()).unwrap();
@@ -200,7 +198,7 @@ fn verified_plan_owns_bytes_and_never_overwrites_destination() {
 fn capture_failure_fences_writer_and_stale_sessions_are_refused() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("repo.sqlite");
-    let mut db = ManagedDb::open(
+    let mut db = Db::open(
         &path,
         Limits {
             max_capture_bytes: 32768,
@@ -208,7 +206,7 @@ fn capture_failure_fences_writer_and_stale_sessions_are_refused() {
         },
     )
     .unwrap();
-    assert!(ManagedDb::open(&path, Limits::default()).is_err());
+    assert!(Db::open(&path, Limits::default()).is_err());
     db.transaction(|tx| {
         tx.execute("CREATE TABLE large (body BLOB)", [])?;
         tx.execute("INSERT INTO large VALUES (randomblob(65536))", [])?;
@@ -218,13 +216,13 @@ fn capture_failure_fences_writer_and_stale_sessions_are_refused() {
     assert!(db.capture().is_err());
     assert!(matches!(db.transaction(|_| Ok(())), Err(CrabError::Fenced)));
     db.close().unwrap();
-    assert!(ManagedDb::open(&path, Limits::default()).is_err());
+    assert!(Db::open(&path, Limits::default()).is_err());
 }
 
 #[test]
 fn restore_admission_rejects_database_and_chain_byte_limits() {
     let temp = TempDir::new().unwrap();
-    let mut db = ManagedDb::open(&temp.path().join("repo.sqlite"), Limits::default()).unwrap();
+    let mut db = Db::open(&temp.path().join("repo.sqlite"), Limits::default()).unwrap();
     insert(&mut db, "bounded");
     let batch = db.capture().unwrap();
     let small = Limits {
@@ -246,7 +244,7 @@ fn corrupt_committed_wal_cannot_acknowledge_an_earlier_valid_cut() {
     use std::io::{Read, Seek, SeekFrom, Write};
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("repo.sqlite");
-    let mut db = ManagedDb::open(&path, Limits::default()).unwrap();
+    let mut db = Db::open(&path, Limits::default()).unwrap();
     insert(&mut db, "already captured");
     db.capture().unwrap();
     insert(&mut db, "valid but not captured yet");
@@ -272,14 +270,14 @@ fn corrupt_committed_wal_cannot_acknowledge_an_earlier_valid_cut() {
 #[test]
 fn recovered_database_starts_a_new_epoch_and_can_capture_again() {
     let temp = TempDir::new().unwrap();
-    let mut db = ManagedDb::open(&temp.path().join("old.sqlite"), Limits::default()).unwrap();
+    let mut db = Db::open(&temp.path().join("old.sqlite"), Limits::default()).unwrap();
     insert(&mut db, "before takeover");
     let batch = db.capture().unwrap();
     let plan = VerifiedPlan::new(&batch.segments, batch.position, Limits::default()).unwrap();
     db.close().unwrap();
     let path = temp.path().join("new.sqlite");
     restore_exact(&plan, &path).unwrap();
-    let mut new = ManagedDb::open(&path, Limits::default()).unwrap();
+    let mut new = Db::open(&path, Limits::default()).unwrap();
     insert(&mut new, "after takeover");
     let batch = new.capture().unwrap();
     assert_eq!(batch.segments[0].info().min_txid, 1);
@@ -292,7 +290,7 @@ fn recovered_database_starts_a_new_epoch_and_can_capture_again() {
 #[test]
 fn sqlite_sidecars_prevent_restore() {
     let temp = TempDir::new().unwrap();
-    let mut db = ManagedDb::open(&temp.path().join("repo.sqlite"), Limits::default()).unwrap();
+    let mut db = Db::open(&temp.path().join("repo.sqlite"), Limits::default()).unwrap();
     insert(&mut db, "safe");
     let batch = db.capture().unwrap();
     let plan = VerifiedPlan::new(&batch.segments, batch.position, Limits::default()).unwrap();
@@ -307,8 +305,8 @@ fn sqlite_sidecars_prevent_restore() {
 fn database_symlink_cannot_claim_a_second_capture_session() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("repo.sqlite");
-    let db = ManagedDb::open(&path, Limits::default()).unwrap();
+    let db = Db::open(&path, Limits::default()).unwrap();
     let alias = temp.path().join("alias.sqlite");
     std::os::unix::fs::symlink(db.path(), &alias).unwrap();
-    assert!(ManagedDb::open(&alias, Limits::default()).is_err());
+    assert!(Db::open(&alias, Limits::default()).is_err());
 }

@@ -789,8 +789,7 @@ mod tests {
     async fn active_lane_requires_and_returns_a_complete_follower_tail() {
         let limits = crab_ltx::Limits::default();
         let source = tempfile::TempDir::new().unwrap();
-        let mut database =
-            crab_ltx::ManagedDb::open(&source.path().join("cell.sqlite"), limits).unwrap();
+        let mut database = crab_ltx::Db::open(&source.path().join("cell.sqlite"), limits).unwrap();
         database
             .transaction(|transaction| {
                 transaction.execute_batch(
@@ -879,8 +878,7 @@ mod tests {
     async fn recovery_uses_the_next_complete_witness_after_a_read_failure() {
         let limits = crab_ltx::Limits::default();
         let source = tempfile::TempDir::new().unwrap();
-        let mut database =
-            crab_ltx::ManagedDb::open(&source.path().join("cell.sqlite"), limits).unwrap();
+        let mut database = crab_ltx::Db::open(&source.path().join("cell.sqlite"), limits).unwrap();
         database
             .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
             .unwrap();
@@ -1026,8 +1024,7 @@ mod tests {
     async fn recovery_survives_a_simultaneous_follower_fleet_restart() {
         let limits = crab_ltx::Limits::default();
         let source = tempfile::TempDir::new().unwrap();
-        let mut database =
-            crab_ltx::ManagedDb::open(&source.path().join("cell.sqlite"), limits).unwrap();
+        let mut database = crab_ltx::Db::open(&source.path().join("cell.sqlite"), limits).unwrap();
         database
             .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
             .unwrap();

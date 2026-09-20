@@ -111,7 +111,7 @@ flowchart TD
     Resources --> IO
 ```
 
-Each open `ManagedDb` charges:
+Each open `Db` charges:
 
 - Three SQLite connection page caches at 64 KiB each
 - Eight file descriptors

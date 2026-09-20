@@ -1,11 +1,11 @@
-use crab_ltx::{Limits, LocalSegment, ManagedDb, VerifiedPlan, restore_exact};
+use crab_ltx::{Db, Limits, LocalSegment, VerifiedPlan, restore_exact};
 
 fn main() -> crab_ltx::Result<()> {
     let source = tempfile::tempdir()?;
     let replica = tempfile::tempdir()?;
     let restored = tempfile::tempdir()?;
     let limits = Limits::default();
-    let mut db = ManagedDb::open(&source.path().join("repository.sqlite"), limits)?;
+    let mut db = Db::open(&source.path().join("repository.sqlite"), limits)?;
     db.transaction(|tx| {
         tx.execute(
             "CREATE TABLE issues (number INTEGER PRIMARY KEY, title TEXT NOT NULL)",

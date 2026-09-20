@@ -26,7 +26,7 @@ flowchart LR
     Caller[CellClient]
     Mailbox[Bounded Cell mailbox]
     Actor[Cell actor<br/>control + pending cuts]
-    Worker[Stable SQL worker<br/>ManagedDb owner]
+    Worker[Stable SQL worker<br/>Db owner]
     Publisher[CellPublisher]
     Origin[(Object store)]
 
@@ -36,7 +36,7 @@ flowchart LR
     Actor --> Publisher --> Origin
 ```
 
-`CellHandle` is a cloneable mailbox sender. It never exposes a SQLite connection. Stable Cell-ID routing keeps one `ManagedDb` on one operating-system thread until close.
+`CellHandle` is a cloneable mailbox sender. It never exposes a SQLite connection. Stable Cell-ID routing keeps one `Db` on one operating-system thread until close.
 
 The node bounds:
 

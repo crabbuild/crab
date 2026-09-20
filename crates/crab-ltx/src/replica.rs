@@ -554,13 +554,13 @@ impl CellWritableDatabase {
     }
 
     /// Opens a fresh sparse SQLite file pinned to this exact Cell root.
-    pub fn open_writable(self, destination: &std::path::Path) -> Result<crate::ManagedDb> {
+    pub fn open_writable(self, destination: &std::path::Path) -> Result<crate::Db> {
         if destination != self.destination {
             return Err(CrabError::InvalidState(
                 "writable destination differs from prepared destination",
             ));
         }
-        crate::ManagedDb::open_cell_paged(self, destination)
+        crate::Db::open_cell_paged(self, destination)
     }
 }
 
@@ -614,13 +614,13 @@ impl CellReplica {
     ///
     /// The destination and SQLite sidecars must not exist. A failed open leaves
     /// its artifacts quarantined for caller-owned inspection and cleanup.
-    pub fn open_new(&self, destination: &std::path::Path) -> Result<crate::ManagedDb> {
+    pub fn open_new(&self, destination: &std::path::Path) -> Result<crate::Db> {
         crate::recovery::reject_sidecars(destination, &self.host)?;
         let mut file = self.host.filesystem.create(destination)?;
         file.sync_all()?;
         self.host.filesystem.sync_parent(destination)?;
         drop(file);
-        crate::ManagedDb::open_with_host(destination, self.limits, self.host.clone())
+        crate::Db::open_with_host(destination, self.limits, self.host.clone())
     }
 
     /// Verifies and uploads a new immutable root without changing authority.

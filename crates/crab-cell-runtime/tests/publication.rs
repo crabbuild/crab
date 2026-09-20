@@ -13,7 +13,7 @@ use crab_cell_runtime::{
     StoredOutcome, Transition, VersionedControl, install_runtime_schema,
 };
 use crab_ltx::CellStorageLayout;
-use crab_ltx::{CellReplica, Limits, ManagedDb};
+use crab_ltx::{CellReplica, Db, Limits};
 use crab_storage::Store;
 use futures_util::stream::BoxStream;
 use object_store::{
@@ -58,7 +58,7 @@ fn fixture_with_store(store: Store) -> Fixture {
         )
         .unwrap();
     drop(connection);
-    let writer = ManagedDb::open(&database, Limits::default()).unwrap();
+    let writer = Db::open(&database, Limits::default()).unwrap();
     Fixture {
         _directory: directory,
         database,

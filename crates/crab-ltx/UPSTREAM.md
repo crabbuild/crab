@@ -83,7 +83,7 @@ commit; it is not a runtime or compatibility contract.
 
 ### Embedded ownership
 
-- `ManagedDb` owns the SQLite writer, control connection, read lock, WAL commit
+- `Db` owns the SQLite writer, control connection, read lock, WAL commit
   observation, and fresh local session claim.
 - No background daemon, provider URL parser, credential loader, HTTP service,
   retention loop, or scheduler is included.
@@ -129,7 +129,7 @@ commit; it is not a runtime or compatibility contract.
 - Cancellation does not pretend to roll back dispatched work. Admission and
   scratch stay owned until that work actually finishes.
 - Each managed SQLite connection uses a 64 KiB page-cache target; one
-  `ManagedDb` retains three connections.
+  `Db` retains three connections.
 
 ## Compatibility boundary
 

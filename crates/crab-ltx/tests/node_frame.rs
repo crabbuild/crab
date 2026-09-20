@@ -1,7 +1,7 @@
 #![cfg(feature = "replica")]
 
 use bytes::Bytes;
-use crab_ltx::{Limits, ManagedDb, NodeFrameScope, encode_node_frame, inspect_node_frame};
+use crab_ltx::{Db, Limits, NodeFrameScope, encode_node_frame, inspect_node_frame};
 
 fn scope() -> NodeFrameScope {
     NodeFrameScope {
@@ -19,8 +19,7 @@ fn scope() -> NodeFrameScope {
 #[test]
 fn canonical_frame_roundtrips_verified_ltx() {
     let directory = tempfile::TempDir::new().unwrap();
-    let mut database =
-        ManagedDb::open(&directory.path().join("frame.sqlite"), Limits::default()).unwrap();
+    let mut database = Db::open(&directory.path().join("frame.sqlite"), Limits::default()).unwrap();
     database
         .transaction(|transaction| {
             transaction.execute_batch(
@@ -52,8 +51,7 @@ fn canonical_frame_roundtrips_verified_ltx() {
 #[test]
 fn frame_rejects_corruption_trailing_bytes_and_zero_scope() {
     let directory = tempfile::TempDir::new().unwrap();
-    let mut database =
-        ManagedDb::open(&directory.path().join("frame.sqlite"), Limits::default()).unwrap();
+    let mut database = Db::open(&directory.path().join("frame.sqlite"), Limits::default()).unwrap();
     database
         .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
         .unwrap();

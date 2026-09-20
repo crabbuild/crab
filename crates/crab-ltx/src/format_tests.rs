@@ -157,8 +157,7 @@ fn exact_restore_rejects_checksum_disabled_file() {
 #[test]
 fn captured_positions_match_full_database_crc_oracle() {
     let temp = tempfile::TempDir::new().unwrap();
-    let mut db =
-        crate::ManagedDb::open(&temp.path().join("source.sqlite"), Limits::default()).unwrap();
+    let mut db = crate::Db::open(&temp.path().join("source.sqlite"), Limits::default()).unwrap();
     let mut segments = Vec::new();
     for round in 0..8 {
         db.transaction(|tx| {

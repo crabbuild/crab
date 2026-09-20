@@ -1,5 +1,5 @@
 use crab_ltx::{
-    CaptureTiming, Limits, ManagedDb, Position, VerifiedPlan, compact_exact, restore_exact,
+    CaptureTiming, Limits, Db, Position, VerifiedPlan, compact_exact, restore_exact,
 };
 use serde::Serialize;
 use std::error::Error;
@@ -145,7 +145,7 @@ fn option(args: &[String], name: &str) -> Result<Option<usize>, Box<dyn Error>> 
 fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
     let source = directory.path().join("source.sqlite");
-    let mut database = ManagedDb::open(&source, Limits::default())?;
+    let mut database = Db::open(&source, Limits::default())?;
     let mut segments = Vec::new();
     let mut position = Position::default();
     let mut capture_phases = CapturePhases::default();
@@ -241,7 +241,7 @@ fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error>> {
 }
 
 fn append_capture(
-    database: &mut ManagedDb,
+    database: &mut Db,
     segments: &mut Vec<crab_ltx::LocalSegment>,
     position: &mut Position,
     phases: &mut CapturePhases,
