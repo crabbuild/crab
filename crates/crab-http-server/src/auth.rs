@@ -910,7 +910,10 @@ fn parse_key(value: &str) -> Option<Key> {
         return None;
     }
     let mut key = [0; 32];
-    for (slot, pair) in key.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+    let (pairs, []) = value.as_bytes().as_chunks::<2>() else {
+        return None;
+    };
+    for (slot, pair) in key.iter_mut().zip(pairs) {
         *slot = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
     }
     Some(key)

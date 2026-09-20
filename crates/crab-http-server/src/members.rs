@@ -44,28 +44,32 @@ fn error(status: StatusCode, code: &'static str, message: &'static str) -> Respo
         .into_response()
 }
 
+fn boxed_error(status: StatusCode, code: &'static str, message: &'static str) -> Box<Response> {
+    Box::new(error(status, code, message))
+}
+
 async fn authorized(
     server: &Server,
     principal: &Principal,
     owner: &str,
     name: &str,
-) -> Result<(CatalogStore, CatalogDocument), Response> {
+) -> Result<(CatalogStore, CatalogDocument), Box<Response>> {
     if !matches!(principal, Principal::Local | Principal::User(_)) {
-        return Err(error(
+        return Err(boxed_error(
             StatusCode::NOT_FOUND,
             "repository_not_found",
             "Repository not found.",
         ));
     }
     let catalog = server.catalog.clone().ok_or_else(|| {
-        error(
+        boxed_error(
             StatusCode::NOT_FOUND,
             "repository_not_found",
             "Repository not found.",
         )
     })?;
     let (document, _) = catalog.load().await.map_err(|_| {
-        error(
+        boxed_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "membership_unavailable",
             "Membership is temporarily unavailable.",
@@ -78,7 +82,7 @@ async fn authorized(
             record.owner.eq_ignore_ascii_case(owner) && record.name.eq_ignore_ascii_case(name)
         })
         .ok_or_else(|| {
-            error(
+            boxed_error(
                 StatusCode::NOT_FOUND,
                 "repository_not_found",
                 "Repository not found.",
@@ -88,7 +92,7 @@ async fn authorized(
         .repositories
         .get(&(record.owner.clone(), record.name.clone()))
         .ok_or_else(|| {
-            error(
+            boxed_error(
                 StatusCode::NOT_FOUND,
                 "repository_not_found",
                 "Repository not found.",
@@ -97,14 +101,14 @@ async fn authorized(
     let config = record
         .runtime_config(catalog.root(), &active.config.default_branch)
         .map_err(|_| {
-            error(
+            boxed_error(
                 StatusCode::NOT_FOUND,
                 "repository_not_found",
                 "Repository not found.",
             )
         })?;
     if !principal.can_admin(&config) {
-        return Err(error(
+        return Err(boxed_error(
             StatusCode::NOT_FOUND,
             "repository_not_found",
             "Repository not found.",
@@ -120,7 +124,7 @@ async fn list(
 ) -> Response {
     let (_catalog, document) = match authorized(&server, &principal, &owner, &name).await {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let record = document.repositories.into_iter().find(|record| {
         record.owner.eq_ignore_ascii_case(&owner) && record.name.eq_ignore_ascii_case(&name)
@@ -147,7 +151,7 @@ async fn replace(
 ) -> Response {
     let (catalog, document) = match authorized(&server, &principal, &owner, &name).await {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let input = match input {
         Ok(Json(input)) => input,
