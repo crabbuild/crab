@@ -22,6 +22,15 @@ export interface Repository {
     required_checks: string[];
   }>;
 }
+export interface RepositoryMember {
+  subject: string;
+  name: string;
+  access: "read" | "write" | "admin";
+}
+export interface MembershipState {
+  revision: number;
+  members: RepositoryMember[];
+}
 export interface RepositoryLabel {
   id: number;
   name: string;

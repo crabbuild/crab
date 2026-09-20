@@ -265,7 +265,10 @@ Complete the setup in this order:
 
 1. Create versioned storage and provider workload identity with `terraform/aws`, `terraform/gcp`, or `terraform/azure`.
 2. Grant the workload identity access only to the dedicated storage boundary.
-3. Register the OpenID Connect (OIDC) callback `https://git.example.com/auth/callback`.
+3. Register the OpenID Connect (OIDC) callback `https://git.example.com/auth/callback`
+   and Back-Channel Logout URI `https://git.example.com/auth/backchannel-logout`.
+   Set `backchannel_logout_session_required=false`; Crab currently supports
+   subject-scoped Logout Tokens, not `sid`-only delivery.
 4. Export Terraform's generated provider values and edit the provider-neutral team values file.
 5. Create a dedicated namespace with the Restricted Pod Security policy, create
    the Kubernetes Secret, and install the chart.
@@ -317,11 +320,22 @@ unauthenticated loopback deployments may omit membership.
 CASes `cell_ready`. Exact retries retain the catalog UUID and restore the
 published root before completing. `adopt` requires canonical Git objects,
 publishes `empty_cell_pending`, initializes a new empty application Cell and
-then publishes `cell_ready`. `set-members` uses one conditional catalog update and reports a
-conflict instead of replaying a stale decision over a concurrent change. Every
-running replica checks the catalog every five seconds and swaps routing only
-after all records pass Cell readiness validation; in-flight requests retain the
-previous repository handle.
+then publishes `cell_ready`. `set-members` uses one conditional catalog update
+and reports a conflict instead of replaying a stale decision over a concurrent
+change. Browser Settings → Members uses the same revision contract and CSRF
+protection. Both paths create one durable membership audit event with the
+accepted catalog change. Version 2 catalogs remain readable, but the first
+write upgrades the catalog to v3; do not roll a v3 storage root back to an older
+server binary. Every running replica checks the catalog every five seconds and
+swaps routing only after all records pass Cell readiness validation; in-flight
+requests retain the previous repository handle.
+
+Back-channel delivery invalidates all browser sessions and derived Git tokens
+for the Logout Token's exact issuer and subject. The identity index has an
+eight-hour compatibility window for sessions created by the pre-index binary.
+Complete the rollout inside that maximum session lifetime; do not leave old and
+new server binaries coexisting beyond it. A valid or replayed delivery returns
+200, while malformed or invalid tokens return 400.
 
 ## Why Lambda is excluded
 

@@ -2632,6 +2632,145 @@ test("repository settings create, edit, and delete branch protection rules", asy
   await expectNoAccessibilityViolations(page);
 });
 
+test("repository settings manage members with a revisioned CSRF-protected replacement", async ({
+  page,
+}) => {
+  let revision = 42;
+  let conflictNext = false;
+  let members = [
+    { subject: "alice-id", name: "Alice", access: "admin" },
+    { subject: "bob-id", name: "Bob", access: "read" },
+  ];
+  const updates: unknown[] = [];
+
+  await page.route("**/api/session", (route) =>
+    route.fulfill({
+      json: {
+        authenticated: true,
+        mode: "oidc",
+        user: {
+          issuer: "https://issuer.example",
+          subject: "alice-id",
+          name: "Alice",
+        },
+        csrf: "membership-csrf",
+      },
+    }),
+  );
+  await page.route(
+    (url) => url.pathname === "/api/repos/team/project/members",
+    (route) => {
+      if (route.request().method() === "GET")
+        return route.fulfill({ json: { revision, members } });
+
+      expect(route.request().method()).toBe("PUT");
+      expect(route.request().headers()["x-csrf-token"]).toBe("membership-csrf");
+      const update = route.request().postDataJSON() as {
+        expected_revision: number;
+        members: typeof members;
+      };
+      updates.push(update);
+      if (conflictNext) {
+        conflictNext = false;
+        revision += 1;
+        members = [
+          { subject: "alice-id", name: "Alice", access: "admin" },
+          { subject: "charlie-id", name: "Remote change", access: "write" },
+        ];
+        return route.fulfill({
+          status: 409,
+          json: {
+            error: {
+              code: "membership_changed",
+              message: "Membership changed. Reload members and try again.",
+            },
+          },
+        });
+      }
+      if (!update.members.some((member) => member.access === "admin"))
+        return route.fulfill({
+          status: 422,
+          json: {
+            error: {
+              code: "administrator_required",
+              message: "At least one administrator is required.",
+            },
+          },
+        });
+      expect(update.expected_revision).toBe(revision);
+      revision += 1;
+      members = update.members;
+      return route.fulfill({ json: { revision, members } });
+    },
+  );
+
+  await page.goto("/team/project?view=settings&section=members");
+  await expect(
+    page.getByRole("link", { name: "Members", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("heading", { name: "Members" })).toBeVisible();
+  await expect(page.getByText("alice-id", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Add member", exact: true }).click();
+  let form = page.locator(".member-form");
+  await form.getByLabel("Subject").fill("charlie-id");
+  await form.getByLabel("Display name").fill("Charlie");
+  await form.getByLabel("Access").selectOption("read");
+  await form.getByRole("button", { name: "Add member", exact: true }).click();
+
+  await page.getByRole("button", { name: "Edit Charlie" }).click();
+  form = page.locator(".member-form");
+  await form.getByLabel("Display name").fill("Charles");
+  await form.getByLabel("Access").selectOption("write");
+  await form.getByRole("button", { name: "Save member" }).click();
+
+  await page.getByRole("button", { name: "Remove Bob" }).click();
+  const removal = page.getByRole("region", { name: "Remove member" });
+  await expect(removal).toContainText("Remove this member?");
+  await removal.getByRole("button", { name: "Remove member" }).click();
+  await page.getByRole("button", { name: "Save members" }).click();
+  expect(updates[0]).toEqual({
+    expected_revision: 42,
+    members: [
+      { subject: "alice-id", name: "Alice", access: "admin" },
+      { subject: "charlie-id", name: "Charles", access: "write" },
+    ],
+  });
+  await expect(page.getByRole("status")).toContainText("Membership updated.");
+
+  await page.getByRole("button", { name: "Edit Charles" }).click();
+  form = page.locator(".member-form");
+  await form.getByLabel("Display name").fill("Charles draft");
+  await form.getByRole("button", { name: "Save member" }).click();
+  conflictNext = true;
+  await page.getByRole("button", { name: "Save members" }).click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Another administrator changed membership.",
+  );
+  await expect(page.getByText("Charles draft", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Reload members" }).click();
+  await expect(page.getByText("Remote change", { exact: true })).toBeVisible();
+  await expect(page.getByText("Charles draft", { exact: true })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Remove Alice" }).click();
+  await page
+    .getByRole("region", { name: "Remove member" })
+    .getByRole("button", { name: "Remove member" })
+    .click();
+  await page.getByRole("button", { name: "Save members" }).click();
+  await expect(page.getByRole("alert")).toContainText(
+    "At least one administrator is required.",
+  );
+
+  await selectTheme(page, "dark");
+  await page.setViewportSize({ width: 390, height: 800 });
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(390);
+  await expectNoAccessibilityViolations(page);
+});
+
 test("revision picker creates a branch from the exact viewed commit", async ({
   page,
 }) => {

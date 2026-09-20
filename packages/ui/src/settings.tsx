@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Button, Label } from "@primer/react";
 import {
   AlertIcon,
@@ -11,10 +11,14 @@ import {
 } from "@primer/octicons-react";
 import {
   endpoint,
+  navigate,
   repoHref,
   type Ref,
   type Refs,
   type Repository,
+  type MembershipState,
+  type RepositoryMember,
+  type Session,
 } from "./api";
 import { Link, short } from "./ui";
 
@@ -28,13 +32,15 @@ export function Settings({
   refs,
   csrf,
   section,
+  identity,
   onDefaultChanged,
   onRepositoryChanged,
 }: {
   repo: Repository;
   refs: Refs;
   csrf: string;
-  section: "general" | "branches";
+  section: "general" | "branches" | "members";
+  identity: Session["user"];
   onDefaultChanged: () => void;
   onRepositoryChanged: () => void;
 }) {
@@ -56,8 +62,17 @@ export function Settings({
         >
           Branches
         </Link>
+        <Link
+          className={section === "members" ? "active" : ""}
+          aria-current={section === "members" ? "page" : undefined}
+          href={repoHref(repo, { view: "settings", section: "members" })}
+        >
+          Members
+        </Link>
       </nav>
-      {section === "branches" ? (
+      {section === "members" ? (
+        <MemberSettings repo={repo} csrf={csrf} identity={identity} />
+      ) : section === "branches" ? (
         <BranchProtectionSettings
           repo={repo}
           csrf={csrf}
@@ -73,6 +88,351 @@ export function Settings({
         />
       )}
     </div>
+  );
+}
+
+type DraftMember = RepositoryMember & { id: number };
+type MembershipFailure = { error?: { code?: string; message?: string } };
+
+function failureMessage(body: unknown, fallback: string) {
+  const message = (body as MembershipFailure).error?.message;
+  return typeof message === "string" ? message : fallback;
+}
+
+function MemberSettings({
+  repo,
+  csrf,
+  identity,
+}: {
+  repo: Repository;
+  csrf: string;
+  identity: Session["user"];
+}) {
+  const [state, setState] = useState<MembershipState>();
+  const [draft, setDraft] = useState<DraftMember[]>([]);
+  const [error, setError] = useState<string>();
+  const [success, setSuccess] = useState<string>();
+  const [conflict, setConflict] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [editing, setEditing] = useState<number>();
+  const [form, setForm] = useState<RepositoryMember>();
+  const [removing, setRemoving] = useState<number>();
+  const [redirecting, setRedirecting] = useState(false);
+  const nextId = useRef(0);
+
+  function membersToDraft(members: RepositoryMember[]) {
+    return members.map((member) => ({ ...member, id: nextId.current++ }));
+  }
+
+  function newMember() {
+    return { subject: "", name: "", access: "read" } as const;
+  }
+
+  function normalizedMembers() {
+    return draft.map(({ id: _, subject, name, access }) => ({
+      subject: subject.trim(),
+      name: name.trim(),
+      access,
+    }));
+  }
+
+  async function load() {
+    setLoading(true);
+    setError(undefined);
+    try {
+      const response = await fetch(endpoint(repo, "members"), {
+        headers: { Accept: "application/json" },
+      });
+      const body: unknown = await response.json();
+      if (!response.ok)
+        throw new Error(failureMessage(body, "Membership could not be loaded"));
+      const membership = body as MembershipState;
+      setState(membership);
+      setDraft(membersToDraft(membership.members));
+      setEditing(undefined);
+      setForm(undefined);
+      setRemoving(undefined);
+      setConflict(false);
+      setSuccess(undefined);
+    } catch (failure) {
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : "Membership could not be loaded",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+  useEffect(() => {
+    void load();
+  }, [repo.owner, repo.name]);
+
+  useEffect(() => {
+    if (!redirecting) return;
+    const timer = window.setTimeout(() => navigate(repoHref(repo)), 750);
+    return () => window.clearTimeout(timer);
+  }, [redirecting, repo]);
+
+  async function save() {
+    if (!state) return;
+    setError(undefined);
+    setSuccess(undefined);
+    setSaving(true);
+    try {
+      const response = await fetch(endpoint(repo, "members"), {
+        method: "PUT",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrf,
+        },
+        body: JSON.stringify({
+          expected_revision: state.revision,
+          members: normalizedMembers(),
+        }),
+      });
+      if (response.status === 401)
+        window.dispatchEvent(new Event("crab-session-expired"));
+      const body: unknown = await response.json();
+      if (!response.ok) {
+        const failure = body as MembershipFailure;
+        if (failure.error?.code === "membership_changed") {
+          setConflict(true);
+          setError(undefined);
+        } else
+          setError(failureMessage(body, "Membership could not be updated"));
+        return;
+      }
+      const membership = body as MembershipState;
+      setState(membership);
+      setDraft(membersToDraft(membership.members));
+      setEditing(undefined);
+      setForm(undefined);
+      setRemoving(undefined);
+      setConflict(false);
+      setSuccess("Membership updated.");
+      if (
+        identity &&
+        !membership.members.some(
+          (member) =>
+            member.subject === identity.subject && member.access === "admin",
+        )
+      )
+        setRedirecting(true);
+    } catch (failure) {
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : "Membership could not be updated",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function saveMember(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!form) return;
+    const member = {
+      subject: form.subject.trim(),
+      name: form.name.trim(),
+      access: form.access,
+    };
+    if (!member.subject || !member.name) return;
+    setDraft((members) =>
+      editing === undefined
+        ? [...members, { ...member, id: nextId.current++ }]
+        : members.map((candidate) =>
+            candidate.id === editing
+              ? { ...member, id: candidate.id }
+              : candidate,
+          ),
+    );
+    setEditing(undefined);
+    setForm(undefined);
+    setError(undefined);
+  }
+
+  function startEdit(member: DraftMember) {
+    setEditing(member.id);
+    setForm({
+      subject: member.subject,
+      name: member.name,
+      access: member.access,
+    });
+    setRemoving(undefined);
+  }
+
+  const missingRequiredField = draft.some(
+    (member) => !member.subject.trim() || !member.name.trim(),
+  );
+  if (loading)
+    return (
+      <section className="settings-content">
+        <p role="status">Loading members…</p>
+      </section>
+    );
+  if (!state)
+    return (
+      <section className="settings-content">
+        <p role="alert">{error ?? "Membership could not be loaded"}</p>
+        <Button onClick={() => void load()}>Retry</Button>
+      </section>
+    );
+  return (
+    <section className="settings-content" aria-labelledby="member-settings">
+      <h2 id="member-settings">Members</h2>
+      {conflict && (
+        <div className="notice error" role="alert">
+          <p>
+            Another administrator changed membership. Reload before saving
+            again.
+          </p>
+          <Button onClick={() => void load()}>Reload members</Button>
+        </div>
+      )}
+      {error && <p role="alert">{error}</p>}
+      {success && <p role="status">{success}</p>}
+      <div className="member-settings">
+        {draft.length === 0 && <p className="settings-help">No members.</p>}
+        <ul className="member-list" aria-label="Repository members">
+          {draft.map((member) => (
+            <li className="member-row" key={member.id}>
+              <div className="member-subject">
+                <strong>{member.subject}</strong>
+                <span>{member.name}</span>
+              </div>
+              <span className="member-access">{member.access}</span>
+              <div className="member-actions">
+                <Button size="small" onClick={() => startEdit(member)}>
+                  Edit {member.name || member.subject}
+                </Button>
+                <Button
+                  size="small"
+                  variant="danger"
+                  onClick={() => {
+                    setRemoving(member.id);
+                    setEditing(undefined);
+                    setForm(undefined);
+                  }}
+                >
+                  Remove {member.name || member.subject}
+                </Button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      </div>
+      {!form && (
+        <Button
+          onClick={() => {
+            setEditing(undefined);
+            setForm(newMember());
+            setRemoving(undefined);
+          }}
+        >
+          Add member
+        </Button>
+      )}
+      {form && (
+        <form className="member-form" onSubmit={saveMember}>
+          <h3>{editing === undefined ? "Add member" : "Edit member"}</h3>
+          <label className="member-field">
+            Subject
+            <input
+              value={form.subject}
+              required
+              aria-describedby="member-subject-help"
+              onChange={(event) =>
+                setForm({ ...form, subject: event.target.value })
+              }
+            />
+          </label>
+          <p id="member-subject-help" className="settings-help">
+            Use the identity provider’s stable subject.
+          </p>
+          <label className="member-field">
+            Display name
+            <input
+              value={form.name}
+              required
+              onChange={(event) =>
+                setForm({ ...form, name: event.target.value })
+              }
+            />
+          </label>
+          <label className="member-field">
+            Access
+            <select
+              value={form.access}
+              onChange={(event) =>
+                setForm({
+                  ...form,
+                  access: event.target.value as RepositoryMember["access"],
+                })
+              }
+            >
+              <option value="read">Read</option>
+              <option value="write">Write</option>
+              <option value="admin">Admin</option>
+            </select>
+          </label>
+          <div className="member-actions">
+            <Button type="button" onClick={() => setForm(undefined)}>
+              Cancel
+            </Button>
+            <Button variant="primary" type="submit">
+              {editing === undefined ? "Add member" : "Save member"}
+            </Button>
+          </div>
+        </form>
+      )}
+      {removing !== undefined && (
+        <div
+          className="member-remove-confirm"
+          role="region"
+          aria-label="Remove member"
+        >
+          <AlertIcon size={20} />
+          <div>
+            <strong>Remove this member?</strong>
+            <p>The change will take effect when you save membership.</p>
+            <div className="member-actions">
+              <Button size="small" onClick={() => setRemoving(undefined)}>
+                Cancel
+              </Button>
+              <Button
+                size="small"
+                variant="danger"
+                onClick={() => {
+                  setDraft((members) =>
+                    members.filter((member) => member.id !== removing),
+                  );
+                  setRemoving(undefined);
+                  setError(undefined);
+                }}
+              >
+                Remove member
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+      {missingRequiredField && (
+        <p className="settings-help" role="status">
+          Every member needs a subject and display name before saving.
+        </p>
+      )}
+      <Button
+        variant="primary"
+        disabled={saving || missingRequiredField || redirecting}
+        onClick={() => void save()}
+      >
+        {saving ? "Saving…" : "Save members"}
+      </Button>
+    </section>
   );
 }
 

@@ -395,7 +395,19 @@ kubectl --namespace crab exec --stdin deployment/crab-http-server -- \
 
 The command uses one conditional catalog update and fails on a concurrent
 catalog change. Review `repository list` before retrying so a stale operator
-decision cannot overwrite newer membership.
+decision cannot overwrite newer membership. Browser administrators can make the
+same complete replacement in **Settings → Members** with the session CSRF token;
+both paths produce a durable membership audit event. The first catalog mutation
+after a v2 deployment writes v3, so do not roll the chart back to a binary that
+cannot read v3.
+
+Register `https://git.example.com/auth/backchannel-logout` with the OIDC
+provider and set `backchannel_logout_session_required=false`. It accepts signed
+subject-scoped Logout Tokens and returns 200 for valid or replayed delivery,
+400 for invalid delivery. It does not support `sid`-only tokens. Complete the
+identity-index rollout within eight hours so legacy sessions remain revocable;
+then prove a test user's browser sessions and scoped Git token fail after a
+provider logout delivery.
 
 ## Qualify the live deployment
 

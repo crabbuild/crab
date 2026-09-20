@@ -367,6 +367,7 @@ export function App() {
                     theme={resolved}
                     codeThemes={codeThemeChoices[codeTheme].themes}
                     csrf={session.data?.csrf ?? ""}
+                    identity={session.data?.user ?? null}
                     onRepositoryChanged={catalog.retry}
                   />
                 ) : (
@@ -476,6 +477,7 @@ function RepositoryPage({
   theme,
   codeThemes,
   csrf,
+  identity,
   onRepositoryChanged,
 }: {
   repo: Repository;
@@ -483,6 +485,7 @@ function RepositoryPage({
   theme: "light" | "dark";
   codeThemes: CodeThemes;
   csrf: string;
+  identity: Session["user"];
   onRepositoryChanged: () => void;
 }) {
   const view = url.searchParams.get("view") ?? "code";
@@ -755,8 +758,11 @@ function RepositoryPage({
                     section={
                       url.searchParams.get("section") === "branches"
                         ? "branches"
-                        : "general"
+                        : url.searchParams.get("section") === "members"
+                          ? "members"
+                          : "general"
                     }
+                    identity={identity}
                     onDefaultChanged={refs.retry}
                     onRepositoryChanged={onRepositoryChanged}
                   />
