@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { SelectedLineRange } from "@pierre/diffs";
 import { ActionList, ActionMenu, Button, TextInput } from "@primer/react";
 import {
@@ -29,6 +29,7 @@ import {
 } from "./api";
 import {
   ComparisonView,
+  changePanelId,
   type DiffReviewState,
   type InlineDiffThread,
 } from "./content";
@@ -162,6 +163,18 @@ interface PullReviewReply {
   created_at: number;
   updated_at: number;
   can_edit: boolean;
+}
+
+function isOutdatedThread(thread: InlineDiffThread) {
+  return thread.outdated || thread.vanished;
+}
+
+function isOpenThread(thread: InlineDiffThread) {
+  return !thread.resolved && !isOutdatedThread(thread);
+}
+
+function isResolvedThread(thread: InlineDiffThread) {
+  return thread.resolved && !isOutdatedThread(thread);
 }
 
 interface Page<T> {
@@ -813,6 +826,24 @@ function PullReviewThreads({
   const [suggestionEnabled, setSuggestionEnabled] = useState(false);
   const mutation = useMutation(csrf);
   const submission = useSubmission();
+  const reviewMetrics = useMemo(() => {
+    const all = [...threads.items, ...outdatedThreads.items];
+    return {
+      open: all.filter(isOpenThread).length,
+      resolved: all.filter(isResolvedThread).length,
+      outdated: all.filter(isOutdatedThread).length,
+    };
+  }, [outdatedThreads.items, threads.items]);
+  const fileSummaryVersion = useMemo(
+    () =>
+      [...threads.items, ...outdatedThreads.items]
+        .map(
+          (thread) =>
+            `${thread.number}:${thread.resolved ? "r" : "o"}:${isOutdatedThread(thread) ? "x" : "c"}`,
+        )
+        .join("|"),
+    [outdatedThreads.items, threads.items],
+  );
   function clearSelection() {
     setSelection(undefined);
     setBody("");
@@ -833,12 +864,53 @@ function PullReviewThreads({
     },
     onThreadSelected(thread) {
       const node = document.getElementById(`review-thread-${thread.number}`);
-      node?.scrollIntoView({ behavior: "smooth", block: "center" });
+      node?.scrollIntoView({
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+          ? "auto"
+          : "smooth",
+        block: "center",
+      });
     },
+    onDiffSelected(thread) {
+      const panel = document.getElementById(changePanelId(thread.path_hex));
+      panel?.scrollIntoView({
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+          ? "auto"
+          : "smooth",
+        block: "center",
+      });
+      panel
+        ?.querySelector<HTMLButtonElement>(
+          `[data-thread-number="${thread.number}"]`,
+        )
+        ?.focus({ preventScroll: true });
+    },
+    fileSummary(pathHex) {
+      const all = [...threads.items, ...outdatedThreads.items].filter(
+        (thread) => thread.path_hex === pathHex,
+      );
+      if (!all.length) return null;
+      return {
+        total: all.length,
+        open: all.filter(isOpenThread).length,
+        resolved: all.filter(isResolvedThread).length,
+        outdated: all.filter(isOutdatedThread).length,
+      };
+    },
+    fileSummaryVersion,
     renderAnnotation(thread) {
+      const preview = thread.body.replace(/\s+/g, " ").trim();
       return (
-        <span>
-          #{thread.number} {thread.resolved ? "Resolved" : "Review thread"}
+        <span className="inline-review-annotation-content">
+          <span className="inline-review-annotation-number">
+            #{thread.number}
+          </span>
+          <span className="inline-review-annotation-status">
+            {thread.resolved ? "Resolved" : "Review comment"}
+          </span>
+          <span className="inline-review-annotation-preview">
+            {preview || "No comment text"}
+          </span>
         </span>
       );
     },
@@ -876,6 +948,33 @@ function PullReviewThreads({
   }
   return (
     <section className="pull-review-threads" aria-label="Inline review threads">
+      <header className="inline-review-header">
+        <div>
+          <span className="inline-review-kicker">Review workspace</span>
+          <h2>Inline review</h2>
+          <p className="muted">
+            Select a line or range in the diff to leave feedback. Your review
+            stays attached to the exact version you inspected.
+          </p>
+        </div>
+        <div
+          className="inline-review-metrics"
+          aria-label={`${reviewMetrics.open} open, ${reviewMetrics.resolved} resolved, ${reviewMetrics.outdated} outdated`}
+        >
+          <span className="inline-review-metric open">
+            <strong>{reviewMetrics.open}</strong>
+            <span>open</span>
+          </span>
+          <span className="inline-review-metric resolved">
+            <strong>{reviewMetrics.resolved}</strong>
+            <span>resolved</span>
+          </span>
+          <span className="inline-review-metric outdated">
+            <strong>{reviewMetrics.outdated}</strong>
+            <span>outdated</span>
+          </span>
+        </div>
+      </header>
       <ComparisonView
         repo={repo}
         base={pull.base_oid}
@@ -950,8 +1049,10 @@ function PullReviewThreads({
               <div>
                 <h3 id="inline-review-heading">Inline review threads</h3>
                 <p className="muted">
-                  Select lines in the diff to start a thread. Outdated threads
-                  remain visible for context.
+                  {reviewMetrics.open
+                    ? `${reviewMetrics.open} open ${reviewMetrics.open === 1 ? "conversation" : "conversations"} on this revision.`
+                    : "No open conversations on this revision."}{" "}
+                  Outdated threads remain visible for context.
                 </p>
               </div>
               <Button size="small" onClick={threads.retry}>
@@ -966,6 +1067,7 @@ function PullReviewThreads({
                   pull={pull}
                   thread={thread}
                   csrf={csrf}
+                  onJumpToDiff={review.onDiffSelected}
                   refresh={() => {
                     threads.retry();
                     outdatedThreads.retry();
@@ -999,6 +1101,7 @@ function PullReviewThreads({
                     pull={pull}
                     thread={thread}
                     csrf={csrf}
+                    onJumpToDiff={review.onDiffSelected}
                     refresh={() => {
                       threads.retry();
                       outdatedThreads.retry();
@@ -1022,23 +1125,39 @@ function PullReviewThreads({
   );
 }
 
+function initials(value: string) {
+  const parts = value.trim().split(/\s+/).filter(Boolean);
+  const last = parts[parts.length - 1];
+  return (
+    (parts.length > 1
+      ? `${parts[0][0]}${last?.[0]}`
+      : parts[0]?.slice(0, 2)
+    )?.toUpperCase() || "?"
+  );
+}
+
 function ReviewThreadCard({
   repo,
   pull,
   thread,
   csrf,
+  onJumpToDiff,
   refresh,
 }: {
   repo: Repository;
   pull: PullRequest;
   thread: PullReviewThread;
   csrf: string;
+  onJumpToDiff?: (thread: PullReviewThread) => void;
   refresh: () => void;
 }) {
   const mutation = useMutation(csrf);
   const [editing, setEditing] = useState(false);
   const [editBody, setEditBody] = useState(thread.body);
-  const location = `${thread.path}:${thread.start_line}${thread.end_line === thread.start_line ? "" : `–${thread.end_line}`}`;
+  const lineLocation =
+    thread.start_line === thread.end_line
+      ? `line ${thread.start_line}`
+      : `lines ${thread.start_line}–${thread.end_line}`;
   async function saveEdit(event: React.FormEvent) {
     event.preventDefault();
     const updated = await mutation.run<PullReviewThread>(
@@ -1069,54 +1188,73 @@ function ReviewThreadCard({
         open={!thread.resolved || undefined}
       >
         <summary className="review-thread-summary">
-          <span>
-            <strong>{thread.author}</strong>{" "}
-            <span className="muted">commented on {location}</span>
+          <span className="review-thread-summary-main">
+            <span className="review-author-avatar" aria-hidden="true">
+              {initials(thread.author)}
+            </span>
+            <span className="review-thread-summary-copy">
+              <span className="review-thread-author-line">
+                <strong>{thread.author}</strong>
+                <span className="muted">left a review comment</span>
+              </span>
+              <span className="review-thread-location">
+                <code>{thread.path}</code>
+                <span>{lineLocation}</span>
+                <span>{thread.side === "old" ? "old file" : "new file"}</span>
+              </span>
+            </span>
           </span>
-          {thread.outdated && (
-            <span className="review-thread-badge">Outdated</span>
-          )}
-          {thread.resolved && (
-            <span className="review-thread-badge">Resolved</span>
-          )}
+          <span className="review-thread-statuses">
+            {thread.suggested_text !== null && !thread.outdated && (
+              <span className="review-thread-badge suggestion">Suggestion</span>
+            )}
+            {thread.outdated && (
+              <span className="review-thread-badge">Outdated</span>
+            )}
+            {thread.resolved && (
+              <span className="review-thread-badge resolved">Resolved</span>
+            )}
+          </span>
         </summary>
         <div className="review-thread-content">
-          {editing ? (
-            <form className="review-thread-edit" onSubmit={saveEdit}>
-              <Editor
-                id={`thread-${thread.number}-edit`}
-                label="Edit comment"
-                value={editBody}
-                onChange={setEditBody}
-                disabled={mutation.pending}
-                required
-                autoFocus
-              />
-              <div className="discussion-actions">
-                <Button
-                  size="small"
-                  variant="primary"
-                  type="submit"
-                  disabled={mutation.pending || !editBody.trim()}
-                >
-                  {mutation.pending ? "Saving…" : "Save"}
-                </Button>
-                <Button
-                  size="small"
-                  type="button"
+          <div className="review-thread-body">
+            {editing ? (
+              <form className="review-thread-edit" onSubmit={saveEdit}>
+                <Editor
+                  id={`thread-${thread.number}-edit`}
+                  label="Edit comment"
+                  value={editBody}
+                  onChange={setEditBody}
                   disabled={mutation.pending}
-                  onClick={() => {
-                    setEditBody(thread.body);
-                    setEditing(false);
-                  }}
-                >
-                  Cancel
-                </Button>
-              </div>
-            </form>
-          ) : (
-            <DiscussionMarkdown>{thread.body}</DiscussionMarkdown>
-          )}
+                  required
+                  autoFocus
+                />
+                <div className="discussion-actions">
+                  <Button
+                    size="small"
+                    variant="primary"
+                    type="submit"
+                    disabled={mutation.pending || !editBody.trim()}
+                  >
+                    {mutation.pending ? "Saving…" : "Save"}
+                  </Button>
+                  <Button
+                    size="small"
+                    type="button"
+                    disabled={mutation.pending}
+                    onClick={() => {
+                      setEditBody(thread.body);
+                      setEditing(false);
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </form>
+            ) : (
+              <DiscussionMarkdown>{thread.body}</DiscussionMarkdown>
+            )}
+          </div>
           {thread.suggested_text !== null &&
             !thread.outdated &&
             !thread.vanished &&
@@ -1131,7 +1269,16 @@ function ReviewThreadCard({
                 refresh={refresh}
               />
             )}
-          <div className="discussion-actions">
+          <div className="discussion-actions review-thread-actions">
+            {onJumpToDiff && !thread.outdated && !thread.vanished && (
+              <Button
+                size="small"
+                onClick={() => onJumpToDiff(thread)}
+                disabled={mutation.pending}
+              >
+                Jump to diff
+              </Button>
+            )}
             {thread.can_edit && !repo.archived && !editing && (
               <Button
                 size="small"
@@ -1280,6 +1427,12 @@ function ReviewReplies({
   }
   return (
     <div className="review-replies">
+      <div className="review-replies-heading">
+        <strong>Replies</strong>
+        {replies.items.length > 0 && (
+          <span className="muted">{replies.items.length}</span>
+        )}
+      </div>
       <Result state={replies}>
         {() =>
           replies.items.map((reply) => (

@@ -624,7 +624,21 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   await expect(
     changedFiles.getByRole("treeitem", { name: "README.md", exact: true }),
   ).toHaveAttribute("aria-selected", "true");
+  await expect(
+    page.getByText("Review workspace", { exact: true }),
+  ).toBeVisible();
+  await expect(page.locator(".change-tree-header")).toContainText("1 file");
   await expect(page.locator(".diff-panel")).toContainText("New content");
+  await expect(
+    page.getByRole("button", { name: "Open review thread #1" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Jump to diff", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Jump to diff", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Open review thread #1" }),
+  ).toBeFocused();
   await expect(
     page.getByRole("button", { name: "Apply suggestion" }),
   ).toBeVisible();
