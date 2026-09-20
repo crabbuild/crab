@@ -153,7 +153,10 @@ impl EffectBatch {
         intent: &EffectCommandIntent,
     ) -> Result<[u8; 32]> {
         validate_effect_command_intent(self.now_ms, intent)?;
-        let ordinal = self.take_ordinal()?;
+        if self.next_ordinal as usize >= MAX_EFFECTS_PER_COMMAND {
+            return Err(Error::Command("command effects exceed limits"));
+        }
+        let ordinal = self.next_ordinal;
         let id = effect_id(
             self.source.cell_id(),
             self.incarnation,
@@ -195,6 +198,9 @@ impl EffectBatch {
         if prospective > MAX_EFFECT_BYTES {
             return Err(Error::Command("command effects exceed limits"));
         }
+        let next_ordinal = ordinal
+            .checked_add(1)
+            .ok_or(Error::Command("effect ordinal overflow"))?;
         let id = effect_insert(
             transaction,
             self.source.cell_id(),
@@ -208,6 +214,7 @@ impl EffectBatch {
                 expires_at_ms: intent.expires_at_ms,
             },
         )?;
+        self.next_ordinal = next_ordinal;
         self.operation_bytes = prospective;
         Ok(id)
     }
@@ -218,18 +225,6 @@ impl EffectBatch {
 
     pub(crate) const fn source_target(&self) -> &CellTarget {
         &self.source
-    }
-
-    fn take_ordinal(&mut self) -> Result<u32> {
-        if self.next_ordinal as usize >= MAX_EFFECTS_PER_COMMAND {
-            return Err(Error::Command("command effects exceed limits"));
-        }
-        let ordinal = self.next_ordinal;
-        self.next_ordinal = self
-            .next_ordinal
-            .checked_add(1)
-            .ok_or(Error::Command("effect ordinal overflow"))?;
-        Ok(ordinal)
     }
 }
 

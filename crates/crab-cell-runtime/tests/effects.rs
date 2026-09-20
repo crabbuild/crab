@@ -366,6 +366,48 @@ fn one_command_cannot_exceed_effect_count_or_byte_limits() {
 }
 
 #[test]
+fn byte_limit_rejection_does_not_consume_the_next_effect_ordinal() {
+    let source_target = source_target();
+    let destination = CellTarget::new(
+        TenantId::from_bytes([3; 16]),
+        ApplicationId::from_bytes([4; 16]),
+        NamespaceId::from_bytes([5; 16]),
+        b"destination",
+    )
+    .unwrap();
+    let mut source = source_connection();
+    let transaction = source.transaction().unwrap();
+    let mut effects = EffectBatch::new(&transaction, &source_target, 1, 0).unwrap();
+    let large = vec![0; 9_000];
+    let mut successful = 0_u32;
+    while effects
+        .insert_command(
+            &transaction,
+            &command_intent(destination.clone(), &large, 10_000),
+        )
+        .is_ok()
+    {
+        successful += 1;
+    }
+    let effect_id = effects
+        .insert_command(
+            &transaction,
+            &command_intent(destination, b"after-limit", 10_000),
+        )
+        .unwrap();
+    let operation: Vec<u8> = transaction
+        .query_row(
+            "SELECT operation FROM sys_effects WHERE effect_id = ?1",
+            [effect_id.as_slice()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let request = peer_wire::EffectRequest::decode(operation.as_slice()).unwrap();
+    assert_eq!(request.identity.unwrap().ordinal, successful);
+    transaction.commit().unwrap();
+}
+
+#[test]
 fn manual_retry_preserves_identity_and_never_reopens_terminal_effect() {
     let source_target = source_target();
     let destination = CellTarget::new(

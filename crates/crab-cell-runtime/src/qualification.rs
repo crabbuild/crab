@@ -667,7 +667,6 @@ impl QualificationRunArtifact {
             || self.outcome_digest.iter().all(|byte| *byte == 0)
             || self.elapsed_ms == 0
             || self.primitive_counts.len() != QUALIFICATION_PRIMITIVES.len()
-            || self.metrics.len() > MAX_METRICS
         {
             return Err(Error::Control("invalid qualification run artifact"));
         }
@@ -695,10 +694,7 @@ impl QualificationRunArtifact {
             return Err(Error::Control("qualification run counters"));
         }
         self.workload.validate()?;
-        for metric in &self.metrics {
-            validate_label(metric.name(), "qualification run metric name")?;
-            validate_label(metric.unit(), "qualification run metric unit")?;
-        }
+        validate_metrics(&self.metrics)?;
         Ok(())
     }
 }
@@ -1306,6 +1302,21 @@ impl QualificationMetric {
     }
 }
 
+fn validate_metrics(metrics: &[QualificationMetric]) -> Result<()> {
+    if metrics.len() > MAX_METRICS {
+        return Err(Error::Control("qualification metric count exceeds limit"));
+    }
+    let mut identities = BTreeSet::new();
+    for metric in metrics {
+        validate_label(&metric.name, "qualification metric name")?;
+        validate_label(&metric.unit, "qualification metric unit")?;
+        if !identities.insert((metric.name.as_str(), metric.unit.as_str())) {
+            return Err(Error::Control("duplicate qualification metric"));
+        }
+    }
+    Ok(())
+}
+
 impl QualificationReceipt {
     pub fn new(
         source_revision: String,
@@ -1321,9 +1332,7 @@ impl QualificationReceipt {
         validate_label(&provider, "qualification provider")?;
         validate_label(&workload, "qualification workload")?;
         validate_label(&fault, "qualification fault")?;
-        if metrics.len() > MAX_METRICS {
-            return Err(Error::Control("qualification metric count exceeds limit"));
-        }
+        validate_metrics(&metrics)?;
         let fault_schedule_digest = *blake3::hash(fault.as_bytes()).as_bytes();
         let artifact_digest = *artifact_digest.as_bytes();
         Ok(Self {
@@ -1796,9 +1805,7 @@ impl QualificationReceipt {
         validate_label(&self.toolchain, "qualification toolchain")?;
         validate_label(&self.profile, "qualification profile")?;
         validate_label(&self.topology, "qualification topology")?;
-        if self.metrics.len() > MAX_METRICS {
-            return Err(Error::Control("qualification metric count exceeds limit"));
-        }
+        validate_metrics(&self.metrics)?;
         if self.started_at_ms == 0
             || self.finished_at_ms < self.started_at_ms
             || self.fault_schedule_digest.iter().all(|byte| *byte == 0)
@@ -1816,10 +1823,6 @@ impl QualificationReceipt {
             .any(|proof| proof.root.iter().all(|byte| *byte == 0))
         {
             return Err(Error::Control("qualification ownership proof"));
-        }
-        for metric in &self.metrics {
-            validate_label(&metric.name, "qualification metric name")?;
-            validate_label(&metric.unit, "qualification metric unit")?;
         }
         Ok(())
     }
@@ -2313,6 +2316,47 @@ mod tests {
         assert_eq!(receipt.schema_version(), QUALIFICATION_SCHEMA_VERSION);
         let decoded = QualificationReceipt::decode(&receipt.encode().unwrap()).unwrap();
         assert_eq!(decoded, receipt);
+    }
+
+    #[test]
+    fn qualification_metrics_reject_duplicate_identities() {
+        let duplicate = vec![
+            QualificationMetric::new("p99".into(), 7, "ms".into()).unwrap(),
+            QualificationMetric::new("p99".into(), 8, "ms".into()).unwrap(),
+        ];
+        assert!(
+            QualificationReceipt::new(
+                "abc".into(),
+                Digest::from_bytes([1; 32]),
+                "memory".into(),
+                "warm-route".into(),
+                "none".into(),
+                duplicate,
+                Digest::from_bytes([2; 32]),
+                true,
+            )
+            .is_err()
+        );
+
+        let profile = QualificationProfile::pr_contract();
+        let workload = QualificationWorkload::generate(&profile, 19).unwrap();
+        let artifact = QualificationRunArtifact {
+            schema_version: QUALIFICATION_RUN_ARTIFACT_SCHEMA_VERSION,
+            workload: workload.clone(),
+            profile: profile.name.clone(),
+            profile_digest: *profile.digest().unwrap().as_bytes(),
+            seed: workload.seed(),
+            cells: workload.cells(),
+            operations: workload.operations(),
+            elapsed_ms: 1_000,
+            primitive_counts: workload.primitives.clone(),
+            outcome_digest: [7; 32],
+            metrics: vec![
+                QualificationMetric::new("p99_latency_ms".into(), 1, "ms".into()).unwrap(),
+                QualificationMetric::new("p99_latency_ms".into(), 2, "ms".into()).unwrap(),
+            ],
+        };
+        assert!(artifact.encode().is_err());
     }
 
     #[test]

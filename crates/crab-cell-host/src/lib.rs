@@ -120,6 +120,9 @@ impl CellNodeBuilder {
         let session = self
             .session
             .ok_or(Error::Control("CellNode requires a node session"))?;
+        if session.as_bytes().iter().all(|byte| *byte == 0) {
+            return Err(Error::Control("CellNode node session is zero"));
+        }
         let node_retained_bytes = self
             .node_retained_bytes
             .filter(|bytes| *bytes != 0)
@@ -335,6 +338,20 @@ mod tests {
     fn builder_rejects_missing_owners_before_starting() {
         let error = match CellNodeBuilder::new(application()).build() {
             Ok(_) => panic!("missing node owners must fail closed"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, Error::Control(_)));
+    }
+
+    #[test]
+    fn builder_rejects_zero_node_session_before_starting() {
+        let result = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([0; 16]))
+            .build();
+        let error = match result {
+            Ok(_) => panic!("zero node sessions must fail closed"),
             Err(error) => error,
         };
         assert!(matches!(error, Error::Control(_)));
