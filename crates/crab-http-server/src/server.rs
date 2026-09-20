@@ -1090,16 +1090,20 @@ pub async fn serve(config: Config) -> Result<()> {
         }
     };
     let signal_cancellation = cancellation.clone();
-    let signal = tokio::spawn(async move {
-        shutdown_signal().await;
-        signal_cancellation.cancel();
-    });
+    cell_tasks.spawn(async move {
+        tokio::select! {
+            () = shutdown_signal() => signal_cancellation.cancel(),
+            () = signal_cancellation.cancelled() => {}
+        }
+        Ok::<(), crate::Error>(())
+    })?;
     let refresh_server = Arc::clone(&server);
-    let refresh =
-        tokio::spawn(async move { refresh_catalog(refresh_server, catalog_version).await });
+    cell_tasks.spawn(async move {
+        refresh_catalog(refresh_server, catalog_version).await;
+        Ok::<(), crate::Error>(())
+    })?;
     let projection_sweep_server = Arc::clone(&server);
-    let projection_sweep =
-        tokio::spawn(async move { sweep_projections(projection_sweep_server).await });
+    cell_tasks.spawn(async move { sweep_projections(projection_sweep_server).await })?;
     let durability_publisher = Arc::clone(&node_publisher);
     let durability_runtime = server.cell_runtime.clone();
     let durability_transport = Arc::clone(
@@ -1223,21 +1227,12 @@ pub async fn serve(config: Config) -> Result<()> {
         }
         () = cancellation.cancelled() => {
             server.node_healthy.store(false, Ordering::Release);
-            signal.abort();
             let deadline = Instant::now() + SHUTDOWN_DEADLINE;
             (before_shutdown_deadline(deadline, &mut public).await, deadline)
         }
     };
-    signal.abort();
     let result = public_result?;
     before_shutdown_deadline(shutdown_deadline, async move {
-        if let Err(error) = refresh.await {
-            tracing::warn!(error = %error, "repository catalog refresh task failed");
-        }
-        let projection_sweep = match projection_sweep.await {
-            Ok(result) => result,
-            Err(error) => Err(error.into()),
-        };
         // Axum has drained its connections, so no handler can register a new
         // receive after the tracker becomes empty. Close readers only after that drain.
         server.cancellation.cancel();
@@ -1258,7 +1253,6 @@ pub async fn serve(config: Config) -> Result<()> {
             .map(|_| ())
             .map_err(crate::Error::from)
             .and(management)
-            .and(projection_sweep)
             .and(maintenance)
             .and(runtimes)
     })
