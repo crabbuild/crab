@@ -16,7 +16,10 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
-use crab_cell_host::{CellNode, CellNodeBuilder, CellNodeFacility, FOLLOWER_STORE_COMPONENT};
+use crab_cell_host::{
+    CellNode, CellNodeBuilder, CellNodeFacility, FOLLOWER_STORE_COMPONENT,
+    NODE_DURABILITY_PROVIDER_COMPONENT, NodeDurabilitySupervisorConfig,
+};
 use crab_cell_runtime::{
     ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_NATIVE_BYTES, ACTIVE_CELL_PAGE_CACHE_BYTES,
     ApplicationIdentityStore, CellRuntime, Digest, NodeDirectory, Owner, PeerRoundTrip, PeerSigner,
@@ -62,10 +65,6 @@ const MAX_BLOCKING_JOBS: usize = 16;
 const MAX_RECOVERY_JOBS: usize = 2;
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(110);
 const RELEASE_POLL_INTERVAL: Duration = Duration::from_secs(1);
-const NODE_LOG_RECRUIT_INTERVAL: Duration = Duration::from_secs(3);
-const NODE_LOG_LIVE_NODE_LIMIT: usize = 1_024;
-const NODE_LOG_ROTATION_INTERVAL: Duration = Duration::from_secs(5);
-const NODE_LOG_ROTATION_FRAMES: u64 = 1_000_000;
 const RETIRED_FOLLOWER_COLLECTION_INTERVAL: Duration = Duration::from_secs(60);
 const RETIRED_FOLLOWER_GRACE_MS: i64 = 10 * 60 * 1_000;
 const RETIRED_FOLLOWER_BATCH: usize = 64;
@@ -1064,6 +1063,7 @@ pub async fn serve(config: Config) -> Result<()> {
                 FOLLOWER_STORE_COMPONENT,
                 CELL_COMPONENT_NODE_LOG_TRANSPORT,
                 CELL_COMPONENT_NODE_PUBLISHER,
+                NODE_DURABILITY_PROVIDER_COMPONENT,
                 CELL_COMPONENT_CATALOG,
                 CELL_COMPONENT_SCHEDULER_STATUS,
                 CELL_COMPONENT_RELEASE_STORE,
@@ -1110,6 +1110,19 @@ pub async fn serve(config: Config) -> Result<()> {
         )
         .with_local_follower(node, follower_store.clone()),
     );
+    node_publisher.install_node_log_transport(Arc::clone(&node_log_transport))?;
+    cell_node.install_node_durability_provider(
+        Arc::clone(&node_publisher),
+        NodeDurabilitySupervisorConfig::new(
+            startup.identity.application(),
+            crate::cells::repository_replica_limits(),
+            crate::cells::repository_replica_limits().max_capture_bytes,
+            1_024,
+            Duration::from_secs(3),
+            Duration::from_secs(5),
+            1_000_000,
+        )?,
+    )?;
     let recovery_artifacts = Arc::new(crate::cells::RecoveryArtifactRegistry::new(
         session_dir.join("recovery-artifacts"),
         crate::cells::repository_replica_limits(),
@@ -1200,7 +1213,6 @@ pub async fn serve(config: Config) -> Result<()> {
             || async { Ok(()) },
         )?,
     ])?;
-    let durability_application = startup.identity.application();
     let server = Arc::new(Server {
         repositories: repositories.into(),
         runtime: Arc::clone(&runtime),
@@ -1313,40 +1325,6 @@ pub async fn serve(config: Config) -> Result<()> {
     })?;
     let projection_sweep_server = Arc::clone(&server);
     cell_tasks.spawn(async move { sweep_projections(projection_sweep_server).await })?;
-    let durability_publisher = Arc::clone(&node_publisher);
-    let durability_runtime = server.cell_runtime()?;
-    let durability_transport = server
-        .node_log_transport()
-        .ok_or(crate::Error::Config("node-log transport is unavailable"))?;
-    let durability_cancellation = cancellation.clone();
-    cell_tasks.spawn(async move {
-        recruit_node_durability(
-            durability_publisher,
-            durability_runtime,
-            durability_application,
-            durability_transport,
-            durability_cancellation,
-        )
-        .await
-    })?;
-    let rotation_publisher = Arc::clone(&node_publisher);
-    let rotation_runtime = server.cell_runtime()?;
-    let rotation_transport = server
-        .node_log_transport()
-        .ok_or(crate::Error::Config("node-log transport is unavailable"))?;
-    let rotation_cancellation = cancellation.clone();
-    let rotation_metrics = server.metrics.clone();
-    cell_tasks.spawn(async move {
-        rotate_node_durability(
-            rotation_publisher,
-            rotation_runtime,
-            durability_application,
-            rotation_transport,
-            rotation_cancellation,
-            rotation_metrics,
-        )
-        .await
-    })?;
     let follower_collection_store = (*follower_store).clone();
     let follower_collection_directory = directory.clone();
     let follower_collection_cancellation = cancellation.clone();
@@ -1503,123 +1481,6 @@ async fn collect_retired_follower_lanes(
                 }
             }
         }
-    }
-}
-
-async fn recruit_node_durability(
-    publisher: Arc<crate::peer::NodePublisher>,
-    runtime: CellRuntime,
-    application: crab_cell_runtime::ApplicationId,
-    transport: Arc<dyn crab_cell_runtime::NodeLogTransport>,
-    cancellation: CancellationToken,
-) -> Result<()> {
-    let limits = crate::cells::repository_replica_limits();
-    loop {
-        let recruited = publisher
-            .recruit_node_durability(
-                Arc::clone(&transport),
-                limits,
-                limits.max_capture_bytes,
-                NODE_LOG_LIVE_NODE_LIMIT,
-            )
-            .await;
-        match recruited {
-            Ok(Some(durability)) => {
-                runtime.install_node_durability(application, durability)?;
-                tracing::info!("node-log follower durability recruited");
-                return Ok(());
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(error = %error, "node-log follower recruitment failed");
-            }
-        }
-        tokio::select! {
-            () = cancellation.cancelled() => return Ok(()),
-            () = tokio::time::sleep(NODE_LOG_RECRUIT_INTERVAL) => {}
-        }
-    }
-}
-
-async fn rotate_node_durability(
-    publisher: Arc<crate::peer::NodePublisher>,
-    runtime: CellRuntime,
-    application: crab_cell_runtime::ApplicationId,
-    transport: Arc<dyn crab_cell_runtime::NodeLogTransport>,
-    cancellation: CancellationToken,
-    metrics: crate::metrics::Metrics,
-) -> Result<()> {
-    let limits = crate::cells::repository_replica_limits();
-    loop {
-        tokio::select! {
-            () = cancellation.cancelled() => return Ok(()),
-            () = tokio::time::sleep(NODE_LOG_ROTATION_INTERVAL) => {}
-        }
-        let Some((installed_application, durability)) = runtime.node_durability() else {
-            continue;
-        };
-        if installed_application != application {
-            return Err(crate::Error::Config(
-                "node-log durability application changed during rotation",
-            ));
-        }
-        if !durability.needs_rotation(NODE_LOG_ROTATION_FRAMES) {
-            continue;
-        }
-        metrics.record_node_log_rotation(crate::metrics::NodeLogRotationResult::Started);
-        loop {
-            match durability.shutdown().await {
-                Ok(()) => break,
-                Err(crab_cell_runtime::Error::PendingPublication) => {
-                    metrics
-                        .record_node_log_rotation(crate::metrics::NodeLogRotationResult::Pending);
-                    tokio::select! {
-                        () = cancellation.cancelled() => return Ok(()),
-                        () = tokio::time::sleep(NODE_LOG_RECRUIT_INTERVAL) => {}
-                    }
-                }
-                Err(error) => {
-                    metrics.record_node_log_rotation(crate::metrics::NodeLogRotationResult::Failed);
-                    return Err(crate::Error::Cell(error));
-                }
-            }
-        }
-        if cancellation.is_cancelled() {
-            return Ok(());
-        }
-        let replacement = loop {
-            match publisher
-                .recruit_node_durability(
-                    Arc::clone(&transport),
-                    limits,
-                    limits.max_capture_bytes,
-                    NODE_LOG_LIVE_NODE_LIMIT,
-                )
-                .await
-            {
-                Ok(Some(durability)) => break durability,
-                Ok(None) => {}
-                Err(error) => {
-                    metrics.record_node_log_rotation(crate::metrics::NodeLogRotationResult::Failed);
-                    tracing::warn!(error = %error, "node-log epoch rotation recruitment failed");
-                }
-            }
-            tokio::select! {
-                () = cancellation.cancelled() => return Ok(()),
-                () = tokio::time::sleep(NODE_LOG_RECRUIT_INTERVAL) => {}
-            }
-        };
-        if cancellation.is_cancelled() {
-            replacement.shutdown().await?;
-            return Ok(());
-        }
-        if let Err(error) = runtime.replace_node_durability(application, Arc::clone(&replacement)) {
-            metrics.record_node_log_rotation(crate::metrics::NodeLogRotationResult::Failed);
-            replacement.shutdown().await?;
-            return Err(crate::Error::Cell(error));
-        }
-        metrics.record_node_log_rotation(crate::metrics::NodeLogRotationResult::Completed);
-        tracing::info!("node-log epoch rotated after object coverage");
     }
 }
 

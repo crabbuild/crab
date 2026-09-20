@@ -1800,6 +1800,9 @@ CELL_RUNTIME_SERVER_CONSTRUCTOR_PATTERNS = (
     "CellRuntime::new(",
     "CellRuntime::new_with_replica_host(",
     "CellRuntime::new_with_replica_host_requiring_node_lease(",
+    "DurabilityGate::new(",
+    "NodeDurability::new(",
+    "NodeLogShipper::new_with_telemetry(",
 )
 CELL_RUNTIME_SERVER_COMPONENT_FIELDS = frozenset(
     {

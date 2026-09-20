@@ -16,7 +16,7 @@
 - **Depends on**: plan 022
 - **Category**: architecture / lifecycle / DX
 - **Planned at**: commit `892720ce6a6`, 2026-09-19
-- **Implementation status**: provider-neutral host owns serving and offline-maintenance runtime construction, exposes canonical `start`/`status` lifecycle calls, captures required production component names in the builder before runtime construction, constructs the durable follower store from validated node inputs before returning the host, retains the signal/catalog/projection/durability/follower/heartbeat/lease/release/scheduler loops in its bounded task group, retains the production catalog, capacity report, router, peer receiver, follower store, node-log transport, publisher, and release store behind typed host-owned component slots, requires every declared production component before readiness, cancels node admission before reverse provider-facility drains, serializes deadline-aware shutdown/drain callers, and the typed full-primitive reference application now proves source-directory loss, owner fencing, exact-root takeover, and continued post-takeover operations; full operator-facility construction ownership and multi-process public-host qualification remain open
+- **Implementation status**: provider-neutral host owns serving and offline-maintenance runtime construction, exposes canonical `start`/`status` lifecycle calls, captures required production component names in the builder before runtime construction, constructs the durable follower store from validated node inputs before returning the host, retains the signal/catalog/projection/durability/follower/heartbeat/lease/release/scheduler loops in its bounded task group, retains the production catalog, capacity report, router, peer receiver, follower store, node-log transport, publisher, and release store behind typed host-owned component slots, requires every declared production component before readiness, cancels node admission before reverse provider-facility drains, serializes deadline-aware shutdown/drain callers, and the typed full-primitive reference application proves source-directory loss, owner fencing, exact-root takeover, and continued post-takeover operations. Provider-specific enrollment/transport construction stays at the server edge; `NodeDurabilityConfig` construction, installation, recruitment, rotation, and join now stay behind `CellNode`. Multi-process public-host qualification remains open.
 
 ## Why this matters
 
@@ -215,8 +215,10 @@ rg -n "CellRuntime::|FollowerStore::open|RepositoryCellScheduler::new|NodeLogRec
   crates/crab-http-server/src crates/crab-cell-host/src
 ```
 
-Every remaining server match must be a test fixture or host adapter with a
-documented reason; production constructors live once.
+Every remaining server match must be a test fixture or provider adapter with a
+documented reason; production constructors live once. The architecture gate
+also rejects direct server construction of `DurabilityGate`, `NodeDurability`,
+and `NodeLogShipper`.
 
 **Verify**: architecture check fails when a deliberate forbidden constructor is
 temporarily inserted, then passes after removal.
@@ -239,7 +241,9 @@ the new host must delete comparable manual composition complexity from server.
 
 ## Done criteria
 
-- [ ] One `CellNode` owns every listed production runtime facility and task.
+- [x] One `CellNode` owns every listed production runtime facility and task;
+  provider-specific enrollment and transport construction remain explicit edge
+  inputs, while durability construction/recruitment/rotation are host-owned.
 - [x] Server readiness occurs only after complete host validation/startup.
 - [x] Server drain/shutdown awaits work and returns resource ledgers to baseline.
 - [x] Node admission is cancelled before provider-facility drains, with a deadline regression test.

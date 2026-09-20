@@ -547,10 +547,10 @@ infrastructure; it does not create a second receipt format or scheduler.
 | [019](019-command-scoped-effect-ledger.md) | One command-owned effect allocator enforces limits without retained-table scans | P0 | M | — | IMPLEMENTED |
 | [020](020-cache-sealed-follower-tail-index.md) | Recovery tail pagination scans a sealed lane at most once per process | P1 | M | — | IMPLEMENTED |
 | [021](021-constant-time-primitive-accounting.md) | Workflow capacity and Queue status use transactionally maintained counters | P1 | L | 018 | IMPLEMENTED |
-| [022](022-freeze-cell-application-contract.md) | The supported author/operator API and scale envelope are executable contracts | P0 | L | 018–021 | PARTIAL |
-| [023](023-production-cell-node-host.md) | One host facade owns runtime composition and a full-primitive application path | P0 | XL | 022 | PARTIAL |
+| [022](022-freeze-cell-application-contract.md) | The supported author/operator API and scale envelope are executable contracts | P0 | L | 018–021 | IMPLEMENTED — handwritten API; code generation deferred |
+| [023](023-production-cell-node-host.md) | One host facade owns runtime composition and a full-primitive application path | P0 | XL | 022 | IMPLEMENTED locally — protected qualification remains |
 | [024](024-large-scale-primitive-qualification.md) | Release qualification proves every primitive, mixed load, faults, and resource bounds | P0 | XL | 018–023, 015 infrastructure | PARTIAL |
-| [025](025-cell-runtime-production-readiness-execution.md) | Close host-ownership and protected qualification gates for named production profiles | P0 | XL | 022–024 | TODO |
+| [025](025-cell-runtime-production-readiness-execution.md) | Close host-ownership and protected qualification gates for named production profiles | P0 | XL | 022–024 | IN PROGRESS |
 
 ### Execution waves
 
@@ -575,19 +575,20 @@ infrastructure; it does not create a second receipt format or scheduler.
 6. Execute 024 against the integrated candidate. A green unit suite cannot
    mark any production-readiness row complete.
 
-Current boundary: 018–021 are implemented and verified. 022–023 now provide a
-handwritten full-primitive author contract, a typed owner/source-loss takeover
-proof for SQL, KV, Blob, Queue, Cron, Workflow, Activity, and Effects, plus
-fail-closed serving/maintenance host `start`/`status`, readiness, bounded
-ownership of the long-lived server coordination loops and the production
-router/peer/follower/transport components, required component slots,
+Current boundary: 018–023 are implemented and locally verified. 022 provides a
+handwritten full-primitive author contract, deterministic descriptor and
+relationship validation, typed capability scope checks, and the owner/source-loss
+takeover proof for SQL, KV, Blob, Queue, Cron, Workflow, Activity, and Effects.
+023 provides fail-closed serving/maintenance host `start`/`status`, readiness,
+bounded ownership of the long-lived server coordination loops and production
+router/peer/follower/transport components, provider-neutral NodeDurability
+construction/recruitment/rotation ownership, required component slots,
 admission-before-facility-drain ordering, and deadline-aware drain. 024
 provides bounded profile constructors, deterministic streaming execution,
 per-primitive verified-progress validation with canonical attempted-count
 binding, measured run artifacts, preflight guards, pinned-signer validation,
-and fail-closed release packaging. These rows
-remain partial until full operator-facility construction ownership and
-protected provider/Kubernetes/scale receipts exist.
+and fail-closed release packaging. 024 remains partial until protected
+provider/Kubernetes/scale and signed release receipts exist.
 
 ### Shared release rule
 

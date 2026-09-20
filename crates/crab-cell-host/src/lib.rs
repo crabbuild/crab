@@ -20,7 +20,7 @@ use std::{
 use crab_cell_app::{ApplicationHandle, CellApplication, CompiledApplication};
 use crab_cell_runtime::{
     ApplicationId, CellClient, CellRuntime, CellRuntimeStats, DiskBudget, Error, FollowerStore,
-    ReplicaHost, ReplicaLimits, SessionId, SqlWorkerPool, TenantId,
+    NodeDurabilityConfig, ReplicaHost, ReplicaLimits, SessionId, SqlWorkerPool, TenantId,
 };
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -30,9 +30,82 @@ const MAX_NODE_TASKS: usize = 256;
 
 /// Stable host-owned component name for the follower store.
 pub const FOLLOWER_STORE_COMPONENT: &str = "follower-store";
+/// Stable host-owned component name for the node-log enrollment provider.
+pub const NODE_DURABILITY_PROVIDER_COMPONENT: &str = "node-durability-provider";
 
 /// Error returned by a provider-owned node facility during drain.
-pub type FacilityResult = std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>;
+pub type FacilityResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// Node-log rotation events emitted by the host supervisor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeDurabilityRotation {
+    Started,
+    Pending,
+    Failed,
+    Completed,
+}
+
+/// Provider-owned enrollment adapter used by the host durability supervisor.
+///
+/// The provider is responsible for authority and transport enrollment. The
+/// host consumes the resulting provider-neutral configuration and is the only
+/// owner that constructs and installs [`crab_cell_runtime::NodeDurability`].
+pub trait NodeDurabilityProvider: Send + Sync + 'static {
+    fn recruit(
+        self: Arc<Self>,
+        limits: ReplicaLimits,
+        required_follower_bytes: u64,
+        live_node_limit: usize,
+    ) -> Pin<Box<dyn Future<Output = FacilityResult<Option<NodeDurabilityConfig>>> + Send>>;
+
+    fn rotation_event(&self, _event: NodeDurabilityRotation) {}
+}
+
+/// Fixed host-owned bounds and identity for the node-log supervisor.
+#[derive(Clone, Copy, Debug)]
+pub struct NodeDurabilitySupervisorConfig {
+    application: ApplicationId,
+    limits: ReplicaLimits,
+    required_follower_bytes: u64,
+    live_node_limit: usize,
+    recruit_interval: std::time::Duration,
+    rotation_interval: std::time::Duration,
+    max_issued_frames: u64,
+}
+
+impl NodeDurabilitySupervisorConfig {
+    /// Creates a bounded supervisor configuration.
+    pub fn new(
+        application: ApplicationId,
+        limits: ReplicaLimits,
+        required_follower_bytes: u64,
+        live_node_limit: usize,
+        recruit_interval: std::time::Duration,
+        rotation_interval: std::time::Duration,
+        max_issued_frames: u64,
+    ) -> crab_cell_runtime::Result<Self> {
+        if application.as_bytes().iter().all(|byte| *byte == 0)
+            || required_follower_bytes == 0
+            || live_node_limit == 0
+            || recruit_interval.is_zero()
+            || rotation_interval.is_zero()
+            || max_issued_frames == 0
+        {
+            return Err(Error::Control(
+                "invalid CellNode durability supervisor configuration",
+            ));
+        }
+        Ok(Self {
+            application,
+            limits,
+            required_follower_bytes,
+            live_node_limit,
+            recruit_interval,
+            rotation_interval,
+            max_issued_frames,
+        })
+    }
+}
 
 /// One provider-owned lifecycle component attached to a [`CellNode`].
 pub struct CellNodeFacility {
@@ -138,6 +211,22 @@ impl CellNodeTaskGroup {
                 .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
         });
         tasks.push(handle);
+        Ok(())
+    }
+
+    /// Spawns one task that already uses the node's boxed facility error type.
+    pub fn spawn_boxed<F>(&self, task: F) -> crab_cell_runtime::Result<()>
+    where
+        F: Future<Output = FacilityResult> + Send + 'static,
+    {
+        let mut tasks = match self.tasks.lock() {
+            Ok(tasks) => tasks,
+            Err(_) => return Err(Error::Control("CellNode task group lock poisoned")),
+        };
+        if tasks.len() >= MAX_NODE_TASKS {
+            return Err(Error::Capacity("CellNode task limit reached"));
+        }
+        tasks.push(tokio::spawn(task));
         Ok(())
     }
 
@@ -574,6 +663,36 @@ impl CellNode {
         Ok(task_group)
     }
 
+    /// Installs the provider enrollment adapter and moves node-log recruitment
+    /// and rotation into the host-owned task group.
+    pub fn install_node_durability_provider<P>(
+        &self,
+        provider: Arc<P>,
+        configuration: NodeDurabilitySupervisorConfig,
+    ) -> crab_cell_runtime::Result<()>
+    where
+        P: NodeDurabilityProvider,
+    {
+        let task_group = self
+            .task_group
+            .lock()
+            .map_err(|_| Error::Control("CellNode task group lock poisoned"))?
+            .clone()
+            .ok_or(Error::Control(
+                "CellNode durability provider requires an installed task group",
+            ))?;
+        self.install_owned_component(NODE_DURABILITY_PROVIDER_COMPONENT, Arc::clone(&provider))?;
+        let runtime = self.runtime.clone();
+        let cancellation = task_group.cancellation.clone();
+        let result = task_group.spawn_boxed(async move {
+            run_node_durability_supervisor(provider, runtime, configuration, cancellation).await
+        });
+        if result.is_err() {
+            self.remove_facility(NODE_DURABILITY_PROVIDER_COMPONENT)?;
+        }
+        result
+    }
+
     /// Opens readiness after all product startup probes have completed.
     pub fn start(&self) -> crab_cell_runtime::Result<()> {
         if !self.lease_installed.load(Ordering::Acquire) {
@@ -620,6 +739,20 @@ impl CellNode {
                 return Err(Error::Control("CellNode required component is missing"));
             }
         }
+        Ok(())
+    }
+
+    fn remove_facility(&self, name: &'static str) -> crab_cell_runtime::Result<()> {
+        let mut facilities = self
+            .facilities
+            .lock()
+            .map_err(|_| Error::Control("CellNode facility lock poisoned"))?;
+        let Some(index) = facilities.iter().position(|facility| facility.name == name) else {
+            return Err(Error::Control(
+                "CellNode facility rollback target is missing",
+            ));
+        };
+        facilities.remove(index);
         Ok(())
     }
 
@@ -878,6 +1011,142 @@ impl CellNode {
     }
 }
 
+async fn run_node_durability_supervisor<P>(
+    provider: Arc<P>,
+    runtime: CellRuntime,
+    configuration: NodeDurabilitySupervisorConfig,
+    cancellation: CancellationToken,
+) -> FacilityResult
+where
+    P: NodeDurabilityProvider,
+{
+    let mut recruit = tokio::time::interval(configuration.recruit_interval);
+    let mut rotation = tokio::time::interval(configuration.rotation_interval);
+    loop {
+        tokio::select! {
+            () = cancellation.cancelled() => return Ok(()),
+            _ = recruit.tick(), if runtime.node_durability().is_none() => {
+                match provider.clone().recruit(
+                    configuration.limits,
+                    configuration.required_follower_bytes,
+                    configuration.live_node_limit,
+                ).await {
+                    Ok(Some(config)) => {
+                        match config.build() {
+                            Ok(durability) => {
+                                if let Err(error) = runtime.install_node_durability(
+                                    configuration.application,
+                                    durability,
+                                ) {
+                                    provider.rotation_event(NodeDurabilityRotation::Failed);
+                                    return Err(Box::new(error));
+                                }
+                            }
+                            Err(_error) => {
+                                provider.rotation_event(NodeDurabilityRotation::Failed);
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(_) => provider.rotation_event(NodeDurabilityRotation::Failed),
+                }
+            }
+            _ = rotation.tick(), if runtime.node_durability().is_some() => {
+                rotate_node_durability(
+                    Arc::clone(&provider),
+                    runtime.clone(),
+                    configuration,
+                    cancellation.clone(),
+                ).await?;
+            }
+        }
+    }
+}
+
+async fn rotate_node_durability<P>(
+    provider: Arc<P>,
+    runtime: CellRuntime,
+    configuration: NodeDurabilitySupervisorConfig,
+    cancellation: CancellationToken,
+) -> FacilityResult
+where
+    P: NodeDurabilityProvider,
+{
+    let Some((application, durability)) = runtime.node_durability() else {
+        return Ok(());
+    };
+    if application != configuration.application {
+        return Err(Box::new(Error::Control(
+            "CellNode node durability application changed during rotation",
+        )));
+    }
+    if !durability.needs_rotation(configuration.max_issued_frames) {
+        return Ok(());
+    }
+    provider.rotation_event(NodeDurabilityRotation::Started);
+    loop {
+        match durability.shutdown().await {
+            Ok(()) => break,
+            Err(Error::PendingPublication) => {
+                provider.rotation_event(NodeDurabilityRotation::Pending);
+                tokio::select! {
+                    () = cancellation.cancelled() => return Ok(()),
+                    () = tokio::time::sleep(configuration.recruit_interval) => {}
+                }
+            }
+            Err(error) => {
+                provider.rotation_event(NodeDurabilityRotation::Failed);
+                return Err(Box::new(error));
+            }
+        }
+    }
+    if cancellation.is_cancelled() {
+        return Ok(());
+    }
+    let replacement = loop {
+        match provider
+            .clone()
+            .recruit(
+                configuration.limits,
+                configuration.required_follower_bytes,
+                configuration.live_node_limit,
+            )
+            .await
+        {
+            Ok(Some(config)) => match config.build() {
+                Ok(durability) => break durability,
+                Err(_) => provider.rotation_event(NodeDurabilityRotation::Failed),
+            },
+            Ok(None) => {}
+            Err(_) => provider.rotation_event(NodeDurabilityRotation::Failed),
+        }
+        tokio::select! {
+            () = cancellation.cancelled() => return Ok(()),
+            () = tokio::time::sleep(configuration.recruit_interval) => {}
+        }
+    };
+    if cancellation.is_cancelled() {
+        replacement
+            .shutdown()
+            .await
+            .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
+        return Ok(());
+    }
+    match runtime.replace_node_durability(configuration.application, Arc::clone(&replacement)) {
+        Ok(_) => {
+            provider.rotation_event(NodeDurabilityRotation::Completed);
+            Ok(())
+        }
+        Err(error) => {
+            provider.rotation_event(NodeDurabilityRotation::Failed);
+            replacement.shutdown().await.map_err(|shutdown_error| {
+                Box::new(shutdown_error) as Box<dyn std::error::Error + Send + Sync>
+            })?;
+            Err(Box::new(error))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -974,6 +1243,52 @@ mod tests {
             Err(error) => error,
         };
         assert!(matches!(error, Error::Control(_)));
+    }
+
+    struct NoopNodeDurabilityProvider;
+
+    impl NodeDurabilityProvider for NoopNodeDurabilityProvider {
+        fn recruit(
+            self: Arc<Self>,
+            _limits: ReplicaLimits,
+            _required_follower_bytes: u64,
+            _live_node_limit: usize,
+        ) -> Pin<Box<dyn Future<Output = FacilityResult<Option<NodeDurabilityConfig>>> + Send>>
+        {
+            Box::pin(async { Ok(None) })
+        }
+    }
+
+    #[tokio::test]
+    async fn node_durability_supervisor_is_host_owned_and_joined() {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([28; 16]))
+            .build()
+            .unwrap();
+        node.install_task_group(CancellationToken::new(), CancellationToken::new())
+            .unwrap();
+        let provider = Arc::new(NoopNodeDurabilityProvider);
+        node.install_node_durability_provider(
+            Arc::clone(&provider),
+            NodeDurabilitySupervisorConfig::new(
+                ApplicationId::from_bytes([29; 16]),
+                ReplicaLimits::default(),
+                1,
+                1,
+                std::time::Duration::from_millis(1),
+                std::time::Duration::from_millis(1),
+                1,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            node.owned_component::<NoopNodeDurabilityProvider>(NODE_DURABILITY_PROVIDER_COMPONENT)
+                .is_some()
+        );
+        node.shutdown().await.unwrap();
     }
 
     #[tokio::test]

@@ -14,6 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
+use crab_cell_host::{NodeDurabilityProvider, NodeDurabilityRotation};
 use crab_cell_runtime::CellStorageLayout;
 use crab_cell_runtime::{
     ApplicationIdentity, CellAuthority, CellCatalog, CellHandle, CellRuntime, CellTarget, Digest,
@@ -99,6 +100,7 @@ pub(crate) struct NodePublisher {
     runtime: Option<CellRuntime>,
     telemetry: crab_cell_runtime::CellTelemetryHandle,
     metrics: Option<crate::metrics::Metrics>,
+    node_log_transport: OnceLock<Arc<dyn crab_cell_runtime::NodeLogTransport>>,
     lease: OnceLock<crab_cell_runtime::NodeLeaseGuard>,
     observed: OnceLock<tokio::sync::Mutex<VersionedNodeAdvertisement>>,
 }
@@ -160,6 +162,7 @@ impl NodePublisher {
             runtime: None,
             telemetry: crab_cell_runtime::CellTelemetryHandle::default(),
             metrics: None,
+            node_log_transport: OnceLock::new(),
             lease: OnceLock::new(),
             observed: OnceLock::new(),
         })
@@ -189,6 +192,15 @@ impl NodePublisher {
     pub(crate) fn with_metrics(mut self, metrics: crate::metrics::Metrics) -> Self {
         self.metrics = Some(metrics);
         self
+    }
+
+    pub(crate) fn install_node_log_transport(
+        &self,
+        transport: Arc<dyn crab_cell_runtime::NodeLogTransport>,
+    ) -> crate::Result<()> {
+        self.node_log_transport
+            .set(transport)
+            .map_err(|_| crate::Error::Config("node-log transport was initialized twice"))
     }
 
     pub(crate) async fn publish_initial(&self) -> crate::Result<VersionedNodeAdvertisement> {
@@ -242,13 +254,13 @@ impl NodePublisher {
         local_resources(&self.data_dir, self.local_disk_limit_bytes)
     }
 
-    pub(crate) async fn recruit_node_durability(
+    pub(crate) async fn recruit_node_durability_config(
         self: &Arc<Self>,
         transport: Arc<dyn crab_cell_runtime::NodeLogTransport>,
         limits: crab_cell_runtime::ReplicaLimits,
         required_follower_bytes: u64,
         live_node_limit: usize,
-    ) -> crate::Result<Option<Arc<crab_cell_runtime::NodeDurability>>> {
+    ) -> crate::Result<Option<crab_cell_runtime::NodeDurabilityConfig>> {
         let now_ms = now_ms()?;
         let mut observed = self.observed().map_err(crate::Error::from)?.lock().await;
         if observed.advertisement().log().is_none() {
@@ -275,27 +287,19 @@ impl NodePublisher {
             .advertisement()
             .log()
             .ok_or(CellError::Node("enrolled node session lost its log"))?;
-        let gate = crab_cell_runtime::DurabilityGate::new(
+        let authority: Arc<dyn NodeLogAuthority> = self.clone();
+        let config = crab_cell_runtime::NodeDurabilityConfig::new(
             self.session,
             self.node,
             log.epoch(),
-            log.members().iter().copied(),
-        )?;
-        let shipper = crab_cell_runtime::NodeLogShipper::new_with_telemetry(
-            gate.clone(),
-            Arc::clone(&transport),
+            log.members().to_vec(),
+            transport,
+            authority,
+            self.lease_guard()?,
             limits,
             self.telemetry.clone(),
         )?;
-        let authority: Arc<dyn NodeLogAuthority> = self.clone();
-        let durability = crab_cell_runtime::NodeDurability::new(
-            gate,
-            shipper,
-            authority,
-            transport,
-            self.lease_guard()?,
-        );
-        Ok(Some(Arc::new(durability)))
+        Ok(Some(config))
     }
 
     pub(crate) async fn run_shared(
@@ -578,6 +582,55 @@ impl NodeLogAuthority for NodePublisher {
             *observed = self.directory.close_log(&observed, barrier, now_ms).await?;
             Ok(())
         })
+    }
+}
+
+impl NodeDurabilityProvider for NodePublisher {
+    fn recruit(
+        self: Arc<Self>,
+        limits: crab_cell_runtime::ReplicaLimits,
+        required_follower_bytes: u64,
+        live_node_limit: usize,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = crab_cell_host::FacilityResult<
+                        Option<crab_cell_runtime::NodeDurabilityConfig>,
+                    >,
+                > + Send,
+        >,
+    > {
+        let Some(transport) = self.node_log_transport.get().cloned() else {
+            return Box::pin(async {
+                Err(
+                    Box::new(crate::Error::Config("node-log transport is unavailable"))
+                        as Box<dyn std::error::Error + Send + Sync>,
+                )
+            });
+        };
+        Box::pin(async move {
+            self.recruit_node_durability_config(
+                transport,
+                limits,
+                required_follower_bytes,
+                live_node_limit,
+            )
+            .await
+            .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
+        })
+    }
+
+    fn rotation_event(&self, event: NodeDurabilityRotation) {
+        let Some(metrics) = &self.metrics else {
+            return;
+        };
+        let result = match event {
+            NodeDurabilityRotation::Started => crate::metrics::NodeLogRotationResult::Started,
+            NodeDurabilityRotation::Pending => crate::metrics::NodeLogRotationResult::Pending,
+            NodeDurabilityRotation::Failed => crate::metrics::NodeLogRotationResult::Failed,
+            NodeDurabilityRotation::Completed => crate::metrics::NodeLogRotationResult::Completed,
+        };
+        metrics.record_node_log_rotation(result);
     }
 }
 
@@ -2258,9 +2311,16 @@ mod tests {
             crab_cell_runtime::LocalFollowerTransport::new(follower.node(), follower_store),
         );
         let first = publisher
-            .recruit_node_durability(Arc::clone(&transport), crab_ltx::Limits::default(), 1, 10)
+            .recruit_node_durability_config(
+                Arc::clone(&transport),
+                crab_ltx::Limits::default(),
+                1,
+                10,
+            )
             .await
             .unwrap()
+            .unwrap()
+            .build()
             .unwrap();
         let first_epoch = directory
             .load(session, now_ms().unwrap())
@@ -2273,9 +2333,11 @@ mod tests {
             .epoch();
         first.shutdown().await.unwrap();
         let second = publisher
-            .recruit_node_durability(transport, crab_ltx::Limits::default(), 1, 10)
+            .recruit_node_durability_config(transport, crab_ltx::Limits::default(), 1, 10)
             .await
             .unwrap()
+            .unwrap()
+            .build()
             .unwrap();
         assert!(
             directory

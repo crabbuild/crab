@@ -123,7 +123,7 @@ pub use node::{
     NodeFailureDomain, NodePlacementCapacity, NodeTakeoverProof, SealedNodeLog,
     VersionedNodeAdvertisement,
 };
-pub use node_durability::{NodeDurability, NodeLogAuthority};
+pub use node_durability::{NodeDurability, NodeDurabilityConfig, NodeLogAuthority};
 pub use node_lease::NodeLeaseGuard;
 pub use node_log::{
     CommitTicket, DurabilityGate, DurabilityProof, DurabilitySource, NodeLogRotationBarrier,

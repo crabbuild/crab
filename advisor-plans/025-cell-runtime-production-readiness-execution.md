@@ -20,9 +20,9 @@
 - **Category**: architecture / correctness / performance / operations / release
 - **Planned at**: commit `49bc8f0cc96`, 2026-09-20
 - **Implementation status**: local runtime, typed application, host lifecycle,
-  deterministic workload, receipt validation, and release negative gates are
-  implemented and tested; full operator-facility construction ownership and
-  protected provider/Kubernetes/scale receipts remain open
+  provider-neutral durability construction/recruitment/rotation, deterministic
+  workload, receipt validation, and release negative gates are implemented and
+  tested; protected provider/Kubernetes/scale receipts remain open
 
 ## Decision boundary
 
@@ -59,12 +59,16 @@ while closing the remaining gaps:
   status, release store, and capacity report as one host-owned batch.
   `:1263-1365` retains the coordination loops in the host task group and only
   opens readiness after startup probes and lease installation.
-- The remaining ownership seam is visible in
+- The provider boundary is now explicit in
   `crates/crab-http-server/src/peer.rs:245-298`: the server-side publisher
-  still constructs `NodeDurability`. Plan 023 therefore remains partial until
-  that constructor and its long-lived recovery/rotation ownership move behind
-  the provider-neutral host boundary. Do not hide this with another type-erased
-  slot or a second scheduler.
+  enrolls the node session and returns `NodeDurabilityConfig`, while
+  `crates/crab-cell-host/src/lib.rs` builds, installs, recruits, rotates, and
+  joins the runtime durability object. The server no longer constructs
+  `NodeDurability` or owns a second recruitment/rotation loop. Keep provider
+  credentials, HTTP transport, and authority enrollment at the edge; do not
+  move those into the runtime or add another scheduler. The architecture gate
+  now rejects direct server construction of `DurabilityGate`, `NodeDurability`,
+  and `NodeLogShipper` as well as direct `CellRuntime` construction.
 - `crates/crab-cell-runtime/src/qualification.rs:20-38` defines the schema and
   ten matrix rows; `:40-61` defines the schema-2 provider/topology and
   throughput/RSS/disk/FD/object-store-call envelope. Built-in protected profiles
@@ -136,8 +140,10 @@ Add a provider-neutral host operator bundle/supervisor API. `CellNode` must
 construct or receive already-constructed provider-neutral durability, recovery,
 publisher, peer, scheduler, effect, and Activity supervisors, retain them, and
 join them through one bounded task/facility group. Provider SDKs, credentials,
-TLS identity, and HTTP routes remain product-owned inputs. Delete the old server
-construction path once the host path is canonical.
+TLS identity, HTTP routes, and node-session enrollment remain product-owned
+inputs. The canonical path now has the host build and own NodeDurability from a
+provider-returned configuration; delete any old server construction path rather
+than adding another scheduler.
 
 Add a public test cluster that uses only application/host APIs. It must prove
 startup, readiness, admission stop, reverse facility drain, task join, lease
@@ -231,9 +237,11 @@ flags. Never run bucket-wide GC.
 
 ## Machine-checkable done criteria
 
-- [ ] One `CellNode` owns construction, retention, drain, and join for every
-  production runtime/operator facility; no server-side duplicate owner remains.
-- [ ] Host lifecycle tests prove readiness gating, admission-before-drain,
+- [x] One `CellNode` owns construction, retention, drain, and join for every
+  production runtime/operator facility; provider-specific enrollment and HTTP
+  transport remain explicit edge inputs, with no server-side duplicate
+  durability owner.
+- [x] Host lifecycle tests prove readiness gating, admission-before-drain,
   reverse facility drain, task joining, lease fencing, and zero reservations.
 - [ ] Application semantic-validation fixtures cover every relationship listed
   in step 3 and all full-primitive calls remain typed and module-safe.

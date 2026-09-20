@@ -17,7 +17,7 @@
 - **Depends on**: plans 018–021
 - **Category**: architecture / API / direction
 - **Planned at**: commit `892720ce6a6`, 2026-09-19
-- **Implementation status**: deterministic authoring boundary and handwritten full-primitive reference application implemented, including one successful typed invocation per primitive through a bounded local multi-Cell router plus executable scope, role, and capability rejection checks; generated clients, complete descriptor semantic validation, and protected release evidence remain open
+- **Implementation status**: deterministic authoring boundary and handwritten full-primitive reference application implemented, including one successful typed invocation per primitive through a bounded local multi-Cell router plus executable scope, role, capability, relationship, migration, and descriptor-limit rejection checks. Generated clients are intentionally deferred; protected release evidence belongs to plan 024.
 
 ## Why this matters
 
