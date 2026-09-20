@@ -328,7 +328,7 @@ mute.
 
 Don’t repair object storage by editing catalog JSON, ref markers, manifests, or coordination records directly. Use the repository administration commands or a reviewed recovery tool.
 
-The container gate kills Crab after a new immutable pack appears during a 128 MB native push. A fresh process must expose exactly the old or new ref. The same push must become idempotently successful within the publication lease and recovery budget, and an independent clone must reconstruct every byte within that budget. Readiness keeps the replacement out of endpoint routing while startup indexing converges; indexing triggered by a newly accepted write can still reject an early clone and must converge within the recovery budget. Repeat this test with provider storage and pod replacement before production use.
+The container gate kills Crab after a new immutable pack appears during a 128 MB native push. A fresh process must expose exactly the old or new ref. The same push must become idempotently successful within the publication lease and recovery budget, and an independent clone must reconstruct every byte within that budget. Readiness keeps the replacement out of endpoint routing while startup indexing converges. Git browse projection rebuilds are not cut off by the catalog pass budget, so a large repository may remain indexing longer than one recovery window; watch projection build metrics and verify the ready state before declaring the replacement healthy. Repeat this test with provider storage and pod replacement before production use.
 
 ## Drain a deployment
 
