@@ -105,11 +105,17 @@ and exact state through a separate typed client. Queue and Effects also check
 final settlement; every node drains to zero reservations. All seven cases
 passed together on in-memory and fresh isolated RustFS storage on 2026-09-21.
 The sibling response-loss cases were rerun on the same fresh RustFS bucket and
-also passed. Activity retry remains open: `ActivitySupervisor` owns the claim
-and completion identities and does not expose a way to retry a pending exact
-completion through its public capability. These tests share a process with
-their observer and are not scheduled matrix cases or protected provider
-evidence, so they do not set retry case bits.
+also passed. `public_cell_activity_retry.rs` now covers two claim boundaries:
+a pre-dispatch loss resolves `Absent` and the next supervisor run completes
+once; a post-dispatch lost response resolves `Committed`, the 5-second lease
+expires, and the next run reclaims and completes the Activity once. Both
+passed on in-memory and fresh RustFS storage on 2026-09-21, with an
+independent typed Workflow read, an idle follow-up, and zero reservations.
+Exact Activity completion retry remains open: `ActivitySupervisor` owns the
+completion identity and input and does not expose a way to replay a pending
+exact completion through its public capability. These tests share a process
+with their observer and are not scheduled matrix cases or protected provider
+evidence, so they do not set retry or expiry case bits.
 
 A separate `public_cell_takeover.rs` test now uses a fresh successor `CellNode` and
 empty local directory against the same object store. It checks the exact
@@ -401,7 +407,7 @@ Run each Cargo command with a checkout-specific target directory under
 | --- | --- | --- |
 | Application contract | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-app RUSTC_WRAPPER= cargo test -p crab-cell-app --locked` | all unit and reference-application tests pass |
 | Host ownership | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-host RUSTC_WRAPPER= cargo test -p crab-cell-host --locked` | lifecycle/facility tests pass with no leaked tasks |
-| Public typed primitive host | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-public-host RUSTC_WRAPPER= cargo test -p crab-http-server --test public_cell_host_application --test public_cell_qualification --test public_cell_response_loss --test public_cell_retry --test public_cell_takeover --test public_cell_process_fault --locked` | typed smoke, response-loss reconciliation, absent-request retries, fresh-successor takeover, and process harness tests pass; ignored RustFS cases require the isolated provider job |
+| Public typed primitive host | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-public-host RUSTC_WRAPPER= cargo test -p crab-http-server --test public_cell_host_application --test public_cell_qualification --test public_cell_response_loss --test public_cell_retry --test public_cell_activity_retry --test public_cell_takeover --test public_cell_process_fault --locked` | typed smoke, response-loss reconciliation, absent-request retries, Activity claim fault recovery, fresh-successor takeover, and process harness tests pass; ignored RustFS cases require the isolated provider job |
 | Runtime regression | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-runtime RUSTC_WRAPPER= cargo test -p crab-cell-runtime --locked` | all runtime tests pass; ignored provider tests are reported, not fabricated |
 | Server composition | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-server RUSTC_WRAPPER= cargo test -p crab-http-server --lib --locked` | server library tests pass |
 | Strict lint | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-quality RUSTC_WRAPPER= cargo clippy -p crab-cell-app -p crab-cell-host -p crab-cell-runtime --all-targets --locked -- -D warnings` | exit 0 |
