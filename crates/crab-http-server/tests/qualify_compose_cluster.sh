@@ -905,7 +905,6 @@ jq --exit-status \
   <<<"$fallback_response" >/dev/null
 control_before_fallback="$(service_cli server-b cells status --owner demo --name hello)"
 root_before_fallback="$(jq --compact-output '.root' <<<"$control_before_fallback")"
-fallback_owner_metrics_before="$(service_cli server-b cells metrics)"
 fallback_object_covered=false
 for _ in $(seq 1 60); do
   fallback_owner_metrics="$(service_cli server-b cells metrics)"
