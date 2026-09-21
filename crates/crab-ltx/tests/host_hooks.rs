@@ -64,6 +64,7 @@ struct Faults {
     largest_read: Arc<AtomicUsize>,
     read_calls: Arc<AtomicUsize>,
     largest_write: Arc<AtomicUsize>,
+    write_calls: Arc<AtomicUsize>,
     file_syncs: Arc<AtomicUsize>,
     parent_syncs: Arc<AtomicUsize>,
     track_all: Arc<AtomicBool>,
@@ -94,6 +95,7 @@ impl FileIo for File {
             self.faults
                 .largest_write
                 .fetch_max(bytes.len(), Ordering::Relaxed);
+            self.faults.write_calls.fetch_add(1, Ordering::Relaxed);
         }
         if let Err(error) = self.faults.check("write_all") {
             self.inner.write_all(&bytes[..bytes.len() / 2])?;
@@ -106,6 +108,7 @@ impl FileIo for File {
             self.faults
                 .largest_write
                 .fetch_max(bytes.len(), Ordering::Relaxed);
+            self.faults.write_calls.fetch_add(1, Ordering::Relaxed);
         }
         if let Err(error) = self.faults.check("write_all_at") {
             self.inner.write_all_at(offset, &bytes[..bytes.len() / 2])?;
@@ -518,6 +521,58 @@ async fn compaction_overlaps_independent_remote_transfers() {
     // and LTX body cohorts, compacted body/index uploads, directory upload, and
     // final root uploads then consume four more latency intervals.
     assert_eq!(started.elapsed(), delay * 6);
+    writer.close().unwrap();
+}
+
+#[cfg(feature = "replica")]
+#[tokio::test(flavor = "multi_thread")]
+async fn cell_compaction_coalesces_local_output_writes() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let faults = Arc::new(Faults::default());
+    let host = Host::default().with_filesystem(faults.clone());
+    let mut writer = Db::open_with_host(
+        &directory.path().join("source.sqlite"),
+        Limits::default(),
+        host.clone(),
+    )
+    .unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE payload(value BLOB NOT NULL);\
+                 INSERT INTO payload VALUES(randomblob(3000000))",
+            )
+        })
+        .unwrap();
+    let captured = writer.capture().unwrap();
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("buffered-compaction-output"),
+            [66; 16],
+        ),
+        [67; 32],
+        [68; 16],
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(host);
+    let root = replica.prepare(None, &captured, 1, 1).await.unwrap().root();
+    faults.track_all.store(true, Ordering::Relaxed);
+    faults.write_calls.store(0, Ordering::Relaxed);
+    let scratch = tempfile::TempDir::new().unwrap();
+
+    let compacted = replica
+        .prepare_compaction(&root, 0..1, 9, scratch.path())
+        .await
+        .unwrap();
+
+    assert_eq!(compacted.root().position, root.position);
+    assert!(
+        faults.write_calls.load(Ordering::Relaxed) <= 1_000,
+        "compaction used {} local writes",
+        faults.write_calls.load(Ordering::Relaxed)
+    );
     writer.close().unwrap();
 }
 
