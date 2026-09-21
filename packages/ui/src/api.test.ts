@@ -93,3 +93,42 @@ it("notifies the application when a repository request loses its session", async
   ).rejects.toThrow("Sign in");
   expect(expired).toHaveBeenCalledOnce();
 });
+
+it("coalesces concurrent repository reads without coupling abort signals", async () => {
+  let resolveResponse: (response: Response) => void = () => undefined;
+  const fetchMock = vi.fn(
+    () =>
+      new Promise<Response>((resolve) => {
+        resolveResponse = resolve;
+      }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  const firstController = new AbortController();
+  const secondController = new AbortController();
+  const firstUrl = "/api/repos/team/repo.name/tree?limit=200&path_hex=";
+  const secondUrl = "/api/repos/team/repo.name/tree?path_hex=&limit=100";
+
+  const first = request(firstUrl, firstController.signal);
+  firstController.abort();
+  const second = request(secondUrl, secondController.signal);
+
+  expect(fetchMock).toHaveBeenCalledOnce();
+  resolveResponse(new Response(JSON.stringify({ items: [] })));
+  await expect(first).rejects.toMatchObject({ name: "AbortError" });
+  await expect(second).resolves.toMatchObject({ data: { items: [] } });
+
+  fetchMock.mockImplementation(
+    async () => new Response(JSON.stringify({ items: [] })),
+  );
+  await Promise.all([
+    request(
+      "/api/repos/team/repo.name/tree?limit=200&cursor=page",
+      new AbortController().signal,
+    ),
+    request(
+      "/api/repos/team/repo.name/tree?limit=100&cursor=page",
+      new AbortController().signal,
+    ),
+  ]);
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+});

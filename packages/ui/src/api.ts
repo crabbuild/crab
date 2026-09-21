@@ -152,23 +152,137 @@ export interface Loaded<T> {
   timing?: Timing;
 }
 
+type RequestResult = { data: unknown; timing: Timing };
+type InFlightRequest = {
+  promise: Promise<RequestResult>;
+  controller: AbortController;
+  consumers: number;
+  settled: boolean;
+  abortScheduled: boolean;
+};
+
+const inFlightRequests = new Map<string, InFlightRequest>();
+
+function requestKey(url: string) {
+  try {
+    const parsed = new URL(url, "http://crab.local");
+    parsed.searchParams.sort();
+    // The sidebar and directory request the same initial tree page with
+    // different presentation limits. Share that read, but keep paginated
+    // requests distinct because cursors are bound to their page limit.
+    if (parsed.pathname.endsWith("/tree") && !parsed.searchParams.has("cursor"))
+      parsed.searchParams.delete("limit");
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+function abortReason(signal: AbortSignal) {
+  return (
+    signal.reason ?? new DOMException("The operation was aborted", "AbortError")
+  );
+}
+
+function withAbort<T>(
+  request: InFlightRequest,
+  signal: AbortSignal,
+): Promise<{ data: T; timing: Timing }> {
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  request.consumers += 1;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      request.consumers -= 1;
+      if (request.consumers !== 0 || request.settled || request.abortScheduled)
+        return;
+      request.abortScheduled = true;
+      queueMicrotask(() => {
+        request.abortScheduled = false;
+        if (request.consumers === 0 && !request.settled)
+          request.controller.abort();
+      });
+    };
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      release();
+      reject(abortReason(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    request.promise.then(
+      (result) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        release();
+        resolve(result as { data: T; timing: Timing });
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        release();
+        reject(error);
+      },
+    );
+  });
+}
+
 export async function request<T>(
   url: string,
   signal: AbortSignal,
 ): Promise<{ data: T; timing: Timing }> {
-  const start = performance.now();
-  const response = await fetch(url, {
-    signal,
-    headers: { Accept: "application/json" },
-  });
-  const body = await parseResponse<T>(response);
-  return {
-    data: body as T,
-    timing: {
-      roundtrip: performance.now() - start,
-      server: response.headers.get("server-timing"),
-    },
-  };
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  const key = requestKey(url);
+  let shared = inFlightRequests.get(key);
+  if (shared?.controller.signal.aborted) {
+    inFlightRequests.delete(key);
+    shared = undefined;
+  }
+  if (!shared) {
+    const controller = new AbortController();
+    const promise = (async (): Promise<RequestResult> => {
+      const start = performance.now();
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: { Accept: "application/json" },
+      });
+      const body = await parseResponse<unknown>(response);
+      return {
+        data: body,
+        timing: {
+          roundtrip: performance.now() - start,
+          server: response.headers.get("server-timing"),
+        },
+      };
+    })();
+    const entry: InFlightRequest = {
+      promise,
+      controller,
+      consumers: 0,
+      settled: false,
+      abortScheduled: false,
+    };
+    shared = entry;
+    inFlightRequests.set(key, entry);
+    void promise.then(
+      () => {
+        entry.settled = true;
+        if (inFlightRequests.get(key) === entry) inFlightRequests.delete(key);
+      },
+      () => {
+        entry.settled = true;
+        if (inFlightRequests.get(key) === entry) inFlightRequests.delete(key);
+      },
+    );
+  }
+  return withAbort<T>(shared, signal);
 }
 
 async function parseResponse<T>(response: Response): Promise<T> {
