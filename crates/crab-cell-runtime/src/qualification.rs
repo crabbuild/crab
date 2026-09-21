@@ -2665,7 +2665,10 @@ impl QualificationReceipt {
             ("operations", "operations"),
             ("duration_secs", "seconds"),
             ("throughput_ops_per_sec", "ops/s"),
+            ("p50_latency_ms", "ms"),
+            ("p95_latency_ms", "ms"),
             ("p99_latency_ms", "ms"),
+            ("max_latency_ms", "ms"),
         ] {
             if self.threshold_metric(name, unit)? != run.threshold_metric(name, unit)? {
                 return Err(Error::Control(
@@ -4389,7 +4392,10 @@ mod tests {
                 QualificationMetric::new("duration_secs".into(), 1, "seconds".into()).unwrap(),
                 QualificationMetric::new("throughput_ops_per_sec".into(), 8, "ops/s".into())
                     .unwrap(),
+                QualificationMetric::new("p50_latency_ms".into(), 1, "ms".into()).unwrap(),
+                QualificationMetric::new("p95_latency_ms".into(), 1, "ms".into()).unwrap(),
                 QualificationMetric::new("p99_latency_ms".into(), 1, "ms".into()).unwrap(),
+                QualificationMetric::new("max_latency_ms".into(), 1, "ms".into()).unwrap(),
             ]
         };
         let mut receipts = Vec::new();
@@ -4463,6 +4469,31 @@ mod tests {
             key.verifying_key().to_bytes(),
         )
         .unwrap();
+
+        let mut mismatched_receipt = receipts[7].clone();
+        mismatched_receipt
+            .metrics
+            .iter_mut()
+            .find(|metric| metric.name() == "p95_latency_ms")
+            .unwrap()
+            .value = 2;
+        let mismatched_receipt = mismatched_receipt.attest(&key).unwrap();
+        let mut mismatched_evidence = evidence.clone();
+        mismatched_evidence[7] = (
+            "primitives",
+            &mismatched_receipt,
+            artifact_views[7].as_slice(),
+        );
+        assert!(
+            QualificationReceipt::verify_matrix_for_profile_with_signer(
+                "source",
+                image,
+                &profile,
+                &mismatched_evidence,
+                key.verifying_key().to_bytes(),
+            )
+            .is_err()
+        );
 
         let missing_artifacts = artifacts
             .iter()
