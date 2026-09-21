@@ -112,15 +112,18 @@ still needs a dedicated fault boundary, independent process observer, and raw
 artifact before its owner-loss/recovery case bit can be claimed.
 
 `public_cell_process_fault.rs` now kills a separate owner process on isolated
-RustFS after acknowledged SQL and KV writes, then starts a successor process
-with an empty local directory. The successor checks exact SQL bytes, KV bytes
-and version, each acknowledged commit sequence, exact restored roots, higher
-owner epochs, and zero reservations after shutdown. A second boundary kills
-the owner before either write; the successor checks both values are absent.
-Both concurrent RustFS cases passed on 2026-09-21. The test uses a
-test-controlled session fence and covers only SQL and KV. It is not a
-scheduled qualification case, protected three-process provider run, or
-evidence for the other six primitives; it does not set matrix case bits.
+RustFS after acknowledged SQL, KV, Blob, and Queue writes, then starts a
+successor process with an empty local directory. The successor checks exact
+SQL bytes, KV bytes and version, Blob bytes/ETag/size, each acknowledged
+commit sequence, exact restored roots, and higher owner epochs. It claims the
+one recovered Queue message by ID and payload, acknowledges it, confirms zero
+ready or leased messages, and drains runtime reservations to zero. A second
+boundary kills the owner before all four writes; the successor checks their
+values or queued work are absent. Both concurrent RustFS cases passed on
+2026-09-21. The test uses a test-controlled session fence and covers only
+these four primitives. It is not a scheduled qualification case, protected
+three-process provider run, or evidence for Cron, Workflow, Activity, or
+Effects; it does not set matrix case bits.
 
 Implement one fault-capable executor through `CellNode` and typed
 `ApplicationHandle` capabilities. Each operation writes a unique, bounded
