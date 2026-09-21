@@ -74,8 +74,8 @@ unix_millis() {
 
 cleanup() {
   result=$?
-  "${compose[@]}" unpause server >/dev/null 2>&1 || true
-  "${compose[@]}" unpause server-d >/dev/null 2>&1 || true
+  resume_service server >/dev/null 2>&1 || true
+  resume_service server-d >/dev/null 2>&1 || true
   "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
     --endpoint-url http://rustfs:9000 s3api delete-bucket-policy \
     --bucket crab-http-server >/dev/null 2>&1 || true
@@ -89,6 +89,16 @@ cleanup() {
     echo "Compose cluster qualification failed." >&2
   fi
   exit "$result"
+}
+
+freeze_service() {
+  local service="$1"
+  "${compose[@]}" kill --signal SIGSTOP "$service" >/dev/null
+}
+
+resume_service() {
+  local service="$1"
+  "${compose[@]}" kill --signal SIGCONT "$service" >/dev/null
 }
 trap cleanup EXIT
 
@@ -360,12 +370,12 @@ assert_placement_parity "$capacity_b" "$metrics_b" "$node_b"
 assert_placement_parity "$capacity_c" "$metrics_c" "$node_c"
 assert_placement_parity "$capacity_d" "$metrics_d" "$node_d"
 
-# Keep the initial owner’s two-follower log deterministic: with D paused and
+# Keep the initial owner’s two-follower log deterministic: with D frozen and
 # its old lease expired, B can enroll only A and C, so C is guaranteed to be
-# the surviving original follower when A is paused immediately before the
-# owner crash. Pausing alone is not enough because the signed advertisement
+# the surviving original follower when A is frozen immediately before the
+# owner crash. Freezing alone is not enough because the signed advertisement
 # remains live until its lease expires.
-"${compose[@]}" pause server-d >/dev/null
+freeze_service server-d
 d_advertisement_expired=false
 for _ in $(seq 1 45); do
   node_d_status="$("${compose[@]}" exec -T server-c crab-http-server \
@@ -485,7 +495,8 @@ awk '$1 == "crab_cell_follower_retained_bytes" && $2 + 0 > 0 { found = 1 }
 
 # Keep node C as the deterministic surviving follower: node A remains in the
 # log, but its signed advertisement must expire before the owner is killed.
-"${compose[@]}" pause server >/dev/null
+# Freezing preserves the shared Compose network namespace for the proxy.
+freeze_service server
 a_advertisement_expired=false
 for _ in $(seq 1 45); do
   node_a_status="$("${compose[@]}" exec -T server-c crab-http-server \
@@ -498,7 +509,7 @@ for _ in $(seq 1 45); do
   sleep 1
 done
 if ! $a_advertisement_expired; then
-  echo "Paused node A did not leave the live advertisement set." >&2
+  echo "Frozen node A did not leave the live advertisement set." >&2
   exit 1
 fi
 owner_killed_ms="$(unix_millis)"
@@ -634,7 +645,7 @@ jq --exit-status \
    .root.commit_sequence > $sequence_before' \
   <<<"$control_continued" >/dev/null
 
-"${compose[@]}" unpause server >/dev/null
+resume_service server
 "${compose[@]}" up --detach --no-build server server-b >/dev/null
 wait_for_healthy server-b
 rejoin_ready=false
@@ -737,10 +748,10 @@ jq --exit-status \
    any(.advertisement.log.member_nodes[]; . != $node_b)' \
   <<<"$node_before_follower_loss" >/dev/null
 
-# Pausing nodes A and D keeps the shared Compose network namespace alive while
+# Freezing nodes A and D keeps the shared Compose network namespace alive while
 # the old followers, heartbeats, and follower endpoints are unavailable.
-"${compose[@]}" pause server >/dev/null
-"${compose[@]}" pause server-d >/dev/null
+freeze_service server
+freeze_service server-d
 sleep 12
 after_follower_loss="$(curl --fail-with-body --silent --show-error \
   --request POST \
@@ -921,9 +932,9 @@ service_session() {
 stop_fallback_member() {
   case "$1" in
     server)
-      # Pausing A preserves the shared network namespace while removing its
+      # Freezing A preserves the shared network namespace while removing its
       # heartbeat and follower endpoint from the live fleet.
-      "${compose[@]}" pause server >/dev/null
+      freeze_service server
       ;;
     server-c|server-d)
       "${compose[@]}" kill --signal KILL "$1" >/dev/null
@@ -940,8 +951,8 @@ stop_fallback_member() {
 # first publishes an object-covered mutation, then every original member is
 # stopped before the owner is killed. Recovery must therefore use the bounded
 # any-node path and still restore exact data from RustFS.
-"${compose[@]}" unpause server >/dev/null
-"${compose[@]}" unpause server-d >/dev/null
+resume_service server
+resume_service server-d
 "${compose[@]}" up --detach --no-build server-c >/dev/null
 wait_for_healthy server
 wait_for_healthy server-c
