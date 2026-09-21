@@ -1487,6 +1487,37 @@ cold-clone target when the destination is not contending with RustFS. The
 gates remain separate release qualifications; v1 must not be retired until
 those gates meet the matrix in section 13.2.
 
+### 2.5.45 September 21 canonical ordinal and multi-pack cold-clone re-audit
+
+The first fresh PR-208 replay after the ref-only fix exposed a second
+correctness boundary: ref updates append unseen object IDs to the in-memory
+visibility dictionary, but the layered wire format requires a strictly sorted
+OID dictionary. The writer now canonicalizes that dictionary at the wire
+boundary and remaps refs, transitions, history closures, and authenticated
+member admission through one old-to-new ordinal map. This preserves the cheap
+append-only runtime representation while making the serialized proof
+canonical. A focused regression test exercises an unsorted three-object
+dictionary and verifies that the authenticated member order follows the
+canonical remap. The full `crab-metadata` library suite passes 212/212.
+
+The next local-RustFS smoke (seed plus ten replay pushes, with fetch and
+suffix-repack checkpoints at five and ten) passed every push, fetch, repack,
+tip, and fsck gate. After the seed, incremental pushes remained approximately
+1.04 s each. The same run also showed the remaining cold-clone blocker: the
+checkpoint contained multiple active pack members, so the one-source/
+one-member direct installer correctly declined admission and the normal
+upload-pack path performed 357,313 uncoalesced range reads in 163 s before the
+qualification was intentionally stopped. It had read 1.89 GB and inflated
+15.2 GB while producing only about 80 KiB of destination output. This is a
+request-amplification and pack-materialization failure, not a correctness
+pass; the multi-member direct-install path (or an equivalent authenticated
+whole-member union path) is still required before the cold-clone gate can
+close.
+
+Accordingly, this re-audit claims only the ordinal correctness fix and the
+ten-push incremental smoke. It does not claim a passing 5,000-commit replay,
+multi-pack cold clone, or v1 retirement.
+
 ## 3. Goals
 
 The implementation MUST:
