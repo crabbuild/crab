@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
 use crate::resource::{
     ACTIVE_CELL_NATIVE_BYTES, HYDRATION_JOB_CAPACITY, ResourceLedger, ResourceReservation,
@@ -122,6 +122,7 @@ impl SqlWorkerPool {
                 resources,
                 max_active_cells,
                 worker_count,
+                worker_permits: Arc::new(Semaphore::new(worker_count)),
             }),
         })
     }
@@ -602,6 +603,7 @@ impl SqlWorkerPool {
                 ));
             }
             lifecycle.closing = true;
+            self.inner.worker_permits.close();
             lifecycle.workers.clear();
             std::mem::take(&mut lifecycle.threads)
         };
@@ -638,6 +640,21 @@ impl SqlWorkerPool {
     }
 
     async fn send_worker_job(&self, cell: CellId, command: WorkerCommand) -> Result<()> {
+        let worker_permits = {
+            let lifecycle = self
+                .inner
+                .lifecycle
+                .lock()
+                .map_err(|_| Error::RuntimeClosed)?;
+            if lifecycle.closing {
+                return Err(Error::RuntimeClosed);
+            }
+            Arc::clone(&self.inner.worker_permits)
+        };
+        let permit = worker_permits
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::RuntimeClosed)?;
         let reservation = self
             .inner
             .resources
@@ -646,7 +663,10 @@ impl SqlWorkerPool {
             cell,
             WorkerCommand::Reserved {
                 command: Box::new(command),
-                reservation,
+                reservation: WorkerJobReservation {
+                    _reservation: reservation,
+                    _permit: permit,
+                },
             },
         )
         .await
@@ -700,6 +720,7 @@ struct PoolInner {
     resources: ResourceLedger,
     max_active_cells: usize,
     worker_count: usize,
+    worker_permits: Arc<Semaphore>,
 }
 
 struct WorkerLifecycle {
@@ -710,6 +731,7 @@ struct WorkerLifecycle {
 
 impl Drop for PoolInner {
     fn drop(&mut self) {
+        self.worker_permits.close();
         let lifecycle = match self.lifecycle.get_mut() {
             Ok(lifecycle) => lifecycle,
             Err(poisoned) => poisoned.into_inner(),
@@ -725,7 +747,7 @@ impl Drop for PoolInner {
 enum WorkerCommand {
     Reserved {
         command: Box<WorkerCommand>,
-        reservation: ResourceReservation,
+        reservation: WorkerJobReservation,
     },
     Activate {
         cell: CellId,
@@ -865,6 +887,11 @@ enum WorkerCommand {
     },
 }
 
+struct WorkerJobReservation {
+    _reservation: ResourceReservation,
+    _permit: OwnedSemaphorePermit,
+}
+
 struct WorkerBootstrap {
     cell: CellId,
     replica: crab_ltx::CellReplica,
@@ -903,7 +930,7 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
 fn run_worker_command(
     command: WorkerCommand,
     cells: &mut HashMap<CellId, ActiveCell>,
-    mut reservation: Option<ResourceReservation>,
+    mut reservation: Option<WorkerJobReservation>,
 ) {
     match command {
         WorkerCommand::Reserved {
