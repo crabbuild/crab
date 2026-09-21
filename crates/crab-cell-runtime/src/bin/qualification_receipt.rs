@@ -447,10 +447,10 @@ fn require_manifest_output(output: &Path, evidence_dir: &Path) -> Result<(), Str
     if output_parent != evidence_root {
         return Err("matrix manifest output must be directly under the evidence directory".into());
     }
-    if let Ok(metadata) = fs::symlink_metadata(output) {
-        if metadata.file_type().is_symlink() {
-            return Err("matrix manifest output must not be a symlink".into());
-        }
+    if let Ok(metadata) = fs::symlink_metadata(output)
+        && metadata.file_type().is_symlink()
+    {
+        return Err("matrix manifest output must not be a symlink".into());
     }
     Ok(())
 }
