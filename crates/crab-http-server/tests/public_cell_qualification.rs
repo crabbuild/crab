@@ -18,7 +18,7 @@ use crab_cell_runtime::{
     WorkflowOutcome, WorkflowSignal, install_blob_schema, install_cron_schema, install_kv_schema,
     install_queue_schema, install_workflow_schema, partition_for_shard,
 };
-use crab_storage::Store;
+use crab_storage::{ObjectStoreCredentials, Store, build_explicit_store};
 use ed25519_dalek::SigningKey;
 use object_store::{memory::InMemory, path::Path};
 use tokio_util::sync::CancellationToken;
@@ -420,14 +420,27 @@ async fn public_host_fixture() -> (
     ApplicationId,
     tempfile::TempDir,
 ) {
+    public_host_fixture_with_store(
+        Store::new(Arc::new(InMemory::new())),
+        Path::from("public-host-qualification"),
+    )
+    .await
+}
+
+async fn public_host_fixture_with_store(
+    store: Store,
+    root: Path,
+) -> (
+    CellNode,
+    ApplicationHandle<fixture::ReferenceApplication>,
+    TenantId,
+    ApplicationId,
+    tempfile::TempDir,
+) {
     let application = Arc::new(fixture::compiled());
     let tenant = TenantId::from_bytes([71; 16]);
     let application_id = ApplicationId::from_bytes([72; 16]);
-    let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
-        Path::from("public-host-qualification"),
-        *application_id.as_bytes(),
-    );
+    let layout = CellStorageLayout::new(store, root, *application_id.as_bytes());
     let directory = tempfile::tempdir().expect("qualification directory");
     let session = crab_cell_runtime::SessionId::from_bytes([24; 16]);
     let node = CellNodeBuilder::new(Arc::clone(&application))
@@ -562,7 +575,48 @@ async fn public_host_fixture() -> (
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn public_cell_node_runs_typed_primitive_workload() {
-    let (node, typed, tenant, application_id, _directory) = public_host_fixture().await;
+    run_public_typed_primitive_workload(public_host_fixture().await).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_public_cell_node_runs_typed_primitive_workload() {
+    let required = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
+    let bucket = required("CRAB_CELL_TEST_BUCKET");
+    let endpoint = required("CRAB_CELL_TEST_ENDPOINT");
+    let configured_prefix = required("CRAB_CELL_TEST_PREFIX");
+    let store = build_explicit_store(
+        &bucket,
+        ObjectStoreCredentials::Aws {
+            access_key_id: required("AWS_ACCESS_KEY_ID"),
+            secret_access_key: required("AWS_SECRET_ACCESS_KEY"),
+            session_token: None,
+            region: "us-east-1".into(),
+        },
+        Some(&endpoint),
+        true,
+    )
+    .expect("RustFS object store");
+    let run_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let root = Path::from(format!(
+        "{configured_prefix}/public-typed-host-{}-{run_id}",
+        std::process::id()
+    ));
+    run_public_typed_primitive_workload(public_host_fixture_with_store(store, root).await).await;
+}
+
+async fn run_public_typed_primitive_workload(
+    (node, typed, tenant, application_id, _directory): (
+        CellNode,
+        ApplicationHandle<fixture::ReferenceApplication>,
+        TenantId,
+        ApplicationId,
+        tempfile::TempDir,
+    ),
+) {
     let now_ms = i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

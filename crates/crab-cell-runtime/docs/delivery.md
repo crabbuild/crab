@@ -337,6 +337,13 @@ cargo test -p crab-cell-runtime --test actor \
 CRAB_CELL_TEST_BUCKET="$BUCKET" \
 CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
 CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
+cargo test -p crab-http-server --test public_cell_qualification \
+  rustfs_public_cell_node_runs_typed_primitive_workload \
+  -- --ignored --exact --nocapture
+
+CRAB_CELL_TEST_BUCKET="$BUCKET" \
+CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
+CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
 cargo test -p crab-cell-runtime --lib \
   retention::tests::rustfs_maintenance_collection_preserves_live_and_pinned_graphs \
   -- --ignored --exact
@@ -351,8 +358,11 @@ cargo test -p crab-http-server --lib \
 
 The Cell test publishes a command on one session, removes its local database,
 takes over from a second session, resolves the original request from the exact
-root, and publishes the next sequence. CI runs both tests against a pinned
-RustFS image.
+root, and publishes the next sequence. The public-host test drives SQL, KV,
+Blob, Queue, Cron, Workflow, Activity, and Effects through the typed
+`CellNode` application handle against the same real provider. CI runs these
+tests against a pinned RustFS image; they remain iteration evidence until the
+protected provider, Kubernetes, and scale matrix receipts pass.
 
 The same CI job also runs `crab-http-server` through public HTTP and private
 mTLS forwarding to a heartbeat-renewed remote owner. Native Git creates main
