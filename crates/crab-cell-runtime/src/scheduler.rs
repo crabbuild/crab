@@ -562,7 +562,7 @@ pub fn scheduler_next_due_ms(
     }
     if tables.contains("queue_messages") {
         let exhausted_ready: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM queue_messages INDEXED BY queue_ready WHERE state = 0 AND attempt >= ?1)",
+            "SELECT EXISTS(SELECT 1 FROM queue_messages INDEXED BY queue_attempts WHERE state = 0 AND attempt >= ?1)",
             [i64::from(MAX_ATTEMPTS)],
             |row| row.get(0),
         )?;
