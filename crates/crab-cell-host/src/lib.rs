@@ -1050,28 +1050,41 @@ impl CellNode {
             })
             .map_err(|_| Error::Control("CellNode facility lock poisoned"));
         let mut first_error = None;
-        match task_group {
-            Err(error) => first_error = Some(error),
-            Ok(Some(task_group)) => task_group.cancel(),
-            Ok(None) => {}
+        if let Some(error) = task_group.as_ref().err().map(|error| match error {
+            Error::Control(message) => Error::Control(message),
+            _ => Error::Control("CellNode task group unavailable during drain"),
+        }) {
+            first_error = Some(error);
+        }
+        if let Ok(Some(task_group)) = task_group.as_ref() {
+            task_group.cancel();
         }
         match facilities {
             Err(error) if first_error.is_none() => first_error = Some(error),
             Err(_) => {}
             Ok(facilities) => {
                 for (name, drain) in facilities {
-                    let result = match deadline {
-                        Some(deadline) => {
-                            match tokio::time::timeout_at(deadline.into(), drain()).await {
-                                Ok(result) => result,
-                                Err(_) => Err(Box::new(std::io::Error::new(
-                                    std::io::ErrorKind::TimedOut,
-                                    "CellNode facility drain deadline exceeded",
-                                ))
-                                    as Box<dyn std::error::Error + Send + Sync>),
-                            }
+                    let result = if name == "cell-coordination-tasks" {
+                        // The task group is a retained owner, so its join must share the
+                        // node deadline; an unbounded callback could strand shutdown.
+                        match task_group.as_ref() {
+                            Ok(Some(task_group)) => task_group.drain_until(deadline).await,
+                            _ => drain().await,
                         }
-                        None => drain().await,
+                    } else {
+                        match deadline {
+                            Some(deadline) => {
+                                match tokio::time::timeout_at(deadline.into(), drain()).await {
+                                    Ok(result) => result,
+                                    Err(_) => Err(Box::new(std::io::Error::new(
+                                        std::io::ErrorKind::TimedOut,
+                                        "CellNode facility drain deadline exceeded",
+                                    ))
+                                        as Box<dyn std::error::Error + Send + Sync>),
+                                }
+                            }
+                            None => drain().await,
+                        }
                     };
                     if let Err(source) = result
                         && first_error.is_none()
@@ -1762,6 +1775,35 @@ mod tests {
         let result = node
             .shutdown_until(Instant::now() + std::time::Duration::from_millis(10))
             .await;
+
+        assert!(result.is_err());
+        assert_eq!(node.state(), NodeState::Draining);
+    }
+
+    #[tokio::test]
+    async fn node_deadline_bounds_a_stalled_coordination_task() {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([23; 16]))
+            .build()
+            .unwrap();
+        let tasks = node
+            .install_task_group(CancellationToken::new(), CancellationToken::new())
+            .unwrap();
+        tasks
+            .spawn(async {
+                std::future::pending::<()>().await;
+                Ok::<(), Error>(())
+            })
+            .unwrap();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            node.shutdown_until(Instant::now() + std::time::Duration::from_millis(10)),
+        )
+        .await
+        .expect("deadline-aware shutdown must return");
 
         assert!(result.is_err());
         assert_eq!(node.state(), NodeState::Draining);
