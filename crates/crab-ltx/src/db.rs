@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, Transaction};
@@ -34,6 +35,7 @@ pub struct Db {
     retained: Vec<LocalSegment>,
     path: PathBuf,
     host: crate::Host,
+    pending_durability: Vec<PathBuf>,
     #[cfg(feature = "replica")]
     paged: Option<crate::writable_vfs::Registration>,
 }
@@ -110,8 +112,12 @@ impl Db {
 
     /// Deletes this session's exact captured artifacts after their root publishes.
     ///
-    /// Every selected file is reverified before deletion. An error retains its
-    /// accounting so the owner can retry or discard the complete local session.
+    /// Publication is the durability proof for selected deferred captures, so
+    /// they are reverified and unlinked without a local durability barrier.
+    /// Every session owns a fresh metadata directory, so a crash-resurrected
+    /// local name remains quarantined rather than becoming acknowledged state.
+    /// An error retains unfinished accounting so the owner can retry or discard
+    /// the complete local session.
     #[cfg(feature = "replica")]
     pub fn prune_captured(&mut self, batch: &crate::CaptureBatch) -> Result<usize> {
         self.prune_retained(|segment| {
@@ -134,17 +140,13 @@ impl Db {
                 index += 1;
                 continue;
             }
-            match self.host.read(segment.path(), segment.info().size_bytes) {
-                Ok(bytes) => {
-                    crate::recovery::verify_segment(&bytes, segment.info(), self.limits)?;
-                    self.host.filesystem.remove_file(segment.path())?;
-                }
-                // A previous removal may have succeeded before parent sync failed.
-                // Keep accounting until sync succeeds, including on retry.
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-            self.host.filesystem.sync_parent(segment.path())?;
+            let bytes = self.host.read(segment.path(), segment.info().size_bytes)?;
+            crate::recovery::verify_segment(&bytes, segment.info(), self.limits)?;
+            // The published immutable root, not durable local deletion, releases
+            // the result. A fresh session never adopts crash-resurrected residue.
+            self.host.filesystem.remove_file(segment.path())?;
+            self.pending_durability
+                .retain(|pending| pending != segment.path());
             let segment = self.retained.remove(index);
             self.retained_bytes -= segment.info().size_bytes;
             self.retained_segments -= 1;
@@ -169,14 +171,17 @@ impl Db {
         limits: Limits,
         host: crate::Host,
     ) -> Result<Self> {
-        let (checksums, page_size, count) = crate::recovery::continuation(plan)?;
+        let materialized = plan.materialize();
         let limits = limits.validate()?;
-        if u64::from(count) * u64::from(page_size) > limits.max_database_bytes {
+        if u64::from(materialized.database_pages) * u64::from(materialized.page_size)
+            > limits.max_database_bytes
+        {
             return Err(CrabError::Limit("database bytes"));
         }
-        let database_bytes = u64::from(count) * u64::from(page_size);
+        let database_bytes =
+            u64::from(materialized.database_pages) * u64::from(materialized.page_size);
         let local_disk = host.reserve_local_disk(database_bytes)?;
-        host.restore(plan, destination)?;
+        host.restore_materialized(materialized, destination)?;
         let vfs = host.sqlite_vfs.clone();
         let mut db = Self::open_inner(
             destination,
@@ -186,8 +191,12 @@ impl Db {
             false,
             Some(local_disk),
         )?;
-        db.capture
-            .seed_continuation(plan.position(), checksums, page_size, count)?;
+        db.capture.seed_continuation(
+            plan.position(),
+            materialized.checksums.clone(),
+            materialized.page_size,
+            materialized.database_pages,
+        )?;
         Ok(db)
     }
 
@@ -295,6 +304,7 @@ impl Db {
             retained: Vec::new(),
             path: path.to_owned(),
             host: facilities,
+            pending_durability: Vec::new(),
             #[cfg(feature = "replica")]
             paged: None,
         })
@@ -414,7 +424,8 @@ impl Db {
     /// `prune_captured` can then release one exact acknowledged batch.
     pub fn capture(&mut self) -> Result<CaptureBatch> {
         self.ensure_active()?;
-        let (result, timing) = self.capture_inner();
+        self.flush_pending_durability()?;
+        let (result, timing) = self.capture_inner(false);
         #[cfg(feature = "replica")]
         self.host.observe_ltx_capture(&timing, result.is_ok());
         let result = result.map(|mut batch| {
@@ -427,7 +438,79 @@ impl Db {
         result
     }
 
-    fn capture_inner(&mut self) -> (Result<CaptureBatch>, crate::CaptureTiming) {
+    /// Captures committed WAL pages while deferring their durability barrier.
+    ///
+    /// LTX files are complete and readable when this returns, but their contents
+    /// and names are not durable until [`Self::durability_barrier`] succeeds.
+    /// This permits a host to group several captures behind one storage flush;
+    /// callers must complete the barrier before acknowledging a locally durable
+    /// batch. A higher-level protocol may instead publish the exact bytes to its
+    /// own durability boundary, then pass that published batch to
+    /// [`Self::prune_captured`]. A failed local barrier fences the session.
+    pub fn capture_deferred(&mut self) -> Result<CaptureBatch> {
+        self.ensure_active()?;
+        let (result, timing) = self.capture_inner(true);
+        #[cfg(feature = "replica")]
+        self.host.observe_ltx_capture(&timing, result.is_ok());
+        let result = result.map(|mut batch| {
+            batch.timing = timing;
+            self.pending_durability.extend(
+                batch
+                    .segments
+                    .iter()
+                    .map(|segment| segment.path().to_owned()),
+            );
+            batch
+        });
+        if result.is_err() {
+            self.fenced = true;
+        }
+        result
+    }
+
+    /// Makes all files published by deferred captures durable as one barrier.
+    ///
+    /// The barrier syncs each completed file before syncing each destination
+    /// directory once. If either step fails, the session is fenced and pending
+    /// paths remain tracked for diagnostics; no caller may acknowledge them.
+    pub fn durability_barrier(&mut self) -> Result<()> {
+        self.ensure_active()?;
+        self.flush_pending_durability()
+    }
+
+    fn flush_pending_durability(&mut self) -> Result<()> {
+        if self.pending_durability.is_empty() {
+            return Ok(());
+        }
+        let mut parents = BTreeMap::new();
+        for path in &self.pending_durability {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(Path::new("."))
+                .to_owned();
+            parents.entry(parent).or_insert_with(|| path.clone());
+        }
+        let result = (|| {
+            self.host.filesystem.sync_files(&self.pending_durability)?;
+            parents
+                .values()
+                .try_for_each(|path| self.host.filesystem.sync_parent(path))?;
+            Ok::<(), std::io::Error>(())
+        })()
+        .map_err(CrabError::from);
+        if result.is_ok() {
+            self.pending_durability.clear();
+        } else {
+            self.fenced = true;
+        }
+        result
+    }
+
+    fn capture_inner(
+        &mut self,
+        defer_durability: bool,
+    ) -> (Result<CaptureBatch>, crate::CaptureTiming) {
         self.capture.start_timing(self.host.now_monotonic());
         self.capture
             .timing_begin(crate::capture::TimingPhase::Preparation);
@@ -436,7 +519,11 @@ impl Db {
             self.capture
                 .timing_end(crate::capture::TimingPhase::Preparation);
             let before = self.capture.pos();
-            self.capture.sync(self.required_cut)?;
+            if defer_durability {
+                self.capture.sync_deferred(self.required_cut)?;
+            } else {
+                self.capture.sync(self.required_cut)?;
+            }
             self.required_cut = None;
             let batch = self.collect_cuts(before)?;
             self.reconcile_local_disk()?;
@@ -474,6 +561,11 @@ impl Db {
                 self.account_capture(&info)?;
                 let segment = LocalSegment::new(path, info);
                 #[cfg(feature = "replica")]
+                let segment = match self.capture.take_sealed_l0_captured_index(Txid(txid)) {
+                    Some(index) => segment.with_captured_index(index),
+                    None => segment,
+                };
+                #[cfg(feature = "replica")]
                 self.retained.push(segment.clone());
                 segments.push(segment);
             }
@@ -491,7 +583,8 @@ impl Db {
     /// returned cuts must be published before acknowledging the operation.
     pub fn checkpoint(&mut self, mode: crate::CheckpointMode) -> Result<CaptureBatch> {
         self.ensure_active()?;
-        let (initial, mut timing) = self.capture_inner();
+        self.flush_pending_durability()?;
+        let (initial, mut timing) = self.capture_inner(false);
         let result = (|| {
             let mut batch = initial?;
             self.local_disk.try_grow(
@@ -542,7 +635,8 @@ impl Db {
     }
 
     fn snapshot_inner(&mut self, destination: &Path) -> Result<(LocalSegment, CaptureBatch)> {
-        let (batch, timing) = self.capture_inner();
+        self.flush_pending_durability()?;
+        let (batch, timing) = self.capture_inner(false);
         #[cfg(feature = "replica")]
         self.host.observe_ltx_capture(&timing, batch.is_ok());
         let mut batch = batch?;
@@ -583,7 +677,8 @@ impl Db {
     }
 
     /// Releases the writer and checkpoint read lock without claiming publication.
-    pub fn close(self) -> Result<()> {
+    pub fn close(mut self) -> Result<()> {
+        self.flush_pending_durability()?;
         drop(self.writer);
         self.capture.close()
     }
@@ -933,6 +1028,44 @@ mod tests {
         assert!(!attempts[0].1);
         assert!(attempts[0].0.total_nanos > 0);
         assert!(attempts[0].0.wal_read_bytes > 0);
+    }
+
+    #[cfg(feature = "replica")]
+    #[test]
+    fn captured_indexes_match_independent_ltx_inspection() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut db = Db::open(&temp.path().join("indexed.sqlite"), Limits::default()).unwrap();
+        db.transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE payload(value BLOB); \
+                 INSERT INTO payload VALUES(randomblob(200000))",
+            )
+        })
+        .unwrap();
+
+        let batch = db.capture().unwrap();
+
+        for segment in &batch.segments {
+            let file = std::fs::File::open(segment.path()).unwrap();
+            let (decoded, size, digest, pages) =
+                crate::ltx::inspect_reader_with_index(file).unwrap();
+            assert_eq!(
+                crate::SegmentInfo::from_inspected(&decoded, size, digest),
+                *segment.info()
+            );
+            assert_eq!(
+                segment.captured_index().unwrap().as_ref(),
+                crate::paged::encode_index_from_pages(&pages)
+                    .unwrap()
+                    .as_slice()
+            );
+            let cloned = segment.clone();
+            assert_eq!(
+                segment.captured_index().unwrap().as_ptr(),
+                cloned.captured_index().unwrap().as_ptr()
+            );
+        }
+        db.close().unwrap();
     }
 
     #[test]

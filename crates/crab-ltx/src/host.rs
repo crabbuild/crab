@@ -15,15 +15,25 @@ pub(crate) struct HostFile {
     file: Box<dyn crate::environment::FileIo>,
     limit: u64,
     read_offset: u64,
+    sequential_write_bytes: Option<u64>,
 }
 
 impl HostFile {
     pub fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-        check_size(
-            self.file.file_len()?.saturating_add(bytes.len() as u64),
-            self.limit,
-        )?;
-        self.file.write_all(bytes)
+        let Some(written) = self.sequential_write_bytes else {
+            check_size(
+                self.file.file_len()?.saturating_add(bytes.len() as u64),
+                self.limit,
+            )?;
+            return self.file.write_all(bytes);
+        };
+        let end = written
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| io::Error::other("LTX local file byte limit exceeded"))?;
+        check_size(end, self.limit)?;
+        self.file.write_all(bytes)?;
+        self.sequential_write_bytes = Some(end);
+        Ok(())
     }
 
     pub fn read_exact_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
@@ -108,6 +118,7 @@ impl LtxHost {
             file: self.facilities.filesystem.open(path)?,
             limit: self.max_file_bytes,
             read_offset: 0,
+            sequential_write_bytes: None,
         })
     }
     #[cfg(feature = "replica")]
@@ -116,6 +127,7 @@ impl LtxHost {
             file: self.facilities.filesystem.open_rw(path)?,
             limit: self.max_file_bytes,
             read_offset: 0,
+            sequential_write_bytes: None,
         })
     }
     pub fn create(&self, path: &Path) -> io::Result<HostFile> {
@@ -123,6 +135,7 @@ impl LtxHost {
             file: self.facilities.filesystem.create(path)?,
             limit: self.max_file_bytes,
             read_offset: 0,
+            sequential_write_bytes: Some(0),
         })
     }
     pub fn metadata(&self, path: &Path) -> io::Result<HostMetadata> {
@@ -140,6 +153,9 @@ impl LtxHost {
     pub fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         // A fresh session owns this directory. Directory fsync seals the new name.
         self.facilities.filesystem.rename(from, to)
+    }
+    pub fn rename_uncommitted(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.facilities.filesystem.rename_uncommitted(from, to)
     }
     pub fn now_unix_millis(&self) -> i64 {
         self.facilities.clock.unix_millis()
@@ -165,4 +181,68 @@ pub(crate) fn sync_parent(path: &Path) -> io::Result<()> {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     File::open(parent)?.sync_all()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use super::*;
+
+    struct CountingFile {
+        inner: File,
+        file_len_calls: Arc<AtomicUsize>,
+    }
+
+    impl crate::environment::FileIo for CountingFile {
+        fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+            crate::environment::FileIo::write_all(&mut self.inner, bytes)
+        }
+
+        fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()> {
+            crate::environment::FileIo::write_all_at(&mut self.inner, offset, bytes)
+        }
+
+        fn read_exact_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+            crate::environment::FileIo::read_exact_at(&mut self.inner, offset, len)
+        }
+
+        fn sync_all(&mut self) -> io::Result<()> {
+            crate::environment::FileIo::sync_all(&mut self.inner)
+        }
+
+        fn file_len(&self) -> io::Result<u64> {
+            self.file_len_calls.fetch_add(1, Ordering::Relaxed);
+            crate::environment::FileIo::file_len(&self.inner)
+        }
+
+        fn set_len(&mut self, len: u64) -> io::Result<()> {
+            crate::environment::FileIo::set_len(&mut self.inner, len)
+        }
+    }
+
+    #[test]
+    fn created_output_tracks_its_extent_without_metadata_queries() {
+        let file_len_calls = Arc::new(AtomicUsize::new(0));
+        let mut file = HostFile {
+            file: Box::new(CountingFile {
+                inner: tempfile::tempfile().unwrap(),
+                file_len_calls: Arc::clone(&file_len_calls),
+            }),
+            limit: 4,
+            read_offset: 0,
+            sequential_write_bytes: Some(0),
+        };
+
+        file.write_all(&[1, 2]).unwrap();
+        file.write_all(&[3, 4]).unwrap();
+        assert_eq!(
+            file.write_all(&[5]).unwrap_err().kind(),
+            io::ErrorKind::Other
+        );
+        assert_eq!(file_len_calls.load(Ordering::Relaxed), 0);
+    }
 }

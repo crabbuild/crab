@@ -13,6 +13,7 @@ const MAX_CATALOG_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_REPOSITORIES: usize = 10_000;
 const MAX_CAS_ATTEMPTS: usize = 8;
 const CATALOG_RELATIVE_PATH: &str = ".crab/http-server/v1/catalog.json";
+const MEMBERSHIP_AUDIT_RELATIVE_PREFIX: &str = ".crab/http-server/v1/audit/membership";
 
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogError {
@@ -151,7 +152,7 @@ impl CatalogDocument {
         if self
             .membership_audit_head
             .as_ref()
-            .is_some_and(|path| !valid_audit_path(root, path))
+            .is_some_and(|path| !valid_audit_path(path))
             || (self.schema_version == 2
                 && (self.membership_audit_head.is_some()
                     || self.pending_membership_audit.is_some()))
@@ -199,8 +200,8 @@ fn valid_actor(actor: &MembershipActor) -> bool {
     })
 }
 
-fn valid_audit_path(root: &StorageRoot, path: &str) -> bool {
-    let prefix = format!("{}/", root.path(".crab/http-server/v1/audit/membership"));
+fn valid_audit_path(path: &str) -> bool {
+    let prefix = format!("{MEMBERSHIP_AUDIT_RELATIVE_PREFIX}/");
     let Some(file) = path
         .strip_prefix(&prefix)
         .and_then(|file| file.strip_suffix(".json"))
@@ -521,10 +522,11 @@ impl CatalogStore {
         let Some(event) = document.pending_membership_audit.clone() else {
             return Ok(());
         };
-        let path = self.root.path(&format!(
-            ".crab/http-server/v1/audit/membership/{}-{}.json",
+        let relative_path = format!(
+            "{MEMBERSHIP_AUDIT_RELATIVE_PREFIX}/{}-{}.json",
             event.repository_version, event.id
-        ));
+        );
+        let path = self.root.path(&relative_path);
         match self
             .root
             .store
@@ -544,7 +546,9 @@ impl CatalogStore {
             }
             Err(error) => return Err(error.into()),
         }
-        document.membership_audit_head = Some(path.to_string());
+        // Catalog roots are portable backup units. Persisting a root-qualified
+        // key here would make an otherwise byte-exact restore prefix-dependent.
+        document.membership_audit_head = Some(relative_path);
         document.pending_membership_audit = None;
         document.validate(&self.root)?;
         let _ = self.write_document(&document, etag).await?;
@@ -815,12 +819,17 @@ mod tests {
         let (body, _) = catalog
             .root
             .store
-            .get_with_etag_bounded(&head.clone().into(), 8192)
+            .get_with_etag_bounded(&catalog.root.path(&head), 8192)
             .await
             .unwrap();
         let event: MembershipAuditEvent = serde_json::from_slice(&body).unwrap();
         // Recreate the committed outbox state immediately before its flush.
-        catalog.root.store.delete(&head.into()).await.unwrap();
+        catalog
+            .root
+            .store
+            .delete(&catalog.root.path(&head))
+            .await
+            .unwrap();
         document.membership_audit_head = None;
         document.pending_membership_audit = Some(event.clone());
         assert!(catalog.write_document(&document, etag).await.unwrap());
@@ -841,24 +850,73 @@ mod tests {
         let (after, etag) = catalog.load().await.unwrap();
         catalog.flush_membership_audit().await.unwrap();
         assert_eq!(catalog.load().await.unwrap(), (after.clone(), etag));
+        let current_head = after.membership_audit_head.unwrap();
         let (body, _) = catalog
             .root
             .store
-            .get_with_etag_bounded(&after.membership_audit_head.unwrap().into(), 8192)
+            .get_with_etag_bounded(&catalog.root.path(&current_head), 8192)
             .await
             .unwrap();
         let current: MembershipAuditEvent = serde_json::from_slice(&body).unwrap();
         assert_eq!(current.repository_id, record.id);
+        let previous = current.previous.unwrap();
         let (body, _) = catalog
             .root
             .store
-            .get_with_etag_bounded(&current.previous.unwrap().into(), 8192)
+            .get_with_etag_bounded(&catalog.root.path(&previous), 8192)
             .await
             .unwrap();
         assert_eq!(
             serde_json::from_slice::<MembershipAuditEvent>(&body).unwrap(),
             event
         );
+    }
+
+    #[tokio::test]
+    async fn membership_audit_chain_survives_storage_root_relocation() {
+        let source = catalog();
+        source
+            .create_repository(
+                "team".into(),
+                "project".into(),
+                "team/project".into(),
+                "main".into(),
+                String::new(),
+                vec![admin()],
+            )
+            .await
+            .unwrap();
+        let (document, _) = source.load().await.unwrap();
+        let head = document.membership_audit_head.clone().unwrap();
+        assert!(head.starts_with(MEMBERSHIP_AUDIT_RELATIVE_PREFIX));
+        let (audit, _) = source
+            .root
+            .store
+            .get_with_etag_bounded(&source.root.path(&head), MAX_CATALOG_BYTES)
+            .await
+            .unwrap();
+
+        let restored = CatalogStore::new(StorageRoot::memory(
+            source.root.store.clone(),
+            "restored-repositories",
+        ));
+        restored
+            .root
+            .store
+            .put_overwrite(&restored.root.path(&head), audit)
+            .await
+            .unwrap();
+        restored
+            .root
+            .store
+            .put_overwrite(
+                &restored.path,
+                Bytes::from(serde_json::to_vec(&document).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(restored.load().await.unwrap().0, document);
     }
 
     #[test]

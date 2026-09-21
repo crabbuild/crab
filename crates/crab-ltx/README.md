@@ -163,7 +163,9 @@ fn main() -> crab_ltx::Result<()> {
 `LocalSegment::new` only describes a selected file and its expected metadata.
 It is not trusted until `VerifiedPlan::new` has read the bytes, checked the
 BLAKE3 digest and LTX structure, verified the complete checksum-linked chain,
-and reconstructed the requested endpoint.
+and reconstructed the requested endpoint. The plan owns that verified database
+image, so source files may be removed or replaced afterward without changing
+what restore, resume, or compaction consumes.
 
 Run the complete local demonstration from the repository root:
 
@@ -214,6 +216,44 @@ fn rename_issue(
 
 A successful transaction is still only a local SQLite commit. Capture and
 publication remain separate durability steps.
+
+### Grouping capture durability barriers
+
+`capture()` is the synchronous convenience path: it syncs the LTX file and
+its published name before returning. A host that already has a higher-level
+acknowledgement barrier can capture several batches with
+`capture_deferred()`, then make all of their LTX files durable with one
+`durability_barrier()` call:
+
+```rust,no_run
+use crab_ltx::Db;
+
+fn capture_group(database: &mut Db) -> crab_ltx::Result<()> {
+    let first = database.capture_deferred()?;
+    let second = database.capture_deferred()?;
+
+    // Do not acknowledge local durability or close the session until this
+    // flushes every completed file and seals their directory entries.
+    database.durability_barrier()?;
+
+    assert!(second.position.txid >= first.position.txid);
+    Ok(())
+}
+```
+
+The default `capture()` contract is unchanged. A failed barrier fences the
+session, so the host must not acknowledge either batch. Checkpoint and snapshot
+operations flush pending deferred files before changing the WAL lifecycle.
+
+An embedding protocol with a stronger external proof can instead publish the
+exact deferred bytes to that boundary and call `prune_captured()` only after
+publication succeeds. This is how `crab-cell-runtime` avoids duplicating a
+follower fsync or authoritative object-root CAS with a soon-to-be-deleted local
+file barrier. Failure before the external proof remains an unknown outcome;
+the runtime never acknowledges the local cut alone. Published-cut cleanup
+reverifies and unlinks the local file without making that deletion an
+acknowledgement barrier. A session always uses a fresh metadata directory, so
+crash-resurrected cleanup residue remains quarantined.
 
 ## Checkpoint without losing capture boundaries
 
@@ -328,6 +368,37 @@ embedding runtime publishes `PreparedRoot::root()` through `crab-cell-runtime`
 authority. After durable publication it may call
 `Db::prune_captured(&captured)` for that exact acknowledged batch.
 
+Preparation opens each selected capture once and keeps that exact file handle
+through verification and every provider retry. Replacing its path therefore
+cannot redirect the proposal. The LTX inspection verifies the declared size,
+metadata, and digest; multipart upload hashes the complete source again before
+publishing the immutable object and rechecks its length afterward. An in-place
+mutation fails one of those gates. This path needs no upload scratch or local
+write: immutable upload plus the embedding runtime's authority CAS remains the
+durability boundary. Up to four capture handles are opened and inspected in
+order-preserving parallel waves; predecessor verification progresses alongside
+that local work, and final chain validation still waits for both exact inputs.
+
+`Db` also carries the page index produced while it encodes each fresh capture.
+`CellReplica::prepare` can therefore publish that exact capture without decoding
+the complete LTX file a second time; the multipart whole-object hash still
+proves that the pinned bytes match the encoder's digest. Segments created with
+the public `LocalSegment::new` constructor carry no trusted encoder state and
+continue through full structural inspection before upload.
+The retained indexes share storage across `CaptureBatch` clones and are capped
+at 1 MiB per captured batch; descriptor construction, directory updates, and
+immutable upload reuse those same bytes without another full index copy. Larger
+batches use the inspection fallback.
+
+Immutable preparation overlaps independent uploads without weakening the root
+gate: each LTX body uploads alongside its index, changed directory nodes upload
+concurrently, initial directory construction streams nodes in eight-object
+waves, and the root document uploads alongside its segment pages. Up to four
+captured segments and eight small metadata objects progress concurrently; the
+shared host I/O permits remain the process-wide request ceiling. A root proposal
+is returned only after every dependency succeeds, so failed work can leave
+unreachable content-addressed objects but cannot publish an incomplete root.
+
 The live RustFS example exercises Cell publication, sparse activation,
 compaction, source deletion, and exact recovery. See the
 [examples guide](examples/README.md) before running it against a disposable
@@ -413,9 +484,11 @@ in that order.
 | `Db::open` | Claims a fresh exclusive session and owns the writer, control, and read-lock SQLite connections |
 | `Db::transaction` | Commits one local SQL transaction; does not claim remote durability |
 | `Db::capture` | Returns every new ordered cut plus its exact TXID/checksum endpoint |
+| `Db::capture_deferred` | Returns complete, readable LTX files whose durability remains pending |
+| `Db::durability_barrier` | Flushes deferred files concurrently, then syncs each parent directory once; failure fences the session |
 | `Db::checkpoint` | Captures a barrier, runs the selected SQLite checkpoint, and returns every generated cut |
 | `Db::snapshot` | Returns an independent full snapshot plus any pending captured cuts |
-| `VerifiedPlan::new` | Owns and verifies the complete selected snapshot-plus-delta chain |
+| `VerifiedPlan::new` | Verifies the complete selected snapshot-plus-delta chain and owns its exact reconstructed image |
 | `restore_exact` | Installs a fresh database at exactly the verified endpoint; never overwrites |
 | `compact_exact` | Produces a verified full snapshot without deleting its inputs |
 | `Db::resume` | Restores a verified plan into a fresh session and continues its TXID/checksum lineage |
@@ -485,6 +558,12 @@ recover the authoritative plan or Cell root into a fresh directory instead.
 `Limits::default()` admits a 512 MiB database, 64 MiB per capture, 512 MiB per
 input/output file, 1 GiB across a plan or retained captures, and 1,024 segments.
 These are per-operation correctness bounds, not an RSS quota.
+
+Each live `VerifiedPlan` retains one reconstructed database image, bounded by
+`max_database_bytes`, plus its checksum state and segment metadata. Drop plans
+after restore, resume, or compaction; services that build several plans at once
+must admit their combined decoded size rather than only their compressed LTX
+input size.
 
 Each open `Db` retains three SQLite connections with a 64 KiB page-cache
 target per connection. `Host` can share disk, I/O, blocking-job, recovery,

@@ -11,6 +11,18 @@ The Celld runner is pinned to the revision documented in
 
 `10cb1303dac710dcb3b557e318e08c855261f68b`
 
+## Current conclusion
+
+This harness does **not** establish that Crab is universally faster than
+Celld. Crab's default capture pays a parent-directory durability barrier that
+the pinned Celld capture does not, and is slower in the direct comparison.
+Crab's opt-in grouped barrier improves total throughput in the retained local
+workloads, but it measures batch completion rather than independently durable
+per-transaction latency; repeated runs have not established a universal 1.5x
+speedup. Recovery is also workload-dependent, with Celld still able to win the
+small case. Treat the phase data and durability contract as part of every
+performance claim.
+
 ## Run it
 
 The script uses release builds, one warmup round, and five measured rounds by
@@ -30,6 +42,23 @@ LTX_ROUNDS=7 \
 LTX_WARMUP=2 \
 crates/crab-ltx/perf/run.sh
 ```
+
+To measure the opt-in grouped durability path on the Crab runner, invoke it
+directly with `--durability-batch N`. It completes and renames each LTX file,
+then uses a bounded parallel file flush followed by one shared parent-directory
+sync whenever `N` captures are ready. The final partial batch is also flushed:
+
+```bash
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-ltx-perf" \
+  cargo run --release \
+  --manifest-path crates/crab-ltx/perf/crab/Cargo.toml -- \
+  --transactions 128 --payload-bytes 4096 --rounds 5 --warmup 1 \
+  --durability-batch 8
+```
+
+`--durability-batch 1` is the default synchronous path. Values greater than
+one bound each durability group to at most `N` captures; they do not make an
+individual capture durable before that group's barrier succeeds.
 
 The binaries also run directly when a single side is useful:
 
@@ -62,6 +91,9 @@ important fields are:
   file sync; `capture_parent_sync_us` is the directory-entry sync that makes
   the atomic rename durable. The other fields split position resolution, WAL
   reads, page collection, encoding, and local writes.
+- `capture_barrier_us`: only populated for the Crab deferred mode; it includes
+  the grouped file flush and final parent-directory barrier and is included in
+  `capture_us`.
 - `verify_us`: Crab's explicit owned-input plan verification. Celld reports
   zero because its compactor does not expose an equivalent call.
 - `compact_us`: local LTX compaction, including source listing, reads, merge,
@@ -70,20 +102,24 @@ important fields are:
   destination-level continuity check is included in `compact_us`.
 - `restore_us`: end-to-end restore wall time. Celld additionally reports its
   plan, download, and apply sub-timings.
+- `recovery_us`: the recovery subtotal. Crab defines it as
+  `verify_us + compact_us + compact_verify_us + restore_us`. Celld uses the
+  same formula, with its explicit verification fields set to zero.
+- `total_us`: the full local-round headline:
+  `workload_write_us + capture_us + recovery_us`.
 - `input_ltx_bytes` and `compacted_ltx_bytes`: storage amplification evidence.
 
 The harness checks the restored row count and SQLite integrity in every round;
 it does not include those checks in the reported restore timer.
 
-For a phase comparison, add Crab's `verify_us` to its `compact_us` (and, when
-you want the fully checked path, `compact_verify_us`) before comparing it with
-Celld's `compact_us`. Crab intentionally verifies and owns every input before
-the merge; the compacted output also recomputes its page checksum while merging
-and is decoded once before installation. Celld's pinned `ReplicaCompactor`
-validates the range shape and destination continuity but does not expose the
-same input-plan verification phase. The `end_to_end_us` field already includes
-all reported phases for each implementation, so it is the safer headline
-number.
+For a phase comparison, use `recovery_us` rather than comparing `compact_us`
+alone. Crab intentionally verifies and owns every input before the merge; the
+verified image is then encoded as a snapshot, synced, and read back to match its
+exact length and BLAKE3 digest before installation. `compact_verify_us` builds
+the explicit plan required by Crab's restore API and independently decodes that
+snapshot. Celld's pinned `ReplicaCompactor` validates the range shape and
+destination continuity but does not expose equivalent input-plan or compacted-
+plan verification phases. Use `total_us` as the only full local-round headline.
 
 The implementations do not have identical durability costs. Crab fsyncs the
 LTX file and its parent directory before returning a capture batch. The pinned
@@ -91,14 +127,33 @@ Celld path fsyncs the file but uses a plain rename without a parent-directory
 sync. Do not treat the capture-only gap as a portable performance win without
 making that durability choice explicit.
 
+The Celld runner accepts `--sync-parent` as a diagnostic contract-normalization
+mode. After each upstream `Db::sync()`, it syncs Celld's L0 directory before
+recording capture completion. It also syncs the destination directory after
+compaction and restore installation. This is not pinned Celld behavior and
+must be reported separately; it answers what the local comparison looks like
+when both runners pay parent-directory barriers for installed artifacts.
+
+The grouped Crab mode measures batch completion: all captures remain
+unacknowledged until the final file-and-directory barrier succeeds. It is a
+throughput comparison, not a measurement of independently durable
+per-transaction acknowledgement latency. Compare Crab's default `capture()`
+path when every capture must cross its own durability boundary.
+
 ## Scope
 
 This is a local mechanics benchmark, not a claim about the complete durability
-protocol. It does not measure object-store latency, network retries, Cell
-authority/owner-head CAS, acknowledgement ordering, retention, scheduled
-multi-level compaction, or either implementation's paged VFS. Those paths have
-different contracts and need a second harness with the same object-store and
-authority model before they can be compared fairly.
+protocol. It does not measure immutable-root preparation, object-store latency,
+network retries, Cell authority/owner-head CAS, acknowledgement ordering,
+retention, scheduled multi-level compaction, or either implementation's paged
+VFS. Those paths have different contracts and need a second harness with the
+same object-store and authority model before they can be compared fairly.
+
+The runners also use the implementations' pinned bundled SQLite versions:
+Crab currently links SQLite 3.49.1 while the pinned Celld revision links SQLite
+3.45.0. `workload_write_us` and therefore `total_us` include that difference;
+use the capture and recovery subtotals when attributing work specifically to
+the LTX implementations.
 
 Run each workload matrix on the same machine, filesystem, SQLite page size,
 build profile, and power state. Use the median as a compact summary, but retain

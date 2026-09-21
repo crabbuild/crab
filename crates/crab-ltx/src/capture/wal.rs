@@ -11,6 +11,11 @@ use std::sync::{
 
 const IN_MEMORY_INDEX_PAGE_LIMIT: usize = 64 << 10;
 
+#[cfg(feature = "replica")]
+type CapturedIndex = Option<Vec<u8>>;
+#[cfg(not(feature = "replica"))]
+type CapturedIndex = ();
+
 struct TimedWriter<W> {
     inner: W,
     host: crate::Host,
@@ -338,8 +343,9 @@ impl CaptureEngine {
             info.snapshotting,
             info.prev_commit,
             commit,
+            !self.defer_durability,
         );
-        let (mut checksums, size_bytes, digest) = match write_result {
+        let (mut checksums, size_bytes, digest, captured_index) = match write_result {
             Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 if let Some(parent) = &parent {
                     self.host.create_dir_all(parent)?;
@@ -354,6 +360,7 @@ impl CaptureEngine {
                     info.snapshotting,
                     info.prev_commit,
                     commit,
+                    !self.defer_durability,
                 )?
             }
             other => other?,
@@ -397,6 +404,12 @@ impl CaptureEngine {
             size_bytes,
             blake3: digest,
         });
+        #[cfg(feature = "replica")]
+        if let Some(index) = captured_index {
+            self.sealed_l0_captured_indexes.insert(tx_id.0, index);
+        }
+        #[cfg(not(feature = "replica"))]
+        let _ = captured_index;
 
         // Advance cursor and checksum state together, only after the file is sealed.
         self.position = Pos::new(tx_id, post_checksum);
@@ -426,8 +439,15 @@ impl CaptureEngine {
         snapshotting: bool,
         prev_commit: u32,
         commit: u32,
-    ) -> Result<(crate::pages::PageChecksums, u64, [u8; 32])> {
-        let result = (|| -> Result<(crate::pages::PageChecksums, u64, [u8; 32])> {
+        durable: bool,
+    ) -> Result<(crate::pages::PageChecksums, u64, [u8; 32], CapturedIndex)> {
+        #[cfg(feature = "replica")]
+        let captured_index_budget = RETAINED_CAPTURE_INDEX_BYTES.saturating_sub(
+            self.sealed_l0_captured_indexes
+                .values()
+                .fold(0_usize, |total, index| total.saturating_add(index.len())),
+        );
+        let result = (|| -> Result<(crate::pages::PageChecksums, u64, [u8; 32], CapturedIndex)> {
             let output = self.host.create(Path::new(tmp_filename))?;
             let estimated_pages = if snapshotting {
                 commit as usize
@@ -461,6 +481,7 @@ impl CaptureEngine {
                 bytes_written: 0,
                 digest: blake3::Hasher::new(),
             };
+            let output = std::io::BufWriter::with_capacity(64 << 10, output);
             let index = index.map(|index| {
                 Box::new(TimedFileIo {
                     inner: index,
@@ -469,6 +490,12 @@ impl CaptureEngine {
                 }) as Box<dyn crate::environment::FileIo>
             });
             let mut encoder = crate::codec::Encoder::new_block_with_index(output, index);
+            #[cfg(feature = "replica")]
+            let mut captured_index = Some(Vec::with_capacity(
+                estimated_pages
+                    .saturating_mul(crate::paged::ENTRY_BYTES)
+                    .min(captured_index_budget),
+            ));
             let encode_started = self.host.now_monotonic();
             encoder.encode_header(header)?;
 
@@ -477,7 +504,11 @@ impl CaptureEngine {
                 let lock = lock_pgno(self.page_size);
                 let pages = (1..=commit).filter(|page| *page != lock).map(|pgno| {
                     let data = self.capture_page(wal, page_map, pgno)?;
-                    encoder.encode_page(ltx::PageHeader { pgno, flags: 0 }, &data)?;
+                    let encoded = encoder.encode_page(ltx::PageHeader { pgno, flags: 0 }, &data)?;
+                    #[cfg(feature = "replica")]
+                    retain_encoded_page(&mut captured_index, &encoded, captured_index_budget)?;
+                    #[cfg(not(feature = "replica"))]
+                    let _ = encoded;
                     Ok((pgno, data))
                 });
                 checksums.apply_iter(
@@ -490,7 +521,11 @@ impl CaptureEngine {
                 let pgnos = self.wal_page_numbers(page_map, prev_commit, commit);
                 let pages = pgnos.into_iter().map(|pgno| {
                     let data = self.capture_page(wal, page_map, pgno)?;
-                    encoder.encode_page(ltx::PageHeader { pgno, flags: 0 }, &data)?;
+                    let encoded = encoder.encode_page(ltx::PageHeader { pgno, flags: 0 }, &data)?;
+                    #[cfg(feature = "replica")]
+                    retain_encoded_page(&mut captured_index, &encoded, captured_index_budget)?;
+                    #[cfg(not(feature = "replica"))]
+                    let _ = encoded;
                     Ok((pgno, data))
                 });
                 checksums.apply_iter(
@@ -501,6 +536,12 @@ impl CaptureEngine {
                 )?;
             }
             encoder.close(checksums.checksum())?;
+            #[cfg(not(feature = "replica"))]
+            let captured_index = ();
+            let output = encoder
+                .into_writer()
+                .into_inner()
+                .map_err(|error| error.into_error())?;
             let encode_elapsed = nanos(
                 self.host
                     .now_monotonic()
@@ -512,19 +553,26 @@ impl CaptureEngine {
                 encode_elapsed.saturating_sub(local_write_nanos),
             );
             self.timing_add_phase_nanos(crate::capture::TimingPhase::LocalWrite, local_write_nanos);
-            let (mut output, size_bytes, digest) = encoder.into_writer().finish();
-            self.timing_begin(crate::capture::TimingPhase::Fsync);
-            output.sync_all()?;
-            self.timing_end(crate::capture::TimingPhase::Fsync);
+            let (mut output, size_bytes, digest) = output.finish();
+            if durable {
+                self.timing_begin(crate::capture::TimingPhase::Fsync);
+                output.sync_all()?;
+                self.timing_end(crate::capture::TimingPhase::Fsync);
+            }
             drop(output);
             if spool_index {
                 self.host.remove_file(Path::new(index_filename))?;
             }
             self.timing_begin(crate::capture::TimingPhase::ParentSync);
-            self.host
-                .rename(Path::new(tmp_filename), Path::new(filename))?;
+            if durable {
+                self.host
+                    .rename(Path::new(tmp_filename), Path::new(filename))?;
+            } else {
+                self.host
+                    .rename_uncommitted(Path::new(tmp_filename), Path::new(filename))?;
+            }
             self.timing_end(crate::capture::TimingPhase::ParentSync);
-            Ok((checksums, size_bytes, digest))
+            Ok((checksums, size_bytes, digest, captured_index))
         })();
         if result.is_err() {
             let _ = self.host.remove_file(Path::new(tmp_filename));
@@ -570,5 +618,47 @@ impl CaptureEngine {
         // Read through SQLite's file, below its WAL-aware pager. A sparse VFS
         // must hydrate holes here too, not only on application SQL reads.
         crate::db::read_main(&self.conn, offset, self.page_size as usize)
+    }
+}
+
+#[cfg(feature = "replica")]
+fn retain_encoded_page(
+    index: &mut Option<Vec<u8>>,
+    page: &crate::codec::EncodedPage,
+    budget: usize,
+) -> Result<()> {
+    let Some(bytes) = index else {
+        return Ok(());
+    };
+    if crate::paged::ENTRY_BYTES > budget.saturating_sub(bytes.len()) {
+        *index = None;
+        return Ok(());
+    }
+    crate::paged::append_index_page(bytes, page)
+}
+
+#[cfg(all(test, feature = "replica"))]
+mod tests {
+    use super::*;
+
+    fn encoded_page(page: u32) -> crate::codec::EncodedPage {
+        crate::codec::EncodedPage {
+            page,
+            offset: u64::from(page) * 4096,
+            size: 4096,
+            frame_hash: [page as u8; 32],
+            checksum: u64::from(page),
+        }
+    }
+
+    #[test]
+    fn captured_index_falls_back_when_page_would_exceed_budget() {
+        let mut index = Some(Vec::new());
+
+        retain_encoded_page(&mut index, &encoded_page(1), crate::paged::ENTRY_BYTES).unwrap();
+        assert_eq!(index.as_ref().unwrap().len(), crate::paged::ENTRY_BYTES);
+
+        retain_encoded_page(&mut index, &encoded_page(2), crate::paged::ENTRY_BYTES).unwrap();
+        assert!(index.is_none());
     }
 }

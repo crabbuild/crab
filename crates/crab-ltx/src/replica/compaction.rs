@@ -6,14 +6,17 @@ use std::{
     path::Path,
 };
 
+use futures_util::{StreamExt as _, stream};
+
 use super::{
-    CellReplica, DirectoryEntry, LoadedGraph, PreparedRoot, RootRef, SegmentDescriptor, directory,
+    CellReplica, DirectoryEntry, LoadedGraph, PreparedRoot, RootRef, SEGMENT_TRANSFER_CONCURRENCY,
+    SegmentDescriptor, directory,
 };
 use crate::{CellObjectKind, CrabError, Result, SegmentInfo, Txid, environment::FileIo};
 
 pub(super) mod scratch;
 use scratch::ScratchFiles;
-pub(super) use scratch::upload;
+pub(super) use scratch::{upload, upload_source};
 
 const INDEX_READ_BYTES: u64 = 60 * 8_192;
 const FRAME_READ_BYTES: u64 = 1 << 20;
@@ -44,9 +47,16 @@ pub(super) async fn prepare(
     let compacted_ltx = scratch.create("compacted-ltx")?;
     let codec_index = scratch.create("codec-index")?;
     let compacted_index = scratch.create("compacted-index")?;
-    let spooled = spool_indexes(replica, &graph.descriptors, &original_indexes).await?;
+    // The authenticated streams have separate scratch files. Both must finish
+    // before the merge, but neither depends on the other's transfer.
+    let (spooled, body_inputs) = futures_util::future::join(
+        spool_indexes(replica, &graph.descriptors, &original_indexes),
+        spool_selected_bodies(replica, selected, &original_bodies),
+    )
+    .await;
+    let spooled = spooled?;
+    let body_inputs = body_inputs?;
     let selected_inputs = spooled[range.clone()].to_vec();
-    let body_inputs = spool_selected_bodies(replica, &selected_inputs, &original_bodies).await?;
     let artifacts = write_compacted(
         replica,
         &selected_inputs,
@@ -76,20 +86,25 @@ pub(super) async fn prepare(
             .with_level(level);
     descriptor.validate_published(replica.limits)?;
 
-    upload(
-        replica,
-        &compacted_ltx,
-        &descriptor.info.blake3,
-        CellObjectKind::Ltx,
+    // These immutable objects are unreachable until the final root is returned,
+    // so either upload may finish first without publishing a partial compaction.
+    let (body_upload, index_upload) = futures_util::future::join(
+        upload(
+            replica,
+            &compacted_ltx,
+            &descriptor.info.blake3,
+            CellObjectKind::Ltx,
+        ),
+        upload(
+            replica,
+            &compacted_index,
+            &descriptor.index_digest,
+            CellObjectKind::Index,
+        ),
     )
-    .await?;
-    upload(
-        replica,
-        &compacted_index,
-        &descriptor.index_digest,
-        CellObjectKind::Index,
-    )
-    .await?;
+    .await;
+    body_upload?;
+    index_upload?;
 
     let mut descriptors = graph.descriptors.clone();
     descriptors.splice(range.clone(), [descriptor.clone()]);
@@ -134,71 +149,77 @@ pub(super) async fn prepare(
 
 async fn spool_selected_bodies(
     replica: &CellReplica,
-    inputs: &[SpoolInput],
+    descriptors: &[SegmentDescriptor],
     destination: &Path,
 ) -> Result<Vec<BodySpoolInput>> {
-    let mut file = replica.host.filesystem.open_rw(destination)?;
-    let mut spooled = Vec::with_capacity(inputs.len());
-    let mut destination_offset = 0_u64;
-    for input in inputs {
-        let descriptor = &input.descriptor;
-        let start = descriptor.offset();
-        let end = start
-            .checked_add(descriptor.info.size_bytes)
-            .ok_or(CrabError::LTXCorrupted)?;
-        let path = replica.layout.incarnation_object_path(
-            &replica.cell,
-            &replica.incarnation,
-            &descriptor.object_digest(),
-            descriptor.object_kind(),
-        );
-        let mut offset = start;
-        let mut hasher = blake3::Hasher::new();
-        while offset < end {
-            let next = offset
-                .checked_add((end - offset).min(FRAME_READ_BYTES))
-                .ok_or(CrabError::LTXCorrupted)?;
-            let _permit = replica.host.io_permit().await?;
-            let bytes = replica
-                .layout
-                .store()
-                .range_get(&path, offset..next)
-                .await?;
-            drop(_permit);
-            if bytes.len() as u64 != next - offset {
-                return Err(CrabError::ChecksumMismatch);
-            }
-            hasher.update(&bytes);
-            file = replica
-                .host
-                .run(move || {
-                    file.write_all(&bytes)?;
-                    Ok::<_, CrabError>(file)
-                })
-                .await??;
-            offset = next;
-        }
-        if *hasher.finalize().as_bytes() != descriptor.info.blake3 {
-            return Err(CrabError::ChecksumMismatch);
-        }
-        spooled.push(BodySpoolInput {
-            descriptor: descriptor.clone(),
-            start: destination_offset,
-        });
-        destination_offset = destination_offset
+    let mut planned = Vec::with_capacity(descriptors.len());
+    let mut total_bytes = 0_u64;
+    for descriptor in descriptors {
+        let start = total_bytes;
+        total_bytes = total_bytes
             .checked_add(descriptor.info.size_bytes)
             .ok_or(CrabError::Limit("compaction body spool"))?;
+        planned.push((descriptor.clone(), start));
     }
-    replica
-        .host
-        .run(move || {
-            if file.file_len()? != destination_offset {
-                return Err(CrabError::LTXCorrupted);
-            }
-            file.sync_all()?;
-            Ok::<_, CrabError>(())
-        })
-        .await??;
+
+    let results = stream::iter(
+        planned
+            .into_iter()
+            .map(|(descriptor, output_start)| async move {
+                let mut file = replica.host.filesystem.open_rw(destination)?;
+                let source_start = descriptor.offset();
+                let source_end = source_start
+                    .checked_add(descriptor.info.size_bytes)
+                    .ok_or(CrabError::LTXCorrupted)?;
+                let path = replica.layout.incarnation_object_path(
+                    &replica.cell,
+                    &replica.incarnation,
+                    &descriptor.object_digest(),
+                    descriptor.object_kind(),
+                );
+                let mut source_offset = source_start;
+                let mut hasher = blake3::Hasher::new();
+                while source_offset < source_end {
+                    let next = source_offset
+                        .checked_add((source_end - source_offset).min(FRAME_READ_BYTES))
+                        .ok_or(CrabError::LTXCorrupted)?;
+                    let _permit = replica.host.io_permit().await?;
+                    let bytes = replica
+                        .layout
+                        .store()
+                        .range_get(&path, source_offset..next)
+                        .await?;
+                    drop(_permit);
+                    if bytes.len() as u64 != next - source_offset {
+                        return Err(CrabError::ChecksumMismatch);
+                    }
+                    hasher.update(&bytes);
+                    let output_offset = output_start
+                        .checked_add(source_offset - source_start)
+                        .ok_or(CrabError::Limit("compaction body spool"))?;
+                    file = replica
+                        .host
+                        .run(move || {
+                            file.write_all_at(output_offset, &bytes)?;
+                            Ok::<_, CrabError>(file)
+                        })
+                        .await??;
+                    source_offset = next;
+                }
+                if *hasher.finalize().as_bytes() != descriptor.info.blake3 {
+                    return Err(CrabError::ChecksumMismatch);
+                }
+                Ok(BodySpoolInput {
+                    descriptor,
+                    start: output_start,
+                })
+            }),
+    )
+    .buffered(SEGMENT_TRANSFER_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+    let spooled = results.into_iter().collect::<Result<Vec<_>>>()?;
+    sync_spool(replica, destination, total_bytes).await?;
     Ok(spooled)
 }
 
@@ -207,75 +228,98 @@ async fn spool_indexes(
     descriptors: &[SegmentDescriptor],
     destination: &Path,
 ) -> Result<Vec<SpoolInput>> {
-    let mut file = replica.host.filesystem.open_rw(destination)?;
-    let mut inputs = Vec::with_capacity(descriptors.len());
-    let mut destination_offset = 0_u64;
+    let mut planned = Vec::with_capacity(descriptors.len());
+    let mut total_bytes = 0_u64;
     for descriptor in descriptors {
         if descriptor.index_length == 0
             || descriptor.index_length % crate::paged::ENTRY_BYTES as u64 != 0
         {
             return Err(CrabError::LTXCorrupted);
         }
-        let path = replica.layout.incarnation_object_path(
-            &replica.cell,
-            &replica.incarnation,
-            &descriptor.index_digest,
-            CellObjectKind::Index,
-        );
-        let mut source_offset = 0_u64;
-        let mut hasher = blake3::Hasher::new();
-        let mut validator = crate::paged::IndexValidator::new(&descriptor.info);
-        while source_offset < descriptor.index_length {
-            let length = (descriptor.index_length - source_offset).min(INDEX_READ_BYTES);
-            let _permit = replica.host.io_permit().await?;
-            let bytes = replica
-                .layout
-                .store()
-                .range_get(&path, source_offset..source_offset + length)
-                .await?;
-            drop(_permit);
-            if bytes.len() as u64 != length {
-                return Err(CrabError::ChecksumMismatch);
-            }
-            hasher.update(&bytes);
-            let returned = replica
-                .host
-                .run(move || {
-                    for entry in bytes.as_chunks::<{ crate::paged::ENTRY_BYTES }>().0 {
-                        validator.validate(crate::paged::decode_index_entry(entry)?)?;
-                    }
-                    file.write_all(&bytes)?;
-                    Ok::<_, CrabError>((file, validator))
-                })
-                .await??;
-            file = returned.0;
-            validator = returned.1;
-            source_offset += length;
-        }
-        if *hasher.finalize().as_bytes() != descriptor.index_digest {
-            return Err(CrabError::ChecksumMismatch);
-        }
-        inputs.push(SpoolInput {
-            descriptor: descriptor.clone(),
-            source: 0,
-            start: destination_offset,
-            length: descriptor.index_length,
-        });
-        destination_offset = destination_offset
+        let start = total_bytes;
+        total_bytes = total_bytes
             .checked_add(descriptor.index_length)
             .ok_or(CrabError::Limit("compaction index spool"))?;
+        planned.push((descriptor.clone(), start));
     }
+
+    let results = stream::iter(
+        planned
+            .into_iter()
+            .map(|(descriptor, output_start)| async move {
+                let mut file = replica.host.filesystem.open_rw(destination)?;
+                let path = replica.layout.incarnation_object_path(
+                    &replica.cell,
+                    &replica.incarnation,
+                    &descriptor.index_digest,
+                    CellObjectKind::Index,
+                );
+                let mut source_offset = 0_u64;
+                let mut hasher = blake3::Hasher::new();
+                let mut validator = crate::paged::IndexValidator::new(&descriptor.info);
+                while source_offset < descriptor.index_length {
+                    let length = (descriptor.index_length - source_offset).min(INDEX_READ_BYTES);
+                    let _permit = replica.host.io_permit().await?;
+                    let bytes = replica
+                        .layout
+                        .store()
+                        .range_get(&path, source_offset..source_offset + length)
+                        .await?;
+                    drop(_permit);
+                    if bytes.len() as u64 != length {
+                        return Err(CrabError::ChecksumMismatch);
+                    }
+                    hasher.update(&bytes);
+                    let output_offset = output_start
+                        .checked_add(source_offset)
+                        .ok_or(CrabError::Limit("compaction index spool"))?;
+                    let returned = replica
+                        .host
+                        .run(move || {
+                            for entry in bytes.as_chunks::<{ crate::paged::ENTRY_BYTES }>().0 {
+                                validator.validate(crate::paged::decode_index_entry(entry)?)?;
+                            }
+                            file.write_all_at(output_offset, &bytes)?;
+                            Ok::<_, CrabError>((file, validator))
+                        })
+                        .await??;
+                    file = returned.0;
+                    validator = returned.1;
+                    source_offset += length;
+                }
+                if *hasher.finalize().as_bytes() != descriptor.index_digest {
+                    return Err(CrabError::ChecksumMismatch);
+                }
+                let length = descriptor.index_length;
+                Ok(SpoolInput {
+                    descriptor,
+                    source: 0,
+                    start: output_start,
+                    length,
+                })
+            }),
+    )
+    .buffered(SEGMENT_TRANSFER_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+    let inputs = results.into_iter().collect::<Result<Vec<_>>>()?;
+    sync_spool(replica, destination, total_bytes).await?;
+    Ok(inputs)
+}
+
+async fn sync_spool(replica: &CellReplica, path: &Path, expected_bytes: u64) -> Result<()> {
+    let mut file = replica.host.filesystem.open_rw(path)?;
     replica
         .host
         .run(move || {
-            if file.file_len()? != destination_offset {
+            if file.file_len()? != expected_bytes {
                 return Err(CrabError::LTXCorrupted);
             }
             file.sync_all()?;
             Ok::<_, CrabError>(())
         })
         .await??;
-    Ok(inputs)
+    Ok(())
 }
 
 async fn write_compacted(

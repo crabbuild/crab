@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -372,7 +372,8 @@ impl Drop for DiskReservation {
 /// An open local artifact/WAL handle supplied by a host filesystem.
 ///
 /// Positional reads and writes use their explicit offsets. A handle returned by
-/// `FileSystem::open_rw` supports both operations.
+/// `FileSystem::open_rw` supports both operations. An open handle remains bound
+/// to the selected artifact even if its namespace path is later replaced.
 pub trait FileIo: Send {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()>;
     fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()>;
@@ -385,8 +386,10 @@ pub trait FileIo: Send {
 /// Local filesystem boundary; SQLite pager I/O remains under its selected VFS.
 ///
 /// `create` must exclusively create a new file. `open_rw` must not create.
-/// `rename` must sync the destination parent before succeeding. Implementations
-/// must preserve underlying I/O errors.
+/// `rename` must sync the destination parent before succeeding. The opt-in
+/// `rename_uncommitted` variant may install a file before its contents or name
+/// are durable; the caller must sync the file and then its parent directory.
+/// Implementations must preserve underlying I/O errors.
 /// `exists` must detect dangling symlinks. `create_dir` is an exclusive claim.
 /// `persist_new` atomically installs fully synced bytes without replacing any
 /// destination and syncs its parent; `persist_file_new` does the same for an
@@ -399,10 +402,30 @@ pub trait FileSystem: Send + Sync {
     fn file_len(&self, path: &Path) -> io::Result<u64>;
     fn create_dir_all(&self, path: &Path) -> io::Result<()>;
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
+
+    /// Atomically renames a file without requiring the destination directory
+    /// to be durable yet. The default preserves the synchronous `rename`
+    /// contract for host filesystems that do not support batching.
+    fn rename_uncommitted(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.rename(from, to)
+    }
+
     fn remove_file(&self, path: &Path) -> io::Result<()>;
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
     fn exists(&self, path: &Path) -> io::Result<bool>;
     fn create_dir(&self, path: &Path) -> io::Result<()>;
+
+    /// Syncs every named file before a shared directory barrier.
+    ///
+    /// Hosts may coalesce or parallelize these independent flushes. Success
+    /// must still mean that every file's contents are durable.
+    fn sync_files(&self, paths: &[PathBuf]) -> io::Result<()> {
+        for path in paths {
+            self.open_rw(path)?.sync_all()?;
+        }
+        Ok(())
+    }
+
     fn sync_parent(&self, path: &Path) -> io::Result<()>;
     fn persist_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
     fn persist_file_new(&self, source: &Path, destination: &Path) -> io::Result<()>;
@@ -1012,9 +1035,18 @@ impl Host {
         plan: &crate::VerifiedPlan,
         destination: &Path,
     ) -> crate::Result<crate::Position> {
+        self.restore_materialized(plan.materialize(), destination)
+    }
+
+    pub(crate) fn restore_materialized(
+        &self,
+        materialized: &crate::recovery::MaterializedPlan,
+        destination: &Path,
+    ) -> crate::Result<crate::Position> {
         crate::recovery::reject_sidecars(destination, self)?;
-        self.filesystem.persist_new(destination, &plan.image()?)?;
-        Ok(plan.position())
+        self.filesystem
+            .persist_new(destination, &materialized.image)?;
+        Ok(materialized.position)
     }
 
     /// Installs a verified full-chain compaction through this host's filesystem.
@@ -1023,9 +1055,7 @@ impl Host {
         plan: &crate::VerifiedPlan,
         destination: &Path,
     ) -> crate::Result<crate::LocalSegment> {
-        let (bytes, info) = crate::recovery::compact_bytes(plan)?;
-        self.filesystem.persist_new(destination, &bytes)?;
-        Ok(crate::LocalSegment::new(destination.to_owned(), info))
+        crate::recovery::compact_to_file(self, plan, destination)
     }
 
     /// Selects an already registered SQLite VFS for local and sparse databases.
@@ -1632,6 +1662,9 @@ impl FileSystem for DirectFileSystem {
         std::fs::rename(from, to)?;
         crate::host::sync_parent(to)
     }
+    fn rename_uncommitted(&self, from: &Path, to: &Path) -> io::Result<()> {
+        std::fs::rename(from, to)
+    }
     fn remove_file(&self, path: &Path) -> io::Result<()> {
         std::fs::remove_file(path)
     }
@@ -1647,6 +1680,55 @@ impl FileSystem for DirectFileSystem {
     }
     fn create_dir(&self, path: &Path) -> io::Result<()> {
         std::fs::create_dir(path)
+    }
+    fn sync_files(&self, paths: &[PathBuf]) -> io::Result<()> {
+        let workers = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(paths.len());
+        if workers <= 1 {
+            for path in paths {
+                self.open_rw(path)?.sync_all()?;
+            }
+            return Ok(());
+        }
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let handles = (0..workers)
+                .map(|_| {
+                    let next = &next;
+                    scope.spawn(move || {
+                        loop {
+                            let index = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(path) = paths.get(index) else {
+                                break;
+                            };
+                            std::fs::OpenOptions::new()
+                                .read(true)
+                                .write(true)
+                                .open(path)?
+                                .sync_all()?;
+                        }
+                        Ok::<(), io::Error>(())
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut first_error = None;
+            for handle in handles {
+                let result = handle
+                    .join()
+                    .map_err(|_| io::Error::other("file sync worker panicked"))
+                    .and_then(|result| result);
+                if let Err(error) = result
+                    && first_error.is_none()
+                {
+                    first_error = Some(error);
+                }
+            }
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+            Ok(())
+        })
     }
     fn sync_parent(&self, path: &Path) -> io::Result<()> {
         crate::host::sync_parent(path)
@@ -1670,7 +1752,9 @@ impl FileSystem for DirectFileSystem {
             ));
         }
         std::fs::hard_link(source, destination)?;
-        self.sync_parent(destination)?;
+        // Both names share one directory, so one barrier after link + unlink
+        // makes the no-clobber install and scratch cleanup durable together.
+        // A barrier error is ambiguous because the destination may now exist.
         std::fs::remove_file(source)?;
         self.sync_parent(destination)
     }

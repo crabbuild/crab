@@ -15,14 +15,24 @@ pub(crate) async fn upload(
     kind: CellObjectKind,
 ) -> Result<()> {
     let size = replica.host.filesystem.file_len(source)?;
-    let path =
-        replica
-            .layout
-            .incarnation_object_path(&replica.cell, &replica.incarnation, digest, kind);
     let upload: Arc<dyn MultipartUploadSource> = Arc::new(HostUploadSource {
         host: replica.host.clone(),
         path: source.to_owned(),
     });
+    upload_source(replica, upload, size, digest, kind).await
+}
+
+pub(crate) async fn upload_source(
+    replica: &CellReplica,
+    upload: Arc<dyn MultipartUploadSource>,
+    size: u64,
+    digest: &[u8; 32],
+    kind: CellObjectKind,
+) -> Result<()> {
+    let path =
+        replica
+            .layout
+            .incarnation_object_path(&replica.cell, &replica.incarnation, digest, kind);
     let cancel = tokio_util::sync::CancellationToken::new();
     let _permit = replica.host.io_permit().await?;
     replica

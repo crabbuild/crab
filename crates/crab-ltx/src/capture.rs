@@ -232,15 +232,20 @@ pub(crate) struct CaptureEngine {
     verified_schema_version: Option<i64>,
     last_l0_header: Option<(Txid, LastL0Header)>,
     last_l0_segment: Option<crate::SegmentInfo>,
+    #[cfg(feature = "replica")]
+    sealed_l0_captured_indexes: HashMap<u64, Vec<u8>>,
 
     position: Pos,
     l0_dir_ready: bool,
     wal_file: Option<crate::HostFile>,
     timing: Option<TimingRecorder>,
+    defer_durability: bool,
 }
 
 const CONTROL_TABLES_DDL: &str = "CREATE TABLE IF NOT EXISTS _litestream_seq (id INTEGER PRIMARY KEY, seq INTEGER);\
      CREATE TABLE IF NOT EXISTS _litestream_lock (id INTEGER);";
+#[cfg(feature = "replica")]
+const RETAINED_CAPTURE_INDEX_BYTES: usize = 1 << 20;
 
 impl CaptureEngine {
     pub const DEFAULT_MIN_CHECKPOINT_PAGE_N: u32 = 1000;
@@ -319,10 +324,13 @@ impl CaptureEngine {
             verified_schema_version: None,
             last_l0_header: None,
             last_l0_segment: None,
+            #[cfg(feature = "replica")]
+            sealed_l0_captured_indexes: HashMap::new(),
             position: Pos::ZERO,
             l0_dir_ready: false,
             wal_file: None,
             timing: None,
+            defer_durability: false,
         };
 
         // Start the long-running read transaction (db.go:867-871).
@@ -529,6 +537,11 @@ impl CaptureEngine {
             .cloned()
     }
 
+    #[cfg(feature = "replica")]
+    pub(crate) fn take_sealed_l0_captured_index(&mut self, txid: Txid) -> Option<Vec<u8>> {
+        self.sealed_l0_captured_indexes.remove(&txid.0)
+    }
+
     pub(crate) fn seed_continuation(
         &mut self,
         position: crate::Position,
@@ -545,6 +558,10 @@ impl CaptureEngine {
         }
         let wal = self.wal_header_bytes()?;
         self.last_l0_segment = None;
+        #[cfg(feature = "replica")]
+        {
+            self.sealed_l0_captured_indexes.clear();
+        }
         self.last_l0_header = Some((
             Txid(position.txid),
             LastL0Header {
@@ -641,6 +658,18 @@ impl CaptureEngine {
     }
 
     pub fn sync(&mut self, required: Option<crate::commit::WalCut>) -> Result<()> {
+        self.sync_impl(required)
+    }
+
+    pub(crate) fn sync_deferred(&mut self, required: Option<crate::commit::WalCut>) -> Result<()> {
+        let previous = self.defer_durability;
+        self.defer_durability = true;
+        let result = self.sync(required);
+        self.defer_durability = previous;
+        result
+    }
+
+    fn sync_impl(&mut self, required: Option<crate::commit::WalCut>) -> Result<()> {
         // Self-heal: recreate the control tables if something swept them out
         // of `sqlite_schema` from under the replicator — without them every
         // capture fails until the database is reopened. A no-op when the

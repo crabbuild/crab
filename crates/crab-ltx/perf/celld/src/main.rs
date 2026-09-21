@@ -15,6 +15,7 @@ struct Config {
     payload_bytes: usize,
     rounds: usize,
     warmup: usize,
+    sync_parent: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -29,7 +30,8 @@ struct Sample {
     restore_plan_us: u64,
     restore_download_us: u64,
     restore_apply_us: u64,
-    end_to_end_us: u64,
+    recovery_us: u64,
+    total_us: u64,
     segments: usize,
     input_ltx_bytes: u64,
     compacted_ltx_bytes: u64,
@@ -52,6 +54,7 @@ struct ConfigOutput {
     payload_bytes: usize,
     measured_rounds: usize,
     warmup_rounds: usize,
+    sync_parent: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -65,7 +68,8 @@ struct Summary {
     restore_plan_us: u64,
     restore_download_us: u64,
     restore_apply_us: u64,
-    end_to_end_us: u64,
+    recovery_us: u64,
+    total_us: u64,
     segments: usize,
     input_ltx_bytes: u64,
     compacted_ltx_bytes: u64,
@@ -92,6 +96,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             payload_bytes: config.payload_bytes,
             measured_rounds: config.rounds,
             warmup_rounds: config.warmup,
+            sync_parent: config.sync_parent,
         },
         median: Summary::from_samples(&samples),
         samples,
@@ -110,6 +115,7 @@ impl Config {
         let payload_bytes = option(&args, "--payload-bytes")?.unwrap_or(4096);
         let rounds = option(&args, "--rounds")?.unwrap_or(5);
         let warmup = option(&args, "--warmup")?.unwrap_or(1);
+        let sync_parent = args.iter().any(|arg| arg == "--sync-parent");
         if transactions == 0 || payload_bytes == 0 || rounds == 0 {
             return Err("transactions, payload-bytes, and rounds must be positive".into());
         }
@@ -118,6 +124,7 @@ impl Config {
             payload_bytes,
             rounds,
             warmup,
+            sync_parent,
         })
     }
 }
@@ -151,6 +158,9 @@ async fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error
     workload_write_us += elapsed_us(started);
     let started = Instant::now();
     ltx_db.sync()?;
+    if config.sync_parent {
+        sync_ltx_parent(ltx_db.meta_path(), 0)?;
+    }
     capture_us += elapsed_us(started);
 
     for id in 0..config.transactions {
@@ -166,6 +176,9 @@ async fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error
 
         let started = Instant::now();
         ltx_db.sync()?;
+        if config.sync_parent {
+            sync_ltx_parent(ltx_db.meta_path(), 0)?;
+        }
         capture_us += elapsed_us(started);
     }
 
@@ -185,6 +198,9 @@ async fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error
         .compact(1)
         .await?
         .ok_or("Celld compaction produced no output")?;
+    if config.sync_parent {
+        sync_ltx_parent(&meta_path, 1)?;
+    }
     let compact_us = elapsed_us(started);
     let compacted_ltx_bytes = u64::try_from(output.info.size)
         .map_err(|_| "Celld compaction returned a negative output size")?;
@@ -198,8 +214,14 @@ async fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error
         Arc::new(Semaphore::new(1)),
     )
     .await?;
+    if config.sync_parent {
+        sync_parent(&restored)?;
+    }
     let restore_us = elapsed_us(started);
     validate_restore(&restored, config.transactions)?;
+
+    let recovery_us = recovery_us(0, compact_us, 0, restore_us);
+    let total_us = total_us(workload_write_us, capture_us, recovery_us);
 
     Ok(Sample {
         round,
@@ -212,13 +234,25 @@ async fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error
         restore_plan_us: timing.plan_us,
         restore_download_us: timing.download_us,
         restore_apply_us: timing.apply_us,
-        end_to_end_us: compact_us + restore_us,
+        recovery_us,
+        total_us,
         segments,
         input_ltx_bytes,
         compacted_ltx_bytes,
         source_database_bytes,
         final_txid: output.info.max_txid.0,
     })
+}
+
+fn sync_ltx_parent(meta_path: &Path, level: u32) -> Result<(), Box<dyn Error>> {
+    std::fs::File::open(meta_path.join("ltx").join(level.to_string()))?.sync_all()?;
+    Ok(())
+}
+
+fn sync_parent(path: &Path) -> Result<(), Box<dyn Error>> {
+    let parent = path.parent().filter(|path| !path.as_os_str().is_empty());
+    std::fs::File::open(parent.unwrap_or_else(|| Path::new(".")))?.sync_all()?;
+    Ok(())
 }
 
 fn list_ltx_files(root: &Path, level: u32) -> Result<Vec<(PathBuf, u64)>, Box<dyn Error>> {
@@ -273,7 +307,8 @@ impl Summary {
             restore_plan_us: median(samples.iter().map(|sample| sample.restore_plan_us)),
             restore_download_us: median(samples.iter().map(|sample| sample.restore_download_us)),
             restore_apply_us: median(samples.iter().map(|sample| sample.restore_apply_us)),
-            end_to_end_us: median(samples.iter().map(|sample| sample.end_to_end_us)),
+            recovery_us: median(samples.iter().map(|sample| sample.recovery_us)),
+            total_us: median(samples.iter().map(|sample| sample.total_us)),
             segments: median(samples.iter().map(|sample| sample.segments as u64)) as usize,
             input_ltx_bytes: median(samples.iter().map(|sample| sample.input_ltx_bytes)),
             compacted_ltx_bytes: median(samples.iter().map(|sample| sample.compacted_ltx_bytes)),
@@ -285,8 +320,36 @@ impl Summary {
     }
 }
 
+fn recovery_us(verify_us: u64, compact_us: u64, compact_verify_us: u64, restore_us: u64) -> u64 {
+    verify_us
+        .saturating_add(compact_us)
+        .saturating_add(compact_verify_us)
+        .saturating_add(restore_us)
+}
+
+fn total_us(workload_write_us: u64, capture_us: u64, recovery_us: u64) -> u64 {
+    workload_write_us
+        .saturating_add(capture_us)
+        .saturating_add(recovery_us)
+}
+
 fn median(values: impl Iterator<Item = u64>) -> u64 {
     let mut values = values.collect::<Vec<_>>();
     values.sort_unstable();
     values[values.len() / 2]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{recovery_us, total_us};
+
+    #[test]
+    fn recovery_subtotal_includes_each_phase_once() {
+        assert_eq!(recovery_us(11, 13, 17, 19), 60);
+    }
+
+    #[test]
+    fn total_includes_workload_capture_and_recovery_once() {
+        assert_eq!(total_us(23, 29, 31), 83);
+    }
 }

@@ -133,16 +133,24 @@ pub(crate) fn encode_index_from_pages(pages: &[crate::codec::EncodedPage]) -> Re
             .ok_or(CrabError::Limit("LTX page index bytes"))?,
     );
     for page in pages {
-        if page.frame_hash == [0; 32] || page.size == 0 {
-            return Err(CrabError::LTXCorrupted);
-        }
-        index.extend_from_slice(&page.page.to_be_bytes());
-        index.extend_from_slice(&page.offset.to_be_bytes());
-        index.extend_from_slice(&page.size.to_be_bytes());
-        index.extend_from_slice(&page.frame_hash);
-        index.extend_from_slice(&page.checksum.to_be_bytes());
+        append_index_page(&mut index, page)?;
     }
     Ok(index)
+}
+
+pub(crate) fn append_index_page(
+    index: &mut Vec<u8>,
+    page: &crate::codec::EncodedPage,
+) -> Result<()> {
+    if page.frame_hash == [0; 32] || page.size == 0 {
+        return Err(CrabError::LTXCorrupted);
+    }
+    index.extend_from_slice(&page.page.to_be_bytes());
+    index.extend_from_slice(&page.offset.to_be_bytes());
+    index.extend_from_slice(&page.size.to_be_bytes());
+    index.extend_from_slice(&page.frame_hash);
+    index.extend_from_slice(&page.checksum.to_be_bytes());
+    Ok(())
 }
 
 fn array<const N: usize>(bytes: &[u8]) -> Result<[u8; N]> {

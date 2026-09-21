@@ -325,6 +325,7 @@ pub(crate) fn inspect_bytes_with_index(
     inspect_reader_with_index(std::io::Cursor::new(bytes))
 }
 
+#[cfg_attr(any(not(test), all(test, not(feature = "replica"))), expect(dead_code))]
 pub(crate) fn decode_file_with_pages(bytes: &[u8]) -> Result<(DecodedFile, DecodedPages)> {
     decode_file_inner(bytes, true)
 }

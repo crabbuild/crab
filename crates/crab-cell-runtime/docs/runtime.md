@@ -97,6 +97,43 @@ Handler errors roll back the application savepoint. Runtime ledger updates still
 
 The actor never reruns a handler after SQLite may have started it. `Resolve` reads the durable ledger at an authoritative root.
 
+Runtime capture leaves each complete local LTX file readable but defers its
+file and directory flush. The actor then submits those exact bytes to the node
+log and object publisher. A follower fsync or authoritative object-root CAS—not
+the owner-local file—proves durability before a result can be observed. After
+the root publishes, the worker reverifies and deletes the matching local cut
+without first flushing either that copy or its deletion. Every activation owns
+a fresh local session, so a crash can leave only quarantined residue; it cannot
+turn that residue into acknowledged state. Standalone `crab_ltx::Db::capture()`
+remains synchronously durable.
+
+Immutable-root preparation pins every selected capture by its open file handle
+through verification and upload retries. Later path replacement cannot change
+the source. LTX inspection verifies its declared metadata and digest, and the
+multipart uploader hashes the complete file again before publishing the
+immutable object. The path performs no defensive local copy or scratch flush;
+the proposal cannot reach authority until all immutable dependencies upload
+successfully. Multi-cut batches open and inspect up to four pinned captures at
+once while the immutable predecessor graph is verified independently. The
+ordered descriptors are joined only before exact chain validation.
+
+Fresh `Db` captures privately retain the page index already authenticated by
+their encoder. Root preparation reuses it instead of decoding the same local
+LTX file again, while multipart upload still verifies every source byte against
+the captured digest. Caller-constructed local segments do not carry this
+private provenance and retain the full inspection path.
+Index retention is capped at 1 MiB per pending `CaptureBatch`; larger capture
+cohorts fall back to decoding. Descriptor construction, directory updates, and
+index upload share the retained bytes rather than copying them at each stage.
+The executor retains only one unpublished batch.
+
+Root preparation also overlaps independent content-addressed uploads. The LTX
+body and index, changed and initial directory nodes, and root metadata use
+bounded concurrency under the runtime's shared I/O permits. Initial directory
+construction retains at most eight encoded nodes awaiting upload. The proposal
+remains private until every dependency upload completes, so authority cannot
+observe a partial root.
+
 ## Use receipts for read consistency
 
 A receipt identifies the Cell incarnation and commit sequence. A query with a minimum receipt runs only after the local owner reaches that position.

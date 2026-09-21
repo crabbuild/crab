@@ -15,7 +15,6 @@ mod capture;
 mod cell_layout;
 mod codec;
 mod commit;
-mod compactor;
 mod db;
 pub mod environment;
 mod error;

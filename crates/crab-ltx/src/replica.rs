@@ -4,10 +4,7 @@ use std::{
     collections::BTreeMap,
     io,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex},
 };
 
 use crate::{CellObjectKind, CellStorageLayout};
@@ -37,6 +34,10 @@ const MAX_COMPACTION_INPUTS: usize = 128;
 // These buffers schedule immutable reads; Host I/O permits remain the shared
 // admission boundary across roots, restores, and concurrent Cells.
 const OBJECT_FETCH_CONCURRENCY: usize = 8;
+pub(super) const OBJECT_UPLOAD_CONCURRENCY: usize = 8;
+// A capture body upload can retain four multipart chunks. Bound each
+// multi-segment transfer cohort here; Host permits cap aggregate cohorts.
+pub(super) const SEGMENT_TRANSFER_CONCURRENCY: usize = 4;
 pub(super) const RESTORE_IN_FLIGHT_WINDOWS: usize = 8;
 pub(super) const RESTORE_WINDOW_BYTES: u32 = 1 << 20;
 
@@ -660,10 +661,17 @@ impl CellReplica {
         if captured_bytes > self.limits.max_capture_bytes {
             return Err(CrabError::Limit("captured Cell LTX bytes"));
         }
-        let base_graph = match base {
-            Some(root) => Some(self.load_graph(root).await?),
-            None => None,
+        let load_base = async {
+            match base {
+                Some(root) => self.load_graph(root).await.map(Some),
+                None => Ok(None),
+            }
         };
+        // Local captures and the immutable predecessor cannot affect each
+        // other; chain validation still waits for both exact inputs.
+        let (base_graph, inputs) =
+            futures_util::future::try_join(load_base, self.prepare_captured_inputs(&cuts.segments))
+                .await?;
         self.validate_append_sequence(&base_graph, commit_sequence)?;
 
         // Admit the complete prospective chain from trusted capture metadata
@@ -679,54 +687,9 @@ impl CellReplica {
         );
         self.validate_chain(&descriptors, cuts.position)?;
 
-        // Capture files are copied into owned, replayable scratch files. The
-        // copy is chunked so a large WAL cut never becomes an in-memory upload
-        // body and a retry can reopen the same verified source.
-        let _scratch = self.host.for_scratch(captured_bytes).await?;
-        let mut inputs = Vec::with_capacity(cuts.segments.len());
-        for segment in &cuts.segments {
-            let source = segment.path().to_owned();
-            let info = segment.info().clone();
-            let directory = source
-                .parent()
-                .ok_or(CrabError::InvalidState("capture path has no parent"))?;
-            let scratch = ScratchFile::new(&self.host, directory, "segment")?;
-            let scratch_path = scratch.path().to_owned();
-            let filesystem = Arc::clone(&self.host.filesystem);
-            let expected = info.size_bytes;
-            self.host
-                .run(move || {
-                    let mut source_file = filesystem.open(&source)?;
-                    let mut destination = filesystem.open_rw(&scratch_path)?;
-                    let mut offset = 0_u64;
-                    while offset < expected {
-                        let length =
-                            usize::try_from((expected - offset).min(STREAM_COPY_BYTES as u64))
-                                .map_err(io::Error::other)?;
-                        let bytes = source_file.read_exact_at(offset, length)?;
-                        destination.write_all(&bytes)?;
-                        offset = offset
-                            .checked_add(length as u64)
-                            .ok_or_else(|| io::Error::other("capture offset overflow"))?;
-                    }
-                    if source_file.file_len()? != expected {
-                        return Err(io::Error::new(
-                            io::ErrorKind::UnexpectedEof,
-                            "capture size changed while copying",
-                        ));
-                    }
-                    destination.sync_all()?;
-                    Ok::<_, io::Error>(())
-                })
-                .await??;
-            let index = inspect_segment_file(self, scratch.path(), &info).await?;
-            inputs.push(AppendInput {
-                info,
-                location: BodyLocation::Native,
-                index,
-                body: AppendBody::Native(scratch),
-            });
-        }
+        // Keep each exact capture handle open through verification and upload.
+        // A path replacement cannot redirect retries, while the inspected LTX
+        // digest still rejects in-place mutation before authority may publish.
         self.prepare_append(
             base,
             base_graph,
@@ -736,6 +699,34 @@ impl CellReplica {
             schema,
             None,
         )
+        .await
+    }
+
+    async fn prepare_captured_inputs(
+        &self,
+        segments: &[crate::LocalSegment],
+    ) -> Result<Vec<AppendInput>> {
+        stream::iter(segments.iter().cloned().map(|segment| async move {
+            let source = segment.path().to_owned();
+            let info = segment.info().clone();
+            let source = PinnedCapture::open(&self.host, source, info.size_bytes).await?;
+            let index = match segment.captured_index() {
+                Some(index) => index,
+                None => {
+                    Bytes::from(inspect_segment_source(self, Arc::clone(&source), &info).await?)
+                }
+            };
+            Ok(AppendInput {
+                info,
+                location: BodyLocation::Native,
+                index,
+                body: AppendBody::Native(source),
+            })
+        }))
+        // Preserve descriptor order while overlapping independent file jobs.
+        // Host job permits remain the shared process-wide admission boundary.
+        .buffered(SEGMENT_TRANSFER_CONCURRENCY)
+        .try_collect()
         .await
     }
 
@@ -849,7 +840,7 @@ impl CellReplica {
             {
                 return Err(CrabError::ChecksumMismatch);
             }
-            let index_bytes = crate::paged::encode_index_from_pages(&pages)?;
+            let index_bytes = Bytes::from(crate::paged::encode_index_from_pages(&pages)?);
             inputs.push(AppendInput {
                 info: row.info.clone(),
                 location: BodyLocation::Bundle {
@@ -1013,35 +1004,28 @@ impl CellReplica {
             .unwrap_or_default();
         descriptors.extend(prepared.iter().map(|segment| segment.descriptor.clone()));
         self.validate_chain(&descriptors, target)?;
-        if let Some(bundle) = bundle {
-            self.put_bundle(bundle).await?;
-        }
-        let mut directory_inputs = Vec::with_capacity(prepared.len());
-        for segment in prepared {
-            if segment.descriptor.object_kind() == CellObjectKind::Ltx {
-                let AppendBody::Native(source) = segment.body else {
-                    return Err(CrabError::InvalidState("native Cell body source missing"));
-                };
-                compaction::upload(
-                    self,
-                    source.path(),
-                    &segment.descriptor.info.blake3,
-                    CellObjectKind::Ltx,
-                )
-                .await?;
+        let directory_inputs = prepared
+            .iter()
+            .map(|segment| DirectoryInput {
+                descriptor: segment.descriptor.clone(),
+                index: segment.index.clone(),
+            })
+            .collect::<Vec<_>>();
+        let dependency_uploads = async {
+            if let Some(bundle) = bundle {
+                self.put_bundle(bundle).await?;
             }
-            self.put_object(
-                &segment.descriptor.index_digest,
-                CellObjectKind::Index,
-                segment.index.clone(),
+            stream::iter(
+                prepared
+                    .into_iter()
+                    .map(|segment| self.upload_prepared_segment(segment)),
             )
+            .buffered(SEGMENT_TRANSFER_CONCURRENCY)
+            .try_collect::<Vec<_>>()
             .await?;
-            directory_inputs.push(DirectoryInput {
-                descriptor: segment.descriptor,
-                index: segment.index,
-            });
-        }
-        self.finish_preparation(
+            Ok::<(), CrabError>(())
+        };
+        let root_preparation = self.finish_preparation(
             base,
             base_graph,
             descriptors,
@@ -1049,8 +1033,13 @@ impl CellReplica {
             target,
             commit_sequence,
             schema,
-        )
-        .await
+        );
+        // Content-addressed dependencies and root metadata can upload in
+        // parallel. The private proposal is returned only after both branches
+        // finish, so a failed branch can leave only unreachable objects.
+        let (_, prepared) =
+            futures_util::future::try_join(dependency_uploads, root_preparation).await?;
+        Ok(prepared)
     }
 
     async fn finish_preparation(
@@ -1113,10 +1102,15 @@ impl CellReplica {
             }
             directory
         };
-        for node in directory.objects() {
-            self.put_object(&node.digest, CellObjectKind::Directory, node.bytes.clone())
-                .await?;
-        }
+        self.put_objects(
+            CellObjectKind::Directory,
+            directory
+                .objects()
+                .iter()
+                .map(|node| (node.digest, node.bytes.clone()))
+                .collect(),
+        )
+        .await?;
 
         self.finish_root(
             base,
@@ -1148,11 +1142,11 @@ impl CellReplica {
         }
 
         let mut segment_pages = Vec::new();
+        let mut root_objects = Vec::new();
         for page in descriptors.chunks(SEGMENTS_PER_PAGE) {
             let bytes = encode_segment_page(page)?;
             let digest = *blake3::hash(&bytes).as_bytes();
-            self.put_object(&digest, CellObjectKind::Root, bytes)
-                .await?;
+            root_objects.push((digest, bytes));
             segment_pages.push(digest);
         }
         if segment_pages.len() > MAX_SEGMENT_PAGES {
@@ -1173,8 +1167,10 @@ impl CellReplica {
         };
         let bytes = encode_root(&document)?;
         let digest = *blake3::hash(&bytes).as_bytes();
-        self.put_object(&digest, CellObjectKind::Root, bytes)
-            .await?;
+        root_objects.push((digest, bytes));
+        // The document and its immutable segment pages can be uploaded in
+        // parallel. The root digest remains private until all uploads finish.
+        self.put_objects(CellObjectKind::Root, root_objects).await?;
         let root = RootRef {
             cell: self.cell,
             incarnation: self.incarnation,
@@ -1532,6 +1528,50 @@ impl CellReplica {
         Ok(())
     }
 
+    async fn put_objects(
+        &self,
+        kind: CellObjectKind,
+        objects: Vec<([u8; 32], Vec<u8>)>,
+    ) -> Result<()> {
+        stream::iter(
+            objects
+                .into_iter()
+                .map(|(digest, bytes)| async move { self.put_object(&digest, kind, bytes).await }),
+        )
+        .buffer_unordered(OBJECT_UPLOAD_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+        Ok(())
+    }
+
+    async fn upload_prepared_segment(&self, segment: PreparedSegment) -> Result<()> {
+        let PreparedSegment {
+            descriptor,
+            index,
+            body,
+        } = segment;
+        let body_upload = async {
+            if descriptor.object_kind() != CellObjectKind::Ltx {
+                return Ok(());
+            }
+            let AppendBody::Native(source) = body else {
+                return Err(CrabError::InvalidState("native Cell body source missing"));
+            };
+            compaction::upload_source(
+                self,
+                source,
+                descriptor.info.size_bytes,
+                &descriptor.info.blake3,
+                CellObjectKind::Ltx,
+            )
+            .await
+        };
+        let index_upload =
+            self.put_object_bytes(&descriptor.index_digest, CellObjectKind::Index, index);
+        futures_util::future::try_join(body_upload, index_upload).await?;
+        Ok(())
+    }
+
     async fn put_bundle(&self, bundle: &crate::bundle::Bundle) -> Result<()> {
         let digest = bundle.digest();
         if bundle.len() > self.limits.max_plan_bytes {
@@ -1672,12 +1712,12 @@ fn compaction_scratch_bytes(graph: &LoadedGraph, range: std::ops::Range<usize>) 
 struct AppendInput {
     info: crate::SegmentInfo,
     location: BodyLocation,
-    index: Vec<u8>,
+    index: Bytes,
     body: AppendBody,
 }
 
 enum AppendBody {
-    Native(ScratchFile),
+    Native(Arc<PinnedCapture>),
     Bundle,
 }
 
@@ -1689,16 +1729,15 @@ enum BodyLocation {
 
 struct PreparedSegment {
     descriptor: SegmentDescriptor,
-    index: Vec<u8>,
+    index: Bytes,
     body: AppendBody,
 }
 
 struct DirectoryInput {
     descriptor: SegmentDescriptor,
-    index: Vec<u8>,
+    index: Bytes,
 }
 
-const STREAM_COPY_BYTES: usize = 1 << 20;
 const MULTIPART_BYTES: usize = 8 << 20;
 
 async fn cleanup_staged(
@@ -1711,70 +1750,107 @@ async fn cleanup_staged(
     }
 }
 
-struct ScratchFile {
-    filesystem: Arc<dyn crate::environment::FileSystem>,
-    path: PathBuf,
+struct PinnedCapture {
+    host: Host,
+    file: Arc<Mutex<Box<dyn crate::environment::FileIo>>>,
+    size: u64,
 }
 
-impl ScratchFile {
-    fn new(host: &Host, directory: &Path, label: &str) -> Result<Self> {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        for _ in 0..16 {
-            let path = directory.join(format!(
-                ".crab-cell-{label}-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            match host.filesystem.create(&path) {
-                Ok(file) => {
-                    drop(file);
-                    return Ok(Self {
-                        filesystem: Arc::clone(&host.filesystem),
-                        path,
-                    });
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error.into()),
+impl PinnedCapture {
+    async fn open(host: &Host, path: PathBuf, expected_size: u64) -> Result<Arc<Self>> {
+        let source_host = host.clone();
+        let filesystem = Arc::clone(&host.filesystem);
+        host.run(move || {
+            let file = filesystem.open(&path)?;
+            if file.file_len()? != expected_size {
+                return Err(CrabError::ChecksumMismatch);
             }
-        }
-        Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "Cell publication scratch namespace exhausted",
-        )
-        .into())
+            Ok(Arc::new(Self {
+                host: source_host,
+                file: Arc::new(Mutex::new(file)),
+                size: expected_size,
+            }))
+        })
+        .await?
     }
 
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for ScratchFile {
-    fn drop(&mut self) {
-        if self.filesystem.remove_file(&self.path).is_ok() {
-            let _ = self.filesystem.sync_parent(&self.path);
-        }
+    fn read_exact(&self, offset: u64, length: usize) -> io::Result<Vec<u8>> {
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| io::Error::other("capture file lock poisoned"))?;
+        file.read_exact_at(offset, length)
     }
 }
 
-async fn inspect_segment_file(
+struct PinnedCaptureReader {
+    source: Arc<PinnedCapture>,
+    offset: u64,
+}
+
+impl io::Read for PinnedCaptureReader {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        let remaining = self.source.size.saturating_sub(self.offset);
+        let length =
+            usize::try_from(remaining.min(bytes.len() as u64)).map_err(io::Error::other)?;
+        if length == 0 {
+            return Ok(0);
+        }
+        let read = self.source.read_exact(self.offset, length)?;
+        bytes[..length].copy_from_slice(&read);
+        self.offset = self
+            .offset
+            .checked_add(length as u64)
+            .ok_or_else(|| io::Error::other("capture offset overflow"))?;
+        Ok(length)
+    }
+}
+
+#[async_trait::async_trait]
+impl crab_storage::MultipartUploadSource for PinnedCapture {
+    async fn byte_len(&self) -> crab_storage::Result<u64> {
+        let file = Arc::clone(&self.file);
+        self.host
+            .run(move || {
+                let file = file
+                    .lock()
+                    .map_err(|_| io::Error::other("capture file lock poisoned"))?;
+                file.file_len()
+            })
+            .await
+            .map_err(pinned_storage_error)?
+            .map_err(|error| crab_storage::StorageError::ReadRejected {
+                source: Box::new(error),
+            })
+    }
+
+    async fn read_exact(&self, offset: u64, length: usize) -> crab_storage::Result<Bytes> {
+        let file = Arc::clone(&self.file);
+        self.host
+            .run(move || {
+                let mut file = file
+                    .lock()
+                    .map_err(|_| io::Error::other("capture file lock poisoned"))?;
+                file.read_exact_at(offset, length).map(Bytes::from)
+            })
+            .await
+            .map_err(pinned_storage_error)?
+            .map_err(|error| crab_storage::StorageError::ReadRejected {
+                source: Box::new(error),
+            })
+    }
+}
+
+async fn inspect_segment_source(
     replica: &CellReplica,
-    path: &Path,
+    source: Arc<PinnedCapture>,
     expected: &crate::SegmentInfo,
 ) -> Result<Vec<u8>> {
-    let host = replica.host.clone();
-    let limits = replica.limits;
-    let path = path.to_owned();
     let expected = expected.clone();
     replica
         .host
         .run(move || {
-            let reader = crate::host::LtxHost {
-                facilities: host.clone(),
-                max_database_bytes: limits.max_database_bytes,
-                max_file_bytes: expected.size_bytes,
-            }
-            .open(&path)?;
+            let reader = PinnedCaptureReader { source, offset: 0 };
             let (file, size, digest, pages) = crate::ltx::inspect_reader_with_index(reader)?;
             if size != expected.size_bytes || digest != expected.blake3 {
                 return Err(CrabError::ChecksumMismatch);
@@ -1785,6 +1861,12 @@ async fn inspect_segment_file(
             crate::paged::encode_index_from_pages(&pages)
         })
         .await?
+}
+
+fn pinned_storage_error(error: CrabError) -> crab_storage::StorageError {
+    crab_storage::StorageError::ReadRejected {
+        source: Box::new(error),
+    }
 }
 
 impl VerifiedRoot {
@@ -1887,4 +1969,31 @@ fn directory_changes(
         }
     }
     Ok((changes, retain_through))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::io::Read as _;
+
+    use super::{Host, PinnedCapture, PinnedCaptureReader};
+
+    #[tokio::test]
+    async fn pinned_capture_ignores_later_path_replacement() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("capture.ltx");
+        let displaced = directory.path().join("original.ltx");
+        let original = b"verified capture bytes";
+        std::fs::write(&path, original).unwrap();
+        let source = PinnedCapture::open(&Host::default(), path.clone(), original.len() as u64)
+            .await
+            .unwrap();
+
+        std::fs::rename(&path, &displaced).unwrap();
+        std::fs::write(&path, b"replacement contents!").unwrap();
+
+        let mut reader = PinnedCaptureReader { source, offset: 0 };
+        let mut observed = Vec::new();
+        reader.read_to_end(&mut observed).unwrap();
+        assert_eq!(observed, original);
+    }
 }

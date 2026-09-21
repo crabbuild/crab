@@ -1090,7 +1090,11 @@ mod tests {
 
     use bytes::Bytes;
     use crab_storage::Store;
-    use object_store::{memory::InMemory, path::Path};
+    use object_store::{
+        memory::InMemory,
+        path::Path,
+        throttle::{ThrottleConfig, ThrottledStore},
+    };
 
     use super::*;
 
@@ -1117,7 +1121,7 @@ mod tests {
         assert!(tree.objects.len() > 256);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn streamed_tree_matches_canonical_root_without_retaining_objects() {
         let entries = (1..=70_000)
             .map(|page| DirectoryEntry {
@@ -1139,15 +1143,36 @@ mod tests {
             70_000,
         )
         .unwrap();
-        let store = Store::new(Arc::new(InMemory::new()));
+        let delay = std::time::Duration::from_millis(10);
+        let store = Store::new(Arc::new(ThrottledStore::new(
+            InMemory::new(),
+            ThrottleConfig {
+                wait_put_per_call: delay,
+                ..ThrottleConfig::default()
+            },
+        )));
         let layout = CellStorageLayout::new(store.clone(), Path::from("streaming"), [3; 16]);
         let replica =
             super::super::CellReplica::new(layout, [1; 32], [2; 16], crate::Limits::default())
                 .unwrap();
+        let started = tokio::time::Instant::now();
         let streamed =
             build_initial_and_upload(entries.into_iter().map(Ok), 4096, 70_000, &replica)
                 .await
                 .unwrap();
+        let mut level_nodes = 70_000_usize.div_ceil(FANOUT);
+        let mut upload_intervals = 0_usize;
+        loop {
+            upload_intervals += level_nodes.div_ceil(super::super::OBJECT_UPLOAD_CONCURRENCY);
+            if level_nodes == 1 {
+                break;
+            }
+            level_nodes = level_nodes.div_ceil(FANOUT);
+        }
+        assert_eq!(
+            started.elapsed(),
+            delay * u32::try_from(upload_intervals).unwrap()
+        );
 
         assert_eq!(streamed.root_digest(), canonical.root_digest());
         assert_eq!(streamed.height(), canonical.height());

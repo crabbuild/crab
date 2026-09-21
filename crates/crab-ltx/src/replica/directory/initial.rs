@@ -2,7 +2,7 @@ use std::{cmp::Reverse, collections::BinaryHeap};
 
 use crate::{CellObjectKind, CrabError, Result};
 
-use super::super::{CellReplica, DirectoryInput};
+use super::super::{CellReplica, DirectoryInput, OBJECT_UPLOAD_CONCURRENCY};
 use super::{DirectoryEntry, DirectoryTree, FANOUT, Node, encode_branch, encode_leaf};
 
 struct IndexCursor<'a> {
@@ -151,6 +151,7 @@ pub(in crate::replica) async fn build_and_upload(
     let mut leaf_index = None;
     let mut leaf_entries = Vec::with_capacity(FANOUT);
     let mut nodes = Vec::new();
+    let mut pending = Vec::with_capacity(OBJECT_UPLOAD_CONCURRENCY);
     for entry in entries {
         let entry = entry?;
         if expected_page == u64::from(lock) {
@@ -166,7 +167,10 @@ pub(in crate::replica) async fn build_and_upload(
         if leaf_index.is_some_and(|current| current != index) {
             // Directory nodes are immutable and the private PreparedRoot is
             // unreachable until every dependency is uploaded and verified.
-            nodes.push(upload_leaf(replica, leaf_index, &leaf_entries).await?);
+            pending.push(encode_leaf_node(leaf_index, &leaf_entries)?);
+            if pending.len() == OBJECT_UPLOAD_CONCURRENCY {
+                flush_node_uploads(replica, &mut pending, &mut nodes).await?;
+            }
             leaf_entries.clear();
         }
         leaf_index = Some(index);
@@ -175,8 +179,9 @@ pub(in crate::replica) async fn build_and_upload(
         expected_page += 1;
     }
     if !leaf_entries.is_empty() {
-        nodes.push(upload_leaf(replica, leaf_index, &leaf_entries).await?);
+        pending.push(encode_leaf_node(leaf_index, &leaf_entries)?);
     }
+    flush_node_uploads(replica, &mut pending, &mut nodes).await?;
     if expected_page == u64::from(lock) {
         expected_page += 1;
     }
@@ -188,17 +193,19 @@ pub(in crate::replica) async fn build_and_upload(
     let mut height = 0;
     while nodes.len() > 1 {
         let mut parents = Vec::new();
+        let mut pending = Vec::with_capacity(OBJECT_UPLOAD_CONCURRENCY);
         for group in
             nodes.chunk_by(|left, right| left.index / FANOUT as u32 == right.index / FANOUT as u32)
         {
             let index = group[0].index / FANOUT as u32;
             let bytes = encode_branch(group)?;
             let node = Node::from_bytes(index, &bytes)?;
-            replica
-                .put_object(&node.digest, CellObjectKind::Directory, bytes)
-                .await?;
-            parents.push(node);
+            pending.push((node, bytes));
+            if pending.len() == OBJECT_UPLOAD_CONCURRENCY {
+                flush_node_uploads(replica, &mut pending, &mut parents).await?;
+            }
         }
+        flush_node_uploads(replica, &mut pending, &mut parents).await?;
         nodes = parents;
         height += 1;
     }
@@ -210,16 +217,34 @@ pub(in crate::replica) async fn build_and_upload(
     })
 }
 
-async fn upload_leaf(
-    replica: &CellReplica,
-    index: Option<u32>,
-    entries: &[DirectoryEntry],
-) -> Result<Node> {
+fn encode_leaf_node(index: Option<u32>, entries: &[DirectoryEntry]) -> Result<(Node, Vec<u8>)> {
     let index = index.ok_or(CrabError::LTXCorrupted)?;
     let bytes = encode_leaf(entries)?;
     let node = Node::from_bytes(index, &bytes)?;
+    Ok((node, bytes))
+}
+
+async fn flush_node_uploads(
+    replica: &CellReplica,
+    pending: &mut Vec<(Node, Vec<u8>)>,
+    output: &mut Vec<Node>,
+) -> Result<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let pending = std::mem::replace(pending, Vec::with_capacity(OBJECT_UPLOAD_CONCURRENCY));
+    let mut nodes = Vec::with_capacity(pending.len());
+    let objects = pending
+        .into_iter()
+        .map(|(node, bytes)| {
+            let digest = node.digest;
+            nodes.push(node);
+            (digest, bytes)
+        })
+        .collect();
     replica
-        .put_object(&node.digest, CellObjectKind::Directory, bytes)
+        .put_objects(CellObjectKind::Directory, objects)
         .await?;
-    Ok(node)
+    output.extend(nodes);
+    Ok(())
 }
