@@ -101,24 +101,35 @@ resume_service() {
   "${compose[@]}" kill --signal SIGCONT "$service" >/dev/null
 }
 
+compose_container_id() {
+  local service="$1"
+  local containers
+  # Service namespace dependencies can make `compose ps SERVICE` resolve the
+  # namespace provider; labels keep kill and remove scoped to the requested node.
+  containers="$(docker container ls --all \
+    --filter "label=com.docker.compose.project=${project}" \
+    --filter "label=com.docker.compose.service=${service}" \
+    --format '{{.ID}}')"
+  if [ -z "$containers" ] || [[ "$containers" == *$'\n'* ]]; then
+    return 1
+  fi
+  printf '%s\n' "$containers"
+}
+
 remove_stopped_service() {
   local service="$1"
   local container
-  container="$("${compose[@]}" ps --all --quiet "$service")"
-  if [ -z "$container" ]; then
+  if ! container="$(compose_container_id "$service")"; then
     echo "${service} did not have a removable container." >&2
     return 1
   fi
-  # Node services use `service:server`; targeting the exact container avoids
-  # Compose treating the shared namespace provider as part of node removal.
   docker rm --force "$container" >/dev/null
 }
 
 kill_service() {
   local service="$1"
   local container
-  container="$("${compose[@]}" ps --all --quiet "$service")"
-  if [ -z "$container" ]; then
+  if ! container="$(compose_container_id "$service")"; then
     echo "${service} did not have a container to kill." >&2
     return 1
   fi
@@ -130,7 +141,7 @@ wait_for_healthy() {
   local service="$1"
   local container
   for _ in $(seq 1 90); do
-    container="$("${compose[@]}" ps --quiet "$service")"
+    container="$(compose_container_id "$service" || true)"
     if [ -n "$container" ] &&
       [ "$(docker inspect --format '{{.State.Health.Status}}' "$container")" = healthy ]; then
       return 0
