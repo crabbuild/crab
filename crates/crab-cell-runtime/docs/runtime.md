@@ -124,10 +124,11 @@ Index retention is capped at 1 MiB per pending `CaptureBatch`; larger capture
 cohorts fall back to decoding. The executor retains only one unpublished batch.
 
 Root preparation also overlaps independent content-addressed uploads. The LTX
-body and index, changed directory nodes, and root metadata use bounded
-concurrency under the runtime's shared I/O permits. The proposal remains private
-until every dependency upload completes, so authority cannot observe a partial
-root.
+body and index, changed and initial directory nodes, and root metadata use
+bounded concurrency under the runtime's shared I/O permits. Initial directory
+construction retains at most eight encoded nodes awaiting upload. The proposal
+remains private until every dependency upload completes, so authority cannot
+observe a partial root.
 
 ## Use receipts for read consistency
 

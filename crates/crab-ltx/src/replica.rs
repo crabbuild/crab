@@ -34,7 +34,7 @@ const MAX_COMPACTION_INPUTS: usize = 128;
 // These buffers schedule immutable reads; Host I/O permits remain the shared
 // admission boundary across roots, restores, and concurrent Cells.
 const OBJECT_FETCH_CONCURRENCY: usize = 8;
-const OBJECT_UPLOAD_CONCURRENCY: usize = 8;
+pub(super) const OBJECT_UPLOAD_CONCURRENCY: usize = 8;
 // Each body upload can retain four multipart chunks. Keep multi-segment
 // capture batches below the host-wide request ceiling and bounded in memory.
 const SEGMENT_UPLOAD_CONCURRENCY: usize = 4;

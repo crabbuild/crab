@@ -388,12 +388,12 @@ at 1 MiB per captured batch; larger batches use the inspection fallback.
 
 Immutable preparation overlaps independent uploads without weakening the root
 gate: each LTX body uploads alongside its index, changed directory nodes upload
-concurrently, and the root document uploads alongside its segment pages. Up to
-four captured segments and eight small metadata objects progress concurrently;
-the shared host I/O permits remain the process-wide request ceiling. A root
-proposal is returned only after every dependency succeeds, so failed work can
-leave unreachable content-addressed objects but cannot publish an incomplete
-root.
+concurrently, initial directory construction streams nodes in eight-object
+waves, and the root document uploads alongside its segment pages. Up to four
+captured segments and eight small metadata objects progress concurrently; the
+shared host I/O permits remain the process-wide request ceiling. A root proposal
+is returned only after every dependency succeeds, so failed work can leave
+unreachable content-addressed objects but cannot publish an incomplete root.
 
 The live RustFS example exercises Cell publication, sparse activation,
 compaction, source deletion, and exact recovery. See the

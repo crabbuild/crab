@@ -1048,6 +1048,16 @@ is intentionally not used as performance evidence. This is a Crab root-
 preparation optimization; Celld exposes no equivalent standalone root protocol
 in the retained local harness.
 
+Initial root preparation had a second latency multiplier: its streaming
+directory builder awaited every leaf and parent object individually. It now
+encodes and uploads nodes in ordered waves of eight, retaining the original
+streaming-memory property and canonical root digest. A deterministic 70,000-page
+test produces 277 directory objects. At 10 ms per object write, the original
+path required 277 intervals (2.77 seconds); the bounded path requires 37
+intervals (370 ms), a 7.49x modeled provider-latency reduction. The test still
+compares the streamed root, height, checksum, empty retained-object set, and
+remote object count with the canonical in-memory tree.
+
 ## Maintenance notes
 
 - Reviewers should trace one corrupt input through plan construction, one
