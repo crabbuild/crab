@@ -81,8 +81,8 @@ cleanup() {
     --bucket crab-http-server >/dev/null 2>&1 || true
   if [ "$result" -ne 0 ]; then
     failed=true
-    "${compose[@]}" ps --all || true
-    "${compose[@]}" logs --no-color || true
+    "${compose[@]}" ps --all >&2 || true
+    "${compose[@]}" logs --no-color >&2 || true
   fi
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
   if $failed; then
@@ -600,6 +600,20 @@ for _ in $(seq 1 45); do
 done
 if [ -z "$restored" ]; then
   echo "Node C did not recover the follower-proven commit." >&2
+  echo "Node C control:" >&2
+  "${compose[@]}" exec -T server-c crab-http-server \
+    --config /etc/crab/server.toml cells status --owner demo --name hello >&2 || true
+  echo "Node C node sessions:" >&2
+  # shellcheck disable=SC2016
+  "${compose[@]}" exec -T server-c sh -ec \
+    'for path in /var/lib/crab/cells/sessions/*; do
+       if [ -d "$path" ]; then printf "%s\n" "${path##*/}"; fi
+     done' >&2 || true
+  echo "Node C metrics:" >&2
+  "${compose[@]}" exec -T server-c crab-http-server \
+    --config /etc/crab/server.toml cells metrics >&2 || true
+  echo "Node C logs:" >&2
+  "${compose[@]}" logs --no-color server-c >&2 || true
   exit 1
 fi
 
