@@ -1,10 +1,4 @@
-use std::{
-    cmp::Reverse,
-    collections::BinaryHeap,
-    io::{self, Write as _},
-    ops::Range,
-    path::Path,
-};
+use std::{cmp::Reverse, collections::BinaryHeap, io, ops::Range, path::Path};
 
 use futures_util::{StreamExt as _, stream};
 
@@ -446,8 +440,8 @@ fn decode_pages(
 }
 
 struct OutputState {
-    encoder: crate::codec::Encoder<DigestWriter>,
-    sidecar: DigestWriter,
+    encoder: crate::codec::Encoder<io::BufWriter<DigestWriter>>,
+    sidecar: io::BufWriter<DigestWriter>,
 }
 
 impl OutputState {
@@ -462,8 +456,9 @@ impl OutputState {
         if first.page_size != last.page_size {
             return Err(CrabError::LTXCorrupted);
         }
+        let output = DigestWriter::new(output, limits.max_file_bytes);
         let mut encoder = crate::codec::Encoder::new_block_with_index(
-            DigestWriter::new(output, limits.max_file_bytes),
+            io::BufWriter::with_capacity(64 << 10, output),
             Some(codec_index),
         );
         encoder.encode_header(crate::ltx::Header {
@@ -479,7 +474,10 @@ impl OutputState {
         })?;
         Ok(Self {
             encoder,
-            sidecar: DigestWriter::new(sidecar, limits.max_plan_bytes),
+            sidecar: io::BufWriter::with_capacity(
+                64 << 10,
+                DigestWriter::new(sidecar, limits.max_plan_bytes),
+            ),
         })
     }
 
@@ -492,18 +490,40 @@ impl OutputState {
                 },
                 &bytes,
             )?;
-            self.sidecar.write_index(&encoded)?;
+            write_sidecar_entry(&mut self.sidecar, &encoded)?;
         }
         Ok(self)
     }
 
     fn finish(mut self, post_checksum: u64) -> Result<CompactedArtifacts> {
         self.encoder.close(post_checksum)?;
-        Ok(CompactedArtifacts {
-            ltx: self.encoder.into_writer().finish()?,
-            index: self.sidecar.finish()?,
-        })
+        // Flush both streams before DigestWriter checks the exact stored length
+        // and syncs; a partial buffered output must never become publishable.
+        let ltx = self
+            .encoder
+            .into_writer()
+            .into_inner()
+            .map_err(|error| error.into_error())?
+            .finish()?;
+        let index = self
+            .sidecar
+            .into_inner()
+            .map_err(|error| error.into_error())?
+            .finish()?;
+        Ok(CompactedArtifacts { ltx, index })
     }
+}
+
+fn write_sidecar_entry(
+    writer: &mut impl io::Write,
+    page: &crate::codec::EncodedPage,
+) -> Result<()> {
+    writer.write_all(&page.page.to_be_bytes())?;
+    writer.write_all(&page.offset.to_be_bytes())?;
+    writer.write_all(&page.size.to_be_bytes())?;
+    writer.write_all(&page.frame_hash)?;
+    writer.write_all(&page.checksum.to_be_bytes())?;
+    Ok(())
 }
 
 struct DigestWriter {
@@ -521,15 +541,6 @@ impl DigestWriter {
             length: 0,
             limit,
         }
-    }
-
-    fn write_index(&mut self, page: &crate::codec::EncodedPage) -> Result<()> {
-        self.write_all(&page.page.to_be_bytes())?;
-        self.write_all(&page.offset.to_be_bytes())?;
-        self.write_all(&page.size.to_be_bytes())?;
-        self.write_all(&page.frame_hash)?;
-        self.write_all(&page.checksum.to_be_bytes())?;
-        Ok(())
     }
 
     fn finish(mut self) -> Result<Artifact> {
