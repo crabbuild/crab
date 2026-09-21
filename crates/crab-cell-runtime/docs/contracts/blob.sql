@@ -19,7 +19,7 @@ CREATE TABLE blob_parts (
     upload_id BLOB NOT NULL REFERENCES blob_uploads(upload_id) ON DELETE CASCADE,
     part_number INTEGER NOT NULL CHECK (part_number BETWEEN 1 AND 4096),
     digest BLOB NOT NULL CHECK (length(digest) = 32),
-    payload BLOB NOT NULL CHECK (length(payload) <= 262144),
+    size INTEGER NOT NULL CHECK (size BETWEEN 0 AND 262144),
     byte_offset INTEGER CHECK (byte_offset IS NULL OR byte_offset >= 0),
     PRIMARY KEY (upload_id, part_number)
 ) STRICT, WITHOUT ROWID;

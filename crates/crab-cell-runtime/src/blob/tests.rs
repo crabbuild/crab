@@ -1,8 +1,11 @@
 use super::*;
 use crab_ltx::rusqlite::Connection;
 
-#[test]
-fn multipart_publish_is_atomic_conditional_and_range_readable() {
+#[tokio::test]
+async fn multipart_publish_is_atomic_conditional_and_range_readable() {
+    use crab_storage::Store;
+    use object_store::memory::InMemory;
+    let artifacts = BlobArtifactStore::new(Store::new(std::sync::Arc::new(InMemory::new())));
     let mut connection = Connection::open_in_memory().unwrap();
     connection
         .execute_batch("PRAGMA foreign_keys = ON")
@@ -29,16 +32,19 @@ fn multipart_publish_is_atomic_conditional_and_range_readable() {
         BlobMutationOutcome::Begun
     );
     for (part_number, payload) in [(1, b"hello ".as_slice()), (2, b"world".as_slice())] {
+        let digest = part_digest(payload);
+        artifacts.put_part(digest, payload).await.unwrap();
         assert!(matches!(
             blob_mutate(
                 &transaction,
                 2,
                 2,
-                &BlobMutation::PutPart {
+                &BlobMutation::PutPartRef {
                     key: key.clone(),
                     upload_id,
                     part_number,
-                    payload: payload.to_vec(),
+                    digest,
+                    size: payload.len() as u32,
                 },
             )
             .unwrap(),
@@ -70,7 +76,14 @@ fn multipart_publish_is_atomic_conditional_and_range_readable() {
     .unwrap() else {
         panic!("blob range was not returned");
     };
-    assert_eq!(read.bytes, b"lo wo");
+    let mut bytes = Vec::new();
+    for part in &read.parts {
+        let payload = artifacts.read_part(part.digest, part.size).await.unwrap();
+        let start = 3_u64.saturating_sub(part.offset) as usize;
+        let end = 8_u64.saturating_sub(part.offset).min(u64::from(part.size)) as usize;
+        bytes.extend_from_slice(&payload[start..end]);
+    }
+    assert_eq!(bytes, b"lo wo");
     assert_eq!(read.metadata.etag, etag);
     let BlobQueryResult::List(page) = blob_query(
         &transaction,
@@ -104,6 +117,24 @@ fn multipart_publish_is_atomic_conditional_and_range_readable() {
 #[test]
 fn checked_in_blob_schema_matches_runtime_schema() {
     assert_eq!(BLOB_SCHEMA, include_str!("../../docs/contracts/blob.sql"));
+}
+
+#[test]
+fn blob_schema_keeps_part_bytes_out_of_sqlite() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    let transaction = connection.transaction().unwrap();
+    install_blob_schema(&transaction).unwrap();
+    let columns = transaction
+        .prepare("PRAGMA table_info(blob_parts)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        columns,
+        ["upload_id", "part_number", "digest", "size", "byte_offset"]
+    );
 }
 
 #[test]

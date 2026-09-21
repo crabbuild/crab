@@ -3,11 +3,11 @@ use std::{future::Future, pin::Pin, sync::Arc, sync::OnceLock, time::UNIX_EPOCH}
 use crab_cell_app::{ApplicationBuilder, ApplicationHandle, CellApplication, CellType};
 use crab_cell_runtime::{
     ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome, ApplicationId,
-    BlobCondition, BlobModule, BlobMutation, BlobMutationOutcome, BlobQuery, BlobQueryResult,
-    BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellClient, CellHandle, CellModule,
-    CellRuntime, CellStorageLayout, CellTarget, CronModule, CronMutation, CronQueryResult,
-    CronTarget, Digest, EffectClaimRequest, EffectLeaseOutcome, EffectModule, Error,
-    FencedNodeSession, IncarnationId, InvocationError, KvAtomicCommand, KvAtomicRequest,
+    BlobArtifactStore, BlobCondition, BlobModule, BlobMutation, BlobMutationOutcome, BlobQuery,
+    BlobQueryResult, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellClient,
+    CellHandle, CellModule, CellRuntime, CellStorageLayout, CellTarget, CronModule, CronMutation,
+    CronQueryResult, CronTarget, Digest, EffectClaimRequest, EffectLeaseOutcome, EffectModule,
+    Error, FencedNodeSession, IncarnationId, InvocationError, KvAtomicCommand, KvAtomicRequest,
     KvGetQuery, KvGetRequest, KvModule, KvMutation, MaintenanceModule, ModuleDescriptor,
     MutationIdentity, NamespaceDescriptor, NamespaceId, NodeAdvertisement, NodeCapacity,
     NodeDirectory, NodeFailureDomain, NodeId, OperationDescriptor, Owner, QualificationExecution,
@@ -625,7 +625,7 @@ async fn reference_application_uses_typed_handle_for_a_real_commit() {
     let incarnation = IncarnationId::from_bytes([23; 16]);
     let store = Store::new(Arc::new(InMemory::new()));
     let layout = CellStorageLayout::new(
-        store,
+        store.clone(),
         object_store::path::Path::from("reference-application"),
         *application_id.as_bytes(),
     );
@@ -682,7 +682,8 @@ async fn reference_application_uses_typed_handle_for_a_real_commit() {
         .unwrap();
     let client = CellClient::local(application.registry(), handle);
     let typed =
-        ApplicationHandle::<ReferenceApplication>::new(client, application, tenant, application_id);
+        ApplicationHandle::<ReferenceApplication>::new(client, application, tenant, application_id)
+            .with_blob_artifact_store(BlobArtifactStore::new(store));
     typed_capability_surface(&typed, target.clone()).unwrap();
     let now_ms = i64::try_from(
         std::time::SystemTime::now()
@@ -1015,7 +1016,7 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
     let application_id = ApplicationId::from_bytes([32; 16]);
     let store = Store::new(Arc::new(InMemory::new()));
     let layout = CellStorageLayout::new(
-        store,
+        store.clone(),
         object_store::path::Path::from("reference-primitive-qualification"),
         *application_id.as_bytes(),
     );
@@ -1142,7 +1143,8 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
         Arc::clone(&application),
         tenant,
         application_id,
-    );
+    )
+    .with_blob_artifact_store(BlobArtifactStore::new(store.clone()));
     let now_ms = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1568,7 +1570,8 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
         application,
         tenant,
         application_id,
-    );
+    )
+    .with_blob_artifact_store(BlobArtifactStore::new(store));
     restored
         .sql::<ReferenceSql>(sql_target.clone())
         .unwrap()
