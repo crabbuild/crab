@@ -12,7 +12,7 @@ pub const MAX_CAPSULE_REF_HEADS: usize = 1_000_000;
 /// Maximum immutable run segments retained by one independently mutable ref.
 pub const MAX_CAPSULE_REF_FRONTIER: usize = 64;
 /// Equal-level suffix runs folded in one bounded compaction wave.
-pub const CAPSULE_REF_COMPACTION_FAN_IN: usize = 32;
+pub const CAPSULE_REF_COMPACTION_FAN_IN: usize = 2;
 
 /// One visible or prepared ref value and its bounded immutable capsule frontier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,9 +347,12 @@ fn validate_state(state: &CapsuleRefState) -> Result<()> {
     }
     let mut transactions = std::collections::BTreeSet::new();
     for pointer in &state.frontier {
-        CapsulePointer::new(
+        CapsulePointer::new_with_control(
             pointer.hash(),
             pointer.size(),
+            pointer.control_offset(),
+            pointer.control_size(),
+            pointer.footer_hash(),
             pointer.level(),
             pointer.transaction_ids().to_vec(),
             pointer.newest_base_root_digest(),

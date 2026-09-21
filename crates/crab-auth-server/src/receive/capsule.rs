@@ -80,7 +80,7 @@ pub(super) async fn commit_capsule_candidate(
         let Some(active_active) = active_active else {
             return Ok(None);
         };
-        let run = CapsuleRun::leaf(capsule)?;
+        let run = crab_write::capsule_protocol::capsule_leaf_run(&capsule)?;
         let descriptor = crab_write::capsule_protocol::coordinated_publication_descriptor(
             transaction.base_root_digest(),
             &transaction.id()?,
@@ -451,7 +451,7 @@ pub(super) async fn verify_capsule_candidate(
     }
     let mut replication_objects = replication_objects;
     replication_objects.remove(ctx.router().capsule_path(&plan.run_hash).as_ref());
-    let publication_run = CapsuleRun::leaf(publication.clone())?;
+    let publication_run = crab_write::capsule_protocol::capsule_leaf_run(&publication)?;
     replication_objects.insert(
         ctx.router()
             .capsule_path(publication_run.hash())

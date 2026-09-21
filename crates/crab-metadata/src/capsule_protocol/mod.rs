@@ -5,6 +5,7 @@ use bstr::ByteSlice;
 mod capsule;
 mod checkpoint;
 mod history;
+mod layered;
 #[cfg(feature = "storage")]
 mod plan;
 mod pointer;
@@ -26,6 +27,11 @@ pub use history::{
     HistorySegment, HistorySegmentPointer, HistorySegmentState, MAX_HISTORY_CHAIN_BYTES,
     MAX_HISTORY_CHAIN_SEGMENTS, MAX_HISTORY_SEGMENT_BYTES,
 };
+pub use layered::{
+    LayeredCheckpoint, LayeredObjectMember, LayeredVisibilitySnapshot, PackLayer,
+    PackMemberDescriptor, PackRange, PackSourceDescriptor, PackSourceKind, source_catalog_digest,
+    visibility_object_set_digest,
+};
 #[cfg(feature = "storage")]
 pub use plan::{
     CapsulePlanReceipt, ensure_capsule_plan_unattempted, prepare_capsule_plan,
@@ -43,11 +49,15 @@ pub use root::{
     CapsulePointer, CheckpointPointer, GcFence, MAX_CAPSULE_FRONTIER, MAX_ROOT_BYTES,
     RepositoryRoot, RootRecord,
 };
-pub use run::{CapsuleRun, MAX_CAPSULES_PER_RUN};
+pub use run::{
+    CapsuleControl, CapsuleControlLocation, CapsuleRun, CapsuleRunAdmission, CapsuleRunControl,
+    MAX_CAPSULES_PER_RUN,
+};
 #[cfg(feature = "storage")]
 pub use store::{
-    RootSnapshot, create_root, load_capsule_run, load_checkpoint, load_checkpoint_control,
-    load_history_chain, load_history_segment, load_pointer_catalog, load_pointer_catalog_from_root,
+    RootSnapshot, create_root, load_capsule_run, load_capsule_run_control, load_checkpoint,
+    load_checkpoint_control, load_history_chain, load_history_segment, load_layered_checkpoint,
+    load_layered_checkpoint_control, load_pointer_catalog, load_pointer_catalog_from_root,
     load_root,
 };
 pub use transaction::{CapsuleRefEdit, CapsuleTransaction};

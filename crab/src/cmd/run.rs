@@ -81,8 +81,9 @@ use crate::workflow::cache::{
     cached_artifacts, overwrite_policy, read_local, read_local_xorb,
 };
 use crate::workflow::executor::{
-    ExecutorConfig, StageOutResolver, resolve_dep_hashes_with_wdir_allow_missing_remote_aliases,
-    run_local,
+    ExecutorConfig, StageOutResolver, execute_hook_owned,
+    resolve_dep_hashes_with_wdir_allow_missing_remote_aliases, run_local,
+    run_local_owned_with_journal_path,
 };
 use crate::workflow::gitignore::ensure_workflow_ignored;
 use crate::workflow::hasher::{ResolvedStage, compute as compute_stage_hash};
@@ -524,6 +525,15 @@ pub(crate) async fn run_in_with_options(
     })
 }
 
+pub(crate) async fn run_in_with_options_owned(
+    args: RunArgs,
+    repo_root: PathBuf,
+    mode: OutputMode,
+    options: RunInvocationOptions,
+) -> Result<()> {
+    run_in_with_options(&args, &repo_root, mode, options).await
+}
+
 fn probe_workflow_cache(cache_root: &Path, mode: OutputMode) {
     crate::workflow::cache::probe_cache_writable(cache_root);
     if mode != OutputMode::Text || !crate::workflow::cache::is_cache_disabled() {
@@ -599,7 +609,13 @@ async fn run_inline_single_stage(
     // become `StageDepMalformed`.
     // When --pull is set, attempt to download missing deps first.
     if args.pull {
-        try_pull_missing_deps(&stage, &stage_name, repo_root, config).await?;
+        try_pull_missing_deps(
+            stage.clone(),
+            stage_name.as_str().to_owned(),
+            repo_root.to_path_buf(),
+            config.clone(),
+        )
+        .await?;
     }
     let remote_aliases = workflow_remote_aliases(config);
     let dep_hashes =
@@ -1794,7 +1810,6 @@ async fn run_dag(
             let journal_path_clone = journal_path.clone();
             let args_force = args.force;
             let args_allow_missing = args.allow_missing;
-            let args_pull = args.pull;
             let config_clone = config.clone();
             let cache_root_clone = cache_root.clone();
             let param_files_clone = workflow.params.clone();
@@ -1827,6 +1842,18 @@ async fn run_dag(
                 .map(StageHash::as_hex)
                 .unwrap_or_default();
 
+            let pull_result = if args.pull {
+                try_pull_missing_deps(
+                    stage_clone.clone(),
+                    stage_name_clone.as_str().to_owned(),
+                    repo_root_owned.clone(),
+                    config_clone.clone(),
+                )
+                .await
+            } else {
+                Ok(Vec::new())
+            };
+
             tokio::spawn(async move {
                 let stage_span = info_span!(
                     "workflow.stage",
@@ -1835,25 +1862,28 @@ async fn run_dag(
                     source = tracing::field::Empty,
                     duration_ms = tracing::field::Empty,
                 );
-                let outcome = execute_stage_parallel(
-                    &stage_clone,
-                    &stage_name_clone,
-                    &repo_root_owned,
-                    &lockfile_clone,
-                    &executor_cfg_clone,
-                    &journal_path_clone,
-                    run_id,
-                    args_force,
-                    &cache_root_clone,
-                    &param_files_clone,
-                    args_allow_missing,
-                    args_pull,
-                    config_clone,
-                    jsonl_shared_clone,
-                    started_at,
-                )
-                .instrument(stage_span.clone())
-                .await;
+                let outcome = match pull_result {
+                    Ok(_) => {
+                        execute_stage_parallel(
+                            stage_clone,
+                            stage_name_clone.clone(),
+                            repo_root_owned,
+                            lockfile_clone,
+                            executor_cfg_clone,
+                            journal_path_clone,
+                            run_id,
+                            args_force,
+                            cache_root_clone,
+                            param_files_clone,
+                            args_allow_missing,
+                            jsonl_shared_clone,
+                            started_at,
+                        )
+                        .instrument(stage_span.clone())
+                        .await
+                    }
+                    Err(error) => Err(error),
+                };
 
                 // Record source and duration on the span.
                 match &outcome {
@@ -1875,7 +1905,7 @@ async fn run_dag(
 
                 // Release the semaphore permit before sending.
                 drop(permit);
-                let _ = tx.send(result).await;
+                let _ = tx.try_send(result);
             });
         }
 
@@ -2126,56 +2156,50 @@ struct ParallelStageResult {
     reason = "parallel stage execution needs all context passed in"
 )]
 async fn execute_stage_parallel(
-    stage: &Stage,
-    stage_name: &StageName,
-    repo_root: &Path,
-    lockfile: &Lockfile,
-    executor_cfg: &ExecutorConfig,
-    journal_path: &Path,
+    stage: Stage,
+    stage_name: StageName,
+    repo_root: PathBuf,
+    lockfile: Lockfile,
+    executor_cfg: ExecutorConfig,
+    journal_path: PathBuf,
     run_id: Uuid,
     force: bool,
-    cache_root: &Path,
-    param_files: &[PathBuf],
+    cache_root: PathBuf,
+    param_files: Vec<PathBuf>,
     allow_missing: bool,
-    pull: bool,
-    config: Config,
     jsonl: Option<Arc<tokio::sync::Mutex<JsonlStream<std::io::Stdout>>>>,
     run_started_at: Instant,
 ) -> Result<(StageCacheEntry, bool, u64, BTreeMap<String, String>)> {
     // Each parallel task opens its own journal connection. SQLite WAL
     // mode with busy_timeout handles concurrent writers.
-    let journal = Journal::open(journal_path)?;
+    let journal = Journal::open(&journal_path)?;
     // Validate declared outs before any journal work.
     for out in &stage.outs {
-        out.validate(stage_name)?;
-    }
-
-    // When --pull is set, attempt to download missing dep files from
-    // the remote before resolving hashes.
-    if pull {
-        try_pull_missing_deps(stage, stage_name, repo_root, &config).await?;
+        out.validate(&stage_name)?;
     }
 
     // Build a fresh RunState for dep resolution. In parallel mode,
     // each task resolves deps against the lockfile and working tree
     // (not the in-memory run state which is only updated after
     // results come back to the scheduler).
-    let run_state = RunState::new();
-    let resolver = StageOutResolver::new(&run_state, Some(lockfile), repo_root);
-    let dep_hashes = resolve_dep_hashes_with_wdir_allow_missing_remote_aliases(
-        stage_name,
-        &stage.deps,
-        repo_root,
-        &resolver,
-        stage.wdir.as_deref(),
-        allow_missing,
-        Some(lockfile),
-        Some(stage_name),
-        &executor_cfg.remote_aliases,
-    )?;
+    let dep_hashes = {
+        let run_state = RunState::new();
+        let resolver = StageOutResolver::new(&run_state, Some(&lockfile), &repo_root);
+        resolve_dep_hashes_with_wdir_allow_missing_remote_aliases(
+            &stage_name,
+            &stage.deps,
+            &repo_root,
+            &resolver,
+            stage.wdir.as_deref(),
+            allow_missing,
+            Some(&lockfile),
+            Some(&stage_name),
+            &executor_cfg.remote_aliases,
+        )?
+    };
     let params = resolve_stage_param_values_with_wdir(
-        repo_root,
-        param_files,
+        &repo_root,
+        &param_files,
         &stage.params,
         stage_name.as_str(),
         stage.wdir.as_deref(),
@@ -2193,7 +2217,7 @@ async fn execute_stage_parallel(
 
     let cache_lookup_enabled = stage.run_cache_lookup_enabled() && !executor_cfg.no_run_cache;
     let cached = if cache_lookup_enabled {
-        read_local(cache_root, &stage_hash).ok().flatten()
+        read_local(&cache_root, &stage_hash).ok().flatten()
     } else {
         None
     };
@@ -2208,9 +2232,15 @@ async fn execute_stage_parallel(
     let policy = stage.retry.clone().unwrap_or_else(RetryPolicy::no_retry);
     let mut attempt: u32 = 1;
     let exec_result = loop {
-        let result = run_local(&resolved, executor_cfg, &journal, run_id, attempt)
-            .await
-            .map_err(CrabError::from);
+        let result = run_local_owned_with_journal_path(
+            resolved.clone(),
+            executor_cfg.clone(),
+            journal_path.clone(),
+            run_id,
+            attempt,
+        )
+        .await
+        .map_err(CrabError::from);
         match result {
             Ok(entry) => break Ok(entry),
             Err(e) => {
@@ -2225,16 +2255,16 @@ async fn execute_stage_parallel(
                             "retry: scheduling next attempt"
                         );
                         emit_retry_shared(
-                            jsonl.as_ref(),
-                            stage_name.as_str(),
-                            &stage_hash,
+                            jsonl.clone(),
+                            stage_name.as_str().to_owned(),
+                            stage_hash.clone(),
                             attempt,
-                            reason,
+                            reason.to_owned(),
                             backoff,
-                            &run_started_at,
+                            run_started_at.clone(),
                         )
                         .await;
-                        clean_partial_outputs(stage, repo_root);
+                        clean_partial_outputs(&stage, &repo_root);
                         attempt += 1;
                         journal.insert_stage_retry(run_id, stage_name.as_str(), attempt)?;
                         journal.transition(
@@ -2262,17 +2292,22 @@ async fn execute_stage_parallel(
                     no_overwrite: false,
                 };
                 materialize_hit_with_flags(
-                    stage_name, run_id, &entry, cache_root, repo_root, flags,
+                    &stage_name,
+                    run_id,
+                    &entry,
+                    &cache_root,
+                    &repo_root,
+                    flags,
                 )?;
 
                 // P7: on_cache_hit hook.
                 if stage.side_effects
                     && let Some(hook_cmd) = &stage.on_cache_hit
                 {
-                    let status = crate::workflow::executor::execute_hook(
-                        hook_cmd,
-                        &stage.env,
-                        executor_cfg.working_dir.as_deref(),
+                    let status = execute_hook_owned(
+                        hook_cmd.clone(),
+                        stage.env.clone(),
+                        executor_cfg.working_dir.clone(),
                     )
                     .await?;
                     if !status.success() {
@@ -2349,21 +2384,21 @@ async fn emit_cache_checked_shared(
 }
 
 async fn emit_retry_shared(
-    jsonl: Option<&Arc<tokio::sync::Mutex<JsonlStream<std::io::Stdout>>>>,
-    stage: &str,
-    stage_hash: &StageHash,
+    jsonl: Option<Arc<tokio::sync::Mutex<JsonlStream<std::io::Stdout>>>>,
+    stage: String,
+    stage_hash: StageHash,
     attempt: u32,
-    reason: &str,
+    reason: String,
     backoff: std::time::Duration,
-    started_at: &Instant,
+    started_at: Instant,
 ) {
     let Some(shared) = jsonl else { return };
     let mut stream = shared.lock().await;
     let payload = WorkflowStageRetry {
-        stage: stage.to_owned(),
+        stage,
         stage_hash: stage_hash.as_hex(),
         attempt,
-        reason: reason.to_owned(),
+        reason,
         backoff_ms: backoff.as_millis().min(u128::from(u64::MAX)) as u64,
         exhausted: false,
         elapsed_ms: Some(started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
@@ -2792,7 +2827,13 @@ async fn execute_one_stage_from_yaml_with_jsonl(
     // resolution so that successfully pulled files are picked up by
     // the normal hash computation.
     if args.pull {
-        try_pull_missing_deps(stage, stage_name, repo_root, config).await?;
+        try_pull_missing_deps(
+            stage.clone(),
+            stage_name.as_str().to_owned(),
+            repo_root.to_path_buf(),
+            config.clone(),
+        )
+        .await?;
     }
 
     let resolver = StageOutResolver::new(run_state, lockfile, repo_root);
@@ -4512,10 +4553,10 @@ fn clean_partial_outputs(stage: &Stage, repo_root: &Path) {
 /// transfer cannot leave a partial dependency or overwrite a concurrent
 /// producer before a later hash.
 async fn try_pull_missing_deps(
-    stage: &Stage,
-    stage_name: &StageName,
-    repo_root: &Path,
-    config: &Config,
+    stage: Stage,
+    stage_name: String,
+    repo_root: PathBuf,
+    config: Config,
 ) -> Result<Vec<PathBuf>> {
     let missing = stage
         .deps
@@ -4574,7 +4615,7 @@ async fn try_pull_missing_deps(
             return Ok(Vec::new());
         }
     };
-    let snapshot = match reader.snapshot(Some("HEAD")).await {
+    let snapshot = match reader.snapshot_owned(Some("HEAD".to_owned())).await {
         Ok(snapshot) => snapshot,
         Err(error) => {
             warn!(
@@ -4588,7 +4629,11 @@ async fn try_pull_missing_deps(
 
     let mut pulled = Vec::with_capacity(missing.len());
     for (declared_path, destination, repo_path) in missing {
-        let entry = match snapshot.entry_for_path(&repo_path).await {
+        let entry = match snapshot
+            .clone()
+            .entry_for_path_owned(repo_path.clone())
+            .await
+        {
             Ok(entry) => entry,
             Err(error) => {
                 warn!(
@@ -4607,7 +4652,11 @@ async fn try_pull_missing_deps(
             .tempfile_in(parent)?
             .into_temp_path();
         let temp_path = temp.to_path_buf();
-        let bytes = match snapshot.download_to_path(&repo_path, &temp_path).await {
+        let bytes = match snapshot
+            .clone()
+            .download_to_path_owned(repo_path.clone(), temp_path.clone())
+            .await
+        {
             Ok(bytes) => bytes,
             Err(error) => {
                 warn!(
@@ -5454,9 +5503,14 @@ mod tests {
             Cmd::Argv(vec!["true".to_owned()]),
         );
         stage.deps.push(Dep::Path(PathBuf::from("dep.txt")));
-        let pulled = try_pull_missing_deps(&stage, &stage.name, tmp.path(), &Config::default())
-            .await
-            .unwrap();
+        let pulled = try_pull_missing_deps(
+            stage.clone(),
+            stage.name.as_str().to_owned(),
+            tmp.path().to_path_buf(),
+            Config::default(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(pulled, vec![PathBuf::from("dep.txt")]);
         assert_eq!(

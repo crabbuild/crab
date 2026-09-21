@@ -510,7 +510,7 @@ pub trait FsckChecker: Send + Sync {
     /// Returns issues found at the git object layer.
     fn check_git_objects(
         &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<FsckIssue>>> + Send + '_>>;
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<FsckIssue>>> + '_>>;
 
     /// Check pointer → file-index → shard → xorb chain integrity.
     /// Returns issues found in the crab data chain.
@@ -930,7 +930,7 @@ mod tests {
     impl FsckChecker for MockChecker {
         fn check_git_objects(
             &self,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<FsckIssue>>> + Send + '_>>
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<FsckIssue>>> + '_>>
         {
             if self.git_failure {
                 return Box::pin(async { Err(CrabError::Internal("git checker failed".into())) });

@@ -1462,6 +1462,40 @@ pub(crate) async fn create_connectivity_proof_pack(
     })?
 }
 
+/// Create Git's temporary keep file for an already verified pack.
+///
+/// The pack was authenticated before this marker is created. Git uses the
+/// marker to associate its connectivity proof with the installed pack, then
+/// removes the marker when the fetch transaction completes.
+pub(crate) async fn create_existing_pack_connectivity_lock(
+    pack_path: &Path,
+) -> Result<Option<PathBuf>> {
+    let pack_path = pack_path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        if pack_path.extension().and_then(std::ffi::OsStr::to_str) != Some("pack") {
+            return Ok(None);
+        }
+        if pack_path
+            .to_str()
+            .is_none_or(|path| path.contains(['\r', '\n']))
+        {
+            return Ok(None);
+        }
+        let keep_path = pack_path.with_extension("keep");
+        let mut keep = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&keep_path)?;
+        std::io::Write::write_all(
+            &mut keep,
+            b"Crab remote-helper connectivity proof; Git removes this file.\n",
+        )?;
+        Ok(Some(keep_path))
+    })
+    .await
+    .map_err(|error| CrabError::Internal(format!("Git pack lock join error: {error}")))?
+}
+
 fn create_connectivity_proof_pack_blocking(
     git_dir: &Path,
     ref_tips: &[String],
@@ -1875,6 +1909,54 @@ pub async fn install_pack_file_locally_with_timeout(
     }
 }
 
+/// Repair and install a generated thin fetch pack whose bases are already in
+/// the local Git object database.
+pub async fn install_thin_pack_file_locally_with_timeout(
+    pack_dir: &Path,
+    pack_tmp_path: &Path,
+    canonical_name: &str,
+    max_input_size: u64,
+    fsck_objects: bool,
+) -> Result<InstalledPack> {
+    let pack_dir = pack_dir.to_owned();
+    let pack_tmp_path = pack_tmp_path.to_owned();
+    let canonical_name = canonical_name.to_owned();
+    let error_pack_id = canonical_name.clone();
+    match tokio::time::timeout(
+        INDEX_PACK_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            crab_git::pack::install_thin_pack_file_from_path(
+                &pack_dir,
+                &pack_tmp_path,
+                &canonical_name,
+                max_input_size,
+                fsck_objects,
+            )
+        }),
+    )
+    .await
+    {
+        Ok(Ok(result)) => result.map_err(|error| match error {
+            crab_git::pack::PackError::ObjectFsckFailed { git_sha1, stderr } => {
+                CrabError::FetchMalformedObject {
+                    pack_id: error_pack_id,
+                    oid: git_sha1,
+                    kind: "pack".to_owned(),
+                    detail: stderr,
+                }
+            }
+            error => CrabError::from(error),
+        }),
+        Ok(Err(error)) => Err(CrabError::Internal(format!(
+            "install_thin_pack_file join: {error}"
+        ))),
+        Err(_) => Err(CrabError::Internal(format!(
+            "git index-pack --fix-thin exceeded timeout of {}s",
+            INDEX_PACK_TIMEOUT.as_secs()
+        ))),
+    }
+}
+
 /// Delete the `.pack`, `.idx`, and (if present) `.rev` files for
 /// the given pack id from the pack directory.
 ///
@@ -1981,6 +2063,23 @@ mod tests {
         .await
         .expect_err("a stale proof pack must not be acknowledged");
         assert!(error.to_string().contains("requested ref tips"));
+    }
+
+    #[tokio::test]
+    async fn existing_pack_connectivity_lock_is_exclusive() {
+        let directory = tempfile::tempdir().unwrap();
+        let pack = directory.path().join("pack-verified.pack");
+        std::fs::write(&pack, b"verified pack placeholder").unwrap();
+
+        let keep = create_existing_pack_connectivity_lock(&pack)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(keep, directory.path().join("pack-verified.keep"));
+        assert!(keep.is_file());
+        assert!(create_existing_pack_connectivity_lock(&pack).await.is_err());
+
+        std::fs::remove_file(keep).unwrap();
     }
 
     /// Build a minimal valid pack index v2 file containing the given OIDs.

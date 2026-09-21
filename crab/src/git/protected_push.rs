@@ -36,7 +36,7 @@ pub(crate) async fn finalize_capsule_push(
     cancel: &CancellationToken,
 ) -> Result<Option<crab_coordination::write_coordinator::CommitOutcome>> {
     crate::core::error::check_cancelled(cancel)?;
-    let run = crab_metadata::capsule_protocol::CapsuleRun::leaf(capsule.clone())?;
+    let run = crab_write::capsule_protocol::capsule_leaf_run(capsule)?;
     let run_path = router.capsule_path(run.hash());
     store.put(&run_path, run.bytes().clone()).await?;
     let staged_objects = store.flush_staged_writes(upload_concurrency).await?;

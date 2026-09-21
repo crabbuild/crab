@@ -105,11 +105,23 @@ const MATERIALIZE_CHUNK_SIZE: usize = 256;
 const PACK_INDEX_LOOKUP_MIN_OBJECTS: usize = 256;
 const PACK_INDEX_LOAD_CONCURRENCY: usize = 4;
 
+#[derive(Clone)]
+struct CoalescedRangeEntry {
+    oid: gix_hash::ObjectId,
+    locator: GitObjectLocator,
+    source_start: u64,
+}
+
+enum CoalescedRangeSource {
+    Pack(MerkleHash),
+    Object(ObjectPath),
+}
+
 struct CoalescedRange {
-    pack_id: MerkleHash,
+    source: CoalescedRangeSource,
     start: u64,
     end: u64,
-    entries: Vec<(gix_hash::ObjectId, GitObjectLocator)>,
+    entries: Vec<CoalescedRangeEntry>,
 }
 
 struct DeltaReadState {
@@ -142,6 +154,7 @@ pub(crate) struct RemoteGitPackedEntry {
 #[derive(Default)]
 pub(crate) struct ReaderLookupSources {
     preferred_pack_indexes: Option<Vec<GitPackInventoryEntry>>,
+    preferred_object_admission: Option<Arc<HashMap<[u8; 20], Vec<MerkleHash>>>>,
     inline_locators: Option<Arc<HashMap<[u8; 20], GitObjectLocator>>>,
     pack_sources: Option<HashMap<MerkleHash, RemoteGitPackSource>>,
 }
@@ -153,6 +166,7 @@ impl ReaderLookupSources {
     ) -> Self {
         Self {
             preferred_pack_indexes: preferred_pack_indexes.map(|packs| packs.into_iter().collect()),
+            preferred_object_admission: None,
             inline_locators,
             pack_sources: None,
         }
@@ -165,6 +179,33 @@ impl ReaderLookupSources {
         self.pack_sources = Some(pack_sources);
         self
     }
+
+    pub(crate) fn with_preferred_pack_indexes(
+        mut self,
+        preferred_pack_indexes: impl IntoIterator<Item = GitPackInventoryEntry>,
+    ) -> Self {
+        self.preferred_pack_indexes = Some(preferred_pack_indexes.into_iter().collect());
+        self
+    }
+
+    pub(crate) fn with_preferred_object_admission(
+        mut self,
+        admission: HashMap<[u8; 20], Vec<MerkleHash>>,
+    ) -> Self {
+        self.preferred_object_admission = Some(Arc::new(admission));
+        self
+    }
+}
+
+/// One authenticated sidecar range in a lazy layered pack source.
+#[derive(Debug, Clone)]
+pub struct RemoteGitSidecarRange {
+    /// Absolute byte offset in the immutable source object.
+    pub offset: u64,
+    /// Number of bytes in this sidecar.
+    pub length: u64,
+    /// BLAKE3 identity committed by the source descriptor.
+    pub blake3: String,
 }
 
 /// Authenticated source for one Git pack that is not stored at the canonical
@@ -175,9 +216,25 @@ pub struct RemoteGitPackSource {
     object_offset: u64,
     pack_size: u64,
     pack: Option<Bytes>,
-    index: Bytes,
-    reverse_index: Bytes,
+    index: Option<Bytes>,
+    reverse_index: Option<Bytes>,
     kind_metadata: Option<Bytes>,
+    lazy_sidecars: Option<LazyPackSidecars>,
+    lazy_index: Option<LazyPackIndex>,
+}
+
+#[derive(Debug, Clone)]
+struct LazyPackSidecars {
+    window: std::ops::Range<u64>,
+    index: RemoteGitSidecarRange,
+    reverse_index: RemoteGitSidecarRange,
+    kind_metadata: RemoteGitSidecarRange,
+}
+
+#[derive(Debug, Clone)]
+struct LazyPackIndex {
+    index: RemoteGitSidecarRange,
+    reverse_index: RemoteGitSidecarRange,
 }
 
 impl RemoteGitPackSource {
@@ -205,9 +262,132 @@ impl RemoteGitPackSource {
             object_offset,
             pack_size,
             pack: None,
-            index,
-            reverse_index,
+            index: Some(index),
+            reverse_index: Some(reverse_index),
             kind_metadata,
+            lazy_sidecars: None,
+            lazy_index: None,
+        })
+    }
+
+    /// Bind a pack to authenticated sidecar ranges in an immutable source.
+    pub fn embedded_lazy(
+        path: ObjectPath,
+        object_offset: u64,
+        pack_size: u64,
+        source_size: u64,
+        index: RemoteGitSidecarRange,
+        reverse_index: RemoteGitSidecarRange,
+        kind_metadata: RemoteGitSidecarRange,
+    ) -> Result<Self> {
+        if pack_size == 0 || source_size == 0 {
+            return Err(Error::RepositoryState {
+                reason: RepositoryStateError::InconsistentGeneration,
+            });
+        }
+        object_offset
+            .checked_add(pack_size)
+            .filter(|end| *end <= source_size)
+            .ok_or(Error::RepositoryState {
+                reason: RepositoryStateError::InconsistentGeneration,
+            })?;
+        let ranges = [&index, &reverse_index, &kind_metadata];
+        if ranges.iter().any(|range| {
+            range.length == 0
+                || range
+                    .offset
+                    .checked_add(range.length)
+                    .is_none_or(|end| end > source_size)
+                || blake3::Hash::from_hex(&range.blake3).is_err()
+        }) {
+            return Err(Error::RepositoryState {
+                reason: RepositoryStateError::InconsistentGeneration,
+            });
+        }
+        let window_start =
+            ranges
+                .iter()
+                .map(|range| range.offset)
+                .min()
+                .ok_or(Error::RepositoryState {
+                    reason: RepositoryStateError::InconsistentGeneration,
+                })?;
+        let window_end = ranges
+            .iter()
+            .filter_map(|range| range.offset.checked_add(range.length))
+            .max()
+            .ok_or(Error::RepositoryState {
+                reason: RepositoryStateError::InconsistentGeneration,
+            })?;
+        Ok(Self {
+            path: Some(path),
+            object_offset,
+            pack_size,
+            pack: None,
+            index: None,
+            reverse_index: None,
+            kind_metadata: None,
+            lazy_sidecars: Some(LazyPackSidecars {
+                window: window_start..window_end,
+                index,
+                reverse_index,
+                kind_metadata,
+            }),
+            lazy_index: None,
+        })
+    }
+
+    /// Bind a pack to lazy authenticated index and reverse-index ranges.
+    ///
+    /// The normal read path needs only the pack index to locate requested
+    /// objects. Reverse indexes remain authenticated and are fetched by
+    /// explicit pack-install/repack callers, avoiding an eager sidecar wave
+    /// for incremental fetches.
+    pub fn embedded_lazy_index(
+        path: ObjectPath,
+        object_offset: u64,
+        pack_size: u64,
+        source_size: u64,
+        index: RemoteGitSidecarRange,
+        reverse_index: RemoteGitSidecarRange,
+    ) -> Result<Self> {
+        if pack_size == 0 || source_size == 0 {
+            return Err(Error::RepositoryState {
+                reason: RepositoryStateError::InconsistentGeneration,
+            });
+        }
+        object_offset
+            .checked_add(pack_size)
+            .filter(|end| *end <= source_size)
+            .ok_or(Error::RepositoryState {
+                reason: RepositoryStateError::InconsistentGeneration,
+            })?;
+        for range in [&index, &reverse_index] {
+            if range.length == 0
+                || range
+                    .offset
+                    .checked_add(range.length)
+                    .is_none_or(|end| end > source_size)
+                || blake3::Hash::from_hex(&range.blake3).is_err()
+            {
+                return Err(Error::RepositoryState {
+                    reason: RepositoryStateError::InconsistentGeneration,
+                });
+            }
+        }
+        Ok(Self {
+            path: Some(path),
+            object_offset,
+            pack_size,
+            pack: None,
+            index: None,
+            reverse_index: None,
+            kind_metadata: None,
+            lazy_sidecars: None,
+            lazy_index: Some(LazyPackIndex {
+                index,
+                reverse_index,
+            }),
         })
     }
 
@@ -228,9 +408,11 @@ impl RemoteGitPackSource {
             object_offset: 0,
             pack_size: pack.len() as u64,
             pack: Some(pack),
-            index,
-            reverse_index,
+            index: Some(index),
+            reverse_index: Some(reverse_index),
             kind_metadata,
+            lazy_sidecars: None,
+            lazy_index: None,
         })
     }
 }
@@ -241,6 +423,7 @@ pub(crate) struct RemoteGitReader {
     repo_prefix: String,
     inventory: HashMap<MerkleHash, GitPackInventoryEntry>,
     preferred_pack_indexes: Option<HashMap<MerkleHash, GitPackInventoryEntry>>,
+    preferred_object_admission: Option<Arc<HashMap<[u8; 20], Vec<MerkleHash>>>>,
     inline_locators: Option<Arc<HashMap<[u8; 20], GitObjectLocator>>>,
     pack_sources: HashMap<MerkleHash, RemoteGitPackSource>,
     limits: ReaderLimits,
@@ -323,6 +506,7 @@ impl RemoteGitReader {
             repo_prefix: repo_prefix.into(),
             inventory: canonical,
             preferred_pack_indexes,
+            preferred_object_admission: lookup_sources.preferred_object_admission,
             inline_locators: lookup_sources.inline_locators,
             pack_sources,
             limits,
@@ -334,6 +518,10 @@ impl RemoteGitReader {
 
     fn pack_source(&self, pack_id: &MerkleHash) -> Option<&RemoteGitPackSource> {
         self.pack_sources.get(pack_id)
+    }
+
+    pub(crate) fn has_pack_sources(&self) -> bool {
+        !self.pack_sources.is_empty()
     }
 
     fn pack_path_range(
@@ -601,7 +789,7 @@ impl RemoteGitReader {
     ) -> Result<Vec<GitObjectLookup>> {
         if let Some(locators) = &self.inline_locators {
             tracing::debug!(object_count = requested.len(), "remote Git locator lookup");
-            return Ok(requested
+            let mut lookups = requested
                 .iter()
                 .map(|oid| {
                     locators
@@ -610,7 +798,74 @@ impl RemoteGitReader {
                         .map(GitObjectLookup::Hit)
                         .unwrap_or(GitObjectLookup::Miss)
                 })
-                .collect());
+                .collect::<Vec<_>>();
+            if lookups
+                .iter()
+                .any(|lookup| matches!(lookup, GitObjectLookup::Miss))
+            {
+                let mut admitted = HashMap::new();
+                let mut all_missing_admitted = true;
+                if let Some(admission) = &self.preferred_object_admission {
+                    for (lookup, oid) in lookups.iter().zip(requested) {
+                        if !matches!(lookup, GitObjectLookup::Miss) {
+                            continue;
+                        }
+                        let Some(pack_ids) = admission.get(oid) else {
+                            all_missing_admitted = false;
+                            continue;
+                        };
+                        for pack_id in pack_ids {
+                            let Some(pack) = self.inventory.get(pack_id).copied() else {
+                                return Err(Error::RepositoryState {
+                                    reason: RepositoryStateError::InconsistentGeneration,
+                                });
+                            };
+                            admitted.insert(*pack_id, pack);
+                        }
+                    }
+                    if !admitted.is_empty() {
+                        self.fill_pack_index_misses(
+                            &mut lookups,
+                            requested,
+                            &admitted,
+                            budget,
+                            cancellation,
+                        )
+                        .await?;
+                    }
+                    if all_missing_admitted
+                        && !lookups
+                            .iter()
+                            .any(|lookup| matches!(lookup, GitObjectLookup::Miss))
+                    {
+                        return Ok(lookups);
+                    }
+                }
+                if let Some(preferred) = &self.preferred_pack_indexes {
+                    self.fill_pack_index_misses(
+                        &mut lookups,
+                        requested,
+                        preferred,
+                        budget,
+                        cancellation,
+                    )
+                    .await?;
+                }
+                if lookups
+                    .iter()
+                    .any(|lookup| matches!(lookup, GitObjectLookup::Miss))
+                {
+                    self.fill_pack_index_misses(
+                        &mut lookups,
+                        requested,
+                        &self.inventory,
+                        budget,
+                        cancellation,
+                    )
+                    .await?;
+                }
+            }
+            return Ok(lookups);
         }
         if !session.is_available() {
             // Canonical snapshot inspection must not open or repair mutable
@@ -1032,7 +1287,7 @@ impl RemoteGitReader {
             )?;
             ready.push((oid, locator));
         }
-        let ranges = coalesce_ranges(ready)?;
+        let ranges = self.coalesce_reader_ranges(ready)?;
         let caller_cancellation = cancellation.clone();
         let results = stream::iter(ranges.into_iter().map(|range| {
             let reader = Arc::clone(self);
@@ -1042,16 +1297,16 @@ impl RemoteGitReader {
                     .read_coalesced_range(&range, budget, &caller_cancellation)
                     .await?;
                 let mut entries = Vec::with_capacity(range.entries.len());
-                for (oid, locator) in range.entries {
-                    let relative_start = locator
-                        .location
-                        .pack_offset
-                        .checked_sub(range.start)
-                        .ok_or(Error::Corrupt {
-                            stage: CorruptionStage::PackEntry,
-                        })?;
+                for entry in range.entries {
+                    let relative_start =
+                        entry
+                            .source_start
+                            .checked_sub(range.start)
+                            .ok_or(Error::Corrupt {
+                                stage: CorruptionStage::PackEntry,
+                            })?;
                     let relative_end = relative_start
-                        .checked_add(locator.location.entry_len)
+                        .checked_add(entry.locator.location.entry_len)
                         .ok_or(Error::Corrupt {
                             stage: CorruptionStage::PackEntry,
                         })?;
@@ -1064,15 +1319,18 @@ impl RemoteGitReader {
                     let entry_bytes = bytes.get(start..end).ok_or(Error::Corrupt {
                         stage: CorruptionStage::PackEntry,
                     })?;
-                    if gix_features::hash::crc32(entry_bytes) != locator.location.crc32 {
-                        return Err(Error::PackedEntryCrcMismatch { oid });
+                    if gix_features::hash::crc32(entry_bytes) != entry.locator.location.crc32 {
+                        return Err(Error::PackedEntryCrcMismatch { oid: entry.oid });
                     }
                     let parsed = gix_pack::data::Entry::from_bytes(
                         entry_bytes,
-                        locator.location.pack_offset,
+                        entry.locator.location.pack_offset,
                         20,
                     )
-                    .map_err(|source| Error::PackEntry { oid, source })?;
+                    .map_err(|source| Error::PackEntry {
+                        oid: entry.oid,
+                        source,
+                    })?;
                     let maximum = if parsed.header.as_kind().is_some() {
                         reader
                             .limits
@@ -1096,7 +1354,7 @@ impl RemoteGitReader {
                         Header::RefDelta { base_id } => Some(base_id),
                         Header::OfsDelta { base_distance } => {
                             let base_offset = Header::verified_base_pack_offset(
-                                locator.location.pack_offset,
+                                entry.locator.location.pack_offset,
                                 base_distance,
                             )
                             .ok_or(Error::Corrupt {
@@ -1105,7 +1363,7 @@ impl RemoteGitReader {
                             Some(
                                 reader
                                     .oid_at_pack_offset(
-                                        locator.pack_id,
+                                        entry.locator.pack_id,
                                         base_offset,
                                         budget,
                                         &caller_cancellation,
@@ -1116,8 +1374,8 @@ impl RemoteGitReader {
                         Header::Commit | Header::Tree | Header::Blob | Header::Tag => None,
                     };
                     entries.push(RemoteGitPackedEntry {
-                        oid,
-                        pack_offset: locator.location.pack_offset,
+                        oid: entry.oid,
+                        pack_offset: entry.locator.location.pack_offset,
                         header: parsed.header,
                         decompressed_size: parsed.decompressed_size,
                         header_size,
@@ -1398,8 +1656,78 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<Bytes> {
-        self.read_pack_range(&range.pack_id, range.start, range.end, budget, cancellation)
-            .await
+        match &range.source {
+            CoalescedRangeSource::Pack(pack_id) => {
+                self.read_pack_range(pack_id, range.start, range.end, budget, cancellation)
+                    .await
+            }
+            CoalescedRangeSource::Object(path) => {
+                self.read_object_range(path, range.start, range.end, budget, cancellation)
+                    .await
+            }
+        }
+    }
+
+    async fn read_object_range(
+        &self,
+        path: &ObjectPath,
+        start: u64,
+        end: u64,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Bytes> {
+        let length = end.checked_sub(start).ok_or(Error::Corrupt {
+            stage: CorruptionStage::PackEntry,
+        })?;
+        check_limit(
+            "fetched bytes",
+            length,
+            budget.remaining(BudgetDimension::FetchedBytes).await,
+        )?;
+        let bytes = self
+            .read_object_range_admitted(
+                path,
+                start,
+                end,
+                budget.read_admission(cancellation.clone()),
+                cancellation,
+            )
+            .await?;
+        if bytes.len() as u64 != length {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            });
+        }
+        Ok(bytes)
+    }
+
+    async fn read_object_range_admitted(
+        &self,
+        path: &ObjectPath,
+        start: u64,
+        end: u64,
+        admission: Arc<dyn crab_storage::ReadAdmission>,
+        cancellation: &CancellationToken,
+    ) -> Result<Bytes> {
+        let length = end.checked_sub(start).ok_or(Error::Corrupt {
+            stage: CorruptionStage::PackEntry,
+        })?;
+        let store = self.store.clone().with_read_admission(admission);
+        let origin_permit = self.runtime.origin_permit(cancellation).await?;
+        let bytes = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(Error::Cancelled),
+            bytes = store.range_get(path, start..end) => bytes?,
+        };
+        observe_storage_read("range_get", bytes.len() as u64);
+        drop(origin_permit);
+        check_cancelled(cancellation)?;
+        if bytes.len() as u64 != length {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            });
+        }
+        Ok(bytes)
     }
 
     async fn locate(
@@ -1702,19 +2030,28 @@ impl RemoteGitReader {
                 stage: CorruptionStage::Inventory,
             })?;
         if let Some(source) = self.pack_source(&pack_id).cloned() {
-            let source_size = source.index.len() as u64;
+            let source_size = source.index.as_ref().map_or_else(
+                || {
+                    source.lazy_index.as_ref().map_or_else(
+                        || {
+                            source
+                                .lazy_sidecars
+                                .as_ref()
+                                .map_or(0, |lazy| lazy.index.length)
+                        },
+                        |lazy| lazy.index.length,
+                    )
+                },
+                |index| index.len() as u64,
+            );
             check_limit(
                 "pack index bytes",
                 source_size,
                 self.limits.max_pack_index_bytes,
             )?;
-            check_limit(
-                "fetched bytes",
-                source_size,
-                budget.remaining(BudgetDimension::FetchedBytes).await,
-            )?;
-            let kind_metadata = source.kind_metadata.clone();
             let runtime = Arc::clone(&self.runtime);
+            let store = self.store.clone();
+            let source_for_work = source.clone();
             let index = runtime
                 .clone()
                 .load_pack_index_singleflight(
@@ -1724,9 +2061,50 @@ impl RemoteGitReader {
                     budget,
                     move |shared_cancellation, shared_budget| async move {
                         check_cancelled(&shared_cancellation)?;
-                        shared_budget
-                            .charge(BudgetDimension::FetchedBytes, source_size)
-                            .await?;
+                        let (index_bytes, kind_metadata) =
+                            if let Some(index) = source_for_work.index.clone() {
+                                shared_budget
+                                    .charge(BudgetDimension::FetchedBytes, index.len() as u64)
+                                    .await?;
+                                (index, source_for_work.kind_metadata.clone())
+                            } else if let Some(lazy) = source_for_work.lazy_index.clone() {
+                                let path = source_for_work.path.clone().ok_or(Error::Corrupt {
+                                    stage: CorruptionStage::PackIndex,
+                                })?;
+                                let admission: Arc<dyn crab_storage::ReadAdmission> =
+                                    shared_budget.clone();
+                                let index = read_lazy_range_from_store(
+                                    &store,
+                                    &runtime,
+                                    &path,
+                                    &lazy.index,
+                                    admission,
+                                    &shared_cancellation,
+                                )
+                                .await?;
+                                (index, None)
+                            } else if let Some(lazy) = source_for_work.lazy_sidecars.clone() {
+                                let path = source_for_work.path.clone().ok_or(Error::Corrupt {
+                                    stage: CorruptionStage::PackIndex,
+                                })?;
+                                let admission: Arc<dyn crab_storage::ReadAdmission> =
+                                    shared_budget.clone();
+                                let (index, _reverse_index, kind_metadata) =
+                                    read_lazy_sidecars_from_store(
+                                        &store,
+                                        &runtime,
+                                        &path,
+                                        lazy,
+                                        admission,
+                                        &shared_cancellation,
+                                    )
+                                    .await?;
+                                (index, Some(kind_metadata))
+                            } else {
+                                return Err(Error::Corrupt {
+                                    stage: CorruptionStage::PackIndex,
+                                });
+                            };
                         if let Some(kind_metadata) = &kind_metadata {
                             let maximum =
                                 crab_git::max_pack_kind_metadata_size(inventory.object_count)
@@ -1746,7 +2124,7 @@ impl RemoteGitReader {
                                 parse_pack_index(
                                     pack_id,
                                     inventory,
-                                    source.index,
+                                    index_bytes,
                                     kind_metadata,
                                     &token,
                                 )
@@ -1875,6 +2253,7 @@ impl RemoteGitReader {
         &self,
         pack_id: MerkleHash,
         object_ids: &[gix_hash::ObjectId],
+        allowed_external_bases: &[gix_hash::ObjectId],
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<Option<[u8; 20]>> {
@@ -1885,7 +2264,16 @@ impl RemoteGitReader {
         let matches = object_ids
             .iter()
             .all(|oid| index.object_ids.binary_search(oid).is_ok());
-        Ok(matches.then_some(index.pack_checksum))
+        if !matches {
+            return Ok(None);
+        }
+        if index.external_delta_bases.values().any(|base| {
+            !object_ids.iter().any(|oid| oid == base)
+                && !allowed_external_bases.iter().any(|oid| oid == base)
+        }) {
+            return Ok(None);
+        }
+        Ok(Some(index.pack_checksum))
     }
 
     pub(crate) async fn download_pack_to_path(
@@ -2106,12 +2494,75 @@ impl RemoteGitReader {
         cancellation: &CancellationToken,
     ) -> Result<()> {
         if let Some(source) = self.pack_source(&pack_id) {
+            if let Some(bytes) = source.index.clone() {
+                return self
+                    .write_inline_artifact(
+                        bytes,
+                        maximum_size,
+                        destination,
+                        budget,
+                        cancellation,
+                        "pack index bytes",
+                        "pack_index_source",
+                    )
+                    .await;
+            }
+            if let Some(lazy) = source.lazy_index.clone() {
+                let path = source.path.clone().ok_or(Error::Corrupt {
+                    stage: CorruptionStage::PackIndex,
+                })?;
+                let bytes = read_lazy_range_from_store(
+                    &self.store,
+                    &self.runtime,
+                    &path,
+                    &lazy.index,
+                    budget.read_admission(cancellation.clone()),
+                    cancellation,
+                )
+                .await?;
+                return self
+                    .write_fetched_artifact(
+                        bytes,
+                        maximum_size,
+                        destination,
+                        cancellation,
+                        "pack index bytes",
+                        "pack_index_source",
+                    )
+                    .await;
+            }
+            let lazy = source.lazy_sidecars.clone().ok_or(Error::Corrupt {
+                stage: CorruptionStage::PackIndex,
+            })?;
+            let window_size =
+                lazy.window
+                    .end
+                    .checked_sub(lazy.window.start)
+                    .ok_or(Error::Corrupt {
+                        stage: CorruptionStage::PackIndex,
+                    })?;
+            check_limit(
+                "fetched bytes",
+                window_size,
+                budget.remaining(BudgetDimension::FetchedBytes).await,
+            )?;
+            let path = source.path.clone().ok_or(Error::Corrupt {
+                stage: CorruptionStage::PackIndex,
+            })?;
+            let (index, _, _) = read_lazy_sidecars_from_store(
+                &self.store,
+                &self.runtime,
+                &path,
+                lazy,
+                budget.read_admission(cancellation.clone()),
+                cancellation,
+            )
+            .await?;
             return self
-                .write_inline_artifact(
-                    source.index.clone(),
+                .write_fetched_artifact(
+                    index,
                     maximum_size,
                     destination,
-                    budget,
                     cancellation,
                     "pack index bytes",
                     "pack_index_source",
@@ -2139,12 +2590,75 @@ impl RemoteGitReader {
         cancellation: &CancellationToken,
     ) -> Result<()> {
         if let Some(source) = self.pack_source(&pack_id) {
+            if let Some(bytes) = source.reverse_index.clone() {
+                return self
+                    .write_inline_artifact(
+                        bytes,
+                        maximum_size,
+                        destination,
+                        budget,
+                        cancellation,
+                        "pack reverse-index bytes",
+                        "pack_reverse_index_source",
+                    )
+                    .await;
+            }
+            if let Some(lazy) = source.lazy_index.clone() {
+                let path = source.path.clone().ok_or(Error::Corrupt {
+                    stage: CorruptionStage::PackIndex,
+                })?;
+                let bytes = read_lazy_range_from_store(
+                    &self.store,
+                    &self.runtime,
+                    &path,
+                    &lazy.reverse_index,
+                    budget.read_admission(cancellation.clone()),
+                    cancellation,
+                )
+                .await?;
+                return self
+                    .write_fetched_artifact(
+                        bytes,
+                        maximum_size,
+                        destination,
+                        cancellation,
+                        "pack reverse-index bytes",
+                        "pack_reverse_index_source",
+                    )
+                    .await;
+            }
+            let lazy = source.lazy_sidecars.clone().ok_or(Error::Corrupt {
+                stage: CorruptionStage::PackIndex,
+            })?;
+            let window_size =
+                lazy.window
+                    .end
+                    .checked_sub(lazy.window.start)
+                    .ok_or(Error::Corrupt {
+                        stage: CorruptionStage::PackIndex,
+                    })?;
+            check_limit(
+                "fetched bytes",
+                window_size,
+                budget.remaining(BudgetDimension::FetchedBytes).await,
+            )?;
+            let path = source.path.clone().ok_or(Error::Corrupt {
+                stage: CorruptionStage::PackIndex,
+            })?;
+            let (_, reverse_index, _) = read_lazy_sidecars_from_store(
+                &self.store,
+                &self.runtime,
+                &path,
+                lazy,
+                budget.read_admission(cancellation.clone()),
+                cancellation,
+            )
+            .await?;
             return self
-                .write_inline_artifact(
-                    source.reverse_index.clone(),
+                .write_fetched_artifact(
+                    reverse_index,
                     maximum_size,
                     destination,
-                    budget,
                     cancellation,
                     "pack reverse-index bytes",
                     "pack_reverse_index_source",
@@ -2184,6 +2698,46 @@ impl RemoteGitReader {
             budget.remaining(BudgetDimension::FetchedBytes).await,
         )?;
         budget.charge(BudgetDimension::FetchedBytes, size).await?;
+        let result = async {
+            let mut file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(destination)
+                .await
+                .map_err(|source| {
+                    Error::Metadata(crab_metadata::error::MetadataError::Io { source })
+                })?;
+            file.write_all(&bytes).await.map_err(|source| {
+                Error::Metadata(crab_metadata::error::MetadataError::Io { source })
+            })?;
+            file.flush().await.map_err(|source| {
+                Error::Metadata(crab_metadata::error::MetadataError::Io { source })
+            })?;
+            observe_storage_read(storage_request, size);
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(destination).await;
+        }
+        result
+    }
+
+    async fn write_fetched_artifact(
+        &self,
+        bytes: Bytes,
+        maximum_size: u64,
+        destination: &std::path::Path,
+        cancellation: &CancellationToken,
+        limit: &'static str,
+        storage_request: &'static str,
+    ) -> Result<()> {
+        use tokio::io::AsyncWriteExt as _;
+
+        check_cancelled(cancellation)?;
+        let size = bytes.len() as u64;
+        check_limit(limit, size, maximum_size)?;
         let result = async {
             let mut file = tokio::fs::OpenOptions::new()
                 .create(true)
@@ -2308,6 +2862,114 @@ fn observe_storage_read(storage_request: &'static str, storage_bytes: u64) {
     );
 }
 
+async fn read_lazy_sidecars_from_store(
+    store: &Store,
+    runtime: &Arc<RemoteGitRuntime>,
+    path: &ObjectPath,
+    lazy: LazyPackSidecars,
+    admission: Arc<dyn crab_storage::ReadAdmission>,
+    cancellation: &CancellationToken,
+) -> Result<(Bytes, Bytes, Bytes)> {
+    let expected = lazy
+        .window
+        .end
+        .checked_sub(lazy.window.start)
+        .ok_or(Error::Corrupt {
+            stage: CorruptionStage::PackIndex,
+        })?;
+    let store = store.clone().with_read_admission(admission);
+    let origin_permit = runtime.origin_permit(cancellation).await?;
+    let bytes = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(Error::Cancelled),
+        bytes = store.range_get(path, lazy.window.clone()) => bytes?,
+    };
+    drop(origin_permit);
+    observe_storage_read("range_get", bytes.len() as u64);
+    if bytes.len() as u64 != expected {
+        return Err(Error::Corrupt {
+            stage: CorruptionStage::PackIndex,
+        });
+    }
+    let index = copy_lazy_sidecar(&bytes, lazy.window.start, &lazy.index)?;
+    let reverse_index = copy_lazy_sidecar(&bytes, lazy.window.start, &lazy.reverse_index)?;
+    let kind_metadata = copy_lazy_sidecar(&bytes, lazy.window.start, &lazy.kind_metadata)?;
+    Ok((index, reverse_index, kind_metadata))
+}
+
+async fn read_lazy_range_from_store(
+    store: &Store,
+    runtime: &Arc<RemoteGitRuntime>,
+    path: &ObjectPath,
+    range: &RemoteGitSidecarRange,
+    admission: Arc<dyn crab_storage::ReadAdmission>,
+    cancellation: &CancellationToken,
+) -> Result<Bytes> {
+    let end = range
+        .offset
+        .checked_add(range.length)
+        .ok_or(Error::Corrupt {
+            stage: CorruptionStage::PackIndex,
+        })?;
+    let store = store.clone().with_read_admission(admission);
+    let origin_permit = runtime.origin_permit(cancellation).await?;
+    let bytes = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(Error::Cancelled),
+        bytes = store.range_get(path, range.offset..end) => bytes?,
+    };
+    drop(origin_permit);
+    observe_storage_read("range_get", bytes.len() as u64);
+    if bytes.len() as u64 != range.length {
+        return Err(Error::Corrupt {
+            stage: CorruptionStage::PackIndex,
+        });
+    }
+    let expected = blake3::Hash::from_hex(&range.blake3).map_err(|_| Error::Corrupt {
+        stage: CorruptionStage::PackIndex,
+    })?;
+    if blake3::hash(&bytes) != expected {
+        return Err(Error::Corrupt {
+            stage: CorruptionStage::PackIndex,
+        });
+    }
+    Ok(bytes)
+}
+
+fn copy_lazy_sidecar(
+    window: &Bytes,
+    window_start: u64,
+    range: &RemoteGitSidecarRange,
+) -> Result<Bytes> {
+    let relative = range
+        .offset
+        .checked_sub(window_start)
+        .ok_or(Error::Corrupt {
+            stage: CorruptionStage::PackIndex,
+        })?;
+    let end = relative.checked_add(range.length).ok_or(Error::Corrupt {
+        stage: CorruptionStage::PackIndex,
+    })?;
+    let start = usize::try_from(relative).map_err(|_| Error::Corrupt {
+        stage: CorruptionStage::PackIndex,
+    })?;
+    let end = usize::try_from(end).map_err(|_| Error::Corrupt {
+        stage: CorruptionStage::PackIndex,
+    })?;
+    let bytes = window.get(start..end).ok_or(Error::Corrupt {
+        stage: CorruptionStage::PackIndex,
+    })?;
+    let expected = blake3::Hash::from_hex(&range.blake3).map_err(|_| Error::Corrupt {
+        stage: CorruptionStage::PackIndex,
+    })?;
+    if blake3::hash(bytes) != expected {
+        return Err(Error::Corrupt {
+            stage: CorruptionStage::PackIndex,
+        });
+    }
+    Ok(Bytes::copy_from_slice(bytes))
+}
+
 fn coalesce_ranges(
     entries: Vec<(gix_hash::ObjectId, GitObjectLocator)>,
 ) -> Result<Vec<CoalescedRange>> {
@@ -2339,7 +3001,7 @@ fn coalesce_ranges(
                     stage: CorruptionStage::PackEntry,
                 })?;
             let can_extend = current.as_ref().is_some_and(|range| {
-                range.pack_id == locator.pack_id
+                matches!(&range.source, CoalescedRangeSource::Pack(pack_id) if *pack_id == locator.pack_id)
                     && start <= range.end.saturating_add(MAX_COALESCED_GAP_BYTES)
                     && end.saturating_sub(range.start) <= MAX_COALESCED_RANGE_BYTES
             });
@@ -2348,17 +3010,25 @@ fn coalesce_ranges(
                     invariant: "coalesced range disappeared while extending",
                 })?;
                 range.end = range.end.max(end);
-                range.entries.push((oid, locator));
+                range.entries.push(CoalescedRangeEntry {
+                    oid,
+                    locator,
+                    source_start: start,
+                });
                 continue;
             }
             if let Some(range) = current.take() {
                 ranges.push(range);
             }
             current = Some(CoalescedRange {
-                pack_id: locator.pack_id,
+                source: CoalescedRangeSource::Pack(locator.pack_id),
                 start,
                 end,
-                entries: vec![(oid, locator)],
+                entries: vec![CoalescedRangeEntry {
+                    oid,
+                    locator,
+                    source_start: start,
+                }],
             });
         }
         if let Some(range) = current {
@@ -2366,6 +3036,101 @@ fn coalesce_ranges(
         }
     }
     Ok(ranges)
+}
+
+impl RemoteGitReader {
+    fn coalesce_reader_ranges(
+        &self,
+        entries: Vec<(gix_hash::ObjectId, GitObjectLocator)>,
+    ) -> Result<Vec<CoalescedRange>> {
+        let mut source_entries: HashMap<ObjectPath, Vec<CoalescedRangeEntry>> = HashMap::new();
+        let mut local_entries = Vec::new();
+        for (oid, locator) in entries {
+            let Some(source) = self.pack_source(&locator.pack_id) else {
+                local_entries.push((oid, locator));
+                continue;
+            };
+            if source.pack.is_some() {
+                local_entries.push((oid, locator));
+                continue;
+            }
+            let path = source.path.clone().ok_or(Error::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            })?;
+            let source_start = source
+                .object_offset
+                .checked_add(locator.location.pack_offset)
+                .ok_or(Error::Corrupt {
+                    stage: CorruptionStage::PackEntry,
+                })?;
+            let source_end =
+                source_start
+                    .checked_add(locator.location.entry_len)
+                    .ok_or(Error::Corrupt {
+                        stage: CorruptionStage::PackEntry,
+                    })?;
+            let pack_end =
+                source
+                    .object_offset
+                    .checked_add(source.pack_size)
+                    .ok_or(Error::Corrupt {
+                        stage: CorruptionStage::PackEntry,
+                    })?;
+            if source_end > pack_end {
+                return Err(Error::Corrupt {
+                    stage: CorruptionStage::PackEntry,
+                });
+            }
+            source_entries
+                .entry(path)
+                .or_default()
+                .push(CoalescedRangeEntry {
+                    oid,
+                    locator,
+                    source_start,
+                });
+        }
+
+        let mut ranges = coalesce_ranges(local_entries)?;
+        for (path, mut entries) in source_entries {
+            entries.sort_unstable_by_key(|entry| entry.source_start);
+            let mut current: Option<CoalescedRange> = None;
+            for entry in entries {
+                let start = entry.source_start;
+                let end =
+                    start
+                        .checked_add(entry.locator.location.entry_len)
+                        .ok_or(Error::Corrupt {
+                            stage: CorruptionStage::PackEntry,
+                        })?;
+                let can_extend = current.as_ref().is_some_and(|range| {
+                    start <= range.end.saturating_add(MAX_COALESCED_GAP_BYTES)
+                        && end.saturating_sub(range.start) <= MAX_COALESCED_RANGE_BYTES
+                });
+                if can_extend {
+                    let range = current.as_mut().ok_or(Error::InternalInvariant {
+                        invariant: "source coalesced range disappeared while extending",
+                    })?;
+                    range.end = range.end.max(end);
+                    range.entries.push(entry);
+                } else {
+                    if let Some(range) = current.take() {
+                        ranges.push(range);
+                    }
+                    current = Some(CoalescedRange {
+                        source: CoalescedRangeSource::Object(path.clone()),
+                        start,
+                        end,
+                        entries: vec![entry],
+                    });
+                }
+            }
+            if let Some(range) = current {
+                ranges.push(range);
+            }
+        }
+        Ok(ranges)
+    }
 }
 
 fn collect_missing_delta_bases(
@@ -3177,7 +3942,7 @@ mod tests {
         .unwrap();
         let budget = OperationBudget::new(crate::OperationLimits::default(), runtime);
         let range = CoalescedRange {
-            pack_id: MerkleHash::from_hex(&"11".repeat(32)).unwrap(),
+            source: CoalescedRangeSource::Pack(MerkleHash::from_hex(&"11".repeat(32)).unwrap()),
             start: 0,
             end: 64,
             entries: Vec::new(),
@@ -3494,6 +4259,94 @@ mod tests {
     }
 
     #[test]
+    fn coalesces_entries_from_pack_members_sharing_one_source() {
+        let first_pack = MerkleHash::from_hex(&"11".repeat(32)).expect("first pack hash");
+        let second_pack = MerkleHash::from_hex(&"22".repeat(32)).expect("second pack hash");
+        let path = ObjectPath::from("v2/capsules/run");
+        let sidecar = |offset| RemoteGitSidecarRange {
+            offset,
+            length: 1,
+            blake3: blake3::hash(b"x").to_hex().to_string(),
+        };
+        let source = |object_offset, pack_size| {
+            RemoteGitPackSource::embedded_lazy(
+                path.clone(),
+                object_offset,
+                pack_size,
+                512,
+                sidecar(object_offset + 100),
+                sidecar(object_offset + 101),
+                sidecar(object_offset + 102),
+            )
+            .expect("valid lazy source")
+        };
+        let mut pack_sources = HashMap::new();
+        pack_sources.insert(first_pack, source(0, 100));
+        pack_sources.insert(second_pack, source(200, 100));
+        let reader = RemoteGitReader::from_pinned_with_preferred_pack_indexes(
+            Store::new(Arc::new(InMemory::new())),
+            "repository",
+            [
+                GitPackInventoryEntry {
+                    pack_id: first_pack,
+                    object_count: 1,
+                    pack_size: 100,
+                },
+                GitPackInventoryEntry {
+                    pack_id: second_pack,
+                    object_count: 1,
+                    pack_size: 100,
+                },
+            ],
+            ReaderLookupSources::default().with_pack_sources(pack_sources),
+            ReaderLimits::default(),
+            Arc::new(RemoteGitRuntime::default()),
+            RepositoryIdentity::new("provider", "repository", 1).expect("identity"),
+            1,
+        )
+        .expect("reader");
+        let oid = gix_hash::ObjectId::empty_blob(gix_hash::Kind::Sha1);
+        let ranges = reader
+            .coalesce_reader_ranges(vec![
+                (
+                    oid,
+                    GitObjectLocator {
+                        ordinal: 0,
+                        pack_id: first_pack,
+                        location: GitObjectLocation {
+                            pack_offset: 10,
+                            entry_len: 5,
+                            crc32: 0,
+                        },
+                        metadata: Default::default(),
+                    },
+                ),
+                (
+                    oid,
+                    GitObjectLocator {
+                        ordinal: 0,
+                        pack_id: second_pack,
+                        location: GitObjectLocation {
+                            pack_offset: 10,
+                            entry_len: 5,
+                            crc32: 0,
+                        },
+                        metadata: Default::default(),
+                    },
+                ),
+            ])
+            .expect("coalesced ranges");
+        assert_eq!(ranges.len(), 1);
+        assert!(matches!(
+            &ranges[0].source,
+            CoalescedRangeSource::Object(actual) if actual == &path
+        ));
+        assert_eq!(ranges[0].start, 10);
+        assert_eq!(ranges[0].end, 215);
+        assert_eq!(ranges[0].entries.len(), 2);
+    }
+
+    #[test]
     fn coalescing_preserves_entries_at_admission_boundaries() {
         let pack_id = MerkleHash::from_hex(&"11".repeat(32)).expect("pack hash");
         let oid = gix_hash::ObjectId::empty_blob(gix_hash::Kind::Sha1);
@@ -3561,7 +4414,12 @@ mod tests {
             let mut retained: Vec<_> = ranges
                 .into_iter()
                 .flat_map(|range| range.entries)
-                .map(|(_, locator)| (locator.location.pack_offset, locator.location.entry_len))
+                .map(|entry| {
+                    (
+                        entry.locator.location.pack_offset,
+                        entry.locator.location.entry_len,
+                    )
+                })
                 .collect();
             retained.sort_unstable();
             assert_eq!(
@@ -3671,6 +4529,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn frontier_admission_limits_index_probe_to_admitted_sources() {
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let identity = RepositoryIdentity::new("provider", "repository", 1).expect("identity");
+        let admitted_pack = MerkleHash::from_hex(&"11".repeat(32)).expect("admitted pack");
+        let unadmitted_pack = MerkleHash::from_hex(&"22".repeat(32)).expect("unadmitted pack");
+        let oid = [1; 20];
+        runtime
+            .insert_pack_index(
+                crate::runtime::PackIndexCacheKey::new(&identity, admitted_pack),
+                Arc::new(PackIndex {
+                    object_ids: vec![gix_hash::ObjectId::from(oid)],
+                    pack_offsets: vec![100],
+                    crc32: vec![11],
+                    offset_order: vec![0],
+                    pack_data_end: 200,
+                    pack_checksum: [0; 20],
+                    external_delta_bases: HashMap::new(),
+                    source_bytes: 1,
+                }),
+            )
+            .await;
+        let admission = HashMap::from([(oid, vec![admitted_pack])]);
+        let sources = ReaderLookupSources::new(
+            None::<Vec<GitPackInventoryEntry>>,
+            Some(Arc::new(HashMap::new())),
+        )
+        .with_preferred_object_admission(admission);
+        let reader = RemoteGitReader::from_pinned_with_preferred_pack_indexes(
+            Store::new(Arc::new(InMemory::new())),
+            "repository",
+            [admitted_pack, unadmitted_pack].map(|pack_id| GitPackInventoryEntry {
+                pack_id,
+                object_count: 1,
+                pack_size: 220,
+            }),
+            sources,
+            ReaderLimits::default(),
+            Arc::clone(&runtime),
+            identity,
+            1,
+        )
+        .expect("reader");
+        let budget = OperationBudget::new(crate::OperationLimits::default(), runtime.clone());
+        let lookups = reader
+            .lookup_batch_for_read(
+                &GitObjectLocatorSession::without_catalog(),
+                &[oid],
+                &budget,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("admitted lookup");
+
+        assert!(matches!(
+            lookups.as_slice(),
+            [GitObjectLookup::Hit(GitObjectLocator { pack_id, .. })]
+                if *pack_id == admitted_pack
+        ));
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn pack_index_lookup_prefers_a_self_contained_duplicate() {
         let runtime = Arc::new(RemoteGitRuntime::default());
         let identity = RepositoryIdentity::new("provider", "repository", 1).expect("identity");
@@ -3732,6 +4652,68 @@ mod tests {
                 ..
             })] if *pack_id == full_pack
         ));
+    }
+
+    #[tokio::test]
+    async fn exact_pack_reuse_rejects_unproven_external_delta_bases() {
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let identity = RepositoryIdentity::new("provider", "repository", 1).expect("identity");
+        let pack_id = MerkleHash::from_hex(&"33".repeat(32)).expect("pack hash");
+        let object = gix_hash::ObjectId::from([1; 20]);
+        let base = gix_hash::ObjectId::from([2; 20]);
+        runtime
+            .insert_pack_index(
+                crate::runtime::PackIndexCacheKey::new(&identity, pack_id),
+                Arc::new(PackIndex {
+                    object_ids: vec![object],
+                    pack_offsets: vec![100],
+                    crc32: vec![11],
+                    offset_order: vec![0],
+                    pack_data_end: 200,
+                    pack_checksum: [7; 20],
+                    external_delta_bases: HashMap::from([(object, base)]),
+                    source_bytes: 1,
+                }),
+            )
+            .await;
+        let reader = RemoteGitReader::from_pinned(
+            Store::new(Arc::new(InMemory::new())),
+            "repository",
+            [GitPackInventoryEntry {
+                pack_id,
+                object_count: 1,
+                pack_size: 220,
+            }],
+            ReaderLimits::default(),
+            Arc::clone(&runtime),
+            identity,
+            1,
+        )
+        .expect("reader");
+        let budget = OperationBudget::new(crate::OperationLimits::default(), runtime.clone());
+        let cancellation = CancellationToken::new();
+
+        assert_eq!(
+            reader
+                .pack_checksum_for_exact_objects(pack_id, &[object], &[], &budget, &cancellation)
+                .await
+                .expect("unproven base check"),
+            None
+        );
+        assert_eq!(
+            reader
+                .pack_checksum_for_exact_objects(
+                    pack_id,
+                    &[object],
+                    &[base],
+                    &budget,
+                    &cancellation,
+                )
+                .await
+                .expect("proven base check"),
+            Some([7; 20])
+        );
+        runtime.shutdown().await;
     }
 
     #[tokio::test]

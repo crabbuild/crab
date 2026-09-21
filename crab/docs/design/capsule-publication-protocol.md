@@ -9,9 +9,16 @@
 | Status | Protocol-v2 ordinary Git/server paths implemented; full v1 parity and current-format qualification open |
 | Priority | Correctness, then request latency, throughput, and transferred bytes |
 | Replaces | The v1 multi-object publication layout after an explicit cutover |
-| Companion | [Protocol v2 Xorb and Shard Integration](capsule-xorbs-shards.md), [Push Pipeline Deep Dive](push.md), [Canonical Object Storage Layout V1](../architecture/object-storage-layout.md) |
+| Companion | [Protocol v2 Stable Layered Packs](capsule-layered-packs.md), [Protocol v2 Xorb and Shard Integration](capsule-xorbs-shards.md), [Push Pipeline Deep Dive](push.md), [Canonical Object Storage Layout V1](../architecture/object-storage-layout.md) |
 
 ### Implementation status
+
+The current `CRBCKP03` complete-pack checkpoint is a measured scaling blocker,
+not the final v2 storage shape. The [stable layered-pack
+plan](capsule-layered-packs.md) replaces it with metadata-only checkpoints and
+content-addressed geometric pack layers. Until that plan passes its full
+qualification matrix, the complete-pack clauses below describe current
+behavior and correctness constraints rather than an accepted release design.
 
 The hard-cutover implementation is wired to the user-facing ordinary Git path:
 
@@ -687,6 +694,23 @@ validate.
 
 `git pull` adds no remote storage protocol. It performs this fetch and then Git
 merges or rebases locally.
+
+Protocol-v2 negotiation is multi-round: Git may send `have` lines in several
+requests and omit them from the terminal request carrying `done`. The server
+retains a deduplicated, bounded union of those haves and gives that union to
+the tip-bound transition planner. Dropping earlier rounds silently turns an
+incremental fetch into a full authenticated graph walk; retaining them keeps
+the planner on the exact transition delta while rejecting an unbounded
+negotiation rather than dropping proof inputs.
+
+RustFS qualification on the Kubernetes repository demonstrated the effect:
+the fresh base-to-tip fetch carried 17 negotiation rounds and 140,589 haves,
+but the authenticated transition selected 778 objects, generated a 1.48 MiB
+pack in 38 ms, and used two remote object reads (1.52 MiB fetched inside the
+remote-Git operation). End-to-end Git time was 5.91 s and connectivity fsck
+passed; the remaining wall time was local Git negotiation/indexing, not a
+repository-wide object-store walk. A true full clone, shallow/deepen request,
+filter, or incomplete transition proof still uses its strict bounded fallback.
 
 ### 10.4 Shallow, partial, and lazy fetch
 

@@ -12,7 +12,7 @@ const MAX_CAPSULE_SECTIONS: usize = 65_535;
 const MAX_CAPSULE_FOOTER_BYTES: usize = 8 * 1024 * 1024;
 
 /// Authoritative payload kind stored inside one immutable capsule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapsuleSectionKind {
     /// Canonical expected-old ref transaction; always the first section.
@@ -35,6 +35,8 @@ pub enum CapsuleSectionKind {
     VisibilityDelta,
     /// Complete authorization visibility state compacted into a checkpoint.
     VisibilitySnapshot,
+    /// Compact ordinal authorization visibility state for a layered checkpoint.
+    VisibilityOrdinalSnapshot,
 }
 
 /// One locally prepared capsule payload section.
@@ -53,6 +55,7 @@ pub struct CapsuleGitPack {
     pub(crate) locator: Bytes,
     pub(crate) git_checksum: String,
     pub(crate) object_count: u64,
+    pub(crate) external_delta_bases: Vec<String>,
 }
 
 impl CapsuleGitPack {
@@ -65,6 +68,31 @@ impl CapsuleGitPack {
         git_checksum: impl Into<String>,
         object_count: u64,
     ) -> Result<Self> {
+        Self::new_with_external_delta_bases(
+            pack,
+            index,
+            reverse_index,
+            locator,
+            git_checksum,
+            object_count,
+            Vec::new(),
+        )
+    }
+
+    /// Bind a pack and declare the object IDs required by its `REF_DELTA` entries.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the descriptor carries each independently authenticated Git artifact"
+    )]
+    pub fn new_with_external_delta_bases(
+        pack: Bytes,
+        index: Bytes,
+        reverse_index: Bytes,
+        locator: Bytes,
+        git_checksum: impl Into<String>,
+        object_count: u64,
+        external_delta_bases: Vec<String>,
+    ) -> Result<Self> {
         let pack = Self {
             pack,
             index,
@@ -72,6 +100,7 @@ impl CapsuleGitPack {
             locator,
             git_checksum: git_checksum.into(),
             object_count,
+            external_delta_bases,
         };
         validate_git_pack_input(&pack)?;
         Ok(pack)
@@ -118,6 +147,12 @@ impl CapsuleGitPack {
     pub fn object_count(&self) -> u64 {
         self.object_count
     }
+
+    /// Return external `REF_DELTA` bases required by this pack.
+    #[must_use]
+    pub fn external_delta_bases(&self) -> &[String] {
+        &self.external_delta_bases
+    }
 }
 
 /// Authenticated section bindings and Git identity for one capsule pack.
@@ -130,6 +165,8 @@ pub struct CapsuleGitPackDescriptor {
     pub(crate) locator_section: u32,
     pub(crate) git_checksum: String,
     pub(crate) object_count: u64,
+    #[serde(default)]
+    pub(crate) external_delta_bases: Vec<String>,
 }
 
 impl CapsuleGitPackDescriptor {
@@ -167,6 +204,12 @@ impl CapsuleGitPackDescriptor {
     #[must_use]
     pub fn object_count(&self) -> u64 {
         self.object_count
+    }
+
+    /// Return external `REF_DELTA` bases required by this pack.
+    #[must_use]
+    pub fn external_delta_bases(&self) -> &[String] {
+        &self.external_delta_bases
     }
 }
 
@@ -279,6 +322,7 @@ impl Capsule {
                 locator_section: first + 3,
                 git_checksum: pack.git_checksum,
                 object_count: pack.object_count,
+                external_delta_bases: pack.external_delta_bases,
             });
         }
         encoded_sections.extend(
@@ -567,6 +611,7 @@ fn validate_git_pack_input(pack: &CapsuleGitPack) -> Result<()> {
     if pack.object_count == 0 {
         return Err(contract_error("capsule Git pack must contain an object"));
     }
+    validate_external_delta_bases(&pack.external_delta_bases, pack.object_count)?;
     Ok(())
 }
 
@@ -582,6 +627,8 @@ fn validate_git_pack_descriptors(footer: &CapsuleFooter) -> Result<()> {
         if descriptor.object_count == 0 {
             return Err(corrupt("capsule Git pack has zero objects"));
         }
+        validate_external_delta_bases(&descriptor.external_delta_bases, descriptor.object_count)
+            .map_err(|error| corrupt(error.to_string()))?;
         let bindings = [
             (descriptor.pack_section, CapsuleSectionKind::GitPack),
             (descriptor.index_section, CapsuleSectionKind::GitIndex),
@@ -616,6 +663,28 @@ fn validate_git_pack_descriptors(footer: &CapsuleFooter) -> Result<()> {
         if is_git_section(location.kind) != claimed[index] {
             return Err(corrupt(
                 "capsule Git sections must belong to exactly one pack descriptor",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_external_delta_bases(bases: &[String], object_count: u64) -> Result<()> {
+    if bases.len() as u64 > object_count {
+        return Err(contract_error(
+            "capsule Git external delta base count exceeds its object count",
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for base in bases {
+        validate_sha1(
+            base,
+            "capsule Git external delta base",
+            "capsule-protocol capsule",
+        )?;
+        if !seen.insert(base) {
+            return Err(contract_error(
+                "capsule Git external delta base list repeats an object",
             ));
         }
     }

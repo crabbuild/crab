@@ -197,7 +197,103 @@ pub async fn run_repack_from_root(
     config: &RepackConfig,
     cancel: &CancellationToken,
 ) -> Result<RepackOutcome> {
-    run_capsule_repack(store, prefix, config, cancel, Some(root)).await
+    run_layered_repack_from_root(store, prefix, root, config, cancel).await
+}
+
+async fn run_layered_repack_from_root(
+    store: &Store,
+    prefix: &str,
+    root: crab_metadata::capsule_protocol::RootSnapshot,
+    config: &RepackConfig,
+    cancel: &CancellationToken,
+) -> Result<RepackOutcome> {
+    const MAX_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+    let started = Instant::now();
+    check_cancelled(cancel)?;
+    let router = StoreLayout::new(store.clone(), prefix.to_owned());
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let view = open_repack_view(&layout, root, MAX_CHECKPOINT_BYTES).await?;
+    if view.refs().is_empty() {
+        return Err(CrabError::Protocol(
+            "cannot checkpoint an unborn repository".to_owned(),
+        ));
+    }
+    let packs_before = view.git_pack_count();
+    let bytes_before = view.git_pack_bytes()?;
+    let mut source_hashes = BTreeSet::new();
+    if let Some(checkpoint) = view.layered_checkpoint() {
+        source_hashes.extend(
+            checkpoint
+                .sources()
+                .iter()
+                .map(|source| source.object_hash().to_owned()),
+        );
+    }
+    source_hashes.extend(
+        view.capsule_run_sources()
+            .iter()
+            .map(|source| source.object_hash().to_owned()),
+    );
+    let compaction_due = source_hashes.len() > 8;
+    let published = if config.dry_run {
+        false
+    } else {
+        check_cancelled(cancel)?;
+        crab_remote::checkpoint::publish_capsule_checkpoint_with_catalog_from_view(
+            &layout,
+            &view,
+            view.pointer_catalog()?,
+            MAX_CHECKPOINT_BYTES,
+            cancel,
+        )
+        .await
+        .map_err(map_checkpoint_error)?
+    };
+    let (packs_after, bytes_after) = if published {
+        let committed = crab_write::capsule_protocol::open_root(&layout).await?;
+        let committed = open_repack_view(&layout, committed, MAX_CHECKPOINT_BYTES).await?;
+        (committed.git_pack_count(), committed.git_pack_bytes()?)
+    } else {
+        (packs_before, bytes_before)
+    };
+    Ok(RepackOutcome {
+        packs_before,
+        packs_after,
+        bytes_before,
+        bytes_after,
+        bytes_read: if compaction_due { bytes_before } else { 0 },
+        bytes_written: if compaction_due { bytes_after } else { 0 },
+        elapsed: started.elapsed(),
+    })
+}
+
+async fn open_repack_view(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    root: crab_metadata::capsule_protocol::RootSnapshot,
+    maximum_bytes: u64,
+) -> crab_read::Result<crab_read::capsule_protocol::CapsuleRepositoryView> {
+    let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+        max_capsule_bytes: maximum_bytes,
+        max_frontier_bytes: maximum_bytes,
+    };
+    let control =
+        crab_read::capsule_protocol::open_view_from_root_with_control(layout, root.clone(), limits)
+            .await?;
+    let has_admission = control.capsule_run_sources().iter().all(|source| {
+        control
+            .capsule_run_member_oids()
+            .contains_key(source.object_hash())
+    });
+    if has_admission {
+        Ok(control)
+    } else {
+        crab_read::capsule_protocol::open_view_from_root(layout, root, limits).await
+    }
 }
 
 async fn run_capsule_repack(

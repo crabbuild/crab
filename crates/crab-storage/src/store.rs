@@ -24,14 +24,14 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::Stream;
-use futures_util::StreamExt as _;
+use futures_util::{StreamExt as _, TryStreamExt as _};
 use object_store::path::Path;
 use object_store::{
     Attributes, GetOptions, GetRange, MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt,
     PutMode, PutOptions,
 };
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter};
 
 use crab_types::storage::StorageScope;
 
@@ -71,6 +71,11 @@ pub type StorageByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + '
 
 /// Bounded-memory stream of object metadata below one exact prefix.
 pub type StorageObjectStream = Pin<Box<dyn Stream<Item = Result<ObjectMeta>> + Send + 'static>>;
+
+const SIGNED_RANGE_CHUNK_BYTES: u64 = 512 * 1024 * 1024;
+const SIGNED_RANGE_READ_CONCURRENCY: usize = 4;
+const SIGNED_RANGE_WRITE_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+const SIGNED_RANGE_GET_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Re-openable bounded source for a retryable multipart upload.
 ///
@@ -1569,6 +1574,16 @@ impl Store {
     /// Returns [`StorageError::NotFound`] if `path` does not exist, or
     /// the backend's error if the range is unsatisfiable.
     pub async fn range_get(&self, path: &Path, range: Range<u64>) -> Result<Bytes> {
+        let large_range = range
+            .end
+            .checked_sub(range.start)
+            .is_some_and(|length| length >= SIGNED_RANGE_GET_THRESHOLD_BYTES);
+        if large_range && self.signer.is_some() && self.read_routes.is_none() {
+            match self.try_signed_range_get(path, range.clone()).await? {
+                Some(bytes) => return Ok(bytes),
+                None => {}
+            }
+        }
         retry(&self.retry, || {
             let path = path.clone();
             let range = range.clone();
@@ -1584,6 +1599,24 @@ impl Store {
             }
         })
         .await
+    }
+
+    async fn try_signed_range_get(&self, path: &Path, range: Range<u64>) -> Result<Option<Bytes>> {
+        let Some(_) = self.signer else {
+            return Ok(None);
+        };
+        let url = self.signed_url(path, Duration::from_secs(300)).await?;
+        let client = reqwest::Client::builder().build().map_err(|error| {
+            StorageError::Internal(format!("signed object client failed: {error}"))
+        })?;
+        match self
+            .download_signed_range(&client, &url, path.as_ref(), range)
+            .await
+        {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(StorageError::NotSupported { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// Deletes `path`.
@@ -2839,6 +2872,440 @@ impl Store {
             .signed_url(reqwest::Method::GET, path, expires_in)
             .await
             .map_err(|e| StorageError::Internal(format!("signed_url failed: {e}")))
+    }
+
+    /// Download two authenticated ranges from one immutable S3 object.
+    ///
+    /// The pack range is split into bounded parallel requests and written at
+    /// its exact local offsets; the second range is returned in memory for
+    /// sidecar slicing. The consumed ranges are checked for exact lengths and
+    /// the pack bytes are hashed after reassembly. Bytes outside those ranges
+    /// are deliberately not downloaded: the source path and range commitments
+    /// are already authenticated by the layered checkpoint.
+    ///
+    /// Returns `Ok(None)` when the store has no signer or has routed reads to
+    /// another provider.
+    pub async fn try_download_signed_ranges_to_path(
+        &self,
+        path: &Path,
+        destination: &std::path::Path,
+        expected_size: u64,
+        expected_hash: &str,
+        write_range: std::ops::Range<u64>,
+        capture_range: std::ops::Range<u64>,
+    ) -> Result<Option<(Bytes, blake3::Hash)>> {
+        if self.signer.is_none() || self.read_routes.is_some() {
+            return Ok(None);
+        }
+        let _expected_source_hash =
+            blake3::Hash::from_hex(expected_hash).map_err(|error| StorageError::CorruptObject {
+                path: path.to_string(),
+                reason: format!("invalid expected source hash: {error}"),
+            })?;
+        if write_range.start == write_range.end
+            || capture_range.start == capture_range.end
+            || write_range.end > expected_size
+            || write_range.start > write_range.end
+            || capture_range.end > expected_size
+            || capture_range.start > capture_range.end
+        {
+            return Err(StorageError::CorruptObject {
+                path: path.to_string(),
+                reason: "signed source extraction range is outside the source".to_owned(),
+            });
+        }
+        let url = self.signed_url(path, Duration::from_secs(300)).await?;
+        let client = reqwest::Client::builder().build().map_err(|error| {
+            StorageError::Internal(format!("signed object client failed: {error}"))
+        })?;
+        let destination = destination.to_owned();
+        let path_text = path.to_string();
+        let pack_length = write_range.end - write_range.start;
+        let coalesce_capture = capture_range.start == write_range.end;
+        let download_end = if coalesce_capture {
+            capture_range.end
+        } else {
+            write_range.end
+        };
+        let download_length = download_end - write_range.start;
+        let mut downloaded_pack_hash = None;
+        let captured = if coalesce_capture {
+            // Pack and sidecar bytes are contiguous in the immutable source.
+            // One sequential read avoids making a local RustFS disk service
+            // several large competing range requests for the same object.
+            let combined_range = write_range.start..download_end;
+            let mut output = tokio::fs::File::create(&destination).await?;
+            output.set_len(download_length).await?;
+            output.flush().await?;
+            drop(output);
+            downloaded_pack_hash = Some(
+                self.download_signed_range_to_path_with_hash(
+                    &client,
+                    &url,
+                    &path_text,
+                    &destination,
+                    combined_range,
+                    write_range.start,
+                    pack_length,
+                )
+                .await?,
+            );
+            let capture_length = capture_range.end - capture_range.start;
+            let mut input = tokio::fs::File::open(&destination).await?;
+            input
+                .seek(std::io::SeekFrom::Start(
+                    capture_range.start - write_range.start,
+                ))
+                .await?;
+            let mut captured = vec![
+                0_u8;
+                usize::try_from(capture_length).map_err(|_| {
+                    StorageError::CorruptObject {
+                        path: path_text.clone(),
+                        reason: "signed sidecar range is too large to capture".to_owned(),
+                    }
+                })?
+            ];
+            input.read_exact(&mut captured).await?;
+            let mut output = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(&destination)
+                .await?;
+            output.set_len(pack_length).await?;
+            output.flush().await?;
+            Bytes::from(captured)
+        } else {
+            let mut pack_ranges = Vec::new();
+            let mut start = write_range.start;
+            while start < write_range.end {
+                let end = start
+                    .saturating_add(SIGNED_RANGE_CHUNK_BYTES)
+                    .min(write_range.end);
+                pack_ranges.push(start..end);
+                start = end;
+            }
+            let mut output = tokio::fs::File::create(&destination).await?;
+            output.set_len(pack_length).await?;
+            output.flush().await?;
+            drop(output);
+            let pack_downloads = futures_util::stream::iter(pack_ranges.into_iter().map(|range| {
+                let client = client.clone();
+                let url = url.clone();
+                let destination = destination.clone();
+                let path_text = path_text.clone();
+                async move {
+                    self.download_signed_range_to_path(
+                        &client,
+                        &url,
+                        &path_text,
+                        &destination,
+                        range,
+                        write_range.start,
+                    )
+                    .await
+                }
+            }))
+            .buffer_unordered(SIGNED_RANGE_READ_CONCURRENCY)
+            .try_collect::<Vec<_>>();
+            let capture =
+                self.download_signed_range(&client, &url, &path_text, capture_range.clone());
+            let (captured, _) = tokio::try_join!(capture, pack_downloads)?;
+            captured
+        };
+
+        if captured.len() as u64 != capture_range.end - capture_range.start {
+            return Err(StorageError::CorruptObject {
+                path: path_text,
+                reason: "signed range body failed its authenticated lengths".to_owned(),
+            });
+        }
+        let pack_hash = if let Some(hash) = downloaded_pack_hash {
+            hash
+        } else {
+            let mut input = tokio::fs::File::open(&destination).await?;
+            let mut hasher = blake3::Hasher::new();
+            let mut buffer = vec![0_u8; 1024 * 1024];
+            let mut size = 0_u64;
+            loop {
+                let read = input.read(&mut buffer).await?;
+                if read == 0 {
+                    break;
+                }
+                size =
+                    size.checked_add(read as u64)
+                        .ok_or_else(|| StorageError::CorruptObject {
+                            path: path_text.clone(),
+                            reason: "signed pack length overflowed".to_owned(),
+                        })?;
+                hasher.update(&buffer[..read]);
+            }
+            if size != pack_length {
+                return Err(StorageError::CorruptObject {
+                    path: path_text,
+                    reason: "signed pack body length changed after download".to_owned(),
+                });
+            }
+            hasher.finalize()
+        };
+        Ok(Some((Bytes::from(captured), pack_hash)))
+    }
+
+    async fn download_signed_range(
+        &self,
+        client: &reqwest::Client,
+        url: &url::Url,
+        path: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<Bytes> {
+        retry(&self.retry, || {
+            let client = client.clone();
+            let url = url.clone();
+            let path = path.to_owned();
+            let range = range.clone();
+            async move {
+                let bytes = self
+                    .download_signed_response(&client, &url, &path, range.clone())
+                    .await?;
+                if bytes.len() as u64 != range.end - range.start {
+                    return Err(StorageError::CorruptObject {
+                        path,
+                        reason: "signed range body length does not match its request".to_owned(),
+                    });
+                }
+                self.record_read_bytes(bytes.len() as u64);
+                Ok(bytes)
+            }
+        })
+        .await
+    }
+
+    async fn download_signed_range_to_path(
+        &self,
+        client: &reqwest::Client,
+        url: &url::Url,
+        path: &str,
+        destination: &std::path::Path,
+        range: std::ops::Range<u64>,
+        base: u64,
+    ) -> Result<()> {
+        retry(&self.retry, || {
+            let client = client.clone();
+            let url = url.clone();
+            let path = path.to_owned();
+            let destination = destination.to_owned();
+            let range = range.clone();
+            async move {
+                let response = self
+                    .download_signed_response_stream(&client, &url, &path, range.clone())
+                    .await?;
+                let output = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&destination)
+                    .await?;
+                let mut output = BufWriter::with_capacity(SIGNED_RANGE_WRITE_BUFFER_BYTES, output);
+                output
+                    .seek(std::io::SeekFrom::Start(range.start - base))
+                    .await?;
+                let mut body = response.bytes_stream();
+                let mut size = 0_u64;
+                while let Some(chunk) = body.next().await {
+                    let chunk = chunk.map_err(|error| StorageError::NetworkTransient {
+                        source: object_store::Error::Generic {
+                            store: "signed object range read",
+                            source: Box::new(error),
+                        },
+                    })?;
+                    size = size.checked_add(chunk.len() as u64).ok_or_else(|| {
+                        StorageError::CorruptObject {
+                            path: path.clone(),
+                            reason: "signed range length overflowed".to_owned(),
+                        }
+                    })?;
+                    if size > range.end - range.start {
+                        return Err(StorageError::CorruptObject {
+                            path: path.clone(),
+                            reason: "signed range body exceeded its request".to_owned(),
+                        });
+                    }
+                    output.write_all(&chunk).await?;
+                }
+                output.flush().await?;
+                if size != range.end - range.start {
+                    return Err(StorageError::CorruptObject {
+                        path,
+                        reason: "signed range body ended before its request".to_owned(),
+                    });
+                }
+                self.record_read_bytes(size);
+                Ok(())
+            }
+        })
+        .await
+    }
+
+    async fn download_signed_range_to_path_with_hash(
+        &self,
+        client: &reqwest::Client,
+        url: &url::Url,
+        path: &str,
+        destination: &std::path::Path,
+        range: std::ops::Range<u64>,
+        base: u64,
+        hash_length: u64,
+    ) -> Result<blake3::Hash> {
+        if hash_length > range.end - range.start {
+            return Err(StorageError::CorruptObject {
+                path: path.to_owned(),
+                reason: "signed hash prefix exceeds its requested range".to_owned(),
+            });
+        }
+        retry(&self.retry, || {
+            let client = client.clone();
+            let url = url.clone();
+            let path = path.to_owned();
+            let destination = destination.to_owned();
+            let range = range.clone();
+            async move {
+                let response = self
+                    .download_signed_response_stream(&client, &url, &path, range.clone())
+                    .await?;
+                let output = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&destination)
+                    .await?;
+                let mut output = BufWriter::with_capacity(SIGNED_RANGE_WRITE_BUFFER_BYTES, output);
+                output
+                    .seek(std::io::SeekFrom::Start(range.start - base))
+                    .await?;
+                let mut body = response.bytes_stream();
+                let mut size = 0_u64;
+                let mut hasher = blake3::Hasher::new();
+                while let Some(chunk) = body.next().await {
+                    let chunk = chunk.map_err(|error| StorageError::NetworkTransient {
+                        source: object_store::Error::Generic {
+                            store: "signed object range read",
+                            source: Box::new(error),
+                        },
+                    })?;
+                    let next_size = size.checked_add(chunk.len() as u64).ok_or_else(|| {
+                        StorageError::CorruptObject {
+                            path: path.clone(),
+                            reason: "signed range length overflowed".to_owned(),
+                        }
+                    })?;
+                    if next_size > range.end - range.start {
+                        return Err(StorageError::CorruptObject {
+                            path: path.clone(),
+                            reason: "signed range body exceeded its request".to_owned(),
+                        });
+                    }
+                    let hash_bytes = hash_length.saturating_sub(size).min(chunk.len() as u64);
+                    if hash_bytes != 0 {
+                        hasher.update(
+                            &chunk[..usize::try_from(hash_bytes).map_err(|_| {
+                                StorageError::CorruptObject {
+                                    path: path.clone(),
+                                    reason: "signed hash prefix is too large".to_owned(),
+                                }
+                            })?],
+                        );
+                    }
+                    output.write_all(&chunk).await?;
+                    size = next_size;
+                }
+                output.flush().await?;
+                if size != range.end - range.start {
+                    return Err(StorageError::CorruptObject {
+                        path,
+                        reason: "signed range body ended before its request".to_owned(),
+                    });
+                }
+                self.record_read_bytes(size);
+                Ok(hasher.finalize())
+            }
+        })
+        .await
+    }
+
+    async fn download_signed_response(
+        &self,
+        client: &reqwest::Client,
+        url: &url::Url,
+        path: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<Bytes> {
+        Ok(self
+            .download_signed_response_stream(client, url, path, range)
+            .await?
+            .bytes()
+            .await
+            .map_err(|error| StorageError::NetworkTransient {
+                source: object_store::Error::Generic {
+                    store: "signed object range read",
+                    source: Box::new(error),
+                },
+            })?)
+    }
+
+    async fn download_signed_response_stream(
+        &self,
+        client: &reqwest::Client,
+        url: &url::Url,
+        path: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<reqwest::Response> {
+        let range_header = format!("bytes={}-{}", range.start, range.end - 1);
+        self.record_read_request(StorageReadKind::Range);
+        let response = client
+            .get(url.clone())
+            .header(reqwest::header::RANGE, range_header)
+            .send()
+            .await
+            .map_err(|error| StorageError::NetworkTransient {
+                source: object_store::Error::Generic {
+                    store: "signed object range read",
+                    source: Box::new(error),
+                },
+            })?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(StorageError::NotFound {
+                path: path.to_owned(),
+            });
+        }
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(StorageError::Forbidden {
+                path: path.to_owned(),
+            });
+        }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            return Err(StorageError::NetworkTransient {
+                source: object_store::Error::Generic {
+                    store: "signed object range read",
+                    source: Box::new(std::io::Error::other(format!("HTTP status {status}"))),
+                },
+            });
+        }
+        if status != reqwest::StatusCode::PARTIAL_CONTENT {
+            return Err(StorageError::NotSupported {
+                source: object_store::Error::NotSupported {
+                    source: Box::new(std::io::Error::other(format!(
+                        "signed object range read returned HTTP status {status}"
+                    ))),
+                },
+            });
+        }
+        if response.content_length() != Some(range.end - range.start) {
+            return Err(StorageError::CorruptObject {
+                path: path.to_owned(),
+                reason: format!(
+                    "signed range length {:?} does not match expected {}",
+                    response.content_length(),
+                    range.end - range.start
+                ),
+            });
+        }
+        Ok(response)
     }
 }
 

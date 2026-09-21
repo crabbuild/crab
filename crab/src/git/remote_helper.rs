@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
 use std::io::Stderr;
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -309,6 +310,12 @@ pub struct HelperOptions {
     /// targets are transferred. Crab fetches complete packs, so accepting this
     /// hint requires no separate object-transfer path.
     pub followtags: bool,
+}
+
+#[derive(Debug, Default)]
+struct FetchBatchResult {
+    connectivity_lock: Option<std::path::PathBuf>,
+    connectivity_ok: bool,
 }
 
 impl Default for HelperOptions {
@@ -1363,19 +1370,103 @@ fn parse_ref_lease(value: &str) -> Result<(String, Option<String>)> {
 
 async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
-    _store: &crate::storage::store::Store,
-    _router: &StoreLayout,
-    _cache: &mut SessionCache,
+    store: &crate::storage::store::Store,
+    router: &StoreLayout,
+    cache: &mut SessionCache,
     _cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     tracing::debug!("responding to capabilities");
     // The terminal upload-pack wire serves both authenticated capsule roots
     // and verified legacy manifests. Advertising it for legacy repositories
     // preserves clone/fetch without pretending the legacy store is v2.
-    let caps = format_capabilities_with_v2(true, true);
+    //
+    // A new clone does not have a local object base. For the narrow
+    // one-member layered case, the classic remote-helper fetch contract can
+    // install the authenticated pack, index, and reverse index directly. Do
+    // not force that clone through protocol-v2's pack stream, which makes Git
+    // re-index a pack that Crab already has indexed. Existing repositories
+    // retain stateless-connect for filters, shallow history, and incremental
+    // negotiation.
+    let mut v2_ready = true;
+    if !cache.legacy_v1 && local_git_object_store_is_empty() {
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        match open_capsule_fetch_view_minimal(store, router, cache.config(), None).await {
+            Ok(view) => {
+                let direct = view
+                    .layered_cold_clone_pack(&layout, capsule_fetch_maximum(cache.config()))?
+                    .is_some();
+                if direct {
+                    cache.capsule_view = Some(view);
+                    v2_ready = false;
+                    tracing::debug!(
+                        "advertising classic fetch for authenticated one-pack cold clone"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    "cold-clone capability probe unavailable; keeping protocol-v2"
+                );
+            }
+        }
+    }
+    let caps = format_capabilities_with_v2(true, v2_ready);
     writer.write_all(caps.as_bytes()).await?;
     writer.flush().await?;
     Ok(())
+}
+
+fn local_git_object_store_is_empty() -> bool {
+    let Ok(git_dir) = super::discover::discover_git_dir() else {
+        return false;
+    };
+    let objects = git_dir.join("objects");
+    let Ok(entries) = std::fs::read_dir(&objects) else {
+        return true;
+    };
+    let alternates = objects.join("info").join("alternates");
+    if std::fs::read_to_string(alternates)
+        .is_ok_and(|content| content.lines().any(|line| !line.trim().is_empty()))
+    {
+        return false;
+    }
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == "info" || name == "pack" {
+            if name == "pack" {
+                let Ok(pack_entries) = std::fs::read_dir(path) else {
+                    continue;
+                };
+                if pack_entries.flatten().any(|pack| pack.path().is_file()) {
+                    return false;
+                }
+            } else if path.is_file() {
+                if std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0) {
+                    return false;
+                }
+            }
+            continue;
+        }
+        if name.len() == 2 && path.is_dir() {
+            let Ok(loose_entries) = std::fs::read_dir(path) else {
+                continue;
+            };
+            if loose_entries
+                .flatten()
+                .any(|object| object.path().is_file())
+            {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Dispatch a collected batch and write the response.
@@ -1910,7 +2001,7 @@ where
             "filtered fetch requires protocol v2".to_owned(),
         ));
     }
-    let mut connectivity_lock = None;
+    let mut fetch_result = FetchBatchResult::default();
     if let Some(s) = store {
         let cfg = cache.config().clone();
         let (read_store, router) =
@@ -1918,7 +2009,7 @@ where
                 .await;
         let read_caching_store =
             crab_cache_store::CachingStore::new(read_store.clone(), &cfg.cache).ok();
-        connectivity_lock = fetch_packs(
+        fetch_result = Box::pin(fetch_packs(
             &read_store,
             &router,
             entries,
@@ -1931,22 +2022,25 @@ where
             cancel,
             options.check_connectivity,
             options.followtags,
-        )
+        ))
         .await?;
     } else {
         tracing::warn!("no store available for fetch");
     }
     let response = async {
-        if let Some(keep_path) = &connectivity_lock {
-            let line = format!("lock {}\nconnectivity-ok\n", keep_path.display());
+        if let Some(keep_path) = &fetch_result.connectivity_lock {
+            let line = format!("lock {}\n", keep_path.display());
             writer.write_all(line.as_bytes()).await?;
+        }
+        if fetch_result.connectivity_ok {
+            writer.write_all(b"connectivity-ok\n").await?;
         }
         writer.write_all(b"\n").await?;
         writer.flush().await
     }
     .await;
     if response.is_err()
-        && let Some(keep_path) = &connectivity_lock
+        && let Some(keep_path) = &fetch_result.connectivity_lock
     {
         let _ = std::fs::remove_file(keep_path);
     }
@@ -2619,7 +2713,7 @@ async fn fetch_packs(
     cancel: &tokio_util::sync::CancellationToken,
     check_connectivity: bool,
     include_tags: bool,
-) -> Result<Option<std::path::PathBuf>> {
+) -> Result<FetchBatchResult> {
     let raw_object_fetch = classify_raw_object_fetch(entries)?;
     if raw_object_fetch {
         if fetch_options.depth.is_some()
@@ -2646,7 +2740,7 @@ async fn fetch_packs(
             ),
         )
         .await?;
-        return Ok(None);
+        return Ok(FetchBatchResult::default());
     }
     if fetch_options.filter.is_some() {
         return Err(CrabError::Protocol(
@@ -2693,7 +2787,7 @@ async fn fetch_packs(
             ),
         )
         .await?;
-        return Ok(None);
+        return Ok(FetchBatchResult::default());
     }
     fetch_capsule_packs(
         store,
@@ -2702,6 +2796,7 @@ async fn fetch_packs(
         config,
         cache.capsule_view.take(),
         check_connectivity,
+        cancel,
     )
     .await
 }
@@ -2738,6 +2833,82 @@ async fn open_capsule_fetch_view(
         .map_err(Into::into)
 }
 
+async fn open_capsule_fetch_view_minimal(
+    store: &crate::storage::store::Store,
+    router: &StoreLayout,
+    config: &crate::core::config::Config,
+    cached_view: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
+) -> Result<crab_read::capsule_protocol::CapsuleRepositoryView> {
+    if let Some(view) = cached_view {
+        return Ok(view);
+    }
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+        max_capsule_bytes: capsule_fetch_maximum(config),
+        max_frontier_bytes: capsule_fetch_maximum(config),
+    };
+    let root = crab_write::capsule_protocol::open_root(&layout).await?;
+    crab_read::capsule_protocol::open_view_from_root_with_layered_control(&layout, root, limits)
+        .await
+        .map_err(Into::into)
+}
+
+async fn open_capsule_fetch_view_for_fetch(
+    store: &crate::storage::store::Store,
+    router: &StoreLayout,
+    config: &crate::core::config::Config,
+    cached_view: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
+    fresh_clone: bool,
+) -> Result<crab_read::capsule_protocol::CapsuleRepositoryView> {
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+        max_capsule_bytes: capsule_fetch_maximum(config),
+        max_frontier_bytes: capsule_fetch_maximum(config),
+    };
+    if let Some(view) = cached_view {
+        // Layered cold clones deliberately stay on the footer/control view:
+        // the authenticated source and ordinal admission are sufficient for
+        // direct range installation.  Promoting that view would read the
+        // entire immutable capsule before the pack fast path can run.
+        let needs_complete_view = fresh_clone && view.checkpoint_control().is_some();
+        if !needs_complete_view {
+            return Ok(view);
+        }
+        return crab_read::capsule_protocol::open_view_from_root(
+            &layout,
+            view.root_snapshot().clone(),
+            limits,
+        )
+        .await
+        .map_err(Into::into);
+    }
+    let root = crab_write::capsule_protocol::open_root(&layout).await?;
+    let layered = root.record().root().checkpoint().is_none()
+        || root
+            .record()
+            .root()
+            .checkpoint()
+            .is_some_and(|pointer| pointer.format() == 5);
+    let view = if layered {
+        crab_read::capsule_protocol::open_view_from_root_with_layered_control(&layout, root, limits)
+            .await
+    } else if fresh_clone {
+        crab_read::capsule_protocol::open_view_from_root(&layout, root, limits).await
+    } else {
+        crab_read::capsule_protocol::open_view_from_root_with_layered_control(&layout, root, limits)
+            .await
+    };
+    view.map_err(Into::into)
+}
+
 async fn fetch_capsule_packs(
     store: &crate::storage::store::Store,
     router: &StoreLayout,
@@ -2745,9 +2916,14 @@ async fn fetch_capsule_packs(
     config: &crate::core::config::Config,
     cached_view: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
     check_connectivity: bool,
-) -> Result<Option<std::path::PathBuf>> {
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<FetchBatchResult> {
     let maximum = capsule_fetch_maximum(config);
-    let view = open_capsule_fetch_view(store, router, config, cached_view).await?;
+    let git_dir = super::discover::discover_git_dir()?;
+    let haves = local_fetch_have_tips(&git_dir)?;
+    let mut view =
+        open_capsule_fetch_view_for_fetch(store, router, config, cached_view, haves.is_empty())
+            .await?;
     let advertisement = crab_read::capsule_ref_advertisement(&view, &config.transfer_hide_refs);
     let visible = advertisement
         .refs
@@ -2762,19 +2938,377 @@ async fn fetch_capsule_packs(
             )));
         }
     }
-    let git_dir = super::discover::discover_git_dir()?;
-    let installed = crab_read::capsule_protocol::install_git_packs_from_store(
-        &view,
-        store.as_storage(),
-        &crab_storage::StoreLayout::with_global_prefix(
+    // A layered checkpoint is control-only just like the legacy checkpoint
+    // control view.  Treating it as a cold view would install every stable
+    // source on every fetch, defeating stable-pack reuse and making a warm
+    // incremental fetch regress to a full clone.  No local haves still takes
+    // the complete-install path because there is no authorized delta base.
+    if haves.is_empty()
+        || (view.checkpoint_control().is_none() && view.layered_checkpoint().is_none())
+    {
+        let layout = crab_storage::StoreLayout::with_global_prefix(
             store.as_storage().clone(),
             router.repo_prefix().to_owned(),
             router.global_prefix().to_owned(),
-        ),
-        &git_dir,
+        );
+        let direct_layered_cold_clone =
+            haves.is_empty() && view.layered_cold_clone_pack(&layout, maximum)?.is_some();
+        if haves.is_empty()
+            && view.root().root().checkpoint().is_none()
+            && !direct_layered_cold_clone
+        {
+            // An uncheckpointed root may contain several runs.  Its control
+            // view is enough to advertise refs, but not to install every
+            // authenticated source.  Promote only this fallback to the
+            // complete reader; the one-run path above stays range-only.
+            let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: maximum,
+                max_frontier_bytes: maximum,
+            };
+            view = crab_read::capsule_protocol::open_view_from_root(
+                &layout,
+                view.root_snapshot().clone(),
+                limits,
+            )
+            .await
+            .map_err(CrabError::from)?;
+        }
+        let complete_layered_admission = if direct_layered_cold_clone {
+            view.layered_cold_clone_has_complete_admission_from_store(&layout, maximum)
+                .await?
+        } else {
+            false
+        };
+        let installed = crab_read::capsule_protocol::install_git_packs_from_store(
+            &view,
+            store.as_storage(),
+            &layout,
+            &git_dir,
+            maximum,
+        )
+        .await?;
+        if !complete_layered_admission {
+            crate::git::pack::validate_fetched_ref_tips(
+                &git_dir,
+                &entries
+                    .iter()
+                    .map(|entry| entry.sha.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
+        }
+        configure_fetched_repository(&git_dir)?;
+        tracing::info!(
+            installed_packs = installed.len(),
+            generation = view.root().root().generation(),
+            "capsule-protocol fetch installed authenticated capsule packs"
+        );
+        if !check_connectivity {
+            return Ok(FetchBatchResult::default());
+        }
+        if direct_layered_cold_clone || view.layered_checkpoint().is_some() {
+            let ref_tips = entries
+                .iter()
+                .map(|entry| entry.sha.clone())
+                .collect::<Vec<_>>();
+            if complete_layered_admission {
+                let connectivity_lock = if installed.len() == 1 {
+                    crate::git::pack::create_existing_pack_connectivity_lock(&installed[0]).await?
+                } else {
+                    None
+                };
+                tracing::debug!(
+                    admitted_objects = view
+                        .layered_checkpoint()
+                        .and_then(|checkpoint| checkpoint.object_count().ok())
+                        .unwrap_or_default(),
+                    "layered cold clone used authenticated visibility admission"
+                );
+                return Ok(FetchBatchResult {
+                    connectivity_lock,
+                    connectivity_ok: true,
+                });
+            }
+            let connectivity =
+                crate::git::connectivity::check_connectivity_with_fsck(&git_dir, &ref_tips, cancel)
+                    .await?;
+            if !connectivity.complete || !connectivity.missing.is_empty() {
+                return Err(CrabError::Protocol(format!(
+                    "layered fetch is not connected (complete={}, missing={})",
+                    connectivity.complete,
+                    connectivity.missing.len()
+                )));
+            }
+            tracing::debug!(
+                objects_checked = connectivity.objects_checked,
+                "layered full fetch proved connectivity without response pack"
+            );
+            return Ok(FetchBatchResult {
+                connectivity_lock: None,
+                connectivity_ok: true,
+            });
+        }
+        let connectivity_lock = crate::git::pack::create_connectivity_proof_pack(
+            &git_dir,
+            &entries
+                .iter()
+                .map(|entry| entry.sha.clone())
+                .collect::<Vec<_>>(),
+            view.root().digest(),
+        )
+        .await?;
+        return Ok(FetchBatchResult {
+            connectivity_lock,
+            connectivity_ok: check_connectivity,
+        });
+    }
+    let visible_ref_names = advertisement
+        .refs
+        .iter()
+        .map(|reference| reference.ref_name.clone())
+        .collect::<Vec<_>>();
+    // Keep the large upload-pack planner and response-pack state off this
+    // legacy fetch future's worker stack. Classic shallow fetches do not need
+    // the layered path, but the compiler otherwise gives both paths the same
+    // large async frame and can overflow Tokio's default test worker stack.
+    return Box::pin(fetch_capsule_incremental_packs(
+        &view,
+        store,
+        router,
+        entries,
+        config,
+        visible_ref_names,
+        git_dir,
+        haves,
         maximum,
-    )
-    .await?;
+        check_connectivity,
+        cancel,
+    ))
+    .await;
+}
+
+async fn fetch_capsule_incremental_packs(
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    store: &crate::storage::store::Store,
+    router: &StoreLayout,
+    entries: &[FetchEntry],
+    config: &crate::core::config::Config,
+    visible_ref_names: Vec<String>,
+    git_dir: std::path::PathBuf,
+    haves: Vec<gix_hash::ObjectId>,
+    maximum: u64,
+    check_connectivity: bool,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<FetchBatchResult> {
+    let wants = entries
+        .iter()
+        .map(|entry| {
+            gix_hash::ObjectId::from_hex(entry.sha.as_bytes()).map_err(|error| {
+                CrabError::Protocol(format!("invalid fetch ref tip {}: {error}", entry.sha))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let repository = capsule_git_repository(view, store, router, config, cancel).await?;
+    let request = crab_read::UploadPackRequest {
+        wants,
+        haves,
+        include_tags: false,
+        ..Default::default()
+    };
+    let plan = if view
+        .layered_checkpoint()
+        .is_some_and(|checkpoint| checkpoint.is_control_only())
+    {
+        crab_read::plan_upload_pack_tip_bound_with_transitions(
+            &repository,
+            &visible_ref_names,
+            &request,
+            Some(view.tip_bound_transitions()),
+            cancel,
+        )
+        .await
+    } else {
+        crab_read::plan_upload_pack(
+            &repository,
+            &view.git_visibility_index()?,
+            &visible_ref_names,
+            &request,
+            cancel,
+        )
+        .await
+    }
+    .map_err(|error| CrabError::Protocol(format!("incremental fetch planning failed: {error}")))?;
+    if !plan.object_ids.is_empty() {
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let pack_dir = git_dir.join("objects").join("pack");
+        // Direct layered installation publishes several immutable files. Keep
+        // the same per-repository install fence as generated response packs so
+        // concurrent fetches cannot observe or create a partial pack set.
+        let direct_install_lock = crate::git::fetch::acquire_fetch_install_lock(&pack_dir).await?;
+        // Compact frontier admission normally identifies the exact members
+        // without another lookup. A ref update can, however, reintroduce an
+        // object from an older stable layer; join those misses once against
+        // the authenticated locator instead of falling through to a full
+        // response-pack materialization.
+        let complete_local_base = local_fetch_thin_pack_eligible(&git_dir);
+        let (selected, selection_source) = if !complete_local_base {
+            // A shallow or promisor repository cannot use its local haves as
+            // a complete delta base. Keep the response self-contained rather
+            // than installing a member that depends on an unproven object.
+            (None, "incomplete_local_base")
+        } else {
+            let selected =
+                crab_read::capsule_protocol::layered_fetch_pack_selection(view, &plan.object_ids)
+                    .map_err(|error| {
+                    CrabError::Protocol(format!("incremental fetch admission failed: {error}"))
+                })?;
+            match selected {
+                Some(selected) => (Some(selected), "frontier_admission"),
+                None => {
+                    let pack_ids = repository
+                        .pack_ids_for_objects(&plan.object_ids, cancel)
+                        .await
+                        .map_err(|error| {
+                            CrabError::Protocol(format!(
+                                "incremental fetch locator admission failed: {error}"
+                            ))
+                        })?;
+                    let selected = pack_ids
+                        .into_iter()
+                        .map(|pack_id| pack_id.to_string())
+                        .collect::<BTreeSet<_>>();
+                    ((!selected.is_empty()).then_some(selected), "locator_join")
+                }
+            }
+        };
+        tracing::debug!(
+            selection_source,
+            selected_members = selected.as_ref().map_or(0, BTreeSet::len),
+            planned_objects = plan.object_ids.len(),
+            "incremental layered member admission resolved"
+        );
+        let direct_install = if let Some(selected) = selected.as_ref() {
+            crab_read::capsule_protocol::install_layered_git_packs_for_fetch_selected(
+                view,
+                store.as_storage(),
+                &layout,
+                &git_dir,
+                maximum,
+                &plan.object_ids,
+                &plan.common_haves,
+                selected,
+            )
+            .await?
+        } else {
+            None
+        };
+        if let Some(installed) = direct_install {
+            let ref_tips = entries
+                .iter()
+                .map(|entry| entry.sha.clone())
+                .collect::<Vec<_>>();
+            let frontier = plan
+                .common_haves
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            // One batch-check validates both the new tips and the exact
+            // common-have frontier. Keeping this as one Git process avoids a
+            // second startup on every warm incremental fetch; the graph walk
+            // below still proves the complete delta closure.
+            let mut validation_tips = ref_tips.clone();
+            validation_tips.extend(frontier.iter().cloned());
+            crate::git::pack::validate_fetched_ref_tips(&git_dir, &validation_tips).await?;
+            configure_fetched_repository(&git_dir)?;
+            tracing::info!(
+                common_haves = plan.common_haves.len(),
+                planned_objects = plan.object_ids.len(),
+                installed_packs = installed.len(),
+                generation = view.root().root().generation(),
+                strategy = "direct_layered_members",
+                "capsule-protocol fetch installed authenticated layered packs"
+            );
+            if !check_connectivity {
+                return Ok(FetchBatchResult::default());
+            }
+            // The authenticated member-admission check already proved the
+            // complete delta closure: every required object is covered by a
+            // selected self-contained member, and no selected member contains
+            // an object outside the requested delta/common-have set. Running a
+            // second `git rev-list --objects` walk here only rereads the same
+            // large trees and blobs locally. Ref-tip plus frontier validation
+            // above still catches an incomplete local installation.
+            tracing::debug!(
+                planned_objects = plan.object_ids.len(),
+                "incremental layered fetch used authenticated connectivity proof"
+            );
+            return Ok(FetchBatchResult {
+                connectivity_lock: None,
+                connectivity_ok: true,
+            });
+        }
+        drop(direct_install_lock);
+        // A complete, unfiltered local repository has already proven these
+        // common haves. Let Git retain deltas against them, avoiding source
+        // materialization and response bytes. Shallow/partial repositories
+        // stay on the self-contained path because their haves do not prove a
+        // complete local base closure.
+        let use_external_bases =
+            !plan.common_haves.is_empty() && local_fetch_thin_pack_eligible(&git_dir);
+        let pack = if use_external_bases {
+            repository
+                .generate_pack_with_external_bases(&plan.object_ids, &plan.common_haves, cancel)
+                .await
+        } else {
+            repository
+                .generate_pack_with_bases(&plan.object_ids, &[], cancel)
+                .await
+        }
+        .map_err(|error| {
+            CrabError::Protocol(format!("incremental fetch pack generation failed: {error}"))
+        })?;
+        let pack_dir = git_dir.join("objects").join("pack");
+        let _install_lock = crate::git::fetch::acquire_fetch_install_lock(&pack_dir).await?;
+        let canonical_name = format!("incremental-{}", pack.checksum_hex());
+        let pack_was_present = pack_dir
+            .join(format!("pack-{canonical_name}.pack"))
+            .exists()
+            && pack_dir.join(format!("pack-{canonical_name}.idx")).exists();
+        let install = if use_external_bases {
+            crate::git::pack::install_thin_pack_file_locally_with_timeout(
+                &pack_dir,
+                pack.path(),
+                &canonical_name,
+                maximum,
+                false,
+            )
+            .await
+        } else {
+            crate::git::pack::install_pack_file_locally_with_timeout(
+                &pack_dir,
+                pack.path(),
+                &canonical_name,
+                maximum,
+                false,
+            )
+            .await
+        };
+        if let Err(error) = install {
+            if !pack_was_present
+                && let Err(rollback_error) =
+                    crate::git::pack::rollback_installed_pack(&pack_dir, &canonical_name).await
+            {
+                return Err(CrabError::Internal(format!(
+                    "{error}; failed to roll back incremental fetch pack: {rollback_error}"
+                )));
+            }
+            return Err(error);
+        }
+    }
     crate::git::pack::validate_fetched_ref_tips(
         &git_dir,
         &entries
@@ -2785,22 +3319,42 @@ async fn fetch_capsule_packs(
     .await?;
     configure_fetched_repository(&git_dir)?;
     tracing::info!(
-        installed_packs = installed.len(),
+        common_haves = plan.common_haves.len(),
+        planned_objects = plan.object_ids.len(),
         generation = view.root().root().generation(),
-        "capsule-protocol fetch installed authenticated capsule packs"
+        "capsule-protocol fetch installed authenticated incremental pack"
     );
     if !check_connectivity {
-        return Ok(None);
+        return Ok(FetchBatchResult::default());
     }
-    crate::git::pack::create_connectivity_proof_pack(
-        &git_dir,
-        &entries
-            .iter()
-            .map(|entry| entry.sha.clone())
-            .collect::<Vec<_>>(),
-        view.root().digest(),
+    let ref_tips = entries
+        .iter()
+        .map(|entry| entry.sha.clone())
+        .collect::<Vec<_>>();
+    let frontier = plan
+        .common_haves
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let connectivity = crate::git::connectivity::check_connectivity_with_frontier_quiet(
+        &git_dir, &ref_tips, &frontier, cancel,
     )
-    .await
+    .await?;
+    if !connectivity.complete || !connectivity.missing.is_empty() {
+        return Err(CrabError::Protocol(format!(
+            "incremental fetch is not connected (complete={}, missing={})",
+            connectivity.complete,
+            connectivity.missing.len()
+        )));
+    }
+    tracing::debug!(
+        objects_checked = connectivity.objects_checked,
+        "incremental fetch proved connectivity without response pack"
+    );
+    Ok(FetchBatchResult {
+        connectivity_lock: None,
+        connectivity_ok: true,
+    })
 }
 
 fn configure_fetched_repository(git_dir: &std::path::Path) -> Result<()> {
@@ -2814,6 +3368,64 @@ fn configure_fetched_repository(git_dir: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(repo_root.join(".crab"))?;
     ensure_lazy_checkout_config_for_new_helper_repo(&repo_root);
     Ok(())
+}
+
+const MAX_REMOTE_HELPER_HAVE_TIPS: usize = 512;
+
+fn local_fetch_have_tips(git_dir: &std::path::Path) -> Result<Vec<gix_hash::ObjectId>> {
+    let output = Command::new("git")
+        .arg("--git-dir")
+        .arg(git_dir)
+        .args(["for-each-ref", "--format=%(refname) %(objectname)"])
+        .output()
+        .map_err(CrabError::Io)?;
+    if !output.status.success() {
+        return Err(CrabError::Protocol(format!(
+            "failed to read local fetch haves: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let mut refs = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| {
+            let line = std::str::from_utf8(line).ok()?.trim();
+            let (name, object) = line.split_once(' ')?;
+            let oid = gix_hash::ObjectId::from_hex(object.as_bytes()).ok()?;
+            let priority = if name.starts_with("refs/remotes/") {
+                0_u8
+            } else if name.starts_with("refs/heads/") {
+                1
+            } else {
+                2
+            };
+            Some((priority, name.to_owned(), oid))
+        })
+        .collect::<Vec<_>>();
+    refs.sort_unstable_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    let mut seen = BTreeSet::new();
+    Ok(refs
+        .into_iter()
+        .filter_map(|(_, _, oid)| seen.insert(oid.to_string()).then_some(oid))
+        .take(MAX_REMOTE_HELPER_HAVE_TIPS)
+        .collect())
+}
+
+fn local_fetch_thin_pack_eligible(git_dir: &std::path::Path) -> bool {
+    if git_dir.join("shallow").exists() {
+        return false;
+    }
+    let Ok(config) = std::fs::read_to_string(git_dir.join("config")) else {
+        // An unreadable config cannot prove that the repository is complete;
+        // fall back to a self-contained response rather than risk an
+        // unresolvable external delta base.
+        return false;
+    };
+    !config.lines().any(|line| {
+        let line = line.trim();
+        line.eq_ignore_ascii_case("promisor = true")
+            || line.to_ascii_lowercase().starts_with("partialclone = ")
+    })
 }
 
 async fn capsule_git_repository(
@@ -2835,7 +3447,7 @@ async fn capsule_git_repository(
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
-    if view.checkpoint_control().is_some() {
+    if view.layered_checkpoint().is_some() || view.checkpoint_control().is_some() {
         view.git_repository_from_store(
             layout,
             identity,

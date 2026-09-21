@@ -6,7 +6,9 @@
 //! remain in that single state machine.
 
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -693,6 +695,8 @@ async fn run_native_push_inner(
 
     progress.begin_push_preparation();
     let pipeline_ticker = progress.start_ticker();
+    let final_sha_map = sha_map.clone();
+    let pointer_count = pointers.len() as u64;
     let result = if config.push.protected_push.is_some() {
         debug!("native push: protected push skips client-owned push lock");
         let prepopulated = PrePopulatedWalk {
@@ -728,12 +732,12 @@ async fn run_native_push_inner(
                     cancel,
                     Arc::clone(&progress),
                     leases,
-                    pointers.clone(),
-                    commit_entries.clone(),
-                    sha_map.clone(),
+                    pointers,
+                    commit_entries,
+                    sha_map,
                     remote_name,
-                    locked_base_snapshot.clone(),
-                    existing_ref_base.clone(),
+                    locked_base_snapshot,
+                    existing_ref_base,
                 )
                 .await
             }
@@ -759,9 +763,9 @@ async fn run_native_push_inner(
                             cancel,
                             Arc::clone(&progress),
                             leases,
-                            pointers.clone(),
-                            commit_entries.clone(),
-                            sha_map.clone(),
+                            pointers,
+                            commit_entries,
+                            sha_map,
                             remote_name,
                             None,
                             None,
@@ -780,14 +784,14 @@ async fn run_native_push_inner(
 
     // ── Update push state on success ───────────────────────────────
     if result.all_ok() {
-        update_push_state_on_success(push_state, specs, remote_url, &sha_map);
+        update_push_state_on_success(push_state, specs, remote_url, &final_sha_map);
 
         if config.emit_summary {
             // Pull bytes/xorb counts from the shared progress tracker —
             // the counters were populated by the packing and upload
             // phases above.
             progress.report_summary(
-                pointers.len() as u64,
+                pointer_count,
                 progress.upload_bytes_done(),
                 progress.upload_xorbs_done(),
                 remote_name,
@@ -835,9 +839,9 @@ fn validate_publication_plan_context(config: &NativePushConfig) -> Result<()> {
     clippy::too_many_arguments,
     reason = "native lock handoff carries the precomputed walk plus independent pipeline resources"
 )]
-async fn run_native_push_with_locks(
-    specs: &[PushSpec],
-    delegated_push: &PushConfig,
+fn run_native_push_with_locks<'a>(
+    specs: &'a [PushSpec],
+    delegated_push: &'a PushConfig,
     store: Option<Store>,
     caching_store: Option<crab_cache_store::CachingStore>,
     staging: Option<Arc<StagingAreaReadOnly>>,
@@ -849,10 +853,10 @@ async fn run_native_push_with_locks(
     pointers: Vec<PointerBlob>,
     commit_entries: Vec<crab_metadata::commit_graph::CommitEntry>,
     sha_map: HashMap<String, String>,
-    remote_name: &str,
+    remote_name: &'a str,
     locked_base_snapshot: Option<Arc<crate::metadata::manifest::RepositorySnapshot>>,
     existing_ref_base: Option<ExistingRefPushBase>,
-) -> PushResult {
+) -> Pin<Box<dyn Future<Output = PushResult> + 'a>> {
     let prepopulated = PrePopulatedWalk {
         pointers,
         commit_entries,
@@ -878,7 +882,6 @@ async fn run_native_push_with_locks(
         Some(progress),
         handoff,
     ))
-    .await
 }
 
 fn push_lock_rejection_result(specs: &[PushSpec], err: &CrabError) -> PushResult {

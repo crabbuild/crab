@@ -271,7 +271,7 @@ fn default_host_fingerprint() -> String {
 /// had they asked the journal directly.
 #[instrument(
     skip(resolved, cfg, journal),
-    fields(stage = %resolved.stage.name, attempt)
+    fields(stage = tracing::field::Empty, attempt)
 )]
 pub async fn run_local(
     resolved: &ResolvedStage,
@@ -281,6 +281,7 @@ pub async fn run_local(
     attempt: u32,
 ) -> Result<StageCacheEntry> {
     let stage_name = resolved.stage.name.as_str().to_owned();
+    tracing::Span::current().record("stage", tracing::field::display(&stage_name));
 
     // Each retry attempt beyond the first is counted as a retry.
     // The caller drives the retry loop (task 1.8 / 3.14); here we
@@ -305,6 +306,30 @@ pub async fn run_local(
             Err(err)
         }
     }
+}
+
+/// Run a stage from an owned task payload so spawned workflow workers do not
+/// retain borrowed stage/config inputs across suspension points.
+pub async fn run_local_owned(
+    resolved: ResolvedStage,
+    cfg: ExecutorConfig,
+    journal: &Journal,
+    run_id: Uuid,
+    attempt: u32,
+) -> Result<StageCacheEntry> {
+    run_local(&resolved, &cfg, journal, run_id, attempt).await
+}
+
+/// Run a stage with a task-owned journal connection.
+pub async fn run_local_owned_with_journal_path(
+    resolved: ResolvedStage,
+    cfg: ExecutorConfig,
+    journal_path: std::path::PathBuf,
+    run_id: Uuid,
+    attempt: u32,
+) -> Result<StageCacheEntry> {
+    let journal = Journal::open(&journal_path)?;
+    run_local(&resolved, &cfg, &journal, run_id, attempt).await
 }
 
 async fn run_inner(
@@ -1094,6 +1119,46 @@ pub async fn execute_hook(
     command.stderr(Stdio::inherit());
     let mut child = command.spawn().map_err(CrabError::Io)?;
     child.wait().await.map_err(CrabError::Io)
+}
+
+/// Execute a cache-hit hook from owned task inputs.
+pub async fn execute_hook_owned(
+    cmd: crate::stage::Cmd,
+    env: crate::stage::EnvSpec,
+    cwd: Option<std::path::PathBuf>,
+) -> Result<std::process::ExitStatus> {
+    match cmd {
+        Cmd::ShellList(commands) => {
+            let mut last_status = None;
+            for shell in commands {
+                let mut command = build_shell_command(&shell, &env, cwd.as_deref(), None)?;
+                command.stdout(Stdio::inherit());
+                command.stderr(Stdio::inherit());
+                let mut child = command.spawn().map_err(CrabError::Io)?;
+                let status = child.wait().await.map_err(CrabError::Io)?;
+                if !status.success() {
+                    return Ok(status);
+                }
+                last_status = Some(status);
+            }
+            if let Some(status) = last_status {
+                return Ok(status);
+            }
+            let mut command =
+                build_command(&Cmd::ShellList(Vec::new()), &env, cwd.as_deref(), None)?;
+            command.stdout(Stdio::inherit());
+            command.stderr(Stdio::inherit());
+            let mut child = command.spawn().map_err(CrabError::Io)?;
+            child.wait().await.map_err(CrabError::Io)
+        }
+        cmd => {
+            let mut command = build_command(&cmd, &env, cwd.as_deref(), None)?;
+            command.stdout(Stdio::inherit());
+            command.stderr(Stdio::inherit());
+            let mut child = command.spawn().map_err(CrabError::Io)?;
+            child.wait().await.map_err(CrabError::Io)
+        }
+    }
 }
 
 /// Map a supervisor outcome onto the workflow error vocabulary.

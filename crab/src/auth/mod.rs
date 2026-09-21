@@ -413,7 +413,14 @@ fn should_build_aws_sdk_store(config: &Config) -> Result<bool> {
     if config.auth.provider != AuthProvider::Static {
         return Ok(false);
     }
-    Ok(static_auth_config(&config.auth)?.storage_provider == StorageProviderKind::S3)
+    if static_auth_config(&config.auth)?.storage_provider != StorageProviderKind::S3 {
+        return Ok(false);
+    }
+    // The SDK credential path is for AWS's default endpoint. Custom S3
+    // endpoints (RustFS, MinIO, and gateways) need the native adapter's
+    // endpoint/addressing/signature handling; using the SDK path there can
+    // turn an existing v2 root into a false not-found during clone.
+    Ok(crab_storage::s3_endpoint_from_env().is_none())
 }
 
 #[cfg(not(feature = "tier-s3"))]
@@ -1015,7 +1022,11 @@ mod tests {
     #[cfg(feature = "tier-s3")]
     #[test]
     fn aws_sdk_store_selection_uses_resolved_static_provider() {
-        let _guard = EnvGuard::set("CRAB_STORAGE_PROVIDER", None);
+        let _guard = EnvGuard::set_many(&[
+            ("CRAB_STORAGE_PROVIDER", None),
+            ("AWS_ENDPOINT_URL_S3", None),
+            ("AWS_ENDPOINT_URL", None),
+        ]);
         let auto = config_with(AuthProvider::Static, StorageProvider::Auto);
         assert!(should_build_aws_sdk_store(&auto).unwrap());
 
@@ -1029,19 +1040,58 @@ mod tests {
         assert!(!should_build_aws_sdk_store(&no_auth).unwrap());
     }
 
+    #[cfg(feature = "tier-s3")]
+    #[test]
+    fn aws_sdk_store_selection_uses_native_adapter_for_custom_endpoints() {
+        let _guard = EnvGuard::set_many(&[
+            ("CRAB_STORAGE_PROVIDER", None),
+            ("AWS_ENDPOINT_URL_S3", Some("http://127.0.0.1:9000")),
+            ("AWS_ENDPOINT_URL", None),
+        ]);
+        let config = config_with(AuthProvider::Static, StorageProvider::S3);
+
+        assert!(!should_build_aws_sdk_store(&config).unwrap());
+    }
+
     // --- Env var guard for test isolation ---
 
     /// RAII guard that sets/unsets an env var and restores the original value.
     struct EnvGuard {
         _lock: MutexGuard<'static, ()>,
-        key: &'static str,
-        original: Option<String>,
+        entries: Vec<(&'static str, Option<String>)>,
     }
 
     impl EnvGuard {
         fn set(key: &'static str, value: Option<&str>) -> Self {
+            Self::set_many(&[(key, value)])
+        }
+
+        fn set_many(entries: &[(&'static str, Option<&str>)]) -> Self {
             let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-            let original = std::env::var(key).ok();
+            let entries = entries
+                .iter()
+                .map(|(key, value)| {
+                    let original = std::env::var(key).ok();
+                    // SAFETY: process-wide env mutation is serialized by ENV_MUTEX.
+                    unsafe {
+                        match value {
+                            Some(v) => std::env::set_var(key, v),
+                            None => std::env::remove_var(key),
+                        }
+                    }
+                    (*key, original)
+                })
+                .collect();
+            Self {
+                _lock: lock,
+                entries,
+            }
+        }
+
+        fn update(&self, value: Option<&str>) {
+            let Some((key, _)) = self.entries.first() else {
+                return;
+            };
             // SAFETY: process-wide env mutation is serialized by ENV_MUTEX.
             unsafe {
                 match value {
@@ -1049,31 +1099,18 @@ mod tests {
                     None => std::env::remove_var(key),
                 }
             }
-            Self {
-                _lock: lock,
-                key,
-                original,
-            }
-        }
-
-        fn update(&self, value: Option<&str>) {
-            // SAFETY: process-wide env mutation is serialized by ENV_MUTEX.
-            unsafe {
-                match value {
-                    Some(v) => std::env::set_var(self.key, v),
-                    None => std::env::remove_var(self.key),
-                }
-            }
         }
     }
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            // SAFETY: see EnvGuard::set.
-            unsafe {
-                match &self.original {
-                    Some(v) => std::env::set_var(self.key, v),
-                    None => std::env::remove_var(self.key),
+            for (key, original) in &self.entries {
+                // SAFETY: see EnvGuard::set_many.
+                unsafe {
+                    match original {
+                        Some(v) => std::env::set_var(key, v),
+                        None => std::env::remove_var(key),
+                    }
                 }
             }
         }

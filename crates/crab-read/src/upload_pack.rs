@@ -14,6 +14,7 @@ use crab_remote_git::{
 use gix_hash::ObjectId;
 use tokio_util::sync::CancellationToken;
 
+use crate::capsule_protocol::{CapsuleTipBoundTransitions, CapsuleVisibilityTransition};
 use crate::{ReadError, Result};
 
 const OBJECT_BATCH_SIZE: usize = 32;
@@ -368,6 +369,11 @@ pub struct PackPlan {
 enum VisibilitySource<'a> {
     Materialized(&'a GitVisibilityIndex),
     Catalog(&'a GitCatalogVisibilityIndex),
+    /// Authorization rooted in exact advertised ref tips.
+    TipBound {
+        refs: &'a HashMap<String, ObjectId>,
+        transitions: Option<&'a CapsuleTipBoundTransitions>,
+    },
 }
 
 impl<'a> VisibilitySource<'a> {
@@ -395,6 +401,7 @@ impl<'a> VisibilitySource<'a> {
                 };
                 Ok(visibility.contains_ordinal_in_ref(name, ordinal))
             }
+            Self::TipBound { refs, .. } => Ok(refs.get(name).is_some_and(|target| target == oid)),
         }
     }
 
@@ -430,6 +437,10 @@ impl<'a> VisibilitySource<'a> {
                     })
                     .collect())
             }
+            Self::TipBound { refs, .. } => {
+                let authorized = !refs.is_empty();
+                Ok(object_ids.iter().map(|_| authorized).collect())
+            }
         }
     }
 
@@ -448,6 +459,9 @@ impl<'a> VisibilitySource<'a> {
                 let ordinals = visibility.ordinals_for_refs(refs.iter().map(String::as_str));
                 self.resolve_ordinals(operation, &ordinals).await
             }
+            Self::TipBound { .. } => Err(RemoteGitError::InternalInvariant {
+                invariant: "tip-bound visibility attempted ref closure materialization",
+            }),
         }
     }
 
@@ -470,6 +484,9 @@ impl<'a> VisibilitySource<'a> {
                 );
                 self.resolve_ordinals(operation, &ordinals).await
             }
+            Self::TipBound { .. } => Err(RemoteGitError::InternalInvariant {
+                invariant: "tip-bound visibility attempted ref difference materialization",
+            }),
         }
     }
 
@@ -510,6 +527,7 @@ impl<'a> VisibilitySource<'a> {
                 };
                 self.resolve_ordinals(operation, &objects).await.map(Some)
             }
+            Self::TipBound { .. } => Ok(None),
         }
     }
 
@@ -569,6 +587,85 @@ pub async fn plan_upload_pack_catalog(
     .await
 }
 
+/// Plan an ordinary advertised-ref fetch without materializing the complete
+/// layered visibility dictionary.
+///
+/// The request must be unfiltered and non-shallow. Authorization is rooted in
+/// the exact advertised ref tips, while bounded traversal proves the complete
+/// reachable closure from those roots.
+pub async fn plan_upload_pack_tip_bound(
+    repository: &RemoteGitRepository,
+    visible_ref_names: &[String],
+    request: &UploadPackRequest,
+    cancellation: &CancellationToken,
+) -> Result<PackPlan> {
+    plan_upload_pack_tip_bound_with_transitions(
+        repository,
+        visible_ref_names,
+        request,
+        None,
+        cancellation,
+    )
+    .await
+}
+
+/// Plan an ordinary advertised-ref fetch with optional authenticated per-ref
+/// visibility transitions. Missing or incomplete transitions fall back to the
+/// existing tip-bound graph walk.
+pub async fn plan_upload_pack_tip_bound_with_transitions(
+    repository: &RemoteGitRepository,
+    visible_ref_names: &[String],
+    request: &UploadPackRequest,
+    transitions: Option<&CapsuleTipBoundTransitions>,
+    cancellation: &CancellationToken,
+) -> Result<PackPlan> {
+    // include-tag is commonly sent by Git even when this authenticated view
+    // advertises no tags. Only a visible tag needs complete visibility for its
+    // peeled/tag-object closure; treating the no-tag case as ordinary keeps
+    // incremental fetches on the tip-bound path.
+    let include_tags_requires_complete_view = request.include_tags
+        && visible_ref_names
+            .iter()
+            .any(|name| name.starts_with("refs/tags/"));
+    if include_tags_requires_complete_view
+        || !matches!(request.filter, UploadPackFilter::None)
+        || !request.shallow.is_empty()
+        || request.deepen.is_some()
+        || request.deepen_since.is_some()
+        || !request.deepen_not.is_empty()
+        || request.deepen_relative
+    {
+        return Err(ReadError::Internal(
+            "tip-bound upload-pack planning requires an ordinary unfiltered fetch".to_owned(),
+        ));
+    }
+    let visible = visible_ref_names
+        .iter()
+        .filter_map(|name| {
+            repository
+                .refs()
+                .entries
+                .iter()
+                .find(|reference| reference.name == *name)
+                .map(|reference| (name.clone(), reference.target))
+        })
+        .collect::<HashMap<_, _>>();
+    if visible.is_empty() || request.wants.is_empty() {
+        return Err(ReadError::UnauthorizedObject);
+    }
+    plan_upload_pack_inner(
+        repository,
+        VisibilitySource::TipBound {
+            refs: &visible,
+            transitions,
+        },
+        visible_ref_names,
+        request,
+        cancellation,
+    )
+    .await
+}
+
 async fn plan_upload_pack_inner(
     repository: &RemoteGitRepository,
     visibility: VisibilitySource<'_>,
@@ -611,6 +708,15 @@ async fn authorize_wants_source(
     visible_ref_names: &[String],
     wants: &[ObjectId],
 ) -> crab_remote_git::Result<()> {
+    if let VisibilitySource::TipBound { refs, .. } = visibility {
+        for want in wants {
+            if !refs.values().any(|target| target == want) {
+                tracing::debug!(want = %want, "tip-bound want is not an advertised ref tip");
+                return Err(RemoteGitError::AuthorizationDenied);
+            }
+        }
+        return Ok(());
+    }
     let authorized = visibility
         .contains_for_refs(operation, visible_ref_names, wants)
         .await?;
@@ -641,6 +747,130 @@ fn authorize_wants(
     Ok(())
 }
 
+fn plan_from_tip_bound_transitions(
+    visible: &HashMap<String, ObjectId>,
+    transitions: &CapsuleTipBoundTransitions,
+    request: &UploadPackRequest,
+    maximum_objects: u64,
+) -> crab_remote_git::Result<Option<PackPlan>> {
+    if request.haves.is_empty() {
+        return Ok(None);
+    }
+    let selected_refs = request
+        .wants
+        .iter()
+        .map(|want| {
+            visible
+                .iter()
+                .find_map(|(name, target)| (target == want).then_some(name))
+        })
+        .collect::<Option<Vec<_>>>();
+    let Some(selected_refs) = selected_refs else {
+        return Ok(None);
+    };
+
+    let mut common_haves = HashSet::new();
+    let mut object_ids = Vec::new();
+    for (ref_name, want) in selected_refs.iter().zip(&request.wants) {
+        let Some(ref_transitions) = transitions.get(*ref_name) else {
+            return Ok(None);
+        };
+        let Some((have, delta)) =
+            transition_delta_for_haves(ref_transitions, *want, &request.haves)
+        else {
+            return Ok(None);
+        };
+        common_haves.insert(have);
+        object_ids.extend(delta);
+    }
+    object_ids.sort_unstable();
+    object_ids.dedup();
+    let actual = u64::try_from(object_ids.len()).unwrap_or(u64::MAX);
+    if actual > maximum_objects {
+        return Err(RemoteGitError::LimitExceeded {
+            limit: "upload-pack planned objects",
+            actual,
+            maximum: maximum_objects,
+        });
+    }
+    let mut common_haves = common_haves.into_iter().collect::<Vec<_>>();
+    common_haves.sort_unstable();
+    Ok(Some(PackPlan {
+        wants: request.wants.clone(),
+        common_haves,
+        filter: request.filter.clone(),
+        include_tags: request.include_tags,
+        object_ids,
+        required_bases: Vec::new(),
+        shallow: Vec::new(),
+        unshallow: Vec::new(),
+    }))
+}
+
+fn transition_delta_for_haves(
+    transitions: &[CapsuleVisibilityTransition],
+    target: ObjectId,
+    haves: &[ObjectId],
+) -> Option<(ObjectId, Vec<ObjectId>)> {
+    for have in haves {
+        if *have == target {
+            return Some((*have, Vec::new()));
+        }
+        let mut current = target;
+        let mut path = Vec::new();
+        let mut visited = HashSet::new();
+        loop {
+            if current == *have {
+                break;
+            }
+            if !visited.insert(current) {
+                break;
+            }
+            let candidates = transitions
+                .iter()
+                .filter(|transition| transition.new_oid == current && transition.old_oid.is_some())
+                .collect::<Vec<_>>();
+            if candidates.len() != 1 {
+                break;
+            }
+            let transition = candidates[0];
+            path.push(transition);
+            current = transition.old_oid?;
+        }
+        if current != *have {
+            continue;
+        }
+
+        // Fold the exact sequence into final-minus-initial state. A
+        // remove-first event was already present in the client's old tip;
+        // an add-first event contributes only when it remains at the target.
+        let mut events = HashMap::<ObjectId, (Option<bool>, bool)>::new();
+        for transition in path.iter().rev() {
+            for oid in &transition.added {
+                let event = events.entry(*oid).or_insert((None, false));
+                if event.0.is_none() {
+                    event.0 = Some(true);
+                }
+                event.1 = true;
+            }
+            for oid in &transition.removed {
+                let event = events.entry(*oid).or_insert((None, false));
+                if event.0.is_none() {
+                    event.0 = Some(false);
+                }
+                event.1 = false;
+            }
+        }
+        let mut delta = events
+            .into_iter()
+            .filter_map(|(oid, (first, present))| (first == Some(true) && present).then_some(oid))
+            .collect::<Vec<_>>();
+        delta.sort_unstable();
+        return Some((*have, delta));
+    }
+    None
+}
+
 async fn plan_with_operation(
     repository: &RemoteGitRepository,
     operation: &OperationContext,
@@ -658,83 +888,109 @@ async fn plan_with_operation(
     tracing::debug!("upload-pack plan authorization completed");
     let started = Instant::now();
     let maximum_objects = operation.max_logical_objects();
-    if let Some(plan) = plan_from_visibility_source(
-        &repository.refs().entries,
-        visible_ref_names,
-        visibility,
-        operation,
-        request,
-        maximum_objects,
-    )
-    .await?
+    if let VisibilitySource::TipBound {
+        refs,
+        transitions: Some(transitions),
+    } = visibility
+        && let Some(plan) =
+            plan_from_tip_bound_transitions(refs, transitions, request, maximum_objects)?
     {
-        let strategy = if request.haves.is_empty() {
-            "full_closure"
-        } else {
-            "incremental_transition"
-        };
-        tracing::debug!(
-            planned_objects = plan.object_ids.len(),
-            strategy,
-            "planned object closure from visibility proof"
-        );
         tracing::info!(
             telemetry_event = "visibility_plan",
-            strategy,
+            strategy = "tip_bound_transition",
             planned_objects = plan.object_ids.len(),
             visibility_plan_ms = started.elapsed().as_millis() as u64,
             "upload-pack object plan completed"
         );
         return Ok(plan);
     }
-
-    if let Some(plan) = plan_from_visibility_catalog(
-        operation,
-        &repository.refs().entries,
-        visible_ref_names,
-        visibility,
-        request,
-        maximum_objects,
-    )
-    .await?
-    {
-        tracing::info!(
-            telemetry_event = "visibility_plan",
-            strategy = "catalog_filter",
-            planned_objects = plan.object_ids.len(),
-            visibility_plan_ms = started.elapsed().as_millis() as u64,
-            "upload-pack object plan completed"
-        );
-        return Ok(plan);
-    }
-
-    if let Some(plan) = plan_from_shallow_closure(
-        operation,
-        &repository.refs().entries,
-        visible_ref_names,
-        visibility,
-        request,
-    )
-    .await?
-    {
-        tracing::info!(
-            telemetry_event = "visibility_plan",
-            strategy = "shallow_closure_index",
-            planned_objects = plan.object_ids.len(),
-            shallow_boundaries = plan.shallow.len(),
-            visibility_plan_ms = started.elapsed().as_millis() as u64,
-            "upload-pack object plan completed"
-        );
-        return Ok(plan);
-    }
-
-    let common_haves = visibility
-        .contains_for_refs(operation, visible_ref_names, &request.haves)
+    if !matches!(visibility, VisibilitySource::TipBound { .. }) {
+        if let Some(plan) = plan_from_visibility_source(
+            &repository.refs().entries,
+            visible_ref_names,
+            visibility,
+            operation,
+            request,
+            maximum_objects,
+        )
         .await?
-        .into_iter()
-        .zip(&request.haves)
-        .filter_map(|(visible, oid)| visible.then_some(*oid))
-        .collect::<HashSet<_>>();
+        {
+            let strategy = if request.haves.is_empty() {
+                "full_closure"
+            } else {
+                "incremental_transition"
+            };
+            tracing::debug!(
+                planned_objects = plan.object_ids.len(),
+                strategy,
+                "planned object closure from visibility proof"
+            );
+            tracing::info!(
+                telemetry_event = "visibility_plan",
+                strategy,
+                planned_objects = plan.object_ids.len(),
+                visibility_plan_ms = started.elapsed().as_millis() as u64,
+                "upload-pack object plan completed"
+            );
+            return Ok(plan);
+        }
+
+        if let Some(plan) = plan_from_visibility_catalog(
+            operation,
+            &repository.refs().entries,
+            visible_ref_names,
+            visibility,
+            request,
+            maximum_objects,
+        )
+        .await?
+        {
+            tracing::info!(
+                telemetry_event = "visibility_plan",
+                strategy = "catalog_filter",
+                planned_objects = plan.object_ids.len(),
+                visibility_plan_ms = started.elapsed().as_millis() as u64,
+                "upload-pack object plan completed"
+            );
+            return Ok(plan);
+        }
+
+        if let Some(plan) = plan_from_shallow_closure(
+            operation,
+            &repository.refs().entries,
+            visible_ref_names,
+            visibility,
+            request,
+        )
+        .await?
+        {
+            tracing::info!(
+                telemetry_event = "visibility_plan",
+                strategy = "shallow_closure_index",
+                planned_objects = plan.object_ids.len(),
+                shallow_boundaries = plan.shallow.len(),
+                visibility_plan_ms = started.elapsed().as_millis() as u64,
+                "upload-pack object plan completed"
+            );
+            return Ok(plan);
+        }
+    }
+
+    let mut common_haves = if matches!(visibility, VisibilitySource::TipBound { .. }) {
+        // Do not trust arbitrary client haves when the large visibility
+        // dictionary is intentionally cold. The traversal below promotes only
+        // commit haves encountered on the authenticated tip closure.
+        HashSet::new()
+    } else {
+        visibility
+            .contains_for_refs(operation, visible_ref_names, &request.haves)
+            .await?
+            .into_iter()
+            .zip(&request.haves)
+            .filter_map(|(visible, oid)| visible.then_some(*oid))
+            .collect::<HashSet<_>>()
+    };
+    let client_haves = request.haves.iter().copied().collect::<HashSet<_>>();
     let existing_shallow = request.shallow.iter().copied().collect::<HashSet<_>>();
     let excluded_commits = resolve_excluded_commits(
         repository,
@@ -848,29 +1104,37 @@ async fn plan_with_operation(
             if excluded_commits.contains(&item.oid) && !roots.contains(&item.oid) {
                 continue;
             }
+            let encountered_client_have = matches!(visibility, VisibilitySource::TipBound { .. })
+                && client_haves.contains(&item.oid)
+                && object.kind == gix_object::Kind::Commit;
+            if encountered_client_have {
+                common_haves.insert(item.oid);
+            }
             let include = !common_haves.contains(&item.oid)
                 && (roots.contains(&item.oid)
                     || filter_accepts(&request.filter, &object, &item, &sparse_matchers));
             if include && selected.insert(item.oid) {
                 object_ids.push(item.oid);
             }
-            enqueue_children(
-                &object,
-                &item,
-                request,
-                maximum_objects,
-                &existing_shallow,
-                Some(operation),
-                &excluded_commits,
-                &sparse_matchers,
-                &mut queue,
-                &mut queued,
-                &mut shallow,
-                &mut unshallow,
-                cancellation,
-                deduplicate_by_oid,
-            )
-            .await?;
+            if !encountered_client_have {
+                enqueue_children(
+                    &object,
+                    &item,
+                    request,
+                    maximum_objects,
+                    &existing_shallow,
+                    Some(operation),
+                    &excluded_commits,
+                    &sparse_matchers,
+                    &mut queue,
+                    &mut queued,
+                    &mut shallow,
+                    &mut unshallow,
+                    cancellation,
+                    deduplicate_by_oid,
+                )
+                .await?;
+            }
         }
     }
 
@@ -1368,6 +1632,11 @@ async fn plan_from_visibility_catalog(
                 })
                 .collect::<std::result::Result<Vec<[u8; 20]>, RemoteGitError>>()?;
             operation.catalog_object_kinds(&object_bytes).await?
+        }
+        VisibilitySource::TipBound { .. } => {
+            return Err(RemoteGitError::InternalInvariant {
+                invariant: "tip-bound visibility attempted catalog filter planning",
+            });
         }
     };
     if kinds.len() != selection.objects.len() || kinds.iter().any(Option::is_none) {
@@ -2433,6 +2702,31 @@ mod tests {
         deduplicate_visibility_objects(&mut objects, false);
 
         assert_eq!(objects, [oid('1'), oid('2'), oid('3')]);
+    }
+
+    #[test]
+    fn tip_bound_transition_delta_folds_additions_and_removals() {
+        let transitions = vec![
+            CapsuleVisibilityTransition {
+                old_oid: Some(oid('1')),
+                new_oid: oid('2'),
+                added: vec![oid('2'), oid('3')],
+                removed: Vec::new(),
+            },
+            CapsuleVisibilityTransition {
+                old_oid: Some(oid('2')),
+                new_oid: oid('4'),
+                added: vec![oid('4'), oid('5')],
+                removed: vec![oid('3')],
+            },
+        ];
+
+        let (have, delta) =
+            transition_delta_for_haves(&transitions, oid('4'), &[oid('1')]).expect("chain");
+
+        assert_eq!(have, oid('1'));
+        assert_eq!(delta, [oid('2'), oid('4'), oid('5')]);
+        assert!(transition_delta_for_haves(&transitions, oid('4'), &[oid('9')]).is_none());
     }
 
     #[test]

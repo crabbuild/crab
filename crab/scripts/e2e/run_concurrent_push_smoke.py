@@ -61,6 +61,9 @@ PUBLICATION_GATE_PATHS = {
 REF_JOURNAL_FAULT_PHASES = {"before-upstream", "after-upstream"}
 SECRET_KEYS = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
 BAD_PUSH_STATUSES = {"internal", "unpack-failed", "missing-object", "malformed-object"}
+PROXY_STREAM_CHUNK_BYTES = 4 * 1024 * 1024
+PROXY_BUFFER_LIMIT_BYTES = 8 * 1024 * 1024
+PROXY_REQUEST_BUFFER_LIMIT_BYTES = 64 * 1024 * 1024
 
 
 class SmokeError(RuntimeError):
@@ -85,6 +88,8 @@ class RequestCountingProxy:
         self.categories: dict[str, int] = {}
         self.classes: dict[str, int] = {}
         self.statuses: dict[str, int] = {}
+        self.trace_paths = os.environ.get("CRAB_E2E_TRACE_REQUEST_PATHS") == "1"
+        self.paths: list[dict[str, Any]] = []
         self.server: http.server.ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
         self.ref_journal_gate: str | None = None
@@ -132,7 +137,11 @@ class RequestCountingProxy:
 
             def forward(self) -> None:
                 length = int(self.headers.get("Content-Length", "0"))
-                body = self.rfile.read(length) if length else None
+                body = (
+                    self.rfile.read(length)
+                    if length <= PROXY_REQUEST_BUFFER_LIMIT_BYTES
+                    else None
+                )
                 headers = {
                     key: value
                     for key, value in self.headers.items()
@@ -166,30 +175,84 @@ class RequestCountingProxy:
                         recorded = True
                         self.send_error_response(503, message)
                         return
+                    remaining = 0 if body is not None else length
                     try:
-                        connection.request(
-                            self.command, upstream_path, body=body, headers=headers
-                        )
+                        if body is not None:
+                            connection.request(
+                                self.command,
+                                upstream_path,
+                                body=body,
+                                headers=headers,
+                            )
+                        else:
+                            connection.putrequest(
+                                self.command,
+                                upstream_path,
+                                skip_host=True,
+                                skip_accept_encoding=True,
+                            )
+                            for key, value in headers.items():
+                                connection.putheader(key, value)
+                            connection.endheaders()
+                            while remaining:
+                                chunk = self.rfile.read(
+                                    min(PROXY_STREAM_CHUNK_BYTES, remaining)
+                                )
+                                if not chunk:
+                                    raise ConnectionError(
+                                        "request body ended before Content-Length"
+                                    )
+                                connection.send(chunk)
+                                remaining -= len(chunk)
                     except (BrokenPipeError, ConnectionResetError) as send_error:
                         # S3 implementations may reject create-only writes as
                         # soon as they parse the headers. Preserve that real
                         # response even when it arrives before a large request
                         # body has finished crossing the proxy.
+                        while remaining:
+                            chunk = self.rfile.read(
+                                min(PROXY_STREAM_CHUNK_BYTES, remaining)
+                            )
+                            if not chunk:
+                                break
+                            remaining -= len(chunk)
                         try:
                             response = connection.getresponse()
                         except Exception:
                             raise send_error
                     else:
                         response = connection.getresponse()
-                    response_body = response.read()
                     response_headers = response.getheaders()
                     status = response.status
+                    original_content_length = next(
+                        (
+                            value
+                            for key, value in response_headers
+                            if key.lower() == "content-length"
+                        ),
+                        None,
+                    )
+                    response_length = (
+                        int(original_content_length)
+                        if original_content_length is not None
+                        else None
+                    )
+                    if (
+                        self.command == "HEAD"
+                        or response_length is None
+                        or response_length <= PROXY_BUFFER_LIMIT_BYTES
+                    ):
+                        response_body = response.read()
+                        response_bytes = len(response_body)
+                    else:
+                        response_body = None
+                        response_bytes = response_length
                     proxy.record(
                         self.command,
                         self.path,
                         self.headers,
                         length,
-                        len(response_body),
+                        response_bytes,
                         status,
                     )
                     recorded = True
@@ -202,7 +265,6 @@ class RequestCountingProxy:
                         return
                     proxy.gate_ref_journal_response(self.command, self.path, status)
                     self.send_response_only(status, response.reason)
-                    original_content_length = None
                     for key, value in response_headers:
                         lower = key.lower()
                         if lower == "content-length":
@@ -223,13 +285,21 @@ class RequestCountingProxy:
                     content_length = (
                         original_content_length
                         if self.command == "HEAD" and original_content_length is not None
-                        else str(len(response_body))
+                        else str(response_bytes)
                     )
                     self.send_header("Content-Length", content_length)
                     self.send_header("Connection", "close")
                     self.end_headers()
-                    if self.command != "HEAD" and response_body:
-                        self.wfile.write(response_body)
+                    if self.command != "HEAD":
+                        if response_body is not None:
+                            if response_body:
+                                self.wfile.write(response_body)
+                        else:
+                            while True:
+                                chunk = response.read(PROXY_STREAM_CHUNK_BYTES)
+                                if not chunk:
+                                    break
+                                self.wfile.write(chunk)
                 except Exception as exc:
                     message = f"request meter upstream failure: {exc}".encode()
                     if not recorded:
@@ -406,6 +476,17 @@ class RequestCountingProxy:
             self.categories[category] = self.categories.get(category, 0) + 1
             self.classes[request_class] = self.classes.get(request_class, 0) + 1
             self.statuses[status_class] = self.statuses.get(status_class, 0) + 1
+            if self.trace_paths:
+                self.paths.append(
+                    {
+                        "method": method,
+                        "operation": operation,
+                        "category": category,
+                        "status": status,
+                        "key": relative_key,
+                        "range": headers.get("Range"),
+                    }
+                )
 
     @staticmethod
     def request_key(path: str, operation: str) -> str:
@@ -447,7 +528,7 @@ class RequestCountingProxy:
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
-            return {
+            snapshot = {
                 "requests": self.requests,
                 "request_body_bytes": self.request_bytes,
                 "response_body_bytes": self.response_bytes,
@@ -457,6 +538,9 @@ class RequestCountingProxy:
                 "classes": dict(sorted(self.classes.items())),
                 "statuses": dict(sorted(self.statuses.items())),
             }
+            if self.trace_paths:
+                snapshot["paths"] = list(self.paths)
+            return snapshot
 
     @staticmethod
     def delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
@@ -471,6 +555,8 @@ class RequestCountingProxy:
                 for name in sorted(set(earlier) | set(later))
                 if int(later.get(name, 0)) != int(earlier.get(name, 0))
             }
+        if "paths" in after:
+            result["paths"] = list(after["paths"][len(before.get("paths", [])) :])
         return result
 
 

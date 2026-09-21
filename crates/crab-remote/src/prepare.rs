@@ -876,14 +876,22 @@ impl Prepared {
                 tokio::fs::read(pack.reverse_path()),
                 tokio::fs::read(pack.kinds_path()),
             )?;
-            packs.push(crab_metadata::capsule_protocol::CapsuleGitPack::new(
-                Bytes::from(pack_bytes),
-                Bytes::from(index),
-                Bytes::from(reverse_index),
-                Bytes::from(locator),
-                pack.git_sha1().to_string(),
-                u64::from(pack.object_count()),
-            )?);
+            let external_delta_bases = pack
+                .external_delta_bases()
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            packs.push(
+                crab_metadata::capsule_protocol::CapsuleGitPack::new_with_external_delta_bases(
+                    Bytes::from(pack_bytes),
+                    Bytes::from(index),
+                    Bytes::from(reverse_index),
+                    Bytes::from(locator),
+                    pack.git_sha1().to_string(),
+                    u64::from(pack.object_count()),
+                    external_delta_bases,
+                )?,
+            );
         }
         let mut sections = Vec::with_capacity(2);
         if !pointer_delta.is_empty() {

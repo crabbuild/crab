@@ -73,12 +73,164 @@ pub async fn check_connectivity_with_frontier(
         .map_err(|e| CrabError::Internal(format!("connectivity check join error: {e}")))?
 }
 
-/// Synchronous implementation of the connectivity walk.
-fn check_connectivity_sync(
+/// Check connectivity while suppressing output for objects Git found.
+///
+/// Git still walks the same graph and emits every missing object with
+/// `--missing=print`; only the present-object stream is suppressed. This is
+/// appropriate after an authenticated pack admission already proves the
+/// selected object set, where the caller needs a fail-closed missing-object
+/// result but not a second copy of every present OID. `objects_checked` is
+/// zero because the quiet Git mode does not expose the present-object count.
+pub async fn check_connectivity_with_frontier_quiet(
     git_dir: &Path,
     ref_tips: &[String],
     frontier_ref_tips: &[String],
     cancel: &CancellationToken,
+) -> Result<ConnectivityResult> {
+    let git_dir = git_dir.to_path_buf();
+    let tips = ref_tips.to_vec();
+    let frontier = frontier_ref_tips.to_vec();
+    let token = cancel.clone();
+
+    tokio::task::spawn_blocking(move || {
+        check_connectivity_quiet_sync(&git_dir, &tips, &frontier, &token)
+    })
+    .await
+    .map_err(|e| CrabError::Internal(format!("quiet connectivity check join error: {e}")))?
+}
+
+/// Check a complete cold clone with Git's native connectivity-only walker.
+///
+/// Unlike the streaming `rev-list` path, this does not enumerate every
+/// present object through a pipe. Git still verifies that each reachable
+/// commit, tree, and blob exists, while avoiding the large textual OID stream
+/// that dominates a cold clone with a pre-indexed pack.
+pub async fn check_connectivity_with_fsck(
+    git_dir: &Path,
+    ref_tips: &[String],
+    cancel: &CancellationToken,
+) -> Result<ConnectivityResult> {
+    let git_dir = git_dir.to_path_buf();
+    let tips = ref_tips.to_vec();
+    let token = cancel.clone();
+    tokio::task::spawn_blocking(move || check_connectivity_fsck_sync(&git_dir, &tips, &token))
+        .await
+        .map_err(|e| CrabError::Internal(format!("connectivity fsck join error: {e}")))?
+}
+
+/// Synchronous implementation of the connectivity walk.
+pub(crate) fn check_connectivity_sync(
+    git_dir: &Path,
+    ref_tips: &[String],
+    frontier_ref_tips: &[String],
+    cancel: &CancellationToken,
+) -> Result<ConnectivityResult> {
+    check_connectivity_sync_mode(git_dir, ref_tips, frontier_ref_tips, cancel, true)
+}
+
+fn check_connectivity_quiet_sync(
+    git_dir: &Path,
+    ref_tips: &[String],
+    frontier_ref_tips: &[String],
+    cancel: &CancellationToken,
+) -> Result<ConnectivityResult> {
+    check_connectivity_sync_mode(git_dir, ref_tips, frontier_ref_tips, cancel, false)
+}
+
+fn check_connectivity_fsck_sync(
+    git_dir: &Path,
+    ref_tips: &[String],
+    cancel: &CancellationToken,
+) -> Result<ConnectivityResult> {
+    if cancel.is_cancelled() {
+        return Ok(ConnectivityResult {
+            objects_checked: 0,
+            missing: Vec::new(),
+            complete: false,
+        });
+    }
+
+    let stdout = tempfile::NamedTempFile::new()?;
+    let stderr = tempfile::NamedTempFile::new()?;
+    let mut command = Command::new("git");
+    command
+        .arg("--git-dir")
+        .arg(git_dir)
+        .args([
+            "fsck",
+            "--full",
+            "--connectivity-only",
+            "--no-dangling",
+            "--no-progress",
+            "--no-reflogs",
+        ])
+        .stdout(Stdio::from(stdout.reopen()?))
+        .stderr(Stdio::from(stderr.reopen()?));
+    let mut valid_tips = 0usize;
+    for tip in ref_tips {
+        if ObjectId::from_hex(tip.as_bytes()).is_ok() {
+            command.arg(tip);
+            valid_tips += 1;
+        }
+    }
+    if valid_tips == 0 {
+        return Ok(ConnectivityResult {
+            objects_checked: 0,
+            missing: Vec::new(),
+            complete: true,
+        });
+    }
+    let mut child = command.spawn().map_err(CrabError::Io)?;
+    let status = loop {
+        match child.try_wait().map_err(CrabError::Io)? {
+            Some(status) => break status,
+            None if cancel.is_cancelled() => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(ConnectivityResult {
+                    objects_checked: 0,
+                    missing: Vec::new(),
+                    complete: false,
+                });
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    };
+    let stdout = std::fs::read_to_string(stdout.path())?;
+    let stderr = std::fs::read_to_string(stderr.path())?;
+    let missing = parse_fsck_missing(&stdout, &stderr);
+    if !status.success() && missing.is_empty() {
+        return Err(CrabError::Internal(format!(
+            "git fsck failed: {}",
+            stderr.trim()
+        )));
+    }
+    Ok(ConnectivityResult {
+        objects_checked: 0,
+        missing,
+        complete: true,
+    })
+}
+
+fn parse_fsck_missing(stdout: &str, stderr: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .chain(stderr.lines())
+        .filter_map(|line| {
+            let mut fields = line.split_ascii_whitespace();
+            (fields.next() == Some("missing")).then(|| fields.nth(1).unwrap_or_default())
+        })
+        .filter(|oid| oid.len() == 40 && oid.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn check_connectivity_sync_mode(
+    git_dir: &Path,
+    ref_tips: &[String],
+    frontier_ref_tips: &[String],
+    cancel: &CancellationToken,
+    count_present_objects: bool,
 ) -> Result<ConnectivityResult> {
     let objects_dir = git_dir.join("objects");
     if !objects_dir.is_dir() {
@@ -110,7 +262,13 @@ fn check_connectivity_sync(
     }
 
     let frontier = normalize_frontier_ref_tips(frontier_ref_tips);
-    check_streaming_connectivity_sync(git_dir, &tip_shas, &frontier, cancel)
+    check_streaming_connectivity_sync_mode(
+        git_dir,
+        &tip_shas,
+        &frontier,
+        cancel,
+        count_present_objects,
+    )
 }
 
 fn normalize_frontier_ref_tips(frontier_ref_tips: &[String]) -> Vec<String> {
@@ -128,11 +286,12 @@ fn normalize_frontier_ref_tips(frontier_ref_tips: &[String]) -> Vec<String> {
     tips.into_iter().collect()
 }
 
-fn check_streaming_connectivity_sync(
+fn check_streaming_connectivity_sync_mode(
     git_dir: &Path,
     tip_shas: &[String],
     frontier_ref_tips: &[String],
     cancel: &CancellationToken,
+    count_present_objects: bool,
 ) -> Result<ConnectivityResult> {
     if cancel.is_cancelled() {
         return Ok(ConnectivityResult {
@@ -144,10 +303,25 @@ fn check_streaming_connectivity_sync(
 
     let rev_stderr = tempfile::NamedTempFile::new()?;
     let revision_input = build_revision_input(tip_shas, frontier_ref_tips);
-    let mut rev_list = Command::new("git")
+    let mut rev_list = Command::new("git");
+    rev_list
         .arg("--git-dir")
         .arg(git_dir)
-        .args(["rev-list", "--stdin", "--objects", "--missing=print"])
+        // Connectivity only needs object IDs. Avoid asking Git to append
+        // path names for every tree/blob entry; on a large incremental walk
+        // those names can dominate the pipe and parser without changing the
+        // completeness proof.
+        .args([
+            "rev-list",
+            "--stdin",
+            "--objects",
+            "--no-object-names",
+            "--missing=print",
+        ]);
+    if !count_present_objects {
+        rev_list.arg("--quiet");
+    }
+    let mut rev_list = rev_list
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::from(rev_stderr.reopen()?))
@@ -210,8 +384,12 @@ fn check_streaming_connectivity_sync(
         };
         // Git's object traversal marks emitted objects as SEEN, so each
         // reachable object is produced once. Keeping a second process-local
-        // set here would make Crab memory scale with repository size.
-        objects_checked += 1;
+        // set here would make Crab memory scale with repository size. Quiet
+        // mode intentionally suppresses present objects, so its count is not
+        // observable without a second graph walk.
+        if count_present_objects {
+            objects_checked += 1;
+        }
 
         match object {
             RevListObject::Present => {}
@@ -438,6 +616,27 @@ mod tests {
             result.objects_checked >= 3,
             "expected at least 3 objects, got {}",
             result.objects_checked
+        );
+
+        let fast = check_connectivity_with_fsck(&git_dir, &tips, &cancel)
+            .await
+            .unwrap();
+        assert!(fast.complete);
+        assert!(fast.missing.is_empty());
+    }
+
+    #[test]
+    fn parse_fsck_missing_objects() {
+        let missing = parse_fsck_missing(
+            "missing tree 0123456789012345678901234567890123456789\n",
+            "missing blob abcdefabcdefabcdefabcdefabcdefabcdefabcd\n",
+        );
+        assert_eq!(
+            missing,
+            vec![
+                "0123456789012345678901234567890123456789".to_owned(),
+                "abcdefabcdefabcdefabcdefabcdefabcdefabcd".to_owned(),
+            ]
         );
     }
 
@@ -917,15 +1116,35 @@ mod tests {
         }
 
         let cancel = CancellationToken::new();
-        let result = check_connectivity_with_frontier(&git_dir, &[head_sha], &[base_sha], &cancel)
-            .await
-            .unwrap();
+        let result = check_connectivity_with_frontier(
+            &git_dir,
+            std::slice::from_ref(&head_sha),
+            std::slice::from_ref(&base_sha),
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let quiet = check_connectivity_with_frontier_quiet(
+            &git_dir,
+            std::slice::from_ref(&head_sha),
+            std::slice::from_ref(&base_sha),
+            &cancel,
+        )
+        .await
+        .unwrap();
 
         assert!(result.complete);
         assert!(
             result.missing.iter().any(|oid| oid == &tree_sha),
             "expected removed tree {tree_sha} in missing list, got {:?}",
             result.missing
+        );
+        assert!(quiet.complete);
+        assert_eq!(quiet.objects_checked, 0);
+        assert!(
+            quiet.missing.iter().any(|oid| oid == &tree_sha),
+            "quiet checker must retain missing-object diagnostics, got {:?}",
+            quiet.missing
         );
     }
 }

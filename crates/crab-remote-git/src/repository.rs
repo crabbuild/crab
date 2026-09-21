@@ -339,6 +339,8 @@ impl RemoteGitRepository {
             None,
             None,
             None,
+            None,
+            None,
         )
     }
 
@@ -368,6 +370,8 @@ impl RemoteGitRepository {
             None,
             Some(Arc::new(inline_locators)),
             None,
+            None,
+            None,
         )
     }
 
@@ -386,6 +390,70 @@ impl RemoteGitRepository {
         pack_sources: std::collections::HashMap<MerkleHash, RemoteGitPackSource>,
         cancellation: &CancellationToken,
     ) -> Result<Self> {
+        Self::from_snapshot_with_inline_locators_and_pack_sources_and_preferred_pack_indexes(
+            layout,
+            snapshot,
+            identity,
+            runtime,
+            options,
+            inline_locators,
+            pack_sources,
+            std::iter::empty(),
+            cancellation,
+        )
+        .await
+    }
+
+    /// Open a snapshot with lazy pack sources and a preferred immutable frontier.
+    ///
+    /// Inline locators are checked first. A miss is resolved through the preferred
+    /// pack indexes before the complete pinned inventory, allowing layered readers
+    /// to keep stable source sidecars cold on ordinary incremental fetches.
+    pub async fn from_snapshot_with_inline_locators_and_pack_sources_and_preferred_pack_indexes(
+        layout: StoreLayout<Store>,
+        snapshot: &crab_metadata::manifest_store::RepositorySnapshot,
+        identity: RepositoryIdentity,
+        runtime: Arc<RemoteGitRuntime>,
+        options: RepositoryOptions,
+        inline_locators: std::collections::HashMap<
+            [u8; 20],
+            crab_metadata::git_object_locator::GitObjectLocator,
+        >,
+        pack_sources: std::collections::HashMap<MerkleHash, RemoteGitPackSource>,
+        preferred_pack_indexes: impl IntoIterator<Item = GitPackInventoryEntry>,
+        cancellation: &CancellationToken,
+    ) -> Result<Self> {
+        Self::from_snapshot_with_inline_locators_and_pack_sources_and_preferred_pack_indexes_and_admission(
+            layout,
+            snapshot,
+            identity,
+            runtime,
+            options,
+            inline_locators,
+            pack_sources,
+            preferred_pack_indexes,
+            None,
+            cancellation,
+        )
+        .await
+    }
+
+    /// Open a snapshot with lazy pack sources and an authenticated object-to-member join.
+    pub async fn from_snapshot_with_inline_locators_and_pack_sources_and_preferred_pack_indexes_and_admission(
+        layout: StoreLayout<Store>,
+        snapshot: &crab_metadata::manifest_store::RepositorySnapshot,
+        identity: RepositoryIdentity,
+        runtime: Arc<RemoteGitRuntime>,
+        options: RepositoryOptions,
+        inline_locators: std::collections::HashMap<
+            [u8; 20],
+            crab_metadata::git_object_locator::GitObjectLocator,
+        >,
+        pack_sources: std::collections::HashMap<MerkleHash, RemoteGitPackSource>,
+        preferred_pack_indexes: impl IntoIterator<Item = GitPackInventoryEntry>,
+        preferred_object_admission: Option<std::collections::HashMap<[u8; 20], Vec<MerkleHash>>>,
+        cancellation: &CancellationToken,
+    ) -> Result<Self> {
         Self::from_snapshot_parts(
             layout,
             snapshot,
@@ -396,6 +464,8 @@ impl RemoteGitRepository {
             None,
             Some(Arc::new(inline_locators)),
             Some(pack_sources),
+            Some(preferred_pack_indexes.into_iter().collect()),
+            preferred_object_admission,
         )
     }
 
@@ -425,6 +495,8 @@ impl RemoteGitRepository {
             catalog_tail,
             None,
             None,
+            None,
+            None,
         )
     }
 
@@ -449,6 +521,8 @@ impl RemoteGitRepository {
             >,
         >,
         pack_sources: Option<std::collections::HashMap<MerkleHash, RemoteGitPackSource>>,
+        preferred_pack_indexes: Option<Vec<GitPackInventoryEntry>>,
+        preferred_object_admission: Option<std::collections::HashMap<[u8; 20], Vec<MerkleHash>>>,
     ) -> Result<Self> {
         RepositoryOptions::new(options.object_limits(), options.operation_limits())?;
         check_cancelled(cancellation)?;
@@ -471,12 +545,21 @@ impl RemoteGitRepository {
         let manifest = snapshot.materialized_manifest();
         let refs = RepositoryRefs::try_from(&manifest)?;
         let inventory = parse_inventory(&snapshot.journal.packs)?;
-        let (lookup_catalog_identity, preferred_pack_indexes) = match catalog_tail {
+        let (lookup_catalog_identity, catalog_preferred_pack_indexes) = match catalog_tail {
             Some((identity, packs)) => (Some(identity), Some(packs)),
             None => (None, None),
         };
-        let mut lookup_sources =
-            crate::reader::ReaderLookupSources::new(preferred_pack_indexes, inline_locators);
+        let mut lookup_sources = crate::reader::ReaderLookupSources::new(
+            catalog_preferred_pack_indexes,
+            inline_locators,
+        );
+        if let Some(preferred_pack_indexes) = preferred_pack_indexes {
+            lookup_sources = lookup_sources.with_preferred_pack_indexes(preferred_pack_indexes);
+        }
+        if let Some(preferred_object_admission) = preferred_object_admission {
+            lookup_sources =
+                lookup_sources.with_preferred_object_admission(preferred_object_admission);
+        }
         if let Some(pack_sources) = pack_sources {
             lookup_sources = lookup_sources.with_pack_sources(pack_sources);
         }
@@ -912,11 +995,20 @@ impl RemoteGitRepository {
         self.state.inventory.len()
     }
 
-    pub(crate) fn single_pack_inventory(&self) -> Option<GitPackInventoryEntry> {
-        if self.state.inventory.len() != 1 {
-            return None;
+    pub(crate) fn exact_pack_reuse_inventory(&self) -> Vec<GitPackInventoryEntry> {
+        let layered = self
+            .state
+            .reader
+            .as_ref()
+            .is_some_and(|reader| reader.has_pack_sources());
+        if self.state.inventory.len() > 1 && !layered {
+            return Vec::new();
         }
-        self.state.inventory.values().copied().next()
+        let mut inventory = self.state.inventory.values().copied().collect::<Vec<_>>();
+        inventory.sort_unstable_by(|left, right| {
+            left.pack_id.to_string().cmp(&right.pack_id.to_string())
+        });
+        inventory
     }
 
     /// Check the current catalog-bound visibility proof without loading its object dictionary.
@@ -1197,6 +1289,34 @@ impl RemoteGitRepository {
     ) -> Result<OperationContext> {
         validate_operation_limits(limits)?;
         OperationContext::open(Arc::clone(&self.state), kind, cancellation, limits).await
+    }
+
+    /// Resolve the immutable pack identities containing a batch of Git objects.
+    ///
+    /// This is a metadata-only join. Callers must still authenticate the
+    /// selected pack sidecars and object set before installing any returned
+    /// pack body. The operation is closed before this method returns.
+    pub async fn pack_ids_for_objects(
+        &self,
+        object_ids: &[ObjectId],
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<MerkleHash>> {
+        if object_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let operation = self
+            .operation(OperationKind::UploadPack, cancellation)
+            .await?;
+        let result = operation
+            .lookup_packed_entry_locators(object_ids)
+            .await
+            .map(|locators| {
+                locators
+                    .into_iter()
+                    .map(|locator| locator.pack_id)
+                    .collect()
+            });
+        operation.finish(result).await
     }
 
     /// Prove which candidate commits are reachable from any pinned graph root.

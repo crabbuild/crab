@@ -363,9 +363,12 @@ fn validate_checkpoint_pointer(pointer: &CheckpointPointer) -> Result<()> {
 }
 
 fn validate_capsule_pointer(pointer: &CapsulePointer) -> Result<()> {
-    CapsulePointer::new(
+    CapsulePointer::new_with_control(
         pointer.hash(),
         pointer.size(),
+        pointer.control_offset(),
+        pointer.control_size(),
+        pointer.footer_hash(),
         pointer.level(),
         pointer.transaction_ids().to_vec(),
         pointer.newest_base_root_digest(),

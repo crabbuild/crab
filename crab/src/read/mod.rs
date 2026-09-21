@@ -229,6 +229,10 @@ impl RepositoryReader {
         })
     }
 
+    pub(crate) async fn snapshot_owned(self, revision: Option<String>) -> Result<SnapshotReader> {
+        self.snapshot(revision.as_deref()).await
+    }
+
     async fn open_local_path(path: &Path, options: RepositoryOpenOptions) -> Result<Self> {
         let absolute = tokio::fs::canonicalize(path).await?;
         let url = local_path_to_file_url(&absolute);
@@ -329,6 +333,10 @@ impl SnapshotReader {
         .map_err(|join_err| CrabError::Internal(format!("entry stat task failed: {join_err}")))?
     }
 
+    pub(crate) async fn entry_for_path_owned(self, path: String) -> Result<DownloadEntry> {
+        self.entry_for_path(&path).await
+    }
+
     /// List all materializable file entries in the snapshot.
     pub async fn list_entries(&self) -> Result<Vec<DownloadEntry>> {
         let git_dir = self.git_dir.clone();
@@ -382,6 +390,10 @@ impl SnapshotReader {
 
         tokio::fs::write(dest, &blob_bytes).await?;
         Ok(blob_bytes.len() as u64)
+    }
+
+    pub(crate) async fn download_to_path_owned(self, path: String, dest: PathBuf) -> Result<u64> {
+        self.download_to_path(&path, &dest).await
     }
 
     /// Materialize one repo-relative file into a blocking writer.

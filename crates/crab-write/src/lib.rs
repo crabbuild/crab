@@ -86,6 +86,8 @@ pub enum WriteError {
     RemoteGit(#[from] crab_remote_git::Error),
     #[error("Git pack evidence is invalid")]
     Git(#[from] crab_git::pack::PackError),
+    #[error("Git pack index admission is invalid")]
+    GitLocator(#[from] crab_git::pack_locator::PackLocatorError),
     #[error("publication file I/O failed")]
     Io(#[from] std::io::Error),
     #[error("publication worker failed")]

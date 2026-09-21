@@ -10914,13 +10914,17 @@ impl PushPipeline {
             return Ok(false);
         }
 
-        let mut verified_refs = match self
-            .revalidate_add_plan_existing_candidates(&candidate_refs)
-            .await
-        {
-            Ok(refs) => refs,
-            Err(CrabError::Cancelled) => return Err(CrabError::Cancelled),
-            Err(error) => return Err(error),
+        let mut verified_refs = if candidate_refs.is_empty() {
+            HashMap::new()
+        } else {
+            // Keep the proof-revalidation state machine off the caller's
+            // executor stack. This path owns several repository-sized maps;
+            // heap-pinning the future avoids inflating the default test stack.
+            match Box::pin(self.revalidate_add_plan_existing_candidates(&candidate_refs)).await {
+                Ok(refs) => refs,
+                Err(CrabError::Cancelled) => return Err(CrabError::Cancelled),
+                Err(error) => return Err(error),
+            }
         };
         let stale_existing = candidate_refs.len().saturating_sub(verified_refs.len());
         if stale_existing > 0 {
@@ -10951,9 +10955,8 @@ impl PushPipeline {
         }
 
         lookup_candidates.retain(|chunk_hash| !verified_refs.contains_key(chunk_hash));
-        let global_lookup = self
-            .lookup_verified_global_chunk_refs(&lookup_candidates)
-            .await?;
+        let global_lookup =
+            Box::pin(self.lookup_verified_global_chunk_refs(&lookup_candidates)).await?;
         if global_lookup.stale_hits > 0 {
             warn!(
                 stale_chunks = global_lookup.stale_hits,
@@ -13307,19 +13310,22 @@ impl PushPipeline {
             let mut uploaded = Vec::with_capacity(packed_files.len());
             let ref_tips = &ref_tips;
             let evidence_dir = &evidence_dir;
-            let multipart_journal = multipart_journal
-                .as_deref()
-                .map(|journal| journal as &dyn crab_storage::multipart::MultipartJournal);
-            let mut jobs = packed_files.iter().enumerate().map(|(index, packed)| async move {
+            let mut jobs = packed_files.iter().enumerate().map(|(index, packed)| {
+                let multipart_journal = multipart_journal.clone();
+                async move {
                 check_cancelled(&self.cancel)?;
-                let credited_bytes = std::sync::atomic::AtomicU64::new(0);
-                let on_part_done = |bytes: u64| {
-                    let previous = credited_bytes.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
-                    let accepted = bytes.min(packed.pack_size.saturating_sub(previous));
-                    if let Some(progress) = &self.progress {
+                let credited_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+                let credited_for_callback = Arc::clone(&credited_bytes);
+                let progress = self.progress.clone();
+                let pack_size = packed.pack_size;
+                let on_part_done: Arc<dyn Fn(u64) + Send + Sync> = Arc::new(move |bytes: u64| {
+                    let previous = credited_for_callback
+                        .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+                    let accepted = bytes.min(pack_size.saturating_sub(previous));
+                    if let Some(progress) = &progress {
                         progress.add_git_upload_bytes(accepted);
                     }
-                };
+                });
                 let pack_sha = packed.pack_blake3_hex.clone();
                 let pack_path = self.router.pack_path(&pack_sha);
                 let installed = pack::install_pack_file_locally_with_timeout(
@@ -13339,125 +13345,90 @@ impl PushPipeline {
                 if let Some(progress) = &self.progress {
                     progress.begin_git_upload();
                 }
-                let mut locations = crab_git::pack_locator::PackLocationIter::open(
-                    &installed.idx_path,
-                    &installed.rev_path,
-                    packed.pack_size,
-                )
-                .map_err(crab_git::pack::PackError::from)?;
-                if locations.object_count() != packed.object_count {
-                    return Err(CrabError::CorruptObject {
-                        path: installed.idx_path.display().to_string(),
-                        reason: format!(
-                            "generated pack records {} objects but verified index contains {}",
-                            packed.object_count,
-                            locations.object_count()
-                        ),
-                    });
-                }
-                if locations.pack_checksum().to_string() != installed.git_sha1 {
-                    return Err(CrabError::Internal(
-                        "generated pack index checksum disagrees with verified pack trailer"
-                            .to_owned(),
-                    ));
-                }
-                let object_ids = locations
-                    .by_ref()
-                    .map(|location| {
-                        location
-                            .map(|location| location.oid)
-                            .map_err(crab_git::pack::PackError::from)
-                    })
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(CrabError::from)?;
-                let upload_body = upload_push_pack_file_body(
-                    store,
-                    &pack_path,
-                    packed.pack_path.as_ref(),
-                    packed.pack_size,
-                    packed.pack_blake3,
-                    &self.cancel,
-                    multipart_journal,
-                    self.metrics.as_deref(),
-                    Some(&on_part_done),
-                );
-                let upload_kinds = async {
-                    let kind_by_oid = match self.discover_git_dir() {
-                        Ok(git_dir) => resolve_local_object_kinds(&git_dir, &object_ids).await,
-                        Err(error) => {
-                            warn!(error = %error, "Git object-kind catalog metadata is unavailable; owner rebuild can repair it");
-                            None
-                        }
-                    };
-                    let kind_metadata = kind_by_oid
-                        .as_ref()
-                        .map(|kinds| {
-                            encode_pack_kind_metadata(&object_ids, &installed.git_sha1, kinds)
-                        })
-                        .transpose()?;
-                    if let Some(kind_metadata) = &kind_metadata {
-                        store
-                            .put(
-                                &self.router.pack_kind_metadata_path(&pack_sha),
-                                kind_metadata.clone(),
-                            )
-                            .await?;
+                let locator_idx_path = installed.idx_path.clone();
+                let locator_rev_path = installed.rev_path.clone();
+                let locator_git_sha1 = installed.git_sha1.clone();
+                let locator_object_count = packed.object_count;
+                let locator_pack_size = packed.pack_size;
+                // Index validation and offset traversal are synchronous and can
+                // recurse through gix-pack's index decoder. Keep that work off
+                // the small libtest/filter-process stack and leave the async
+                // upload future responsible only for I/O orchestration.
+                let object_ids = tokio::task::spawn_blocking(move || {
+                    let mut locations = crab_git::pack_locator::PackLocationIter::open(
+                        &locator_idx_path,
+                        &locator_rev_path,
+                        locator_pack_size,
+                    )
+                    .map_err(crab_git::pack::PackError::from)?;
+                    if locations.object_count() != locator_object_count {
+                        return Err(CrabError::CorruptObject {
+                            path: locator_idx_path.display().to_string(),
+                            reason: format!(
+                                "generated pack records {} objects but verified index contains {}",
+                                locator_object_count,
+                                locations.object_count()
+                            ),
+                        });
                     }
-                    Ok::<_, CrabError>(kind_metadata.is_some())
-                };
-                let upload_sidecars = async {
-                    // Protected receive rebuilds and verifies the Git index
-                    // from the staged pack; sidecars are not wire objects.
-                    if store.staging_write_prefix().is_some() {
-                        return Ok::<_, CrabError>(());
+                    if locations.pack_checksum().to_string() != locator_git_sha1 {
+                        return Err(CrabError::Internal(
+                            "generated pack index checksum disagrees with verified pack trailer"
+                                .to_owned(),
+                        ));
                     }
-                    let idx_path = installed.idx_path.clone();
-                    let rev_path = installed.rev_path.clone();
-                    let ((idx_hash, idx_size), (rev_hash, rev_size)) =
-                        tokio::task::spawn_blocking(move || {
-                            Ok::<_, CrabError>((
-                                hash_file_blake3(&idx_path)?,
-                                hash_file_blake3(&rev_path)?,
-                            ))
+                    locations
+                        .by_ref()
+                        .map(|location| {
+                            location
+                                .map(|location| location.oid)
+                                .map_err(crab_git::pack::PackError::from)
                         })
-                        .await
-                        .map_err(|error| {
-                            CrabError::Internal(format!(
-                                "pack evidence hashing join failed: {error}"
-                            ))
-                        })??;
-                    let remote_idx_path = self.router.pack_index_path(&pack_sha);
-                    let remote_rev_path = self.router.pack_reverse_index_path(&pack_sha);
-                    let (idx_result, rev_result) = tokio::join!(
-                        upload_pack_sidecar_file(
-                            store,
-                            &remote_idx_path,
-                            &installed.idx_path,
-                            idx_size,
-                            idx_hash,
-                            &self.cancel,
-                        ),
-                        upload_pack_sidecar_file(
-                            store,
-                            &remote_rev_path,
-                            &installed.rev_path,
-                            rev_size,
-                            rev_hash,
-                            &self.cancel,
-                        ),
-                    );
-                    idx_result?;
-                    rev_result?;
-                    Ok(())
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .map_err(CrabError::from)
+                })
+                .await
+                .map_err(|error| {
+                    CrabError::Internal(format!("pack locator validation join failed: {error}"))
+                })??;
+                let kind_git_dir = match self.discover_git_dir() {
+                    Ok(git_dir) => Some(git_dir),
+                    Err(error) => {
+                        warn!(error = %error, "Git object-kind catalog metadata is unavailable; owner rebuild can repair it");
+                        None
+                    }
                 };
                 // All three artifacts are immutable and independently named.
                 // Their presence is not published until the metadata/origin
                 // receipts below, so failed siblings leave only safe orphans.
-                let (body_result, kind_result, sidecar_result) =
-                    tokio::join!(upload_body, upload_kinds, upload_sidecars);
-                let (uploaded, verified_meta) = body_result?;
-                let kind_metadata_published = kind_result?;
-                sidecar_result?;
+                // Run the nested join on a Tokio worker stack: pack uploads
+                // can carry large provider futures that overflow libtest's
+                // small per-test stack when polled inline here.
+                let (uploaded, verified_meta, kind_metadata_published) = tokio::spawn(
+                    upload_pack_artifacts(
+                        store.clone(),
+                        pack_path,
+                        packed.pack_path.to_path_buf(),
+                        packed.pack_size,
+                        packed.pack_blake3,
+                        self.cancel.clone(),
+                        multipart_journal.clone(),
+                        self.metrics.clone(),
+                        on_part_done,
+                        kind_git_dir,
+                        object_ids,
+                        installed.git_sha1.clone(),
+                        self.router.pack_kind_metadata_path(&pack_sha),
+                        installed.idx_path.clone(),
+                        installed.rev_path.clone(),
+                        self.router.pack_index_path(&pack_sha),
+                        self.router.pack_reverse_index_path(&pack_sha),
+                    ),
+                )
+                .await
+                .map_err(|error| {
+                    CrabError::Internal(format!("pack artifact upload join failed: {error}"))
+                })??;
                 if let Some(progress) = &self.progress {
                     progress.finish_git_pack_body();
                 }
@@ -13532,6 +13503,7 @@ impl PushPipeline {
                     kind_metadata_published,
                     _evidence_dir: Arc::clone(evidence_dir),
                 }))
+                }
             });
             let concurrency = self
                 .config
@@ -14173,23 +14145,27 @@ impl PushPipeline {
         };
 
         let result = guard.check_cache_gc_drift().await;
-        *self.metadb.lock().await = Some(guard);
-
         match result {
             Ok(crate::metadata::CacheDriftOutcome::WipedCache {
                 old_generation,
                 new_generation,
-            }) => info!(
-                old_generation,
-                new_generation, "step 0: chunk-index cache GC drift wiped local cache"
-            ),
+            }) => {
+                *self.metadb.lock().await = Some(guard);
+                info!(
+                    old_generation,
+                    new_generation, "step 0: chunk-index cache GC drift wiped local cache"
+                );
+            }
             Ok(crate::metadata::CacheDriftOutcome::NoDrift {
                 local_generation,
                 remote_generation,
-            }) => debug!(
-                local_generation,
-                remote_generation, "step 0: chunk-index cache GC drift within grace"
-            ),
+            }) => {
+                *self.metadb.lock().await = Some(guard);
+                debug!(
+                    local_generation,
+                    remote_generation, "step 0: chunk-index cache GC drift within grace"
+                );
+            }
             Err(e) => warn!(
                 error = %e,
                 "step 0: chunk-index cache GC drift check failed; continuing with verified remote lookups"
@@ -15153,8 +15129,9 @@ impl PushPipeline {
     ) -> Result<VerifiedGlobalChunkRefs> {
         let global_lookup_phase = PhaseTimer::start("push", "chunk_index_global_lookup");
         let candidate_count = chunk_hashes.len() as u64;
+        let global_lookup_future = self.lookup_global_chunk_refs(chunk_hashes);
         let (hits, skipped_after_unavailable, lookup_unavailable) =
-            match self.lookup_global_chunk_refs(chunk_hashes).await? {
+            match Box::pin(global_lookup_future).await? {
                 Some((hits, skipped_remote)) => (hits, skipped_remote, skipped_remote > 0),
                 None => (HashMap::new(), chunk_hashes.len(), true),
             };
@@ -15168,7 +15145,7 @@ impl PushPipeline {
             );
         }
 
-        let committed_receipts = self.validate_committed_chunk_receipts(&hits).await;
+        let committed_receipts = Box::pin(self.validate_committed_chunk_receipts(&hits)).await;
         let refs = self
             .verify_xorb_refs_with_committed_receipts(&hits, &committed_receipts)
             .await?;
@@ -15813,17 +15790,20 @@ impl PushPipeline {
         let git_dir = self.common_git_dir()?;
 
         let frontier_tips = self.connectivity_frontier_tips.lock().await.clone();
-        let result = if frontier_tips.is_empty() {
-            super::connectivity::check_connectivity(&git_dir, &tips, &self.cancel).await?
-        } else {
-            super::connectivity::check_connectivity_with_frontier(
+        let tip_count = tips.len();
+        let frontier_count = frontier_tips.len();
+        let connectivity_cancel = self.cancel.clone();
+        let connectivity_task = tokio::task::spawn_blocking(move || {
+            super::connectivity::check_connectivity_sync(
                 &git_dir,
                 &tips,
                 &frontier_tips,
-                &self.cancel,
+                &connectivity_cancel,
             )
-            .await?
-        };
+        });
+        let result = connectivity_task.await.map_err(|error| {
+            CrabError::Internal(format!("connectivity task join error: {error}"))
+        })??;
 
         if !result.complete {
             // Cancellation is already surfaced by the caller's
@@ -15838,8 +15818,8 @@ impl PushPipeline {
         }
 
         info!(
-            tips = tips.len(),
-            frontier_tips = frontier_tips.len(),
+            tips = tip_count,
+            frontier_tips = frontier_count,
             objects_checked = result.objects_checked,
             missing = result.missing.len(),
             "step 10b: connectivity check complete"
@@ -16612,18 +16592,22 @@ impl PushPipeline {
         match admission_lock {
             Some(lock) => {
                 let (committed_tx, committed_rx) = tokio::sync::oneshot::channel();
+                let admitted_future = self.execute_admitted(preflight, Some(committed_tx));
                 self.at_stage(
                     PushFailureStage::Admission,
                     while_admitted_until_commit(
                         lock,
                         self.cancel.clone(),
-                        Box::pin(self.execute_admitted(preflight, Some(committed_tx))),
+                        Box::pin(admitted_future),
                         committed_rx,
                     )
                     .await,
                 )
             }
-            None => Box::pin(self.execute_admitted(preflight, None)).await,
+            None => {
+                let admitted_future = self.execute_admitted(preflight, None);
+                Box::pin(admitted_future).await
+            }
         }
     }
 
@@ -16780,11 +16764,10 @@ impl PushPipeline {
         // uploads or visibility-evidence construction. Pack validity was
         // already established by strict local `git index-pack`; this branch
         // proves graph reachability from each new tip.
-        let (pack_upload_result, prepared_existing_ref_edit, connectivity_result) = tokio::join!(
-            self.upload_packs_with_progress(),
-            prepare_visibility,
-            self.verify_connectivity(),
-        );
+        let pack_upload_future = Box::pin(self.upload_packs_with_progress());
+        let connectivity_future = Box::pin(self.verify_connectivity());
+        let (pack_upload_result, prepared_existing_ref_edit, connectivity_result) =
+            tokio::join!(pack_upload_future, prepare_visibility, connectivity_future,);
         self.at_stage(PushFailureStage::GitPackUpload, pack_upload_result)?;
         let prepared_existing_ref_edit =
             self.at_stage(PushFailureStage::RefCommit, prepared_existing_ref_edit)?;
@@ -17124,7 +17107,26 @@ pub(crate) async fn run_push_batch_with_locks(
     if let Some(pre) = prepopulated {
         pipeline.install_prepopulated_walk(pre).await;
     }
-    Box::pin(pipeline.execute()).await
+    // Poll the large pipeline from a runtime task boundary. Native callers
+    // can already be nested under a caller-side `join!` (for example two
+    // sibling worktrees sharing staging); polling the full preparation DAG
+    // inline exhausts the caller's bounded test/filter-process stack before
+    // any I/O future yields. The task owns the pipeline, so no borrowed
+    // state crosses the boundary and normal success/failure cleanup remains
+    // inside `PushPipeline::execute`.
+    let handle = tokio::runtime::Handle::current();
+    let dispatch = tracing::dispatcher::get_default(|current| current.clone());
+    match tokio::task::spawn_blocking(move || {
+        tracing::dispatcher::with_default(&dispatch, || handle.block_on(pipeline.execute()))
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            let reason = CrabError::Internal(format!("push pipeline task failed: {error}"));
+            reject_batch_for_error(specs, &reason)
+        }
+    }
 }
 
 fn reject_batch_for_error(specs: &[PushSpec], error: &CrabError) -> PushResult {
@@ -18700,6 +18702,104 @@ pub(crate) fn build_push_metadb_guard_with_object_store(
         Some(m) => crate::metadata::MetaDbGuard::new_with_metrics(metadb, m),
         None => crate::metadata::MetaDbGuard::new(metadb),
     }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "pack artifact upload keeps immutable body, kind, and sidecar inputs explicit"
+)]
+async fn upload_pack_artifacts(
+    store: Store,
+    pack_path: ObjectPath,
+    pack_file: PathBuf,
+    pack_size: u64,
+    pack_blake3: [u8; 32],
+    cancel: CancellationToken,
+    journal: Option<Arc<MultipartJournal>>,
+    metrics: Option<Arc<Metrics>>,
+    on_part_done: Arc<dyn Fn(u64) + Send + Sync>,
+    git_dir: Option<PathBuf>,
+    object_ids: Vec<gix_hash::ObjectId>,
+    git_sha1: String,
+    kind_path: ObjectPath,
+    idx_path: PathBuf,
+    rev_path: PathBuf,
+    remote_idx_path: ObjectPath,
+    remote_rev_path: ObjectPath,
+) -> Result<(bool, Option<ObjectMeta>, bool)> {
+    let upload_body = upload_push_pack_file_body(
+        &store,
+        &pack_path,
+        &pack_file,
+        pack_size,
+        pack_blake3,
+        &cancel,
+        journal
+            .as_deref()
+            .map(|journal| journal as &dyn crab_storage::multipart::MultipartJournal),
+        metrics.as_deref(),
+        Some(on_part_done.as_ref()),
+    );
+    let upload_kinds = async {
+        let kind_by_oid = match git_dir {
+            Some(git_dir) => resolve_local_object_kinds(&git_dir, &object_ids).await,
+            None => None,
+        };
+        let kind_metadata = kind_by_oid
+            .as_ref()
+            .map(|kinds| encode_pack_kind_metadata(&object_ids, &git_sha1, kinds))
+            .transpose()?;
+        if let Some(kind_metadata) = &kind_metadata {
+            store.put(&kind_path, kind_metadata.clone()).await?;
+        }
+        Ok::<_, CrabError>(kind_metadata.is_some())
+    };
+    let upload_sidecars = async {
+        // Protected receive rebuilds and verifies the Git index from the
+        // staged pack; sidecars are not wire objects.
+        if store.staging_write_prefix().is_some() {
+            return Ok::<_, CrabError>(());
+        }
+        let idx_for_hash = idx_path.clone();
+        let rev_for_hash = rev_path.clone();
+        let ((idx_hash, idx_size), (rev_hash, rev_size)) = tokio::task::spawn_blocking(move || {
+            Ok::<_, CrabError>((
+                hash_file_blake3(&idx_for_hash)?,
+                hash_file_blake3(&rev_for_hash)?,
+            ))
+        })
+        .await
+        .map_err(|error| {
+            CrabError::Internal(format!("pack evidence hashing join failed: {error}"))
+        })??;
+        let (idx_result, rev_result) = tokio::join!(
+            upload_pack_sidecar_file(
+                &store,
+                &remote_idx_path,
+                &idx_path,
+                idx_size,
+                idx_hash,
+                &cancel,
+            ),
+            upload_pack_sidecar_file(
+                &store,
+                &remote_rev_path,
+                &rev_path,
+                rev_size,
+                rev_hash,
+                &cancel,
+            ),
+        );
+        idx_result?;
+        rev_result?;
+        Ok(())
+    };
+    let (body_result, kind_result, sidecar_result) =
+        tokio::join!(upload_body, upload_kinds, upload_sidecars);
+    let (uploaded, verified_meta) = body_result?;
+    let kind_metadata_published = kind_result?;
+    sidecar_result?;
+    Ok((uploaded, verified_meta, kind_metadata_published))
 }
 
 async fn upload_push_pack_file_body(

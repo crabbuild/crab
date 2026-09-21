@@ -368,6 +368,18 @@ struct GitCatalogVisibilityTransition {
     objects: GitVisibilityClosure,
 }
 
+/// Ordinal transition fields used by compact capsule visibility proofs.
+///
+/// The capsule protocol owns the wire encoding; this crate only exposes the
+/// validated in-memory representation so the OID dictionary is not expanded
+/// into repeated hexadecimal strings on every ref transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GitVisibilityOrdinalTransition {
+    pub(crate) from_ordinal: u32,
+    pub(crate) to_ordinal: u32,
+    pub(crate) objects: Vec<u32>,
+}
+
 /// Catalog-bound visibility proof that keeps the large OID dictionary lazy.
 ///
 /// Catalog-bound v1 proofs store ref closures as catalog ordinals. This view validates and
@@ -847,6 +859,12 @@ fn validate_catalog_transitions(
 }
 
 impl GitVisibilityIndex {
+    /// Return the complete sorted SHA-1 dictionary for this visibility proof.
+    #[must_use]
+    pub fn objects(&self) -> &[GitVisibilityOid] {
+        &self.objects
+    }
+
     /// Build a normalized proof from ref-rooted object sets.
     pub fn new(
         generation: u64,
@@ -1303,6 +1321,65 @@ impl GitVisibilityIndex {
             .collect()
     }
 
+    /// Return the dense dictionary and ordinal closures used by a compact
+    /// capsule checkpoint proof.
+    pub(crate) fn ordinal_parts(
+        &self,
+    ) -> Result<(
+        Vec<GitVisibilityOid>,
+        BTreeMap<String, Vec<u32>>,
+        BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
+        BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
+    )> {
+        let refs = self
+            .refs
+            .iter()
+            .map(|(name, closure)| (name.clone(), closure.positions()))
+            .collect();
+        let transitions = ordinal_transitions(&self.transitions, &self.positions)?;
+        let incremental_history = ordinal_transitions(&self.incremental_history, &self.positions)?;
+        Ok((self.objects.clone(), refs, transitions, incremental_history))
+    }
+
+    /// Restore a validated visibility index from an ordinal proof.
+    pub(crate) fn from_ordinal_parts(
+        generation: u64,
+        pack_index_hash: impl Into<String>,
+        git_validation_digest: impl Into<String>,
+        objects: Vec<GitVisibilityOid>,
+        refs: BTreeMap<String, Vec<u32>>,
+        transitions: BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
+        incremental_history: BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
+    ) -> Result<Self> {
+        let positions = build_positions(&objects)?;
+        let object_count = objects.len();
+        let refs = refs
+            .into_iter()
+            .map(|(name, positions_for_ref)| {
+                Ok((
+                    name,
+                    GitVisibilityClosure::from_positions(positions_for_ref, object_count)?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let transitions = restore_ordinal_transitions(transitions, &objects, object_count)?;
+        let incremental_history =
+            restore_ordinal_transitions(incremental_history, &objects, object_count)?;
+        let index = Self {
+            version: GIT_VISIBILITY_INDEX_VERSION,
+            generation,
+            pack_index_hash: pack_index_hash.into(),
+            git_validation_digest: git_validation_digest.into(),
+            objects,
+            positions,
+            refs,
+            transitions,
+            incremental_history,
+        };
+        index.validate()?;
+        Ok(index)
+    }
+
     pub(crate) fn restore_checkpoint_history(
         &mut self,
         history: &BTreeMap<String, Vec<GitVisibilityCheckpointTransition>>,
@@ -1502,6 +1579,72 @@ impl GitVisibilityIndex {
         }
         union
     }
+}
+
+fn ordinal_transitions(
+    source: &BTreeMap<String, Vec<GitVisibilityTransition>>,
+    positions: &HashMap<GitVisibilityOid, u32>,
+) -> Result<BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>> {
+    source
+        .iter()
+        .map(|(name, transitions)| {
+            let transitions = transitions
+                .iter()
+                .map(|transition| {
+                    let from_ordinal = positions
+                        .get(&transition.from_oid)
+                        .copied()
+                        .ok_or_else(|| corrupt("visibility transition source is absent"))?;
+                    let to_ordinal = positions
+                        .get(&transition.to_oid)
+                        .copied()
+                        .ok_or_else(|| corrupt("visibility transition target is absent"))?;
+                    Ok(GitVisibilityOrdinalTransition {
+                        from_ordinal,
+                        to_ordinal,
+                        objects: transition.objects.positions(),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok((name.clone(), transitions))
+        })
+        .collect()
+}
+
+fn restore_ordinal_transitions(
+    source: BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
+    objects: &[GitVisibilityOid],
+    object_count: usize,
+) -> Result<BTreeMap<String, Vec<GitVisibilityTransition>>> {
+    source
+        .into_iter()
+        .map(|(name, transitions)| {
+            let transitions = transitions
+                .into_iter()
+                .map(|transition| {
+                    let from_oid = *objects
+                        .get(usize::try_from(transition.from_ordinal).map_err(|_| {
+                            corrupt("visibility transition source ordinal overflows")
+                        })?)
+                        .ok_or_else(|| corrupt("visibility transition source is out of range"))?;
+                    let to_oid = *objects
+                        .get(usize::try_from(transition.to_ordinal).map_err(|_| {
+                            corrupt("visibility transition target ordinal overflows")
+                        })?)
+                        .ok_or_else(|| corrupt("visibility transition target is out of range"))?;
+                    Ok(GitVisibilityTransition {
+                        from_oid,
+                        to_oid,
+                        objects: GitVisibilityClosure::from_positions(
+                            transition.objects,
+                            object_count,
+                        )?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok((name, transitions))
+        })
+        .collect()
 }
 
 fn build_positions(objects: &[GitVisibilityOid]) -> Result<HashMap<GitVisibilityOid, u32>> {

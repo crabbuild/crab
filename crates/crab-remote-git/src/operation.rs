@@ -628,10 +628,17 @@ impl OperationContext {
         &self,
         pack_id: crab_xet::hash::MerkleHash,
         object_ids: &[gix_hash::ObjectId],
+        allowed_external_bases: &[gix_hash::ObjectId],
     ) -> Result<Option<[u8; 20]>> {
         let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
         let checksum = reader
-            .pack_checksum_for_exact_objects(pack_id, object_ids, &self.budget, &self.cancellation)
+            .pack_checksum_for_exact_objects(
+                pack_id,
+                object_ids,
+                allowed_external_bases,
+                &self.budget,
+                &self.cancellation,
+            )
             .await?;
         if checksum.is_some() {
             self.budget

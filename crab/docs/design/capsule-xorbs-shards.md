@@ -8,7 +8,7 @@
 | Scope | Pointer push, clone, fetch, hydrate, mount, recovery, and GC |
 | Status | Protocol core and major terminal/server paths implemented; complete v1 product parity and current-format production qualification remain open |
 | Priority | Correctness, large-file efficiency, then request latency and throughput |
-| Companion | [Capsule Publication Protocol](capsule-publication-protocol.md), [Push Pipeline Deep Dive](push.md), [Canonical Object Storage Layout V1](../architecture/object-storage-layout.md) |
+| Companion | [Capsule Publication Protocol](capsule-publication-protocol.md), [Protocol v2 Stable Layered Packs](capsule-layered-packs.md), [Push Pipeline Deep Dive](push.md), [Canonical Object Storage Layout V1](../architecture/object-storage-layout.md) |
 
 ## 1. Decision
 

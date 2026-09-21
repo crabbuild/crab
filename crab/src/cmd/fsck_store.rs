@@ -88,6 +88,7 @@ pub struct StoreChecker {
     capsule: Option<CapsuleFsckState>,
 }
 
+#[derive(Clone)]
 struct CapsuleFsckState {
     view: crab_read::capsule_protocol::CapsuleRepositoryView,
     catalog: crab_metadata::capsule_protocol::PointerCatalog,
@@ -218,39 +219,6 @@ impl StoreChecker {
         }
 
         Ok(issues)
-    }
-
-    async fn check_capsule_git_connectivity(&self, state: &CapsuleFsckState) -> Result<()> {
-        let workspace = tempfile::tempdir()?;
-        crab_read::capsule_protocol::install_git_packs(
-            &state.view,
-            workspace.path(),
-            MAX_FSCK_FRONTIER_BYTES,
-        )
-        .await?;
-        let refs = state
-            .view
-            .refs()
-            .iter()
-            .map(|(name, oid)| (name.clone(), oid.clone()))
-            .collect::<Vec<_>>();
-        let git_dir = workspace.path().to_owned();
-        let scan = tokio::task::spawn_blocking(move || {
-            crab_git::walk::scan_pointers(
-                &git_dir,
-                &refs,
-                crab_git::walk::PointerScanLimits {
-                    objects: MAX_FSCK_GIT_OBJECTS,
-                    lookups: MAX_FSCK_GIT_LOOKUPS,
-                    allocation_bytes: MAX_FSCK_GIT_ALLOCATION_BYTES,
-                },
-                &|| false,
-            )
-        })
-        .await
-        .map_err(|error| CrabError::Internal(format!("Git connectivity scan failed: {error}")))??;
-        crab_git::batch::verify_git_dir_blobs(workspace.path(), &scan.unchecked_blobs, &|| false)
-            .map_err(CrabError::Io)
     }
 
     async fn check_capsule_root_stability(&self, state: &CapsuleFsckState) -> Result<()> {
@@ -1007,10 +975,14 @@ async fn verify_capsule_history(
         }
     }
     futures_util::stream::iter(checkpoints.into_values().map(|pointer| async move {
-        crab_metadata::capsule_protocol::load_checkpoint(layout, &pointer)
-            .await
-            .map(|_| ())
-            .map_err(CrabError::from)
+        if pointer.format() == 5 {
+            verify_layered_checkpoint(layout, &pointer).await
+        } else {
+            crab_metadata::capsule_protocol::load_checkpoint(layout, &pointer)
+                .await
+                .map(|_| ())
+                .map_err(CrabError::from)
+        }
     }))
     .buffer_unordered(16)
     .try_collect::<Vec<_>>()
@@ -1020,6 +992,116 @@ async fn verify_capsule_history(
             .await
             .map(|_| ())
             .map_err(CrabError::from)
+    }))
+    .buffer_unordered(16)
+    .try_collect::<Vec<_>>()
+    .await?;
+    Ok(())
+}
+
+async fn verify_layered_checkpoint(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    pointer: &crab_metadata::capsule_protocol::CheckpointPointer,
+) -> Result<()> {
+    let checkpoint = crab_metadata::capsule_protocol::load_layered_checkpoint(layout, pointer)
+        .await
+        .map_err(CrabError::from)?;
+    futures_util::stream::iter(checkpoint.sources().iter().map(|source| async move {
+        let path = match source.kind() {
+            crab_metadata::capsule_protocol::PackSourceKind::CapsuleRun => {
+                layout.capsule_path(source.object_hash())
+            }
+            crab_metadata::capsule_protocol::PackSourceKind::PackLayer => {
+                layout.capsule_pack_layer_path(source.object_hash())
+            }
+        };
+        let (bytes, _) = layout
+            .store()
+            .get_with_etag_bounded(&path, MAX_FSCK_FRONTIER_BYTES)
+            .await
+            .map_err(CrabError::from)?;
+        if bytes.len() as u64 != source.object_size() {
+            return Err(CrabError::CorruptObject {
+                path: path.to_string(),
+                reason: "layered pack source size does not match its checkpoint descriptor"
+                    .to_owned(),
+            });
+        }
+        match source.kind() {
+            crab_metadata::capsule_protocol::PackSourceKind::CapsuleRun => {
+                let run = crab_metadata::capsule_protocol::CapsuleRun::decode(bytes.clone())
+                    .map_err(CrabError::from)?;
+                let actual =
+                    crab_metadata::capsule_protocol::PackSourceDescriptor::from_capsule_run(&run)
+                        .map_err(CrabError::from)?;
+                if &actual != source {
+                    return Err(CrabError::CorruptObject {
+                        path: path.to_string(),
+                        reason:
+                            "capsule-run source does not match its layered checkpoint descriptor"
+                                .to_owned(),
+                    });
+                }
+            }
+            crab_metadata::capsule_protocol::PackSourceKind::PackLayer => {
+                let layer = crab_metadata::capsule_protocol::PackLayer::decode(bytes.clone())
+                    .map_err(CrabError::from)?;
+                let actual = layer.source_descriptor().map_err(CrabError::from)?;
+                if &actual != source {
+                    return Err(CrabError::CorruptObject {
+                        path: path.to_string(),
+                        reason:
+                            "pack-layer source does not match its layered checkpoint descriptor"
+                                .to_owned(),
+                    });
+                }
+                for member in source.members() {
+                    for range in [
+                        member.pack(),
+                        member.index(),
+                        member.reverse_index(),
+                        member.locator(),
+                    ] {
+                        let start = usize::try_from(range.offset()).map_err(|_| {
+                            CrabError::CorruptObject {
+                                path: path.to_string(),
+                                reason: "layered pack range offset cannot be represented"
+                                    .to_owned(),
+                            }
+                        })?;
+                        let length = usize::try_from(range.length()).map_err(|_| {
+                            CrabError::CorruptObject {
+                                path: path.to_string(),
+                                reason: "layered pack range length cannot be represented"
+                                    .to_owned(),
+                            }
+                        })?;
+                        let end =
+                            start
+                                .checked_add(length)
+                                .ok_or_else(|| CrabError::CorruptObject {
+                                    path: path.to_string(),
+                                    reason: "layered pack range overflows source bytes".to_owned(),
+                                })?;
+                        let section =
+                            bytes
+                                .get(start..end)
+                                .ok_or_else(|| CrabError::CorruptObject {
+                                    path: path.to_string(),
+                                    reason: "layered pack range is outside source bytes".to_owned(),
+                                })?;
+                        if blake3::hash(section).to_hex().as_str() != range.blake3() {
+                            return Err(CrabError::CorruptObject {
+                                path: path.to_string(),
+                                reason: "layered pack range hash does not match its descriptor"
+                                    .to_owned(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }))
     .buffer_unordered(16)
     .try_collect::<Vec<_>>()
@@ -1196,20 +1278,87 @@ fn validate_catalog_shard(
     Ok(())
 }
 
+async fn install_capsule_git_packs(
+    view: crab_read::capsule_protocol::CapsuleRepositoryView,
+    storage: crab_storage::Store,
+    layout: crab_storage::StoreLayout<crab_storage::Store>,
+    git_dir: std::path::PathBuf,
+    max_input_bytes: u64,
+) -> crab_read::Result<Vec<std::path::PathBuf>> {
+    if view.layered_checkpoint().is_some() {
+        crab_read::capsule_protocol::install_git_packs_from_store(
+            &view,
+            &storage,
+            &layout,
+            &git_dir,
+            max_input_bytes,
+        )
+        .await
+    } else {
+        crab_read::capsule_protocol::install_git_packs(&view, &git_dir, max_input_bytes).await
+    }
+}
+
+async fn check_capsule_git_connectivity(
+    store: Store,
+    router: StoreLayout,
+    state: CapsuleFsckState,
+) -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let storage = store.as_storage().clone();
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        storage.clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let refs = state
+        .view
+        .refs()
+        .iter()
+        .map(|(name, oid)| (name.clone(), oid.clone()))
+        .collect::<Vec<_>>();
+    install_capsule_git_packs(
+        state.view,
+        storage,
+        layout,
+        workspace.path().to_owned(),
+        MAX_FSCK_FRONTIER_BYTES,
+    )
+    .await?;
+
+    let git_dir = workspace.path().to_owned();
+    let scan = tokio::task::spawn_blocking(move || {
+        crab_git::walk::scan_pointers(
+            &git_dir,
+            &refs,
+            crab_git::walk::PointerScanLimits {
+                objects: MAX_FSCK_GIT_OBJECTS,
+                lookups: MAX_FSCK_GIT_LOOKUPS,
+                allocation_bytes: MAX_FSCK_GIT_ALLOCATION_BYTES,
+            },
+            &|| false,
+        )
+    })
+    .await
+    .map_err(|error| CrabError::Internal(format!("Git connectivity scan failed: {error}")))??;
+    crab_git::batch::verify_git_dir_blobs(workspace.path(), &scan.unchecked_blobs, &|| false)
+        .map_err(CrabError::Io)
+}
+
 impl FsckChecker for StoreChecker {
     fn check_git_objects(
         &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<FsckIssue>>> + Send + '_>>
-    {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<FsckIssue>>> + '_>> {
+        let store = self.store.clone();
+        let router = self.router.clone();
+        let prefix = self.prefix.clone();
+        let capsule = self.capsule.clone();
         Box::pin(async move {
-            if self.capsule.is_some() {
+            if let Some(state) = capsule {
                 // Pack installation validates every advertised pack. The reachable
                 // walker then proves each ref's commit/tree/blob closure instead of
                 // treating an authenticated ref OID as sufficient evidence.
-                let state = self.capsule.as_ref().ok_or_else(|| {
-                    CrabError::Internal("capsule fsck state disappeared".to_owned())
-                })?;
-                self.check_capsule_git_connectivity(state).await?;
+                check_capsule_git_connectivity(store, router, state).await?;
                 return Ok(Vec::new());
             }
             // Git-object connectivity requires a local git repo and gix-fsck.
@@ -1217,20 +1366,32 @@ impl FsckChecker for StoreChecker {
             // in the pack storage.
             let mut issues = Vec::new();
 
-            let ref_keys = self.list_keys("refs").await?;
-            for ref_key in &ref_keys {
+            let prefix_path = Path::from(format!("{prefix}/refs"));
+            let ref_keys = store
+                .inner()
+                .list(Some(&prefix_path))
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    CrabError::from(crab_storage::map_object_store_error(
+                        error,
+                        prefix_path.as_ref(),
+                    ))
+                })?
+                .into_iter()
+                .map(|meta| meta.location.to_string())
+                .collect::<Vec<_>>();
+            for ref_key in ref_keys {
                 let path = Path::from(ref_key.as_str());
-                match self
-                    .store
-                    .get_with_etag_bounded(&path, MAX_FSCK_REF_BYTES)
-                    .await
-                {
+                match store.get_with_etag_bounded(&path, MAX_FSCK_REF_BYTES).await {
                     Ok((body, _)) => {
                         let sha = String::from_utf8_lossy(&body).trim().to_string();
                         if sha.is_empty() {
                             let ref_name = ref_key
-                                .strip_prefix(&format!("{}/refs/", self.prefix))
-                                .unwrap_or(ref_key);
+                                .strip_prefix(&format!("{prefix}/refs/"))
+                                .unwrap_or(&ref_key);
                             issues.push(FsckIssue::dangling_ref(ref_name, "<empty>"));
                         }
                     }

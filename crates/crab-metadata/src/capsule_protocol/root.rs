@@ -64,6 +64,12 @@ pub struct CapsulePointer {
     capsule_count: u32,
     transaction_ids: Vec<String>,
     newest_base_root_digest: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    control_offset: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    control_size: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    footer_hash: String,
 }
 
 impl CapsulePointer {
@@ -84,6 +90,41 @@ impl CapsulePointer {
             capsule_count,
             transaction_ids,
             newest_base_root_digest: newest_base_root_digest.into(),
+            control_offset: 0,
+            control_size: 0,
+            footer_hash: String::new(),
+        };
+        validate_capsule_pointer(&pointer)?;
+        Ok(pointer)
+    }
+
+    /// Create a root pointer with the run control suffix carried inline.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the pointer binds the immutable run and its directly readable control suffix"
+    )]
+    pub fn new_with_control(
+        hash: impl Into<String>,
+        size: u64,
+        control_offset: u64,
+        control_size: u64,
+        footer_hash: impl Into<String>,
+        level: u8,
+        transaction_ids: Vec<String>,
+        newest_base_root_digest: impl Into<String>,
+    ) -> Result<Self> {
+        let capsule_count = u32::try_from(transaction_ids.len())
+            .map_err(|_| contract_error("root capsule run count cannot be represented"))?;
+        let pointer = Self {
+            hash: hash.into(),
+            size,
+            level,
+            capsule_count,
+            transaction_ids,
+            newest_base_root_digest: newest_base_root_digest.into(),
+            control_offset,
+            control_size,
+            footer_hash: footer_hash.into(),
         };
         validate_capsule_pointer(&pointer)?;
         Ok(pointer)
@@ -124,12 +165,41 @@ impl CapsulePointer {
     pub fn newest_base_root_digest(&self) -> &str {
         &self.newest_base_root_digest
     }
+
+    /// Return the absolute offset of the authenticated run control suffix.
+    #[must_use]
+    pub const fn control_offset(&self) -> u64 {
+        self.control_offset
+    }
+
+    /// Return the size of the authenticated run control suffix.
+    #[must_use]
+    pub const fn control_size(&self) -> u64 {
+        self.control_size
+    }
+
+    /// Return the BLAKE3 identity of the authenticated run footer.
+    #[must_use]
+    pub fn footer_hash(&self) -> &str {
+        &self.footer_hash
+    }
+
+    /// Whether this pointer carries a directly addressable control suffix.
+    #[must_use]
+    pub fn has_control_suffix(&self) -> bool {
+        self.control_offset != 0 && self.control_size != 0 && !self.footer_hash.is_empty()
+    }
 }
 
 /// Root reference to one complete immutable repository checkpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointPointer {
+    #[serde(
+        default = "default_checkpoint_format",
+        skip_serializing_if = "is_legacy_checkpoint_format"
+    )]
+    format: u32,
     hash: String,
     size: u64,
     control_offset: u64,
@@ -158,7 +228,68 @@ impl CheckpointPointer {
         pack_count: u32,
         object_count: u64,
     ) -> Result<Self> {
+        Self::new_with_format(
+            3,
+            hash,
+            size,
+            control_offset,
+            control_size,
+            footer_hash,
+            covered_generation,
+            covered_root_digest,
+            pack_count,
+            object_count,
+        )
+    }
+
+    /// Create a metadata-only layered-checkpoint pointer.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the serialized pointer carries each independently authenticated checkpoint field"
+    )]
+    pub fn new_layered(
+        hash: impl Into<String>,
+        size: u64,
+        control_offset: u64,
+        control_size: u64,
+        footer_hash: impl Into<String>,
+        covered_generation: u64,
+        covered_root_digest: impl Into<String>,
+        pack_count: u32,
+        object_count: u64,
+    ) -> Result<Self> {
+        Self::new_with_format(
+            5,
+            hash,
+            size,
+            control_offset,
+            control_size,
+            footer_hash,
+            covered_generation,
+            covered_root_digest,
+            pack_count,
+            object_count,
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the serialized pointer carries each independently authenticated checkpoint field"
+    )]
+    fn new_with_format(
+        format: u32,
+        hash: impl Into<String>,
+        size: u64,
+        control_offset: u64,
+        control_size: u64,
+        footer_hash: impl Into<String>,
+        covered_generation: u64,
+        covered_root_digest: impl Into<String>,
+        pack_count: u32,
+        object_count: u64,
+    ) -> Result<Self> {
         let pointer = Self {
+            format,
             hash: hash.into(),
             size,
             control_offset,
@@ -171,6 +302,12 @@ impl CheckpointPointer {
         };
         validate_checkpoint_pointer(&pointer)?;
         Ok(pointer)
+    }
+
+    /// Return the authenticated checkpoint wire format version.
+    #[must_use]
+    pub const fn format(&self) -> u32 {
+        self.format
     }
 
     /// Return the immutable checkpoint object identity.
@@ -872,10 +1009,34 @@ fn validate_capsule_pointer(pointer: &CapsulePointer) -> Result<()> {
             ));
         }
     }
+    let control_fields_absent =
+        pointer.control_offset == 0 && pointer.control_size == 0 && pointer.footer_hash.is_empty();
+    if !control_fields_absent {
+        validate_content_hash(
+            &pointer.footer_hash,
+            "root capsule footer hash",
+            "capsule-protocol root",
+        )?;
+        if pointer.control_offset == 0
+            || pointer.control_size == 0
+            || pointer.control_offset.checked_add(pointer.control_size) != Some(pointer.size)
+        {
+            return Err(contract_error(
+                "root capsule control suffix is out of bounds",
+            ));
+        }
+    }
     Ok(())
 }
 
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 fn validate_checkpoint_pointer(pointer: &CheckpointPointer) -> Result<()> {
+    if !matches!(pointer.format, 3 | 5) {
+        return Err(contract_error("checkpoint format is unsupported"));
+    }
     validate_content_hash(
         &pointer.hash,
         "root checkpoint hash",
@@ -901,6 +1062,14 @@ fn validate_checkpoint_pointer(pointer: &CheckpointPointer) -> Result<()> {
         return Err(contract_error("checkpoint descriptor is out of bounds"));
     }
     Ok(())
+}
+
+fn default_checkpoint_format() -> u32 {
+    3
+}
+
+fn is_legacy_checkpoint_format(format: &u32) -> bool {
+    *format == 3
 }
 
 fn validate_gc_fence(fence: &GcFence) -> Result<()> {

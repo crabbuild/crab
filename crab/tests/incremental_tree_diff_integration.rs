@@ -713,9 +713,10 @@ async fn push_ref_from_git_dir(
     config.incremental = false;
     let router = StoreLayout::new(store.clone(), prefix.to_owned());
     initialize_remote(&store, &router).await;
-    let result = run_native_push(
+    let specs = make_specs_for_ref(ref_name);
+    let push_future = run_native_push(
         &config,
-        &make_specs_for_ref(ref_name),
+        &specs,
         NativePushInputs::new(
             Some(store),
             None,
@@ -727,9 +728,8 @@ async fn push_ref_from_git_dir(
             None,
             CancellationToken::new(),
         ),
-    )
-    .await
-    .expect("native push");
+    );
+    let result = push_future.await.expect("native push");
     assert_eq!(result.outcomes.get(ref_name), Some(&RefPushOutcome::Ok));
 }
 

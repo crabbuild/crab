@@ -196,6 +196,13 @@ impl<S> StoreLayout<S> {
         self.repo_path(&format!("v2/checkpoints/{partition}/{hash}"))
     }
 
+    /// Path to one immutable protocol-v2 geometric Git pack layer.
+    #[must_use]
+    pub fn capsule_pack_layer_path(&self, hash: &str) -> ObjectPath {
+        let partition = hash.get(..GLOBAL_CONTENT_FANOUT_WIDTH).unwrap_or(hash);
+        self.repo_path(&format!("v2/pack-layers/{partition}/{hash}"))
+    }
+
     /// Path to one immutable capsule-protocol history segment.
     #[must_use]
     pub fn capsule_history_segment_path(&self, hash: &str) -> ObjectPath {
@@ -608,6 +615,10 @@ mod tests {
         assert_eq!(
             layout.capsule_checkpoint_path(&hash).as_ref(),
             format!("org/models/v2/checkpoints/ab/{hash}")
+        );
+        assert_eq!(
+            layout.capsule_pack_layer_path(&hash).as_ref(),
+            format!("org/models/v2/pack-layers/ab/{hash}")
         );
         assert_eq!(
             layout.capsule_history_segment_path(&hash).as_ref(),

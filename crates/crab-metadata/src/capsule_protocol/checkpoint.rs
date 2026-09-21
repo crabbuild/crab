@@ -107,6 +107,7 @@ impl Checkpoint {
                 locator_section: 0,
                 git_checksum: pack.git_checksum.clone(),
                 object_count: pack.object_count,
+                external_delta_bases: pack.external_delta_bases.clone(),
             })
             .collect::<Vec<_>>();
         for (pack_index, pack) in git_packs.iter().enumerate() {

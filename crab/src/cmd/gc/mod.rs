@@ -3048,6 +3048,7 @@ async fn sweep_capsule_objects(
                 .capsule_checkpoint_path(checkpoint.hash())
                 .to_string(),
         );
+        mark_layered_checkpoint_sources(layout, checkpoint, &mut reachable).await?;
     }
     reachable.extend(
         capsule_runs
@@ -3073,6 +3074,7 @@ async fn sweep_capsule_objects(
                     .capsule_checkpoint_path(segment.checkpoint().hash())
                     .to_string(),
             );
+            mark_layered_checkpoint_sources(layout, segment.checkpoint(), &mut reachable).await?;
             reachable.extend(
                 segment
                     .capsule_runs()
@@ -3085,16 +3087,19 @@ async fn sweep_capsule_objects(
 
     let capsule_prefix = layout.repo_path("v2/capsules/");
     let checkpoint_prefix = layout.repo_path("v2/checkpoints/");
+    let pack_layer_prefix = layout.repo_path("v2/pack-layers/");
     let history_prefix = layout.repo_path("v2/history/");
-    let (capsules, checkpoints, history) = tokio::try_join!(
+    let (capsules, checkpoints, pack_layers, history) = tokio::try_join!(
         store.list_prefix(&capsule_prefix),
         store.list_prefix(&checkpoint_prefix),
+        store.list_prefix(&pack_layer_prefix),
         store.list_prefix(&history_prefix),
     )?;
     let cutoff = snapshot_at - grace_period.max(MIN_GRACE_PERIOD);
     let candidates = capsules
         .into_iter()
         .chain(checkpoints)
+        .chain(pack_layers)
         .chain(history)
         .filter(|object| !reachable.contains(object.location.as_ref()))
         // Per-ref publications do not register in one shared writer object.
@@ -3133,12 +3138,37 @@ async fn sweep_capsule_objects(
     Ok(GcOutcome {
         packs_deleted: candidates.len() as u64,
         bytes_reclaimed: bytes,
-        list_requests: 2,
-        list_parallelism: 2,
+        list_requests: 3,
+        list_parallelism: 3,
         list_wall_seconds: started.elapsed().as_secs_f64(),
         dry_run: args.dry_run,
         ..GcOutcome::default()
     })
+}
+
+async fn mark_layered_checkpoint_sources(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    pointer: &crab_metadata::capsule_protocol::CheckpointPointer,
+    reachable: &mut HashSet<String>,
+) -> Result<()> {
+    if pointer.format() != 5 {
+        return Ok(());
+    }
+    let checkpoint = crab_metadata::capsule_protocol::load_layered_checkpoint(layout, pointer)
+        .await
+        .map_err(CrabError::from)?;
+    for source in checkpoint.sources() {
+        let path = match source.kind() {
+            crab_metadata::capsule_protocol::PackSourceKind::CapsuleRun => {
+                layout.capsule_path(source.object_hash())
+            }
+            crab_metadata::capsule_protocol::PackSourceKind::PackLayer => {
+                layout.capsule_pack_layer_path(source.object_hash())
+            }
+        };
+        reachable.insert(path.to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -5100,6 +5130,117 @@ mod tests {
         for path in [history_path, run_path, checkpoint_path] {
             assert!(store.head(&path).await.is_ok());
         }
+    }
+
+    #[tokio::test]
+    async fn capsule_protocol_gc_retains_layered_checkpoint_sources() {
+        use bytes::Bytes;
+        use crab_metadata::capsule_protocol::{
+            Capsule, CapsuleGitPack, CapsuleRefEdit, CapsuleTransaction, LayeredCheckpoint,
+            PackLayer, PointerCatalog,
+        };
+        use object_store::memory::InMemory;
+        use std::sync::Arc;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/v2-layer-gc".to_owned());
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let base =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
+        crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+            .await
+            .unwrap();
+        let captured = crab_read::capsule_protocol::open_view(
+            &layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 1024 * 1024,
+                max_frontier_bytes: 8 * 1024 * 1024,
+            },
+        )
+        .await
+        .unwrap();
+        let layer = PackLayer::build(
+            &CapsuleGitPack::new(
+                Bytes::from_static(b"PACK"),
+                Bytes::from_static(b"index"),
+                Bytes::from_static(b"reverse"),
+                Bytes::from_static(b"locator"),
+                "3".repeat(40),
+                1,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let source = layer.source_descriptor().unwrap();
+        let checkpoint = LayeredCheckpoint::build(
+            captured.root().root().generation(),
+            captured.root().digest(),
+            vec![source],
+            PointerCatalog::new(),
+            None,
+        )
+        .unwrap();
+        let live_layer = layout.capsule_pack_layer_path(layer.hash());
+        store.put(&live_layer, layer.bytes().clone()).await.unwrap();
+        let root = crab_write::capsule_protocol::publish_ref_layered_checkpoint(
+            &layout,
+            captured.root_snapshot().clone(),
+            &checkpoint,
+            captured.refs().clone(),
+            captured.peeled_refs().clone(),
+            captured.visible_ref_transactions().clone(),
+            captured.capsule_run_pointers().to_vec(),
+        )
+        .await
+        .unwrap();
+        let orphan_layer = layout.capsule_pack_layer_path(&"f".repeat(64));
+        let orphan_checkpoint = layout.capsule_checkpoint_path(&"e".repeat(64));
+        for path in [&orphan_layer, &orphan_checkpoint] {
+            store
+                .put(path, Bytes::from_static(b"orphan"))
+                .await
+                .unwrap();
+        }
+
+        let outcome = sweep_capsule_objects(
+            &GcArgs {
+                dry_run: true,
+                ..GcArgs::default()
+            },
+            &store,
+            &layout,
+            root.record().root(),
+            &[],
+            &HashSet::new(),
+            &CancellationToken::new(),
+            SystemTime::now() + Duration::from_secs(2 * 3600),
+            Duration::from_secs(3600),
+            Instant::now(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.packs_deleted, 2);
+        assert!(store.head(&live_layer).await.is_ok());
+        assert!(store.head(&orphan_layer).await.is_ok());
+        assert!(store.head(&orphan_checkpoint).await.is_ok());
     }
 
     #[tokio::test]

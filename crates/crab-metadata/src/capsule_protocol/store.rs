@@ -5,9 +5,9 @@ use futures_util::{StreamExt, TryStreamExt};
 use object_store::ObjectMeta;
 
 use crate::capsule_protocol::{
-    Capsule, CapsuleRefHead, CapsuleRun, Checkpoint, HistorySegment, HistorySegmentPointer,
-    MAX_CAPSULE_REF_HEADS, MAX_HISTORY_SEGMENT_BYTES, MAX_ROOT_BYTES, PointerCatalog, RootRecord,
-    capsule_ref_name_key,
+    Capsule, CapsuleControl, CapsuleRefHead, CapsuleRun, CapsuleRunControl, CapsuleSectionKind,
+    Checkpoint, HistorySegment, HistorySegmentPointer, LayeredCheckpoint, MAX_CAPSULE_REF_HEADS,
+    MAX_HISTORY_SEGMENT_BYTES, MAX_ROOT_BYTES, PointerCatalog, RootRecord, capsule_ref_name_key,
 };
 use crate::error::MetadataError;
 use crate::error::Result;
@@ -296,6 +296,12 @@ pub async fn load_checkpoint(
     router: &StoreLayout<Store>,
     pointer: &super::CheckpointPointer,
 ) -> Result<Checkpoint> {
+    if pointer.format() != 3 {
+        return Err(corrupt(
+            &router.capsule_checkpoint_path(pointer.hash()),
+            "checkpoint pointer does not name the legacy checkpoint format",
+        ));
+    }
     let path = router.capsule_checkpoint_path(pointer.hash());
     let (bytes, _) = router
         .store()
@@ -320,6 +326,91 @@ pub async fn load_checkpoint(
         return Err(corrupt(
             &path,
             "checkpoint does not match its authenticated pointer",
+        ));
+    }
+    Ok(checkpoint)
+}
+
+/// Load and verify one immutable metadata-only layered checkpoint.
+pub async fn load_layered_checkpoint(
+    router: &StoreLayout<Store>,
+    pointer: &super::CheckpointPointer,
+) -> Result<LayeredCheckpoint> {
+    if pointer.format() != 5 {
+        return Err(corrupt(
+            &router.capsule_checkpoint_path(pointer.hash()),
+            "checkpoint pointer does not name the layered checkpoint format",
+        ));
+    }
+    let path = router.capsule_checkpoint_path(pointer.hash());
+    let (bytes, _) = router
+        .store()
+        .get_with_etag_bounded(&path, pointer.size())
+        .await?;
+    let checkpoint = LayeredCheckpoint::decode(bytes)?;
+    let object_count = checkpoint.object_count()?;
+    let pack_count = checkpoint.pack_count()?;
+    if checkpoint.hash() != pointer.hash()
+        || checkpoint.bytes().len() as u64 != pointer.size()
+        || checkpoint.control_offset() != pointer.control_offset()
+        || checkpoint.control_size() != pointer.control_size()
+        || checkpoint.footer_hash() != pointer.footer_hash()
+        || checkpoint.covered_generation() != pointer.covered_generation()
+        || checkpoint.covered_root_digest() != pointer.covered_root_digest()
+        || pack_count != pointer.pack_count()
+        || object_count != pointer.object_count()
+    {
+        return Err(corrupt(
+            &path,
+            "layered checkpoint does not match its authenticated pointer",
+        ));
+    }
+    Ok(checkpoint)
+}
+
+/// Load and authenticate only the footer of one layered checkpoint.
+pub async fn load_layered_checkpoint_control(
+    router: &StoreLayout<Store>,
+    pointer: &super::CheckpointPointer,
+) -> Result<LayeredCheckpoint> {
+    if pointer.format() != 5 {
+        return Err(corrupt(
+            &router.capsule_checkpoint_path(pointer.hash()),
+            "checkpoint pointer does not name the layered checkpoint format",
+        ));
+    }
+    if pointer.control_offset() == 0 || pointer.control_size() == 0 {
+        return Err(corrupt(
+            &router.capsule_checkpoint_path(pointer.hash()),
+            "layered checkpoint pointer does not name a control suffix",
+        ));
+    }
+    let path = router.capsule_checkpoint_path(pointer.hash());
+    let bytes = router
+        .store()
+        .range_get(&path, pointer.control_offset()..pointer.size())
+        .await?;
+    let checkpoint = LayeredCheckpoint::decode_control(
+        bytes,
+        pointer.size(),
+        pointer.control_offset(),
+        pointer.hash(),
+        pointer.footer_hash(),
+    )?;
+    let object_count = checkpoint.object_count()?;
+    let pack_count = checkpoint.pack_count()?;
+    if checkpoint.hash() != pointer.hash()
+        || checkpoint.control_offset() != pointer.control_offset()
+        || checkpoint.control_size() != pointer.control_size()
+        || checkpoint.footer_hash() != pointer.footer_hash()
+        || checkpoint.covered_generation() != pointer.covered_generation()
+        || checkpoint.covered_root_digest() != pointer.covered_root_digest()
+        || pack_count != pointer.pack_count()
+        || object_count != pointer.object_count()
+    {
+        return Err(corrupt(
+            &path,
+            "layered checkpoint control does not match its authenticated pointer",
         ));
     }
     Ok(checkpoint)
@@ -369,6 +460,132 @@ pub async fn load_capsule_run(
     load_run(router, pointer).await
 }
 
+/// Load one run's authenticated footer and control sections without reading its Git payload.
+pub async fn load_capsule_run_control(
+    router: &StoreLayout<Store>,
+    pointer: &super::CapsulePointer,
+) -> Result<(CapsuleRunControl, Vec<CapsuleControl>)> {
+    let path = router.capsule_path(pointer.hash());
+    let suffix = if pointer.has_control_suffix() {
+        let suffix_end = pointer
+            .control_offset()
+            .checked_add(pointer.control_size())
+            .ok_or_else(|| corrupt(&path, "capsule run control suffix overflows"))?;
+        if suffix_end != pointer.size() {
+            return Err(corrupt(
+                &path,
+                "capsule pointer control suffix does not end at the object boundary",
+            ));
+        }
+        router
+            .store()
+            .range_get(&path, pointer.control_offset()..suffix_end)
+            .await?
+    } else {
+        // Older development roots did not carry the suffix offset. Keep this
+        // bounded discovery path only for those explicitly legacy pointers;
+        // published v2 pointers always take the direct range above.
+        let trailer_size = u64::try_from(CapsuleRunControl::trailer_bytes())
+            .map_err(|_| corrupt(&path, "capsule run trailer size cannot be represented"))?;
+        let trailer_start = pointer
+            .size()
+            .checked_sub(trailer_size)
+            .ok_or_else(|| corrupt(&path, "capsule run is shorter than its trailer"))?;
+        let trailer = router
+            .store()
+            .range_get(&path, trailer_start..pointer.size())
+            .await?;
+        let suffix_size = CapsuleRunControl::suffix_length_from_trailer(&trailer)?;
+        if suffix_size > pointer.size() {
+            return Err(corrupt(
+                &path,
+                "capsule run control suffix exceeds its object",
+            ));
+        }
+        let suffix_start = pointer.size() - suffix_size;
+        if suffix_start == trailer_start {
+            trailer
+        } else {
+            router
+                .store()
+                .range_get(&path, suffix_start..pointer.size())
+                .await?
+        }
+    };
+    let control = CapsuleRunControl::decode_suffix(
+        suffix,
+        pointer.size(),
+        pointer.hash(),
+        pointer.level(),
+        pointer.transaction_ids(),
+        pointer.newest_base_root_digest(),
+    )?;
+    if pointer.has_control_suffix() && control.footer_hash() != pointer.footer_hash() {
+        return Err(corrupt(
+            &path,
+            "capsule pointer footer hash does not match the authenticated run suffix",
+        ));
+    }
+    let (detached, admission) = futures_util::try_join!(
+        load_detached_control_sections(router, &path, &control),
+        load_run_admission(router, &path, &control),
+    )?;
+    let control = match admission {
+        Some(bytes) => control.attach_admission(bytes)?,
+        None => control,
+    };
+    let capsules = control.materialize_capsules_with_external_controls(&detached)?;
+    Ok((control, capsules))
+}
+
+async fn load_run_admission(
+    router: &StoreLayout<Store>,
+    path: &object_store::path::Path,
+    control: &CapsuleRunControl,
+) -> Result<Option<bytes::Bytes>> {
+    let Some(range) = control.admission_range() else {
+        return Ok(None);
+    };
+    let end = range
+        .offset()
+        .checked_add(range.length())
+        .ok_or_else(|| corrupt(path, "capsule run admission range overflows"))?;
+    Ok(Some(
+        router.store().range_get(path, range.offset()..end).await?,
+    ))
+}
+
+async fn load_detached_control_sections(
+    router: &StoreLayout<Store>,
+    path: &object_store::path::Path,
+    control: &CapsuleRunControl,
+) -> Result<BTreeMap<(String, CapsuleSectionKind), bytes::Bytes>> {
+    let ranges = control
+        .capsule_locations()
+        .iter()
+        .flat_map(|location| location.detached_controls())
+        .collect::<Vec<_>>();
+    futures_util::stream::iter(ranges.into_iter().map(|(hash, kind, range)| async move {
+        let end = range
+            .offset()
+            .checked_add(range.length())
+            .ok_or_else(|| corrupt(path, "detached capsule control range overflows"))?;
+        let bytes = router.store().range_get(path, range.offset()..end).await?;
+        if bytes.len() as u64 != range.length()
+            || blake3::hash(&bytes).to_hex().as_str() != range.blake3()
+        {
+            return Err(corrupt(
+                path,
+                "detached capsule control range does not match its commitment",
+            ));
+        }
+        Ok(((hash, kind), bytes))
+    }))
+    .buffer_unordered(8)
+    .try_collect()
+    .await
+}
+
 /// Load the complete authenticated pointer catalog named by one v2 root.
 pub async fn load_pointer_catalog(router: &StoreLayout<Store>) -> Result<PointerCatalog> {
     let snapshot = load_root(router).await?;
@@ -382,8 +599,15 @@ pub async fn load_pointer_catalog_from_root(
 ) -> Result<PointerCatalog> {
     let root = snapshot.record().root().clone();
     let mut catalog = if let Some(pointer) = root.checkpoint() {
-        let checkpoint = load_checkpoint_control(router, pointer).await?;
-        checkpoint.pointer_catalog()?
+        if pointer.format() == 5 {
+            load_layered_checkpoint(router, pointer)
+                .await?
+                .pointer_catalog()?
+        } else {
+            load_checkpoint_control(router, pointer)
+                .await?
+                .pointer_catalog()?
+        }
     } else {
         PointerCatalog::new()
     };
