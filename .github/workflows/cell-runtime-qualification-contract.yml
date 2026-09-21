@@ -151,9 +151,10 @@ jobs:
             workload "$canonical_workload" "$profile" 7
           cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
             verify-workload "$canonical_workload" "$profile"
-          entries='[]'
           for workload in protocol storage publication warm-path churn fleet failover primitives accounting compatibility; do
-            artifact="$root/artifacts/${workload}.json"
+            artifact_dir="$root/artifacts/$workload"
+            mkdir -p "$artifact_dir"
+            artifact="$artifact_dir/primary.json"
             receipt="$root/receipts/${workload}.json"
             if [ "$workload" = primitives ]; then
               cp "$canonical_workload" "$artifact"
@@ -163,15 +164,9 @@ jobs:
             cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
               emit "$receipt" "$source_revision" "$image_digest" "$artifact" \
               github-actions "$workload" none "$profile"
-            entries="$(jq -c \
-              --arg workload "$workload" \
-              --arg receipt "receipts/${workload}.json" \
-              --arg artifact "artifacts/${workload}.json" \
-              '. + [{workload: $workload, receipt: $receipt, artifacts: [$artifact]}]' \
-              <<< "$entries")"
           done
-          printf '%s' "$(jq -cn --argjson entries "$entries" \
-            '{schema_version: 1, entries: $entries}')" > "$root/qualification-matrix.json"
+          cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
+            manifest "$root/qualification-matrix.json" "$root"
           (
             cd "$root"
             cargo run --quiet --locked --manifest-path "${GITHUB_WORKSPACE}/Cargo.toml" \

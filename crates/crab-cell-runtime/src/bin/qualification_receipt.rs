@@ -6,9 +6,9 @@ use std::{
 };
 
 use crab_cell_runtime::{
-    Digest, QualificationMatrixManifest, QualificationMetric, QualificationOwnership,
-    QualificationProfile, QualificationReceipt, QualificationRunArtifact, QualificationRunner,
-    QualificationWorkload, validate_cluster_receipt,
+    Digest, QUALIFICATION_MATRIX_ROWS, QualificationMatrixEntry, QualificationMatrixManifest,
+    QualificationMetric, QualificationOwnership, QualificationProfile, QualificationReceipt,
+    QualificationRunArtifact, QualificationRunner, QualificationWorkload, validate_cluster_receipt,
 };
 use ed25519_dalek::SigningKey;
 use rand::Rng;
@@ -181,6 +181,20 @@ fn run() -> Result<(), String> {
             workload
                 .verify_for_profile(&profile)
                 .map_err(|error| error.to_string())
+        }
+        Some("manifest") => {
+            let output = PathBuf::from(required(&mut args, "manifest output")?);
+            let evidence_dir = PathBuf::from(required(&mut args, "evidence directory")?);
+            if args.next().is_some() {
+                return Err(usage());
+            }
+            let manifest = build_manifest(&evidence_dir)?;
+            fs::write(
+                output,
+                manifest.encode().map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| format!("write matrix manifest: {error}"))?;
+            Ok(())
         }
         Some("verify") => {
             let receipt_path = required(&mut args, "receipt")?;
@@ -374,6 +388,80 @@ fn verify_matrix(args: &mut impl Iterator<Item = String>) -> Result<(), String> 
     Ok(())
 }
 
+fn build_manifest(evidence_dir: &Path) -> Result<QualificationMatrixManifest, String> {
+    require_directory(evidence_dir, "evidence directory")?;
+    let receipts_dir = evidence_dir.join("receipts");
+    let artifacts_dir = evidence_dir.join("artifacts");
+    require_directory(&receipts_dir, "matrix receipts directory")?;
+    require_directory(&artifacts_dir, "matrix artifacts directory")?;
+
+    let entries = QUALIFICATION_MATRIX_ROWS
+        .iter()
+        .map(|workload| {
+            let receipt_name = format!("{workload}.json");
+            require_file(&receipts_dir.join(&receipt_name), "matrix receipt")?;
+            let workload_dir = artifacts_dir.join(workload);
+            require_directory(&workload_dir, "matrix workload artifact directory")?;
+            let mut artifact_names = fs::read_dir(&workload_dir)
+                .map_err(|error| format!("read matrix workload artifacts: {error}"))?
+                .map(|entry| {
+                    let entry = entry.map_err(|error| format!("read matrix artifact: {error}"))?;
+                    let name = entry
+                        .file_name()
+                        .into_string()
+                        .map_err(|_| "matrix artifact name is not UTF-8".to_owned())?;
+                    validate_component(&name, "matrix artifact name")?;
+                    require_file(&entry.path(), "matrix artifact")?;
+                    Ok(name)
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            artifact_names.sort_unstable();
+            if artifact_names.is_empty() {
+                return Err("matrix workload has no artifacts".into());
+            }
+            let artifacts = artifact_names
+                .into_iter()
+                .map(|name| format!("artifacts/{workload}/{name}"))
+                .collect();
+            QualificationMatrixEntry::new(
+                (*workload).to_owned(),
+                format!("receipts/{receipt_name}"),
+                artifacts,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    QualificationMatrixManifest::new(entries).map_err(|error| error.to_string())
+}
+
+fn require_directory(path: &Path, field: &str) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| format!("{field}: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!("{field} must be a real directory"));
+    }
+    Ok(())
+}
+
+fn require_file(path: &Path, field: &str) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| format!("{field}: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!("{field} must be a real file"));
+    }
+    Ok(())
+}
+
+fn validate_component(value: &str, field: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 256
+        || !value.is_ascii()
+        || value.bytes().any(|byte| byte.is_ascii_control())
+        || matches!(value, "." | "..")
+    {
+        return Err(format!("{field} is invalid"));
+    }
+    Ok(())
+}
+
 fn resolve_manifest_path(base: &Path, value: &str) -> Result<PathBuf, String> {
     let path = Path::new(value);
     if path.is_absolute()
@@ -475,13 +563,13 @@ fn unix_millis() -> Result<u64, String> {
 }
 
 fn usage() -> String {
-    "usage: qualification_receipt profile <output> [pr-contract|local-provider|scale|fault|fault-s3|fault-gcs|fault-azure|provider|provider-s3|provider-gcs|provider-azure|compatibility]\n       qualification_receipt workload <output> <profile.json> <seed> [cells operations duration_secs]\n       qualification_receipt verify-workload <workload.json> <profile.json>\n       qualification_receipt emit <output> <source> <image-digest> <artifact> [provider workload fault profile.json]\n       qualification_receipt verify <receipt> <source> <image-digest> <artifact> [profile.json [trusted-signer-hex]]\n       qualification_receipt verify-matrix <manifest> <source> <image-digest> [profile.json [trusted-signer-hex]]\n       qualification_receipt validate-cluster <receipt> <source> <image-digest> [release|source-only]".into()
+    "usage: qualification_receipt profile <output> [pr-contract|local-provider|scale|fault|fault-s3|fault-gcs|fault-azure|provider|provider-s3|provider-gcs|provider-azure|compatibility]\n       qualification_receipt workload <output> <profile.json> <seed> [cells operations duration_secs]\n       qualification_receipt verify-workload <workload.json> <profile.json>\n       qualification_receipt manifest <output> <evidence-dir>\n       qualification_receipt emit <output> <source> <image-digest> <artifact> [provider workload fault profile.json]\n       qualification_receipt verify <receipt> <source> <image-digest> <artifact> [profile.json [trusted-signer-hex]]\n       qualification_receipt verify-matrix <manifest> <source> <image-digest> [profile.json [trusted-signer-hex]]\n       qualification_receipt validate-cluster <receipt> <source> <image-digest> [release|source-only]".into()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{manifest_base, require_trusted_signer, resolve_manifest_path};
-    use crab_cell_runtime::QualificationProfile;
+    use super::{build_manifest, manifest_base, require_trusted_signer, resolve_manifest_path};
+    use crab_cell_runtime::{QUALIFICATION_MATRIX_ROWS, QualificationProfile};
     use std::{fs, path::Path};
 
     #[test]
@@ -506,6 +594,47 @@ mod tests {
         assert!(require_trusted_signer(Some(&protected), None).is_err());
         assert!(require_trusted_signer(Some(&QualificationProfile::pr_contract()), None).is_ok());
         assert!(require_trusted_signer(None, None).is_ok());
+    }
+
+    #[test]
+    fn manifest_builder_emits_canonical_rows_and_rejects_missing_files() {
+        let directory = tempfile::tempdir().expect("matrix directory");
+        fs::create_dir(directory.path().join("receipts")).expect("receipts");
+        fs::create_dir(directory.path().join("artifacts")).expect("artifacts");
+        for workload in QUALIFICATION_MATRIX_ROWS {
+            fs::write(
+                directory
+                    .path()
+                    .join("receipts")
+                    .join(format!("{workload}.json")),
+                b"receipt",
+            )
+            .expect("receipt");
+            let workload_dir = directory.path().join("artifacts").join(workload);
+            fs::create_dir(&workload_dir).expect("workload artifacts");
+            fs::write(workload_dir.join("z.json"), b"z").expect("z artifact");
+            fs::write(workload_dir.join("a.json"), b"a").expect("a artifact");
+        }
+
+        let manifest = build_manifest(directory.path()).expect("canonical manifest");
+        assert_eq!(
+            manifest
+                .entries()
+                .iter()
+                .map(|entry| entry.workload())
+                .collect::<Vec<_>>(),
+            QUALIFICATION_MATRIX_ROWS
+        );
+        assert_eq!(
+            manifest.entries()[0].artifacts(),
+            &[
+                "artifacts/protocol/a.json".to_owned(),
+                "artifacts/protocol/z.json".to_owned()
+            ]
+        );
+
+        fs::remove_file(directory.path().join("receipts/protocol.json")).expect("remove receipt");
+        assert!(build_manifest(directory.path()).is_err());
     }
 
     #[cfg(unix)]

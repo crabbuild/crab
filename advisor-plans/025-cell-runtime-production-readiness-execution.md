@@ -25,10 +25,11 @@
   workload with seed-bound lifecycle cases for every primitive, public `CellNode`
   typed all-primitive execution, public
   receipt/matrix validation, protected-profile/run-artifact verifier coverage,
-  release negative gates, exact tagged-source profile binding, and a
-  fresh/clock-skew check for protected matrix consumption are implemented and
-  tested; the protected ten-row profile workload and provider/Kubernetes/scale
-  receipts remain open
+  release negative gates, exact tagged-source profile binding, a
+  schema-2 canonical manifest builder, readiness-frozen host facility
+  ownership, and a fresh/clock-skew check for protected matrix consumption are
+  implemented and tested; the protected ten-row profile workload and
+  provider/Kubernetes/scale receipts remain open
 
 ## Decision boundary
 

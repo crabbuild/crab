@@ -23,6 +23,24 @@ cargo run --locked -p crab-cell-runtime --bin qualification_receipt -- \
   verify-workload workload.json profiles/pr-contract-v1.json
 ```
 
+After a real harness has written one receipt and one or more raw artifacts for
+each matrix workload, build the canonical manifest from that evidence tree:
+
+```text
+evidence/
+├── receipts/<workload>.json
+└── artifacts/<workload>/<artifact files>
+
+cargo run --locked -p crab-cell-runtime --bin qualification_receipt -- \
+  manifest evidence/qualification-matrix.json evidence/
+```
+
+The builder emits schema-2 rows in the required order and rejects missing,
+symlinked, or non-file evidence entries. It only indexes files; it does not
+create or sign receipts. Run `verify-matrix` with the protected profile and
+pinned attestation key before treating the resulting manifest as release
+evidence.
+
 Typed qualification adapters may use the bounded `QualificationWorkload::run_concurrent`
 entry point when scheduled operations are independent or idempotent. The serial
 `run` entry point remains the safe choice for workloads with application-level

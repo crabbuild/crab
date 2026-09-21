@@ -877,7 +877,7 @@ impl CellNode {
         self.runtime.is_shutting_down()
     }
 
-    /// Attaches one provider-owned lifecycle component before node shutdown.
+    /// Attaches one provider-owned lifecycle component during node startup.
     pub fn install_facility(&self, facility: CellNodeFacility) -> crab_cell_runtime::Result<()> {
         self.install_facilities(std::iter::once(facility))
     }
@@ -886,6 +886,8 @@ impl CellNode {
     ///
     /// All names and capacity are validated before any facility is retained, so
     /// a failed composition cannot leave the node with a partial owner set.
+    /// Registration closes when readiness opens so the owner set cannot change
+    /// underneath admitted requests.
     pub fn install_facilities(
         &self,
         facilities: impl IntoIterator<Item = CellNodeFacility>,
@@ -901,7 +903,7 @@ impl CellNode {
             .state
             .lock()
             .map_err(|_| Error::Control("CellNode lifecycle lock poisoned"))?;
-        if !matches!(*state, NodeState::Starting | NodeState::Ready) {
+        if *state != NodeState::Starting {
             return Err(Error::CellDraining);
         }
         let mut facilities = self
@@ -1953,6 +1955,27 @@ mod tests {
             .unwrap();
         node.start().unwrap();
         assert!(node.is_ready());
+        node.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn facility_registration_is_frozen_after_readiness() {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([34; 16]))
+            .build()
+            .unwrap();
+        node.install_task_group(CancellationToken::new(), CancellationToken::new())
+            .unwrap();
+        node.install_node_lease(NodeLeaseGuard::new(0, 60_000).unwrap())
+            .unwrap();
+        assert!(node.is_ready());
+
+        assert!(matches!(
+            node.install_facility(CellNodeFacility::new("late", || async { Ok(()) }).unwrap()),
+            Err(Error::CellDraining)
+        ));
         node.shutdown().await.unwrap();
     }
 
