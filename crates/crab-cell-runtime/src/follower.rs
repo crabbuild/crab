@@ -255,14 +255,7 @@ impl FollowerStore {
             if !directory.join("sealed").exists() && !directory.join("retired").exists() {
                 retained.try_grow(8)?;
             }
-            let result = seal_sync(
-                &root,
-                lane,
-                limits,
-                &index_used,
-                &mut state,
-                &scan_counter,
-            );
+            let result = seal_sync(&root, lane, limits, &index_used, &mut state, &scan_counter);
             let resize =
                 follower_bytes(&root).and_then(|bytes| retained.resize(bytes).map_err(Error::from));
             if result.is_err() {
@@ -1013,6 +1006,10 @@ fn retire_sync(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "keeps tail bounds, cache ownership, and scan instrumentation explicit"
+)]
 fn read_tail_sync(
     root: &Path,
     lane: Lane,
@@ -1031,8 +1028,7 @@ fn read_tail_sync(
         return Err(Error::Node("follower lane is not sealed"));
     }
     if state.is_none() {
-        let retained =
-            scan_lane_counted(&directory.join("chunks"), lane, limits, scan_counter)?;
+        let retained = scan_lane_counted(&directory.join("chunks"), lane, limits, scan_counter)?;
         let open_records = scan_chunk(&directory.join("chunks/open.log"), lane, limits, true)?;
         let scan_only = retained.clone();
         match lane_memory(retained, &open_records, index_used) {

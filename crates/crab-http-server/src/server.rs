@@ -1110,7 +1110,7 @@ pub async fn serve(config: Config) -> Result<()> {
             peer_tls.client_identity(),
             session,
         )
-        .with_local_follower(node, follower_store.clone()),
+        .with_local_follower(node, (*follower_store).clone()),
     );
     node_publisher.install_node_log_transport(Arc::clone(&node_log_transport))?;
     cell_node.install_node_durability_provider(

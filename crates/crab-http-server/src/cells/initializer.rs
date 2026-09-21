@@ -10,9 +10,7 @@ use crab_cell_runtime::{
 };
 use uuid::Uuid;
 
-use super::{
-    REPOSITORY_MIGRATION, REPOSITORY_NAMESPACE, repository_replica_limits,
-};
+use super::{REPOSITORY_MIGRATION, REPOSITORY_NAMESPACE, repository_replica_limits};
 use crate::catalog::RepositoryApplicationState;
 use crate::{Config, Error, Result};
 
