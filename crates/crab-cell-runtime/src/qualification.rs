@@ -865,18 +865,32 @@ impl QualificationRunArtifact {
         {
             return Err(Error::Control("qualification run profile identity"));
         }
+        let duration_secs = self.elapsed_ms.saturating_add(999) / 1_000;
+        for (name, unit, expected) in [
+            ("cells", "cells", self.cells),
+            ("operations", "operations", self.operations),
+            ("duration_secs", "seconds", duration_secs),
+            (
+                "throughput_ops_per_sec",
+                "ops/s",
+                self.operations / duration_secs,
+            ),
+        ] {
+            if self.threshold_metric(name, unit)? != expected {
+                return Err(Error::Control("qualification run measured metrics"));
+            }
+        }
         if self.elapsed_ms < profile.minimum_duration_secs().saturating_mul(1_000)
             || self.threshold_metric("p99_latency_ms", "ms")? > profile.maximum_p99_latency_ms()
         {
             return Err(Error::Control("qualification run profile threshold failed"));
         }
-        if profile.minimum_throughput_ops_per_sec() != 0 {
-            let duration_secs = self.elapsed_ms.saturating_add(999) / 1_000;
-            if self.operations / duration_secs < profile.minimum_throughput_ops_per_sec() {
-                return Err(Error::Control(
-                    "qualification run throughput threshold failed",
-                ));
-            }
+        if profile.minimum_throughput_ops_per_sec() != 0
+            && self.operations / duration_secs < profile.minimum_throughput_ops_per_sec()
+        {
+            return Err(Error::Control(
+                "qualification run throughput threshold failed",
+            ));
         }
         Ok(())
     }
@@ -2368,6 +2382,19 @@ impl QualificationReceipt {
                 "qualification receipt does not bind the measured workload seed",
             ));
         }
+        for (name, unit) in [
+            ("cells", "cells"),
+            ("operations", "operations"),
+            ("duration_secs", "seconds"),
+            ("throughput_ops_per_sec", "ops/s"),
+            ("p99_latency_ms", "ms"),
+        ] {
+            if self.threshold_metric(name, unit)? != run.threshold_metric(name, unit)? {
+                return Err(Error::Control(
+                    "qualification receipt does not bind measured run metrics",
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -2946,6 +2973,11 @@ mod tests {
                 .unwrap()
                 .as_bytes(),
             metrics: vec![
+                QualificationMetric::new("cells".into(), 1, "cells".into()).unwrap(),
+                QualificationMetric::new("operations".into(), 64, "operations".into()).unwrap(),
+                QualificationMetric::new("duration_secs".into(), 1, "seconds".into()).unwrap(),
+                QualificationMetric::new("throughput_ops_per_sec".into(), 64, "ops/s".into())
+                    .unwrap(),
                 QualificationMetric::new("p99_latency_ms".into(), 1, "ms".into()).unwrap(),
             ],
         };
@@ -2993,11 +3025,18 @@ mod tests {
             .unwrap()
             .as_bytes(),
             metrics: vec![
+                QualificationMetric::new("cells".into(), 1, "cells".into()).unwrap(),
+                QualificationMetric::new("operations".into(), 8, "operations".into()).unwrap(),
+                QualificationMetric::new("duration_secs".into(), 2, "seconds".into()).unwrap(),
+                QualificationMetric::new("throughput_ops_per_sec".into(), 4, "ops/s".into())
+                    .unwrap(),
                 QualificationMetric::new("p99_latency_ms".into(), 1, "ms".into()).unwrap(),
             ],
         };
         assert!(slow.verify_for_profile(&throughput_profile).is_err());
         slow.elapsed_ms = 1_000;
+        slow.metrics[2].value = 1;
+        slow.metrics[3].value = 8;
         slow.verify_for_profile(&throughput_profile).unwrap();
 
         let mut forged = artifact.clone();
@@ -3706,6 +3745,11 @@ mod tests {
                 .unwrap()
                 .as_bytes(),
             metrics: vec![
+                QualificationMetric::new("cells".into(), 1, "cells".into()).unwrap(),
+                QualificationMetric::new("operations".into(), 8, "operations".into()).unwrap(),
+                QualificationMetric::new("duration_secs".into(), 1, "seconds".into()).unwrap(),
+                QualificationMetric::new("throughput_ops_per_sec".into(), 8, "ops/s".into())
+                    .unwrap(),
                 QualificationMetric::new("p99_latency_ms".into(), 1, "ms".into()).unwrap(),
             ],
         }
@@ -3714,8 +3758,10 @@ mod tests {
         let threshold_metrics = || {
             vec![
                 QualificationMetric::new("cells".into(), 1, "cells".into()).unwrap(),
-                QualificationMetric::new("operations".into(), 1, "operations".into()).unwrap(),
+                QualificationMetric::new("operations".into(), 8, "operations".into()).unwrap(),
                 QualificationMetric::new("duration_secs".into(), 1, "seconds".into()).unwrap(),
+                QualificationMetric::new("throughput_ops_per_sec".into(), 8, "ops/s".into())
+                    .unwrap(),
                 QualificationMetric::new("p99_latency_ms".into(), 1, "ms".into()).unwrap(),
             ]
         };

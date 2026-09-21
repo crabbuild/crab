@@ -87,8 +87,11 @@ CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-b347-clippy \
 
 Use the checkout's actual stable target suffix when it differs from `b347`.
 
-Release jobs bind a schema-v4 qualification matrix and threshold-profile digest
-to the exact tagged source, published image manifest, and raw cluster evidence.
+Release jobs bind schema-v4 qualification matrices and threshold-profile
+digests to the exact tagged source, published image manifest, and raw cluster
+evidence. The protected bundle must contain exact matrices for
+`local-provider-v1`, `scale-v1`, `compatibility-v1`, each of
+`provider-{s3,gcs,azure}-v1`, and each of `fault-{s3,gcs,azure}-v1`.
 The crate-owned validator requires a pinned Ed25519 qualification public key,
 canonical receipts, passing thresholds, exact source/image identity, and every
 matrix row; fixture or self-signed evidence cannot satisfy the release gate.
@@ -113,14 +116,16 @@ requires the pinned signer argument and applies the protected freshness and
 clock-skew gate. The profile-less form below is retained only for generic
 historical receipt inspection and is not a release decision.
 
-Release qualification can be verified as one bounded matrix instead of a
-caller-owned loop. `QualificationMatrixManifest` requires exactly one entry for
-each of these rows: `protocol`, `storage`, `publication`, `warm-path`, `churn`,
+Each profile is verified as one bounded matrix instead of a caller-owned row
+loop. `QualificationMatrixManifest` requires exactly one entry for each of
+these rows: `protocol`, `storage`, `publication`, `warm-path`, `churn`,
 `fleet`, `failover`, `primitives`, `accounting`, and `compatibility`. Each entry
 binds a relative receipt path and one or more relative raw-artifact paths. The
 manifest and every receipt are canonical JSON; absolute paths, parent-directory
 components, duplicate rows, missing rows, dirty receipts, source/image drift,
-and any artifact digest mismatch fail closed.
+and any artifact digest mismatch fail closed. The release job runs this
+verification independently for every required profile, so a valid scale matrix
+cannot substitute for provider or Kubernetes fault evidence.
 
 After the release job writes the ten receipts and their raw artifacts beside the
 manifest, verify the complete set in a fresh process:

@@ -325,6 +325,82 @@ async fn public_protected_matrix_binds_run_artifact_profile_and_signer() {
         )
         .is_err()
     );
+    let mismatched_metrics = summary
+        .metrics()
+        .expect("run metrics")
+        .into_iter()
+        .map(|metric| {
+            let value = if metric.name() == "p99_latency_ms" {
+                metric.value().saturating_add(1)
+            } else {
+                metric.value()
+            };
+            crab_cell_runtime::QualificationMetric::new(
+                metric.name().into(),
+                value,
+                metric.unit().into(),
+            )
+            .expect("mismatched metric")
+        })
+        .collect();
+    let primitive_artifacts = &artifacts[7];
+    let mismatched_primitive = QualificationRunner::new(signing_key.clone())
+        .emit_with_profile_and_evidence(
+            &profile,
+            "protected-source".into(),
+            image,
+            "protected-provider".into(),
+            "primitives".into(),
+            "none".into(),
+            mismatched_metrics,
+            &primitive_artifacts[0],
+            true,
+            (
+                "rustc".into(),
+                "release".into(),
+                "protected-topology".into(),
+                workload.seed(),
+                1,
+                1,
+                false,
+            ),
+            1,
+            2,
+            b"none",
+            primitive_artifacts
+                .iter()
+                .map(|artifact| Digest::from_bytes(*blake3::hash(artifact).as_bytes()))
+                .collect(),
+            vec![QualificationOwnership::new(
+                1,
+                1,
+                Digest::from_bytes([14; 32]),
+            )],
+        )
+        .expect("mismatched protected receipt");
+    let mut mismatched_receipts = receipts.clone();
+    mismatched_receipts[7] = mismatched_primitive;
+    let mismatched_evidence = MATRIX_ROWS
+        .iter()
+        .enumerate()
+        .map(|(index, workload_name)| {
+            (
+                *workload_name,
+                &mismatched_receipts[index],
+                artifact_views[index].as_slice(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        QualificationReceipt::verify_matrix_for_profile_with_signer(
+            "protected-source",
+            image,
+            &profile,
+            &mismatched_evidence,
+            trusted_signer,
+        )
+        .is_err()
+    );
     assert!(
         QualificationReceipt::verify_matrix_for_profile_with_signer(
             "protected-source",

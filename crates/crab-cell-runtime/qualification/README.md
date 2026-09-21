@@ -31,7 +31,10 @@ latency histogram, and logical outcome digest.
 
 The measured summary also emits `throughput_ops_per_sec` using a conservative
 rounded-up duration; protected profiles still verify the raw elapsed duration
-and their independent resource counters. The PR profile is a correctness gate.
+and their independent resource counters. Protected `primitives` receipts must
+also match the measured run artifact's cells, operations, duration, throughput,
+and p99 metrics; a signed receipt with substituted threshold values is rejected.
+The PR profile is a correctness gate.
 `local-provider-v1`, `fault-v1`, `provider-v1`, `compatibility-v1`, and
 `scale-v1` are release-candidate inputs only. The provider-specific
 `provider-{s3,gcs,azure}-v1` and `fault-{s3,gcs,azure}-v1` profiles bind the
