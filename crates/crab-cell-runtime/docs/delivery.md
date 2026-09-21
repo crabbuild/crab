@@ -87,14 +87,16 @@ CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-b347-clippy \
 
 Use the checkout's actual stable target suffix when it differs from `b347`.
 
-Release jobs bind schema-v4 qualification matrices and threshold-profile
+Release jobs bind schema-v5 qualification matrices and threshold-profile
 digests to the exact tagged source, published image manifest, and raw cluster
 evidence. The protected bundle must contain exact matrices for
 `local-provider-v1`, `scale-v1`, `compatibility-v1`, each of
 `provider-{s3,gcs,azure}-v1`, and each of `fault-{s3,gcs,azure}-v1`.
 The crate-owned validator requires a pinned Ed25519 qualification public key,
 canonical receipts, passing thresholds, exact source/image identity, and every
-matrix row; fixture or self-signed evidence cannot satisfy the release gate.
+matrix row. Protected receipts also retain and verify a `release` execution
+profile; debug or otherwise non-release runs cannot satisfy the release gate.
+Fixture or self-signed evidence cannot satisfy the release gate.
 The release job also compares the supplied protected profile byte-for-byte with
 the checked-in profile from the tagged source before invoking the validator.
 GitHub's workflow attestation remains the trust anchor for the release job and
@@ -157,7 +159,7 @@ The provider-backed
 passed Queue/Workflow retained-work protection, exact-root restore, and
 capacity reuse against its isolated prefix.
 These commands are provider evidence for iteration, not release receipts;
-protected release jobs must consume a schema-v4 matrix signed by the pinned
+protected release jobs must consume a schema-v5 matrix signed by the pinned
 qualification key and bound to the tagged source, immutable image, profile,
 and every raw artifact.
 

@@ -34,7 +34,7 @@ schema, signer, artifact-digest, and exact-source/image checks.
 
 ## Current state
 
-- `crates/crab-cell-runtime/src/qualification.rs` defines schema-v4 signed
+- `crates/crab-cell-runtime/src/qualification.rs` defines schema-v5 signed
   receipts with profile digests and the ten required rows: protocol, storage, publication,
   warm-path, churn, fleet, failover, primitives, accounting, compatibility.
 - `.github/workflows/cell-runtime-qualification-contract.yml` validates fixture

@@ -1,6 +1,6 @@
 # Cell runtime production qualification and receipts
 
-Status: IN PROGRESS — schema-v4 receipt/profile binding, complete matrix verification, local RustFS provider/fault evidence, and the instrumented local warm-path probe pass; scale, matched latency, Kubernetes, and protected release-receipt gates remain
+Status: IN PROGRESS — schema-v5 receipt/profile binding, complete matrix verification, local RustFS provider/fault evidence, and the instrumented local warm-path probe pass; scale, matched latency, Kubernetes, and protected release-receipt gates remain
 Priority: P0
 Effort: XL
 Risk: Medium

@@ -25,7 +25,7 @@ pub const QUALIFICATION_PROTECTED_EVIDENCE_MAX_AGE_MS: u64 = 7 * 24 * 60 * 60 * 
 pub const QUALIFICATION_PROTECTED_EVIDENCE_MAX_CLOCK_SKEW_MS: u64 = 5 * 60 * 1_000;
 
 /// Current wire schema for qualification evidence.
-pub const QUALIFICATION_SCHEMA_VERSION: u32 = 4;
+pub const QUALIFICATION_SCHEMA_VERSION: u32 = 5;
 /// Schema for a manifest that binds one receipt to every qualification row.
 pub const QUALIFICATION_MATRIX_SCHEMA_VERSION: u32 = 1;
 /// Schema for a versioned workload threshold profile.
@@ -1506,6 +1506,7 @@ pub struct QualificationReceipt {
     passed: bool,
     dirty: bool,
     toolchain: String,
+    execution_profile: String,
     profile: String,
     profile_digest: [u8; 32],
     topology: String,
@@ -1756,6 +1757,7 @@ impl QualificationReceipt {
             passed,
             dirty: false,
             toolchain: "unknown".into(),
+            execution_profile: "unknown".into(),
             profile: "unqualified".into(),
             profile_digest: [0; 32],
             topology: "local".into(),
@@ -1776,7 +1778,7 @@ impl QualificationReceipt {
     pub fn with_execution(
         mut self,
         toolchain: String,
-        profile: String,
+        execution_profile: String,
         topology: String,
         workload_seed: u64,
         bucket_calls: u64,
@@ -1784,10 +1786,10 @@ impl QualificationReceipt {
         dirty: bool,
     ) -> Result<Self> {
         validate_label(&toolchain, "qualification toolchain")?;
-        validate_label(&profile, "qualification profile")?;
+        validate_label(&execution_profile, "qualification execution profile")?;
         validate_label(&topology, "qualification topology")?;
         self.toolchain = toolchain;
-        self.profile = profile;
+        self.execution_profile = execution_profile;
         self.topology = topology;
         self.workload_seed = workload_seed;
         self.bucket_calls = bucket_calls;
@@ -1894,6 +1896,11 @@ impl QualificationReceipt {
     #[must_use]
     pub fn toolchain(&self) -> &str {
         &self.toolchain
+    }
+
+    #[must_use]
+    pub fn execution_profile(&self) -> &str {
+        &self.execution_profile
     }
 
     #[must_use]
@@ -2294,6 +2301,7 @@ impl QualificationReceipt {
         validate_label(&self.workload, "qualification workload")?;
         validate_label(&self.fault, "qualification fault")?;
         validate_label(&self.toolchain, "qualification toolchain")?;
+        validate_label(&self.execution_profile, "qualification execution profile")?;
         validate_label(&self.profile, "qualification profile")?;
         validate_label(&self.topology, "qualification topology")?;
         validate_metrics(&self.metrics)?;
@@ -2408,6 +2416,7 @@ impl QualificationReceipt {
         }
         if self.topology == "local"
             || self.toolchain == "unknown"
+            || self.execution_profile != "release"
             || self.bucket_calls == 0
             || self.peak_rss_bytes == 0
             || self.ownership.is_empty()
@@ -3414,6 +3423,33 @@ mod tests {
                 key.verifying_key().to_bytes(),
             )
             .unwrap();
+
+        let debug_execution = protected
+            .clone()
+            .with_execution(
+                "rustc".into(),
+                "debug".into(),
+                "dedicated-hosts".into(),
+                7,
+                1,
+                1,
+                false,
+            )
+            .unwrap()
+            .attest(&key)
+            .unwrap();
+        assert!(
+            debug_execution
+                .verify_for_profile_with_signer(
+                    "source",
+                    image,
+                    &profile,
+                    &[artifact],
+                    key.verifying_key().to_bytes(),
+                )
+                .is_err(),
+            "protected evidence must come from a release execution profile"
+        );
 
         for metric_name in ["peak_local_disk_bytes", "peak_file_descriptors"] {
             let mut missing_measurement = protected.clone();

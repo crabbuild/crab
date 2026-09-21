@@ -234,7 +234,7 @@ Local proof completed:
   passes the Queue/Workflow retained-work, exact-root restore, and
   capacity-reuse proof against an isolated RustFS prefix. The shared
   runtime/SQL/hydration/primitive-job ledger (including exported hydration-job
-  usage/capacity metrics) and schema-v4/profile-digest receipt evidence path are covered by
+  usage/capacity metrics) and schema-v5/profile-digest receipt evidence path are covered by
   focused tests; user SQL commands now hold bounded worker
   reservations for their full queued/executing lifetime, and pending
   publication bytes remain ledger-reserved until publication completes. Active
