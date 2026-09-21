@@ -127,15 +127,20 @@ and any artifact digest mismatch fail closed. The release job runs this
 verification independently for every required profile, so a valid scale matrix
 cannot substitute for provider or Kubernetes fault evidence.
 
-After the release job writes the ten receipts and their raw artifacts beside the
-manifest, verify the complete set in a fresh process:
+After the release job writes the ten row receipts and their raw artifacts into
+each protected matrix directory, verify one profile-bound matrix in a fresh
+process:
 
 ```bash
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
   cargo run -p crab-cell-runtime --bin qualification_receipt --locked -- \
-  verify-matrix qualification-matrix.json "$SOURCE_SHA" "$IMAGE_DIGEST"
+  verify-matrix \
+  protected/qualification-matrix.json "$SOURCE_SHA" "$IMAGE_DIGEST" \
+  protected/scale-v1.json "$QUALIFICATION_SIGNER"
 ```
 
+Repeat that command for every matrix/profile pair listed above; the release
+workflow does not accept a scale matrix as a substitute for any other profile.
 The matrix verifier recomputes every raw digest, checks the primary artifact
 digest for each receipt, and requires all rows to use the supplied source and
 image identity. It is a release-evidence check only; it does not promote local
