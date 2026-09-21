@@ -514,7 +514,7 @@ if ! $a_advertisement_expired; then
 fi
 owner_killed_ms="$(unix_millis)"
 "${compose[@]}" kill --signal KILL server-b >/dev/null
-"${compose[@]}" rm --force --stop server-b >/dev/null
+"${compose[@]}" rm --force server-b >/dev/null
 "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
   --endpoint-url http://rustfs:9000 s3api delete-bucket-policy \
   --bucket crab-http-server >/dev/null
@@ -823,7 +823,7 @@ jq --exit-status \
 
 second_owner_killed_ms="$(unix_millis)"
 "${compose[@]}" kill --signal KILL server-c >/dev/null
-"${compose[@]}" rm --force --stop server-c >/dev/null
+"${compose[@]}" rm --force server-c >/dev/null
 "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
   --endpoint-url http://rustfs:9000 s3api delete-bucket-policy \
   --bucket crab-http-server >/dev/null
@@ -953,7 +953,7 @@ stop_fallback_member() {
       ;;
     server-c|server-d)
       "${compose[@]}" kill --signal KILL "$1" >/dev/null
-      "${compose[@]}" rm --force --stop "$1" >/dev/null
+      "${compose[@]}" rm --force "$1" >/dev/null
       ;;
     *)
       echo "unknown fallback member service: $1" >&2
@@ -1061,7 +1061,7 @@ done
 fallback_origin="$(service_origin "$fallback_candidate_service")"
 fallback_owner_killed_ms="$(unix_millis)"
 "${compose[@]}" kill --signal KILL server-b >/dev/null
-"${compose[@]}" rm --force --stop server-b >/dev/null
+"${compose[@]}" rm --force server-b >/dev/null
 "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
   --endpoint-url http://rustfs:9000 s3api delete-bucket-policy \
   --bucket crab-http-server >/dev/null
