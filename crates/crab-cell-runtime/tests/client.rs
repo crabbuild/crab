@@ -73,6 +73,14 @@ const COMMANDS: &[OperationDescriptor] = &[
         input_limit: 64,
         output_limit: 64,
     },
+    OperationDescriptor {
+        id: 7,
+        codec_version: 1,
+        schema_min: 1,
+        schema_max: 1,
+        input_limit: 64,
+        output_limit: 64,
+    },
 ];
 const QUERIES: &[OperationDescriptor] = &[
     OperationDescriptor {
@@ -107,6 +115,7 @@ impl CellModule for RepositoryModule {
         registry.bind_command::<RejectComment>()?;
         registry.bind_command::<InvalidResultComment>()?;
         registry.bind_command::<EmitEffectComment>()?;
+        registry.bind_command::<EmitUndeclaredEffect>()?;
         registry.bind_query::<CountComments>()?;
         register_effect_delivery::<Self>(registry)?;
         Ok(())
@@ -191,6 +200,39 @@ impl Command for EmitEffectComment {
             expires_at_ms,
         })?;
         Ok(CommandResult::Success(effect_id.to_vec()))
+    }
+}
+
+struct EmitUndeclaredEffect;
+
+impl Command for EmitUndeclaredEffect {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 7;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Vec<u8>;
+    type Output = Vec<u8>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        input: Self::Input,
+    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+        let target = CellTarget::new(
+            context.target().tenant(),
+            context.target().application(),
+            NamespaceId::from_bytes([99; 16]),
+            context.target().partition(),
+        )?;
+        context.emit_effect(&EffectCommandIntent {
+            target,
+            command_id: CreateComment::ID,
+            codec_version: CreateComment::CODEC_VERSION,
+            input,
+            expires_at_ms: context
+                .now_ms()
+                .checked_add(60_000)
+                .ok_or(crab_cell_runtime::Error::Command("effect expiry overflow"))?,
+        })?;
+        Ok(CommandResult::Success(Vec::new()))
     }
 }
 
@@ -298,7 +340,7 @@ fn descriptor() -> &'static ModuleDescriptor {
             name: MODULE,
             role: CatalogRole::Repository,
             shards: 1,
-            effect_targets: &[],
+            effect_targets: &[NAMESPACE],
             dead_letter: None,
         }],
     })
@@ -988,6 +1030,32 @@ async fn typed_client_rejects_conflicting_identity_receipt_and_module_before_exe
             crab_cell_runtime::Error::Command("invalid mutation identity lifetime")
         ))
     ));
+
+    fixture.handle().drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn command_effects_require_declared_same_application_targets() {
+    let fixture = fixture().await;
+    let client = CellClient::local(Arc::clone(&fixture.registry), fixture.handle().clone());
+
+    let result = client
+        .command::<EmitUndeclaredEffect>(&fixture.target, mutation(50), b"foreign".to_vec())
+        .await;
+    assert!(matches!(
+        result,
+        Err(InvocationError::NotStarted(
+            crab_cell_runtime::Error::Command("effect target is not declared")
+        ))
+    ));
+    assert_eq!(
+        client
+            .query::<CountComments>(&fixture.target, None, ())
+            .await
+            .unwrap()
+            .output,
+        0
+    );
 
     fixture.handle().drain().await.unwrap();
 }

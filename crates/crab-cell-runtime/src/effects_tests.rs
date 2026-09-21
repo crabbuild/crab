@@ -71,8 +71,8 @@ fn command_effect_is_canonical_and_does_not_pin_destination_incarnation() {
     let mut source = source_connection();
     let source_target = source_target();
     let target = CellTarget::new(
-        TenantId::from_bytes([3; 16]),
-        ApplicationId::from_bytes([4; 16]),
+        source_target.tenant(),
+        source_target.application(),
         NamespaceId::from_bytes([5; 16]),
         b"target-partition",
     )
@@ -126,13 +126,41 @@ fn command_effect_rejects_a_source_target_for_another_cell() {
 }
 
 #[test]
+fn command_effect_rejects_a_foreign_application_before_writes() {
+    let mut source = source_connection();
+    let source_target = source_target();
+    let target = CellTarget::new(
+        TenantId::from_bytes([3; 16]),
+        ApplicationId::from_bytes([4; 16]),
+        NamespaceId::from_bytes([5; 16]),
+        b"foreign-application",
+    )
+    .unwrap();
+    let transaction = source.transaction().unwrap();
+    let result = EffectBatch::new(&transaction, &source_target, 1, 10)
+        .unwrap()
+        .insert_command(&transaction, &command_intent(target, b"foreign", 10_000));
+    assert!(matches!(
+        result,
+        Err(crate::Error::Identity(
+            "effect target is outside the source application scope"
+        ))
+    ));
+    let count: i64 = transaction
+        .query_row("SELECT COUNT(*) FROM sys_effects", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    transaction.rollback().unwrap();
+}
+
+#[test]
 fn target_commit_and_lost_response_retry_execute_destination_once() {
     const EXPIRES_AT_MS: i64 = 10_000;
     const INBOX_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
     let source_target = source_target();
     let destination = CellTarget::new(
-        TenantId::from_bytes([3; 16]),
-        ApplicationId::from_bytes([4; 16]),
+        source_target.tenant(),
+        source_target.application(),
         NamespaceId::from_bytes([5; 16]),
         b"destination",
     )
@@ -320,8 +348,8 @@ fn rejected_effect_rolls_back_target_writes_but_publishes_inbox_result() {
 fn one_command_cannot_exceed_effect_count_or_byte_limits() {
     let source_target = source_target();
     let destination = CellTarget::new(
-        TenantId::from_bytes([3; 16]),
-        ApplicationId::from_bytes([4; 16]),
+        source_target.tenant(),
+        source_target.application(),
         NamespaceId::from_bytes([5; 16]),
         b"destination",
     )
@@ -367,8 +395,8 @@ fn one_command_cannot_exceed_effect_count_or_byte_limits() {
 fn byte_limit_rejection_does_not_consume_the_next_effect_ordinal() {
     let source_target = source_target();
     let destination = CellTarget::new(
-        TenantId::from_bytes([3; 16]),
-        ApplicationId::from_bytes([4; 16]),
+        source_target.tenant(),
+        source_target.application(),
         NamespaceId::from_bytes([5; 16]),
         b"destination",
     )
@@ -409,8 +437,8 @@ fn byte_limit_rejection_does_not_consume_the_next_effect_ordinal() {
 fn manual_retry_preserves_identity_and_never_reopens_terminal_effect() {
     let source_target = source_target();
     let destination = CellTarget::new(
-        TenantId::from_bytes([3; 16]),
-        ApplicationId::from_bytes([4; 16]),
+        source_target.tenant(),
+        source_target.application(),
         NamespaceId::from_bytes([5; 16]),
         b"destination",
     )

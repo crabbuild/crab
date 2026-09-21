@@ -161,6 +161,7 @@ pub struct ModuleDescriptor {
 pub struct CommandContext<'borrow, 'connection> {
     transaction: &'borrow Transaction<'connection>,
     target: CellTarget,
+    effect_targets: &'static [NamespaceId],
     sequence: u64,
     now_ms: i64,
     issued_at_ms: i64,
@@ -202,6 +203,16 @@ impl CommandContext<'_, '_> {
 
     /// Emits one durable cross-Cell command with this command's allocator.
     pub fn emit_effect(&mut self, intent: &EffectCommandIntent) -> Result<[u8; 32]> {
+        if intent.target.tenant() != self.target.tenant()
+            || intent.target.application() != self.target.application()
+        {
+            return Err(Error::Identity(
+                "effect target is outside the source application scope",
+            ));
+        }
+        if !self.effect_targets.contains(&intent.target.namespace()) {
+            return Err(Error::Command("effect target is not declared"));
+        }
         self.ensure_effects()?;
         let transaction = self.transaction;
         self.effects
@@ -1486,6 +1497,11 @@ impl Registry {
         let mut context = CommandContext {
             transaction,
             target: invocation.target.clone(),
+            effect_targets: self
+                .namespace_modules
+                .get(&invocation.target.namespace())
+                .ok_or(Error::Registry("command target namespace is unavailable"))
+                .map(|(_, descriptor)| descriptor.effect_targets)?,
             sequence: invocation.sequence,
             now_ms: invocation.now_ms,
             issued_at_ms,

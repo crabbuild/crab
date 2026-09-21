@@ -156,6 +156,13 @@ impl EffectBatch {
         transaction: &Transaction<'_>,
         intent: &EffectCommandIntent,
     ) -> Result<[u8; 32]> {
+        if intent.target.tenant() != self.source.tenant()
+            || intent.target.application() != self.source.application()
+        {
+            return Err(Error::Identity(
+                "effect target is outside the source application scope",
+            ));
+        }
         validate_effect_command_intent(self.now_ms, intent)?;
         if self.next_ordinal as usize >= MAX_EFFECTS_PER_COMMAND {
             return Err(Error::Command("command effects exceed limits"));
