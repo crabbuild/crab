@@ -100,6 +100,13 @@ resume_service() {
   local service="$1"
   "${compose[@]}" kill --signal SIGCONT "$service" >/dev/null
 }
+
+remove_stopped_service() {
+  local service="$1"
+  # Node services use `service:server`; `--stop` would kill that namespace
+  # provider while removing a dependent node and make rejoin impossible.
+  "${compose[@]}" rm --force "$service" >/dev/null
+}
 trap cleanup EXIT
 
 wait_for_healthy() {
@@ -514,7 +521,7 @@ if ! $a_advertisement_expired; then
 fi
 owner_killed_ms="$(unix_millis)"
 "${compose[@]}" kill --signal KILL server-b >/dev/null
-"${compose[@]}" rm --force server-b >/dev/null
+remove_stopped_service server-b
 "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
   --endpoint-url http://rustfs:9000 s3api delete-bucket-policy \
   --bucket crab-http-server >/dev/null
@@ -823,7 +830,7 @@ jq --exit-status \
 
 second_owner_killed_ms="$(unix_millis)"
 "${compose[@]}" kill --signal KILL server-c >/dev/null
-"${compose[@]}" rm --force server-c >/dev/null
+remove_stopped_service server-c
 "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
   --endpoint-url http://rustfs:9000 s3api delete-bucket-policy \
   --bucket crab-http-server >/dev/null
@@ -953,7 +960,7 @@ stop_fallback_member() {
       ;;
     server-c|server-d)
       "${compose[@]}" kill --signal KILL "$1" >/dev/null
-      "${compose[@]}" rm --force "$1" >/dev/null
+      remove_stopped_service "$1"
       ;;
     *)
       echo "unknown fallback member service: $1" >&2
@@ -1061,7 +1068,7 @@ done
 fallback_origin="$(service_origin "$fallback_candidate_service")"
 fallback_owner_killed_ms="$(unix_millis)"
 "${compose[@]}" kill --signal KILL server-b >/dev/null
-"${compose[@]}" rm --force server-b >/dev/null
+remove_stopped_service server-b
 "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
   --endpoint-url http://rustfs:9000 s3api delete-bucket-policy \
   --bucket crab-http-server >/dev/null
