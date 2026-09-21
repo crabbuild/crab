@@ -675,8 +675,22 @@ if ! $rejoin_ready; then
   "${compose[@]}" exec -T server-b crab-http-server \
     --config /etc/crab/server.toml cells status --owner demo --name hello >&2 || true
   echo "Node B rejoin node status:" >&2
-  "${compose[@]}" exec -T server-b crab-http-server \
-    --config /etc/crab/server.toml cells node --json >&2 || true
+  node_b_rejoin_session="$("${compose[@]}" exec -T server-b sh -ec '
+    for path in /var/lib/crab/cells/sessions/*; do
+      if [ -d "$path" ]; then
+        printf "%s\n" "${path##*/}"
+        exit 0
+      fi
+    done
+    exit 1
+  ' 2>/dev/null || true)"
+  if [ -n "$node_b_rejoin_session" ]; then
+    "${compose[@]}" exec -T server-b crab-http-server \
+      --config /etc/crab/server.toml cells node \
+      --session "$node_b_rejoin_session" --json >&2 || true
+  else
+    echo "Node B session directory was not found." >&2
+  fi
   echo "Node B rejoin log:" >&2
   "${compose[@]}" logs --no-color server-b >&2 || true
   echo "Node C owner log:" >&2
