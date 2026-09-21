@@ -102,6 +102,8 @@ the checked-in profile from the tagged source before invoking the validator.
 GitHub's workflow attestation remains the trust anchor for the release job and
 source identity.
 
+The raw four-process receipt is validated first with the fail-closed v6 command:
+
 ```bash
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
   cargo run -p crab-cell-runtime --bin qualification_receipt --locked -- \
@@ -402,6 +404,11 @@ newer root and a second status visible through another replica. Before takeover
 traffic, it queries the
 old boot session through `cells node --session SESSION --json` until the signed
 advertisement is no longer live; Pod deletion alone is not expiry evidence.
+The receipt also records the failed log epoch and original follower NodeIds,
+maps the new owner endpoint back to its replacement Pod, and requires that
+successor's stable NodeId to be one of those original followers. This proves
+the production deployment exercises follower-affine takeover rather than only
+object-root restoration.
 That case is not evidence until its
 signed provider receipt exists, and it does not replace the remaining partition
 and commit-window faults. Browser E2E is intentionally outside this gate.

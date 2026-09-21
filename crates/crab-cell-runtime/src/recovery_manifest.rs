@@ -22,6 +22,20 @@ pub struct PinnedRecoveryCell {
     pub recovery: RecoveryOverlayRef,
 }
 
+/// Bounded object publication counters for one recovery manifest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RecoveryPublicationSummary {
+    pub bundle_bytes: u64,
+    pub object_reads: u64,
+    pub object_writes: u64,
+}
+
+/// Control-ready recovery pointers and their publication work summary.
+pub struct PinnedRecoveryCells {
+    pub cells: Vec<PinnedRecoveryCell>,
+    pub summary: RecoveryPublicationSummary,
+}
+
 /// Exact immutable identity used for a local recovery-artifact cache entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RecoveryArtifactKey {
@@ -212,6 +226,18 @@ impl RecoveryManifestStore {
         log_epoch: u64,
         tails: Vec<RecoveredCellTail>,
     ) -> Result<Vec<PinnedRecoveryCell>> {
+        Ok(self
+            .pin_with_summary(leader_session, log_epoch, tails)
+            .await?
+            .cells)
+    }
+
+    pub async fn pin_with_summary(
+        &self,
+        leader_session: SessionId,
+        log_epoch: u64,
+        tails: Vec<RecoveredCellTail>,
+    ) -> Result<PinnedRecoveryCells> {
         if leader_session.as_bytes().iter().all(|byte| *byte == 0)
             || log_epoch == 0
             || tails.is_empty()
@@ -220,6 +246,7 @@ impl RecoveryManifestStore {
         }
         let mut rows = Vec::with_capacity(tails.len());
         let mut artifacts = Vec::with_capacity(tails.len());
+        let mut summary = RecoveryPublicationSummary::default();
         for tail in tails {
             let predecessor = tail.overlay.predecessor();
             let cell = CellId::from_bytes(predecessor.cell);
@@ -228,13 +255,17 @@ impl RecoveryManifestStore {
             let final_position = tail.overlay.final_position();
             let final_commit_sequence = tail.overlay.final_commit_sequence();
             let bundle = tail.overlay.into_bundle()?;
+            summary.bundle_bytes = summary
+                .bundle_bytes
+                .checked_add(bundle.len())
+                .ok_or(Error::Capacity("recovery bundle byte count"))?;
             let bundle_digest = bundle.digest();
             let path = self.layout.node_log_bundle_path(
                 leader_session.as_bytes(),
                 log_epoch,
                 &bundle_digest,
             );
-            publish_bundle_immutable(&self.layout, &path, &bundle).await?;
+            publish_bundle_immutable(&self.layout, &path, &bundle, &mut summary).await?;
             if self.artifact_store.is_some() {
                 let key = RecoveryArtifactKey::new(
                     leader_session,
@@ -301,7 +332,7 @@ impl RecoveryManifestStore {
             log_epoch,
             &manifest_digest,
         );
-        publish_immutable(&self.layout, &path, &body, MAX_MANIFEST_BYTES).await?;
+        publish_immutable(&self.layout, &path, &body, MAX_MANIFEST_BYTES, &mut summary).await?;
         if let Some(store) = &self.artifact_store {
             for (key, bundle) in artifacts {
                 let store = Arc::clone(store);
@@ -310,27 +341,30 @@ impl RecoveryManifestStore {
                 let _ = tokio::task::spawn_blocking(move || store.retain(key, bundle)).await;
             }
         }
-        Ok(manifest
-            .cells
-            .into_iter()
-            .map(|cell| PinnedRecoveryCell {
-                application: ApplicationId::from_bytes(cell.application),
-                cell: CellId::from_bytes(cell.cell),
-                incarnation: IncarnationId::from_bytes(cell.incarnation),
-                cell_epoch: cell.cell_epoch,
-                recovery: RecoveryOverlayRef {
-                    leader_session,
-                    log_epoch,
-                    manifest_digest: Digest::from_bytes(manifest_digest),
-                    first_node_sequence: cell.first_node_sequence,
-                    last_node_sequence: cell.last_node_sequence,
-                    predecessor: runtime_root(cell.predecessor),
-                    final_txid: cell.final_position.txid,
-                    final_checksum: cell.final_position.checksum,
-                    final_commit_sequence: cell.final_commit_sequence,
-                },
-            })
-            .collect())
+        Ok(PinnedRecoveryCells {
+            cells: manifest
+                .cells
+                .into_iter()
+                .map(|cell| PinnedRecoveryCell {
+                    application: ApplicationId::from_bytes(cell.application),
+                    cell: CellId::from_bytes(cell.cell),
+                    incarnation: IncarnationId::from_bytes(cell.incarnation),
+                    cell_epoch: cell.cell_epoch,
+                    recovery: RecoveryOverlayRef {
+                        leader_session,
+                        log_epoch,
+                        manifest_digest: Digest::from_bytes(manifest_digest),
+                        first_node_sequence: cell.first_node_sequence,
+                        last_node_sequence: cell.last_node_sequence,
+                        predecessor: runtime_root(cell.predecessor),
+                        final_txid: cell.final_position.txid,
+                        final_checksum: cell.final_position.checksum,
+                        final_commit_sequence: cell.final_commit_sequence,
+                    },
+                })
+                .collect(),
+            summary,
+        })
     }
 
     /// Reopens the exact bundle named by a control-pinned recovery reference.
@@ -626,22 +660,33 @@ async fn publish_immutable(
     path: &object_store::path::Path,
     body: &[u8],
     limit: u64,
+    summary: &mut RecoveryPublicationSummary,
 ) -> Result<()> {
     if body.len() as u64 > limit {
         return Err(Error::Node("recovery object exceeds limit"));
     }
+    summary.object_writes = summary
+        .object_writes
+        .checked_add(1)
+        .ok_or(Error::Capacity("recovery object write count"))?;
     match layout
         .store()
         .create_strict(path, Bytes::copy_from_slice(body))
         .await
     {
         Ok(()) => Ok(()),
-        Err(create_error) => match layout.store().get_with_etag_bounded(path, limit).await {
-            Ok((existing, _)) if existing.as_ref() == body => Ok(()),
-            Ok(_) => Err(Error::Node("recovery digest path contains different bytes")),
-            Err(StorageError::NotFound { .. }) => Err(create_error.into()),
-            Err(error) => Err(error.into()),
-        },
+        Err(create_error) => {
+            summary.object_reads = summary
+                .object_reads
+                .checked_add(1)
+                .ok_or(Error::Capacity("recovery object read count"))?;
+            match layout.store().get_with_etag_bounded(path, limit).await {
+                Ok((existing, _)) if existing.as_ref() == body => Ok(()),
+                Ok(_) => Err(Error::Node("recovery digest path contains different bytes")),
+                Err(StorageError::NotFound { .. }) => Err(create_error.into()),
+                Err(error) => Err(error.into()),
+            }
+        }
     }
 }
 
@@ -649,10 +694,15 @@ async fn publish_bundle_immutable(
     layout: &CellStorageLayout,
     path: &object_store::path::Path,
     bundle: &crab_ltx::bundle::Bundle,
+    summary: &mut RecoveryPublicationSummary,
 ) -> Result<()> {
     let store = layout.store();
     let digest = bundle.digest();
     let size = bundle.len();
+    summary.object_reads = summary
+        .object_reads
+        .checked_add(1)
+        .ok_or(Error::Capacity("recovery object read count"))?;
     match store.verify_size_and_hash(path, size, &digest).await {
         Ok(()) => return Ok(()),
         Err(StorageError::NotFound { .. }) => {}
@@ -675,6 +725,10 @@ async fn publish_bundle_immutable(
             None,
         )
         .await;
+    summary.object_writes = summary
+        .object_writes
+        .checked_add(2)
+        .ok_or(Error::Capacity("recovery object write count"))?;
     if let Err(error) = upload {
         return match cleanup_staged(store, &staged).await {
             Ok(()) => Err(error.into()),
@@ -769,6 +823,7 @@ mod tests {
         replica: crab_ltx::CellReplica,
         manifests: RecoveryManifestStore,
         pinned: PinnedRecoveryCell,
+        publication: RecoveryPublicationSummary,
         base: crab_ltx::RootRef,
         final_position: crab_ltx::Position,
     }
@@ -878,10 +933,12 @@ mod tests {
         let manifests = artifacts.map_or(manifests.clone(), |store| {
             manifests.with_recovery_artifacts(store)
         });
-        let mut pinned = manifests
-            .pin(SessionId::from_bytes([1; 16]), 2, recovered)
+        let pinned = manifests
+            .pin_with_summary(SessionId::from_bytes([1; 16]), 2, recovered)
             .await
             .unwrap();
+        let publication = pinned.summary;
+        let mut pinned = pinned.cells;
         database.close().unwrap();
         RecoveryFixture {
             inner,
@@ -889,6 +946,7 @@ mod tests {
             replica,
             manifests,
             pinned: pinned.pop().unwrap(),
+            publication,
             base,
             final_position: tail.position,
         }
@@ -908,6 +966,9 @@ mod tests {
     #[tokio::test]
     async fn pinned_manifest_reopens_exact_overlay_and_prepares_successor() {
         let fixture = recovery_fixture().await;
+        assert!(fixture.publication.bundle_bytes > 0);
+        assert!(fixture.publication.object_reads > 0);
+        assert!(fixture.publication.object_writes > 0);
         let overlay = fixture
             .manifests
             .load_overlay(

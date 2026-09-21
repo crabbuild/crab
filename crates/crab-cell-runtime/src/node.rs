@@ -745,6 +745,31 @@ impl NodeDirectory {
         claimant: SessionId,
         now_ms: i64,
     ) -> Result<FencedNodeSession> {
+        self.claim_expired_inner(session, claimant, now_ms, false)
+            .await
+    }
+
+    /// Claims an expired session for request-path takeover only when its node
+    /// log is already inactive. An active log returns `PendingPublication`
+    /// without writing a claim so the follower recovery scheduler can proceed.
+    pub async fn claim_expired_for_takeover(
+        &self,
+        session: SessionId,
+        claimant: SessionId,
+        now_ms: i64,
+    ) -> Result<NodeTakeoverProof> {
+        self.claim_expired_inner(session, claimant, now_ms, true)
+            .await?
+            .direct_takeover()
+    }
+
+    async fn claim_expired_inner(
+        &self,
+        session: SessionId,
+        claimant: SessionId,
+        now_ms: i64,
+        reject_active_log: bool,
+    ) -> Result<FencedNodeSession> {
         if now_ms < 0 || claimant.as_bytes().iter().all(|byte| *byte == 0) || claimant == session {
             return Err(Error::Node("node recovery time is invalid"));
         }
@@ -756,7 +781,13 @@ impl NodeDirectory {
             return Err(Error::Node("expired node session record is missing"));
         };
         let tombstone = match record {
-            NodeRecord::Tombstone(tombstone) if tombstone.session == session => {
+            NodeRecord::Tombstone(tombstone) => {
+                if tombstone.session != session {
+                    return Err(Error::Node("node tombstone session differs"));
+                }
+                if reject_active_log && tombstone.log.as_ref().is_some_and(NodeLogStatus::active) {
+                    return Err(Error::PendingPublication);
+                }
                 if tombstone.claimant == Some(claimant)
                     && tombstone
                         .claim_expires_at_ms
@@ -773,6 +804,14 @@ impl NodeDirectory {
                 if advertisement.session != session || advertisement.expires_at_ms > now_ms {
                     return Err(Error::Node("node session is not expired"));
                 }
+                if reject_active_log
+                    && advertisement
+                        .log
+                        .as_ref()
+                        .is_some_and(NodeLogStatus::active)
+                {
+                    return Err(Error::PendingPublication);
+                }
                 NodeTombstone::new(
                     session,
                     advertisement.node,
@@ -782,9 +821,6 @@ impl NodeDirectory {
                     advertisement.log.clone(),
                 )?
                 .claim(claimant, now_ms)?
-            }
-            NodeRecord::Tombstone(_) => {
-                return Err(Error::Node("node tombstone session differs"));
             }
         };
         let proof = tombstone.fenced()?;

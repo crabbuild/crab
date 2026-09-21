@@ -36,6 +36,7 @@ services:
       - 127.0.0.1:${CRAB_HTTP_NODE_A_PORT:-18881}:8091
       - 127.0.0.1:${CRAB_HTTP_NODE_B_PORT:-18882}:8092
       - 127.0.0.1:${CRAB_HTTP_NODE_C_PORT:-18883}:8093
+      - 127.0.0.1:${CRAB_HTTP_NODE_D_PORT:-18884}:8094
 
   server-b:
     <<: *cluster-server
@@ -55,6 +56,19 @@ services:
     volumes:
       - ./compose.node-c.toml:/etc/crab/server.toml:ro
       - peer-identity:/run/secrets/crab-peer:ro
+
+  server-d:
+    <<: *cluster-server
+    volumes:
+      - ./compose.node-d.toml:/etc/crab/server.toml:ro
+      - peer-identity:/run/secrets/crab-peer:ro
+    depends_on:
+      repository-init:
+        condition: service_completed_successfully
+      peer-pki-init:
+        condition: service_completed_successfully
+      server-c:
+        condition: service_healthy
 
   cluster-proxy:
     image: ${CADDY_IMAGE:-caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d}
@@ -78,6 +92,8 @@ services:
       server-b:
         condition: service_healthy
       server-c:
+        condition: service_healthy
+      server-d:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8090/livez"]

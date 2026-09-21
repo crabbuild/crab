@@ -1,6 +1,6 @@
 # Failover phase telemetry and qualification baseline
 
-Status: PARTIAL — phase evidence, typed identity binding, and receipt timestamps implemented; work counters and protected runs pending
+Status: PARTIAL — phase evidence, typed identity binding, strict version-6 selection/work receipts, and local contract tests implemented; protected runs pending
 Priority: P0
 Effort: M
 Risk: Medium
@@ -64,11 +64,22 @@ Only modify:
 - `crates/crab-http-server/src/metrics.rs`
 - `crates/crab-http-server/tests/qualify_compose_cluster.sh`
 - `crates/crab-cell-runtime/src/bin/qualification_receipt.rs`
+- `crates/crab-cell-runtime/src/cluster_qualification.rs`
 - `.github/workflows/http-server-container.yml`
+- `.github/workflows/cell-runtime-qualification-contract.yml`
 - `crates/crab-cell-runtime/src/node_log_recovery.rs`
+- `crates/crab-cell-runtime/src/recovery_manifest.rs`
+- `crates/crab-cell-runtime/src/lib.rs`
 - `crates/crab-cell-runtime/docs/failover-and-followers.md`
 - `crates/crab-cell-runtime/docs/deployment.md`
+- `advisor-plans/018-failover-phase-evidence.md`
+- `advisor-plans/README.md`
 - focused existing test modules adjacent to those owners
+
+The typed receipt owner is `cluster_qualification.rs`; the work counters cross
+the recovery and manifest owners, and the contract workflow must assert that
+the container workflow calls the same validator. These are explicit scope
+amendments, not alternate receipt or telemetry paths.
 
 Do not modify claim/lease formats, scheduling constants, routing, placement, or
 recovery ordering. If another file is required, stop and amend this plan before
@@ -220,7 +231,8 @@ the versioned raw receipt. Do not run it against a shared bucket/prefix.
 - Unit: phase/result mapping, metric rendering, summary arithmetic, error paths.
 - Scheduler: claim failure, inventory failure, witness failure, pin failure,
   fenced completion, and success each terminate telemetry once.
-- Compose: two owner losses, exact-root progression, timestamps, work counters,
+- Compose: three owner losses (two follower-affine and one all-followers-
+  unavailable fallback), exact-root progression, timestamps, work counters,
   and receipt validation.
 - Negative: reject malformed receipt timestamps, missing phase data, duplicate
   phase labels, and identifiers in forbidden label positions.
@@ -228,8 +240,8 @@ the versioned raw receipt. Do not run it against a shared bucket/prefix.
 ## Done criteria
 
 - [ ] Only the files named in **Files in scope** changed.
-- [ ] Exact phase labels and the version-6 receipt shape are asserted in tests.
-- [ ] Focused tests, Clippy, formatting, and doc validation pass.
+- [x] Exact phase labels and the version-6 receipt shape are asserted in tests.
+- [x] Focused tests, Clippy, formatting, and doc validation pass.
 - [ ] One clean local versioned receipt is retained externally and its artifact
       hash is recorded through plan 015's existing convention.
 - [ ] `git diff --name-only c86dd43423ae...HEAD` contains no unplanned path.

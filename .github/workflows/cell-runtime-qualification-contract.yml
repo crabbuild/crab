@@ -96,11 +96,12 @@ jobs:
           harness_version="$(sed -n \
             's/^[[:space:]]*version:[[:space:]]*\([0-9][0-9]*\),$/\1/p' \
             crates/crab-http-server/tests/qualify_compose_cluster.sh | head -1)"
-          gate_versions="$(sed -n \
-            's/.*\.version == \([0-9][0-9]*\) and.*/\1/p' \
-            .github/workflows/http-server-container.yml | sort -u)"
           test -n "$harness_version"
-          test "$gate_versions" = "$harness_version"
+          test "$harness_version" = 6
+          grep -F 'server-d' crates/crab-http-server/tests/qualify_compose_cluster.sh
+          grep -F 'fallback:' crates/crab-http-server/tests/qualify_compose_cluster.sh
+          grep -F -- "validate-cluster \"\${RUNNER_TEMP}/crab-http-server-cluster-receipt.json\"" \
+            .github/workflows/http-server-container.yml
       - name: Keep release qualification bound to the promoted image
         shell: bash
         run: |

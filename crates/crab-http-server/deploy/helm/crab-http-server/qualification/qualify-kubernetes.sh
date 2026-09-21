@@ -442,6 +442,22 @@ check_pod_health() {
   done < <(jq --raw-output '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name' "$pods_json")
 }
 
+node_session_for_pod() {
+  local pod="$1"
+  # The session directory is the process-owned identity boundary. Reading it
+  # avoids guessing a successor from Pod order after Kubernetes replacement.
+  # shellcheck disable=SC2016
+  kubectl --namespace "$namespace" exec "$pod" -- sh -ec '
+    for path in /var/lib/crab/cells/sessions/*; do
+      if [ -d "$path" ]; then
+        printf "%s\n" "${path##*/}"
+        exit 0
+      fi
+    done
+    exit 1
+  '
+}
+
 metric_sample() {
   local file="$1"
   local name="$2"
@@ -950,6 +966,16 @@ owner_endpoint="$(jq --raw-output '.owner.endpoint' "$control_before")"
 owner_session_before="$(jq --raw-output '.owner.session' "$control_before")"
 owner_epoch_before="$(jq --raw-output '.epoch' "$control_before")"
 owner_root_before="$(jq --compact-output '.root' "$control_before")"
+owner_log_before="$(kubectl --namespace "$namespace" exec "${pods[0]}" -- \
+  crab-http-server --config /etc/crab/http-server/server.toml \
+  cells node --session "$owner_session_before" --json)"
+jq --exit-status '
+  .live == true and .session == $session and
+  .advertisement.log.active == true and
+  (.advertisement.log.member_nodes | length) > 0
+' --arg session "$owner_session_before" <<<"$owner_log_before" >/dev/null
+owner_log_epoch_before="$(jq --raw-output '.advertisement.log.epoch' <<<"$owner_log_before")"
+owner_log_members="$(jq --compact-output '.advertisement.log.member_nodes' <<<"$owner_log_before")"
 owner_pod=""
 owner_pod_uid=""
 while IFS=$'\t' read -r pod ip uid; do
@@ -1049,6 +1075,39 @@ jq --exit-status \
   .owner.session != $session and .epoch > $epoch and
   .root == $root
 ' "$control_after" >/dev/null
+owner_session_after="$(jq --raw-output '.owner.session' "$control_after")"
+owner_endpoint_after="$(jq --raw-output '.owner.endpoint' "$control_after")"
+successor_pod=""
+successor_pod_uid=""
+while IFS=$'\t' read -r pod ip uid; do
+  peer_host="$ip"
+  if [[ "$ip" == *:* ]]; then
+    peer_host="[${ip}]"
+  fi
+  if [ "$owner_endpoint_after" = "https://${peer_host}:8789/" ]; then
+    successor_pod="$pod"
+    successor_pod_uid="$uid"
+    break
+  fi
+done < <(jq --raw-output '
+  .items[] | select(.metadata.deletionTimestamp == null) |
+  [.metadata.name, .status.podIP, .metadata.uid] | @tsv
+' "$pods_json")
+test -n "$successor_pod"
+test "$successor_pod" != "$owner_pod"
+successor_session="$(node_session_for_pod "$successor_pod")"
+successor_node_json="$(kubectl --namespace "$namespace" exec "$successor_pod" -- \
+  crab-http-server --config /etc/crab/http-server/server.toml \
+  cells node --session "$successor_session" --json)"
+successor_node="$(jq --raw-output '.advertisement.node' <<<"$successor_node_json")"
+jq --exit-status \
+  --arg session "$owner_session_after" \
+  --arg node "$successor_node" \
+  --argjson members "$owner_log_members" \
+  '.live == true and .session == $session and
+   .advertisement.node == $node and
+   any($members[]; . == $node)' \
+  <<<"$successor_node_json" >/dev/null
 
 continuation_context="crab/live-qualification-after-owner-loss"
 continuation_request_id="$(uuid_from_text "${qualification_id}:owner-loss")"
@@ -1119,6 +1178,12 @@ jq --null-input \
   --arg owner_pod_uid "$owner_pod_uid" \
   --arg owner_session_before "$owner_session_before" \
   --arg owner_session_after "$(jq --raw-output '.owner.session' "$control_after")" \
+  --argjson owner_log_epoch_before "$owner_log_epoch_before" \
+  --argjson owner_log_members "$owner_log_members" \
+  --arg successor_pod "$successor_pod" \
+  --arg successor_pod_uid "$successor_pod_uid" \
+  --arg successor_session "$successor_session" \
+  --arg successor_node "$successor_node" \
   --argjson owner_advertisement_observed_at_ms \
     "$(jq --raw-output '.observed_at_ms' "$owner_advertisement_status")" \
   --argjson root_before "$owner_root_before" \
@@ -1140,7 +1205,7 @@ jq --null-input \
   --slurpfile capacity_after_rollout "$capacity_after_rollout" \
   --slurpfile capacity_after_owner_loss "$capacity_after_owner_loss" \
   --slurpfile load_reports "$load_reports" \
-  '{schema: 11, provider: $provider, namespace: $namespace, deployment: $deployment,
+  '{schema: 12, provider: $provider, namespace: $namespace, deployment: $deployment,
     origin: $origin, image: $image, chart: $chart,
     qualification_source: {release_tag: $release_tag, commit: $source_sha},
     node_profile: $node_profile, scratch_limit_bytes: $scratch_limit_bytes,
@@ -1156,6 +1221,13 @@ jq --null-input \
       deleted_pod_uid: $owner_pod_uid,
       session_before: $owner_session_before,
       session_after: $owner_session_after,
+      log_epoch_before: $owner_log_epoch_before,
+      original_follower_nodes: $owner_log_members,
+      successor_pod: $successor_pod,
+      successor_pod_uid: $successor_pod_uid,
+      successor_session: $successor_session,
+      successor_node: $successor_node,
+      successor_was_original_follower: true,
       previous_advertisement_expired: true,
       advertisement_observed_at_ms: $owner_advertisement_observed_at_ms,
       epoch_before: $owner_epoch_before,
@@ -1203,6 +1275,7 @@ jq --null-input \
       post_rollout_cell_restore: true,
       abrupt_owner_loss: true,
       owner_advertisement_expired: true,
+      owner_loss_follower_affinity: true,
       owner_loss_exact_root_restore: true,
       owner_loss_publication_continues: true
     },

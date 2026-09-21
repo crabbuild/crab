@@ -279,6 +279,92 @@ impl WitnessCollector {
     }
 }
 
+/// Bounded work counters emitted for one node-log recovery attempt.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RecoveryWorkSummary {
+    pub candidate_count: u64,
+    pub affected_cells: u64,
+    pub catalog_shards: u64,
+    pub catalog_pages: u64,
+    pub control_reads: u64,
+    pub follower_pages: u64,
+    pub follower_frames: u64,
+    pub follower_bytes: u64,
+    pub peer_requests: u64,
+    pub bundle_bytes: u64,
+    pub object_reads: u64,
+    pub object_writes: u64,
+}
+
+impl RecoveryWorkSummary {
+    pub fn merge(&mut self, other: Self) -> Result<()> {
+        self.candidate_count = self
+            .candidate_count
+            .checked_add(other.candidate_count)
+            .ok_or(Error::Capacity("recovery candidate count"))?;
+        self.affected_cells = self
+            .affected_cells
+            .checked_add(other.affected_cells)
+            .ok_or(Error::Capacity("recovery affected Cell count"))?;
+        self.catalog_shards = self
+            .catalog_shards
+            .checked_add(other.catalog_shards)
+            .ok_or(Error::Capacity("recovery catalog shard count"))?;
+        self.catalog_pages = self
+            .catalog_pages
+            .checked_add(other.catalog_pages)
+            .ok_or(Error::Capacity("recovery catalog page count"))?;
+        self.control_reads = self
+            .control_reads
+            .checked_add(other.control_reads)
+            .ok_or(Error::Capacity("recovery control read count"))?;
+        self.follower_pages = self
+            .follower_pages
+            .checked_add(other.follower_pages)
+            .ok_or(Error::Capacity("recovery follower page count"))?;
+        self.follower_frames = self
+            .follower_frames
+            .checked_add(other.follower_frames)
+            .ok_or(Error::Capacity("recovery follower frame count"))?;
+        self.follower_bytes = self
+            .follower_bytes
+            .checked_add(other.follower_bytes)
+            .ok_or(Error::Capacity("recovery follower byte count"))?;
+        self.peer_requests = self
+            .peer_requests
+            .checked_add(other.peer_requests)
+            .ok_or(Error::Capacity("recovery peer request count"))?;
+        self.bundle_bytes = self
+            .bundle_bytes
+            .checked_add(other.bundle_bytes)
+            .ok_or(Error::Capacity("recovery bundle byte count"))?;
+        self.object_reads = self
+            .object_reads
+            .checked_add(other.object_reads)
+            .ok_or(Error::Capacity("recovery object read count"))?;
+        self.object_writes = self
+            .object_writes
+            .checked_add(other.object_writes)
+            .ok_or(Error::Capacity("recovery object write count"))?;
+        Ok(())
+    }
+}
+
+/// Catalog work counters collected while validating recovered frame scopes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RecoveryInventorySummary {
+    pub affected_cells: u64,
+    pub catalog_shards: u64,
+    pub catalog_pages: u64,
+    pub control_reads: u64,
+}
+
+/// Recovery Cells together with the bounded catalog work needed to discover them.
+pub struct RecoverableCellInventory {
+    pub cells: Vec<RecoveryCell>,
+    pub summary: RecoveryInventorySummary,
+}
+
 /// Verified uncovered suffix gathered after every reachable follower is sealed.
 pub struct SealedSession {
     pub leader_session: SessionId,
@@ -287,6 +373,7 @@ pub struct SealedSession {
     pub durable_through: u64,
     pub frames: Vec<crab_ltx::VerifiedNodeFrame>,
     witness: Option<SealedWitness>,
+    work: RecoveryWorkSummary,
     // Keep admission until the caller has pinned or discarded the recovered
     // bytes, not merely until their last network page arrives.
     _reservation: Option<crab_ltx::DiskReservation>,
@@ -300,16 +387,50 @@ impl SealedSession {
             .map_or(self.frames.len() as u64, |witness| witness.frame_count)
     }
 
+    #[must_use]
+    pub const fn work(&self) -> RecoveryWorkSummary {
+        self.work
+    }
+
     /// Returns authenticated frame scopes without materializing frame bodies.
     pub fn scopes(&self, limits: crab_ltx::Limits) -> Result<Vec<crab_ltx::NodeFrameScope>> {
         if let Some(witness) = &self.witness {
-            return witness
-                .reader(limits)?
-                .map(|frame| frame.map(|frame| frame.scope()))
-                .collect();
+            return unique_scopes(
+                witness
+                    .reader(limits)?
+                    .map(|frame| frame.map(|frame| frame.scope())),
+            );
         }
-        Ok(self.frames.iter().map(|frame| frame.scope()).collect())
+        unique_scopes(self.frames.iter().map(|frame| Ok(frame.scope())))
     }
+}
+
+/// Retains one authenticated generation per Cell while validating every frame
+/// in the witness. Recovery only needs the affected Cell set; retaining every
+/// frame scope would make catalog discovery grow with the uncovered tail.
+fn unique_scopes<I>(scopes: I) -> Result<Vec<crab_ltx::NodeFrameScope>>
+where
+    I: IntoIterator<Item = Result<crab_ltx::NodeFrameScope>>,
+{
+    let mut unique = BTreeMap::<[u8; 32], crab_ltx::NodeFrameScope>::new();
+    for scope in scopes {
+        let scope = scope?;
+        if let Some(existing) = unique.get(&scope.cell) {
+            if existing.leader_session != scope.leader_session
+                || existing.log_epoch != scope.log_epoch
+                || existing.application != scope.application
+                || existing.incarnation != scope.incarnation
+                || existing.cell_epoch != scope.cell_epoch
+            {
+                return Err(Error::Control(
+                    "recovery Cell scope has multiple generations",
+                ));
+            }
+            continue;
+        }
+        unique.insert(scope.cell, scope);
+    }
+    Ok(unique.into_values().collect())
 }
 
 /// Mechanical seal-and-gather coordinator for one already claimed dead session.
@@ -347,6 +468,12 @@ pub struct CompletedNodeRecovery {
     pub sealed: SealedNodeLog,
     pub controls: Vec<VersionedControl>,
     pub takeover: NodeTakeoverProof,
+}
+
+/// Recovery controls and publication work produced by one sealed recovery.
+pub struct RecoveryCoordinatorResult {
+    pub controls: Vec<VersionedControl>,
+    pub publication: crate::RecoveryPublicationSummary,
 }
 
 /// Scans one application catalog for published Cells owned by a dead session.
@@ -401,7 +528,7 @@ pub async fn recoverable_cells_from_frames(
     frames: &[crab_ltx::VerifiedNodeFrame],
     limit: usize,
 ) -> Result<Vec<RecoveryCell>> {
-    let scopes = frames.iter().map(|frame| frame.scope()).collect::<Vec<_>>();
+    let scopes = unique_scopes(frames.iter().map(|frame| Ok(frame.scope())))?;
     recoverable_cells_from_scopes(catalog, authority, owner, &scopes, limit).await
 }
 
@@ -413,6 +540,20 @@ pub async fn recoverable_cells_from_scopes(
     frame_scopes: &[crab_ltx::NodeFrameScope],
     limit: usize,
 ) -> Result<Vec<RecoveryCell>> {
+    Ok(
+        recoverable_cells_from_scopes_with_summary(catalog, authority, owner, frame_scopes, limit)
+            .await?
+            .cells,
+    )
+}
+
+pub async fn recoverable_cells_from_scopes_with_summary(
+    catalog: &CellCatalog,
+    authority: &CellAuthority,
+    owner: SessionId,
+    frame_scopes: &[crab_ltx::NodeFrameScope],
+    limit: usize,
+) -> Result<RecoverableCellInventory> {
     if owner.as_bytes().iter().all(|byte| *byte == 0) || limit == 0 {
         return Err(Error::Node("node recovery inventory bound is invalid"));
     }
@@ -440,17 +581,28 @@ pub async fn recoverable_cells_from_scopes(
         }
     }
     if scopes.is_empty() {
-        return Ok(Vec::new());
+        return Ok(RecoverableCellInventory {
+            cells: Vec::new(),
+            summary: RecoveryInventorySummary::default(),
+        });
     }
 
     let mut needed = BTreeMap::<u8, Vec<[u8; 32]>>::new();
     for cell in scopes.keys() {
         needed.entry(cell[0]).or_default().push(*cell);
     }
+    let affected_cells =
+        u64::try_from(scopes.len()).map_err(|_| Error::Capacity("recovery affected Cell count"))?;
+    let catalog_shards =
+        u64::try_from(needed.len()).map_err(|_| Error::Capacity("recovery catalog shard count"))?;
     let mut entries = BTreeMap::<[u8; 32], CatalogProof>::new();
+    let mut catalog_pages = 0_u64;
     for (shard, cells) in needed {
         let mut scan = catalog.scan_shard(shard).await?;
         while let Some(page) = scan.next_page().await? {
+            catalog_pages = catalog_pages
+                .checked_add(1)
+                .ok_or(Error::Capacity("recovery catalog page count"))?;
             for proof in page.entries() {
                 if cells.binary_search(proof.entry().cell().as_bytes()).is_ok() {
                     entries.insert(*proof.entry().cell().as_bytes(), proof.clone());
@@ -486,7 +638,16 @@ pub async fn recoverable_cells_from_scopes(
             observed,
         });
     }
-    Ok(recovered)
+    Ok(RecoverableCellInventory {
+        summary: RecoveryInventorySummary {
+            affected_cells,
+            catalog_shards,
+            catalog_pages,
+            control_reads: u64::try_from(recovered.len())
+                .map_err(|_| Error::Capacity("recovery control read count"))?,
+        },
+        cells: recovered,
+    })
 }
 
 impl RecoveryCoordinator {
@@ -521,6 +682,18 @@ impl RecoveryCoordinator {
         cells: Vec<RecoveryCell>,
         sealed: SealedSession,
     ) -> Result<Vec<VersionedControl>> {
+        Ok(self
+            .recover_sealed_with_summary(fenced, cells, sealed)
+            .await?
+            .controls)
+    }
+
+    pub async fn recover_sealed_with_summary(
+        &self,
+        fenced: FencedNodeSession,
+        cells: Vec<RecoveryCell>,
+        sealed: SealedSession,
+    ) -> Result<RecoveryCoordinatorResult> {
         self.recovery.validate_fence(&fenced)?;
         let mut bases = Vec::with_capacity(cells.len());
         for cell in &cells {
@@ -545,7 +718,10 @@ impl RecoveryCoordinator {
         }
 
         if sealed.frame_count() == 0 {
-            return Ok(Vec::new());
+            return Ok(RecoveryCoordinatorResult {
+                controls: Vec::new(),
+                publication: crate::RecoveryPublicationSummary::default(),
+            });
         }
         let scratch = self.manifests.recovery_scratch_directory();
         let tails = if let Some(witness) = &sealed.witness {
@@ -565,18 +741,21 @@ impl RecoveryCoordinator {
             )?
         };
         if tails.is_empty() {
-            return Ok(Vec::new());
+            return Ok(RecoveryCoordinatorResult {
+                controls: Vec::new(),
+                publication: crate::RecoveryPublicationSummary::default(),
+            });
         }
         let pinned = self
             .manifests
-            .pin(sealed.leader_session, sealed.log_epoch, tails)
+            .pin_with_summary(sealed.leader_session, sealed.log_epoch, tails)
             .await?;
-        if pinned.len() > cells.len() {
+        if pinned.cells.len() > cells.len() {
             return Err(Error::Node("recovery manifest exceeds Cell inventory"));
         }
 
-        let mut attached = Vec::with_capacity(pinned.len());
-        for pin in pinned {
+        let mut attached = Vec::with_capacity(pinned.cells.len());
+        for pin in pinned.cells {
             let cell = cells
                 .iter()
                 .find(|candidate| {
@@ -621,7 +800,10 @@ impl RecoveryCoordinator {
             };
             attached.push(versioned);
         }
-        Ok(attached)
+        Ok(RecoveryCoordinatorResult {
+            controls: attached,
+            publication: pinned.summary,
+        })
     }
 
     /// Pins every recovered Cell and then atomically seals the claimed node log.
@@ -855,6 +1037,11 @@ impl NodeLogRecovery {
                 durable_through: self.tiered_through,
                 frames: Vec::new(),
                 witness: None,
+                work: RecoveryWorkSummary {
+                    peer_requests: u64::try_from(self.members.len())
+                        .map_err(|_| Error::Capacity("recovery peer request count"))?,
+                    ..RecoveryWorkSummary::default()
+                },
                 _reservation: None,
             });
         }
@@ -886,6 +1073,11 @@ impl NodeLogRecovery {
             .collect::<Vec<_>>();
         candidates.sort_unstable_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
 
+        let mut work = RecoveryWorkSummary {
+            peer_requests: u64::try_from(self.members.len())
+                .map_err(|_| Error::Capacity("recovery peer request count"))?,
+            ..RecoveryWorkSummary::default()
+        };
         for (candidate_member, candidate_receipt) in candidates {
             let candidate_reservation = self.recovery_disk.try_reserve(0)?;
             let mut collector = if bounded {
@@ -905,6 +1097,7 @@ impl NodeLogRecovery {
                     required_first,
                     limits: self.limits,
                     reservation: Some(&candidate_reservation),
+                    work: Some(&mut work),
                 },
                 TailSinks {
                     collector: Some(&mut collector),
@@ -937,6 +1130,7 @@ impl NodeLogRecovery {
                         required_first,
                         limits: self.limits,
                         reservation: None,
+                        work: Some(&mut work),
                     },
                     TailSinks {
                         collector: None,
@@ -962,6 +1156,7 @@ impl NodeLogRecovery {
                 durable_through,
                 frames,
                 witness,
+                work,
                 _reservation: Some(candidate_reservation),
             });
         }
@@ -982,6 +1177,7 @@ struct TailReadContext<'a> {
     required_first: u64,
     limits: crab_ltx::Limits,
     reservation: Option<&'a crab_ltx::DiskReservation>,
+    work: Option<&'a mut RecoveryWorkSummary>,
 }
 
 struct TailSinks<'a> {
@@ -1003,6 +1199,7 @@ async fn collect_member_tail(
         required_first,
         limits,
         reservation,
+        mut work,
     } = context;
     if receipt.durable_through < required_first {
         return Ok(false);
@@ -1013,6 +1210,12 @@ async fn collect_member_tail(
     }
     let mut tail_bytes = 0_u64;
     loop {
+        if let Some(work) = work.as_deref_mut() {
+            work.peer_requests = work
+                .peer_requests
+                .checked_add(1)
+                .ok_or(Error::Capacity("recovery peer request count"))?;
+        }
         let page = match transport
             .tail_page(
                 member,
@@ -1031,6 +1234,12 @@ async fn collect_member_tail(
             return Ok(false);
         }
         let page_count = page.frames.len();
+        if let Some(work) = work.as_deref_mut() {
+            work.follower_pages = work
+                .follower_pages
+                .checked_add(1)
+                .ok_or(Error::Capacity("recovery follower page count"))?;
+        }
         let verified = match page
             .frames
             .into_iter()
@@ -1054,6 +1263,19 @@ async fn collect_member_tail(
         }) else {
             return Ok(false);
         };
+        if let Some(work) = work.as_deref_mut() {
+            work.follower_frames = work
+                .follower_frames
+                .checked_add(
+                    u64::try_from(verified.len())
+                        .map_err(|_| Error::Capacity("recovery follower frame count"))?,
+                )
+                .ok_or(Error::Capacity("recovery follower frame count"))?;
+            work.follower_bytes = work
+                .follower_bytes
+                .checked_add(page_bytes)
+                .ok_or(Error::Capacity("recovery follower byte count"))?;
+        }
         let page_limit = if page_count == 1 {
             MAX_RECOVERY_PAGE_BYTES.saturating_add(limits.max_capture_bytes)
         } else {
@@ -1115,6 +1337,54 @@ mod tests {
     use crate::{
         AppendRequest, FollowerStore, LocalFollowerTransport, NodeLogTransport, RetireRequest,
     };
+
+    fn scope(cell: u8, sequence: u64) -> crab_ltx::NodeFrameScope {
+        crab_ltx::NodeFrameScope {
+            leader_session: [1; 16],
+            log_epoch: 3,
+            node_sequence: sequence,
+            application: [4; 16],
+            cell: [cell; 32],
+            incarnation: [6; 16],
+            cell_epoch: 7,
+            commit_sequence: sequence,
+        }
+    }
+
+    #[test]
+    fn scope_validation_keeps_one_generation_per_cell() {
+        let scopes = unique_scopes([Ok(scope(1, 1)), Ok(scope(1, 2)), Ok(scope(2, 3))]).unwrap();
+        assert_eq!(scopes.len(), 2);
+        assert_eq!(scopes[0].cell, [1; 32]);
+        assert_eq!(scopes[1].cell, [2; 32]);
+    }
+
+    #[test]
+    fn scope_validation_rejects_conflicting_cell_generations() {
+        let mut conflicting = scope(1, 2);
+        conflicting.cell_epoch = 8;
+        assert!(matches!(
+            unique_scopes([Ok(scope(1, 1)), Ok(conflicting)]),
+            Err(Error::Control(
+                "recovery Cell scope has multiple generations"
+            ))
+        ));
+    }
+
+    #[test]
+    fn recovery_work_summary_merge_is_checked() {
+        let mut summary = RecoveryWorkSummary {
+            follower_bytes: u64::MAX,
+            ..RecoveryWorkSummary::default()
+        };
+        assert!(matches!(
+            summary.merge(RecoveryWorkSummary {
+                follower_bytes: 1,
+                ..RecoveryWorkSummary::default()
+            }),
+            Err(Error::Capacity("recovery follower byte count"))
+        ));
+    }
 
     struct FailingFirstTransport {
         failed: NodeId,

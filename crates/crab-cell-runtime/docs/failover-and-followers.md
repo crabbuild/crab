@@ -157,7 +157,7 @@ recovery path.
 | Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, durability proof, and output acceptance all check it | None for the current non-streaming Cell API |
 | Write-all durability gate, first-fsynced-batch activation, bounded dual-watermark command continuation, ordered object publication, object fallback, schema-migration barriers, and contiguous authoritative object watermark | None for this slice |
 | Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | None for this slice |
-| Cell control attachment and takeover consumption of overlays; server drain closes a fully object-covered epoch before session withdrawal; grace-aged retired follower lanes are deleted only after authority stops naming their epoch; the Compose qualifier proves a follower-only result survives owner `SIGKILL`, owner-disk deletion, RustFS restoration, takeover, and owner rejoin; the Kubernetes harness exercises each selected node profile and the 1,000 aggregate mutation schedule against every Pod across eight load Cells | Signed live runs across small/medium/large profiles plus the extended fault/telemetry matrix |
+| Cell control attachment and takeover consumption of overlays; server drain closes a fully object-covered epoch before session withdrawal; grace-aged retired follower lanes are deleted only after authority stops naming their epoch; the Compose qualifier proves a follower-only result survives owner `SIGKILL`, owner-disk deletion, RustFS restoration, takeover, and owner rejoin; the Kubernetes harness exercises each selected node profile and the 1,000 aggregate mutation schedule against every Pod across eight load Cells, and its owner-loss receipt binds the successor stable NodeId to the failed log's original follower set | Signed live runs across small/medium/large profiles plus the extended fault/telemetry matrix |
 | Bounded command/query responses and the typed `CellStateStream` bind every emitted chunk to the actor's proven logical head | Extended live fault and profile qualification only |
 
 The session record now owns one CAS-protected log epoch, its exact sorted member
@@ -250,7 +250,7 @@ Correctness boundaries exercised by regression tests:
 | Two witnesses return different valid bytes for one sequence | Fail closed, including overlapping evidence from shorter or partially readable witnesses |
 | A valid frame names another session or epoch | Reject it before building a recovery overlay |
 | A recovered suffix is awaiting immutable pinning | Retain its recovery admission until the result is pinned or discarded |
-| Recovery must inspect 256 catalog shard heads | Read heads with a fixed concurrency bound while still verifying every populated shard, page, and Cell control |
+| Recovery must discover affected Cells | Derive authenticated Cell scopes from the sealed tail, read only affected catalog shards once, and revalidate each current Cell control |
 | The claim CAS commits but its response never returns | Bound the storage wait, then resume the same persisted claim idempotently on the next scheduler scan |
 
 ## Use one multiplexed log per owner session
@@ -638,6 +638,9 @@ reader scans one frame at a time, retaining verified file locations and digests,
 then materializes only the requested page. It rechecks the digest after seeking.
 Metadata remains proportional to retained frame count, and each page still
 performs a full validation scan: payload memory is bounded, not total scan I/O.
+A sealed recovery witness is reduced to one authenticated generation per
+affected Cell before catalog lookup, so scope-validation memory is bounded by
+the affected-Cell admission limit rather than the retained tail length.
 A page with
 one frame may be larger than the 1 MiB network target, but that frame is still
 bounded by the configured capture limit; a multi-frame page may not exceed the
@@ -1098,6 +1101,12 @@ A second node waits behind a live claim. After the 30-second claim expiry, it
 may CAS takeover of recovery. All later operations are content-addressed,
 idempotent, or Cell-control CASes, so repeated work converges.
 
+The request path may take over an expired session only when its node log is
+already inactive. An active log returns `PendingPublication` without creating
+a claim; the follower scheduler remains the sole path that can reserve and
+recover that log, so a cold request cannot strand the preferred follower behind
+an arbitrary 30-second claim.
+
 ### Seal and gather followers
 
 Each follower serializes `SealFragment` with append handling. An append wholly
@@ -1473,7 +1482,9 @@ crab_cell_node_log_uncovered_bytes
 crab_cell_node_log_lanes{state="open|degraded|sealed"}
 crab_cell_node_log_recoveries{state="running|waiting"}
 crab_cell_node_log_recovery_seconds
+crab_cell_node_log_recovery_phase_seconds{phase="claim|witness|scope_validation|pin_attach|seal"}
 crab_cell_node_log_recovery_failures_total{reason}
+crab_cell_node_log_recovery_work_total{kind="candidate_count|affected_cells|catalog_shards|catalog_pages|control_reads|follower_pages|follower_frames|follower_bytes|peer_requests|bundle_bytes|object_reads|object_writes"}
 crab_cell_node_log_rotations_total{result="started|pending|failed|completed"}
 crab_cell_follower_retained_bytes
 crab_cell_session_lease_seconds
@@ -1598,6 +1609,14 @@ rejects server, transport, body-limit, latency-over-60-second, or target-rate
 failures. The eight-Cell schedule is the node-level aggregate profile (the
 receipt records a configured 125 target requests/s per Cell); retain a separate
 one-Cell run when measuring the hot-Cell admission limit.
+The version-6 typed cluster-receipt validator maps every failed and successor
+session to stable NodeIds, requires the first two successors to be present in
+their failed log's original follower set, and requires the third successor to
+be a live non-member after every original follower is unavailable. It requires
+a successful observation for each fixed recovery phase and binds bounded work
+counters to all three loss cycles. Prometheus labels remain fixed; the receipt
+keeps the raw metric text only as evidence and rejects identifier-bearing
+labels.
 
 ## Deliver in dependency order
 
