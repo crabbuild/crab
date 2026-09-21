@@ -2713,15 +2713,18 @@ test("repository settings manage members with a revisioned CSRF-protected replac
 
   await page.getByRole("button", { name: "Add member", exact: true }).click();
   let form = page.locator(".member-form");
+  await expect(form.locator("select")).toHaveCount(0);
   await form.getByLabel("Subject").fill("charlie-id");
   await form.getByLabel("Display name").fill("Charlie");
-  await form.getByLabel("Access").selectOption("read");
+  await form.getByRole("button", { name: "Access" }).click();
+  await page.getByRole("menuitemradio", { name: /^Read/ }).click();
   await form.getByRole("button", { name: "Add member", exact: true }).click();
 
   await page.getByRole("button", { name: "Edit Charlie" }).click();
   form = page.locator(".member-form");
   await form.getByLabel("Display name").fill("Charles");
-  await form.getByLabel("Access").selectOption("write");
+  await form.getByRole("button", { name: "Access" }).click();
+  await page.getByRole("menuitemradio", { name: /^Write/ }).click();
   await form.getByRole("button", { name: "Save member" }).click();
 
   await page.getByRole("button", { name: "Remove Bob" }).click();

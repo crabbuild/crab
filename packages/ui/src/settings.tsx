@@ -1,12 +1,23 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { Button, Label } from "@primer/react";
+import {
+  ActionList,
+  ActionMenu,
+  Button,
+  Dialog,
+  IconButton,
+  Label,
+  TextInput,
+} from "@primer/react";
 import {
   AlertIcon,
   ArchiveIcon,
+  EyeIcon,
   GitBranchIcon,
   PencilIcon,
+  PersonIcon,
   PlusIcon,
   ShieldLockIcon,
+  SyncIcon,
   TrashIcon,
 } from "@primer/octicons-react";
 import {
@@ -99,6 +110,41 @@ function failureMessage(body: unknown, fallback: string) {
   return typeof message === "string" ? message : fallback;
 }
 
+function memberAccessDetails(access: RepositoryMember["access"]) {
+  return access === "admin"
+    ? {
+        label: "Admin",
+        description: "Can manage repository settings and members.",
+        Icon: ShieldLockIcon,
+      }
+    : access === "write"
+      ? {
+          label: "Write",
+          description: "Can push changes and collaborate on the repository.",
+          Icon: PencilIcon,
+        }
+      : {
+          label: "Read",
+          description: "Can view and clone the repository.",
+          Icon: EyeIcon,
+        };
+}
+
+function MemberAccess({ access }: { access: RepositoryMember["access"] }) {
+  const details = memberAccessDetails(access);
+  const { Icon } = details;
+  return (
+    <span
+      className="member-role"
+      data-access={access}
+      title={details.description}
+    >
+      <Icon size={16} aria-hidden="true" />
+      <span>{details.label}</span>
+    </span>
+  );
+}
+
 function MemberSettings({
   repo,
   csrf,
@@ -120,6 +166,7 @@ function MemberSettings({
   const [removing, setRemoving] = useState<number>();
   const [redirecting, setRedirecting] = useState(false);
   const nextId = useRef(0);
+  const subjectInput = useRef<HTMLInputElement>(null);
 
   function membersToDraft(members: RepositoryMember[]) {
     return members.map((member) => ({ ...member, id: nextId.current++ }));
@@ -127,6 +174,19 @@ function MemberSettings({
 
   function newMember() {
     return { subject: "", name: "", access: "read" } as const;
+  }
+
+  function startNewMember() {
+    setEditing(undefined);
+    setForm(newMember());
+    setRemoving(undefined);
+    setError(undefined);
+    setSuccess(undefined);
+  }
+
+  function closeForm() {
+    setEditing(undefined);
+    setForm(undefined);
   }
 
   function normalizedMembers() {
@@ -283,111 +343,194 @@ function MemberSettings({
     );
   return (
     <section className="settings-content" aria-labelledby="member-settings">
-      <h2 id="member-settings">Members</h2>
+      <div className="settings-title members-settings-title">
+        <div>
+          <h2 id="member-settings">Members</h2>
+          <p>Manage who can access this repository and what they can do.</p>
+        </div>
+        <Button
+          size="small"
+          variant="primary"
+          leadingVisual={PlusIcon}
+          onClick={startNewMember}
+        >
+          Add member
+        </Button>
+      </div>
       {conflict && (
         <div className="notice error" role="alert">
           <p>
             Another administrator changed membership. Reload before saving
             again.
           </p>
-          <Button onClick={() => void load()}>Reload members</Button>
+          <Button leadingVisual={SyncIcon} onClick={() => void load()}>
+            Reload members
+          </Button>
         </div>
       )}
       {error && <p role="alert">{error}</p>}
       {success && <p role="status">{success}</p>}
       <div className="member-settings">
-        {draft.length === 0 && <p className="settings-help">No members.</p>}
-        <ul className="member-list" aria-label="Repository members">
-          {draft.map((member) => (
-            <li className="member-row" key={member.id}>
-              <div className="member-subject">
-                <strong>{member.subject}</strong>
-                <span>{member.name}</span>
-              </div>
-              <span className="member-access">{member.access}</span>
-              <div className="member-actions">
-                <Button size="small" onClick={() => startEdit(member)}>
-                  Edit {member.name || member.subject}
-                </Button>
-                <Button
-                  size="small"
-                  variant="danger"
-                  onClick={() => {
-                    setRemoving(member.id);
-                    setEditing(undefined);
-                    setForm(undefined);
-                  }}
-                >
-                  Remove {member.name || member.subject}
-                </Button>
-              </div>
-            </li>
-          ))}
-        </ul>
-      </div>
-      {!form && (
-        <Button
-          onClick={() => {
-            setEditing(undefined);
-            setForm(newMember());
-            setRemoving(undefined);
-          }}
-        >
-          Add member
-        </Button>
-      )}
-      {form && (
-        <form className="member-form" onSubmit={saveMember}>
-          <h3>{editing === undefined ? "Add member" : "Edit member"}</h3>
-          <label className="member-field">
-            Subject
-            <input
-              value={form.subject}
-              required
-              aria-describedby="member-subject-help"
-              onChange={(event) =>
-                setForm({ ...form, subject: event.target.value })
-              }
-            />
-          </label>
-          <p id="member-subject-help" className="settings-help">
-            Use the identity provider’s stable subject.
-          </p>
-          <label className="member-field">
-            Display name
-            <input
-              value={form.name}
-              required
-              onChange={(event) =>
-                setForm({ ...form, name: event.target.value })
-              }
-            />
-          </label>
-          <label className="member-field">
-            Access
-            <select
-              value={form.access}
-              onChange={(event) =>
-                setForm({
-                  ...form,
-                  access: event.target.value as RepositoryMember["access"],
-                })
-              }
-            >
-              <option value="read">Read</option>
-              <option value="write">Write</option>
-              <option value="admin">Admin</option>
-            </select>
-          </label>
-          <div className="member-actions">
-            <Button type="button" onClick={() => setForm(undefined)}>
-              Cancel
-            </Button>
-            <Button variant="primary" type="submit">
-              {editing === undefined ? "Add member" : "Save member"}
-            </Button>
+        {draft.length === 0 ? (
+          <div className="member-list-shell member-empty">
+            <PersonIcon size={24} aria-hidden="true" />
+            <strong>No members yet</strong>
+            <p>Add someone to grant access to this repository.</p>
           </div>
-        </form>
+        ) : (
+          <div className="member-list-shell">
+            <div className="member-list-header" aria-hidden="true">
+              <span>Member</span>
+              <span>Access</span>
+              <span>Actions</span>
+            </div>
+            <ul className="member-list" aria-label="Repository members">
+              {draft.map((member) => {
+                const label = member.name || member.subject;
+                return (
+                  <li className="member-row" key={member.id}>
+                    <div className="member-identity">
+                      <span className="member-avatar" aria-hidden="true">
+                        <PersonIcon size={16} />
+                      </span>
+                      <div className="member-subject">
+                        <strong>{label}</strong>
+                        <span title="Identity provider subject">
+                          {member.subject}
+                        </span>
+                      </div>
+                    </div>
+                    <MemberAccess access={member.access} />
+                    <div className="member-actions">
+                      <IconButton
+                        icon={PencilIcon}
+                        size="small"
+                        variant="invisible"
+                        aria-label={`Edit ${label}`}
+                        title={`Edit ${label}`}
+                        onClick={() => startEdit(member)}
+                      />
+                      <IconButton
+                        icon={TrashIcon}
+                        size="small"
+                        variant="danger"
+                        aria-label={`Remove ${label}`}
+                        title={`Remove ${label}`}
+                        onClick={() => {
+                          setRemoving(member.id);
+                          setEditing(undefined);
+                          setForm(undefined);
+                        }}
+                      />
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+      </div>
+      {form && (
+        <Dialog
+          title={editing === undefined ? "Add member" : "Edit member"}
+          subtitle="Grant repository access to someone who can sign in with your identity provider."
+          width="large"
+          position={{ narrow: "bottom", regular: "center" }}
+          initialFocusRef={subjectInput}
+          onClose={closeForm}
+        >
+          <form className="member-form" onSubmit={saveMember}>
+            <div className="member-form-fields">
+              <label className="member-field">
+                <span>Subject</span>
+                <TextInput
+                  ref={subjectInput}
+                  block
+                  value={form.subject}
+                  required
+                  placeholder="e.g. provider|user-id"
+                  autoComplete="off"
+                  aria-describedby="member-subject-help"
+                  onChange={(event) =>
+                    setForm({ ...form, subject: event.target.value })
+                  }
+                />
+                <span id="member-subject-help" className="member-field-help">
+                  The stable identity-provider subject for this person.
+                </span>
+              </label>
+              <label className="member-field">
+                <span>Display name</span>
+                <TextInput
+                  block
+                  value={form.name}
+                  required
+                  placeholder="e.g. Ada Lovelace"
+                  autoComplete="name"
+                  aria-describedby="member-name-help"
+                  onChange={(event) =>
+                    setForm({ ...form, name: event.target.value })
+                  }
+                />
+                <span id="member-name-help" className="member-field-help">
+                  The name shown in this repository&apos;s member list.
+                </span>
+              </label>
+              <div className="member-field">
+                <span>Access</span>
+                <div className="member-access-control">
+                  <ActionMenu>
+                    <ActionMenu.Button
+                      className="member-access-trigger"
+                      aria-label="Access"
+                      aria-describedby="member-access-help"
+                    >
+                      {memberAccessDetails(form.access).label}
+                    </ActionMenu.Button>
+                    <ActionMenu.Overlay width="medium">
+                      <ActionList
+                        selectionVariant="single"
+                        aria-label="Access level"
+                      >
+                        {(["read", "write", "admin"] as const).map((access) => {
+                          const details = memberAccessDetails(access);
+                          const { Icon } = details;
+                          return (
+                            <ActionList.Item
+                              key={access}
+                              role="menuitemradio"
+                              selected={form.access === access}
+                              onSelect={() => setForm({ ...form, access })}
+                            >
+                              <ActionList.LeadingVisual>
+                                <Icon aria-hidden="true" />
+                              </ActionList.LeadingVisual>
+                              {details.label}
+                              <ActionList.Description variant="block">
+                                {details.description}
+                              </ActionList.Description>
+                            </ActionList.Item>
+                          );
+                        })}
+                      </ActionList>
+                    </ActionMenu.Overlay>
+                  </ActionMenu>
+                  <span id="member-access-help" className="member-field-help">
+                    <MemberAccess access={form.access} />
+                  </span>
+                </div>
+              </div>
+            </div>
+            <div className="member-form-actions">
+              <Button type="button" onClick={closeForm}>
+                Cancel
+              </Button>
+              <Button variant="primary" type="submit">
+                {editing === undefined ? "Add member" : "Save member"}
+              </Button>
+            </div>
+          </form>
+        </Dialog>
       )}
       {removing !== undefined && (
         <div
@@ -395,7 +538,7 @@ function MemberSettings({
           role="region"
           aria-label="Remove member"
         >
-          <AlertIcon size={20} />
+          <AlertIcon size={20} aria-hidden="true" />
           <div>
             <strong>Remove this member?</strong>
             <p>The change will take effect when you save membership.</p>
@@ -425,13 +568,18 @@ function MemberSettings({
           Every member needs a subject and display name before saving.
         </p>
       )}
-      <Button
-        variant="primary"
-        disabled={saving || missingRequiredField || redirecting}
-        onClick={() => void save()}
-      >
-        {saving ? "Saving…" : "Save members"}
-      </Button>
+      <div className="member-save-bar">
+        <span className="member-save-hint">
+          Changes apply to the repository when you save.
+        </span>
+        <Button
+          variant="primary"
+          disabled={saving || missingRequiredField || redirecting}
+          onClick={() => void save()}
+        >
+          {saving ? "Saving…" : "Save members"}
+        </Button>
+      </div>
     </section>
   );
 }
