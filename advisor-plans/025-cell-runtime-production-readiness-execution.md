@@ -81,6 +81,11 @@ while closing the remaining gaps:
   exist at `:122-191`, but local `emit` output is not protected evidence.
   The release workflow requires an exact protected matrix at
   `.github/workflows/http-server-release.yml:252-284`.
+- `crates/crab-cell-runtime/src/peer.rs` and `src/peer/dispatch.rs` execute
+  native primitives only through registered `CellCommand`/`CellQuery` codecs.
+  The private `docs/contracts/peer.proto` now reserves the former direct
+  SQL/KV/Queue/Workflow/Activity wire fields, so the checked-in protocol cannot
+  advertise a second path that the verifier rejects.
 
 ## Primitive contract matrix (source-backed)
 

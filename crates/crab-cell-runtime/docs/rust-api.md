@@ -282,6 +282,11 @@ sequenceDiagram
 
 The protocol permits at most two forwarding hops. Mutation retries happen only when transport proves the first attempt did not start. Ambiguous attempts use `Resolve`.
 
+Native SQL, KV, Blob, Queue, Cron, Workflow, Activity, and Effect operations
+cross this private boundary as registered `CellCommand`/`CellQuery` codecs.
+The wire contract deliberately has no primitive-specific peer operation path;
+those commands remain behind the application registry and its module checks.
+
 SQL text never crosses the migration peer boundary. The owner derives a trusted migration from its frozen registry.
 
 ## Add a native feature
