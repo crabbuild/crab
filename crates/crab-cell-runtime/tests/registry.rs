@@ -357,6 +357,44 @@ fn compiled_registry_is_canonical_and_executes_only_declared_bindings() {
 }
 
 #[test]
+fn command_execution_rejects_a_module_targeting_another_namespace_owner() {
+    let registry = build_registry(false);
+    let mut connection = crab_ltx::rusqlite::Connection::open_in_memory().unwrap();
+    connection.execute_batch(MIGRATION).unwrap();
+    let transaction = connection.transaction().unwrap();
+    let input = wire(&b"value".to_vec(), 16);
+    let target = CellTarget::new(
+        TenantId::from_bytes([1; 16]),
+        ApplicationId::from_bytes([2; 16]),
+        NamespaceId::from_bytes([2; 16]),
+        b"registry-test",
+    )
+    .unwrap();
+
+    assert!(matches!(
+        registry.execute_command(
+            &transaction,
+            CommandInvocation {
+                module: "first",
+                operation_id: 1,
+                codec_version: 1,
+                schema: 1,
+                target,
+                sequence: 1,
+                now_ms: 10,
+                input: &input,
+            },
+        ),
+        Err(Error::Registry("operation module does not own namespace"))
+    ));
+    let count: i64 = transaction
+        .query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    transaction.rollback().unwrap();
+}
+
+#[test]
 fn compiled_registry_rejects_descriptor_binding_drift() {
     let mut missing = RegistryBuilder::new(build());
     missing.register(MissingBinding).unwrap();

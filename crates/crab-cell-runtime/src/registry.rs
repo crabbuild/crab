@@ -1489,6 +1489,14 @@ impl Registry {
             .command_descriptors
             .get(&key)
             .ok_or(Error::Registry("command descriptor is unavailable"))?;
+        if self
+            .namespace_modules
+            .get(&invocation.target.namespace())
+            .map(|(module, _)| *module)
+            != Some(invocation.module)
+        {
+            return Err(Error::Registry("operation module does not own namespace"));
+        }
         validate_invocation(operation, invocation.schema, invocation.input.len())?;
         let handler = self
             .commands
