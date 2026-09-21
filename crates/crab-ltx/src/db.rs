@@ -1054,8 +1054,15 @@ mod tests {
                 *segment.info()
             );
             assert_eq!(
-                segment.captured_index().unwrap(),
-                crate::paged::encode_index_from_pages(&pages).unwrap()
+                segment.captured_index().unwrap().as_ref(),
+                crate::paged::encode_index_from_pages(&pages)
+                    .unwrap()
+                    .as_slice()
+            );
+            let cloned = segment.clone();
+            assert_eq!(
+                segment.captured_index().unwrap().as_ptr(),
+                cloned.captured_index().unwrap().as_ptr()
             );
         }
         db.close().unwrap();

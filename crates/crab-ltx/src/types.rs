@@ -104,7 +104,7 @@ pub struct LocalSegment {
     path: PathBuf,
     info: SegmentInfo,
     #[cfg(feature = "replica")]
-    captured_index: Option<std::sync::Arc<[u8]>>,
+    captured_index: Option<bytes::Bytes>,
 }
 
 impl std::fmt::Debug for LocalSegment {
@@ -143,8 +143,8 @@ impl LocalSegment {
     }
 
     #[cfg(feature = "replica")]
-    pub(crate) fn captured_index(&self) -> Option<&[u8]> {
-        self.captured_index.as_deref()
+    pub(crate) fn captured_index(&self) -> Option<bytes::Bytes> {
+        self.captured_index.clone()
     }
 }
 

@@ -711,8 +711,10 @@ impl CellReplica {
             let info = segment.info().clone();
             let source = PinnedCapture::open(&self.host, source, info.size_bytes).await?;
             let index = match segment.captured_index() {
-                Some(index) => index.to_vec(),
-                None => inspect_segment_source(self, Arc::clone(&source), &info).await?,
+                Some(index) => index,
+                None => {
+                    Bytes::from(inspect_segment_source(self, Arc::clone(&source), &info).await?)
+                }
             };
             Ok(AppendInput {
                 info,
@@ -838,7 +840,7 @@ impl CellReplica {
             {
                 return Err(CrabError::ChecksumMismatch);
             }
-            let index_bytes = crate::paged::encode_index_from_pages(&pages)?;
+            let index_bytes = Bytes::from(crate::paged::encode_index_from_pages(&pages)?);
             inputs.push(AppendInput {
                 info: row.info.clone(),
                 location: BodyLocation::Bundle {
@@ -1564,7 +1566,8 @@ impl CellReplica {
             )
             .await
         };
-        let index_upload = self.put_object(&descriptor.index_digest, CellObjectKind::Index, index);
+        let index_upload =
+            self.put_object_bytes(&descriptor.index_digest, CellObjectKind::Index, index);
         futures_util::future::try_join(body_upload, index_upload).await?;
         Ok(())
     }
@@ -1709,7 +1712,7 @@ fn compaction_scratch_bytes(graph: &LoadedGraph, range: std::ops::Range<usize>) 
 struct AppendInput {
     info: crate::SegmentInfo,
     location: BodyLocation,
-    index: Vec<u8>,
+    index: Bytes,
     body: AppendBody,
 }
 
@@ -1726,13 +1729,13 @@ enum BodyLocation {
 
 struct PreparedSegment {
     descriptor: SegmentDescriptor,
-    index: Vec<u8>,
+    index: Bytes,
     body: AppendBody,
 }
 
 struct DirectoryInput {
     descriptor: SegmentDescriptor,
-    index: Vec<u8>,
+    index: Bytes,
 }
 
 const MULTIPART_BYTES: usize = 8 << 20;

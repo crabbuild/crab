@@ -386,7 +386,9 @@ proves that the pinned bytes match the encoder's digest. Segments created with
 the public `LocalSegment::new` constructor carry no trusted encoder state and
 continue through full structural inspection before upload.
 The retained indexes share storage across `CaptureBatch` clones and are capped
-at 1 MiB per captured batch; larger batches use the inspection fallback.
+at 1 MiB per captured batch; descriptor construction, directory updates, and
+immutable upload reuse those same bytes without another full index copy. Larger
+batches use the inspection fallback.
 
 Immutable preparation overlaps independent uploads without weakening the root
 gate: each LTX body uploads alongside its index, changed directory nodes upload

@@ -1077,6 +1077,13 @@ wave needs one open interval plus those upload intervals: 400 ms, a 1.5x
 modeled host-job-latency improvement. This is a Crab root-preparation result;
 it does not change the direct local Celld comparison or its durability caveat.
 
+The same follow-up stores authenticated captured indexes as immutable shared
+byte buffers. `CaptureBatch` clones, prepared descriptors, directory changes,
+and index upload now share one allocation instead of copying each index twice
+before publication. The existing 1 MiB per-batch retention ceiling is
+unchanged, and an independent decoder comparison still verifies every retained
+byte before the zero-copy path is accepted.
+
 ## Maintenance notes
 
 - Reviewers should trace one corrupt input through plan construction, one

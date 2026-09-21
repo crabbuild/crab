@@ -123,7 +123,9 @@ LTX file again, while multipart upload still verifies every source byte against
 the captured digest. Caller-constructed local segments do not carry this
 private provenance and retain the full inspection path.
 Index retention is capped at 1 MiB per pending `CaptureBatch`; larger capture
-cohorts fall back to decoding. The executor retains only one unpublished batch.
+cohorts fall back to decoding. Descriptor construction, directory updates, and
+index upload share the retained bytes rather than copying them at each stage.
+The executor retains only one unpublished batch.
 
 Root preparation also overlaps independent content-addressed uploads. The LTX
 body and index, changed and initial directory nodes, and root metadata use
