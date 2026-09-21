@@ -8,8 +8,9 @@ use crate::{
 };
 
 use super::{
-    BlobCondition, BlobMetadata, BlobMutation, BlobMutationOutcome, BlobPage, BlobQuery,
-    BlobQueryResult, BlobRead, MAX_BLOB_PART_BYTES, MAX_BLOB_READ_BYTES, blob_mutate, blob_query,
+    BlobArtifactStore, BlobCondition, BlobMetadata, BlobMutation, BlobMutationOutcome, BlobPage,
+    BlobPart, BlobQuery, BlobQueryResult, BlobRead, MAX_BLOB_PART_BYTES, MAX_BLOB_READ_BYTES,
+    MAX_BLOB_READ_PARTS, blob_mutate, blob_query,
 };
 
 /// Compile-time namespace and operation identifiers for one Blob module.
@@ -74,6 +75,7 @@ impl<M: BlobModule> Query for BlobQueryCommand<M> {
 /// Authorized Blob capability with deterministic key sharding.
 pub struct BlobNamespace<M> {
     client: CellClient,
+    artifact_store: BlobArtifactStore,
     tenant: TenantId,
     application: ApplicationId,
     shards: u32,
@@ -84,6 +86,7 @@ impl<M> Clone for BlobNamespace<M> {
     fn clone(&self) -> Self {
         Self {
             client: self.client.clone(),
+            artifact_store: self.artifact_store.clone(),
             tenant: self.tenant,
             application: self.application,
             shards: self.shards,
@@ -100,8 +103,12 @@ impl<M: BlobModule> BlobNamespace<M> {
         application: ApplicationId,
     ) -> crate::Result<Self> {
         let shards = client.require_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Blob)?;
+        let artifact_store = client.blob_artifact_store().ok_or(crate::Error::Control(
+            "Blob artifact store is not configured",
+        ))?;
         Ok(Self {
             client,
+            artifact_store,
             tenant,
             application,
             shards,
@@ -119,6 +126,33 @@ impl<M: BlobModule> BlobNamespace<M> {
         let target = self
             .target(mutation_key(&mutation))
             .map_err(InvocationError::NotStarted)?;
+        let mutation = match mutation {
+            BlobMutation::PutPart {
+                key,
+                upload_id,
+                part_number,
+                payload,
+            } => {
+                if payload.len() > MAX_BLOB_PART_BYTES {
+                    return Err(InvocationError::NotStarted(crate::Error::Command(
+                        "blob part exceeds 256 KiB",
+                    )));
+                }
+                let digest = super::part_digest(&payload);
+                self.artifact_store
+                    .put_part(digest, &payload)
+                    .await
+                    .map_err(InvocationError::NotStarted)?;
+                BlobMutation::PutPartRef {
+                    key,
+                    upload_id,
+                    part_number,
+                    digest,
+                    size: payload.len() as u32,
+                }
+            }
+            mutation => mutation,
+        };
         self.client
             .command::<BlobCommand<M>>(&target, identity, mutation)
             .await
@@ -136,9 +170,16 @@ impl<M: BlobModule> BlobNamespace<M> {
             ))
         })?;
         let target = self.target(key).map_err(InvocationError::NotStarted)?;
-        self.client
+        let mut observed = self
+            .client
             .query::<BlobQueryCommand<M>>(&target, minimum, query)
-            .await
+            .await?;
+        if let BlobQueryResult::Read(Some(read)) = &mut observed.output {
+            hydrate_read(&self.artifact_store, read)
+                .await
+                .map_err(InvocationError::NotStarted)?;
+        }
+        Ok(observed)
     }
 
     /// Lists one shard explicitly; global listing is a bounded fan-out concern.
@@ -188,6 +229,7 @@ fn mutation_key(mutation: &BlobMutation) -> &[u8] {
     match mutation {
         BlobMutation::Begin { key, .. }
         | BlobMutation::PutPart { key, .. }
+        | BlobMutation::PutPartRef { key, .. }
         | BlobMutation::Complete { key, .. }
         | BlobMutation::Abort { key, .. }
         | BlobMutation::Delete { key, .. } => key,
@@ -220,20 +262,22 @@ impl WireValue for BlobMutation {
                 encoder.write_bytes(metadata)?;
                 encoder.write_i64(*expires_at_ms)
             }
-            Self::PutPart {
+            Self::PutPart { .. } => Err(CodecError::Invalid(
+                "blob part payload must be uploaded to object store",
+            )),
+            Self::PutPartRef {
                 key,
                 upload_id,
                 part_number,
-                payload,
+                digest,
+                size,
             } => {
-                if payload.len() > MAX_BLOB_PART_BYTES {
-                    return Err(CodecError::Invalid("blob part exceeds 256 KiB"));
-                }
                 encoder.write_u8(1)?;
                 encoder.write_bytes(key)?;
                 encoder.write_bytes(upload_id)?;
                 encoder.write_u32(*part_number)?;
-                encoder.write_bytes(payload)
+                encoder.write_bytes(digest)?;
+                encoder.write_u32(*size)
             }
             Self::Complete {
                 key,
@@ -272,15 +316,17 @@ impl WireValue for BlobMutation {
                 let key = decoder.read_bytes()?.to_vec();
                 let upload_id = read_fixed(decoder, "blob upload ID length")?;
                 let part_number = decoder.read_u32()?;
-                let payload = decoder.read_bytes()?.to_vec();
-                if payload.len() > MAX_BLOB_PART_BYTES {
+                let digest = read_fixed(decoder, "blob part digest length")?;
+                let size = decoder.read_u32()?;
+                if size as usize > MAX_BLOB_PART_BYTES {
                     return Err(CodecError::Invalid("blob part exceeds 256 KiB"));
                 }
-                Ok(Self::PutPart {
+                Ok(Self::PutPartRef {
                     key,
                     upload_id,
                     part_number,
-                    payload,
+                    digest,
+                    size,
                 })
             }
             2 => Ok(Self::Complete {
@@ -471,11 +517,43 @@ impl WireValue for BlobRead {
         }
         self.metadata.encode(encoder)?;
         encoder.write_u64(self.offset)?;
+        encoder.write_u64(self.end)?;
+        if self.parts.len() > MAX_BLOB_READ_PARTS {
+            return Err(CodecError::Invalid("blob range references too many parts"));
+        }
+        encoder.write_count(self.parts.len())?;
+        for part in &self.parts {
+            encoder.write_bytes(&part.digest)?;
+            encoder.write_u64(part.offset)?;
+            encoder.write_u32(part.size)?;
+        }
         encoder.write_bytes(&self.bytes)
     }
     fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
         let metadata = BlobMetadata::decode(decoder)?;
         let offset = decoder.read_u64()?;
+        let end = decoder.read_u64()?;
+        if end < offset {
+            return Err(CodecError::Invalid("blob range end precedes offset"));
+        }
+        let count = decoder.read_count()?;
+        if count > MAX_BLOB_READ_PARTS {
+            return Err(CodecError::Invalid("blob range references too many parts"));
+        }
+        let mut parts = Vec::with_capacity(count);
+        for _ in 0..count {
+            let digest = read_fixed(decoder, "blob part digest length")?;
+            let part_offset = decoder.read_u64()?;
+            let size = decoder.read_u32()?;
+            if size as usize > MAX_BLOB_PART_BYTES {
+                return Err(CodecError::Invalid("blob part exceeds 256 KiB"));
+            }
+            parts.push(BlobPart {
+                digest,
+                offset: part_offset,
+                size,
+            });
+        }
         let bytes = decoder.read_bytes()?.to_vec();
         if bytes.len() > MAX_BLOB_READ_BYTES as usize {
             return Err(CodecError::Invalid("blob read exceeds 512 KiB"));
@@ -484,6 +562,8 @@ impl WireValue for BlobRead {
             metadata,
             offset,
             bytes,
+            parts,
+            end,
         })
     }
 }
@@ -525,6 +605,30 @@ fn read_fixed<const N: usize>(
         .map_err(|_| CodecError::Invalid(message))
 }
 
+async fn hydrate_read(store: &BlobArtifactStore, read: &mut BlobRead) -> crate::Result<()> {
+    if read.parts.is_empty() || read.bytes.len() > MAX_BLOB_READ_BYTES as usize {
+        return Ok(());
+    }
+    let end = read.end.min(read.metadata.size);
+    let mut bytes = Vec::with_capacity((end.saturating_sub(read.offset)) as usize);
+    for part in &read.parts {
+        let payload = store.read_part(part.digest, part.size).await?;
+        let part_end = part.offset.saturating_add(u64::from(part.size));
+        let start = read.offset.saturating_sub(part.offset) as usize;
+        let take_end = end.saturating_sub(part.offset).min(u64::from(part.size)) as usize;
+        if part_end <= read.offset || part.offset >= end || start > take_end {
+            return Err(crate::Error::Command("blob range is incomplete"));
+        }
+        bytes.extend_from_slice(&payload[start..take_end]);
+    }
+    if bytes.len() != end.saturating_sub(read.offset) as usize {
+        return Err(crate::Error::Command("blob range is incomplete"));
+    }
+    read.bytes = bytes;
+    read.parts.clear();
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,11 +652,12 @@ mod tests {
             metadata: b"owner=a".to_vec(),
             expires_at_ms: 100_000,
         });
-        roundtrip(BlobMutation::PutPart {
+        roundtrip(BlobMutation::PutPartRef {
             key: b"logs/a".to_vec(),
             upload_id: [1; 16],
-            part_number: super::super::MAX_BLOB_PARTS,
-            payload: b"part".to_vec(),
+            part_number: 1,
+            digest: [2; 32],
+            size: 4,
         });
         roundtrip(BlobQuery::Read {
             key: b"logs/a".to_vec(),

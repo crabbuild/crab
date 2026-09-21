@@ -692,9 +692,10 @@ external destination must deduplicate by the job or order identity.
 
 ## Store invoices through Blob
 
-Invoice bytes and their manifest live in one Blob shard transaction domain.
-The worker uses multipart publication even though this example produces a small
-document, keeping the same bounded path for larger invoices.
+Invoice metadata and its manifest live in one Blob shard transaction domain;
+invoice bytes live in the configured object store. The worker uses multipart
+publication even though this example produces a small document, keeping the
+same bounded path for larger invoices.
 
 ```rust,ignore
 pub struct InvoiceDocuments;
@@ -1017,7 +1018,7 @@ fencing, and incompatible releases fail closed.
 | --- | --- | --- |
 | Custom SQL | Order aggregate, inventory invariant, customer read model | Serializable state within one Cell |
 | KV | Shopping carts | Atomic checks and mutations within one scope-derived shard |
-| Blob | Invoice documents | Multipart data and manifest in one transactional shard |
+| Blob | Invoice documents | Object-store parts and manifest references in one transactional shard |
 | Queue | Fulfillment jobs | Published leases and at-least-once worker delivery |
 | Cron | Subscription renewals | Failover-safe occurrence effect and schedule advance |
 | Workflow | Checkout | Durable deterministic saga, timers, effects, and activities |

@@ -69,8 +69,8 @@ rejects('', `INSERT INTO sys_effects VALUES(zeroblob(32), zeroblob(32), X'', 1, 
 sqlite(workflow, run + `UPDATE workflow_runs SET status=4; SELECT status FROM workflow_runs;`, '4');
 
 const upload = `INSERT INTO blob_uploads VALUES(zeroblob(16), X'01', zeroblob(32), 0, NULL, NULL, X'', 0, 60000, 0, NULL, 0, 0);`;
-rejects(blob, upload + `INSERT INTO blob_parts VALUES(zeroblob(16), 1, zeroblob(32), zeroblob(262145), NULL);`, /CHECK constraint/);
-rejects(blob, `INSERT INTO blob_parts VALUES(zeroblob(16), 1, zeroblob(32), X'', NULL);`, /FOREIGN KEY constraint/);
+rejects(blob, upload + `INSERT INTO blob_parts VALUES(zeroblob(16), 1, zeroblob(32), 262145, NULL);`, /CHECK constraint/);
+rejects(blob, `INSERT INTO blob_parts VALUES(zeroblob(16), 1, zeroblob(32), 0, NULL);`, /FOREIGN KEY constraint/);
 rejects(cron, `INSERT INTO cron_schedules VALUES(zeroblob(16), 0, X'', X'', 999, 0, 0, 1, 1, 0);`, /CHECK constraint/);
 
 // Only message contracts are intended: product HTTP APIs remain in Crab.

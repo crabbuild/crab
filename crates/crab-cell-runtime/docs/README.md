@@ -131,7 +131,7 @@ The primitives share the same actor, transaction, publication, recovery, and adm
 | --- | --- | --- | --- |
 | SQL | Repository-local relational state | Explicit repository UUID | Serializable single-Cell command |
 | KV | Scoped metadata and atomic checks | Scope hash | Atomic batch within one shard |
-| Blob | Multipart object data and range reads | Object-key hash | Atomic manifest and parts within one shard |
+| Blob | Object-store parts and range reads | Object-key hash | SQLite manifest and content-addressed part references within one shard |
 | Queue | Deferred work | Producer hash for send, explicit shard for claim | At least once |
 | Cron | Recurring typed triggers | Schedule-ID hash | Atomic occurrence effect and schedule advance |
 | Workflow | Durable state machines, timers, activities | Workflow ID hash | Deterministic transition plus retryable activity |

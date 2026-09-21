@@ -169,7 +169,7 @@ async fn typed_blob_and_cron_recover_after_owner_loss() {
     let application = ApplicationId::from_bytes([21; 16]);
     let store = Store::new(Arc::new(InMemory::new()));
     let layout = CellStorageLayout::new(
-        store,
+        store.clone(),
         Path::from("blob-cron-runtime"),
         *application.as_bytes(),
     );
@@ -229,7 +229,8 @@ async fn typed_blob_and_cron_recover_after_owner_loss() {
         .await
         .unwrap();
     let blobs = BlobNamespace::<TestBlob>::new(
-        CellClient::local(registry.clone(), blob_handle.clone()),
+        CellClient::local(registry.clone(), blob_handle.clone())
+            .with_blob_artifact_store(crab_cell_runtime::BlobArtifactStore::new(store.clone())),
         tenant,
         application,
     )
@@ -336,7 +337,8 @@ async fn typed_blob_and_cron_recover_after_owner_loss() {
         .await
         .unwrap();
     let restored_blobs = BlobNamespace::<TestBlob>::new(
-        CellClient::local(registry.clone(), blob_restored.clone()),
+        CellClient::local(registry.clone(), blob_restored.clone())
+            .with_blob_artifact_store(crab_cell_runtime::BlobArtifactStore::new(store)),
         tenant,
         application,
     )

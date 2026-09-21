@@ -375,6 +375,7 @@ pub(super) trait CellTransport: Send + Sync + 'static {
 pub struct CellClient {
     registry: Arc<Registry>,
     transport: Arc<dyn CellTransport>,
+    blob_artifact_store: Option<crate::BlobArtifactStore>,
 }
 
 impl CellClient {
@@ -383,7 +384,20 @@ impl CellClient {
         Self {
             registry,
             transport,
+            blob_artifact_store: None,
         }
+    }
+
+    /// Returns a client clone wired to the configured object-store Blob data.
+    #[must_use]
+    pub fn with_blob_artifact_store(&self, store: crate::BlobArtifactStore) -> Self {
+        let mut client = self.clone();
+        client.blob_artifact_store = Some(store);
+        client
+    }
+
+    pub(crate) fn blob_artifact_store(&self) -> Option<crate::BlobArtifactStore> {
+        self.blob_artifact_store.clone()
     }
 
     /// Builds the canonical single-owner transport used by embedded routes.

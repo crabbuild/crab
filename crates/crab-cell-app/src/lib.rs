@@ -7,12 +7,12 @@
 use std::{marker::PhantomData, sync::Arc};
 
 use crab_cell_runtime::{
-    ApplicationId, BlobModule, BlobNamespace, BuildDescriptor, CatalogRole, CellClient, CellModule,
-    CellTarget, Command, Committed, CronModule, CronNamespace, Digest, EffectModule, EffectSource,
-    Error, InvocationError, KvModule, KvNamespace, NamespaceId, Observed, Query, QueueModule,
-    QueueNamespace, Registry, RegistryBuilder, Result, SqlCell, SqlModule, TenantId,
-    WorkflowActivities, WorkflowActivityModule, WorkflowModule, WorkflowNamespace,
-    partition_for_shard,
+    ApplicationId, BlobArtifactStore, BlobModule, BlobNamespace, BuildDescriptor, CatalogRole,
+    CellClient, CellModule, CellTarget, Command, Committed, CronModule, CronNamespace, Digest,
+    EffectModule, EffectSource, Error, InvocationError, KvModule, KvNamespace, NamespaceId,
+    Observed, Query, QueueModule, QueueNamespace, Registry, RegistryBuilder, Result, SqlCell,
+    SqlModule, TenantId, WorkflowActivities, WorkflowActivityModule, WorkflowModule,
+    WorkflowNamespace, partition_for_shard,
 };
 
 const DESCRIPTOR_MAGIC: &[u8] = b"crab.application.v1\0";
@@ -334,6 +334,14 @@ impl<A> ApplicationHandle<A> {
             compiled,
             marker: PhantomData,
         }
+    }
+
+    /// Returns a handle whose Blob capability uses the configured object store.
+    #[must_use]
+    pub fn with_blob_artifact_store(&self, store: BlobArtifactStore) -> Self {
+        let mut handle = self.clone();
+        handle.client = handle.client.with_blob_artifact_store(store);
+        handle
     }
 
     /// Returns the immutable compiled artifact.

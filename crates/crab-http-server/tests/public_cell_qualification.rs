@@ -8,15 +8,16 @@ use std::{
 use crab_cell_app::ApplicationHandle;
 use crab_cell_host::{CellNode, CellNodeBuilder};
 use crab_cell_runtime::{
-    ActivitySupervisor, ApplicationId, BlobCondition, BlobMutation, BlobQuery, CatalogRole,
-    CellClient, CellStorageLayout, CellTarget, CronMutation, Digest, EffectClaimRequest, Error,
-    KvAtomicRequest, KvMutation, MutationIdentity, NodeLeaseGuard, QUALIFICATION_MATRIX_ROWS,
-    QualificationExecution, QualificationMatrixEntry, QualificationMatrixManifest,
-    QualificationOperation, QualificationOperationExecutor, QualificationProfile,
-    QualificationReceipt, QualificationRunner, QualificationWorkload, QueueClaimRequest,
-    QueueSendRequest, RequestId, Result, SqlBatch, SqlStatement, SqlValue, SqlWorkerPool, TenantId,
-    WorkflowOutcome, WorkflowSignal, install_blob_schema, install_cron_schema, install_kv_schema,
-    install_queue_schema, install_workflow_schema, partition_for_shard,
+    ActivitySupervisor, ApplicationId, BlobArtifactStore, BlobCondition, BlobMutation, BlobQuery,
+    CatalogRole, CellClient, CellStorageLayout, CellTarget, CronMutation, Digest,
+    EffectClaimRequest, Error, KvAtomicRequest, KvMutation, MutationIdentity, NodeLeaseGuard,
+    QUALIFICATION_MATRIX_ROWS, QualificationExecution, QualificationMatrixEntry,
+    QualificationMatrixManifest, QualificationOperation, QualificationOperationExecutor,
+    QualificationProfile, QualificationReceipt, QualificationRunner, QualificationWorkload,
+    QueueClaimRequest, QueueSendRequest, RequestId, Result, SqlBatch, SqlStatement, SqlValue,
+    SqlWorkerPool, TenantId, WorkflowOutcome, WorkflowSignal, install_blob_schema,
+    install_cron_schema, install_kv_schema, install_queue_schema, install_workflow_schema,
+    partition_for_shard,
 };
 use crab_storage::{ObjectStoreCredentials, Store, build_explicit_store};
 use ed25519_dalek::SigningKey;
@@ -440,7 +441,7 @@ async fn public_host_fixture_with_store(
     let application = Arc::new(fixture::compiled());
     let tenant = TenantId::from_bytes([71; 16]);
     let application_id = ApplicationId::from_bytes([72; 16]);
-    let layout = CellStorageLayout::new(store, root, *application_id.as_bytes());
+    let layout = CellStorageLayout::new(store.clone(), root, *application_id.as_bytes());
     let directory = tempfile::tempdir().expect("qualification directory");
     let session = crab_cell_runtime::SessionId::from_bytes([24; 16]);
     let node = CellNodeBuilder::new(Arc::clone(&application))
@@ -568,8 +569,9 @@ async fn public_host_fixture_with_store(
         .expect("Workflow Cell"),
     ];
     let client = CellClient::local_many(registry, handles).expect("qualification client");
-    let typed =
-        node.application_handle::<fixture::ReferenceApplication>(client, tenant, application_id);
+    let typed = node
+        .application_handle::<fixture::ReferenceApplication>(client, tenant, application_id)
+        .with_blob_artifact_store(BlobArtifactStore::new(store));
     (node, typed, tenant, application_id, directory)
 }
 

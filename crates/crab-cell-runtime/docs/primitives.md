@@ -174,7 +174,12 @@ Queue controls are shard-scoped and use the same request ledger as sends and lea
 
 ## Use Blob for transactional object data
 
-`BlobNamespace<M>` hashes the object key to a stable shard. Multipart uploads, parts, the published manifest, request outcomes, and LTX state commit in one SQLite transaction domain. A completed manifest never points at missing part data after restore or failover.
+`BlobNamespace<M>` hashes the object key to a stable shard. Multipart upload
+metadata, part digests, the published manifest, request outcomes, and LTX state
+commit in one SQLite transaction domain; part bytes are immutable,
+content-addressed objects in the configured Crab object store. A completed
+manifest never points at an unrecorded part reference, and range reads verify
+each object-store part before returning bytes after restore or failover.
 
 Blob supports:
 
@@ -196,7 +201,12 @@ Blob supports:
 | Upload lifetime | 1 minute to 7 days from mutation issuance; acceptance rejects an already expired upload |
 | List | 128 objects from one explicit shard |
 
-Blob bodies intentionally remain in the Cell database. This makes publication, backup, exact-root recovery, retention, and conditional replacement one failure domain. Moving bodies to a separate object-store path would require a staged-body publication protocol and independent reachability GC before it could preserve the same contract.
+Blob bodies do not live in the Cell database. `BlobNamespace` uploads each
+bounded part to the configured object store before committing its digest and
+size in SQLite. The manifest is the durable publication boundary; unreferenced
+content-addressed parts are safe to retry. The configured object-store
+lifecycle policy must reclaim abandoned parts; a reachability collector is
+still required before production rollout.
 
 ## Use Cron for failover-safe recurring triggers
 
