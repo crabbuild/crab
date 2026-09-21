@@ -118,8 +118,9 @@ requires the pinned signer argument and applies the protected freshness and
 clock-skew gate. The profile-less form below is retained only for generic
 historical receipt inspection and is not a release decision.
 
-Each profile is verified as one bounded matrix instead of a caller-owned row
-loop. `QualificationMatrixManifest` requires exactly one entry for each of
+Each profile is verified as one bounded schema-2 matrix instead of a
+caller-owned row loop. `QualificationMatrixManifest` requires exactly one entry
+for each of
 these rows: `protocol`, `storage`, `publication`, `warm-path`, `churn`,
 `fleet`, `failover`, `primitives`, `accounting`, and `compatibility`. Each entry
 binds a relative receipt path and one or more relative raw-artifact paths. The

@@ -27,7 +27,7 @@ pub const QUALIFICATION_PROTECTED_EVIDENCE_MAX_CLOCK_SKEW_MS: u64 = 5 * 60 * 1_0
 /// Current wire schema for qualification evidence.
 pub const QUALIFICATION_SCHEMA_VERSION: u32 = 5;
 /// Schema for a manifest that binds one receipt to every qualification row.
-pub const QUALIFICATION_MATRIX_SCHEMA_VERSION: u32 = 1;
+pub const QUALIFICATION_MATRIX_SCHEMA_VERSION: u32 = 2;
 /// Schema for a versioned workload threshold profile.
 pub const QUALIFICATION_PROFILE_SCHEMA_VERSION: u32 = 2;
 /// Required workload rows for a complete release qualification matrix.
@@ -1979,6 +1979,14 @@ impl QualificationMatrixManifest {
             .collect::<BTreeSet<_>>();
         if actual.len() != self.entries.len() || actual != expected {
             return Err(Error::Control("qualification matrix rows"));
+        }
+        if self
+            .entries
+            .iter()
+            .zip(QUALIFICATION_MATRIX_ROWS.iter().copied())
+            .any(|(entry, expected)| entry.workload != expected)
+        {
+            return Err(Error::Control("qualification matrix row order"));
         }
         for entry in &self.entries {
             QualificationMatrixEntry::new(
@@ -4318,6 +4326,10 @@ mod tests {
         let mut incomplete = manifest.entries().to_vec();
         incomplete.pop();
         assert!(QualificationMatrixManifest::new(incomplete).is_err());
+
+        let mut reordered = manifest.entries().to_vec();
+        reordered.swap(0, 1);
+        assert!(QualificationMatrixManifest::new(reordered).is_err());
 
         let mut duplicate = manifest.entries().to_vec();
         duplicate[0] = QualificationMatrixEntry::new(
