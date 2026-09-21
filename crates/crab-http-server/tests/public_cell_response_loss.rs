@@ -16,13 +16,14 @@ mod fixture;
 mod qualification;
 #[path = "support/qualification_fixture.rs"]
 mod qualification_fixture;
+#[path = "support/qualification_local_fixture.rs"]
+mod qualification_local_fixture;
 #[path = "support/qualification_peer.rs"]
 mod qualification_peer;
 
 use qualification::{assert_zero_reservations, fixed_id, identity, rustfs_public_store};
-use qualification_fixture::{
-    PublicHostFixture, public_host_fixture, public_host_fixture_with_store,
-};
+use qualification_fixture::{PublicHostFixture, public_host_fixture_with_store};
+use qualification_local_fixture::public_host_fixture;
 use qualification_peer::peer_client_with_one_lost_mutation_response;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -111,6 +111,17 @@ not a protected owner-kill or a scheduled qualification case. Every primitive
 still needs a dedicated fault boundary, independent process observer, and raw
 artifact before its owner-loss/recovery case bit can be claimed.
 
+`public_cell_process_fault.rs` now kills a separate owner process on isolated
+RustFS after acknowledged SQL and KV writes, then starts a successor process
+with an empty local directory. The successor checks exact SQL bytes, KV bytes
+and version, each acknowledged commit sequence, exact restored roots, higher
+owner epochs, and zero reservations after shutdown. A second boundary kills
+the owner before either write; the successor checks both values are absent.
+Both concurrent RustFS cases passed on 2026-09-21. The test uses a
+test-controlled session fence and covers only SQL and KV. It is not a
+scheduled qualification case, protected three-process provider run, or
+evidence for the other six primitives; it does not set matrix case bits.
+
 Implement one fault-capable executor through `CellNode` and typed
 `ApplicationHandle` capabilities. Each operation writes a unique, bounded
 marker; an independent reader or successor checks the exact value, version,
@@ -369,7 +380,7 @@ Run each Cargo command with a checkout-specific target directory under
 | --- | --- | --- |
 | Application contract | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-app RUSTC_WRAPPER= cargo test -p crab-cell-app --locked` | all unit and reference-application tests pass |
 | Host ownership | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-host RUSTC_WRAPPER= cargo test -p crab-cell-host --locked` | lifecycle/facility tests pass with no leaked tasks |
-| Public typed primitive host | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-public-host RUSTC_WRAPPER= cargo test -p crab-http-server --test public_cell_host_application --test public_cell_qualification --test public_cell_response_loss --test public_cell_takeover --locked` | typed smoke, response-loss reconciliation, and fresh-successor takeover tests pass |
+| Public typed primitive host | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-public-host RUSTC_WRAPPER= cargo test -p crab-http-server --test public_cell_host_application --test public_cell_qualification --test public_cell_response_loss --test public_cell_takeover --test public_cell_process_fault --locked` | typed smoke, response-loss reconciliation, fresh-successor takeover, and process harness tests pass; ignored RustFS cases require the isolated provider job |
 | Runtime regression | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-runtime RUSTC_WRAPPER= cargo test -p crab-cell-runtime --locked` | all runtime tests pass; ignored provider tests are reported, not fabricated |
 | Server composition | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-server RUSTC_WRAPPER= cargo test -p crab-http-server --lib --locked` | server library tests pass |
 | Strict lint | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-quality RUSTC_WRAPPER= cargo clippy -p crab-cell-app -p crab-cell-host -p crab-cell-runtime --all-targets --locked -- -D warnings` | exit 0 |

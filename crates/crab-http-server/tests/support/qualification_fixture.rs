@@ -8,7 +8,7 @@ use crab_cell_runtime::{
     install_cron_schema, install_kv_schema, install_queue_schema, install_workflow_schema,
 };
 use crab_storage::Store;
-use object_store::{memory::InMemory, path::Path};
+use object_store::path::Path;
 use tokio_util::sync::CancellationToken;
 
 use crate::fixture;
@@ -23,14 +23,6 @@ pub type PublicHostFixture = (
     Vec<CellHandle>,
     Store,
 );
-
-pub async fn public_host_fixture() -> PublicHostFixture {
-    public_host_fixture_with_store(
-        Store::new(Arc::new(InMemory::new())),
-        Path::from("public-host-qualification"),
-    )
-    .await
-}
 
 pub async fn public_host_fixture_with_store(store: Store, root: Path) -> PublicHostFixture {
     let application = Arc::new(fixture::compiled());
