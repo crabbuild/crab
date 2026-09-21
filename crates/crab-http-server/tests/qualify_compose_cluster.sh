@@ -159,6 +159,29 @@ assert_json_eventually() {
   return 1
 }
 
+post_json_eventually() {
+  local origin="$1"
+  local path="$2"
+  local payload="$3"
+  local filter="$4"
+  local message="$5"
+  local candidate
+  for _ in $(seq 1 45); do
+    candidate="$(curl --fail-with-body --silent --show-error --max-time 15 \
+      --request POST \
+      --header 'content-type: application/json' \
+      --data "$payload" \
+      "${origin}/${path}" 2>/dev/null || true)"
+    if jq --exit-status "$filter" <<<"$candidate" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "$message" >&2
+  return 1
+}
+
 metric_value() {
   local metrics="$1"
   local name="$2"
@@ -481,15 +504,12 @@ deny_cell_objects='{"Version":"2012-10-17","Statement":[{"Sid":"DenyCellImmutabl
 "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
   --endpoint-url http://rustfs:9000 s3api put-bucket-policy \
   --bucket crab-http-server --policy "$deny_cell_objects" >/dev/null
-fleet_only_response="$(curl --fail-with-body --silent --show-error \
-  --max-time 15 \
-  --request POST \
-  --header 'content-type: application/json' \
-  --data '{"request_id":"00000000-0000-4000-8000-000000000102","name":"follower-only","color":"c2410c","description":"Acknowledged by follower fsync"}' \
-  "${node_b_origin}/${repository_path}/labels")"
-jq --exit-status \
+fleet_only_response="$(post_json_eventually \
+  "$node_b_origin" \
+  "${repository_path}/labels" \
+  '{"request_id":"00000000-0000-4000-8000-000000000102","name":"follower-only","color":"c2410c","description":"Acknowledged by follower fsync"}' \
   '.id == 1 and .name == "follower-only"' \
-  <<<"$fleet_only_response" >/dev/null
+  'Node B did not accept the follower-only label.')"
 control_fleet_only="$("${compose[@]}" exec -T server-b crab-http-server \
   --config /etc/crab/server.toml cells status --owner demo --name hello)"
 jq --exit-status --argjson sequence_before "$sequence_before" \
@@ -647,13 +667,12 @@ for _ in $(seq 1 6); do
     "Cluster proxy did not expose the recovered label."
 done
 
-continued="$(curl --fail-with-body --silent --show-error \
-  --request POST \
-  --header 'content-type: application/json' \
-  --data '{"request_id":"00000000-0000-4000-8000-000000000103","title":"Recovered owner","body":"Published by node C"}' \
-  "${node_c_origin}/${repository_path}/issues")"
-jq --exit-status '.number == 2 and .title == "Recovered owner"' \
-  <<<"$continued" >/dev/null
+continued="$(post_json_eventually \
+  "$node_c_origin" \
+  "${repository_path}/issues" \
+  '{"request_id":"00000000-0000-4000-8000-000000000103","title":"Recovered owner","body":"Published by node C"}' \
+  '.number == 2 and .title == "Recovered owner"' \
+  'Node C did not accept the recovered-owner issue.')"
 
 control_continued="$("${compose[@]}" exec -T server-c crab-http-server \
   --config /etc/crab/server.toml cells status --owner demo --name hello)"
@@ -792,13 +811,12 @@ jq --exit-status \
 freeze_service server
 freeze_service server-d
 sleep 12
-after_follower_loss="$(curl --fail-with-body --silent --show-error \
-  --request POST \
-  --header 'content-type: application/json' \
-  --data '{"request_id":"00000000-0000-4000-8000-000000000104","title":"Follower lost","body":"Published through object coverage before re-enrollment"}' \
-  "${node_c_origin}/${repository_path}/issues")"
-jq --exit-status '.number == 3 and .title == "Follower lost"' \
-  <<<"$after_follower_loss" >/dev/null
+after_follower_loss="$(post_json_eventually \
+  "$node_c_origin" \
+  "${repository_path}/issues" \
+  '{"request_id":"00000000-0000-4000-8000-000000000104","title":"Follower lost","body":"Published through object coverage before re-enrollment"}' \
+  '.number == 3 and .title == "Follower lost"' \
+  'Node C did not accept the object-covered issue after follower loss.')"
 
 reenrolled=false
 for _ in $(seq 1 75); do
@@ -825,15 +843,12 @@ fi
 "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
   --endpoint-url http://rustfs:9000 s3api put-bucket-policy \
   --bucket crab-http-server --policy "$deny_cell_objects" >/dev/null
-replacement_fleet_response="$(curl --fail-with-body --silent --show-error \
-  --max-time 15 \
-  --request POST \
-  --header 'content-type: application/json' \
-  --data '{"request_id":"00000000-0000-4000-8000-000000000105","name":"replacement-follower-only","color":"0369a1","description":"Acknowledged by the replacement follower"}' \
-  "${node_c_origin}/${repository_path}/labels")"
-jq --exit-status \
+replacement_fleet_response="$(post_json_eventually \
+  "$node_c_origin" \
+  "${repository_path}/labels" \
+  '{"request_id":"00000000-0000-4000-8000-000000000105","name":"replacement-follower-only","color":"0369a1","description":"Acknowledged by the replacement follower"}' \
   '.id == 2 and .name == "replacement-follower-only"' \
-  <<<"$replacement_fleet_response" >/dev/null
+  'Node C did not accept the replacement-follower label.')"
 control_before_second_loss="$("${compose[@]}" exec -T server-c crab-http-server \
   --config /etc/crab/server.toml cells status --owner demo --name hello)"
 root_before_second_loss="$(jq --compact-output '.root' <<<"$control_before_second_loss")"
@@ -1013,15 +1028,12 @@ jq --exit-status \
    (.advertisement.log.member_nodes | length > 0)' \
   <<<"$node_b_before_fallback" >/dev/null
 
-fallback_response="$(curl --fail-with-body --silent --show-error \
-  --max-time 15 \
-  --request POST \
-  --header 'content-type: application/json' \
-  --data '{"request_id":"00000000-0000-4000-8000-000000000106","name":"fallback-covered","color":"7c3aed","description":"Object-covered fallback recovery"}' \
-  "${node_b_origin}/${repository_path}/labels")"
-jq --exit-status \
+fallback_response="$(post_json_eventually \
+  "$node_b_origin" \
+  "${repository_path}/labels" \
+  '{"request_id":"00000000-0000-4000-8000-000000000106","name":"fallback-covered","color":"7c3aed","description":"Object-covered fallback recovery"}' \
   '.id == 3 and .name == "fallback-covered"' \
-  <<<"$fallback_response" >/dev/null
+  'Node B did not accept the fallback-covered label.')"
 control_before_fallback="$(service_cli server-b cells status --owner demo --name hello)"
 root_before_fallback="$(jq --compact-output '.root' <<<"$control_before_fallback")"
 fallback_object_covered=false
