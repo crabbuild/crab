@@ -183,9 +183,10 @@ CRAB_HTTP_SERVER_IMAGE=ghcr.io/crabbuild/crab-http-server@sha256:qualified_diges
 ### Qualify three local Cell processes
 
 The cluster overlay runs four independent server containers and one real
-RustFS origin. Each server has its own Cell tmpfs. They share a Docker network
-namespace so every unauthenticated listener can remain on loopback; this keeps
-the same local-trust boundary as the one-node profile.
+RustFS origin. Each server has its own Cell tmpfs. They share a dedicated,
+long-lived Docker network-namespace sidecar so every unauthenticated listener
+can remain on loopback without coupling peer restarts to node A; this keeps the
+same local-trust boundary as the one-node profile.
 
 ```mermaid
 flowchart LR
@@ -245,10 +246,11 @@ volumes. Set
 `CRAB_HTTP_SERVER_IMAGE`.
 
 This is real process-loss, source-loss, peer-routing, follower replacement,
-follower-affine recovery, and bounded non-member fallback evidence. Nodes A and
-D are paused when the replacement log is formed because the Compose fixture
-shares its network namespace; B and C are independently killed and lose their
-tmpfs. The gate is not a production multi-Pod partition test.
+follower-affine recovery, and bounded non-member fallback evidence. The
+qualification fixture uses a dedicated, long-lived network-namespace sidecar,
+so node A or D can self-fence without preventing another node from restarting;
+B and C are independently killed and lose their tmpfs. The gate is not a
+production multi-Pod partition test.
 Lost control-CAS responses are covered by a deterministic scheduler regression.
 
 ## Deploy for a team
