@@ -90,11 +90,11 @@ conditions so an executor can use it without relying on conversation history.
 | [015](015-cell-runtime-qualification-receipts.md) | Simulator, provider, fault, scale, latency, and primitive release evidence | P0 | XL | 006-014 | IN PROGRESS |
 | [016](016-standalone-replication-compatibility-decision.md) | Complete tagged-contract audit and named support decision | P1 | M | 015 | DONE — HARD REMOVE |
 | [017](017-execute-standalone-replication-decision.md) | Retain, deprecate, or remove exactly as approved | P1 | L-XL | 016 | DONE — HARD REMOVE |
-| [018](018-failover-phase-evidence.md) | Phase-level failover metrics, receipt baseline, and accurate operator docs | P0 | M | 015 infrastructure | PARTIAL — protected run pending |
-| [019](019-indexed-follower-tail-reads.md) | Crash-rebuildable follower index and seek-only tail pages | P0 | L | 012, 018 | PROPOSED |
-| [020](020-tail-scoped-streaming-recovery.md) | Tail-derived affected-shard/Cell validation and bounded recovery streaming | P0 | XL | 010, 018, 019 | PROPOSED |
-| [021](021-follower-affine-recovery-and-takeover.md) | Deterministic follower-first recovery and takeover with bounded fallback | P0 | XL | 013, 018, 020 | PROPOSED |
-| [022](022-local-follower-recovery-fast-path.md) | Same-host follower transport and digest-verified recovery artifact reuse | P1 | L | 012, 019-021 | PROPOSED |
+| [018](018-failover-phase-evidence.md) | Phase-level failover metrics, receipt baseline, and accurate operator docs | P0 | M | 015 infrastructure | PARTIAL — work counters/protected run pending |
+| [019](019-indexed-follower-tail-reads.md) | Crash-rebuildable follower index and seek-only tail pages | P0 | L | 012, 018 | IMPLEMENTED — protected scale evidence pending |
+| [020](020-tail-scoped-streaming-recovery.md) | Tail-derived affected-shard/Cell validation and bounded recovery streaming | P0 | XL | 010, 018, 019 | IMPLEMENTED — protected scale evidence pending |
+| [021](021-follower-affine-recovery-and-takeover.md) | Deterministic follower-first recovery and takeover with bounded fallback | P0 | XL | 013, 018, 020 | IMPLEMENTED — direct self-discovery; protected scale evidence pending |
+| [022](022-local-follower-recovery-fast-path.md) | Same-host follower transport and digest-verified recovery artifact reuse | P1 | L | 012, 019-021 | IMPLEMENTED — protected cache evidence pending |
 | [023](023-published-image-failover-qualification.md) | Qualify an immutable candidate image and promote the same digest | P0 release gate | L | 015, 018 | IMPLEMENTED — protected run pending |
 
 ### Dependency graph and execution waves

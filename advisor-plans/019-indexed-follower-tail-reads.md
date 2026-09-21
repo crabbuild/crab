@@ -1,6 +1,6 @@
 # Crash-rebuildable indexed follower tail reads
 
-Status: PROPOSED
+Status: IMPLEMENTED — protected large-tail evidence pending
 Priority: P0
 Effort: L
 Risk: High
@@ -34,10 +34,11 @@ authoritative index. Inventory tagged releases before adding a migration reader.
 
 ## Why this plan exists
 
-`FollowerStore::read_tail_page` calls `read_tail_sync`; every call invokes
-`scan_lane`, walks every chunk, parses and verifies every record, then seeks the
-requested page. `NodeLogRecovery::ensure_sealed` loops over network-sized pages,
-so large tails repeat prefix work and trend toward `O(page_count * tail_size)`.
+Historically `FollowerStore::read_tail_page` called `read_tail_sync`; every call
+invoked `scan_lane`, walked every chunk, parsed and verified every record, then
+sought the requested page. The implementation now builds a bounded derived
+index and revalidates only the selected records, while retaining the original
+scan as the authoritative rebuild path.
 
 The current failover design explicitly lists seek-only indexed reads as the
 large-tail performance gap. Chunk bytes plus seal watermark remain the durable

@@ -1,6 +1,6 @@
 # Follower-affine recovery assignment and takeover
 
-Status: PROPOSED
+Status: IMPLEMENTED — direct self-discovery is canonical; protected scale evidence pending
 Priority: P0
 Effort: XL
 Risk: High
@@ -37,25 +37,31 @@ Do not add a second placement or recovery authority.
 
 ## Why this plan exists
 
-Only `preferred_scanner(0)` schedules node recovery. It calls
-`recovery_candidates(self.session, ...)`, and `recover_node_session` claims with
-that scanner's boot session. Candidate selection does not prefer physical
-`NodeId`s in the failed log. After seal, `takeover_proof` may authorize any live
-claimant and ordinary cold placement receives `locality_bonus: 0` from signed
-capacity. The surviving follower may become owner in Compose, but only by
-incidental scheduling/routing.
+The historical path let only `preferred_scanner(0)` schedule node recovery and
+did not use physical `NodeId` membership when selecting a claimant. The current
+path lets every live scheduler inspect recovery, filters each follower to its
+own stable `NodeId`, and retains the rendezvous scanner only for bounded
+any-node fallback. After seal, `takeover_proof` still authorizes the current
+live claimant and Cell control remains the owner authority.
 
 Stable follower identity already survives restart: log membership records
 physical `NodeId`, and the directory resolves it to one current live boot
 session. Use that fact explicitly; never reuse the failed boot session.
 
-Current coordinator policy is effectively:
+Current scheduler policy is effectively:
 
 ```rust
-if preferred_scanner(0, &nodes)? == Some(self.session) {
-    self.schedule_node_recovery(now_ms).await?;
+if self.node.is_some() || preferred_scanner(0, &nodes)? == Some(self.session) {
+    self.schedule_node_recovery(now_ms, preferred_scanner(0, &nodes)? == Some(self.session))
+        .await?;
 }
-let candidates = directory.recovery_candidates(self.session, now_ms, available).await?;
+let candidates = if let Some(node) = self.node {
+    directory
+        .recovery_candidates_for_node(self.session, node, now_ms, available)
+        .await?
+} else {
+    Vec::new()
+};
 ```
 
 The same scanner session then becomes `claimant`; original follower membership
@@ -63,16 +69,15 @@ is not an input to that decision.
 
 ## Target ownership split
 
-- The shard-zero scanner remains the recovery coordinator/discovery owner.
-- A pure policy ranks live recovery executors from failed-log members plus
-  signed eligibility/capacity.
-- The coordinator sends an authenticated advisory nomination before any claim.
-- The target reserves its bounded queue, recomputes that it is the preferred
-  eligible target, then CAS-claims for its own current session and enqueues work.
-  The hint grants no authority.
-- A pre-claim rejection advances immediately. Unknown delivery is retried for
-  two seconds before any-node fallback. A crash after claim waits for the
-  existing 30-second claim expiry; this plan adds no unsafe release/transfer.
+- Every live node scheduler participates in recovery discovery. A stable
+  physical follower filters its own candidate set first; the shard-zero
+  rendezvous scanner remains the bounded any-node fallback coordinator.
+- The scheduler reserves bounded work capacity, then the current session
+  revalidates eligibility and CAS-claims the failed session. There is no
+  peer-triggered nomination queue and no second recovery engine.
+- A pre-claim capacity or fencing rejection advances immediately. A crash after
+  claim waits for the existing 30-second claim expiry; this plan adds no unsafe
+  release/transfer.
 - Sealing clears the claimant, so activation routing re-runs the deterministic
   member ranker from the sealed log rather than reading executor identity from
   the tombstone. Cell takeover still uses
@@ -80,23 +85,24 @@ is not an input to that decision.
 
 ## Files in scope
 
-Only modify the drift-check paths, the existing private peer route/client
-modules beneath `crates/crab-http-server/src/peer/`, and their adjacent tests.
-Node/tombstone serialization, claim lifetime, Cell control, activation-hint
-wire shape, and public configuration are read-only. Stop and amend the plan if
-claim release/transfer or another serialized field appears necessary.
+Only modify the drift-check paths and their adjacent tests. Node/tombstone
+serialization, claim lifetime, Cell control, activation-hint wire shape,
+private peer routes, and public configuration remain unchanged. The canonical
+implementation keeps recovery discovery in every node scheduler; no
+peer-triggered nomination queue or second recovery engine is introduced.
 
 ## Scope
 
 - Expose the smallest verified recovery-candidate descriptor needed for policy:
   failed session/node, expiry/claim state, log epoch, stable member NodeIds.
-- Add pure deterministic executor ranking and reason codes.
-- Add coordinator assignment, authenticated recovery hint, idempotent receiver,
-  bounded retry, and any-node fallback.
+- Apply deterministic physical-NodeId affinity and signed capacity eligibility
+  in every live scheduler; do not add a second dispatch or claim authority.
+- Admit bounded recovery work before claim and use the existing two-second
+  follower-first grace plus explicit any-node fallback.
 - Carry recovery locality into takeover activation without mutating signed
   advertisements or trusting caller-supplied bonuses.
-- Record selected class (`member`, `nonmember`) and fallback reason through plan
-  018 metrics/receipt using bounded labels.
+- Keep node claim CAS, heartbeat, takeover proof, and Cell control as the only
+  authority; scheduler preference is advisory and restart-safe.
 
 ## Out of scope
 
@@ -115,56 +121,48 @@ Add a crate-private/purpose-built `RecoveryCandidate` returned by the node
 directory with verified failed-log membership and timing. Keep existing
 serialized node records unchanged. Search all `recovery_candidates` consumers
 and remove the session-only path when migrated.
-Implement a pure ranker over candidate plus live signed advertisements. Hard
-exclusions match plan 013: incompatible, stale, draining, critical pressure,
-insufficient disk/memory/job capacity, duplicate physical node identity.
-During the follower grace window, only live sessions resolving member `NodeId`s
-are eligible. Use deterministic fixed-point score and stable hash tie-break; no
-floating ordering.
+Implement deterministic candidate filtering over the failed log's stable member
+`NodeId`s plus live signed advertisements. Hard exclusions match plan 013:
+incompatible, stale, draining, critical pressure, insufficient disk/memory/job
+capacity, and duplicate physical node identity. During the follower grace
+window, each physical follower scheduler only claims sessions for its own
+`NodeId`; after the grace window (or when no eligible follower is live), the
+preferred scanner may use the bounded any-node fallback. Stable `NodeId` order
+is the tie-break; no floating ordering or caller-supplied score is authority.
 
 **Verify:** `cargo test -p crab-cell-runtime node --locked` and
 `cargo test -p crab-cell-runtime placement --locked` prove deterministic,
 permutation-invariant ranking and stable-NodeId restart.
 
-### Step 2: add one admitted nomination receiver
+### Step 2: keep one admitted scheduler path
 
-Add a bounded `mpsc` recovery dispatch queue in `cells/scheduler.rs`. Its
-receiver is owned by the scheduler loop; a cloneable sender is injected into
-the private peer receiver during server construction. The same existing two-job
-semaphore, heartbeat, transport, recovery implementation, and metrics serve
-periodic and hinted work. The loop selects between queue input and its one-second
-scan tick; do not start a second scheduler.
-Add one private mTLS nomination endpoint containing only the failed session and
-coordinator-observed log epoch. Authenticate the enrolled peer, bound body and
-deadline to 500 ms, reload canonical state, recompute signed eligibility and
-deterministic rank, and require the local current session to be the preferred
-target. Reserve queue capacity first; then call
-`claim_expired(failed, self.session, now)` and consume the permit by enqueueing.
-Return accepted only after enqueue. Full/ineligible/stale requests reject before
-claim. A duplicate reloads the self-owned claim and deduplicates by failed
-session/generation in the scheduler queue; arbitrary peer nominations cannot
-force work.
+Every live node scheduler uses the existing recovery job set and semaphore. It
+loads canonical records, applies the stable-NodeId filter, reserves bounded
+work capacity, and then enters the existing claim/heartbeat/recovery path. The
+shard-zero rendezvous scanner is a bounded discovery fallback only; it does not
+send a peer-triggered hint and cannot grant authority. Keep the one-second scan
+tick and do not start a second scheduler.
 
 **Verify:** `cargo test -p crab-http-server cells::scheduler --locked` and
-`cargo test -p crab-http-server peer --locked` prove queue-full/ineligible
-rejection before claim, peer authentication, duplicate delivery, stale
-generation, and enqueue-before-success response.
+`cargo test -p crab-cell-runtime node --locked` prove ineligible/over-capacity
+claimants do not start work, physical follower identity survives boot-session
+rotation, and all claims remain CAS-protected.
 
 ### Step 3: coordinate bounded fallback without claim stealing
 
-The coordinator never claims for another session. It sends nominations in
-rank order. Explicit pre-claim rejection advances immediately. Lost/unknown
-responses are retried only until `FOLLOWER_FIRST_GRACE = 2s` from first eligible
-observation, then the same path ranks all eligible nodes. If a target dies after
-claiming, the coordinator observes the claim and waits for the existing
-30-second TTL; expired takeover retains current generation CAS.
-Refactor scheduler recovery execution so a target resumes its own persisted
-claim from queued or periodic discovery. Preserve cancellation and retry safety.
-Do not add claim release, reassignment, or stealing.
+Each follower scheduler claims only its own physical member sessions during the
+two-second grace window. The preferred scanner may use the no-live-follower
+fallback immediately when no eligible member is live; otherwise it admits
+nonmember candidates only after the grace window. If a target dies after
+claiming, every scheduler observes the persisted claim and waits for the
+existing 30-second TTL; expired takeover retains current generation CAS.
+Preserve cancellation and retry safety. Do not add claim release,
+reassignment, or stealing.
 
-**Verify:** paused-time scheduler tests prove explicit reject advances now,
-unknown delivery transitions at two seconds, two coordinators converge, and a
-post-claim target death waits for the existing 30-second expiry.
+**Verify:** scheduler tests prove follower-first assignment, capacity-drained
+followers are excluded, fallback becomes eligible after two seconds, two
+coordinators converge, and a post-claim target death waits for the existing
+30-second expiry.
 
 ### Step 4: re-rank sealed-log members for takeover
 
@@ -176,9 +174,8 @@ liveness, admission, takeover proof, and control CAS.
 Remove the hardcoded-zero recovery-locality path for this decision without
 adding caller-controlled signed fields. Ordinary non-recovery placement keeps
 its current signed observation contract.
-Add structured traces and bounded metrics for assignment class, attempts,
-follower-grace expiry, rejection reason, and activation class. No raw IDs in
-labels.
+Keep structured traces and bounded metrics for recovery phase and terminal
+result. Do not add raw node/session IDs or a second assignment label set.
 
 **Verify:** `cargo test -p crab-http-server cells::router --locked` proves the
 sealed tombstone has no claimant dependency and all authority checks remain.
@@ -194,15 +191,14 @@ nonmember fallback with monotonic exact roots.
 
 ## Git workflow
 
-Use three reviewable commits after rebasing on current `origin/main`:
+Use reviewable commits after rebasing on current `origin/main`:
 
 1. `feat(cell): rank follower recovery executors`
-2. `feat(http): dispatch claimed recovery hints`
-3. `test(cell): qualify follower-affine takeover fallback`
+2. `test(cell): qualify follower-affine takeover fallback`
 
-The first commit is pure policy plus node-directory tests. The second adds the
-single authenticated execution path and activation preference. The third adds
-fault/Compose evidence. Rebase before push; no merge commit.
+The first commit is node-directory policy plus scheduler integration. The second
+adds fault/Compose evidence. No peer nomination route or second scheduler is
+part of this contract. Rebase before push; no merge commit.
 
 ## Verification
 

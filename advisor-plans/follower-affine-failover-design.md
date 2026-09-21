@@ -1,6 +1,6 @@
 # Follower-affine Cell failover hardening
 
-Status: PROPOSED
+Status: IMPLEMENTED — protected scale/provider/release qualification remains
 Priority: P0
 Planned against: `c86dd43423ae` (`origin/main`, 2026-09-20)
 Design authority: this document extends `crates/crab-cell-runtime/docs/failover-and-followers.md`
@@ -32,8 +32,10 @@ The protocol already has the hard safety pieces:
 
 The slow path is orchestration and repeated I/O:
 
-1. only the shard-zero scanner discovers and claims expired node sessions;
-2. the claimant is whichever scanner won, not necessarily an original follower;
+1. discovery still uses one bounded rendezvous scan, but every node scheduler
+   can inspect expired sessions;
+2. the claimant is now the live scheduler whose stable physical follower is in
+   the failed log whenever that follower is eligible;
 3. each follower tail page rescans and revalidates the whole lane;
 4. recovery scans all 256 catalog shards before reading the sealed tail, even
    though authenticated frames already identify affected Cells;
@@ -57,11 +59,10 @@ The slow path is orchestration and repeated I/O:
 
 ```text
 owner lease expires
-  -> coordinator reads the expired session and its stable follower NodeIds
-  -> rank live follower sessions by eligibility, pressure, then stable hash
-  -> send the preferred follower an authenticated, advisory nomination
-  -> that follower reserves local work capacity, revalidates policy, then
-     CAS-claims recovery for its own current boot session
+  -> live schedulers read the expired session and its stable follower NodeIds
+  -> each follower scheduler filters for its own physical NodeId and eligibility
+  -> the eligible follower reserves local work capacity and CAS-claims recovery
+     for its own current boot session
   -> seal all reachable witnesses and compare their evidence
   -> seek/stream the uncovered tail using the local follower index when present
   -> derive affected Cell scopes from authenticated frame headers
@@ -72,13 +73,12 @@ owner lease expires
   -> CAS a new Cell epoch, restore a fresh sparse Db, verify, serve
 ```
 
-If nomination is rejected before the claim, the coordinator immediately tries
-the next live original follower. Unknown delivery is retried only inside a
-two-second follower-first window; afterward the coordinator nominates any
-eligible node. Once a target has claimed, current fencing permits reassignment
-only after the 30-second claim expires. This design does not invent unsafe claim
-release or transfer. The request is a hint; the persisted recovery claim, node
-lease, Cell control, and actor admission remain authoritative.
+If no eligible original follower claims during the two-second grace window, the
+preferred rendezvous scanner uses the bounded any-node fallback. Once a target
+has claimed, current fencing permits reassignment only after the 30-second claim
+expires. This design does not invent unsafe claim release or transfer. Scheduler
+preference is advisory; the persisted recovery claim, node lease, Cell control,
+and actor admission remain authoritative.
 
 ## Safety invariants
 
@@ -132,15 +132,14 @@ current live boot session, then apply the signed placement eligibility rules:
 
 1. reject stale, draining, critically pressured, incompatible, or admission-
    incapable sessions;
-2. prefer members of the failed log over nonmembers during the two-second grace
-   window;
-3. within the member set, use deterministic score plus stable tie-break so all
-   coordinators would choose the same session;
-4. after the grace window, rank all eligible nodes with the normal planner;
-5. reserve the target's bounded recovery queue before it claims; an explicit
-   pre-claim capacity/fencing rejection advances immediately, while a target
-   crash after claim waits for the existing claim expiry;
-6. retry transport-unknown results only within the two-second bound.
+2. prefer the live member matching the scheduler's stable physical NodeId during
+   the two-second grace window;
+3. after the grace window, let the preferred scanner use any eligible node, with
+   stable NodeId ordering as the deterministic tie-break;
+4. reserve bounded recovery capacity before claim; a pre-claim rejection
+   advances immediately, while a target crash after claim waits for the existing
+   claim expiry;
+5. never treat a scheduler hint or placement observation as ownership authority.
 
 Do not add a public configuration knob. Stable `NodeId` selects the physical
 follower; the new boot `SessionId` is always the claimant and owner. Sealing

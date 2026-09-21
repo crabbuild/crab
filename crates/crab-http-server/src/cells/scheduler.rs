@@ -685,11 +685,9 @@ impl RepositoryCellScheduler {
             self.directory
                 .recovery_candidates_for_node(self.session, node, now_ms, available)
                 .await?
-        } else if preferred_recovery_scanner {
-            self.directory
-                .recovery_candidates(self.session, now_ms, available)
-                .await?
         } else {
+            // A scheduler without a stable physical identity cannot prove
+            // follower affinity; it may only use the no-live-follower fallback.
             Vec::new()
         };
         if candidates.len() < available && preferred_recovery_scanner {

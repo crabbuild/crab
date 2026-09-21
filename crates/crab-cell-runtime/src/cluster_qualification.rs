@@ -99,6 +99,7 @@ fn validate_owner_loss(value: &Value) -> Result<()> {
     if after_epoch <= before_epoch {
         return Err(Error::Control("owner loss epoch did not advance"));
     }
+    validate_timing(object)?;
     let before_root = root(object_value(object, "root_before")?)?;
     let restored_root = root(object_value(object, "root_after_restore")?)?;
     let continued_root = root(object_value(object, "root_continued")?)?;
@@ -178,6 +179,7 @@ fn validate_second_owner_loss(value: &Value) -> Result<()> {
     if number(object, "epoch_after")? <= number(object, "epoch_before")? {
         return Err(Error::Control("second owner loss epoch did not advance"));
     }
+    validate_timing(object)?;
     let before = root(object_value(object, "root_before")?)?;
     let after = root(object_value(object, "root_after")?)?;
     require_root_advance(before, after)?;
@@ -187,6 +189,22 @@ fn validate_second_owner_loss(value: &Value) -> Result<()> {
     )? != 2
     {
         return Err(Error::Control("second owner loss labels"));
+    }
+    Ok(())
+}
+
+fn validate_timing(object: &Map<String, Value>) -> Result<()> {
+    let timing = as_object(object_value(object, "timing")?, "timing")?;
+    let owner_killed = number(timing, "owner_killed_ms")?;
+    let advertisement_expired = number(timing, "advertisement_expired_ms")?;
+    let recovery_sealed = number(timing, "recovery_sealed_ms")?;
+    let first_served = number(timing, "first_served_ms")?;
+    if owner_killed == 0
+        || owner_killed > advertisement_expired
+        || advertisement_expired > recovery_sealed
+        || recovery_sealed > first_served
+    {
+        return Err(Error::Control("cluster qualification timing"));
     }
     Ok(())
 }
@@ -361,12 +379,37 @@ fn is_lower_hex(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_revision;
+    use serde_json::json;
+
+    use super::{validate_revision, validate_timing};
 
     #[test]
     fn source_revision_requires_a_lowercase_commit_shape() {
         assert!(validate_revision(&"a".repeat(40)).is_ok());
         assert!(validate_revision(&"A".repeat(40)).is_err());
         assert!(validate_revision("not-a-commit".repeat(4).as_str()).is_err());
+    }
+
+    #[test]
+    fn timing_requires_monotonic_failover_boundaries() {
+        let valid = json!({
+            "timing": {
+                "owner_killed_ms": 10,
+                "advertisement_expired_ms": 20,
+                "recovery_sealed_ms": 30,
+                "first_served_ms": 40
+            }
+        });
+        assert!(validate_timing(valid.as_object().unwrap()).is_ok());
+
+        let invalid = json!({
+            "timing": {
+                "owner_killed_ms": 20,
+                "advertisement_expired_ms": 10,
+                "recovery_sealed_ms": 30,
+                "first_served_ms": 40
+            }
+        });
+        assert!(validate_timing(invalid.as_object().unwrap()).is_err());
     }
 }

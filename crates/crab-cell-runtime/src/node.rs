@@ -885,8 +885,9 @@ impl NodeDirectory {
             .members()
             .iter()
             .filter_map(|member| {
-                live.iter()
-                    .find(|advertisement| advertisement.node() == *member)
+                live.iter().find(|advertisement| {
+                    advertisement.node() == *member && recovery_executor_eligible(advertisement)
+                })
             })
             .min_by(|left, right| left.node().as_bytes().cmp(right.node().as_bytes()))
             .cloned())
@@ -944,6 +945,9 @@ impl NodeDirectory {
             .load(claimant, now_ms)
             .await?
             .ok_or(Error::Node("node recovery claimant is not live"))?;
+        if !recovery_executor_eligible(claimant_advertisement.advertisement()) {
+            return Ok(Vec::new());
+        }
         if claimant_node.is_some_and(|node| claimant_advertisement.advertisement.node() != node) {
             return Err(Error::Node("node recovery claimant identity differs"));
         }
@@ -951,6 +955,7 @@ impl NodeDirectory {
             self.live(now_ms, MAX_LIVE_NODE_RECORDS)
                 .await?
                 .into_iter()
+                .filter(recovery_executor_eligible)
                 .map(|advertisement| advertisement.node())
                 .collect::<HashSet<_>>()
         } else {
@@ -1906,6 +1911,19 @@ impl NodeDirectory {
         }
         Ok(())
     }
+}
+
+fn recovery_executor_eligible(advertisement: &NodeAdvertisement) -> bool {
+    let capacity = advertisement.capacity();
+    let placement_has_headroom = advertisement.placement_capacity().is_none_or(|placement| {
+        placement.active_cells < placement.max_active_cells
+            && placement.running_jobs < placement.job_capacity
+    });
+    capacity.log_protocol == NODE_LOG_PROTOCOL_VERSION
+        && capacity.free_memory_bytes != 0
+        && capacity.free_disk_bytes != 0
+        && capacity.job_credits != 0
+        && placement_has_headroom
 }
 
 fn validate_record_path(

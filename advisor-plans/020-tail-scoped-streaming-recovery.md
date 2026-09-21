@@ -1,6 +1,6 @@
 # Tail-scoped affected-Cell recovery and bounded streaming
 
-Status: PROPOSED
+Status: IMPLEMENTED — protected large-catalog evidence pending
 Priority: P0
 Effort: XL
 Risk: High
@@ -41,11 +41,12 @@ narrow API extraction first and record it as part of this plan.
 
 ## Why this plan exists
 
-`recover_node_session` calls `recoverable_cells` before sealing the log. That
-function scans all 256 application catalog shards and loads control for every
-entry to find Cells owned by the failed session. Only afterward does recovery
-read frames whose authenticated `NodeFrameScope` already carries application,
-Cell, incarnation, Cell epoch, and commit sequence.
+Historically `recover_node_session` called `recoverable_cells` before sealing
+the log. That function scanned all 256 application catalog shards and loaded
+control for every entry even though authenticated `NodeFrameScope` already
+carried application, Cell, incarnation, Cell epoch, and commit sequence. The
+implementation now seals and verifies first, derives bounded affected scopes,
+and loads each touched catalog shard once.
 
 `ensure_sealed` also retains one complete witness as `Vec<VerifiedNodeFrame>`,
 then overlay construction and `RecoveryManifestStore::pin` materialize complete

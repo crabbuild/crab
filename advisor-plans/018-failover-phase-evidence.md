@@ -1,6 +1,6 @@
 # Failover phase telemetry and qualification baseline
 
-Status: PARTIAL — phase evidence and typed identity binding implemented; timestamp/work extensions and protected runs pending
+Status: PARTIAL — phase evidence, typed identity binding, and receipt timestamps implemented; work counters and protected runs pending
 Priority: P0
 Effort: M
 Risk: Medium

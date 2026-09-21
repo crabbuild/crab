@@ -1,16 +1,16 @@
-# Add follower durability and warm failover
+# Follower durability and warm failover
 
-Crab will add a Celld-style replicated node log around the existing per-Cell
-SQLite/LTX runtime. The target keeps exactly one Cell owner, lets one or two
-other nodes durably retain the owner's recent LTX cuts, and recovers those cuts
-before a successor opens SQLite.
+Crab implements a Celld-style replicated node log around the existing per-Cell
+SQLite/LTX runtime. The implementation keeps exactly one Cell owner, lets one
+or two other nodes durably retain the owner's recent LTX cuts, and recovers
+those cuts before a successor opens SQLite.
 
 | Document intent | Value |
 | --- | --- |
 | Content type | Low-level target design |
 | Audience | `crab-ltx`, `crab-cell-runtime`, and `crab-http-server` implementers |
 | Goal | Define the persistence, wire, gating, recovery, lifecycle, and proof contracts needed for Celld-style follower durability |
-| Status | Non-streaming failover, bounded hot-Cell pipelining, state-observing stream gating, and online epoch rotation implemented; target-load and extended fault qualification remain |
+| Status | Follower durability, bounded recovery, follower-affine takeover, local fast paths, and digest-bound qualification implemented; protected scale, provider, and release runs remain |
 | Reference | Celld commit `10cb1303dac710dcb3b557e318e08c855261f68b` |
 
 [Back to the Cell runtime index](README.md)

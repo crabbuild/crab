@@ -866,7 +866,7 @@ async fn live_original_follower_is_the_only_affine_recovery_candidate() {
         .await
         .unwrap();
     directory.activate_log(&enrolled, NOW_MS + 2).await.unwrap();
-    directory
+    let follower_record = directory
         .refresh(
             &follower_record,
             advertisement_for_node_capacity(
@@ -921,6 +921,36 @@ async fn live_original_follower_is_the_only_affine_recovery_candidate() {
             .session(),
         follower
     );
+    let drained = directory
+        .refresh(
+            &follower_record,
+            advertisement_for_node_capacity(
+                follower_node,
+                follower,
+                &key,
+                3,
+                NOW_MS + 10_003,
+                NodeCapacity {
+                    free_memory_bytes: 0,
+                    free_disk_bytes: 2_000,
+                    follower_free_bytes: 2_000,
+                    follower_retained_bytes: 0,
+                    job_credits: 3,
+                    log_protocol: NODE_LOG_PROTOCOL_VERSION,
+                },
+            ),
+            NOW_MS + 10_003,
+        )
+        .await
+        .unwrap();
+    assert!(
+        directory
+            .preferred_recovery_node(leader, NOW_MS + 10_004)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    drop(drained);
 }
 
 #[tokio::test]

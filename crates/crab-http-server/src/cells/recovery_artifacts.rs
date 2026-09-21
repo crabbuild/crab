@@ -96,7 +96,13 @@ impl RecoveryArtifactRegistry {
             .entries
             .lock()
             .map_err(|_| crab_cell_runtime::Error::Node("recovery artifact lock poisoned"))?;
-        while entries.len() >= MAX_ARTIFACTS && Self::evict_one(&mut entries) {}
+        while entries.len() >= MAX_ARTIFACTS {
+            if !Self::evict_one(&mut entries) {
+                return Err(crab_cell_runtime::Error::Capacity(
+                    "recovery artifact cache",
+                ));
+            }
+        }
         drop(entries);
         loop {
             match self.budget.try_reserve(size) {
@@ -396,5 +402,40 @@ mod tests {
         assert!(!stale.exists());
         assert!(!temporary_file.exists());
         assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn rejects_admission_when_all_artifact_slots_are_in_use() {
+        let temporary = TempDir::new().unwrap();
+        let registry = RecoveryArtifactRegistry::new(
+            temporary.path().join("registry"),
+            Limits::default(),
+            crab_cell_runtime::DiskBudget::new((MAX_ARTIFACTS + 1) as u64),
+        )
+        .unwrap();
+        let bundle = bundle_fixture(temporary.path(), 9);
+        let mut held = Vec::with_capacity(MAX_ARTIFACTS);
+        {
+            let mut entries = registry.entries.lock().unwrap();
+            for marker in 0..MAX_ARTIFACTS {
+                let reservation = registry.budget.try_reserve(1).unwrap();
+                let entry = Arc::new(ArtifactEntry {
+                    path: registry.root.join(format!("held-{marker}.bundle")),
+                    size: 1,
+                    _reservation: reservation,
+                    last_used: AtomicU64::new(marker as u64),
+                });
+                entries.insert(key(&bundle, marker as u8), Arc::clone(&entry));
+                held.push(entry);
+            }
+        }
+
+        assert!(matches!(
+            registry.reserve(1),
+            Err(crab_cell_runtime::Error::Capacity(
+                "recovery artifact cache"
+            ))
+        ));
+        drop(held);
     }
 }

@@ -8,13 +8,13 @@ Verdict: executable after the named prerequisites; not production-qualified yet
 
 | Surface | Current owner/evidence | Audit result |
 | --- | --- | --- |
-| Discovery/job entry | `crates/crab-http-server/src/cells/scheduler.rs` | One scanner owns discovery; phase and remote-dispatch boundaries needed specification. |
+| Discovery/job entry | `crates/crab-http-server/src/cells/scheduler.rs` | Every live node scheduler can discover recovery; the rendezvous scanner owns only bounded any-node fallback. |
 | Claim fencing | `crates/crab-cell-runtime/src/node.rs`, `node_log_state.rs` | CAS/30-second expiry are safe; there is no release/transfer transition. |
-| Follower evidence | `crates/crab-cell-runtime/src/follower.rs` | Durable chunks/markers are sound; every page currently rescans its prefix. |
-| Witness recovery | `crates/crab-cell-runtime/src/node_log_recovery.rs`, `node_log.rs` | Conflict proof is strong; selected witness and bundles are materialized. |
-| Catalog/control validation | `catalog.rs`, `authority.rs` | `lookup` reads every page in one shard; per-Cell calls would repeat shard work. |
-| Immutable pin/load | `recovery_manifest.rs`, `crab-ltx/src/bundle.rs`, `replica.rs` | File-backed bundles exist, but the canonical multipart publisher is not callable across the crate boundary. |
-| Takeover routing | `crates/crab-http-server/src/cells/router.rs` | Authority remains correct; locality is not an explicit production input. |
+| Follower evidence | `crates/crab-cell-runtime/src/follower.rs` | Durable chunks/markers remain authoritative; derived lane indexes support seek-only reads with exact header/body revalidation. |
+| Witness recovery | `crates/crab-cell-runtime/src/node_log_recovery.rs`, `node_log.rs` | Conflict proof is strong; selected witness bytes and digest comparisons are bounded and file-backed. |
+| Catalog/control validation | `catalog.rs`, `authority.rs` | Authenticated tail scopes group affected Cells by shard, avoiding an unconditional 256-shard discovery scan. |
+| Immutable pin/load | `recovery_manifest.rs`, `crab-ltx/src/bundle.rs`, `replica.rs` | File-backed verified bundles and the shared artifact registry preserve mandatory immutable pinning while enabling same-host reuse. |
+| Takeover routing | `crates/crab-http-server/src/cells/router.rs` | Authority remains correct; sealed-log member selection is explicit and advisory. |
 | Artifact lifetime | scheduler/router/server/local disk | Pin and load construct different stores/budgets; a shared cache would otherwise never hit reliably. |
 | Qualification | Compose, container, release workflows | Strong local correctness proof; release workflow now qualifies a run-scoped immutable candidate and promotes that digest without rebuilding; protected execution remains outstanding. |
 
@@ -23,7 +23,8 @@ Verdict: executable after the named prerequisites; not production-qualified yet
 1. **Unsafe immediate reassignment promise.** A claimed target cannot be skipped
    before the current 30-second TTL. Plan 021 now reserves/admission-checks before
    the target self-claims; pre-claim rejection advances immediately, while
-   post-claim death waits for expiry. No claim-stealing path is added.
+   post-claim death waits for expiry. Every live scheduler uses the same path;
+   no claim-stealing or peer nomination path is added.
 2. **Indexed reads could trust stale headers.** Plan 019 now rereads the exact
    52-byte record header and body, uses transactional generation swaps across
    append/rotation, and charges every retained index generation to the runtime
@@ -35,10 +36,10 @@ Verdict: executable after the named prerequisites; not production-qualified yet
    verified multipart slice, factors one file-backed bundle builder/publisher,
    uses a disk-backed digest table, and retains the old algorithm only as a
    private test oracle.
-5. **Follower nomination could become a peer-triggered work/claim DoS.** Plan
-   021 makes the request advisory, authenticated, recomputed locally, queue-
-   admitted before claim, and enqueue-only. The scheduler remains the sole job
-   engine.
+5. **A second recovery dispatcher could become a work/claim DoS.** Plan 021
+   keeps one scheduler/job engine. Follower affinity is recomputed from the
+   failed log and local signed eligibility before claim; the rendezvous scanner
+   supplies only the bounded any-node fallback.
 6. **Sealed tombstones do not retain the executor.** Post-seal takeover now
    reruns the deterministic ranker over stable failed-log member NodeIds rather
    than reading a cleared claimant.

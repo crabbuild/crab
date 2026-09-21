@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -8,9 +8,9 @@ use futures_util::{StreamExt, future::join_all, stream};
 
 use crate::{
     ApplicationId, CatalogProof, CellAuthority, CellCatalog, CellId, Digest, Error,
-    FencedNodeSession, NodeDirectory, NodeId, NodeLogPhase, NodeLogTransport, NodeTakeoverProof,
-    RecoveryBase, RecoveryManifestStore, Result, SealRequest, SealedNodeLog, SessionId,
-    TailRequest, Transition, VersionedControl, build_recovery_overlays_file_backed,
+    FencedNodeSession, FollowerReceipt, NodeDirectory, NodeId, NodeLogPhase, NodeLogTransport,
+    NodeTakeoverProof, RecoveryBase, RecoveryManifestStore, Result, SealRequest, SealedNodeLog,
+    SessionId, TailRequest, Transition, VersionedControl, build_recovery_overlays_file_backed,
     build_recovery_overlays_file_backed_stream,
 };
 
@@ -19,6 +19,7 @@ const MAX_RECOVERY_CATALOG_HEAD_READS: usize = 32;
 const MAX_RECOVERY_PAGE_BYTES: u64 = 1 << 20;
 const MAX_RECOVERY_PAGE_FRAMES: usize = 4_096;
 const WITNESS_RECORD_HEADER_BYTES: usize = 8 + 32;
+const WITNESS_DIGEST_RECORD_BYTES: u64 = 8 + 32;
 
 struct WitnessWriter {
     path: tempfile::TempPath,
@@ -91,6 +92,107 @@ impl SealedWitness {
             limits,
             remaining: self.frame_count,
         })
+    }
+}
+
+/// Disk-backed sequence-to-digest table used to compare every reachable
+/// follower without retaining one digest map per recovered frame in memory.
+struct WitnessDigestWriter {
+    path: tempfile::TempPath,
+    file: File,
+    first_sequence: u64,
+    expected_frames: u64,
+    written_frames: u64,
+}
+
+struct SealedWitnessDigests {
+    _path: tempfile::TempPath,
+    file: File,
+    first_sequence: u64,
+    frame_count: u64,
+}
+
+impl WitnessDigestWriter {
+    fn new(directory: &Path, first_sequence: u64, expected_frames: u64) -> Result<Self> {
+        if expected_frames == 0 {
+            return Err(Error::Node("recovery witness digest range is empty"));
+        }
+        let temporary = tempfile::Builder::new()
+            .prefix(".crab-witness-digests-")
+            .tempfile_in(directory)?;
+        let path = temporary.into_temp_path();
+        let file = OpenOptions::new().append(true).open(&path)?;
+        Ok(Self {
+            path,
+            file,
+            first_sequence,
+            expected_frames,
+            written_frames: 0,
+        })
+    }
+
+    fn push(&mut self, sequence: u64, digest: [u8; 32]) -> Result<()> {
+        let expected = self
+            .first_sequence
+            .checked_add(self.written_frames)
+            .ok_or(Error::Node("recovery witness digest sequence overflow"))?;
+        if sequence != expected || self.written_frames == self.expected_frames {
+            return Err(Error::Node("recovery witness digest range differs"));
+        }
+        self.file.write_all(&sequence.to_le_bytes())?;
+        self.file.write_all(&digest)?;
+        self.written_frames = self
+            .written_frames
+            .checked_add(1)
+            .ok_or(Error::Node("recovery witness digest count overflow"))?;
+        Ok(())
+    }
+
+    fn finish(self) -> Result<SealedWitnessDigests> {
+        if self.written_frames != self.expected_frames {
+            return Err(Error::Node("recovery witness digest range is incomplete"));
+        }
+        self.file.sync_all()?;
+        drop(self.file);
+        let file = File::open(&self.path)?;
+        Ok(SealedWitnessDigests {
+            _path: self.path,
+            file,
+            first_sequence: self.first_sequence,
+            frame_count: self.written_frames,
+        })
+    }
+}
+
+impl SealedWitnessDigests {
+    fn matches(&mut self, sequence: u64, digest: [u8; 32]) -> Result<()> {
+        if sequence < self.first_sequence {
+            return Ok(());
+        }
+        let offset = sequence
+            .checked_sub(self.first_sequence)
+            .and_then(|index| index.checked_mul(WITNESS_DIGEST_RECORD_BYTES))
+            .ok_or(Error::Node("recovery witness digest offset overflow"))?;
+        if sequence
+            >= self
+                .first_sequence
+                .checked_add(self.frame_count)
+                .ok_or(Error::Node("recovery witness digest range overflow"))?
+        {
+            return Ok(());
+        }
+        self.file.seek(SeekFrom::Start(offset))?;
+        let mut record = [0_u8; WITNESS_DIGEST_RECORD_BYTES as usize];
+        self.file.read_exact(&mut record)?;
+        let stored_sequence = u64::from_le_bytes(
+            record[..8]
+                .try_into()
+                .map_err(|_| Error::Node("recovery witness digest record is invalid"))?,
+        );
+        if stored_sequence != sequence || record[8..] != digest {
+            return Err(Error::Node("follower witnesses disagree"));
+        }
+        Ok(())
     }
 }
 
@@ -761,162 +863,94 @@ impl NodeLogRecovery {
             .tiered_through
             .checked_add(1)
             .ok_or(Error::Node("node-log recovery sequence overflow"))?;
-        let reservation = self
-            .recovery_disk
-            .try_reserve(recovery_tail_reservation_bytes(self.limits))?;
-        let mut observed = BTreeMap::new();
-        let mut selected = None::<WitnessMaterial>;
         let scratch = self
             .recovery_scratch
             .clone()
             .unwrap_or_else(std::env::temp_dir);
-        for (member, receipt) in receipts {
-            let Ok(receipt) = receipt else {
-                continue;
-            };
-            if receipt.durable_through < required_first {
-                continue;
-            }
-            let first = required_first.max(receipt.base_sequence);
-            if first > receipt.durable_through {
-                continue;
-            }
-            let retain = selected.is_none()
-                && first == required_first
-                && receipt.durable_through == durable_through;
-            let mut first_sequence = first;
-            let mut candidate = if retain {
-                Some(if bounded {
-                    WitnessCollector::file(&scratch)?
-                } else {
-                    WitnessCollector::Memory(Vec::new())
-                })
+        let expected_frames = durable_through
+            .checked_sub(required_first)
+            .and_then(|count| count.checked_add(1))
+            .ok_or(Error::Node("node-log recovery frame range overflows"))?;
+        let digest_bytes = expected_frames
+            .checked_mul(WITNESS_DIGEST_RECORD_BYTES)
+            .ok_or(Error::Capacity("recovery witness digest table"))?;
+        let digest_reservation = self.recovery_disk.try_reserve(digest_bytes)?;
+        let mut candidates = receipts
+            .iter()
+            .filter_map(|(member, receipt)| {
+                let receipt = receipt.as_ref().ok()?;
+                (receipt.durable_through == durable_through
+                    && receipt.base_sequence <= required_first)
+                    .then_some((*member, *receipt))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_unstable_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+
+        for (candidate_member, candidate_receipt) in candidates {
+            let candidate_reservation = self.recovery_disk.try_reserve(0)?;
+            let mut collector = if bounded {
+                WitnessCollector::file(&scratch)?
             } else {
-                None
+                WitnessCollector::Memory(Vec::new())
             };
-            let mut tail_bytes = 0_u64;
-            let complete;
-            loop {
-                let Ok(page) = self
-                    .transport
-                    .tail_page(
-                        member,
-                        TailRequest {
-                            leader_session: self.leader_session,
-                            log_epoch: self.log_epoch,
-                            first_sequence,
-                        },
-                    )
-                    .await
-                else {
-                    complete = false;
-                    break;
-                };
-                if page.frames.is_empty() {
-                    complete = false;
-                    break;
+            let mut digest_writer =
+                WitnessDigestWriter::new(&scratch, required_first, expected_frames)?;
+            if !collect_member_tail(
+                candidate_member,
+                candidate_receipt,
+                TailReadContext {
+                    transport: self.transport.as_ref(),
+                    leader_session: self.leader_session,
+                    log_epoch: self.log_epoch,
+                    required_first,
+                    limits: self.limits,
+                    reservation: Some(&candidate_reservation),
+                },
+                TailSinks {
+                    collector: Some(&mut collector),
+                    digests: Some(&mut digest_writer),
+                    compare: None,
+                },
+            )
+            .await?
+            {
+                continue;
+            }
+            if !collector.matches_range(required_first, durable_through) {
+                continue;
+            }
+            let mut digests = digest_writer.finish()?;
+            for (member, receipt) in &receipts {
+                if *member == candidate_member {
+                    continue;
                 }
-                let page_count = page.frames.len();
-                if page_count > MAX_RECOVERY_PAGE_FRAMES {
-                    complete = false;
-                    break;
-                }
-                let Ok(verified) = page
-                    .frames
-                    .into_iter()
-                    .map(|bytes| crab_ltx::inspect_node_frame(bytes, self.limits))
-                    .collect::<crab_ltx::Result<Vec<_>>>()
-                else {
-                    complete = false;
-                    break;
+                let Ok(receipt) = receipt else {
+                    continue;
                 };
-                // A valid frame digest proves its bytes, not that it belongs to
-                // the claimed failed session. Bind every page to that lane and
-                // the sealed range before retaining it as recovery evidence.
-                if verified.iter().enumerate().any(|(offset, frame)| {
-                    let scope = frame.scope();
-                    scope.leader_session != *self.leader_session.as_bytes()
-                        || scope.log_epoch != self.log_epoch
-                        || first_sequence.checked_add(offset as u64) != Some(scope.node_sequence)
-                        || scope.node_sequence > receipt.durable_through
-                }) {
-                    complete = false;
-                    break;
-                }
-                let page_bytes = verified.iter().try_fold(0_u64, |bytes, frame| {
-                    bytes.checked_add(frame.encoded().len() as u64)
-                });
-                let Some(page_bytes) = page_bytes else {
-                    complete = false;
-                    break;
-                };
-                let page_limit = if page_count == 1 {
-                    // A single LTX frame may exceed the network page target;
-                    // keep the same bounded-one-frame exception as FollowerStore.
-                    MAX_RECOVERY_PAGE_BYTES.saturating_add(self.limits.max_capture_bytes)
-                } else {
-                    MAX_RECOVERY_PAGE_BYTES
-                };
-                if page_bytes > page_limit {
-                    complete = false;
-                    break;
-                }
-                tail_bytes = match tail_bytes.checked_add(page_bytes) {
-                    Some(bytes) if bytes <= recovery_tail_reservation_bytes(self.limits) => bytes,
-                    _ => {
-                        complete = false;
-                        break;
-                    }
-                };
-                // A shorter or partially readable follower may still expose
-                // a conflicting valid frame. Never choose a witness by order
-                // while silently ignoring that evidence from another member.
-                for frame in &verified {
-                    let digest = frame.digest();
-                    if observed
-                        .insert(frame.scope().node_sequence, digest)
-                        .is_some_and(|previous| previous != digest)
-                    {
-                        return Err(Error::Node("follower witnesses disagree"));
-                    }
-                }
-                let last_sequence = verified.last().map(|frame| frame.scope().node_sequence);
-                if let Some(collector) = candidate.as_mut()
-                    && collector.push(verified).is_err()
+                if !collect_member_tail(
+                    *member,
+                    *receipt,
+                    TailReadContext {
+                        transport: self.transport.as_ref(),
+                        leader_session: self.leader_session,
+                        log_epoch: self.log_epoch,
+                        required_first,
+                        limits: self.limits,
+                        reservation: None,
+                    },
+                    TailSinks {
+                        collector: None,
+                        digests: None,
+                        compare: Some(&mut digests),
+                    },
+                )
+                .await?
                 {
-                    complete = false;
-                    break;
+                    continue;
                 }
-                let Some(next_sequence) = page.next_sequence else {
-                    complete = last_sequence == Some(receipt.durable_through);
-                    break;
-                };
-                let Ok(page_count) = u64::try_from(page_count) else {
-                    complete = false;
-                    break;
-                };
-                let Some(expected_next) = first_sequence.checked_add(page_count) else {
-                    complete = false;
-                    break;
-                };
-                if next_sequence != expected_next || next_sequence > receipt.durable_through {
-                    complete = false;
-                    break;
-                }
-                first_sequence = next_sequence;
             }
-            if !complete || !retain {
-                continue;
-            }
-            let Some(candidate) = candidate else {
-                continue;
-            };
-            if !candidate.matches_range(required_first, durable_through) {
-                continue;
-            }
-            selected = Some(candidate.finish()?);
-        }
-        if let Some(selected) = selected {
+            drop(digest_reservation);
+            let selected = collector.finish()?;
             let (frames, witness) = match selected {
                 WitnessMaterial::Memory(frames) => (frames, None),
                 WitnessMaterial::File(witness) => (Vec::new(), Some(witness)),
@@ -928,12 +962,139 @@ impl NodeLogRecovery {
                 durable_through,
                 frames,
                 witness,
-                _reservation: Some(reservation),
+                _reservation: Some(candidate_reservation),
             });
         }
+        drop(digest_reservation);
         Err(Error::Node(
             "active node log has no complete follower witness",
         ))
+    }
+}
+
+/// Streams one follower tail through the common page/framing checks. A
+/// transport or malformed-page failure returns `false` so another complete
+/// witness may be tried; digest disagreement remains a hard recovery error.
+struct TailReadContext<'a> {
+    transport: &'a dyn NodeLogTransport,
+    leader_session: SessionId,
+    log_epoch: u64,
+    required_first: u64,
+    limits: crab_ltx::Limits,
+    reservation: Option<&'a crab_ltx::DiskReservation>,
+}
+
+struct TailSinks<'a> {
+    collector: Option<&'a mut WitnessCollector>,
+    digests: Option<&'a mut WitnessDigestWriter>,
+    compare: Option<&'a mut SealedWitnessDigests>,
+}
+
+async fn collect_member_tail(
+    member: NodeId,
+    receipt: FollowerReceipt,
+    context: TailReadContext<'_>,
+    mut sinks: TailSinks<'_>,
+) -> Result<bool> {
+    let TailReadContext {
+        transport,
+        leader_session,
+        log_epoch,
+        required_first,
+        limits,
+        reservation,
+    } = context;
+    if receipt.durable_through < required_first {
+        return Ok(false);
+    }
+    let mut first_sequence = required_first.max(receipt.base_sequence);
+    if first_sequence > receipt.durable_through {
+        return Ok(false);
+    }
+    let mut tail_bytes = 0_u64;
+    loop {
+        let page = match transport
+            .tail_page(
+                member,
+                TailRequest {
+                    leader_session,
+                    log_epoch,
+                    first_sequence,
+                },
+            )
+            .await
+        {
+            Ok(page) => page,
+            Err(_) => return Ok(false),
+        };
+        if page.frames.is_empty() || page.frames.len() > MAX_RECOVERY_PAGE_FRAMES {
+            return Ok(false);
+        }
+        let page_count = page.frames.len();
+        let verified = match page
+            .frames
+            .into_iter()
+            .map(|bytes| crab_ltx::inspect_node_frame(bytes, limits))
+            .collect::<crab_ltx::Result<Vec<_>>>()
+        {
+            Ok(verified) => verified,
+            Err(_) => return Ok(false),
+        };
+        if verified.iter().enumerate().any(|(offset, frame)| {
+            let scope = frame.scope();
+            scope.leader_session != *leader_session.as_bytes()
+                || scope.log_epoch != log_epoch
+                || first_sequence.checked_add(offset as u64) != Some(scope.node_sequence)
+                || scope.node_sequence > receipt.durable_through
+        }) {
+            return Ok(false);
+        }
+        let Some(page_bytes) = verified.iter().try_fold(0_u64, |bytes, frame| {
+            bytes.checked_add(frame.encoded().len() as u64)
+        }) else {
+            return Ok(false);
+        };
+        let page_limit = if page_count == 1 {
+            MAX_RECOVERY_PAGE_BYTES.saturating_add(limits.max_capture_bytes)
+        } else {
+            MAX_RECOVERY_PAGE_BYTES
+        };
+        if page_bytes > page_limit {
+            return Ok(false);
+        }
+        tail_bytes = match tail_bytes.checked_add(page_bytes) {
+            Some(bytes) if bytes <= recovery_tail_reservation_bytes(limits) => bytes,
+            _ => return Ok(false),
+        };
+        if let Some(reservation) = reservation {
+            reservation.try_grow(page_bytes)?;
+        }
+        for frame in &verified {
+            let sequence = frame.scope().node_sequence;
+            let digest = frame.digest();
+            if let Some(writer) = sinks.digests.as_mut() {
+                writer.push(sequence, digest)?;
+            }
+            if let Some(table) = sinks.compare.as_mut() {
+                table.matches(sequence, digest)?;
+            }
+        }
+        let last_sequence = verified.last().map(|frame| frame.scope().node_sequence);
+        if let Some(output) = sinks.collector.as_mut() {
+            output.push(verified)?;
+        }
+        let Some(next_sequence) = page.next_sequence else {
+            return Ok(last_sequence == Some(receipt.durable_through));
+        };
+        let page_count = u64::try_from(page_count)
+            .map_err(|_| Error::Node("recovery page frame count overflows"))?;
+        let expected_next = first_sequence
+            .checked_add(page_count)
+            .ok_or(Error::Node("recovery page sequence overflows"))?;
+        if next_sequence != expected_next || next_sequence > receipt.durable_through {
+            return Ok(false);
+        }
+        first_sequence = next_sequence;
     }
 }
 

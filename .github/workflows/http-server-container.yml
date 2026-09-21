@@ -874,6 +874,13 @@ jobs:
             '.version == 6 and
              .owner_loss.session_before != .owner_loss.session_after and
              .owner_loss.epoch_after > .owner_loss.epoch_before and
+             .owner_loss.timing.owner_killed_ms > 0 and
+             .owner_loss.timing.owner_killed_ms <=
+               .owner_loss.timing.advertisement_expired_ms and
+             .owner_loss.timing.advertisement_expired_ms <=
+               .owner_loss.timing.recovery_sealed_ms and
+             .owner_loss.timing.recovery_sealed_ms <=
+               .owner_loss.timing.first_served_ms and
              (.owner_loss.root_before | keys | sort) ==
                ["checksum", "commit_sequence", "digest", "txid"] and
              (.owner_loss.root_before.digest | test("^[0-9a-f]{64}$")) and
@@ -908,6 +915,13 @@ jobs:
              .follower_replacement.fleet_only_response.id == 2 and
              .second_owner_loss.session_before != .second_owner_loss.session_after and
              .second_owner_loss.epoch_after > .second_owner_loss.epoch_before and
+             .second_owner_loss.timing.owner_killed_ms > 0 and
+             .second_owner_loss.timing.owner_killed_ms <=
+               .second_owner_loss.timing.advertisement_expired_ms and
+             .second_owner_loss.timing.advertisement_expired_ms <=
+               .second_owner_loss.timing.recovery_sealed_ms and
+             .second_owner_loss.timing.recovery_sealed_ms <=
+               .second_owner_loss.timing.first_served_ms and
              (.second_owner_loss.root_before | keys | sort) ==
                ["checksum", "commit_sequence", "digest", "txid"] and
              (.second_owner_loss.root_after | keys | sort) ==

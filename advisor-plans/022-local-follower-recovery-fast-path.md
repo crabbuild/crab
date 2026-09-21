@@ -1,6 +1,6 @@
 # Same-host follower recovery and verified artifact reuse
 
-Status: PROPOSED
+Status: IMPLEMENTED — protected cache-reuse evidence pending
 Priority: P1
 Effort: L
 Risk: High
@@ -39,16 +39,16 @@ ownership changed. Extend canonical owners rather than create parallel readers.
 
 ## Why this plan exists
 
-Production constructs only `NodeLogHttpTransport`. Its `remote(member)` resolves
-every physical member to an endpoint and uses mTLS HTTP, including when the
-recovery executor is that physical follower. `LocalFollowerTransport` exists for
-tests/single-process use but is not composed into production recovery.
+The historical production path constructed only `NodeLogHttpTransport`. Its
+`remote(member)` resolved every physical member to an endpoint and used mTLS
+HTTP, including when the recovery executor was that physical follower. The
+current composition dispatches an exact self-`NodeId` to the authorized local
+follower store and keeps mTLS for every other member.
 
-After recovery builds a bundle, `RecoveryManifestStore::pin` reads and uploads
-it. Activation later calls `load_overlay`, reads the manifest and bundle back
-from object storage, writes a temporary bundle, and verifies it. The immutable
-pin is required, but a same-host successor should reuse exact verified bytes
-instead of paying loopback and immediate download costs.
+After recovery builds a bundle, `RecoveryManifestStore::pin` still publishes the
+immutable manifest and bundle. Activation first verifies the control-pinned
+digest and consults the bounded server-owned artifact registry; misses,
+evictions, and restarts use the canonical object-store reader.
 
 The current production transport always resolves an endpoint first:
 
