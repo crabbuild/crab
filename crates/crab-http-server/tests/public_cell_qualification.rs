@@ -634,8 +634,8 @@ async fn run_public_typed_primitive_workload(
         now_ms,
         run_tag: 0,
     };
-    let summary = workload
-        .run_with_case_coverage(&mut executor)
+    let summary = node
+        .run_qualification(&workload, &mut executor)
         .await
         .expect("typed workload");
     assert_eq!(summary.operations(), 64);
@@ -746,8 +746,8 @@ async fn public_cell_node_runs_complete_matrix_through_typed_apis() {
             now_ms: row_now_ms,
             run_tag: row_index as u64 + 1,
         };
-        let summary = workload
-            .run_with_case_coverage(&mut executor)
+        let summary = node
+            .run_qualification(&workload, &mut executor)
             .await
             .expect("typed workload");
         let run_artifact = summary.artifact(&workload).expect("run artifact");

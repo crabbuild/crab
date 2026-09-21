@@ -20,7 +20,8 @@ use std::{
 use crab_cell_app::{ApplicationHandle, CellApplication, CompiledApplication};
 use crab_cell_runtime::{
     ApplicationId, CellClient, CellRuntime, CellRuntimeStats, DiskBudget, Error, FollowerStore,
-    NodeDurabilityConfig, ReplicaHost, ReplicaLimits, SessionId, SqlWorkerPool, TenantId,
+    NodeDurabilityConfig, QualificationOperationExecutor, QualificationRunSummary,
+    QualificationWorkload, ReplicaHost, ReplicaLimits, SessionId, SqlWorkerPool, TenantId,
 };
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -970,6 +971,30 @@ impl CellNode {
         ApplicationHandle::new(client, Arc::clone(&self.application), tenant, application)
     }
 
+    /// Runs a deterministic qualification workload while this node is ready.
+    ///
+    /// The typed executor remains responsible for primitive requests and
+    /// verification. The host only admits a run while serving and rejects a
+    /// result if shutdown or a supervisor failure removed readiness during the
+    /// run, so callers cannot retain evidence from a draining node.
+    pub async fn run_qualification<E>(
+        &self,
+        workload: &QualificationWorkload,
+        executor: &mut E,
+    ) -> crab_cell_runtime::Result<QualificationRunSummary>
+    where
+        E: QualificationOperationExecutor,
+    {
+        if !self.is_ready() {
+            return Err(Error::CellDraining);
+        }
+        let summary = workload.run_with_case_coverage(executor).await?;
+        if !self.is_ready() {
+            return Err(Error::CellDraining);
+        }
+        Ok(summary)
+    }
+
     /// Stops admission, drains the runtime, and waits for its dispatcher.
     pub async fn drain(&self) -> crab_cell_runtime::Result<()> {
         self.drain_until(None).await
@@ -1223,7 +1248,9 @@ mod tests {
     use super::*;
     use crab_cell_runtime::{
         BuildDescriptor, CatalogRole, CellModule, Digest, ModuleDescriptor, NamespaceDescriptor,
-        NodeLeaseGuard, RegistryBuilder,
+        NodeLeaseGuard, QualificationExecution, QualificationOperation,
+        QualificationOperationExecutor, QualificationProfile, QualificationWorkload,
+        RegistryBuilder,
     };
 
     struct Module;
@@ -1314,6 +1341,41 @@ mod tests {
             Err(error) => error,
         };
         assert!(matches!(error, Error::Control(_)));
+    }
+
+    struct QualificationStub;
+
+    impl QualificationOperationExecutor for QualificationStub {
+        type Future<'a> = std::future::Ready<crab_cell_runtime::Result<QualificationExecution>>;
+
+        fn execute<'a>(&'a mut self, operation: QualificationOperation) -> Self::Future<'a> {
+            std::future::ready(Ok(
+                QualificationExecution::acknowledged(true).with_case(operation.case())
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn qualification_rejects_a_node_before_readiness() {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([32; 16]))
+            .build()
+            .unwrap();
+        let workload = QualificationWorkload::generate_with_size(
+            &QualificationProfile::pr_contract(),
+            41,
+            1,
+            56,
+            1,
+        )
+        .unwrap();
+        let error = node
+            .run_qualification(&workload, &mut QualificationStub)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::CellDraining));
     }
 
     struct NoopNodeDurabilityProvider;
