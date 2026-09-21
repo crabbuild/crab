@@ -218,9 +218,7 @@ fn canonical_audit_reference(path: &str) -> Option<String> {
     let marker = format!("{MEMBERSHIP_AUDIT_RELATIVE_PREFIX}/");
     let suffix = path.rsplit_once(&marker)?.1;
     let file = suffix.strip_suffix(".json")?;
-    let Some((version, id)) = file.split_once('-') else {
-        return None;
-    };
+    let (version, id) = file.split_once('-')?;
     if !version.parse::<u64>().is_ok_and(|value| value > 0) || Uuid::parse_str(id).is_err() {
         return None;
     }
