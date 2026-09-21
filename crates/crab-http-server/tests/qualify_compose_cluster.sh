@@ -470,11 +470,11 @@ if ! $log_ready; then
 fi
 
 for origin in "$node_a_origin" "$node_c_origin" "$cluster_origin"; do
-  curl --fail --silent --show-error \
-    "${origin}/${repository_path}/issues?state=all" \
-    | jq --exit-status \
-      '.items | length == 1 and .[0].title == "Owner loss qualification"' \
-      >/dev/null
+  assert_json_eventually \
+    "$origin" \
+    "${repository_path}/issues?state=all" \
+    '.items | length == 1 and .[0].title == "Owner loss qualification"' \
+    "${origin} did not expose the initial owner write."
 done
 
 deny_cell_objects='{"Version":"2012-10-17","Statement":[{"Sid":"DenyCellImmutableObjectWrites","Effect":"Deny","Principal":"*","Action":"s3:PutObject","Resource":"arn:aws:s3:::crab-http-server/repositories/cells/v1/apps/*/cells/*/inc/*/objects/*"}]}'
