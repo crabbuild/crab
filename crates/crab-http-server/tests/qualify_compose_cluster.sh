@@ -103,9 +103,26 @@ resume_service() {
 
 remove_stopped_service() {
   local service="$1"
-  # Node services use `service:server`; `--stop` would kill that namespace
-  # provider while removing a dependent node and make rejoin impossible.
-  "${compose[@]}" rm --force "$service" >/dev/null
+  local container
+  container="$("${compose[@]}" ps --all --quiet "$service")"
+  if [ -z "$container" ]; then
+    echo "${service} did not have a removable container." >&2
+    return 1
+  fi
+  # Node services use `service:server`; targeting the exact container avoids
+  # Compose treating the shared namespace provider as part of node removal.
+  docker rm --force "$container" >/dev/null
+}
+
+kill_service() {
+  local service="$1"
+  local container
+  container="$("${compose[@]}" ps --all --quiet "$service")"
+  if [ -z "$container" ]; then
+    echo "${service} did not have a container to kill." >&2
+    return 1
+  fi
+  docker kill --signal KILL "$container" >/dev/null
 }
 trap cleanup EXIT
 
@@ -520,7 +537,7 @@ if ! $a_advertisement_expired; then
   exit 1
 fi
 owner_killed_ms="$(unix_millis)"
-"${compose[@]}" kill --signal KILL server-b >/dev/null
+kill_service server-b
 remove_stopped_service server-b
 "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
   --endpoint-url http://rustfs:9000 s3api delete-bucket-policy \
@@ -829,7 +846,7 @@ jq --exit-status \
   <<<"$node_before_second_loss" >/dev/null
 
 second_owner_killed_ms="$(unix_millis)"
-"${compose[@]}" kill --signal KILL server-c >/dev/null
+kill_service server-c
 remove_stopped_service server-c
 "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
   --endpoint-url http://rustfs:9000 s3api delete-bucket-policy \
@@ -959,7 +976,7 @@ stop_fallback_member() {
       freeze_service server
       ;;
     server-c|server-d)
-      "${compose[@]}" kill --signal KILL "$1" >/dev/null
+      kill_service "$1"
       remove_stopped_service "$1"
       ;;
     *)
@@ -1067,7 +1084,7 @@ done
 
 fallback_origin="$(service_origin "$fallback_candidate_service")"
 fallback_owner_killed_ms="$(unix_millis)"
-"${compose[@]}" kill --signal KILL server-b >/dev/null
+kill_service server-b
 remove_stopped_service server-b
 "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
   --endpoint-url http://rustfs:9000 s3api delete-bucket-policy \
