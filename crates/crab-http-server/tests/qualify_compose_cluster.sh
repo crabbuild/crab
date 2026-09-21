@@ -660,6 +660,16 @@ for _ in $(seq 1 90); do
 done
 if ! $rejoin_ready; then
   echo "Node B did not publish the recovered serving status after rejoining." >&2
+  echo "Node B rejoin control:" >&2
+  "${compose[@]} exec -T server-b crab-http-server \
+    --config /etc/crab/server.toml cells status --owner demo --name hello >&2 || true
+  echo "Node B rejoin node status:" >&2
+  "${compose[@]} exec -T server-b crab-http-server \
+    --config /etc/crab/server.toml cells node --json >&2 || true
+  echo "Node B rejoin log:" >&2
+  "${compose[@]} logs --no-color server-b >&2 || true
+  echo "Node C owner log:" >&2
+  "${compose[@]} logs --no-color server-c >&2 || true
   exit 1
 fi
 if ! assert_json_eventually \
