@@ -63,7 +63,7 @@ struct ClusterWorkEvidence {
     fallback: WorkCycle,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WorkCycle {
     candidate_count: u64,
@@ -81,7 +81,7 @@ struct WorkCycle {
     phases: RecoveryPhaseEvidence,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RecoveryPhaseEvidence {
     claim: RecoveryPhaseTiming,
@@ -354,28 +354,34 @@ fn member_nodes(object: &Map<String, Value>) -> Result<Vec<&str>> {
 }
 
 fn validate_work(work: &ClusterWorkEvidence) -> Result<()> {
-    validate_work_cycle(&work.owner_loss)?;
-    validate_work_cycle(&work.second_owner_loss)?;
-    validate_work_cycle(&work.fallback)
+    validate_work_cycle(&work.owner_loss, false)?;
+    validate_work_cycle(&work.second_owner_loss, false)?;
+    validate_work_cycle(&work.fallback, true)
 }
 
-fn validate_work_cycle(work: &WorkCycle) -> Result<()> {
+fn validate_work_cycle(work: &WorkCycle, allow_object_only: bool) -> Result<()> {
     for value in [
         work.candidate_count,
         work.affected_cells,
         work.catalog_shards,
         work.catalog_pages,
         work.control_reads,
-        work.follower_pages,
-        work.follower_frames,
-        work.follower_bytes,
-        work.peer_requests,
         work.bundle_bytes,
         work.object_reads,
         work.object_writes,
     ] {
         if value == 0 || value > MAX_CLUSTER_WORK_VALUE {
             return Err(Error::Control("cluster recovery work counter"));
+        }
+    }
+    for value in [
+        work.follower_pages,
+        work.follower_frames,
+        work.follower_bytes,
+        work.peer_requests,
+    ] {
+        if value > MAX_CLUSTER_WORK_VALUE || (!allow_object_only && value == 0) {
+            return Err(Error::Control("cluster recovery follower work counter"));
         }
     }
     let phases = [
@@ -919,7 +925,15 @@ mod tests {
                 seal: phase,
             },
         };
-        assert!(validate_work_cycle(&valid).is_ok());
+        assert!(validate_work_cycle(&valid, false).is_ok());
+        let object_only = WorkCycle {
+            follower_pages: 0,
+            follower_frames: 0,
+            follower_bytes: 0,
+            peer_requests: 0,
+            ..valid.clone()
+        };
+        assert!(validate_work_cycle(&object_only, true).is_ok());
 
         let invalid = WorkCycle {
             phases: RecoveryPhaseEvidence {
@@ -931,7 +945,7 @@ mod tests {
             },
             ..valid
         };
-        assert!(validate_work_cycle(&invalid).is_err());
+        assert!(validate_work_cycle(&invalid, false).is_err());
     }
 
     #[test]
