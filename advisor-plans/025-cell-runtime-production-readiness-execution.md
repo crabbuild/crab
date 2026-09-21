@@ -68,9 +68,9 @@ checks. The 15-bit isolated RustFS run passed in 140 seconds after Workflow and
 Effects duplicate replay checks were added. The expiry wait remains outside
 profile timing. An earlier
 run with the TTL wait inside one operation failed the unchanged 5-second PR
-latency threshold. Scheduled retry, cancellation, owner-loss, recovery, and
-independently checked successor evidence remain open for every primitive;
-expiry still needs a separate case artifact tied to the scheduled operation.
+latency threshold. Scheduled lifecycle cases and independently checked
+protected evidence remain open for every primitive; expiry still needs a
+separate case artifact tied to the scheduled operation.
 The public Activity capability runs claims and completions inside
 `ActivitySupervisor`; it does not expose the completion identity needed to
 replay one exact activity attempt. A second idle supervisor poll or duplicate
@@ -92,11 +92,24 @@ and isolated RustFS storage on 2026-09-21 and drained runtime reservations.
 The complete seven-case RustFS target also passed concurrently against one
 fresh bucket with distinct per-test roots.
 They do not replay committed commands or claim retry case bits. Their observers
-share a process with the owner, so the protected three-process fault and
-successor checks remain open. The RustFS fixture now adds a per-process sequence
+share a process with the owner. The RustFS fixture now adds a per-process sequence
 to each root so parallel cases cannot reuse a prefix. A five-case concurrent
 run passed after this change; a prior run had one `Fenced` SQL bootstrap and
 conditional-write conflicts, while a serial diagnostic passed all five.
+
+`public_cell_retry.rs` now drops the first signed mutation request before
+dispatch for SQL, KV, Blob completion, Queue send, Cron upsert, Workflow start,
+and Effect acknowledgement. Each caller receives `PendingMutation`, resolves
+`Absent`, retries the same identity once, and checks one dispatched mutation
+and exact state through a separate typed client. Queue and Effects also check
+final settlement; every node drains to zero reservations. All seven cases
+passed together on in-memory and fresh isolated RustFS storage on 2026-09-21.
+The sibling response-loss cases were rerun on the same fresh RustFS bucket and
+also passed. Activity retry remains open: `ActivitySupervisor` owns the claim
+and completion identities and does not expose a way to retry a pending exact
+completion through its public capability. These tests share a process with
+their observer and are not scheduled matrix cases or protected provider
+evidence, so they do not set retry case bits.
 
 A separate `public_cell_takeover.rs` test now uses a fresh successor `CellNode` and
 empty local directory against the same object store. It checks the exact
@@ -107,9 +120,10 @@ Effect, then checks their final state and leases. Stale source writes are
 rejected for every owned Cell and both nodes drain to zero reservations. The
 in-memory and isolated-RustFS versions passed on 2026-09-21. This is a
 test-controlled session fence while the source process remains alive; it is
-not a protected owner-kill or a scheduled qualification case. Every primitive
-still needs a dedicated fault boundary, independent process observer, and raw
-artifact before its owner-loss/recovery case bit can be claimed.
+not a protected owner-kill or a scheduled qualification case. The process
+fault test below exercises an independent successor, but raw artifacts and
+protected provider evidence remain necessary before owner-loss/recovery case
+bits can be claimed.
 
 `public_cell_process_fault.rs` now kills a separate owner process on isolated
 RustFS after acknowledged SQL, KV, Blob, Queue, Cron, and Workflow writes,
@@ -387,7 +401,7 @@ Run each Cargo command with a checkout-specific target directory under
 | --- | --- | --- |
 | Application contract | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-app RUSTC_WRAPPER= cargo test -p crab-cell-app --locked` | all unit and reference-application tests pass |
 | Host ownership | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-host RUSTC_WRAPPER= cargo test -p crab-cell-host --locked` | lifecycle/facility tests pass with no leaked tasks |
-| Public typed primitive host | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-public-host RUSTC_WRAPPER= cargo test -p crab-http-server --test public_cell_host_application --test public_cell_qualification --test public_cell_response_loss --test public_cell_takeover --test public_cell_process_fault --locked` | typed smoke, response-loss reconciliation, fresh-successor takeover, and process harness tests pass; ignored RustFS cases require the isolated provider job |
+| Public typed primitive host | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-public-host RUSTC_WRAPPER= cargo test -p crab-http-server --test public_cell_host_application --test public_cell_qualification --test public_cell_response_loss --test public_cell_retry --test public_cell_takeover --test public_cell_process_fault --locked` | typed smoke, response-loss reconciliation, absent-request retries, fresh-successor takeover, and process harness tests pass; ignored RustFS cases require the isolated provider job |
 | Runtime regression | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-runtime RUSTC_WRAPPER= cargo test -p crab-cell-runtime --locked` | all runtime tests pass; ignored provider tests are reported, not fabricated |
 | Server composition | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-server RUSTC_WRAPPER= cargo test -p crab-http-server --lib --locked` | server library tests pass |
 | Strict lint | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-quality RUSTC_WRAPPER= cargo clippy -p crab-cell-app -p crab-cell-host -p crab-cell-runtime --all-targets --locked -- -D warnings` | exit 0 |

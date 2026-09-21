@@ -44,13 +44,15 @@ impl PeerAuthorizer for QualificationAuthorizer {
     }
 }
 
-struct LostMutationResponse {
+struct FaultyMutationRoundTrip {
     verifier: Arc<PeerVerifier>,
     dispatcher: Arc<PeerDispatcher>,
     dropped: Arc<AtomicUsize>,
+    dispatched: Arc<AtomicUsize>,
+    drop_before_dispatch: bool,
 }
 
-impl PeerRoundTrip for LostMutationResponse {
+impl PeerRoundTrip for FaultyMutationRoundTrip {
     fn send(
         &self,
         target: CellTarget,
@@ -60,6 +62,8 @@ impl PeerRoundTrip for LostMutationResponse {
         let verifier = Arc::clone(&self.verifier);
         let dispatcher = Arc::clone(&self.dispatcher);
         let dropped = Arc::clone(&self.dropped);
+        let dispatched = Arc::clone(&self.dispatched);
+        let drop_before_dispatch = self.drop_before_dispatch;
         Box::pin(async move {
             let now_ms = i64::try_from(
                 SystemTime::now()
@@ -72,12 +76,24 @@ impl PeerRoundTrip for LostMutationResponse {
             if verified.target() != &target {
                 return Err(Error::Peer("qualification peer target differs"));
             }
+            let mutation = verified.operation_tag() == 10;
+            let first_loss = || {
+                mutation
+                    && dropped
+                        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+            };
+            if drop_before_dispatch && first_loss() {
+                return Err(Error::PeerTransportUnknown {
+                    context: "qualification request lost before dispatch",
+                    source: Box::new(Error::RuntimeClosed),
+                });
+            }
             let reply = dispatcher.dispatch_bytes(&verified, now_ms).await?;
-            if verified.operation_tag() == 10
-                && dropped
-                    .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-            {
+            if mutation {
+                dispatched.fetch_add(1, Ordering::AcqRel);
+            }
+            if !drop_before_dispatch && first_loss() {
                 return Err(Error::PeerTransportUnknown {
                     context: "qualification response lost after dispatch",
                     source: Box::new(Error::RuntimeClosed),
@@ -88,10 +104,11 @@ impl PeerRoundTrip for LostMutationResponse {
     }
 }
 
-pub fn peer_client_with_one_lost_mutation_response(
+pub fn peer_client_with_one_lost_mutation(
     registry: Arc<Registry>,
     handles: Vec<CellHandle>,
-) -> (CellClient, Arc<AtomicUsize>) {
+    drop_before_dispatch: bool,
+) -> (CellClient, Arc<AtomicUsize>, Arc<AtomicUsize>) {
     let session = SessionId::from_bytes([96; 16]);
     let release = Digest::from_bytes([97; 32]);
     let signer = Arc::new(PeerSigner::new(
@@ -107,7 +124,8 @@ pub fn peer_client_with_one_lost_mutation_response(
             .collect(),
     ));
     let dropped = Arc::new(AtomicUsize::new(0));
-    let round_trip = LostMutationResponse {
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    let round_trip = FaultyMutationRoundTrip {
         verifier: Arc::new(verifier),
         dispatcher: Arc::new(PeerDispatcher::new(
             Arc::clone(&registry),
@@ -115,6 +133,8 @@ pub fn peer_client_with_one_lost_mutation_response(
             Arc::new(QualificationAuthorizer),
         )),
         dropped: Arc::clone(&dropped),
+        dispatched: Arc::clone(&dispatched),
+        drop_before_dispatch,
     };
     let client = CellClient::peer(
         registry,
@@ -126,5 +146,5 @@ pub fn peer_client_with_one_lost_mutation_response(
         },
         Arc::new(round_trip),
     );
-    (client, dropped)
+    (client, dropped, dispatched)
 }
