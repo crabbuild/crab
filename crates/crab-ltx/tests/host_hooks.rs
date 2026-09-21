@@ -472,6 +472,45 @@ async fn prepare_opens_captured_segments_concurrently() {
 }
 
 #[cfg(feature = "replica")]
+#[tokio::test(start_paused = true)]
+async fn compaction_overlaps_index_and_body_downloads() {
+    let (_directory, _faults, _host, mut writer) = fixture();
+    let captured = writer.capture().unwrap();
+    let delay = Duration::from_millis(100);
+    let backend = InMemory::new();
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(ThrottledStore::new(
+                backend,
+                ThrottleConfig {
+                    wait_get_per_call: delay,
+                    ..ThrottleConfig::default()
+                },
+            ))),
+            ObjectPath::from("parallel-compaction-downloads"),
+            [84; 16],
+        ),
+        [85; 32],
+        [86; 16],
+        Limits::default(),
+    )
+    .unwrap();
+    let root = replica.prepare(None, &captured, 1, 1).await.unwrap().root();
+    let scratch = tempfile::TempDir::new().unwrap();
+    let started = tokio::time::Instant::now();
+
+    replica
+        .prepare_compaction(&root, 0..1, 9, scratch.path())
+        .await
+        .unwrap();
+
+    // Root and segment metadata need two ordered reads. The independent index
+    // and LTX body downloads then share one provider-latency interval.
+    assert_eq!(started.elapsed(), delay * 3);
+    writer.close().unwrap();
+}
+
+#[cfg(feature = "replica")]
 #[tokio::test(flavor = "multi_thread")]
 async fn cell_prepare_needs_no_scratch_or_local_durability_barrier() {
     let (_directory, faults, host, mut writer) = fixture();

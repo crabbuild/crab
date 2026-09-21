@@ -44,9 +44,12 @@ pub(super) async fn prepare(
     let compacted_ltx = scratch.create("compacted-ltx")?;
     let codec_index = scratch.create("codec-index")?;
     let compacted_index = scratch.create("compacted-index")?;
-    let spooled = spool_indexes(replica, &graph.descriptors, &original_indexes).await?;
+    let (spooled, body_inputs) = futures_util::future::try_join(
+        spool_indexes(replica, &graph.descriptors, &original_indexes),
+        spool_selected_bodies(replica, selected, &original_bodies),
+    )
+    .await?;
     let selected_inputs = spooled[range.clone()].to_vec();
-    let body_inputs = spool_selected_bodies(replica, &selected_inputs, &original_bodies).await?;
     let artifacts = write_compacted(
         replica,
         &selected_inputs,
@@ -134,14 +137,13 @@ pub(super) async fn prepare(
 
 async fn spool_selected_bodies(
     replica: &CellReplica,
-    inputs: &[SpoolInput],
+    descriptors: &[SegmentDescriptor],
     destination: &Path,
 ) -> Result<Vec<BodySpoolInput>> {
     let mut file = replica.host.filesystem.open_rw(destination)?;
-    let mut spooled = Vec::with_capacity(inputs.len());
+    let mut spooled = Vec::with_capacity(descriptors.len());
     let mut destination_offset = 0_u64;
-    for input in inputs {
-        let descriptor = &input.descriptor;
+    for descriptor in descriptors {
         let start = descriptor.offset();
         let end = start
             .checked_add(descriptor.info.size_bytes)
