@@ -407,10 +407,10 @@ jobs:
               echo "::error::The checked-out source is missing the tracked $profile_name qualification profile."
               exit 1
             }
-            test ! -L "$matrix" && test ! -L "$profile" || {
+            if [[ -L "$matrix" || -L "$profile" ]]; then
               echo "::error::Protected qualification evidence must not contain symlinks."
               exit 1
-            }
+            fi
             cmp -- "$profile" "$tracked_profile" || {
               echo "::error::Protected $profile_name profile does not match the exact tagged source."
               exit 1

@@ -8,6 +8,7 @@ on:
       - "crates/crab-cell-host/**"
       - "crates/crab-http-server/**"
       - "crates/crab-ltx/**"
+      - "packages/ui/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "crab/scripts/check-architecture-gates.py"
@@ -23,6 +24,7 @@ on:
       - "crates/crab-cell-host/**"
       - "crates/crab-http-server/**"
       - "crates/crab-ltx/**"
+      - "packages/ui/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "crab/scripts/check-architecture-gates.py"
@@ -44,6 +46,12 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: packages/ui/package-lock.json
+      - name: Build embedded repository frontend
+        run: |
+          npm ci --prefix packages/ui
+          npm run build --prefix packages/ui
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: stable
