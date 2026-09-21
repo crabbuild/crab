@@ -92,7 +92,7 @@ impl LayeredVisibilitySnapshot {
             "layered visibility catalog digest",
             "capsule-protocol layered checkpoint",
         )?;
-        let (objects, refs, transitions, incremental_history) = index.ordinal_parts()?;
+        let (objects, _, refs, transitions, incremental_history) = index.ordinal_parts()?;
         let snapshot = Self {
             catalog_digest: catalog_digest.to_owned(),
             objects,
@@ -116,12 +116,13 @@ impl LayeredVisibilitySnapshot {
             "layered visibility catalog digest",
             "capsule-protocol layered checkpoint",
         )?;
-        let (objects, refs, transitions, incremental_history) = index.ordinal_parts()?;
+        let (objects, remap, refs, transitions, incremental_history) = index.ordinal_parts()?;
         if member_admission.len() != objects.len() {
             return Err(contract_error(
                 "layered visibility member admission count does not match its dictionary",
             ));
         }
+        let member_admission = remap_member_admission(member_admission, &remap)?;
         let snapshot = Self {
             catalog_digest: catalog_digest.to_owned(),
             objects,
@@ -341,6 +342,36 @@ impl LayeredVisibilitySnapshot {
         )?;
         Ok(())
     }
+}
+
+fn remap_member_admission(
+    member_admission: Vec<LayeredObjectMember>,
+    remap: &[u32],
+) -> Result<Vec<LayeredObjectMember>> {
+    if member_admission.len() != remap.len() {
+        return Err(contract_error(
+            "layered visibility member admission count does not match its dictionary",
+        ));
+    }
+    let mut canonical = vec![None; remap.len()];
+    for (original, member) in member_admission.into_iter().enumerate() {
+        let canonical_position = usize::try_from(remap[original])
+            .map_err(|_| contract_error("layered visibility ordinal remap overflows"))?;
+        let slot = canonical
+            .get_mut(canonical_position)
+            .ok_or_else(|| contract_error("layered visibility ordinal remap is invalid"))?;
+        if slot.replace(member).is_some() {
+            return Err(contract_error(
+                "layered visibility ordinal remap repeats a position",
+            ));
+        }
+    }
+    canonical
+        .into_iter()
+        .map(|member| {
+            member.ok_or_else(|| contract_error("layered visibility ordinal remap is incomplete"))
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -2063,6 +2094,52 @@ mod tests {
             Some(expected_digest.as_str())
         );
         assert_eq!(control.cold_clone_object_count(), Some(1));
+    }
+
+    #[test]
+    fn ordinal_visibility_member_admission_follows_dictionary_remap() {
+        let object_b = "b".repeat(40);
+        let object_a = "a".repeat(40);
+        let object_c = "c".repeat(40);
+        let mut index = GitVisibilityIndex::new(
+            1,
+            "1".repeat(64),
+            "2".repeat(64),
+            BTreeMap::from([("refs/heads/main".to_owned(), vec![object_b.clone()])]),
+        )
+        .unwrap();
+        index
+            .apply_ref_edit(
+                "refs/heads/main".to_owned(),
+                &crate::git_visibility::GitVisibilityEdit::from_delta_objects(
+                    Some(object_b),
+                    object_c.clone(),
+                    vec![object_a, object_c],
+                    Vec::new(),
+                ),
+            )
+            .unwrap();
+
+        let first = LayeredObjectMember::new(0, 0);
+        let second = LayeredObjectMember::new(0, 1);
+        let third = LayeredObjectMember::new(0, 2);
+        let snapshot = LayeredVisibilitySnapshot::from_index_with_member_admission(
+            &index,
+            &"3".repeat(64),
+            vec![first, second, third],
+        )
+        .unwrap();
+        assert!(
+            snapshot
+                .objects()
+                .windows(2)
+                .all(|window| window[0] < window[1])
+        );
+        assert_eq!(
+            snapshot.member_admission(),
+            Some([second, first, third].as_slice())
+        );
+        LayeredVisibilitySnapshot::decode(&snapshot.encode().unwrap()).unwrap();
     }
 
     #[test]

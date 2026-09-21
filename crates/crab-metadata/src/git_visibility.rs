@@ -1327,6 +1327,7 @@ impl GitVisibilityIndex {
         &self,
     ) -> Result<(
         Vec<GitVisibilityOid>,
+        Vec<u32>,
         BTreeMap<String, Vec<u32>>,
         BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
         BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
@@ -1353,7 +1354,7 @@ impl GitVisibilityIndex {
             ordinal_transitions(&self.incremental_history, &self.positions)?,
             &remap,
         )?;
-        Ok((objects, refs, transitions, incremental_history))
+        Ok((objects, remap, refs, transitions, incremental_history))
     }
 
     /// Restore a validated visibility index from an ordinal proof.
@@ -4301,7 +4302,7 @@ mod tests {
         )
         .expect("unsorted in-memory dictionary is valid");
 
-        let (canonical, refs, transitions, history) = index
+        let (canonical, remap, refs, transitions, history) = index
             .ordinal_parts()
             .expect("ordinal projection canonicalizes the dictionary");
         assert_eq!(
@@ -4312,6 +4313,7 @@ mod tests {
                 decode_oid(&"c".repeat(40)).expect("valid object"),
             ]
         );
+        assert_eq!(remap, vec![1, 0, 2]);
         assert_eq!(refs["refs/heads/main"], vec![0, 1, 2]);
         let transition = &transitions["refs/heads/main"][0];
         assert_eq!(transition.from_ordinal, 1);
