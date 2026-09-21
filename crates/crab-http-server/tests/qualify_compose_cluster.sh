@@ -667,12 +667,12 @@ for _ in $(seq 1 6); do
     "Cluster proxy did not expose the recovered label."
 done
 
-continued="$(post_json_eventually \
+post_json_eventually \
   "$node_c_origin" \
   "${repository_path}/issues" \
   '{"request_id":"00000000-0000-4000-8000-000000000103","title":"Recovered owner","body":"Published by node C"}' \
   '.number == 2 and .title == "Recovered owner"' \
-  'Node C did not accept the recovered-owner issue.')"
+  'Node C did not accept the recovered-owner issue.' >/dev/null
 
 control_continued="$("${compose[@]}" exec -T server-c crab-http-server \
   --config /etc/crab/server.toml cells status --owner demo --name hello)"
