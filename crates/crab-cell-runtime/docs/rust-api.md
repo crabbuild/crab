@@ -66,6 +66,7 @@ The registry rejects:
 - Noncontiguous schema migration coverage
 - Incorrect migration digests
 - Narrowed codec ranges or byte limits
+- Commands whose module does not own the target namespace
 - Undeclared effect targets
 - Queue dead-letter cycles
 - Missing workflow definitions or activity bindings
