@@ -40,9 +40,10 @@ sought the requested page. The implementation now builds a bounded derived
 index and revalidates only the selected records, while retaining the original
 scan as the authoritative rebuild path.
 
-The current failover design explicitly lists seek-only indexed reads as the
-large-tail performance gap. Chunk bytes plus seal watermark remain the durable
-local evidence; the index should only accelerate access to them.
+The failover design now records indexed seek-only reads as implemented. Chunk
+bytes plus the seal watermark remain the durable local evidence; the index only
+accelerates access to them and protected large-tail evidence is still required
+before claiming a production scaling result.
 
 The repeated work is explicit in `crates/crab-cell-runtime/src/follower.rs`:
 
@@ -53,7 +54,9 @@ for (sequence, record) in retained.range(first_sequence..) {
 }
 ```
 
-That function runs for every `read_tail_page` call today.
+That scan runs only when a lane index is first built or must be rebuilt. Later
+`read_tail_page` calls select a bounded range and reread only the selected
+headers and bodies.
 
 ## Target contract
 
