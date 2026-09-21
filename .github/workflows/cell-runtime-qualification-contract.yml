@@ -59,14 +59,14 @@ jobs:
           set -euo pipefail
           grep -F 'image_ref:' .github/workflows/http-server-container.yml
           grep -F 'image_digest:' .github/workflows/http-server-container.yml
-          grep -F 'docker pull "$INPUT_IMAGE_REF"' .github/workflows/http-server-container.yml
+          grep -F "docker pull \"\$INPUT_IMAGE_REF\"" .github/workflows/http-server-container.yml
           grep -F 'needs.candidate.outputs.image_ref' \
             .github/workflows/http-server-release.yml
           grep -F 'needs.candidate.outputs.image_digest' \
             .github/workflows/http-server-release.yml
           grep -F 'needs: [prepare, candidate]' .github/workflows/http-server-release.yml
           grep -F 'docker buildx imagetools create' .github/workflows/http-server-release.yml
-          grep -F 'test "$(cat "$evidence_dir/image-digest")" = "$IMAGE_DIGEST"' \
+          grep -F "test \"\$(cat \"\$evidence_dir/image-digest\")\" = \"\$IMAGE_DIGEST\"" \
             .github/workflows/http-server-release.yml
           if grep -F 'Build and publish the image' .github/workflows/http-server-release.yml; then
             echo "release workflow must not rebuild after qualification" >&2
