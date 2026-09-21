@@ -53,7 +53,11 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      disable: true
+      test: ["CMD", "/usr/bin/test", "-x", "/usr/bin/sleep"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 1s
     tmpfs:
       - /var/lib/crab/tmp:rw,noexec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0700
     restart: "no"
