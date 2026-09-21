@@ -112,18 +112,22 @@ still needs a dedicated fault boundary, independent process observer, and raw
 artifact before its owner-loss/recovery case bit can be claimed.
 
 `public_cell_process_fault.rs` now kills a separate owner process on isolated
-RustFS after acknowledged SQL, KV, Blob, and Queue writes, then starts a
-successor process with an empty local directory. The successor checks exact
-SQL bytes, KV bytes and version, Blob bytes/ETag/size, each acknowledged
-commit sequence, exact restored roots, and higher owner epochs. It claims the
-one recovered Queue message by ID and payload, acknowledges it, confirms zero
-ready or leased messages, and drains runtime reservations to zero. A second
-boundary kills the owner before all four writes; the successor checks their
-values or queued work are absent. Both concurrent RustFS cases passed on
-2026-09-21. The test uses a test-controlled session fence and covers only
-these four primitives. It is not a scheduled qualification case, protected
-three-process provider run, or evidence for Cron, Workflow, Activity, or
-Effects; it does not set matrix case bits.
+RustFS after acknowledged SQL, KV, Blob, Queue, Cron, and Workflow writes,
+plus acknowledged Workflow starts that schedule Activity and Effect work.
+The successor starts with an empty local directory and checks exact SQL bytes,
+KV bytes/version, Blob bytes/ETag/size, Queue message ID/payload, Cron
+generation/due time, completed Workflow result/event sequence, each source
+commit sequence, exact restored roots, and higher owner epochs. It claims and
+acknowledges the Queue message, completes the pending Activity, delivers the
+Effect lease, checks both are no longer claimable, and drains runtime
+reservations to zero. A second boundary kills the owner before those writes;
+the successor checks all six values/schedules and both pending work items are
+absent. Both concurrent RustFS cases passed after the test was split into
+owner and successor roles on 2026-09-21. The test uses a test-controlled
+session fence. It is not a scheduled qualification case or protected
+three-process provider run, and it does not set matrix case bits. Activity
+completion and Effect delivery happen after takeover; their pre-kill
+acknowledgements cover scheduling, not settlement.
 
 Implement one fault-capable executor through `CellNode` and typed
 `ApplicationHandle` capabilities. Each operation writes a unique, bounded
