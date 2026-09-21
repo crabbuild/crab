@@ -13,6 +13,7 @@ use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 
 use crate::{CaptureBatch, CrabError, Host, Limits, Position, Result};
 
+mod cache;
 mod compaction;
 mod directory;
 mod restore;
@@ -1121,17 +1122,15 @@ impl CellReplica {
             }
             directory
         };
-        self.put_objects(
+        let directory_uploads = self.put_objects(
             CellObjectKind::Directory,
             directory
                 .objects()
                 .iter()
                 .map(|node| (node.digest, node.bytes.clone()))
                 .collect(),
-        )
-        .await?;
-
-        self.finish_root(
+        );
+        let root_uploads = self.finish_root(
             base,
             descriptors,
             target,
@@ -1140,8 +1139,11 @@ impl CellReplica {
             page_size,
             database_pages,
             directory,
-        )
-        .await
+        );
+        // Both object sets are immutable; no proposal escapes unless every
+        // upload succeeds, and a failed sibling leaves only unreachable data.
+        let (_, prepared) = futures_util::future::try_join(directory_uploads, root_uploads).await?;
+        Ok(prepared)
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -1236,6 +1238,11 @@ impl CellReplica {
     }
 
     /// Reopens and verifies an exact immutable root and its metadata graph.
+    ///
+    /// A same-store authenticated metadata cache may avoid body reads, while
+    /// origin HEADs check cached metadata presence. Use
+    /// [`Self::reachable_objects`] to authenticate current remote bytes and
+    /// inventory every dependency.
     pub async fn open_root(&self, root: &RootRef) -> Result<VerifiedRoot> {
         let graph = self.load_graph(root).await?;
         VerifiedRoot::from_graph(self.clone(), *root, &graph.document, graph.descriptors)
@@ -1246,7 +1253,8 @@ impl CellReplica {
     /// Callers may use this bounded inventory for backup pinning and reachability
     /// collection. A missing or corrupt dependency fails the traversal closed.
     pub async fn reachable_objects(&self, root: &RootRef) -> Result<Vec<RootObjectRef>> {
-        let graph = self.load_graph(root).await?;
+        // Inventory must prove origin presence even for metadata uploaded here.
+        let graph = self.load_graph_with_cache(root, false).await?;
         let extents = object_extents(&graph.descriptors)?;
         let verification = directory::Verification {
             layout: &self.layout,
@@ -1377,17 +1385,21 @@ impl CellReplica {
     }
 
     async fn load_graph(&self, root: &RootRef) -> Result<LoadedGraph> {
+        self.load_graph_with_cache(root, true).await
+    }
+
+    async fn load_graph_with_cache(&self, root: &RootRef, use_cache: bool) -> Result<LoadedGraph> {
         let started = self.host.now_monotonic();
-        let result = self.load_graph_inner(root).await;
+        let result = self.load_graph_inner(root, use_cache).await;
         self.host
             .observe_ltx_phase(crate::LtxPhase::RootOpen, started, result.is_ok());
         result
     }
 
-    async fn load_graph_inner(&self, root: &RootRef) -> Result<LoadedGraph> {
+    async fn load_graph_inner(&self, root: &RootRef, use_cache: bool) -> Result<LoadedGraph> {
         self.check_scope(root)?;
-        let bytes = self
-            .read_object(&root.digest, CellObjectKind::Root, ROOT_BYTES)
+        let (bytes, cached_root) = self
+            .read_object(&root.digest, CellObjectKind::Root, ROOT_BYTES, use_cache)
             .await?;
         if *blake3::hash(&bytes).as_bytes() != root.digest {
             return Err(CrabError::ChecksumMismatch);
@@ -1404,14 +1416,14 @@ impl CellReplica {
         if document.segment_pages.is_empty() || document.segment_pages.len() > MAX_SEGMENT_PAGES {
             return Err(CrabError::LTXCorrupted);
         }
-        let pages: Vec<Vec<SegmentDescriptor>> = stream::iter(
+        let pages = stream::iter(
             document
                 .segment_pages
                 .iter()
                 .copied()
                 .map(|digest| async move {
-                    let bytes = self
-                        .read_object(&digest, CellObjectKind::Root, SEGMENT_PAGE_BYTES)
+                    let (bytes, cached) = self
+                        .read_object(&digest, CellObjectKind::Root, SEGMENT_PAGE_BYTES, use_cache)
                         .await?;
                     if *blake3::hash(&bytes).as_bytes() != digest {
                         return Err(CrabError::ChecksumMismatch);
@@ -1420,13 +1432,24 @@ impl CellReplica {
                     if page.is_empty() || page.len() > SEGMENTS_PER_PAGE {
                         return Err(CrabError::LTXCorrupted);
                     }
-                    Ok(page)
+                    Ok((page, cached.then_some((digest, bytes.len()))))
                 }),
         )
         .buffered(OBJECT_FETCH_CONCURRENCY)
-        .try_collect()
+        .try_collect::<Vec<_>>()
         .await?;
-        let descriptors = pages.into_iter().flatten().collect::<Vec<_>>();
+        let mut cached_metadata = Vec::new();
+        if cached_root {
+            cached_metadata.push((root.digest, bytes.len()));
+        }
+        let mut descriptors = Vec::new();
+        for (page, cached) in pages {
+            descriptors.extend(page);
+            cached_metadata.extend(cached);
+        }
+        // A cached predecessor cannot justify a new root if its metadata has
+        // disappeared from origin. Check all cached objects in one bounded wave.
+        self.verify_cached_metadata(&cached_metadata).await?;
         self.validate_chain(&descriptors, root.position)?;
         for descriptor in &descriptors {
             descriptor.validate_published(self.limits)?;
@@ -1535,13 +1558,14 @@ impl CellReplica {
             .layout
             .incarnation_object_path(&self.cell, &self.incarnation, digest, kind);
         self.layout.store().put(&path, bytes.clone()).await?;
-        if kind == CellObjectKind::Directory {
-            directory::cache_uploaded(
+        if matches!(kind, CellObjectKind::Root | CellObjectKind::Directory) {
+            cache::insert(
                 &self.layout,
                 &self.cell,
                 &self.incarnation,
                 *digest,
-                &bytes,
+                kind,
+                bytes.to_vec().into(),
             )?;
         }
         Ok(())
@@ -1645,7 +1669,20 @@ impl CellReplica {
         digest: &[u8; 32],
         kind: CellObjectKind,
         max_bytes: u64,
-    ) -> Result<Vec<u8>> {
+        use_cache: bool,
+    ) -> Result<(Vec<u8>, bool)> {
+        // Hot roots use the same immutable-cache contract as directory nodes;
+        // the inventory path bypasses it to detect missing remote objects.
+        if use_cache
+            && kind == CellObjectKind::Root
+            && let Some(bytes) =
+                cache::get(&self.layout, &self.cell, &self.incarnation, *digest, kind)?
+        {
+            if bytes.len() as u64 > max_bytes {
+                return Err(CrabError::LTXCorrupted);
+            }
+            return Ok((bytes.to_vec(), true));
+        }
         let _permit = self.host.io_permit().await?;
         let path = self
             .layout
@@ -1661,7 +1698,43 @@ impl CellReplica {
             result.as_ref().map_or(0, |(bytes, _)| bytes.len()),
         );
         let (bytes, _) = result?;
-        Ok(bytes.to_vec())
+        if kind == CellObjectKind::Root {
+            if *blake3::hash(&bytes).as_bytes() != *digest {
+                return Err(CrabError::ChecksumMismatch);
+            }
+            cache::insert(
+                &self.layout,
+                &self.cell,
+                &self.incarnation,
+                *digest,
+                kind,
+                bytes.to_vec().into(),
+            )?;
+        }
+        Ok((bytes.to_vec(), false))
+    }
+
+    async fn verify_cached_metadata(&self, objects: &[([u8; 32], usize)]) -> Result<()> {
+        stream::iter(objects.iter().copied().map(|(digest, size)| async move {
+            let _permit = self.host.io_permit().await?;
+            let path = self.layout.incarnation_object_path(
+                &self.cell,
+                &self.incarnation,
+                &digest,
+                CellObjectKind::Root,
+            );
+            let result = self.layout.store().head(&path).await;
+            self.host
+                .observe_ltx_origin_request(crate::LtxReadOrigin::Cold, result.is_ok(), 0);
+            if result?.size != size as u64 {
+                return Err(CrabError::LTXCorrupted);
+            }
+            Ok(())
+        }))
+        .buffer_unordered(OBJECT_FETCH_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+        Ok(())
     }
 }
 

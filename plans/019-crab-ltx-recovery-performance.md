@@ -1147,6 +1147,74 @@ machine and in-memory object store. This does not include provider-network
 latency, change local `Db::capture()` acknowledgement latency, or establish
 superiority over Celld's remote protocol.
 
+### Follow-up: reuse authenticated root metadata
+
+Every warm Cell append previously fetched its just-uploaded predecessor root
+document and segment page in series. Root objects now share the directory
+nodes' authenticated, store-isolated process-cache contract, with a separate
+8 MiB root-metadata cap. Successful digest-checked uploads seed the cache;
+cold reads verify the object digest before insertion. Keys include the Store
+identity, scoped object path, and digest, so an independent Store still takes
+the cold path. A warm root open checks every cached root metadata object's
+current presence and size using one bounded parallel HEAD wave before the
+metadata can support another proposal. A removed predecessor root therefore
+fails publication preparation. This presence check relies on the immutable
+object contract; it is not a fresh content read after an external overwrite.
+Backup reachability inventory bypasses metadata caches and continues to
+authenticate current origin bytes, including a deleted or corrupted root.
+
+A paused-clock test adding 100 ms per origin operation measures three
+intervals for a warm successor append: one parallel metadata HEAD wave and
+two immutable upload waves. The uncached predecessor path requires two
+serial GET intervals before those uploads, or four intervals in this model.
+The same-store four-segment compaction path drops from six to five 100 ms
+intervals. Cold-open tests still use independent Store identities and retain
+their remote request/concurrency checks. This is a modeled provider-latency
+tradeoff, not a measured Crab-versus-Celld result or a change to default local
+capture durability. Warm requests replace two small GETs with two parallel
+HEADs; real providers could have different per-request costs.
+
+An isolated release-mode A/B used identical temporary probes against merged
+`main` at `6cd4f298871` and the cache candidate at `d931ea9a42d`. Each
+process timed 16 successive warm `CellReplica::prepare()` calls over an
+in-memory object store; each revision ran in eight alternating pairs. The
+store wrapper delayed every GET and PUT by the stated amount and, in this
+dependency version, delayed HEAD by the PUT amount. At 1 ms injected delay,
+the candidate won 8/8 pairs with a 1.30x median paired speedup (median run
+10.64 ms baseline versus 8.12 ms candidate). At 5 ms, it won 8/8 with a
+1.34x median paired speedup (29.90 ms versus 22.08 ms). With no delay, each
+revision won four pairs; there is no reliable local-only win. The probe kept
+SQLite write and capture time outside the timer but included predecessor
+loading, presence checks, and immutable uploads. These numbers qualify the
+network-latency hypothesis only: host contention, synthetic delays, and an
+in-memory backend do not establish live-provider or Celld performance.
+
+### Follow-up: overlap directory and root uploads
+
+After the new directory digest is known, directory objects and the root
+document are independent immutable uploads. They now run concurrently;
+`PreparedRoot` still returns only after both upload sets and the captured
+LTX/index dependencies succeed. A failure can leave unreachable immutable
+objects but cannot yield a publishable proposal. The existing Host I/O limit
+remains the aggregate request bound.
+
+The paused-clock warm-append path drops from three to two 100 ms intervals:
+one parallel predecessor-presence wave and one overlapping upload wave. A
+cold-store successor with no cached predecessor drops from two upload
+intervals to one. Streaming full compaction is unchanged because it must
+finish constructing and uploading its directory before knowing the final
+root digest.
+
+The same release A/B probe then compared merged `main` at `6cd4f298871`
+against the combined cache-and-overlap candidate in eight alternating pairs
+per condition. At 1 ms injected provider delay, the candidate won 8/8 pairs
+with a 1.87x median paired speedup (median run 9.54 ms baseline versus
+5.10 ms candidate). At 5 ms, it won 8/8 with a 1.94x speedup (27.53 ms
+versus 14.40 ms). Without injected delay, timings were noisy and the
+candidate won 6/8 pairs; no reliable low-latency local-only claim follows.
+This exercises warm root preparation with an in-memory store and synthetic
+per-operation delay, not Celld or live cloud end-to-end latency.
+
 ## Maintenance notes
 
 - Reviewers should trace one corrupt input through plan construction, one

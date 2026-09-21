@@ -208,6 +208,54 @@ async fn exact_root_inventory_verifies_every_remote_dependency() {
 }
 
 #[tokio::test]
+async fn warm_root_cache_does_not_mask_missing_metadata() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let mut writer = Db::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| transaction.execute_batch("CREATE TABLE values_(v)"))
+        .unwrap();
+    let backend = Arc::new(InMemory::new());
+    let cell = [41; 32];
+    let incarnation = [42; 16];
+    let layout =
+        CellStorageLayout::new(Store::new(backend.clone()), Path::from("runtime"), [3; 16]);
+    let replica = CellReplica::new(layout.clone(), cell, incarnation, Limits::default()).unwrap();
+    let root = replica
+        .prepare(None, &writer.capture().unwrap(), 1, 1)
+        .await
+        .unwrap()
+        .root();
+    let path =
+        layout.incarnation_object_path(&cell, &incarnation, &root.digest, CellObjectKind::Root);
+    let root_bytes = backend.get(&path).await.unwrap().bytes().await.unwrap();
+    let segment_page = replica
+        .reachable_objects(&root)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|object| object.kind == CellObjectKind::Root && object.digest != root.digest)
+        .unwrap();
+    backend.delete(&path).await.unwrap();
+
+    assert!(replica.reachable_objects(&root).await.is_err());
+    writer
+        .transaction(|transaction| transaction.execute_batch("INSERT INTO values_ VALUES(2)"))
+        .unwrap();
+    let next = writer.capture().unwrap();
+    assert!(replica.prepare(Some(&root), &next, 2, 1).await.is_err());
+    backend.put(&path, root_bytes.into()).await.unwrap();
+    let segment_path = layout.incarnation_object_path(
+        &cell,
+        &incarnation,
+        &segment_page.digest,
+        CellObjectKind::Root,
+    );
+    backend.delete(&segment_path).await.unwrap();
+    assert!(replica.prepare(Some(&root), &next, 2, 1).await.is_err());
+    writer.close().unwrap();
+}
+
+#[tokio::test]
 async fn root_scope_and_commit_sequence_are_fenced() {
     let directory = tempfile::TempDir::new().unwrap();
     let mut writer = Db::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();

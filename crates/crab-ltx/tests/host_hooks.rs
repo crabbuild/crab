@@ -432,7 +432,70 @@ async fn prepare_overlaps_independent_immutable_uploads() {
 
     replica.prepare(Some(&root), &captured, 2, 1).await.unwrap();
 
+    assert_eq!(started.elapsed(), delay);
+    writer.close().unwrap();
+}
+
+#[cfg(feature = "replica")]
+#[tokio::test(start_paused = true)]
+async fn warm_append_reuses_its_authenticated_root_metadata() {
+    let (_directory, _faults, _host, mut writer) = fixture();
+    let first = writer.capture_deferred().unwrap();
+    let delay = Duration::from_millis(100);
+    let backend = InMemory::new();
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(ThrottledStore::new(
+                backend.clone(),
+                ThrottleConfig {
+                    wait_get_per_call: delay,
+                    wait_put_per_call: delay,
+                    ..ThrottleConfig::default()
+                },
+            ))),
+            ObjectPath::from("cached-root-metadata"),
+            [74; 16],
+        ),
+        [75; 32],
+        [76; 16],
+        Limits::default(),
+    )
+    .unwrap();
+    let root = replica.prepare(None, &first, 1, 1).await.unwrap().root();
+    writer.prune_captured(&first).unwrap();
+    writer
+        .transaction(|transaction| transaction.execute_batch("INSERT INTO t VALUES(2)"))
+        .unwrap();
+    let second = writer.capture_deferred().unwrap();
+    let started = tokio::time::Instant::now();
+
+    let prepared = replica.prepare(Some(&root), &second, 2, 1).await.unwrap();
+
+    // The store throttles HEAD with the PUT delay: one parallel presence
+    // wave plus one overlapping immutable-upload wave, with no serial
+    // metadata GETs or directory-before-root upload dependency.
     assert_eq!(started.elapsed(), delay * 2);
+    assert_eq!(prepared.root().position, second.position);
+    let independent = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(ThrottledStore::new(
+                backend,
+                ThrottleConfig {
+                    wait_get_per_call: delay,
+                    ..ThrottleConfig::default()
+                },
+            ))),
+            ObjectPath::from("cached-root-metadata"),
+            [74; 16],
+        ),
+        [75; 32],
+        [76; 16],
+        Limits::default(),
+    )
+    .unwrap();
+    let cold_started = tokio::time::Instant::now();
+    independent.open_root(&prepared.root()).await.unwrap();
+    assert!(cold_started.elapsed() >= delay * 2);
     writer.close().unwrap();
 }
 
@@ -517,10 +580,9 @@ async fn compaction_overlaps_independent_remote_transfers() {
         .await
         .unwrap();
 
-    // Root and segment metadata need two ordered reads. The independent index
-    // and LTX body cohorts, compacted body/index uploads, directory upload, and
-    // final root uploads then consume four more latency intervals.
-    assert_eq!(started.elapsed(), delay * 6);
+    // Cached root metadata is presence-checked in one parallel HEAD wave.
+    // Streaming directory construction still precedes the final root upload.
+    assert_eq!(started.elapsed(), delay * 5);
     writer.close().unwrap();
 }
 

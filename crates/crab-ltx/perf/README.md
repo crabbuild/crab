@@ -23,6 +23,18 @@ speedup. Recovery is also workload-dependent, with Celld still able to win the
 small case. Treat the phase data and durability contract as part of every
 performance claim.
 
+On 2026-09-21, a release diagnostic on the same macOS host ran 128
+transactions with 4 KiB payloads, one warmup and three measured rounds per
+process. In three alternating Crab/Celld pairs, Crab default total time was
+1.51x, 1.49x, and 1.52x the pinned Celld default total time (slower). With
+the runner-only Celld `--sync-parent` option, the Crab/Celld ratios were
+0.965, 1.008, and 0.999: near parity when both pay directory barriers.
+Crab batch-8 completed a separate three-round diagnostic at a 0.424 s
+median versus the pinned Celld default at 0.583 s, but batch completion is
+not independently durable per-capture latency. These small local samples
+confirm the durability-cost explanation; they are not production SLOs or
+evidence of a universal Crab win.
+
 ## Run it
 
 The script uses release builds, one warmup round, and five measured rounds by
