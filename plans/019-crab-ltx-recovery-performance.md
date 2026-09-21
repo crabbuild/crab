@@ -1109,6 +1109,20 @@ reduction (2.33x) from the original call graph. This is a Crab compaction
 improvement; the local Crab/Celld harness does not exercise either
 implementation's object-store compaction protocol.
 
+### Follow-up: coalesce remote compaction output writes
+
+The local merge issued separate filesystem writes for each encoded LTX frame
+fragment and each of the five fields in every 60-byte sidecar entry. Bounded
+64 KiB buffers now coalesce the sequential LTX and sidecar writes. The codec's
+temporary index retains its positional-read contract; final buffer flushes
+precede the same exact-length checks, BLAKE3 digests, and file syncs. A 3 MiB
+end-to-end compaction made 6,643 local writes before and 792 after. A 32 MiB
+probe made 70,456 writes before and 8,390 after. A non-interleaved release
+sample suggests lower total Cell-compaction latency, but filesystem and host
+variance prevent a defensible speedup ratio from these runs. This does not
+change local `Db::capture()` acknowledgement latency or establish superiority
+over Celld's remote protocol.
+
 ## Maintenance notes
 
 - Reviewers should trace one corrupt input through plan construction, one
