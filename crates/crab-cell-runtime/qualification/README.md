@@ -42,8 +42,8 @@ The measured summary also emits `throughput_ops_per_sec` using a conservative
 rounded-up duration; protected profiles still verify the raw elapsed duration
 and their independent resource counters. Protected `primitives` receipts must
 also match the measured run artifact's cells, operations, duration, throughput,
-and p50/p95/p99/max latency metrics; a signed receipt with substituted threshold
-values is rejected.
+and p50/p95/p99/max latency metrics in non-decreasing order; a signed receipt
+with substituted threshold values is rejected.
 Measured run artifacts use schema 3 and include a bounded primitive/case bitset;
 named provider/topology profiles reject artifacts missing any lifecycle case.
 The PR profile is a correctness gate.

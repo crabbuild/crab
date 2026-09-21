@@ -1972,20 +1972,27 @@ fn validate_metrics(metrics: &[QualificationMetric]) -> Result<()> {
 }
 
 fn validate_run_latency_metrics(metrics: &[QualificationMetric]) -> Result<()> {
-    for (name, unit) in [
+    let mut latency = [0_u64; 4];
+    for (index, (name, unit)) in [
         ("p50_latency_ms", "ms"),
         ("p95_latency_ms", "ms"),
         ("p99_latency_ms", "ms"),
         ("max_latency_ms", "ms"),
-    ] {
-        if metrics
-            .iter()
-            .filter(|metric| metric.name() == name && metric.unit() == unit)
-            .count()
-            != 1
-        {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut matches = metrics.iter().filter(|metric| metric.name() == name);
+        let Some(metric) = matches.next() else {
+            return Err(Error::Control("qualification run latency metrics"));
+        };
+        if matches.next().is_some() || metric.unit() != unit {
             return Err(Error::Control("qualification run latency metrics"));
         }
+        latency[index] = metric.value();
+    }
+    if !latency.windows(2).all(|pair| pair[0] <= pair[1]) {
+        return Err(Error::Control("qualification run latency percentile order"));
     }
     Ok(())
 }
@@ -3357,6 +3364,15 @@ mod tests {
             .metrics
             .retain(|metric| metric.name() != "p95_latency_ms");
         assert!(missing_latency.encode().is_err());
+
+        let mut unordered_latency = artifact.clone();
+        unordered_latency
+            .metrics
+            .iter_mut()
+            .find(|metric| metric.name() == "p50_latency_ms")
+            .unwrap()
+            .value = 2;
+        assert!(unordered_latency.encode().is_err());
 
         let mut missing_scheduled_retry = artifact.clone();
         let retrying = missing_scheduled_retry
