@@ -675,6 +675,7 @@ if ! $rejoin_ready; then
   "${compose[@]}" exec -T server-b crab-http-server \
     --config /etc/crab/server.toml cells status --owner demo --name hello >&2 || true
   echo "Node B rejoin node status:" >&2
+  # shellcheck disable=SC2016
   node_b_rejoin_session="$("${compose[@]}" exec -T server-b sh -ec '
     for path in /var/lib/crab/cells/sessions/*; do
       if [ -d "$path" ]; then
