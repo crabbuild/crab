@@ -505,8 +505,21 @@ mod tests {
         });
         assert!(validate_follower_affinity(&owner_loss, &fleet_only_commit, &placement).is_ok());
 
-        let mut invalid_fleet = fleet_only_commit;
+        let mut invalid_fleet = fleet_only_commit.clone();
         invalid_fleet["node_log_before"]["member_nodes"] = json!([failed_node]);
         assert!(validate_follower_affinity(&owner_loss, &invalid_fleet, &placement).is_err());
+
+        let mut mismatched_placement = placement.clone();
+        mismatched_placement["node_c"]["session"] = json!("f".repeat(32));
+        assert!(
+            validate_follower_affinity(&owner_loss, &fleet_only_commit, &mismatched_placement)
+                .is_err()
+        );
+
+        let mut reused_owner = placement;
+        reused_owner["node_c"]["advertisement"]["node"] = json!(failed_node);
+        assert!(
+            validate_follower_affinity(&owner_loss, &fleet_only_commit, &reused_owner).is_err()
+        );
     }
 }
