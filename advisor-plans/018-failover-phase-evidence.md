@@ -231,7 +231,8 @@ the versioned raw receipt. Do not run it against a shared bucket/prefix.
 - Unit: phase/result mapping, metric rendering, summary arithmetic, error paths.
 - Scheduler: claim failure, inventory failure, witness failure, pin failure,
   fenced completion, and success each terminate telemetry once.
-- Compose: two owner losses, exact-root progression, timestamps, work counters,
+- Compose: three owner losses (two follower-affine and one all-followers-
+  unavailable fallback), exact-root progression, timestamps, work counters,
   and receipt validation.
 - Negative: reject malformed receipt timestamps, missing phase data, duplicate
   phase labels, and identifiers in forbidden label positions.

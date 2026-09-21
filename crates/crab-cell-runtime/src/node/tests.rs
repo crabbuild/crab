@@ -954,6 +954,59 @@ async fn live_original_follower_is_the_only_affine_recovery_candidate() {
 }
 
 #[tokio::test]
+async fn non_member_recovery_candidate_is_allowed_when_all_followers_are_expired() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let leader = SessionId::from_bytes([1; 16]);
+    let first_member = SessionId::from_bytes([2; 16]);
+    let second_member = SessionId::from_bytes([3; 16]);
+    let fallback = SessionId::from_bytes([4; 16]);
+    let leader_record = directory
+        .create(advertisement_for(leader, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    let first_record = directory
+        .create(advertisement_for(first_member, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    let second_record = directory
+        .create(advertisement_for(second_member, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    let fallback_record = directory
+        .create(advertisement_for(fallback, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    let enrolled = directory
+        .recruit_log(&leader_record, 7, 1, 8, NOW_MS + 1)
+        .await
+        .unwrap();
+    directory.activate_log(&enrolled, NOW_MS + 2).await.unwrap();
+    let members = enrolled.advertisement().log().unwrap().members().to_vec();
+    let fallback_record = [first_record, second_record, fallback_record]
+        .into_iter()
+        .find(|record| !members.contains(&record.advertisement().node()))
+        .expect("the bounded two-member log leaves one non-member");
+    let fallback_session = fallback_record.advertisement().session();
+    directory
+        .refresh(
+            &fallback_record,
+            advertisement_for(fallback_session, &key, 2, NOW_MS + 10_000),
+            NOW_MS + 10_000,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        directory
+            .recovery_candidates_without_live_followers(fallback_session, NOW_MS + 10_000, 2)
+            .await
+            .unwrap(),
+        [leader]
+    );
+}
+
+#[tokio::test]
 async fn expired_recovery_claim_moves_to_a_new_live_claimant_and_fences_the_old_one() {
     let key = SigningKey::from_bytes(&[7; 32]);
     let directory = directory();

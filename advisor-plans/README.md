@@ -284,7 +284,8 @@ fixtures are explicitly not release evidence. Protected provider/Kubernetes
 and release receipts remain open.
 
 The current checkout also passed the full local Compose/RustFS cluster
-qualification (version-6 receipt) with two owner losses, exact-root monotonicity,
+qualification (version-6 receipt) with two follower-affine owner losses plus an
+all-followers-unavailable non-member fallback, exact-root monotonicity,
 follower replacement, and follower-only commits under an immutable-object deny
 policy. The qualification harness now compares each node's capacity report
 with its runtime Prometheus disk and active-Cell ceilings, the signed placement

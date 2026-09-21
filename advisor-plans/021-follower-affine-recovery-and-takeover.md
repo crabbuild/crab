@@ -239,7 +239,8 @@ Use CI/protected infrastructure for multi-Pod partition and matched-latency proo
 - No hint or placement decision can bypass node claim CAS, takeover proof, Cell
   control CAS, epoch increment, actor admission, or fresh Db restore.
 - Existing two owner-loss proofs still preserve follower-only commits and exact
-  monotonic roots.
+  monotonic roots; the third all-followers-unavailable proof restores an
+  object-covered root through a non-member candidate.
 
 ## Test plan
 

@@ -182,7 +182,7 @@ CRAB_HTTP_SERVER_IMAGE=ghcr.io/crabbuild/crab-http-server@sha256:qualified_diges
 
 ### Qualify three local Cell processes
 
-The cluster overlay runs three independent server containers and one real
+The cluster overlay runs four independent server containers and one real
 RustFS origin. Each server has its own Cell tmpfs. They share a Docker network
 namespace so every unauthenticated listener can remain on loopback; this keeps
 the same local-trust boundary as the one-node profile.
@@ -193,12 +193,15 @@ flowchart LR
     LB --> A[Node A\n127.0.0.1:8788]
     LB --> B[Node B\n127.0.0.1:8888]
     LB --> C[Node C\n127.0.0.1:8988]
-    A & B & C --> Origin[(RustFS)]
+    LB --> D[Node D\n127.0.0.1:9188]
+    A & B & C & D --> Origin[(RustFS)]
     B -. first SIGKILL .-> LostB[Owner B local SQLite removed]
     A -. pause past lease .-> Reenroll[C replaces follower A with B]
     C -. second SIGKILL .-> LostC[Owner C local SQLite removed]
     B -->|verified follower tail| C
     C -->|verified replacement tail| B
+    B -. third SIGKILL .-> LostB2[All B log followers unavailable]
+    D -->|bounded any-node fallback| Recovered[Exact RustFS root restored]
 ```
 
 Run the repeatable owner-loss qualification from the repository root:
@@ -210,8 +213,8 @@ crates/crab-http-server/tests/qualify_compose_cluster.sh
 The script builds the current source by default, creates a uniquely named
 Compose project, and then:
 
-1. Records the live admission envelope from all three processes.
-2. Sends a durable issue mutation directly to node B and proves A, C, and the
+1. Records the live admission envelope from all four processes.
+2. Sends a durable issue mutation directly to node B and proves A, C, D, and the
    round-robin endpoint route to B over the private mTLS peer protocol.
 3. Blocks immutable Cell-object writes, commits through follower fsync, sends
    `SIGKILL` to B, and destroys its local SQLite files.
@@ -226,19 +229,26 @@ Compose project, and then:
 9. Blocks immutable objects again and commits through the replacement follower.
 10. Sends `SIGKILL` to C, destroys its local SQLite files, and requires B to
     recover both follower-only commits before serving further reads.
+11. Restarts the needed local processes, publishes an object-covered label, and
+    records B's exact follower membership before the fallback fault.
+12. Stops every original member of B's log, keeps a non-member process live,
+    then sends `SIGKILL` to B and requires the non-member to recover the exact
+    RustFS root and all labels.
 
-Success prints a JSON receipt containing both failovers' sessions, epochs and
-complete roots, follower replacement evidence, both follower-only responses,
+Success prints a JSON receipt containing all three failovers' sessions, epochs
+and complete roots, the original member sets, follower replacement evidence,
+the non-member fallback identity, all follower-only/object-covered responses,
 and each process's admission envelope. The trap clears an injected bucket
 policy and removes only the uniquely named qualification project and its
 volumes. Set
 `CRAB_HTTP_CLUSTER_BUILD=false` to reuse an already-built
 `CRAB_HTTP_SERVER_IMAGE`.
 
-This is real process-loss, source-loss, peer-routing, follower replacement, and
-repeated recovery evidence. Node A is paused rather than removed because the
-Compose fixture shares its network namespace; B and C are independently killed
-and lose their tmpfs. The gate is not a production three-Pod partition test.
+This is real process-loss, source-loss, peer-routing, follower replacement,
+follower-affine recovery, and bounded non-member fallback evidence. Nodes A and
+D are paused when the replacement log is formed because the Compose fixture
+shares its network namespace; B and C are independently killed and lose their
+tmpfs. The gate is not a production multi-Pod partition test.
 Lost control-CAS responses are covered by a deterministic scheduler regression.
 
 ## Deploy for a team

@@ -36,6 +36,7 @@ export CRAB_HTTP_CLUSTER_PORT="${CRAB_HTTP_CLUSTER_PORT:-18880}"
 export CRAB_HTTP_NODE_A_PORT="${CRAB_HTTP_NODE_A_PORT:-18881}"
 export CRAB_HTTP_NODE_B_PORT="${CRAB_HTTP_NODE_B_PORT:-18882}"
 export CRAB_HTTP_NODE_C_PORT="${CRAB_HTTP_NODE_C_PORT:-18883}"
+export CRAB_HTTP_NODE_D_PORT="${CRAB_HTTP_NODE_D_PORT:-18884}"
 
 compose=(
   docker compose
@@ -47,6 +48,7 @@ cluster_origin="http://127.0.0.1:${CRAB_HTTP_CLUSTER_PORT}"
 node_a_origin="http://127.0.0.1:${CRAB_HTTP_NODE_A_PORT}"
 node_b_origin="http://127.0.0.1:${CRAB_HTTP_NODE_B_PORT}"
 node_c_origin="http://127.0.0.1:${CRAB_HTTP_NODE_C_PORT}"
+node_d_origin="http://127.0.0.1:${CRAB_HTTP_NODE_D_PORT}"
 repository_path="api/repos/demo/hello"
 failed=false
 source_revision="$(git -C "$repo_root" rev-parse --verify HEAD)"
@@ -219,7 +221,9 @@ capacity_b="$("${compose[@]}" exec -T server-b crab-http-server \
   --config /etc/crab/server.toml cells capacity --json --live)"
 capacity_c="$("${compose[@]}" exec -T server-c crab-http-server \
   --config /etc/crab/server.toml cells capacity --json --live)"
-for capacity in "$capacity_a" "$capacity_b" "$capacity_c"; do
+capacity_d="$("${compose[@]}" exec -T server-d crab-http-server \
+  --config /etc/crab/server.toml cells capacity --json --live)"
+for capacity in "$capacity_a" "$capacity_b" "$capacity_c" "$capacity_d"; do
   jq --exit-status \
     '.version == 1 and .resources.memory_bytes > 0 and
      .resources.free_disk_bytes > 0 and .admission.active_cells > 0' \
@@ -233,16 +237,21 @@ disk_probe_b_kib="$("${compose[@]}" exec -T server-b sh -ec \
   'df -P -k /var/lib/crab/cells | tail -n 1 | sed -e "s/^ *//" | tr -s " " | cut -d " " -f4')"
 disk_probe_c_kib="$("${compose[@]}" exec -T server-c sh -ec \
   'df -P -k /var/lib/crab/cells | tail -n 1 | sed -e "s/^ *//" | tr -s " " | cut -d " " -f4')"
+disk_probe_d_kib="$("${compose[@]}" exec -T server-d sh -ec \
+  'df -P -k /var/lib/crab/cells | tail -n 1 | sed -e "s/^ *//" | tr -s " " | cut -d " " -f4')"
 [[ "$disk_probe_a_kib" =~ ^[0-9]+$ ]]
 [[ "$disk_probe_b_kib" =~ ^[0-9]+$ ]]
 [[ "$disk_probe_c_kib" =~ ^[0-9]+$ ]]
+[[ "$disk_probe_d_kib" =~ ^[0-9]+$ ]]
 disk_probe_a=$((disk_probe_a_kib * 1024))
 disk_probe_b=$((disk_probe_b_kib * 1024))
 disk_probe_c=$((disk_probe_c_kib * 1024))
+disk_probe_d=$((disk_probe_d_kib * 1024))
 for pair in \
   "$capacity_a|$disk_probe_a" \
   "$capacity_b|$disk_probe_b" \
-  "$capacity_c|$disk_probe_c"; do
+  "$capacity_c|$disk_probe_c" \
+  "$capacity_d|$disk_probe_d"; do
   capacity="${pair%%|*}"
   observed_disk="${pair#*|}"
   expected_disk="$(jq -r '.resources.free_disk_bytes' <<<"$capacity")"
@@ -260,10 +269,13 @@ metrics_b="$("${compose[@]}" exec -T server-b crab-http-server \
   --config /etc/crab/server.toml cells metrics)"
 metrics_c="$("${compose[@]}" exec -T server-c crab-http-server \
   --config /etc/crab/server.toml cells metrics)"
+metrics_d="$("${compose[@]}" exec -T server-d crab-http-server \
+  --config /etc/crab/server.toml cells metrics)"
 for pair in \
   "$capacity_a|$metrics_a" \
   "$capacity_b|$metrics_b" \
-  "$capacity_c|$metrics_c"; do
+  "$capacity_c|$metrics_c" \
+  "$capacity_d|$metrics_d"; do
   capacity="${pair%%|*}"
   metrics="${pair#*|}"
   expected_disk="$(jq -r '.admission.local_disk_bytes' <<<"$capacity")"
@@ -293,20 +305,24 @@ node_session() {
 session_a="$(node_session server)"
 session_b="$(node_session server-b)"
 session_c="$(node_session server-c)"
+session_d="$(node_session server-d)"
 [[ "$session_a" =~ ^[0-9a-f]{32}$ ]]
 [[ "$session_b" =~ ^[0-9a-f]{32}$ ]]
 [[ "$session_c" =~ ^[0-9a-f]{32}$ ]]
+[[ "$session_d" =~ ^[0-9a-f]{32}$ ]]
 node_a="$("${compose[@]}" exec -T server crab-http-server \
   --config /etc/crab/server.toml cells node --session "$session_a" --json)"
 node_b="$("${compose[@]}" exec -T server-b crab-http-server \
   --config /etc/crab/server.toml cells node --session "$session_b" --json)"
 node_c="$("${compose[@]}" exec -T server-c crab-http-server \
   --config /etc/crab/server.toml cells node --session "$session_c" --json)"
+node_d="$("${compose[@]}" exec -T server-d crab-http-server \
+  --config /etc/crab/server.toml cells node --session "$session_d" --json)"
 
 node_id_for_session() {
   local expected_session="$1"
   local node_json
-  for node_json in "$node_a" "$node_b" "$node_c"; do
+  for node_json in "$node_a" "$node_b" "$node_c" "$node_d"; do
     if [ "$(jq -r '.session' <<<"$node_json")" = "$expected_session" ]; then
       jq -r '.advertisement.node' <<<"$node_json"
       return 0
@@ -341,6 +357,7 @@ assert_placement_parity() {
 assert_placement_parity "$capacity_a" "$metrics_a" "$node_a"
 assert_placement_parity "$capacity_b" "$metrics_b" "$node_b"
 assert_placement_parity "$capacity_c" "$metrics_c" "$node_c"
+assert_placement_parity "$capacity_d" "$metrics_d" "$node_d"
 
 create_response=""
 for _ in $(seq 1 45); do
@@ -653,9 +670,10 @@ jq --exit-status \
    any(.advertisement.log.member_nodes[]; . != $node_b)' \
   <<<"$node_before_follower_loss" >/dev/null
 
-# Pausing node A keeps the shared Compose network namespace alive while its
-# process, heartbeats, and follower endpoint are unavailable.
+# Pausing nodes A and D keeps the shared Compose network namespace alive while
+# the old followers, heartbeats, and follower endpoints are unavailable.
 "${compose[@]}" pause server >/dev/null
+"${compose[@]}" pause server-d >/dev/null
 sleep 12
 after_follower_loss="$(curl --fail-with-body --silent --show-error \
   --request POST \
@@ -803,8 +821,232 @@ if [ -z "$metrics_second" ]; then
   exit 1
 fi
 work_second="$(recovery_work_evidence "$metrics_second_before" "$metrics_second")"
+
+service_cli() {
+  local service="$1"
+  shift
+  case "$service" in
+    server|server-b|server-c|server-d)
+      "${compose[@]}" exec -T "$service" crab-http-server \
+        --config /etc/crab/server.toml "$@"
+      ;;
+    *)
+      echo "unknown cluster service: $service" >&2
+      return 2
+      ;;
+  esac
+}
+
+service_origin() {
+  case "$1" in
+    server) printf '%s\n' "$node_a_origin" ;;
+    server-b) printf '%s\n' "$node_b_origin" ;;
+    server-c) printf '%s\n' "$node_c_origin" ;;
+    server-d) printf '%s\n' "$node_d_origin" ;;
+    *) return 2 ;;
+  esac
+}
+
+service_session() {
+  node_session "$1"
+}
+
+stop_fallback_member() {
+  case "$1" in
+    server)
+      # Pausing A preserves the shared network namespace while removing its
+      # heartbeat and follower endpoint from the live fleet.
+      "${compose[@]}" pause server >/dev/null
+      ;;
+    server-c|server-d)
+      "${compose[@]}" kill --signal KILL "$1" >/dev/null
+      "${compose[@]}" rm --force --stop "$1" >/dev/null
+      ;;
+    *)
+      echo "unknown fallback member service: $1" >&2
+      return 2
+      ;;
+  esac
+}
+
+# A fourth process is kept outside the current log when possible. The owner
+# first publishes an object-covered mutation, then every original member is
+# stopped before the owner is killed. Recovery must therefore use the bounded
+# any-node path and still restore exact data from RustFS.
+"${compose[@]}" unpause server >/dev/null
+"${compose[@]}" unpause server-d >/dev/null
+"${compose[@]}" up --detach --no-build server-c >/dev/null
+wait_for_healthy server
+wait_for_healthy server-c
+wait_for_healthy server-d
+session_a_fallback="$(service_session server)"
+session_c_fallback="$(service_session server-c)"
+session_d_fallback="$(service_session server-d)"
+node_a_fallback="$(service_cli server cells node --session "$session_a_fallback" --json)"
+node_c_fallback="$(service_cli server-c cells node --session "$session_c_fallback" --json)"
+node_d_fallback="$(service_cli server-d cells node --session "$session_d_fallback" --json)"
+node_b_before_fallback="$(service_cli server-b cells node \
+  --session "$session_after_second_loss" --json)"
+fallback_members="$(jq -c '.advertisement.log.member_nodes' <<<"$node_b_before_fallback")"
+jq --exit-status \
+  '.live == true and .advertisement.log.state == "open" and
+   .advertisement.log.active == true and
+   (.advertisement.log.member_nodes | length > 0)' \
+  <<<"$node_b_before_fallback" >/dev/null
+
+fallback_response="$(curl --fail-with-body --silent --show-error \
+  --max-time 15 \
+  --request POST \
+  --header 'content-type: application/json' \
+  --data '{"request_id":"00000000-0000-4000-8000-000000000106","name":"fallback-covered","color":"7c3aed","description":"Object-covered fallback recovery"}' \
+  "${node_b_origin}/${repository_path}/labels")"
+jq --exit-status \
+  '.id == 3 and .name == "fallback-covered"' \
+  <<<"$fallback_response" >/dev/null
+control_before_fallback="$(service_cli server-b cells status --owner demo --name hello)"
+root_before_fallback="$(jq --compact-output '.root' <<<"$control_before_fallback")"
+fallback_owner_metrics_before="$(service_cli server-b cells metrics)"
+fallback_object_covered=false
+for _ in $(seq 1 60); do
+  fallback_owner_metrics="$(service_cli server-b cells metrics)"
+  fallback_uncovered_bytes="$(awk \
+    '$1 == "crab_cell_node_log_uncovered_bytes" { print $2 }' \
+    <<<"$fallback_owner_metrics")"
+  if [ "${fallback_uncovered_bytes:-1}" = 0 ]; then
+    fallback_object_covered=true
+    break
+  fi
+  sleep 1
+done
+if ! $fallback_object_covered; then
+  echo "The fallback mutation did not reach object coverage before member loss." >&2
+  exit 1
+fi
+
+fallback_candidate_service=""
+fallback_candidate_session=""
+fallback_candidate_node=""
+fallback_candidate_record=""
+for candidate in server server-c server-d; do
+  case "$candidate" in
+    server) candidate_json="$node_a_fallback" ;;
+    server-c) candidate_json="$node_c_fallback" ;;
+    server-d) candidate_json="$node_d_fallback" ;;
+  esac
+  candidate_node="$(jq -r '.advertisement.node' <<<"$candidate_json")"
+  if ! jq --exit-status --arg node "$candidate_node" \
+    'any(.[]; . == $node)' <<<"$fallback_members" >/dev/null; then
+    fallback_candidate_service="$candidate"
+    fallback_candidate_session="$(jq -r '.session' <<<"$candidate_json")"
+    fallback_candidate_node="$candidate_node"
+    fallback_candidate_record="$candidate_json"
+    break
+  fi
+done
+if [ -z "$fallback_candidate_service" ]; then
+  echo "No live non-member fallback candidate remained." >&2
+  exit 1
+fi
+fallback_metrics_before="$(service_cli "$fallback_candidate_service" cells metrics)"
+
+for member_service in server server-c server-d; do
+  case "$member_service" in
+    server) member_node_json="$node_a_fallback" ;;
+    server-c) member_node_json="$node_c_fallback" ;;
+    server-d) member_node_json="$node_d_fallback" ;;
+  esac
+  member_node="$(jq -r '.advertisement.node' <<<"$member_node_json")"
+  if jq --exit-status --arg node "$member_node" \
+    'any(.[]; . == $node)' <<<"$fallback_members" >/dev/null; then
+    if [ "$member_service" = "$fallback_candidate_service" ]; then
+      echo "fallback candidate is also an original follower" >&2
+      exit 1
+    fi
+    stop_fallback_member "$member_service"
+  fi
+done
+
+fallback_origin="$(service_origin "$fallback_candidate_service")"
+fallback_owner_killed_ms="$(unix_millis)"
+"${compose[@]}" kill --signal KILL server-b >/dev/null
+"${compose[@]}" rm --force --stop server-b >/dev/null
+"${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
+  --endpoint-url http://rustfs:9000 s3api delete-bucket-policy \
+  --bucket crab-http-server >/dev/null
+
+fallback_advertisement_expired=false
+for _ in $(seq 1 60); do
+  fallback_node_status="$(service_cli "$fallback_candidate_service" cells node \
+    --session "$session_after_second_loss" --json 2>/dev/null || true)"
+  if jq --exit-status '.live == false' <<<"$fallback_node_status" >/dev/null 2>&1; then
+    fallback_advertisement_expired=true
+    fallback_advertisement_expired_ms="$(unix_millis)"
+    break
+  fi
+  sleep 1
+done
+if ! $fallback_advertisement_expired; then
+  echo "The fallback owner's signed advertisement did not expire." >&2
+  exit 1
+fi
+
+fallback_restored_labels=""
+for _ in $(seq 1 75); do
+  candidate_labels="$(curl --fail-with-body --silent --show-error --max-time 10 \
+    "${fallback_origin}/${repository_path}/labels" || true)"
+  if jq --exit-status \
+    '.items | (length == 3 and
+     (map(.name) | sort == ["fallback-covered", "follower-only", "replacement-follower-only"]))' \
+    <<<"$candidate_labels" >/dev/null 2>&1; then
+    fallback_restored_labels="$candidate_labels"
+    break
+  fi
+  sleep 1
+done
+if [ -z "$fallback_restored_labels" ]; then
+  echo "The non-member fallback candidate did not restore the object-covered label." >&2
+  exit 1
+fi
+
+fallback_control_after=""
+for _ in $(seq 1 75); do
+  candidate_control="$(service_cli "$fallback_candidate_service" cells status \
+    --owner demo --name hello 2>/dev/null || true)"
+  if jq --exit-status \
+    --arg failed_session "$session_after_second_loss" \
+    '.state == "serving" and .owner.session != $failed_session and
+     .owner_lease.state == "live" and
+     .owner_lease.expires_at_ms > .owner_lease.observed_at_ms and
+     .recovery == null and
+     .root.commit_sequence > 0' <<<"$candidate_control" >/dev/null 2>&1; then
+    fallback_control_after="$candidate_control"
+    break
+  fi
+  sleep 1
+done
+if [ -z "$fallback_control_after" ]; then
+  echo "The non-member fallback candidate did not publish serving status." >&2
+  exit 1
+fi
+fallback_recovery_sealed_ms="$(unix_millis)"
+fallback_first_served_check="$(curl --fail-with-body --silent --show-error \
+  "${fallback_origin}/${repository_path}/labels")"
+jq --exit-status \
+  '.items | length == 3' <<<"$fallback_first_served_check" >/dev/null
+fallback_first_served_ms="$(unix_millis)"
+fallback_session_after="$(jq --raw-output '.owner.session' <<<"$fallback_control_after")"
+fallback_epoch_before="$(jq --raw-output '.epoch' <<<"$control_before_fallback")"
+fallback_epoch_after="$(jq --raw-output '.epoch' <<<"$fallback_control_after")"
+fallback_root_after="$(jq --compact-output '.root' <<<"$fallback_control_after")"
+fallback_node_log_before="$(jq -c '.advertisement.log' <<<"$node_b_before_fallback")"
+fallback_metrics_after="$(service_cli "$fallback_candidate_service" cells metrics)"
+fallback_work="$(recovery_work_evidence \
+  "$fallback_metrics_before" "$fallback_metrics_after")"
+
 failed_node_first="$(node_id_for_session "$session_before")"
 successor_node_first="$(node_id_for_session "$session_after")"
+first_failed_log_members="$(jq -c '.advertisement.log.member_nodes' <<<"$node_before")"
+second_failed_log_members="$(jq -c '.advertisement.log.member_nodes' <<<"$node_before_second_loss")"
 selection="$(jq -n \
   --arg failed_session "$session_before" \
   --arg successor_session "$session_after" \
@@ -814,12 +1056,20 @@ selection="$(jq -n \
   --arg second_successor_session "$session_after_second_loss" \
   --arg second_failed_node "$node_c_id" \
   --arg second_successor_node "$node_b_id" \
+  --arg fallback_failed_session "$session_after_second_loss" \
+  --arg fallback_successor_session "$fallback_session_after" \
+  --arg fallback_failed_node "$node_b_id" \
+  --arg fallback_successor_node "$fallback_candidate_node" \
+  --argjson failed_log_members "$first_failed_log_members" \
+  --argjson second_failed_log_members "$second_failed_log_members" \
+  --argjson fallback_failed_log_members "$fallback_members" \
   '{
     owner_loss: {
       failed_session: $failed_session,
       successor_session: $successor_session,
       failed_node: $failed_node,
       successor_node: $successor_node,
+      failed_log_members: $failed_log_members,
       selected_original_follower: true,
       terminal_result: "succeeded"
     },
@@ -828,7 +1078,17 @@ selection="$(jq -n \
       successor_session: $second_successor_session,
       failed_node: $second_failed_node,
       successor_node: $second_successor_node,
+      failed_log_members: $second_failed_log_members,
       selected_original_follower: true,
+      terminal_result: "succeeded"
+    },
+    fallback: {
+      failed_session: $fallback_failed_session,
+      successor_session: $fallback_successor_session,
+      failed_node: $fallback_failed_node,
+      successor_node: $fallback_successor_node,
+      failed_log_members: $fallback_failed_log_members,
+      selected_original_follower: false,
       terminal_result: "succeeded"
     }
   }')"
@@ -852,19 +1112,24 @@ jq --null-input \
   --argjson capacity_a "$capacity_a" \
   --argjson capacity_b "$capacity_b" \
   --argjson capacity_c "$capacity_c" \
+  --argjson capacity_d "$capacity_d" \
   --argjson disk_probe_a "$disk_probe_a" \
   --argjson disk_probe_b "$disk_probe_b" \
   --argjson disk_probe_c "$disk_probe_c" \
+  --argjson disk_probe_d "$disk_probe_d" \
   --argjson disk_probe_tolerance_bytes "$disk_probe_tolerance_bytes" \
   --arg session_a "$session_a" \
   --arg session_b "$session_b" \
   --arg session_c "$session_c" \
+  --arg session_d "$session_d" \
   --arg metrics_a "$metrics_a" \
   --arg metrics_b "$metrics_b" \
   --arg metrics_c "$metrics_c" \
+  --arg metrics_d "$metrics_d" \
   --argjson node_a "$node_a" \
   --argjson node_b "$node_b" \
   --argjson node_c "$node_c" \
+  --argjson node_d "$node_d" \
   --argjson node_before "$node_before" \
   --argjson node_fleet_only "$node_fleet_only" \
   --argjson fleet_only_response "$fleet_only_response" \
@@ -885,6 +1150,26 @@ jq --null-input \
   --argjson epoch_after_second_loss "$epoch_after_second_loss" \
   --argjson root_before_second_loss "$root_before_second_loss" \
   --argjson root_after_second_loss "$root_after_second_loss" \
+  --arg fallback_session_before "$session_after_second_loss" \
+  --arg fallback_session_after "$fallback_session_after" \
+  --arg fallback_candidate_service "$fallback_candidate_service" \
+  --arg fallback_candidate_node "$fallback_candidate_node" \
+  --argjson fallback_owner_killed_ms "$fallback_owner_killed_ms" \
+  --argjson fallback_advertisement_expired_ms "$fallback_advertisement_expired_ms" \
+  --argjson fallback_recovery_sealed_ms "$fallback_recovery_sealed_ms" \
+  --argjson fallback_first_served_ms "$fallback_first_served_ms" \
+  --argjson fallback_epoch_before "$fallback_epoch_before" \
+  --argjson fallback_epoch_after "$fallback_epoch_after" \
+  --argjson fallback_root_before "$root_before_fallback" \
+  --argjson fallback_root_after "$fallback_root_after" \
+  --argjson fallback_node_log_before "$fallback_node_log_before" \
+  --argjson fallback_response "$fallback_response" \
+  --argjson fallback_restored_labels "$fallback_restored_labels" \
+  --argjson fallback_control_before "$control_before_fallback" \
+  --argjson fallback_control_after "$fallback_control_after" \
+  --arg fallback_candidate_session "$fallback_candidate_session" \
+  --argjson fallback_candidate_record "$fallback_candidate_record" \
+  --argjson fallback_work "$fallback_work" \
   --argjson selection "$selection" \
   --argjson work_first "$work_first" \
   --argjson work_second "$work_second" \
@@ -943,22 +1228,48 @@ jq --null-input \
       root_after: $root_after_second_loss,
       restored_labels: $second_restored_labels
     },
-    capacity: {node_a: $capacity_a, node_b: $capacity_b, node_c: $capacity_c},
+    fallback_owner_loss: {
+      session_before: $fallback_session_before,
+      session_after: $fallback_session_after,
+      candidate_service: $fallback_candidate_service,
+      candidate_session: $fallback_candidate_session,
+      candidate_node: $fallback_candidate_node,
+      candidate_record: $fallback_candidate_record,
+      epoch_before: $fallback_epoch_before,
+      epoch_after: $fallback_epoch_after,
+      timing: {
+        owner_killed_ms: $fallback_owner_killed_ms,
+        advertisement_expired_ms: $fallback_advertisement_expired_ms,
+        recovery_sealed_ms: $fallback_recovery_sealed_ms,
+        first_served_ms: $fallback_first_served_ms
+      },
+      root_before: $fallback_root_before,
+      root_after: $fallback_root_after,
+      node_log_before: $fallback_node_log_before,
+      response: $fallback_response,
+      restored_labels: $fallback_restored_labels,
+      control_before_owner_loss: $fallback_control_before,
+      control_after: $fallback_control_after
+    },
+    capacity: {node_a: $capacity_a, node_b: $capacity_b, node_c: $capacity_c, node_d: $capacity_d},
     measured_disk: {
       node_a_bytes: $disk_probe_a,
       node_b_bytes: $disk_probe_b,
       node_c_bytes: $disk_probe_c,
+      node_d_bytes: $disk_probe_d,
       tolerance_bytes: $disk_probe_tolerance_bytes
     },
     placement: {
       node_a_session: $session_a,
       node_b_session: $session_b,
       node_c_session: $session_c,
+      node_d_session: $session_d,
       node_a: $node_a,
       node_b: $node_b,
-      node_c: $node_c
+      node_c: $node_c,
+      node_d: $node_d
     },
-    metrics: {node_a: $metrics_a, node_b: $metrics_b, node_c: $metrics_c},
+    metrics: {node_a: $metrics_a, node_b: $metrics_b, node_c: $metrics_c, node_d: $metrics_d},
     capacity_metric_parity: {
       local_disk: true,
       active_cells: true,
@@ -968,7 +1279,8 @@ jq --null-input \
     selection: $selection,
     work: {
       owner_loss: $work_first,
-      second_owner_loss: $work_second
+      second_owner_loss: $work_second,
+      fallback: $fallback_work
     }
   }' > "$receipt_path"
 if [ "${CRAB_HTTP_CLUSTER_VALIDATE:-false}" = true ]; then

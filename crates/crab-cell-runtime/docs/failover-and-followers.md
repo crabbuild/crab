@@ -1603,12 +1603,14 @@ rejects server, transport, body-limit, latency-over-60-second, or target-rate
 failures. The eight-Cell schedule is the node-level aggregate profile (the
 receipt records a configured 125 target requests/s per Cell); retain a separate
 one-Cell run when measuring the hot-Cell admission limit.
-The version-6 typed cluster-receipt validator maps both failed and successor
-sessions to stable NodeIds, requires each selected successor to be present in
-the failed log's original follower set, requires a successful observation for
-each fixed recovery phase, and binds bounded work counters to the two loss
-cycles. Prometheus labels remain fixed; the receipt keeps the raw metric text
-only as evidence and rejects identifier-bearing labels.
+The version-6 typed cluster-receipt validator maps every failed and successor
+session to stable NodeIds, requires the first two successors to be present in
+their failed log's original follower set, and requires the third successor to
+be a live non-member after every original follower is unavailable. It requires
+a successful observation for each fixed recovery phase and binds bounded work
+counters to all three loss cycles. Prometheus labels remain fixed; the receipt
+keeps the raw metric text only as evidence and rejects identifier-bearing
+labels.
 
 ## Deliver in dependency order
 

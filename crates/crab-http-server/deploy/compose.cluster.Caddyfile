@@ -4,7 +4,7 @@
 }
 
 :8090 {
-	reverse_proxy 127.0.0.1:8788 127.0.0.1:8888 127.0.0.1:8988 {
+	reverse_proxy 127.0.0.1:8788 127.0.0.1:8888 127.0.0.1:8988 127.0.0.1:9188 {
 		lb_policy round_robin
 		lb_try_duration 2s
 		lb_try_interval 100ms
@@ -29,6 +29,12 @@
 
 :8093 {
 	reverse_proxy 127.0.0.1:8988 {
+		flush_interval -1
+	}
+}
+
+:8094 {
+	reverse_proxy 127.0.0.1:9188 {
 		flush_interval -1
 	}
 }

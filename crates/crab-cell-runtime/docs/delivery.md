@@ -102,6 +102,8 @@ the checked-in profile from the tagged source before invoking the validator.
 GitHub's workflow attestation remains the trust anchor for the release job and
 source identity.
 
+The raw four-process receipt is validated first with the fail-closed v6 command:
+
 ```bash
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
   cargo run -p crab-cell-runtime --bin qualification_receipt --locked -- \
