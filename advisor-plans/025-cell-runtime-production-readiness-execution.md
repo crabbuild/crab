@@ -81,6 +81,23 @@ can use it to distinguish a committed command from an absent or still-unknown
 attempt before deciding whether to retry; the current smoke does not inject a
 lost response or claim a retry bit.
 
+Separate SQL, KV, Blob, Queue, Cron, Workflow, and Effects response-loss tests
+dispatch signed peer commands through
+the canonical `PeerDispatcher`, drop each reply after dispatch, and check the
+returned `PendingMutation` through `ApplicationHandle::resolve`. A distinct
+typed client checks exact SQL, KV, and Blob bytes, one claimed and settled Queue
+message, Cron schedule generation, terminal Workflow result, or settled Effect
+lease, then compares the commit sequence. All seven tests passed on in-memory
+and isolated RustFS storage on 2026-09-21 and drained runtime reservations.
+The complete seven-case RustFS target also passed concurrently against one
+fresh bucket with distinct per-test roots.
+They do not replay committed commands or claim retry case bits. Their observers
+share a process with the owner, so the protected three-process fault and
+successor checks remain open. The RustFS fixture now adds a per-process sequence
+to each root so parallel cases cannot reuse a prefix. A five-case concurrent
+run passed after this change; a prior run had one `Fenced` SQL bootstrap and
+conditional-write conflicts, while a serial diagnostic passed all five.
+
 A separate `public_cell_takeover.rs` test now uses a fresh successor `CellNode` and
 empty local directory against the same object store. It checks the exact
 published root and a higher owner epoch for the six owned Cells. Typed
@@ -352,7 +369,7 @@ Run each Cargo command with a checkout-specific target directory under
 | --- | --- | --- |
 | Application contract | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-app RUSTC_WRAPPER= cargo test -p crab-cell-app --locked` | all unit and reference-application tests pass |
 | Host ownership | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-host RUSTC_WRAPPER= cargo test -p crab-cell-host --locked` | lifecycle/facility tests pass with no leaked tasks |
-| Public typed primitive host | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-public-host RUSTC_WRAPPER= cargo test -p crab-http-server --test public_cell_host_application --test public_cell_qualification --test public_cell_takeover --locked` | typed smoke and the fresh-successor takeover test pass |
+| Public typed primitive host | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-public-host RUSTC_WRAPPER= cargo test -p crab-http-server --test public_cell_host_application --test public_cell_qualification --test public_cell_response_loss --test public_cell_takeover --locked` | typed smoke, response-loss reconciliation, and fresh-successor takeover tests pass |
 | Runtime regression | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-runtime RUSTC_WRAPPER= cargo test -p crab-cell-runtime --locked` | all runtime tests pass; ignored provider tests are reported, not fabricated |
 | Server composition | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-server RUSTC_WRAPPER= cargo test -p crab-http-server --lib --locked` | server library tests pass |
 | Strict lint | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-quality RUSTC_WRAPPER= cargo clippy -p crab-cell-app -p crab-cell-host -p crab-cell-runtime --all-targets --locked -- -D warnings` | exit 0 |

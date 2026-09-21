@@ -1,36 +1,34 @@
 use std::{
     future::Future,
     pin::Pin,
-    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crab_cell_app::ApplicationHandle;
-use crab_cell_host::{CellNode, CellNodeBuilder};
 use crab_cell_runtime::{
-    ActivityRunOutcome, ActivitySupervisor, ApplicationId, BlobArtifactStore, BlobCondition,
-    BlobMutation, BlobQuery, BlobQueryResult, CatalogRole, CellClient, CellStorageLayout,
-    CellTarget, CronMutation, CronQueryResult, Digest, EffectClaimRequest, EffectLeaseOutcome,
-    Error, KvAtomicOutcome, KvAtomicRequest, KvMutation, NodeLeaseGuard, QUALIFICATION_MATRIX_ROWS,
-    QualificationCase, QualificationExecution, QualificationMatrixEntry,
+    ActivityRunOutcome, ActivitySupervisor, ApplicationId, BlobCondition, BlobMutation, BlobQuery,
+    BlobQueryResult, CellTarget, CronMutation, CronQueryResult, Digest, EffectClaimRequest,
+    EffectLeaseOutcome, Error, KvAtomicOutcome, KvAtomicRequest, KvMutation,
+    QUALIFICATION_MATRIX_ROWS, QualificationCase, QualificationExecution, QualificationMatrixEntry,
     QualificationMatrixManifest, QualificationOperation, QualificationOperationExecutor,
     QualificationProfile, QualificationReceipt, QualificationRunner, QualificationWorkload,
     QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome, QueueSendRequest, QueueState, Result,
-    SqlBatch, SqlStatement, SqlValue, SqlWorkerPool, TenantId, WorkflowOutcome, WorkflowSignal,
-    WorkflowStatus, install_blob_schema, install_cron_schema, install_kv_schema,
-    install_queue_schema, install_workflow_schema, partition_for_shard,
+    SqlBatch, SqlStatement, SqlValue, TenantId, WorkflowOutcome, WorkflowSignal, WorkflowStatus,
+    partition_for_shard,
 };
-use crab_storage::Store;
 use ed25519_dalek::SigningKey;
-use object_store::{memory::InMemory, path::Path};
-use tokio_util::sync::CancellationToken;
 
 #[path = "support/reference_application.rs"]
 mod fixture;
 #[path = "support/qualification.rs"]
 mod qualification;
+#[path = "support/qualification_fixture.rs"]
+mod qualification_fixture;
 
 use qualification::{assert_zero_reservations, fixed_id, identity, rustfs_public_store};
+use qualification_fixture::{
+    PublicHostFixture, public_host_fixture, public_host_fixture_with_store,
+};
 
 struct PublicHostSmokeExecutor {
     handle: ApplicationHandle<fixture::ReferenceApplication>,
@@ -728,187 +726,6 @@ async fn verify_public_kv_expiry(
     Ok(())
 }
 
-async fn public_host_fixture() -> (
-    CellNode,
-    ApplicationHandle<fixture::ReferenceApplication>,
-    TenantId,
-    ApplicationId,
-    tempfile::TempDir,
-) {
-    public_host_fixture_with_store(
-        Store::new(Arc::new(InMemory::new())),
-        Path::from("public-host-qualification"),
-    )
-    .await
-}
-
-async fn public_host_fixture_with_store(
-    store: Store,
-    root: Path,
-) -> (
-    CellNode,
-    ApplicationHandle<fixture::ReferenceApplication>,
-    TenantId,
-    ApplicationId,
-    tempfile::TempDir,
-) {
-    let application = Arc::new(fixture::compiled());
-    let tenant = TenantId::from_bytes([71; 16]);
-    let application_id = ApplicationId::from_bytes([72; 16]);
-    let layout = CellStorageLayout::new(store.clone(), root, *application_id.as_bytes());
-    let directory = tempfile::tempdir().expect("qualification directory");
-    let session = crab_cell_runtime::SessionId::from_bytes([24; 16]);
-    let node = CellNodeBuilder::new(Arc::clone(&application))
-        .with_runtime(
-            SqlWorkerPool::new(4, 32).expect("qualification pool"),
-            64 * 1024 * 1024,
-        )
-        .with_replica_host(fixture::reference_host())
-        .with_session(session)
-        .build()
-        .expect("qualification node");
-    let cancellation = CancellationToken::new();
-    let tasks = node
-        .install_task_group(cancellation.clone(), CancellationToken::new())
-        .expect("qualification task group");
-    let lease = NodeLeaseGuard::new(0, 60_000).expect("qualification lease");
-    node.install_node_lease(lease.clone())
-        .expect("qualification readiness");
-    // This smoke has no authority publisher; keep its test lease live until
-    // the node-owned task group cancels and joins the renewal loop on drain.
-    tasks
-        .spawn(async move {
-            loop {
-                tokio::select! {
-                    () = cancellation.cancelled() => return Ok::<(), Error>(()),
-                    () = tokio::time::sleep(Duration::from_secs(20)) => lease.renew(0, 60_000)?,
-                }
-            }
-        })
-        .expect("qualification lease renewal task");
-    assert!(node.is_ready());
-
-    let runtime = node.runtime();
-    let registry = application.registry();
-    let handles = vec![
-        fixture::bootstrap_reference_cell(
-            &runtime,
-            &registry,
-            &layout,
-            &directory,
-            tenant,
-            application_id,
-            fixture::SQL_NAMESPACE,
-            CatalogRole::Sql,
-            fixture::SQL_MODULE,
-            40,
-            |transaction| {
-                transaction.execute_batch(
-                    "CREATE TABLE qualification_rows (id INTEGER PRIMARY KEY, payload BLOB NOT NULL)",
-                )?;
-                Ok(())
-            },
-        )
-        .await
-        .expect("SQL Cell"),
-        fixture::bootstrap_reference_cell(
-            &runtime,
-            &registry,
-            &layout,
-            &directory,
-            tenant,
-            application_id,
-            fixture::KV_NAMESPACE,
-            CatalogRole::Kv,
-            fixture::KV_MODULE,
-            41,
-            install_kv_schema,
-        )
-        .await
-        .expect("KV Cell"),
-        fixture::bootstrap_reference_cell(
-            &runtime,
-            &registry,
-            &layout,
-            &directory,
-            tenant,
-            application_id,
-            fixture::BLOB_NAMESPACE,
-            CatalogRole::Blob,
-            fixture::BLOB_MODULE,
-            42,
-            install_blob_schema,
-        )
-        .await
-        .expect("Blob Cell"),
-        fixture::bootstrap_reference_cell(
-            &runtime,
-            &registry,
-            &layout,
-            &directory,
-            tenant,
-            application_id,
-            fixture::QUEUE_NAMESPACE,
-            CatalogRole::Queue,
-            fixture::QUEUE_MODULE,
-            43,
-            install_queue_schema,
-        )
-        .await
-        .expect("Queue Cell"),
-        fixture::bootstrap_reference_cell(
-            &runtime,
-            &registry,
-            &layout,
-            &directory,
-            tenant,
-            application_id,
-            fixture::DEAD_LETTER_NAMESPACE,
-            CatalogRole::Queue,
-            fixture::DEAD_LETTER_MODULE,
-            44,
-            install_queue_schema,
-        )
-        .await
-        .expect("dead-letter Cell"),
-        fixture::bootstrap_reference_cell(
-            &runtime,
-            &registry,
-            &layout,
-            &directory,
-            tenant,
-            application_id,
-            fixture::CRON_NAMESPACE,
-            CatalogRole::Cron,
-            fixture::CRON_MODULE,
-            45,
-            install_cron_schema,
-        )
-        .await
-        .expect("Cron Cell"),
-        fixture::bootstrap_reference_cell(
-            &runtime,
-            &registry,
-            &layout,
-            &directory,
-            tenant,
-            application_id,
-            fixture::WORKFLOW_NAMESPACE,
-            CatalogRole::Workflow,
-            fixture::WORKFLOW_MODULE,
-            46,
-            install_workflow_schema,
-        )
-        .await
-        .expect("Workflow Cell"),
-    ];
-    let client = CellClient::local_many(registry, handles).expect("qualification client");
-    let typed = node
-        .application_handle::<fixture::ReferenceApplication>(client, tenant, application_id)
-        .with_blob_artifact_store(BlobArtifactStore::new(store));
-    (node, typed, tenant, application_id, directory)
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn public_cell_node_runs_typed_primitive_workload() {
     run_public_typed_primitive_workload(public_host_fixture().await).await;
@@ -922,13 +739,7 @@ async fn rustfs_public_cell_node_runs_typed_primitive_workload() {
 }
 
 async fn run_public_typed_primitive_workload(
-    (node, typed, tenant, application_id, _directory): (
-        CellNode,
-        ApplicationHandle<fixture::ReferenceApplication>,
-        TenantId,
-        ApplicationId,
-        tempfile::TempDir,
-    ),
+    (node, typed, tenant, application_id, _directory, _registry, _handles, _store): PublicHostFixture,
 ) {
     let profile = QualificationProfile::pr_contract();
     let workload = QualificationWorkload::generate_with_size(&profile, 41, 1, 64, 1)
@@ -1022,7 +833,8 @@ struct MatrixRowEvidence {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn public_cell_node_runs_complete_matrix_through_typed_apis() {
-    let (node, typed, tenant, application_id, _directory) = public_host_fixture().await;
+    let (node, typed, tenant, application_id, _directory, _registry, _handles, _store) =
+        public_host_fixture().await;
     let profile = QualificationProfile::pr_contract();
     let image = Digest::from_bytes([74; 32]);
     let signing_key_bytes = [76; 32];

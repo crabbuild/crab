@@ -1,9 +1,14 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crab_cell_host::CellNode;
 use crab_cell_runtime::{MutationIdentity, RequestId};
 use crab_storage::{ObjectStoreCredentials, Store, build_explicit_store};
 use object_store::path::Path;
+
+static RUSTFS_RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn fixed_id(index: u64) -> [u8; 16] {
     let mut id = [0; 16];
@@ -62,8 +67,9 @@ pub fn rustfs_public_store() -> (Store, Path) {
         .expect("system clock")
         .as_nanos();
     let root = Path::from(format!(
-        "{configured_prefix}/public-typed-host-{}-{run_id}",
-        std::process::id()
+        "{configured_prefix}/public-typed-host-{}-{run_id}-{}",
+        std::process::id(),
+        RUSTFS_RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
     (store, root)
 }
