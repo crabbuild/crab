@@ -950,6 +950,26 @@ at 343.9 ms and 373.8 ms around a 388.5 ms old-path run. That is a 4%--11%
 local publication-latency improvement on a noisy host. It is an incremental
 Crab-versus-Crab result, not a Crab-versus-Celld full-system claim.
 
+### Follow-up: keep defensive upload scratch ephemeral
+
+`CellReplica::prepare()` copies each caller-retained capture into private,
+bounded scratch before inspecting and uploading it. The copy prevents later
+path replacement and gives provider retries one stable source, but it is not
+recovery state: the proposal remains unreachable until every immutable object
+uploads and authority accepts the root. The old path nevertheless fsynced each
+scratch file and then fsynced the parent again after unlinking it. Preparation
+now preserves the copy, exact inspection, digest verification, upload retry,
+and scratch admission while leaving the temporary file and deletion
+uncommitted. A fresh activation never adopts crash-left scratch.
+
+A release-mode 32-command loop covered SQL, capture, scratch copy and
+inspection, in-memory immutable uploads, authority CAS, confirmation, and
+cleanup. Two baseline/candidate pairs reported median improvements from
+557.4 ms to 172.9 ms (3.22x) and from 340.8 ms to 126.1 ms (2.70x). All 24
+retained candidate samples were faster than all 24 retained baseline samples.
+The temporary profiler was removed. This isolates avoidable local barriers;
+it still does not compare real provider or authority latency with Celld.
+
 ## Maintenance notes
 
 - Reviewers should trace one corrupt input through plan construction, one

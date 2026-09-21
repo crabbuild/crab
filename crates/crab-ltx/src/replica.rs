@@ -681,7 +681,9 @@ impl CellReplica {
 
         // Capture files are copied into owned, replayable scratch files. The
         // copy is chunked so a large WAL cut never becomes an in-memory upload
-        // body and a retry can reopen the same verified source.
+        // body and a retry can reopen the same verified source. Scratch is
+        // process-lifetime upload state, not a durability proof: authority
+        // cannot publish until the verified immutable upload completes.
         let _scratch = self.host.for_scratch(captured_bytes).await?;
         let mut inputs = Vec::with_capacity(cuts.segments.len());
         for segment in &cuts.segments {
@@ -715,7 +717,6 @@ impl CellReplica {
                             "capture size changed while copying",
                         ));
                     }
-                    destination.sync_all()?;
                     Ok::<_, io::Error>(())
                 })
                 .await??;
@@ -1751,9 +1752,9 @@ impl ScratchFile {
 
 impl Drop for ScratchFile {
     fn drop(&mut self) {
-        if self.filesystem.remove_file(&self.path).is_ok() {
-            let _ = self.filesystem.sync_parent(&self.path);
-        }
+        // A fresh session never adopts unpublished scratch, so durable cleanup
+        // would only delay the immutable upload path.
+        let _ = self.filesystem.remove_file(&self.path);
     }
 }
 

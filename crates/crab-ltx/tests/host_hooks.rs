@@ -319,6 +319,38 @@ async fn cell_prepare_bounds_source_and_scratch_transfers() {
 
 #[cfg(feature = "replica")]
 #[tokio::test(flavor = "multi_thread")]
+async fn cell_prepare_does_not_flush_ephemeral_upload_scratch() {
+    let (_directory, faults, host, mut writer) = fixture();
+    let captured = writer.capture_deferred().unwrap();
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("cell-ephemeral-scratch"),
+            [41; 16],
+        ),
+        [42; 32],
+        [43; 16],
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(host);
+    faults.calls.lock().unwrap().clear();
+    faults.file_syncs.store(0, Ordering::Relaxed);
+    faults.parent_syncs.store(0, Ordering::Relaxed);
+
+    replica.prepare(None, &captured, 1, 1).await.unwrap();
+
+    let calls = faults.calls.lock().unwrap();
+    assert!(!calls.contains("sync_all"));
+    assert!(!calls.contains("sync_parent"));
+    assert_eq!(faults.file_syncs.load(Ordering::Relaxed), 0);
+    assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 0);
+    drop(calls);
+    writer.close().unwrap();
+}
+
+#[cfg(feature = "replica")]
+#[tokio::test(flavor = "multi_thread")]
 async fn cell_restore_write_and_install_failures_clean_owned_scratch() {
     let (directory, faults, host, mut writer) = fixture();
     let replica = CellReplica::new(

@@ -107,6 +107,12 @@ a fresh local session, so a crash can leave only quarantined residue; it cannot
 turn that residue into acknowledged state. Standalone `crab_ltx::Db::capture()`
 remains synchronously durable.
 
+Immutable-root preparation also keeps its defensive upload copy ephemeral. It
+verifies that bounded scratch copy and uploads its exact digest, but does not
+flush the temporary file or its deletion. The proposal cannot reach authority
+until all immutable dependencies upload successfully, so local scratch
+durability would duplicate the external proof without improving recovery.
+
 ## Use receipts for read consistency
 
 A receipt identifies the Cell incarnation and commit sequence. A query with a minimum receipt runs only after the local owner reaches that position.
