@@ -913,6 +913,23 @@ recovery workloads, while Celld still won the small recovery workload. The
 plan therefore remains in progress rather than converting workload-specific
 recovery and grouped-throughput wins into a general performance claim.
 
+### Independent threshold rerun
+
+A later verification pass on the final branch did not reproduce a 1.5x floor
+for batch 8. An 11-round/2-warmup matrix reported median total speedups over
+shipped Celld of 1.30x, 1.49x, and 1.71x for the small, medium, and large
+workloads. A second pass alternated execution order for 12, 10, and 8
+single-round pairs. Crab won 29 of 30 pairs, but the median paired speedups were
+only 1.40x, 1.41x, and 1.45x.
+
+The host was busy during this rerun (load average about 13 on 12 logical CPUs),
+so these absolute times are not release SLO evidence. The paired direction is
+still strong evidence that bounded grouping improves local throughput, while
+the lower medians show that the earlier 1.5x--2.0x result is not a stable floor.
+The performance gate therefore remains open. Do not claim that batch 8 is
+universally 1.5x faster, or that this local benchmark proves lower production
+acknowledgement latency.
+
 ## Maintenance notes
 
 - Reviewers should trace one corrupt input through plan construction, one
