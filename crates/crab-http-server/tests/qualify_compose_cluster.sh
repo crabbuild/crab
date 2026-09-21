@@ -122,6 +122,86 @@ assert_json_eventually() {
   return 1
 }
 
+metric_value() {
+  local metrics="$1"
+  local name="$2"
+  local value
+  value="$(awk -v name="$name" '$1 == name { print $2; exit }' <<<"$metrics")"
+  printf '%s\n' "${value:-0}"
+}
+
+metric_counter() {
+  local metrics="$1"
+  local kind="$2"
+  metric_value "$metrics" "crab_cell_node_log_recovery_work_total{kind=\"${kind}\"}"
+}
+
+metric_phase_count() {
+  local metrics="$1"
+  local phase="$2"
+  metric_value "$metrics" "crab_cell_node_log_recovery_phase_seconds_count{phase=\"${phase}\"}"
+}
+
+metric_phase_sum() {
+  local metrics="$1"
+  local phase="$2"
+  metric_value "$metrics" "crab_cell_node_log_recovery_phase_seconds_sum{phase=\"${phase}\"}"
+}
+
+counter_delta() {
+  awk -v before="$1" -v after="$2" \
+    'BEGIN { if (after < before) exit 1; printf "%.0f\n", after - before }'
+}
+
+duration_delta_ms() {
+  awk -v before="$1" -v after="$2" \
+    'BEGIN { if (after < before) exit 1; printf "%.0f\n", (after - before) * 1000 }'
+}
+
+recovery_work_evidence() {
+  local before="$1"
+  local after="$2"
+  local -a args=(--argjson candidate_count "$(counter_delta \
+    "$(metric_counter "$before" candidate_count)" \
+    "$(metric_counter "$after" candidate_count)")")
+  for kind in \
+    affected_cells catalog_shards catalog_pages control_reads follower_pages \
+    follower_frames follower_bytes peer_requests bundle_bytes object_reads object_writes; do
+    args+=(--argjson "$kind" "$(counter_delta \
+      "$(metric_counter "$before" "$kind")" \
+      "$(metric_counter "$after" "$kind")")")
+  done
+  for phase in claim witness scope_validation pin_attach seal; do
+    args+=(--argjson "${phase}_count" "$(counter_delta \
+      "$(metric_phase_count "$before" "$phase")" \
+      "$(metric_phase_count "$after" "$phase")")")
+    args+=(--argjson "${phase}_duration_ms" "$(duration_delta_ms \
+      "$(metric_phase_sum "$before" "$phase")" \
+      "$(metric_phase_sum "$after" "$phase")")")
+  done
+  jq -n "${args[@]}" '{
+    candidate_count: $candidate_count,
+    affected_cells: $affected_cells,
+    catalog_shards: $catalog_shards,
+    catalog_pages: $catalog_pages,
+    control_reads: $control_reads,
+    follower_pages: $follower_pages,
+    follower_frames: $follower_frames,
+    follower_bytes: $follower_bytes,
+    peer_requests: $peer_requests,
+    bundle_bytes: $bundle_bytes,
+    object_reads: $object_reads,
+    object_writes: $object_writes,
+    phases: {
+      claim: {count: $claim_count, duration_ms: $claim_duration_ms},
+      witness: {count: $witness_count, duration_ms: $witness_duration_ms},
+      scope_validation: {count: $scope_validation_count, duration_ms: $scope_validation_duration_ms},
+      pin_attach: {count: $pin_attach_count, duration_ms: $pin_attach_duration_ms},
+      seal: {count: $seal_count, duration_ms: $seal_duration_ms}
+    }
+  }'
+}
+
 up_mode=(--no-build)
 if [ "${CRAB_HTTP_CLUSTER_BUILD:-true}" = true ]; then
   up_mode=(--build)
@@ -222,6 +302,21 @@ node_b="$("${compose[@]}" exec -T server-b crab-http-server \
   --config /etc/crab/server.toml cells node --session "$session_b" --json)"
 node_c="$("${compose[@]}" exec -T server-c crab-http-server \
   --config /etc/crab/server.toml cells node --session "$session_c" --json)"
+
+node_id_for_session() {
+  local expected_session="$1"
+  local node_json
+  for node_json in "$node_a" "$node_b" "$node_c"; do
+    if [ "$(jq -r '.session' <<<"$node_json")" = "$expected_session" ]; then
+      jq -r '.advertisement.node' <<<"$node_json"
+      return 0
+    fi
+  done
+  return 1
+}
+
+node_c_id="$(jq -r '.advertisement.node' <<<"$node_c")"
+[[ "$node_c_id" =~ ^[0-9a-f]{32}$ ]]
 
 assert_placement_parity() {
   local capacity="$1"
@@ -447,6 +542,22 @@ first_served_ms="$(unix_millis)"
 session_after="$(jq --raw-output '.owner.session' <<<"$control_after")"
 epoch_after="$(jq --raw-output '.epoch' <<<"$control_after")"
 root_after_state="$(jq --compact-output '.root' <<<"$control_after")"
+metrics_first=""
+for _ in $(seq 1 45); do
+  candidate_metrics="$("${compose[@]}" exec -T server-c crab-http-server \
+    --config /etc/crab/server.toml cells metrics)"
+  if [ "$(metric_counter "$candidate_metrics" candidate_count)" -gt \
+    "$(metric_counter "$metrics_c" candidate_count)" ]; then
+    metrics_first="$candidate_metrics"
+    break
+  fi
+  sleep 1
+done
+if [ -z "$metrics_first" ]; then
+  echo "Node C did not export recovery work after the first owner loss." >&2
+  exit 1
+fi
+work_first="$(recovery_work_evidence "$metrics_c" "$metrics_first")"
 
 for _ in $(seq 1 6); do
   assert_json_eventually \
@@ -532,6 +643,8 @@ if [[ ! "$node_b_id" =~ ^[0-9a-f]{32}$ ]]; then
   echo "Rejoined node B did not expose a canonical local node identity." >&2
   exit 1
 fi
+metrics_second_before="$("${compose[@]}" exec -T server-b crab-http-server \
+  --config /etc/crab/server.toml cells metrics)"
 log_epoch_before_follower_loss="$(jq --raw-output \
   '.advertisement.log.epoch' <<<"$node_before_follower_loss")"
 jq --exit-status \
@@ -589,6 +702,13 @@ jq --exit-status \
 control_before_second_loss="$("${compose[@]}" exec -T server-c crab-http-server \
   --config /etc/crab/server.toml cells status --owner demo --name hello)"
 root_before_second_loss="$(jq --compact-output '.root' <<<"$control_before_second_loss")"
+node_before_second_loss="$("${compose[@]}" exec -T server-b crab-http-server \
+  --config /etc/crab/server.toml cells node --session "$session_after" --json)"
+jq --exit-status \
+  --arg node_b "$node_b_id" \
+  '.live == true and .advertisement.log.state == "open" and
+   .advertisement.log.member_nodes == [$node_b]' \
+  <<<"$node_before_second_loss" >/dev/null
 
 second_owner_killed_ms="$(unix_millis)"
 "${compose[@]}" kill --signal KILL server-c >/dev/null
@@ -667,6 +787,52 @@ epoch_after_second_loss="$(jq --raw-output '.epoch' \
   <<<"$control_after_second_loss")"
 root_after_second_loss="$(jq --compact-output '.root' \
   <<<"$control_after_second_loss")"
+metrics_second=""
+for _ in $(seq 1 45); do
+  candidate_metrics="$("${compose[@]}" exec -T server-b crab-http-server \
+    --config /etc/crab/server.toml cells metrics)"
+  if [ "$(metric_counter "$candidate_metrics" candidate_count)" -gt \
+    "$(metric_counter "$metrics_second_before" candidate_count)" ]; then
+    metrics_second="$candidate_metrics"
+    break
+  fi
+  sleep 1
+done
+if [ -z "$metrics_second" ]; then
+  echo "Node B did not export recovery work after the second owner loss." >&2
+  exit 1
+fi
+work_second="$(recovery_work_evidence "$metrics_second_before" "$metrics_second")"
+failed_node_first="$(node_id_for_session "$session_before")"
+successor_node_first="$(node_id_for_session "$session_after")"
+selection="$(jq -n \
+  --arg failed_session "$session_before" \
+  --arg successor_session "$session_after" \
+  --arg failed_node "$failed_node_first" \
+  --arg successor_node "$successor_node_first" \
+  --arg second_failed_session "$session_after" \
+  --arg second_successor_session "$session_after_second_loss" \
+  --arg second_failed_node "$node_c_id" \
+  --arg second_successor_node "$node_b_id" \
+  '{
+    owner_loss: {
+      failed_session: $failed_session,
+      successor_session: $successor_session,
+      failed_node: $failed_node,
+      successor_node: $successor_node,
+      selected_original_follower: true,
+      terminal_result: "succeeded"
+    },
+    second_owner_loss: {
+      failed_session: $second_failed_session,
+      successor_session: $second_successor_session,
+      failed_node: $second_failed_node,
+      successor_node: $second_successor_node,
+      selected_original_follower: true,
+      terminal_result: "succeeded"
+    }
+  }')"
+receipt_path="${CRAB_HTTP_CLUSTER_RECEIPT_PATH:-${TMPDIR:-/tmp}/crab-http-cluster-receipt-${project}.json}"
 jq --null-input \
   --arg project "$project" \
   --arg source_revision "$source_revision" \
@@ -719,6 +885,9 @@ jq --null-input \
   --argjson epoch_after_second_loss "$epoch_after_second_loss" \
   --argjson root_before_second_loss "$root_before_second_loss" \
   --argjson root_after_second_loss "$root_after_second_loss" \
+  --argjson selection "$selection" \
+  --argjson work_first "$work_first" \
+  --argjson work_second "$work_second" \
   '{
     version: 6,
     source_revision: $source_revision,
@@ -795,5 +964,20 @@ jq --null-input \
       active_cells: true,
       measured_local_disk: true,
       signed_placement: true
+    },
+    selection: $selection,
+    work: {
+      owner_loss: $work_first,
+      second_owner_loss: $work_second
     }
-  }'
+  }' > "$receipt_path"
+if [ "${CRAB_HTTP_CLUSTER_VALIDATE:-false}" = true ]; then
+  receipt_mode=source-only
+  if [ "$qualified_image_ref" != source-only ]; then
+    receipt_mode=release
+  fi
+  CARGO_TARGET_DIR="${CRAB_HTTP_CLUSTER_CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/crab-http-cluster-target}" \
+    cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
+      validate-cluster "$receipt_path" "$source_revision" "$qualified_image_digest" "$receipt_mode"
+fi
+cat "$receipt_path"

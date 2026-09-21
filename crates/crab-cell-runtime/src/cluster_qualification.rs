@@ -5,6 +5,7 @@ use crate::{Digest, Error, Result, identity::encode_hex};
 
 const MAX_CLUSTER_RECEIPT_BYTES: usize = 8 << 20;
 const CLUSTER_RECEIPT_SCHEMA_VERSION: u64 = 6;
+const MAX_CLUSTER_WORK_VALUE: u64 = 1 << 40;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,6 +23,8 @@ struct ClusterQualificationReceipt {
     placement: Value,
     metrics: Value,
     capacity_metric_parity: Value,
+    selection: ClusterSelectionEvidence,
+    work: ClusterWorkEvidence,
 }
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +32,66 @@ struct ClusterQualificationReceipt {
 struct ClusterImageBinding {
     reference: String,
     digest: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClusterSelectionEvidence {
+    owner_loss: SelectionCycle,
+    second_owner_loss: SelectionCycle,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelectionCycle {
+    failed_session: String,
+    successor_session: String,
+    failed_node: String,
+    successor_node: String,
+    selected_original_follower: bool,
+    terminal_result: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClusterWorkEvidence {
+    owner_loss: WorkCycle,
+    second_owner_loss: WorkCycle,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkCycle {
+    candidate_count: u64,
+    affected_cells: u64,
+    catalog_shards: u64,
+    catalog_pages: u64,
+    control_reads: u64,
+    follower_pages: u64,
+    follower_frames: u64,
+    follower_bytes: u64,
+    peer_requests: u64,
+    bundle_bytes: u64,
+    object_reads: u64,
+    object_writes: u64,
+    phases: RecoveryPhaseEvidence,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryPhaseEvidence {
+    claim: RecoveryPhaseTiming,
+    witness: RecoveryPhaseTiming,
+    scope_validation: RecoveryPhaseTiming,
+    pin_attach: RecoveryPhaseTiming,
+    seal: RecoveryPhaseTiming,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryPhaseTiming {
+    count: u64,
+    duration_ms: u64,
 }
 
 /// Validates one raw three-node failover receipt against its release identity.
@@ -89,7 +152,173 @@ pub fn validate_cluster_receipt(
         &receipt.placement,
     )?;
     validate_metrics(&receipt.metrics)?;
-    validate_metric_parity(&receipt.capacity_metric_parity)
+    validate_metric_parity(&receipt.capacity_metric_parity)?;
+    validate_selection(
+        &receipt.selection,
+        &receipt.owner_loss,
+        &receipt.second_owner_loss,
+        &receipt.fleet_only_commit,
+        &receipt.follower_replacement,
+        &receipt.placement,
+    )?;
+    validate_work(&receipt.work)
+}
+
+fn validate_selection(
+    selection: &ClusterSelectionEvidence,
+    owner_loss: &Value,
+    second_owner_loss: &Value,
+    fleet_only_commit: &Value,
+    follower_replacement: &Value,
+    placement: &Value,
+) -> Result<()> {
+    let owner_loss = as_object(owner_loss, "owner loss")?;
+    let second_owner_loss = as_object(second_owner_loss, "second owner loss")?;
+    validate_selection_cycle(
+        &selection.owner_loss,
+        session(owner_loss, "session_before")?,
+        session(owner_loss, "session_after")?,
+    )?;
+    validate_selection_cycle(
+        &selection.second_owner_loss,
+        session(second_owner_loss, "session_before")?,
+        session(second_owner_loss, "session_after")?,
+    )?;
+
+    let placement = as_object(placement, "placement")?;
+    let expected_failed =
+        placement_node_for_session(placement, &selection.owner_loss.failed_session)?;
+    let expected_successor =
+        placement_node_for_session(placement, &selection.owner_loss.successor_session)?;
+    if selection.owner_loss.failed_node != expected_failed
+        || selection.owner_loss.successor_node != expected_successor
+    {
+        return Err(Error::Control("owner-loss selection identity"));
+    }
+    let first_members = member_nodes(as_object(
+        object_value(
+            as_object(fleet_only_commit, "fleet-only commit")?,
+            "node_log_before",
+        )?,
+        "node log",
+    )?)?;
+    if !first_members
+        .iter()
+        .any(|member| *member == selection.owner_loss.successor_node)
+    {
+        return Err(Error::Control("owner-loss successor is not a follower"));
+    }
+
+    let second_members = member_nodes(as_object(
+        object_value(
+            as_object(follower_replacement, "follower replacement")?,
+            "node_log_after",
+        )?,
+        "node log",
+    )?)?;
+    if selection.second_owner_loss.failed_node != selection.owner_loss.successor_node
+        || selection.second_owner_loss.failed_node == selection.second_owner_loss.successor_node
+        || !second_members
+            .iter()
+            .any(|member| *member == selection.second_owner_loss.successor_node)
+    {
+        return Err(Error::Control("second owner-loss selection identity"));
+    }
+    Ok(())
+}
+
+fn validate_selection_cycle(
+    cycle: &SelectionCycle,
+    expected_failed_session: &str,
+    expected_successor_session: &str,
+) -> Result<()> {
+    validate_session_value(&cycle.failed_session)?;
+    validate_session_value(&cycle.successor_session)?;
+    validate_node_value(&cycle.failed_node)?;
+    validate_node_value(&cycle.successor_node)?;
+    if cycle.failed_session != expected_failed_session
+        || cycle.successor_session != expected_successor_session
+        || cycle.failed_session == cycle.successor_session
+        || cycle.failed_node == cycle.successor_node
+        || !cycle.selected_original_follower
+        || cycle.terminal_result != "succeeded"
+    {
+        return Err(Error::Control("cluster selection evidence"));
+    }
+    Ok(())
+}
+
+fn placement_node_for_session<'a>(
+    placement: &'a Map<String, Value>,
+    expected_session: &str,
+) -> Result<&'a str> {
+    for label in ["node_a", "node_b", "node_c"] {
+        let node = as_object(object_value(placement, label)?, "placement node")?;
+        if session(node, "session")? == expected_session {
+            return node_id(
+                as_object(
+                    object_value(node, "advertisement")?,
+                    "placement advertisement",
+                )?,
+                "node",
+            );
+        }
+    }
+    Err(Error::Control("selection session is not in placement"))
+}
+
+fn member_nodes(object: &Map<String, Value>) -> Result<Vec<&str>> {
+    object_value(object, "member_nodes")?
+        .as_array()
+        .ok_or(Error::Control("cluster receipt array"))?
+        .iter()
+        .map(|member| {
+            let value = member
+                .as_str()
+                .ok_or(Error::Control("cluster receipt node"))?;
+            validate_node_value(value)?;
+            Ok(value)
+        })
+        .collect()
+}
+
+fn validate_work(work: &ClusterWorkEvidence) -> Result<()> {
+    validate_work_cycle(&work.owner_loss)?;
+    validate_work_cycle(&work.second_owner_loss)
+}
+
+fn validate_work_cycle(work: &WorkCycle) -> Result<()> {
+    for value in [
+        work.candidate_count,
+        work.affected_cells,
+        work.catalog_shards,
+        work.catalog_pages,
+        work.control_reads,
+        work.follower_pages,
+        work.follower_frames,
+        work.follower_bytes,
+        work.peer_requests,
+        work.bundle_bytes,
+        work.object_reads,
+        work.object_writes,
+    ] {
+        if value == 0 || value > MAX_CLUSTER_WORK_VALUE {
+            return Err(Error::Control("cluster recovery work counter"));
+        }
+    }
+    let phases = [
+        &work.phases.claim,
+        &work.phases.witness,
+        &work.phases.scope_validation,
+        &work.phases.pin_attach,
+        &work.phases.seal,
+    ];
+    for phase in phases {
+        if phase.count == 0 || phase.duration_ms > MAX_CLUSTER_WORK_VALUE {
+            return Err(Error::Control("cluster recovery phase evidence"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_owner_loss(value: &Value) -> Result<()> {
@@ -325,7 +554,26 @@ fn validate_follower_affinity(
 fn validate_metrics(value: &Value) -> Result<()> {
     let object = as_object(value, "metrics")?;
     for node in ["node_a", "node_b", "node_c"] {
-        if !object_value(object, node)?.is_string() {
+        let metrics = object_value(object, node)?
+            .as_str()
+            .ok_or(Error::Control("metrics payload"))?;
+        for forbidden in [
+            "node=\"",
+            "session=\"",
+            "cell=\"",
+            "application=\"",
+            "incarnation=\"",
+            "owner=\"",
+            "repository=\"",
+            "tenant=\"",
+            "bucket=\"",
+            "node_id=\"",
+        ] {
+            if metrics.contains(forbidden) {
+                return Err(Error::Control("metrics payload contains an identifier"));
+            }
+        }
+        if metrics.is_empty() {
             return Err(Error::Control("metrics payload"));
         }
     }
@@ -409,18 +657,28 @@ fn string<'a>(object: &'a Map<String, Value>, key: &str) -> Result<&'a str> {
 
 fn session<'a>(object: &'a Map<String, Value>, key: &str) -> Result<&'a str> {
     let value = string(object, key)?;
-    if value.len() != 32 || !value.bytes().all(is_lower_hex) {
-        return Err(Error::Control("cluster receipt session"));
-    }
+    validate_session_value(value)?;
     Ok(value)
 }
 
 fn node_id<'a>(object: &'a Map<String, Value>, key: &str) -> Result<&'a str> {
     let value = string(object, key)?;
+    validate_node_value(value)?;
+    Ok(value)
+}
+
+fn validate_session_value(value: &str) -> Result<()> {
+    if value.len() != 32 || !value.bytes().all(is_lower_hex) {
+        return Err(Error::Control("cluster receipt session"));
+    }
+    Ok(())
+}
+
+fn validate_node_value(value: &str) -> Result<()> {
     if value.len() != 32 || !value.bytes().all(is_lower_hex) {
         return Err(Error::Control("cluster receipt node"));
     }
-    Ok(value)
+    Ok(())
 }
 
 fn number(object: &Map<String, Value>, key: &str) -> Result<u64> {
@@ -450,7 +708,11 @@ fn is_lower_hex(byte: u8) -> bool {
 mod tests {
     use serde_json::json;
 
-    use super::{validate_follower_affinity, validate_revision, validate_timing};
+    use super::{
+        ClusterWorkEvidence, RecoveryPhaseEvidence, RecoveryPhaseTiming, WorkCycle,
+        validate_follower_affinity, validate_metrics, validate_revision, validate_timing,
+        validate_work_cycle,
+    };
 
     #[test]
     fn source_revision_requires_a_lowercase_commit_shape() {
@@ -521,5 +783,102 @@ mod tests {
         assert!(
             validate_follower_affinity(&owner_loss, &fleet_only_commit, &reused_owner).is_err()
         );
+    }
+
+    #[test]
+    fn work_evidence_requires_a_bounded_observation_per_phase() {
+        let phase = RecoveryPhaseTiming {
+            count: 1,
+            duration_ms: 0,
+        };
+        let valid = WorkCycle {
+            candidate_count: 1,
+            affected_cells: 1,
+            catalog_shards: 1,
+            catalog_pages: 1,
+            control_reads: 1,
+            follower_pages: 1,
+            follower_frames: 1,
+            follower_bytes: 1,
+            peer_requests: 1,
+            bundle_bytes: 1,
+            object_reads: 1,
+            object_writes: 1,
+            phases: RecoveryPhaseEvidence {
+                claim: phase,
+                witness: phase,
+                scope_validation: phase,
+                pin_attach: phase,
+                seal: phase,
+            },
+        };
+        assert!(validate_work_cycle(&valid).is_ok());
+
+        let invalid = WorkCycle {
+            phases: RecoveryPhaseEvidence {
+                claim: RecoveryPhaseTiming {
+                    count: 0,
+                    duration_ms: 0,
+                },
+                ..valid.phases
+            },
+            ..valid
+        };
+        assert!(validate_work_cycle(&invalid).is_err());
+    }
+
+    #[test]
+    fn metrics_reject_identifier_bearing_labels() {
+        let valid = json!({
+            "node_a": "crab_cell_node_log_recovery_work_total{kind=\"candidate_count\"} 1",
+            "node_b": "crab_cell_node_log_recovery_work_total{kind=\"candidate_count\"} 1",
+            "node_c": "crab_cell_node_log_recovery_work_total{kind=\"candidate_count\"} 1"
+        });
+        assert!(validate_metrics(&valid).is_ok());
+        let invalid = json!({
+            "node_a": "crab_cell_node_log_recovery_work_total{node=\"deadbeef\"} 1",
+            "node_b": "ok",
+            "node_c": "ok"
+        });
+        assert!(validate_metrics(&invalid).is_err());
+    }
+
+    #[test]
+    fn work_receipt_shape_rejects_missing_or_unknown_phase_fields() {
+        let phase = json!({"count": 1, "duration_ms": 0});
+        let cycle = json!({
+            "candidate_count": 1,
+            "affected_cells": 1,
+            "catalog_shards": 1,
+            "catalog_pages": 1,
+            "control_reads": 1,
+            "follower_pages": 1,
+            "follower_frames": 1,
+            "follower_bytes": 1,
+            "peer_requests": 1,
+            "bundle_bytes": 1,
+            "object_reads": 1,
+            "object_writes": 1,
+            "phases": {
+                "claim": phase,
+                "witness": phase,
+                "scope_validation": phase,
+                "pin_attach": phase,
+                "seal": phase
+            }
+        });
+        let valid = json!({
+            "owner_loss": cycle.clone(),
+            "second_owner_loss": cycle.clone()
+        });
+        assert!(serde_json::from_value::<ClusterWorkEvidence>(valid).is_ok());
+
+        let mut missing = cycle.clone();
+        missing["phases"].as_object_mut().unwrap().remove("seal");
+        assert!(serde_json::from_value::<WorkCycle>(missing).is_err());
+
+        let mut unknown = cycle;
+        unknown["phases"]["seal"]["extra"] = json!(true);
+        assert!(serde_json::from_value::<WorkCycle>(unknown).is_err());
     }
 }

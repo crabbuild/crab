@@ -766,6 +766,10 @@ jobs:
           docker run --rm crab-http-server:test --help | grep -F -- "storage-probe"
           docker run --rm crab-http-server:test --config /dev/null repository --help | grep -F -- "create"
           docker run --rm crab-http-server:test --config /dev/null repository --help | grep -F -- "set-members"
+      - name: Set up Rust for cluster receipt validation
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
       - name: Exercise Compose startup, restore, crash recovery, and restart
         env:
           CRAB_HTTP_SERVER_IMAGE: crab-http-server:test
@@ -868,70 +872,19 @@ jobs:
 
           CRAB_HTTP_SERVER_IMAGE=crab-http-server:test \
             CRAB_HTTP_CLUSTER_BUILD=false \
+            CRAB_HTTP_CLUSTER_VALIDATE=true \
+            CRAB_HTTP_CLUSTER_CARGO_TARGET_DIR="${RUNNER_TEMP}/crab-http-server-receipt-target" \
             crates/crab-http-server/tests/qualify_compose_cluster.sh \
             > "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json"
-          jq --exit-status \
-            '.version == 6 and
-             .owner_loss.session_before != .owner_loss.session_after and
-             .owner_loss.epoch_after > .owner_loss.epoch_before and
-             .owner_loss.timing.owner_killed_ms > 0 and
-             .owner_loss.timing.owner_killed_ms <=
-               .owner_loss.timing.advertisement_expired_ms and
-             .owner_loss.timing.advertisement_expired_ms <=
-               .owner_loss.timing.recovery_sealed_ms and
-             .owner_loss.timing.recovery_sealed_ms <=
-               .owner_loss.timing.first_served_ms and
-             (.owner_loss.root_before | keys | sort) ==
-               ["checksum", "commit_sequence", "digest", "txid"] and
-             (.owner_loss.root_before.digest | test("^[0-9a-f]{64}$")) and
-             .owner_loss.root_before.txid > 0 and
-             (.owner_loss.root_before.checksum | type) == "number" and
-             .owner_loss.root_before.commit_sequence > 0 and
-             (.owner_loss.root_after_restore | keys | sort) ==
-               ["checksum", "commit_sequence", "digest", "txid"] and
-             (.owner_loss.root_after_restore.digest | test("^[0-9a-f]{64}$")) and
-             (.owner_loss.root_after_restore.checksum | type) == "number" and
-             .owner_loss.root_after_restore.digest != .owner_loss.root_before.digest and
-             .owner_loss.root_after_restore.txid > .owner_loss.root_before.txid and
-             .owner_loss.root_after_restore.commit_sequence >
-               .owner_loss.root_before.commit_sequence and
-             (.owner_loss.root_continued | keys | sort) ==
-               ["checksum", "commit_sequence", "digest", "txid"] and
-             (.owner_loss.root_continued.digest | test("^[0-9a-f]{64}$")) and
-             (.owner_loss.root_continued.checksum | type) == "number" and
-             .owner_loss.root_continued.digest != .owner_loss.root_after_restore.digest and
-             .owner_loss.root_continued.txid > .owner_loss.root_after_restore.txid and
-             .owner_loss.root_continued.commit_sequence >
-               .owner_loss.root_after_restore.commit_sequence and
-             .fleet_only_commit.owner_uncovered_bytes > 0 and
-             .fleet_only_commit.follower_retained_bytes > 0 and
-             .fleet_only_commit.control_before_owner_loss.owner_lease.state == "live" and
-             .fleet_only_commit.control_before_owner_loss.owner_lease.expires_at_ms >
-               .fleet_only_commit.control_before_owner_loss.owner_lease.observed_at_ms and
-             .follower_replacement.node_log_after.epoch >
-               .follower_replacement.node_log_before.epoch and
-             (.follower_replacement.node_log_after.member_nodes | length) == 1 and
-             .follower_replacement.object_covered_response.number == 3 and
-             .follower_replacement.fleet_only_response.id == 2 and
-             .second_owner_loss.session_before != .second_owner_loss.session_after and
-             .second_owner_loss.epoch_after > .second_owner_loss.epoch_before and
-             .second_owner_loss.timing.owner_killed_ms > 0 and
-             .second_owner_loss.timing.owner_killed_ms <=
-               .second_owner_loss.timing.advertisement_expired_ms and
-             .second_owner_loss.timing.advertisement_expired_ms <=
-               .second_owner_loss.timing.recovery_sealed_ms and
-             .second_owner_loss.timing.recovery_sealed_ms <=
-               .second_owner_loss.timing.first_served_ms and
-             (.second_owner_loss.root_before | keys | sort) ==
-               ["checksum", "commit_sequence", "digest", "txid"] and
-             (.second_owner_loss.root_after | keys | sort) ==
-               ["checksum", "commit_sequence", "digest", "txid"] and
-             .second_owner_loss.root_after.digest != .second_owner_loss.root_before.digest and
-             .second_owner_loss.root_after.txid > .second_owner_loss.root_before.txid and
-             .second_owner_loss.root_after.commit_sequence >
-               .second_owner_loss.root_before.commit_sequence and
-             (.second_owner_loss.restored_labels.items | length) == 2' \
-            "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json"
+          source_revision="$(git rev-parse HEAD)"
+          receipt_mode=source-only
+          if [ -n '${{ inputs.image_ref }}' ]; then
+            receipt_mode=release
+          fi
+          CARGO_TARGET_DIR="${RUNNER_TEMP}/crab-http-server-receipt-target" \
+            cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
+              validate-cluster "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json" \
+              "$source_revision" "${{ steps.image.outputs.digest }}" "$receipt_mode"
       - name: Prepare exact-source qualification evidence
         shell: bash
         run: |

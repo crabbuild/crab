@@ -1476,7 +1476,9 @@ crab_cell_node_log_uncovered_bytes
 crab_cell_node_log_lanes{state="open|degraded|sealed"}
 crab_cell_node_log_recoveries{state="running|waiting"}
 crab_cell_node_log_recovery_seconds
+crab_cell_node_log_recovery_phase_seconds{phase="claim|witness|scope_validation|pin_attach|seal"}
 crab_cell_node_log_recovery_failures_total{reason}
+crab_cell_node_log_recovery_work_total{kind="candidate_count|affected_cells|catalog_shards|catalog_pages|control_reads|follower_pages|follower_frames|follower_bytes|peer_requests|bundle_bytes|object_reads|object_writes"}
 crab_cell_node_log_rotations_total{result="started|pending|failed|completed"}
 crab_cell_follower_retained_bytes
 crab_cell_session_lease_seconds
@@ -1601,9 +1603,12 @@ rejects server, transport, body-limit, latency-over-60-second, or target-rate
 failures. The eight-Cell schedule is the node-level aggregate profile (the
 receipt records a configured 125 target requests/s per Cell); retain a separate
 one-Cell run when measuring the hot-Cell admission limit.
-The typed cluster-receipt validator also maps the failed and successor sessions
-to their stable NodeIds and requires the first successor to be present in the
-failed log's original follower set.
+The version-6 typed cluster-receipt validator maps both failed and successor
+sessions to stable NodeIds, requires each selected successor to be present in
+the failed log's original follower set, requires a successful observation for
+each fixed recovery phase, and binds bounded work counters to the two loss
+cycles. Prometheus labels remain fixed; the receipt keeps the raw metric text
+only as evidence and rejects identifier-bearing labels.
 
 ## Deliver in dependency order
 
