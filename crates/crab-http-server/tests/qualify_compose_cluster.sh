@@ -360,10 +360,27 @@ assert_placement_parity "$capacity_b" "$metrics_b" "$node_b"
 assert_placement_parity "$capacity_c" "$metrics_c" "$node_c"
 assert_placement_parity "$capacity_d" "$metrics_d" "$node_d"
 
-# Keep the initial owner’s two-follower log deterministic: with D paused,
-# B can enroll only A and C, so C is guaranteed to be the surviving original
-# follower when A is paused immediately before the owner crash.
+# Keep the initial owner’s two-follower log deterministic: with D paused and
+# its old lease expired, B can enroll only A and C, so C is guaranteed to be
+# the surviving original follower when A is paused immediately before the
+# owner crash. Pausing alone is not enough because the signed advertisement
+# remains live until its lease expires.
 "${compose[@]}" pause server-d >/dev/null
+d_advertisement_expired=false
+for _ in $(seq 1 45); do
+  node_d_status="$("${compose[@]}" exec -T server-c crab-http-server \
+    --config /etc/crab/server.toml cells node \
+    --session "$session_d" --json 2>/dev/null || true)"
+  if jq --exit-status '.live == false' <<<"$node_d_status" >/dev/null 2>&1; then
+    d_advertisement_expired=true
+    break
+  fi
+  sleep 1
+done
+if ! $d_advertisement_expired; then
+  echo "Paused node D did not leave the live advertisement set." >&2
+  exit 1
+fi
 
 create_response=""
 for _ in $(seq 1 45); do
