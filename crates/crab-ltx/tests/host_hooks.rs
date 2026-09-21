@@ -432,7 +432,7 @@ async fn prepare_overlaps_independent_immutable_uploads() {
 
     replica.prepare(Some(&root), &captured, 2, 1).await.unwrap();
 
-    assert_eq!(started.elapsed(), delay * 2);
+    assert_eq!(started.elapsed(), delay);
     writer.close().unwrap();
 }
 
@@ -472,8 +472,9 @@ async fn warm_append_reuses_its_authenticated_root_metadata() {
     let prepared = replica.prepare(Some(&root), &second, 2, 1).await.unwrap();
 
     // The store throttles HEAD with the PUT delay: one parallel presence
-    // wave plus the immutable upload waves, but no serial metadata GETs.
-    assert_eq!(started.elapsed(), delay * 3);
+    // wave plus one overlapping immutable-upload wave, with no serial
+    // metadata GETs or directory-before-root upload dependency.
+    assert_eq!(started.elapsed(), delay * 2);
     assert_eq!(prepared.root().position, second.position);
     let independent = CellReplica::new(
         CellStorageLayout::new(
@@ -580,7 +581,7 @@ async fn compaction_overlaps_independent_remote_transfers() {
         .unwrap();
 
     // Cached root metadata is presence-checked in one parallel HEAD wave.
-    // Index/body downloads and the upload waves each add one interval.
+    // Streaming directory construction still precedes the final root upload.
     assert_eq!(started.elapsed(), delay * 5);
     writer.close().unwrap();
 }

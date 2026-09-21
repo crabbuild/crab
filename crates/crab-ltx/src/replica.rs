@@ -1122,17 +1122,15 @@ impl CellReplica {
             }
             directory
         };
-        self.put_objects(
+        let directory_uploads = self.put_objects(
             CellObjectKind::Directory,
             directory
                 .objects()
                 .iter()
                 .map(|node| (node.digest, node.bytes.clone()))
                 .collect(),
-        )
-        .await?;
-
-        self.finish_root(
+        );
+        let root_uploads = self.finish_root(
             base,
             descriptors,
             target,
@@ -1141,8 +1139,11 @@ impl CellReplica {
             page_size,
             database_pages,
             directory,
-        )
-        .await
+        );
+        // Both object sets are immutable; no proposal escapes unless every
+        // upload succeeds, and a failed sibling leaves only unreachable data.
+        let (_, prepared) = futures_util::future::try_join(directory_uploads, root_uploads).await?;
+        Ok(prepared)
     }
 
     #[expect(clippy::too_many_arguments)]

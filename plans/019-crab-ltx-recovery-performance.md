@@ -1189,6 +1189,32 @@ loading, presence checks, and immutable uploads. These numbers qualify the
 network-latency hypothesis only: host contention, synthetic delays, and an
 in-memory backend do not establish live-provider or Celld performance.
 
+### Follow-up: overlap directory and root uploads
+
+After the new directory digest is known, directory objects and the root
+document are independent immutable uploads. They now run concurrently;
+`PreparedRoot` still returns only after both upload sets and the captured
+LTX/index dependencies succeed. A failure can leave unreachable immutable
+objects but cannot yield a publishable proposal. The existing Host I/O limit
+remains the aggregate request bound.
+
+The paused-clock warm-append path drops from three to two 100 ms intervals:
+one parallel predecessor-presence wave and one overlapping upload wave. A
+cold-store successor with no cached predecessor drops from two upload
+intervals to one. Streaming full compaction is unchanged because it must
+finish constructing and uploading its directory before knowing the final
+root digest.
+
+The same release A/B probe then compared merged `main` at `6cd4f298871`
+against the combined cache-and-overlap candidate in eight alternating pairs
+per condition. At 1 ms injected provider delay, the candidate won 8/8 pairs
+with a 1.87x median paired speedup (median run 9.54 ms baseline versus
+5.10 ms candidate). At 5 ms, it won 8/8 with a 1.94x speedup (27.53 ms
+versus 14.40 ms). Without injected delay, timings were noisy and the
+candidate won 6/8 pairs; no reliable low-latency local-only claim follows.
+This exercises warm root preparation with an in-memory store and synthetic
+per-operation delay, not Celld or live cloud end-to-end latency.
+
 ## Maintenance notes
 
 - Reviewers should trace one corrupt input through plan construction, one
