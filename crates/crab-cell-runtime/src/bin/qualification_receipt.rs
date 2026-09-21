@@ -117,12 +117,17 @@ fn run() -> Result<(), String> {
                 "local-provider" => QualificationProfile::local_provider(),
                 "scale" => QualificationProfile::scale(),
                 "fault" => QualificationProfile::fault(),
+                "fault-s3" => QualificationProfile::fault_s3(),
+                "fault-gcs" => QualificationProfile::fault_gcs(),
+                "fault-azure" => QualificationProfile::fault_azure(),
                 "provider" => QualificationProfile::provider(),
+                "provider-s3" => QualificationProfile::provider_s3(),
+                "provider-gcs" => QualificationProfile::provider_gcs(),
+                "provider-azure" => QualificationProfile::provider_azure(),
                 "compatibility" => QualificationProfile::compatibility(),
                 _ => {
                     return Err(
-                        "profile must be pr-contract, local-provider, scale, fault, provider, or compatibility"
-                            .into(),
+                        "profile must be pr-contract, local-provider, scale, fault, fault-s3, fault-gcs, fault-azure, provider, provider-s3, provider-gcs, provider-azure, or compatibility".into(),
                     );
                 }
             };
@@ -462,7 +467,7 @@ fn unix_millis() -> Result<u64, String> {
 }
 
 fn usage() -> String {
-    "usage: qualification_receipt profile <output> [pr-contract|local-provider|scale|fault|provider|compatibility]\n       qualification_receipt workload <output> <profile.json> <seed> [cells operations duration_secs]\n       qualification_receipt verify-workload <workload.json> <profile.json>\n       qualification_receipt emit <output> <source> <image-digest> <artifact> [provider workload fault profile.json]\n       qualification_receipt verify <receipt> <source> <image-digest> <artifact> [profile.json [trusted-signer-hex]]\n       qualification_receipt verify-matrix <manifest> <source> <image-digest> [profile.json [trusted-signer-hex]]\n       qualification_receipt validate-cluster <receipt> <source> <image-digest> [release|source-only]".into()
+    "usage: qualification_receipt profile <output> [pr-contract|local-provider|scale|fault|fault-s3|fault-gcs|fault-azure|provider|provider-s3|provider-gcs|provider-azure|compatibility]\n       qualification_receipt workload <output> <profile.json> <seed> [cells operations duration_secs]\n       qualification_receipt verify-workload <workload.json> <profile.json>\n       qualification_receipt emit <output> <source> <image-digest> <artifact> [provider workload fault profile.json]\n       qualification_receipt verify <receipt> <source> <image-digest> <artifact> [profile.json [trusted-signer-hex]]\n       qualification_receipt verify-matrix <manifest> <source> <image-digest> [profile.json [trusted-signer-hex]]\n       qualification_receipt validate-cluster <receipt> <source> <image-digest> [release|source-only]".into()
 }
 
 #[cfg(test)]

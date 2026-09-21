@@ -51,6 +51,24 @@ jobs:
         run: python3 crab/scripts/check-architecture-gates.py
       - name: Validate executable design contracts
         run: node crates/crab-cell-runtime/docs/validate.mjs
+      - name: Verify tracked qualification profiles
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/qualification-profiles"
+          mkdir -p "$root"
+          for profile in \
+            pr-contract local-provider scale fault fault-s3 fault-gcs fault-azure \
+            provider provider-s3 provider-gcs provider-azure compatibility; do
+            generated="$root/${profile}.json"
+            cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
+              profile "$generated" "$profile"
+            jq -S . "$generated" > "$root/${profile}.generated"
+            jq -S . "crates/crab-cell-runtime/qualification/profiles/${profile}-v1.json" \
+              > "$root/${profile}.tracked"
+            cmp "$root/${profile}.generated" "$root/${profile}.tracked"
+          done
       - name: Run production hot-path preflight guards
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target

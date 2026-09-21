@@ -162,6 +162,21 @@ impl QualificationProfile {
         )
     }
 
+    /// Returns the protected Kubernetes fault profile for an S3 deployment.
+    pub fn fault_s3() -> Self {
+        Self::fault_for("fault-s3-v1", "s3")
+    }
+
+    /// Returns the protected Kubernetes fault profile for a GCS deployment.
+    pub fn fault_gcs() -> Self {
+        Self::fault_for("fault-gcs-v1", "gcs")
+    }
+
+    /// Returns the protected Kubernetes fault profile for an Azure deployment.
+    pub fn fault_azure() -> Self {
+        Self::fault_for("fault-azure-v1", "azure")
+    }
+
     /// Returns the provider-specific correctness profile.
     pub fn provider() -> Self {
         Self::built_in(
@@ -178,6 +193,21 @@ impl QualificationProfile {
             10_000,
             10_000_000,
         )
+    }
+
+    /// Returns the protected provider correctness profile for S3.
+    pub fn provider_s3() -> Self {
+        Self::provider_for("provider-s3-v1", "s3")
+    }
+
+    /// Returns the protected provider correctness profile for GCS.
+    pub fn provider_gcs() -> Self {
+        Self::provider_for("provider-gcs-v1", "gcs")
+    }
+
+    /// Returns the protected provider correctness profile for Azure.
+    pub fn provider_azure() -> Self {
+        Self::provider_for("provider-azure-v1", "azure")
     }
 
     /// Returns the rolling-release compatibility profile.
@@ -339,6 +369,40 @@ impl QualificationProfile {
             provider: provider.to_owned(),
             topology: topology.to_owned(),
         }
+    }
+
+    fn fault_for(name: &'static str, provider: &'static str) -> Self {
+        Self::built_in(
+            name,
+            256,
+            1_000_000,
+            60,
+            1_000,
+            provider,
+            "kubernetes",
+            1,
+            8 * 1024 * 1024 * 1024,
+            20 * 1024 * 1024 * 1024,
+            10_000,
+            10_000_000,
+        )
+    }
+
+    fn provider_for(name: &'static str, provider: &'static str) -> Self {
+        Self::built_in(
+            name,
+            256,
+            1_000_000,
+            60,
+            1_000,
+            provider,
+            "three-process",
+            1,
+            8 * 1024 * 1024 * 1024,
+            20 * 1024 * 1024 * 1024,
+            10_000,
+            10_000_000,
+        )
     }
 
     fn validate(&self) -> Result<()> {
@@ -2570,6 +2634,49 @@ mod tests {
         assert_eq!(fault.name(), "fault-v1");
         assert_eq!(provider.name(), "provider-v1");
         assert_eq!(compatibility.name(), "compatibility-v1");
+        for (profile, name, provider, topology) in [
+            (
+                QualificationProfile::provider_s3(),
+                "provider-s3-v1",
+                "s3",
+                "three-process",
+            ),
+            (
+                QualificationProfile::provider_gcs(),
+                "provider-gcs-v1",
+                "gcs",
+                "three-process",
+            ),
+            (
+                QualificationProfile::provider_azure(),
+                "provider-azure-v1",
+                "azure",
+                "three-process",
+            ),
+            (
+                QualificationProfile::fault_s3(),
+                "fault-s3-v1",
+                "s3",
+                "kubernetes",
+            ),
+            (
+                QualificationProfile::fault_gcs(),
+                "fault-gcs-v1",
+                "gcs",
+                "kubernetes",
+            ),
+            (
+                QualificationProfile::fault_azure(),
+                "fault-azure-v1",
+                "azure",
+                "kubernetes",
+            ),
+        ] {
+            assert_eq!(profile.name(), name);
+            assert_eq!(profile.required_provider(), provider);
+            assert_eq!(profile.required_topology(), topology);
+            assert!(profile.requires_protected_evidence());
+        }
         assert_ne!(contract.digest().unwrap(), local.digest().unwrap());
         assert_eq!(
             QualificationProfile::decode(&contract.encode().unwrap()).unwrap(),
