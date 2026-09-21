@@ -103,7 +103,7 @@ zero-tolerance.
 | --- | --- | --- |
 | Runtime baseline | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-024-qualification cargo test -p crab-cell-runtime --release --locked` | exit 0 |
 | LTX baseline | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-024-qualification cargo test -p crab-ltx --release --features replica --locked` | exit 0 |
-| Server baseline | `npm ci --prefix packages/repository && npm run build --prefix packages/repository && CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-024-qualification cargo test -p crab-http-server --locked --lib` | exit 0 |
+| Server baseline | `npm ci --prefix packages/ui && npm run build --prefix packages/ui && CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-024-qualification cargo test -p crab-http-server --locked --lib` | exit 0 |
 | Receipt tests | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-024-qualification cargo test -p crab-cell-runtime --test qualification_receipt --locked` | exit 0 |
 | Architecture/docs | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-024-qualification make -C crab architecture-check && node crates/crab-cell-runtime/docs/validate.mjs` | exit 0 |
 | Quality | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-024-qualification cargo clippy -p crab-cell-host -p crab-cell-app -p crab-cell-runtime -p crab-http-server --all-targets --locked -- -D warnings && cargo fmt --all -- --check` | exit 0 |

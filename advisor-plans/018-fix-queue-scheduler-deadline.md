@@ -66,7 +66,7 @@ consumer runner is later added as a separate, resource-admitted owner.
 | --- | --- | --- |
 | Runtime regression | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-018-queue cargo test -p crab-cell-runtime --test scheduler --locked` | exit 0; new deadline tests pass |
 | Queue integration | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-018-queue cargo test -p crab-cell-runtime --test queue --locked` | exit 0 |
-| Server scheduler | `npm ci --prefix packages/repository && npm run build --prefix packages/repository && CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-018-queue cargo test -p crab-http-server --locked --lib cells::scheduler::tests` | exit 0 |
+| Server scheduler | `npm ci --prefix packages/ui && npm run build --prefix packages/ui && CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-018-queue cargo test -p crab-http-server --locked --lib cells::scheduler::tests` | exit 0 |
 | Lint | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-018-queue cargo clippy -p crab-cell-runtime -p crab-http-server --all-targets --locked -- -D warnings` | exit 0 |
 | Format | `cargo fmt --all -- --check` | exit 0 |
 

@@ -77,7 +77,7 @@ consumer callback or treat ready Queue messages as maintenance.
 
 | Purpose | Command | Expected on success |
 | --- | --- | --- |
-| Frontend prerequisite | `npm ci --prefix packages/repository && npm run build --prefix packages/repository` | exit 0 |
+| Frontend prerequisite | `npm ci --prefix packages/ui && npm run build --prefix packages/ui` | exit 0 |
 | Host tests | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-023-host cargo test -p crab-cell-host --locked` | exit 0 |
 | Runtime tests | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-023-host cargo test -p crab-cell-runtime --release --locked` | exit 0 |
 | Server tests | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-023-host cargo test -p crab-http-server --locked --lib` | exit 0 |
