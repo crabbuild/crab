@@ -637,12 +637,46 @@ jq --exit-status \
 "${compose[@]}" unpause server >/dev/null
 "${compose[@]}" up --detach --no-build server server-b >/dev/null
 wait_for_healthy server-b
-assert_json_eventually \
+rejoin_ready=false
+control_after_rejoin=""
+for _ in $(seq 1 90); do
+  candidate="$("${compose[@]}" exec -T server-b crab-http-server \
+    --config /etc/crab/server.toml cells status --owner demo --name hello \
+    2>/dev/null || true)"
+  if jq --exit-status \
+    --arg session_after "$session_after" \
+    --argjson epoch_after "$epoch_after" \
+    --argjson sequence_continued "$sequence_continued" \
+    '.state == "serving" and .owner.session == $session_after and
+     .owner.endpoint == "https://localhost:8989/" and .epoch == $epoch_after and
+     .owner_lease.state == "live" and
+     .owner_lease.expires_at_ms > .owner_lease.observed_at_ms and
+     .recovery == null and .root.commit_sequence >= $sequence_continued' <<<"$candidate" >/dev/null 2>&1; then
+    control_after_rejoin="$candidate"
+    rejoin_ready=true
+    break
+  fi
+  sleep 1
+done
+if ! $rejoin_ready; then
+  echo "Node B did not publish the recovered serving status after rejoining." >&2
+  exit 1
+fi
+if ! assert_json_eventually \
   "$node_b_origin" \
   "${repository_path}/issues?state=all" \
   '.items | length == 2 and .[0].title == "Recovered owner" and
    .[1].title == "Owner loss qualification"' \
-  "Node B did not expose the recovered issues after rejoining."
+  "Node B did not expose the recovered issues after rejoining."; then
+  echo "Node B rejoin control:" >&2
+  "${compose[@]}" exec -T server-b crab-http-server \
+    --config /etc/crab/server.toml cells status --owner demo --name hello >&2 || true
+  echo "Node B rejoin log:" >&2
+  "${compose[@]}" logs --no-color server-b >&2 || true
+  echo "Node C owner log:" >&2
+  "${compose[@]}" logs --no-color server-c >&2 || true
+  exit 1
+fi
 assert_json_eventually \
   "$node_b_origin" \
   "${repository_path}/labels" \
