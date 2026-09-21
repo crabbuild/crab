@@ -8,7 +8,6 @@ restore_origin="http://127.0.0.1:${restore_port}"
 work_root="${RUNNER_TEMP:?RUNNER_TEMP must name disposable qualification storage}"
 work_dir="$(mktemp -d "${work_root}/crab-http-server-restore.XXXXXX")"
 chmod 0755 "$work_dir"
-deploy_dir="$(cd "$(dirname "$compose_file")" && pwd)"
 hash_script="$(cd "$(dirname "$0")" && pwd)/hash_backup_restore_objects.sh"
 compose=(docker compose --file "$compose_file")
 server_id="$("${compose[@]}" ps --quiet server)"
@@ -19,6 +18,7 @@ suffix="${work_dir##*.}"
 restore_prefix="restore-${suffix}"
 restore_server="crab-http-server-restore-${suffix}"
 restore_proxy="crab-http-server-restore-proxy-${suffix}"
+restore_network="${restore_server}-network"
 
 if [ -z "$server_id" ] || [ -z "$proxy_id" ] || [ -z "$rustfs_id" ]; then
   echo "The Compose server, proxy, and RustFS services must be running." >&2
@@ -27,7 +27,7 @@ fi
 
 cleanup() {
   result=$?
-  docker rm --force "$restore_proxy" "$restore_server" >/dev/null 2>&1 || true
+  docker rm --force "$restore_proxy" "$restore_server" "$restore_network" >/dev/null 2>&1 || true
   if $source_stopped; then
     "${compose[@]}" up --detach --no-build --wait --wait-timeout 120 \
       server proxy >/dev/null 2>&1 || true
@@ -144,6 +144,20 @@ peer_ca = "/run/secrets/crab-peer/ca.crt"
 url = "s3://crab-http-server/${restore_prefix}"
 EOF
 chmod 0644 "${work_dir}/restore.server.toml"
+restore_caddyfile="${work_dir}/restore.Caddyfile"
+cat > "$restore_caddyfile" <<EOF
+{
+  admin off
+  auto_https off
+}
+
+:8080 {
+  reverse_proxy 127.0.0.1:8788 {
+    flush_interval -1
+  }
+}
+EOF
+chmod 0644 "$restore_caddyfile"
 
 network_name="$(docker inspect "$rustfs_id" \
   --format '{{json .NetworkSettings.Networks}}' | jq --raw-output 'keys[0]')"
@@ -156,9 +170,17 @@ if [ -z "$peer_identity_volume" ]; then
   exit 1
 fi
 
-docker run --detach --name "$restore_server" \
+# Keep the shared namespace alive while the restored server and proxy are
+# replaced independently; Docker cannot attach a sidecar after its owner exits.
+docker run --detach --name "$restore_network" \
   --network "$network_name" \
   --publish "127.0.0.1:${restore_port}:8080" \
+  --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+  --entrypoint /usr/bin/sleep \
+  "$server_image" 600 >/dev/null
+
+docker run --detach --name "$restore_server" \
+  --network "container:${restore_network}" \
   --env AWS_ACCESS_KEY_ID=crab-local-access \
   --env AWS_SECRET_ACCESS_KEY=crab-local-secret-key \
   --env AWS_DEFAULT_REGION=us-east-1 \
@@ -196,13 +218,13 @@ if ! $restore_server_ready; then
 fi
 
 docker run --detach --name "$restore_proxy" \
-  --network "container:${restore_server}" \
+  --network "container:${restore_network}" \
   --user 65534:65534 \
   --read-only --cap-drop ALL --cap-add NET_BIND_SERVICE \
   --security-opt no-new-privileges:true \
   --tmpfs /config:rw,noexec,nosuid,nodev,size=8m,uid=65534,gid=65534,mode=0700 \
   --tmpfs /data:rw,noexec,nosuid,nodev,size=8m,uid=65534,gid=65534,mode=0700 \
-  --volume "${deploy_dir}/compose.Caddyfile:/etc/caddy/Caddyfile:ro" \
+  --volume "${restore_caddyfile}:/etc/caddy/Caddyfile:ro" \
   "$proxy_image" >/dev/null
 
 restore_ready=false
