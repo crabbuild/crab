@@ -173,11 +173,13 @@ docker run --detach --name "$restore_server" \
   --volume "${peer_identity_volume}:/run/secrets/crab-peer:ro" \
   "$server_image" >/dev/null
 
-restore_server_running=false
-for _attempt in $(seq 1 30); do
+restore_server_ready=false
+for _attempt in $(seq 1 120); do
   restore_state="$(docker inspect --format '{{.State.Status}}' "$restore_server" 2>/dev/null || true)"
-  if [ "$restore_state" = running ]; then
-    restore_server_running=true
+  if [ "$restore_state" = running ] \
+    && docker exec "$restore_server" crab-http-server \
+      --config /etc/crab/server.toml healthcheck >/dev/null 2>&1; then
+    restore_server_ready=true
     break
   fi
   if [ "$restore_state" = exited ] || [ "$restore_state" = dead ]; then
@@ -187,9 +189,9 @@ for _attempt in $(seq 1 30); do
   fi
   sleep 1
 done
-if ! $restore_server_running; then
+if ! $restore_server_ready; then
   docker logs "$restore_server" >&2 || true
-  echo "The isolated restored server did not start within thirty seconds." >&2
+  echo "The isolated restored server did not become ready within two minutes." >&2
   exit 1
 fi
 
