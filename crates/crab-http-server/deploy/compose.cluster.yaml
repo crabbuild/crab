@@ -52,6 +52,8 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    healthcheck:
+      disable: true
     tmpfs:
       - /var/lib/crab/tmp:rw,noexec,nosuid,nodev,size=16m,uid=10001,gid=10001,mode=0700
     restart: "no"
