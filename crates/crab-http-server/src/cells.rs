@@ -66,6 +66,7 @@ pub(crate) const REPOSITORY_PULL_REVIEW_REPLY_GET_QUERY_ID: u32 = 32;
 pub(crate) const REPOSITORY_PULL_REVIEW_REPLY_LIST_QUERY_ID: u32 = 33;
 pub(crate) const REPOSITORY_PULL_REVIEW_REPLY_SUBMISSION_QUERY_ID: u32 = 34;
 
+#[cfg(test)]
 pub(crate) fn initialize_repository_schema(
     transaction: &rusqlite::Transaction<'_>,
 ) -> rusqlite::Result<()> {
@@ -269,6 +270,7 @@ pub(crate) fn compiled_application() -> crab_cell_runtime::Result<Arc<CompiledAp
                     CatalogRole::Repository,
                     1,
                 )?
+                .with_schema_range(1, 2)?
                 .with_limits(REPOSITORY_MAX_DATABASE_BYTES, REPOSITORY_MAX_CAPTURE_BYTES)?,
             )?;
             Ok(())

@@ -5,13 +5,13 @@ use crab_cell_host::CellNodeBuilder;
 use crab_cell_runtime::CellStorageLayout;
 use crab_cell_runtime::{
     ApplicationIdentity, CatalogEntry, CatalogProof, CatalogRole, CellAuthority, CellCatalog,
-    CellHandle, CellModule, CellReplica, CellTarget, ControlState, IncarnationId, Owner, Registry,
+    CellHandle, CellReplica, CellTarget, ControlState, IncarnationId, Owner, Registry,
     ReleaseState, ReleaseStore, SessionId, SqlWorkerPool,
 };
 use uuid::Uuid;
 
 use super::{
-    REPOSITORY_MIGRATION, REPOSITORY_NAMESPACE, RepositoryModule, repository_replica_limits,
+    REPOSITORY_MIGRATION, REPOSITORY_NAMESPACE, repository_replica_limits,
 };
 use crate::catalog::RepositoryApplicationState;
 use crate::{Config, Error, Result};
@@ -266,17 +266,16 @@ pub(crate) async fn provision_repository(
     target: &CellTarget,
 ) -> Result<(CatalogProof, CellAuthority)> {
     let catalog = CellCatalog::new(layout.clone(), identity.tenant());
-    let code =
-        registry
-            .module_code(RepositoryModule::NAME)
-            .ok_or(crab_cell_runtime::Error::Registry(
-                "repository module is not registered",
-            ))?;
+    let (code, schema) = registry
+        .current_cell_version(REPOSITORY_NAMESPACE, CatalogRole::Repository)
+        .ok_or(crab_cell_runtime::Error::Registry(
+            "repository module is not registered",
+        ))?;
     let proof = ReleaseStore::new(layout.clone(), identity)?
         .provision(
             &catalog,
             registry,
-            CatalogEntry::new(target, CatalogRole::Repository, code, 1)?,
+            CatalogEntry::new(target, CatalogRole::Repository, code, schema)?,
         )
         .await?;
     Ok((proof, CellAuthority::new(layout.clone())))

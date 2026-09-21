@@ -835,7 +835,7 @@ impl Server {
         })
     }
 
-    fn catalog(&self) -> Option<CatalogStore> {
+    pub(crate) fn catalog(&self) -> Option<CatalogStore> {
         self.node_component::<CatalogStore>(CELL_COMPONENT_CATALOG)
             .map(|catalog| catalog.as_ref().clone())
             .or_else(|| {
