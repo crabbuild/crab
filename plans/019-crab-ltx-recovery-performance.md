@@ -1174,6 +1174,21 @@ tradeoff, not a measured Crab-versus-Celld result or a change to default local
 capture durability. Warm requests replace two small GETs with two parallel
 HEADs; real providers could have different per-request costs.
 
+An isolated release-mode A/B used identical temporary probes against merged
+`main` at `6cd4f298871` and the cache candidate at `d931ea9a42d`. Each
+process timed 16 successive warm `CellReplica::prepare()` calls over an
+in-memory object store; each revision ran in eight alternating pairs. The
+store wrapper delayed every GET and PUT by the stated amount and, in this
+dependency version, delayed HEAD by the PUT amount. At 1 ms injected delay,
+the candidate won 8/8 pairs with a 1.30x median paired speedup (median run
+10.64 ms baseline versus 8.12 ms candidate). At 5 ms, it won 8/8 with a
+1.34x median paired speedup (29.90 ms versus 22.08 ms). With no delay, each
+revision won four pairs; there is no reliable local-only win. The probe kept
+SQLite write and capture time outside the timer but included predecessor
+loading, presence checks, and immutable uploads. These numbers qualify the
+network-latency hypothesis only: host contention, synthetic delays, and an
+in-memory backend do not establish live-provider or Celld performance.
+
 ## Maintenance notes
 
 - Reviewers should trace one corrupt input through plan construction, one
