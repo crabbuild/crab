@@ -646,14 +646,12 @@ impl RepositoryCellRouter {
                 .await?
             {
                 Some(proof) => Some(proof),
-                None => {
-                    let fenced = self
-                        .peer
+                None => Some(
+                    self.peer
                         .directory
-                        .claim_expired(owner.session, self.peer.owner.session, now_ms)
-                        .await?;
-                    Some(fenced.direct_takeover()?)
-                }
+                        .claim_expired_for_takeover(owner.session, self.peer.owner.session, now_ms)
+                        .await?,
+                ),
             }
         } else {
             None

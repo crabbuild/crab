@@ -1101,6 +1101,12 @@ A second node waits behind a live claim. After the 30-second claim expiry, it
 may CAS takeover of recovery. All later operations are content-addressed,
 idempotent, or Cell-control CASes, so repeated work converges.
 
+The request path may take over an expired session only when its node log is
+already inactive. An active log returns `PendingPublication` without creating
+a claim; the follower scheduler remains the sole path that can reserve and
+recover that log, so a cold request cannot strand the preferred follower behind
+an arbitrary 30-second claim.
+
 ### Seal and gather followers
 
 Each follower serializes `SealFragment` with append handling. An append wholly

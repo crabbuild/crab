@@ -731,6 +731,63 @@ async fn clean_node_log_close_clears_authority_before_session_withdrawal() {
 }
 
 #[tokio::test]
+async fn request_takeover_does_not_claim_active_node_log() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let leader = SessionId::from_bytes([1; 16]);
+    let member = SessionId::from_bytes([2; 16]);
+    let claimant = SessionId::from_bytes([3; 16]);
+    let created = directory
+        .create(advertisement_for(leader, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    let member_record = directory
+        .create(advertisement_for(member, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    let enrolled = directory
+        .recruit_log(&created, 7, 1, 2, NOW_MS + 1)
+        .await
+        .unwrap();
+    directory.activate_log(&enrolled, NOW_MS + 2).await.unwrap();
+    let claimant_record = directory
+        .create(advertisement_for(claimant, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    for (record, session) in [(&member_record, member), (&claimant_record, claimant)] {
+        directory
+            .refresh(
+                record,
+                advertisement_for(session, &key, 2, NOW_MS + 9_000),
+                NOW_MS + 9_000,
+            )
+            .await
+            .unwrap();
+    }
+
+    assert!(matches!(
+        directory
+            .claim_expired_for_takeover(leader, claimant, NOW_MS + 10_000)
+            .await,
+        Err(Error::PendingPublication)
+    ));
+    assert_eq!(
+        directory
+            .recovery_candidates(claimant, NOW_MS + 10_000, 2)
+            .await
+            .unwrap(),
+        [leader]
+    );
+    assert!(
+        directory
+            .takeover_proof(leader, claimant, NOW_MS + 10_000)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn expired_enrolled_log_becomes_a_renewable_recovery_claim() {
     let key = SigningKey::from_bytes(&[7; 32]);
     let directory = directory();
