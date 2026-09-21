@@ -108,9 +108,9 @@ fn dead_transition_atomically_links_one_canonical_queue_effect() {
     assert_eq!(linked.len(), 32);
     let effect = crate::peer_wire::EffectRequest::decode(operation.as_slice()).unwrap();
     assert!(effect.destination_incarnation.is_empty());
-    let command = match effect.operation.unwrap() {
-        crate::peer_wire::effect_request::Operation::CellCommand(command) => command,
-        _ => panic!("dead letter must use the typed Queue command"),
+    let command = match effect.operation {
+        Some(crate::peer_wire::effect_request::Operation::CellCommand(command)) => command,
+        None => panic!("dead letter must use the typed Queue command"),
     };
     assert_eq!(command.command_id, 7);
     let mut decoder =

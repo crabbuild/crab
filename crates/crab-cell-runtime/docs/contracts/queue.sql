@@ -15,6 +15,7 @@ CREATE TABLE queue_messages (
     CHECK (dead_letter_effect_id IS NULL OR state = 3)
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX queue_ready ON queue_messages(state, due_at_ms, message_id);
+CREATE INDEX queue_attempts ON queue_messages(state, attempt);
 CREATE INDEX queue_leases ON queue_messages(state, lease_until_ms, message_id);
 CREATE INDEX queue_retention ON queue_messages(expires_at_ms);
 

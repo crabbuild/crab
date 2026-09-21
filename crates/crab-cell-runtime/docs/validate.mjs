@@ -94,11 +94,6 @@ try {
   // Serialization fixtures only; they do not prove authentication or signature validation.
   const fixtures = [
     {
-      type: 'MutationRequest',
-      input: target + identity + 'sql_batch { statements { sql: "SELECT ?" parameters { integer: 9223372036854775807 } } }',
-      expected: /integer: 9223372036854775807/,
-    },
-    {
       type: 'PeerRequest',
       input: 'version: 1 hop_count: 1 remaining_ms: 1000 authorization { origin_session: "session000000001" actions: "comment.write" } mutate {'
         + target + identity + 'cell_command { command_id: 17 codec_version: 2 input: "comment" } }',

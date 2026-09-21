@@ -271,13 +271,20 @@ fn unknown_and_duplicate_fields_are_rejected() {
 }
 
 #[test]
+fn primitive_specific_wire_fields_are_rejected() {
+    let mut payload = mutation().encode_to_vec();
+    encode_bytes_field(&mut payload, 11, b"unsupported-primitive").unwrap();
+    assert!(super::protobuf::validate_operation(10, &payload).is_err());
+}
+
+#[test]
 fn reordered_protobuf_payload_retains_exact_signature_binding() {
     let signer = signer();
     let mutation = mutation();
     let mut payload = Vec::new();
-    let command = match mutation.operation.as_ref().unwrap() {
-        wire::mutation_request::Operation::CellCommand(command) => command.encode_to_vec(),
-        _ => unreachable!(),
+    let command = match mutation.operation.as_ref() {
+        Some(wire::mutation_request::Operation::CellCommand(command)) => command.encode_to_vec(),
+        None => unreachable!(),
     };
     encode_bytes_field(&mut payload, 10, &command).unwrap();
     encode_bytes_field(

@@ -351,9 +351,9 @@ fn terminal_transition_inserts_effect_with_cell_command_identity() {
     assert_eq!(stored.2, 20_000);
     let request = peer_wire::EffectRequest::decode(stored.1.as_slice()).unwrap();
     assert!(request.destination_incarnation.is_empty());
-    let command = match request.operation.unwrap() {
-        peer_wire::effect_request::Operation::CellCommand(command) => command,
-        _ => panic!("workflow effect must contain a typed Cell command"),
+    let command = match request.operation {
+        Some(peer_wire::effect_request::Operation::CellCommand(command)) => command,
+        None => panic!("workflow effect must contain a typed Cell command"),
     };
     assert_eq!((command.command_id, command.codec_version), (7, 1));
     assert_eq!(command.input, b"canonical-destination-command");

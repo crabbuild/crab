@@ -381,7 +381,6 @@ fn validate_mutation_reply(reply: &wire::MutationReply) -> Result<()> {
             Some(wire::mutation_result::Result::CommandOutput(_)) => {
                 Err(Error::Peer("mutation result exceeds one MiB"))
             }
-            Some(_) => Err(Error::Peer("mutation result is not implemented")),
             None => Err(Error::Peer("mutation result is missing")),
         },
         Some(wire::mutation_reply::Outcome::Error(error)) => validate_error(error),
@@ -418,7 +417,6 @@ fn validate_read_reply(reply: &wire::ReadReply) -> Result<()> {
             Ok(())
         }
         Some(wire::read_reply::Result::Error(error)) => validate_error(error),
-        Some(_) => Err(Error::Peer("read result is not implemented")),
         None => Err(Error::Peer("read reply result is missing")),
     }
 }
@@ -597,7 +595,6 @@ fn validate_mutation(request: &wire::MutationRequest, now_ms: i64) -> Result<()>
         Some(wire::mutation_request::Operation::CellCommand(_)) => {
             Err(Error::Peer("invalid Cell command identifier"))
         }
-        Some(_) => Err(Error::Peer("typed mutation operation is not implemented")),
         None => Err(Error::Peer("mutation operation is missing")),
     }
 }
@@ -623,7 +620,6 @@ fn validate_read(request: &wire::ReadRequest) -> Result<()> {
         Some(wire::read_request::Operation::CellQuery(_)) => {
             Err(Error::Peer("invalid Cell query identifier"))
         }
-        Some(_) => Err(Error::Peer("typed read operation is not implemented")),
         None => Err(Error::Peer("read operation is missing")),
     }
 }
@@ -662,7 +658,6 @@ fn validate_effect(request: &wire::EffectRequest, now_ms: i64) -> Result<()> {
         Some(wire::effect_request::Operation::CellCommand(_)) => {
             Err(Error::Peer("invalid effect Cell command identifier"))
         }
-        Some(_) => Err(Error::Peer("typed effect operation is not implemented")),
         None => Err(Error::Peer("effect operation is missing")),
     }
 }

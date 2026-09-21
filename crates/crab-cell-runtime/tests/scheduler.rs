@@ -521,6 +521,28 @@ fn summary_wakes_immediately_for_exhausted_ready_queue_work() {
 }
 
 #[test]
+fn exhausted_ready_deadline_uses_the_attempt_index() {
+    let mut connection = connection();
+    let transaction = connection.transaction().unwrap();
+    install_queue_schema(&transaction).unwrap();
+    let details = transaction
+        .prepare(
+            "EXPLAIN QUERY PLAN SELECT EXISTS(SELECT 1 FROM queue_messages INDEXED BY queue_attempts WHERE state = 0 AND attempt >= ?1)",
+        )
+        .unwrap()
+        .query_map([i64::from(20_u32)], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+
+    assert!(
+        details
+            .iter()
+            .any(|detail| detail.contains("SEARCH") && detail.contains("queue_attempts"))
+    );
+}
+
+#[test]
 fn summary_uses_queue_lease_deadline_not_ready_available_time() {
     let mut connection = connection();
     let transaction = connection.transaction().unwrap();
