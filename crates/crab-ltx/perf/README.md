@@ -11,6 +11,18 @@ The Celld runner is pinned to the revision documented in
 
 `10cb1303dac710dcb3b557e318e08c855261f68b`
 
+## Current conclusion
+
+This harness does **not** establish that Crab is universally faster than
+Celld. Crab's default capture pays a parent-directory durability barrier that
+the pinned Celld capture does not, and is slower in the direct comparison.
+Crab's opt-in grouped barrier improves total throughput in the retained local
+workloads, but it measures batch completion rather than independently durable
+per-transaction latency; repeated runs have not established a universal 1.5x
+speedup. Recovery is also workload-dependent, with Celld still able to win the
+small case. Treat the phase data and durability contract as part of every
+performance claim.
+
 ## Run it
 
 The script uses release builds, one warmup round, and five measured rounds by

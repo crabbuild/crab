@@ -984,6 +984,47 @@ claim remains narrower: bounded-group Crab throughput is faster in these
 workloads, medium total time exceeded 2x in both orders, and independently
 durable per-capture latency is not represented by this grouped mode.
 
+### Follow-up: reuse the authenticated capture index
+
+Fresh root preparation decoded every LTX file to reconstruct the same page
+index that `Db` had just produced while encoding it, then read the file again
+for immutable upload. `LocalSegment` now privately carries an encoder-produced
+index only when it comes from the managed `Db` capture path. Preparation pins
+the exact file as before, reuses that index, and lets multipart upload verify
+the complete source length and BLAKE3 digest before object completion. The
+public `LocalSegment::new` constructor cannot attach this provenance and keeps
+the full structural-inspection fallback. Retained index bytes share storage
+across batch clones and are capped at 1 MiB per captured batch; larger cohorts
+fall back rather than adding unbounded pending-publication memory.
+
+Retained tests independently decode captured files and compare every index
+byte, prove managed preparation performs exactly one bounded source read per
+multipart part, and prove caller-constructed segments still take the full
+inspection path. In a bracketed release profiler over 32 sequential prepares,
+the full-decode baseline was 16.2 ms for 1 KiB mutations versus 10.2 ms and
+10.1 ms candidate medians (1.59x--1.60x). For 256 KiB mutations, the baseline
+was 76.3 ms versus 34.7 ms and 26.6 ms candidates (2.20x--2.87x). The in-memory
+object store isolates local preparation work; these are Crab-versus-Crab
+results, not a new full-system Celld comparison.
+
+The final bounded implementation was rerun after index construction changed to
+abandon retention as soon as a batch would exceed 1 MiB. On a heavily loaded
+12-logical-CPU host, its 15-sample medians were 13.6 ms for 1 KiB mutations and
+34.2 ms for 256 KiB mutations. Compared with the earlier same-harness decode
+baseline, those observations suggest 1.19x and 2.23x improvements, but they are
+not a controlled A/B because the host state differed. The retained correctness
+tests, not those timings, are the proof for landing the bounded fast path.
+
+An additional order-balanced direct matrix used seven measured rounds, two
+warmups, and Crab durability batch 8 while the host load exceeded its logical
+CPU count. Crab won total time in all six order/workload combinations, but the
+speedups ranged from 1.11x to 1.66x. Recovery speedups ranged from 0.71x to
+4.99x; Celld won the small recovery subtotal in both orders. A separate
+diagnostic of Crab's default synchronous path was 1.74x--2.18x slower in total
+than the shipped Celld path, consistent with Crab paying a parent-directory
+barrier on every capture while pinned Celld does not. These results reject a
+general "Crab is 1.5x--2x faster" or "Crab always has lower latency" claim.
+
 ## Maintenance notes
 
 - Reviewers should trace one corrupt input through plan construction, one

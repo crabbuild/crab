@@ -684,7 +684,10 @@ impl CellReplica {
             let source = segment.path().to_owned();
             let info = segment.info().clone();
             let source = PinnedCapture::open(&self.host, source, info.size_bytes).await?;
-            let index = inspect_segment_source(self, Arc::clone(&source), &info).await?;
+            let index = match segment.captured_index() {
+                Some(index) => index.to_vec(),
+                None => inspect_segment_source(self, Arc::clone(&source), &info).await?,
+            };
             inputs.push(AppendInput {
                 info,
                 location: BodyLocation::Native,

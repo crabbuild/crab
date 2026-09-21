@@ -115,6 +115,14 @@ immutable object. The path performs no defensive local copy or scratch flush;
 the proposal cannot reach authority until all immutable dependencies upload
 successfully.
 
+Fresh `Db` captures privately retain the page index already authenticated by
+their encoder. Root preparation reuses it instead of decoding the same local
+LTX file again, while multipart upload still verifies every source byte against
+the captured digest. Caller-constructed local segments do not carry this
+private provenance and retain the full inspection path.
+Index retention is capped at 1 MiB per pending `CaptureBatch`; larger capture
+cohorts fall back to decoding. The executor retains only one unpublished batch.
+
 ## Use receipts for read consistency
 
 A receipt identifies the Cell incarnation and commit sequence. A query with a minimum receipt runs only after the local owner reaches that position.

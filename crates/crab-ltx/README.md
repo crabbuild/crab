@@ -377,6 +377,15 @@ mutation fails one of those gates. This path needs no upload scratch or local
 write: immutable upload plus the embedding runtime's authority CAS remains the
 durability boundary.
 
+`Db` also carries the page index produced while it encodes each fresh capture.
+`CellReplica::prepare` can therefore publish that exact capture without decoding
+the complete LTX file a second time; the multipart whole-object hash still
+proves that the pinned bytes match the encoder's digest. Segments created with
+the public `LocalSegment::new` constructor carry no trusted encoder state and
+continue through full structural inspection before upload.
+The retained indexes share storage across `CaptureBatch` clones and are capped
+at 1 MiB per captured batch; larger batches use the inspection fallback.
+
 The live RustFS example exercises Cell publication, sparse activation,
 compaction, source deletion, and exact recovery. See the
 [examples guide](examples/README.md) before running it against a disposable

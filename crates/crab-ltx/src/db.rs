@@ -561,6 +561,11 @@ impl Db {
                 self.account_capture(&info)?;
                 let segment = LocalSegment::new(path, info);
                 #[cfg(feature = "replica")]
+                let segment = match self.capture.take_sealed_l0_captured_index(Txid(txid)) {
+                    Some(index) => segment.with_captured_index(index),
+                    None => segment,
+                };
+                #[cfg(feature = "replica")]
                 self.retained.push(segment.clone());
                 segments.push(segment);
             }
@@ -1023,6 +1028,37 @@ mod tests {
         assert!(!attempts[0].1);
         assert!(attempts[0].0.total_nanos > 0);
         assert!(attempts[0].0.wal_read_bytes > 0);
+    }
+
+    #[cfg(feature = "replica")]
+    #[test]
+    fn captured_indexes_match_independent_ltx_inspection() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut db = Db::open(&temp.path().join("indexed.sqlite"), Limits::default()).unwrap();
+        db.transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE payload(value BLOB); \
+                 INSERT INTO payload VALUES(randomblob(200000))",
+            )
+        })
+        .unwrap();
+
+        let batch = db.capture().unwrap();
+
+        for segment in &batch.segments {
+            let file = std::fs::File::open(segment.path()).unwrap();
+            let (decoded, size, digest, pages) =
+                crate::ltx::inspect_reader_with_index(file).unwrap();
+            assert_eq!(
+                crate::SegmentInfo::from_inspected(&decoded, size, digest),
+                *segment.info()
+            );
+            assert_eq!(
+                segment.captured_index().unwrap(),
+                crate::paged::encode_index_from_pages(&pages).unwrap()
+            );
+        }
+        db.close().unwrap();
     }
 
     #[test]

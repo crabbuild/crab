@@ -1,5 +1,5 @@
 #[cfg(feature = "replica")]
-use crab_ltx::{CellReplica, CellStorageLayout};
+use crab_ltx::{CellReplica, CellStorageLayout, LocalSegment};
 use crab_ltx::{
     CheckpointMode, CrabError, Db, Host, Limits,
     environment::{DirectFileSystem, FileIo, FileSystem},
@@ -27,6 +27,7 @@ struct Faults {
     failure: Arc<Mutex<Option<&'static str>>>,
     calls: Arc<Mutex<BTreeSet<&'static str>>>,
     largest_read: Arc<AtomicUsize>,
+    read_calls: Arc<AtomicUsize>,
     largest_write: Arc<AtomicUsize>,
     file_syncs: Arc<AtomicUsize>,
     parent_syncs: Arc<AtomicUsize>,
@@ -80,6 +81,7 @@ impl FileIo for File {
     fn read_exact_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
         if self.track {
             self.faults.largest_read.fetch_max(len, Ordering::Relaxed);
+            self.faults.read_calls.fetch_add(1, Ordering::Relaxed);
         }
         self.faults.check("read_exact_at")?;
         self.inner.read_exact_at(offset, len)
@@ -203,6 +205,7 @@ fn capture_and_inspection_bound_each_filesystem_transfer() {
     assert!(faults.largest_read.load(Ordering::Relaxed) < 128 * 1024);
 
     faults.largest_read.store(0, Ordering::Relaxed);
+    faults.read_calls.store(0, Ordering::Relaxed);
     faults.largest_write.store(0, Ordering::Relaxed);
     let (snapshot, _) = writer
         .snapshot(&directory.path().join("streamed-snapshot.ltx"))
@@ -287,6 +290,7 @@ async fn cell_prepare_bounds_source_transfers_without_local_writes() {
     let captured = writer.capture().unwrap();
     faults.track_all.store(true, Ordering::Relaxed);
     faults.largest_read.store(0, Ordering::Relaxed);
+    faults.read_calls.store(0, Ordering::Relaxed);
     faults.largest_write.store(0, Ordering::Relaxed);
     let replica = CellReplica::new(
         CellStorageLayout::new(
@@ -309,8 +313,44 @@ async fn cell_prepare_bounds_source_transfers_without_local_writes() {
         faults.largest_read.load(Ordering::Relaxed)
     );
     assert_eq!(faults.largest_write.load(Ordering::Relaxed), 0);
+    let expected_reads: usize = captured
+        .segments
+        .iter()
+        .map(|segment| segment.info().size_bytes.div_ceil(8 << 20) as usize)
+        .sum();
+    assert_eq!(faults.read_calls.load(Ordering::Relaxed), expected_reads);
     writer.close().unwrap();
     drop(directory);
+}
+
+#[cfg(feature = "replica")]
+#[tokio::test(flavor = "multi_thread")]
+async fn caller_constructed_segment_uses_full_inspection_fallback() {
+    let (_directory, faults, host, mut writer) = fixture();
+    let mut captured = writer.capture().unwrap();
+    captured.segments[0] = LocalSegment::new(
+        captured.segments[0].path().to_owned(),
+        captured.segments[0].info().clone(),
+    );
+    faults.track_all.store(true, Ordering::Relaxed);
+    faults.read_calls.store(0, Ordering::Relaxed);
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("cell-external-segment"),
+            [34; 16],
+        ),
+        [35; 32],
+        [36; 16],
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(host);
+
+    replica.prepare(None, &captured, 1, 1).await.unwrap();
+
+    assert!(faults.read_calls.load(Ordering::Relaxed) > 1);
+    writer.close().unwrap();
 }
 
 #[cfg(feature = "replica")]
