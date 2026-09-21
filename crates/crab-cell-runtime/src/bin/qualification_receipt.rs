@@ -188,6 +188,7 @@ fn run() -> Result<(), String> {
             if args.next().is_some() {
                 return Err(usage());
             }
+            require_manifest_output(&output, &evidence_dir)?;
             let manifest = build_manifest(&evidence_dir)?;
             fs::write(
                 output,
@@ -434,6 +435,26 @@ fn build_manifest(evidence_dir: &Path) -> Result<QualificationMatrixManifest, St
     QualificationMatrixManifest::new(entries).map_err(|error| error.to_string())
 }
 
+fn require_manifest_output(output: &Path, evidence_dir: &Path) -> Result<(), String> {
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let evidence_root = fs::canonicalize(evidence_dir)
+        .map_err(|error| format!("canonicalize evidence directory: {error}"))?;
+    let output_parent = fs::canonicalize(parent)
+        .map_err(|error| format!("canonicalize matrix manifest parent: {error}"))?;
+    if output_parent != evidence_root {
+        return Err("matrix manifest output must be directly under the evidence directory".into());
+    }
+    if let Ok(metadata) = fs::symlink_metadata(output) {
+        if metadata.file_type().is_symlink() {
+            return Err("matrix manifest output must not be a symlink".into());
+        }
+    }
+    Ok(())
+}
+
 fn require_directory(path: &Path, field: &str) -> Result<(), String> {
     let metadata = fs::symlink_metadata(path).map_err(|error| format!("{field}: {error}"))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -568,7 +589,10 @@ fn usage() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_manifest, manifest_base, require_trusted_signer, resolve_manifest_path};
+    use super::{
+        build_manifest, manifest_base, require_manifest_output, require_trusted_signer,
+        resolve_manifest_path,
+    };
     use crab_cell_runtime::{QUALIFICATION_MATRIX_ROWS, QualificationProfile};
     use std::{fs, path::Path};
 
@@ -597,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_builder_emits_canonical_rows_and_rejects_missing_files() {
+    fn manifest_builder_emits_canonical_rows_and_rejects_invalid_output_or_missing_files() {
         let directory = tempfile::tempdir().expect("matrix directory");
         fs::create_dir(directory.path().join("receipts")).expect("receipts");
         fs::create_dir(directory.path().join("artifacts")).expect("artifacts");
@@ -633,8 +657,26 @@ mod tests {
             ]
         );
 
+        assert!(
+            require_manifest_output(
+                &directory.path().join("nested/qualification-matrix.json"),
+                directory.path()
+            )
+            .is_err()
+        );
         fs::remove_file(directory.path().join("receipts/protocol.json")).expect("remove receipt");
         assert!(build_manifest(directory.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_output_rejects_symlinks() {
+        let directory = tempfile::tempdir().expect("matrix directory");
+        let target = directory.path().join("target.json");
+        let output = directory.path().join("qualification-matrix.json");
+        fs::write(&target, b"existing").expect("target");
+        std::os::unix::fs::symlink(&target, &output).expect("manifest symlink");
+        assert!(require_manifest_output(&output, directory.path()).is_err());
     }
 
     #[cfg(unix)]

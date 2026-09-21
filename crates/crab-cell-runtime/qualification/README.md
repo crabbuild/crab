@@ -36,10 +36,11 @@ cargo run --locked -p crab-cell-runtime --bin qualification_receipt -- \
 ```
 
 The builder emits schema-2 rows in the required order and rejects missing,
-symlinked, or non-file evidence entries. It only indexes files; it does not
-create or sign receipts. Run `verify-matrix` with the protected profile and
-pinned attestation key before treating the resulting manifest as release
-evidence.
+symlinked, or non-file evidence entries. The manifest output must be directly
+under the evidence directory so its relative paths remain verifiable. It only
+indexes files; it does not create or sign receipts. Run `verify-matrix` with the
+protected profile and pinned attestation key before treating the resulting
+manifest as release evidence.
 
 Typed qualification adapters may use the bounded `QualificationWorkload::run_concurrent`
 entry point when scheduled operations are independent or idempotent. The serial
