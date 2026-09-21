@@ -75,6 +75,7 @@ unix_millis() {
 cleanup() {
   result=$?
   "${compose[@]}" unpause server >/dev/null 2>&1 || true
+  "${compose[@]}" unpause server-d >/dev/null 2>&1 || true
   "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
     --endpoint-url http://rustfs:9000 s3api delete-bucket-policy \
     --bucket crab-http-server >/dev/null 2>&1 || true
@@ -359,6 +360,11 @@ assert_placement_parity "$capacity_b" "$metrics_b" "$node_b"
 assert_placement_parity "$capacity_c" "$metrics_c" "$node_c"
 assert_placement_parity "$capacity_d" "$metrics_d" "$node_d"
 
+# Keep the initial owner’s two-follower log deterministic: with D paused,
+# B can enroll only A and C, so C is guaranteed to be the surviving original
+# follower when A is paused immediately before the owner crash.
+"${compose[@]}" pause server-d >/dev/null
+
 create_response=""
 for _ in $(seq 1 45); do
   candidate="$(curl --fail-with-body --silent --show-error --max-time 10 \
@@ -397,9 +403,10 @@ for _ in $(seq 1 45); do
   node_before="$("${compose[@]}" exec -T server-c crab-http-server \
     --config /etc/crab/server.toml cells node \
     --session "$session_before" --json)"
-  if jq --exit-status \
+  if jq --exit-status --arg node_c_id "$node_c_id" \
     '.live == true and .advertisement.log.state == "open" and
-     (.advertisement.log.member_nodes | length) == 2' \
+     (.advertisement.log.member_nodes | length) == 2 and
+     any(.advertisement.log.member_nodes[]; . == $node_c_id)' \
     <<<"$node_before" >/dev/null; then
     log_ready=true
     break
@@ -477,7 +484,6 @@ if ! $a_advertisement_expired; then
   echo "Paused node A did not leave the live advertisement set." >&2
   exit 1
 fi
-
 owner_killed_ms="$(unix_millis)"
 "${compose[@]}" kill --signal KILL server-b >/dev/null
 "${compose[@]}" rm --force --stop server-b >/dev/null

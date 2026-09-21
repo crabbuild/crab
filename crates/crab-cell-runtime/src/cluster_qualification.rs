@@ -374,15 +374,20 @@ fn validate_work_cycle(work: &WorkCycle, allow_object_only: bool) -> Result<()> 
             return Err(Error::Control("cluster recovery work counter"));
         }
     }
-    for value in [
+    let follower_work = [
         work.follower_pages,
         work.follower_frames,
         work.follower_bytes,
         work.peer_requests,
-    ] {
+    ];
+    for value in follower_work {
         if value > MAX_CLUSTER_WORK_VALUE || (!allow_object_only && value == 0) {
             return Err(Error::Control("cluster recovery follower work counter"));
         }
+    }
+    let follower_work_is_empty = follower_work.iter().all(|value| *value == 0);
+    if allow_object_only && !follower_work_is_empty && follower_work.contains(&0) {
+        return Err(Error::Control("cluster recovery follower work counter"));
     }
     let phases = [
         &work.phases.claim,
@@ -934,6 +939,12 @@ mod tests {
             ..valid.clone()
         };
         assert!(validate_work_cycle(&object_only, true).is_ok());
+        let partial_follower_work = WorkCycle {
+            follower_pages: 1,
+            follower_frames: 0,
+            ..object_only
+        };
+        assert!(validate_work_cycle(&partial_follower_work, true).is_err());
 
         let invalid = WorkCycle {
             phases: RecoveryPhaseEvidence {
