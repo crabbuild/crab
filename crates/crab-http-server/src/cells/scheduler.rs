@@ -15,8 +15,9 @@ use crab_cell_runtime::{
     DueCellScan, EffectRunOutcome, FencedNodeSession, InvocationError, MaintenanceTickOutcome,
     MaintenanceTickRequest, MigrationFailure, MigrationProgressAttempt, MigrationProgressStore,
     MutationIdentity, NodeDirectory, NodeId, NodeLogRecovery, NodeLogTransport,
-    RecoveryCoordinator, RecoveryManifestStore, Registry, ReleaseState, ReleaseStore, RequestId,
-    SchedulerFleet, SessionId, preferred_scanner, recoverable_cells_from_scopes,
+    RecoveryCoordinator, RecoveryManifestStore, RecoveryWorkSummary, Registry, ReleaseState,
+    ReleaseStore, RequestId, SchedulerFleet, SessionId, preferred_scanner,
+    recoverable_cells_from_scopes_with_summary,
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -740,6 +741,9 @@ impl RepositoryCellScheduler {
                 let metrics = context.metrics.clone();
                 let result = recover_node_session(context, session, claimant).await;
                 if let Some(metrics) = metrics {
+                    if let Ok(work) = &result {
+                        metrics.record_recovery_work(*work);
+                    }
                     metrics.record_recovery_finished(
                         started.elapsed(),
                         result.as_ref().err().map(|error| match error {
@@ -920,7 +924,7 @@ async fn recover_node_session(
     context: RecoveryContext,
     session: SessionId,
     claimant: SessionId,
-) -> crate::Result<()> {
+) -> crate::Result<RecoveryWorkSummary> {
     let RecoveryContext {
         directory,
         catalog,
@@ -931,6 +935,10 @@ async fn recover_node_session(
         recovery_scratch,
         metrics,
     } = context;
+    let mut work = RecoveryWorkSummary {
+        candidate_count: 1,
+        ..RecoveryWorkSummary::default()
+    };
     let phase_started = std::time::Instant::now();
     let mut fenced = match claim_expired_with_timeout(
         &directory,
@@ -1007,6 +1015,7 @@ async fn recover_node_session(
         frames = sealed.frame_count(),
         "sealed node-log witnesses"
     );
+    work.merge(sealed.work()).map_err(crate::Error::from)?;
     let phase_started = std::time::Instant::now();
     let scopes = match sealed.scopes(super::repository_replica_limits()) {
         Ok(scopes) => scopes,
@@ -1020,10 +1029,10 @@ async fn recover_node_session(
             return Err(error.into());
         }
     };
-    let cells = match await_with_claim_heartbeat(
+    let inventory = match await_with_claim_heartbeat(
         &directory,
         &mut fenced,
-        recoverable_cells_from_scopes(
+        recoverable_cells_from_scopes_with_summary(
             &catalog,
             &authority,
             session,
@@ -1033,7 +1042,7 @@ async fn recover_node_session(
     )
     .await
     {
-        Ok(cells) => cells,
+        Ok(inventory) => inventory,
         Err(error) => {
             if let Some(metrics) = &metrics {
                 metrics.record_recovery_phase(
@@ -1044,6 +1053,31 @@ async fn recover_node_session(
             return Err(error);
         }
     };
+    work.affected_cells = work
+        .affected_cells
+        .checked_add(inventory.summary.affected_cells)
+        .ok_or(crab_cell_runtime::Error::Capacity(
+            "recovery affected Cell count",
+        ))?;
+    work.catalog_shards = work
+        .catalog_shards
+        .checked_add(inventory.summary.catalog_shards)
+        .ok_or(crab_cell_runtime::Error::Capacity(
+            "recovery catalog shard count",
+        ))?;
+    work.catalog_pages = work
+        .catalog_pages
+        .checked_add(inventory.summary.catalog_pages)
+        .ok_or(crab_cell_runtime::Error::Capacity(
+            "recovery catalog page count",
+        ))?;
+    work.control_reads = work
+        .control_reads
+        .checked_add(inventory.summary.control_reads)
+        .ok_or(crab_cell_runtime::Error::Capacity(
+            "recovery control read count",
+        ))?;
+    let cells = inventory.cells;
     if let Some(metrics) = &metrics {
         metrics.record_recovery_phase(
             crate::metrics::RecoveryPhase::ScopeValidation,
@@ -1059,14 +1093,14 @@ async fn recover_node_session(
     let coordinator = RecoveryCoordinator::new(recovery, manifests);
     let recovery_fence = fenced.clone();
     let phase_started = std::time::Instant::now();
-    let controls = match await_with_claim_heartbeat(
+    let result = match await_with_claim_heartbeat(
         &directory,
         &mut fenced,
-        coordinator.recover_sealed(recovery_fence, cells, sealed),
+        coordinator.recover_sealed_with_summary(recovery_fence, cells, sealed),
     )
     .await
     {
-        Ok(controls) => controls,
+        Ok(result) => result,
         Err(error) => {
             if let Some(metrics) = &metrics {
                 metrics.record_recovery_phase(
@@ -1077,6 +1111,25 @@ async fn recover_node_session(
             return Err(error);
         }
     };
+    work.bundle_bytes = work
+        .bundle_bytes
+        .checked_add(result.publication.bundle_bytes)
+        .ok_or(crab_cell_runtime::Error::Capacity(
+            "recovery bundle byte count",
+        ))?;
+    work.object_reads = work
+        .object_reads
+        .checked_add(result.publication.object_reads)
+        .ok_or(crab_cell_runtime::Error::Capacity(
+            "recovery object read count",
+        ))?;
+    work.object_writes = work
+        .object_writes
+        .checked_add(result.publication.object_writes)
+        .ok_or(crab_cell_runtime::Error::Capacity(
+            "recovery object write count",
+        ))?;
+    let controls = result.controls;
     if let Some(metrics) = &metrics {
         metrics.record_recovery_phase(
             crate::metrics::RecoveryPhase::PinAttach,
@@ -1109,7 +1162,7 @@ async fn recover_node_session(
         metrics.record_recovery_phase(crate::metrics::RecoveryPhase::Seal, phase_started.elapsed());
     }
     tracing::debug!(?session, ?claimant, "sealed recovered Cell node log");
-    Ok(())
+    Ok(work)
 }
 
 async fn claim_expired_with_timeout(

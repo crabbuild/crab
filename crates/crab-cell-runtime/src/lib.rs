@@ -131,8 +131,10 @@ pub use node_log::{
     close_node_log, rotate_node_log,
 };
 pub use node_log_recovery::{
-    CompletedNodeRecovery, NodeLogRecovery, RecoveryCell, RecoveryCoordinator, SealedSession,
-    recoverable_cells, recoverable_cells_from_frames, recoverable_cells_from_scopes,
+    CompletedNodeRecovery, NodeLogRecovery, RecoverableCellInventory, RecoveryCell,
+    RecoveryCoordinator, RecoveryCoordinatorResult, RecoveryInventorySummary, RecoveryWorkSummary,
+    SealedSession, recoverable_cells, recoverable_cells_from_frames, recoverable_cells_from_scopes,
+    recoverable_cells_from_scopes_with_summary,
 };
 pub use node_log_shipper::{NodeLogShipper, NodeLogSubmission};
 pub use node_log_state::{NodeLogPhase, NodeLogStatus, NodeRecoveryClaim};
@@ -177,8 +179,8 @@ pub use queue::{
 };
 pub use recovery_artifacts::RecoveryArtifactRegistry;
 pub use recovery_manifest::{
-    PinnedRecoveryCell, RecoveryArtifact, RecoveryArtifactKey, RecoveryArtifactStore,
-    RecoveryManifestStore,
+    PinnedRecoveryCell, PinnedRecoveryCells, RecoveryArtifact, RecoveryArtifactKey,
+    RecoveryArtifactStore, RecoveryManifestStore, RecoveryPublicationSummary,
 };
 pub use registry::{
     BuildDescriptor, CellModule, Command, CommandContext, CommandInvocation, CommandResult,

@@ -28,6 +28,7 @@ const SELF_FENCE_REASON_COUNT: usize = 4;
 const RECOVERY_STATE_COUNT: usize = 2;
 const RECOVERY_FAILURE_REASON_COUNT: usize = 4;
 const RECOVERY_PHASE_COUNT: usize = 5;
+const RECOVERY_WORK_COUNT: usize = 12;
 const NODE_LOG_ROTATION_RESULT_COUNT: usize = 4;
 const LTX_PHASE_COUNT: usize = 18;
 const LTX_READ_ORIGIN_COUNT: usize = 4;
@@ -82,6 +83,20 @@ const RECOVERY_FAILURE_REASON_LABELS: [&str; RECOVERY_FAILURE_REASON_COUNT] =
     ["storage", "capacity", "fenced", "other"];
 const RECOVERY_PHASE_LABELS: [&str; RECOVERY_PHASE_COUNT] =
     ["claim", "witness", "scope_validation", "pin_attach", "seal"];
+const RECOVERY_WORK_LABELS: [&str; RECOVERY_WORK_COUNT] = [
+    "candidate_count",
+    "affected_cells",
+    "catalog_shards",
+    "catalog_pages",
+    "control_reads",
+    "follower_pages",
+    "follower_frames",
+    "follower_bytes",
+    "peer_requests",
+    "bundle_bytes",
+    "object_reads",
+    "object_writes",
+];
 const NODE_LOG_ROTATION_RESULT_LABELS: [&str; NODE_LOG_ROTATION_RESULT_COUNT] =
     ["started", "pending", "failed", "completed"];
 const PROJECTION_PROBE_RESULT_LABELS: [&str; PROJECTION_PROBE_RESULT_COUNT] =
@@ -175,6 +190,7 @@ struct MetricsInner {
     node_log_recovery_seconds: Histogram,
     node_log_recovery_phase_seconds: [Histogram; RECOVERY_PHASE_COUNT],
     node_log_recovery_failures: [Counter; RECOVERY_FAILURE_REASON_COUNT],
+    node_log_recovery_work: [Counter; RECOVERY_WORK_COUNT],
     node_log_rotations: [Counter; NODE_LOG_ROTATION_RESULT_COUNT],
     catalog_refresh_failures: Counter,
     transfer_admission_rejections: [Counter; TRANSFER_REJECTION_COUNT],
@@ -611,6 +627,12 @@ impl Metrics {
                             "crab_cell_node_log_recovery_failures_total",
                             &[("reason", reason)],
                         ),
+                        &METADATA,
+                    )
+                }),
+                node_log_recovery_work: RECOVERY_WORK_LABELS.map(|kind| {
+                    recorder.register_counter(
+                        &key("crab_cell_node_log_recovery_work_total", &[("kind", kind)]),
                         &METADATA,
                     )
                 }),
@@ -1198,6 +1220,26 @@ impl Metrics {
         self.inner.node_log_recovery_phase_seconds[phase as usize].record(elapsed.as_secs_f64());
     }
 
+    pub(crate) fn record_recovery_work(&self, work: crab_cell_runtime::RecoveryWorkSummary) {
+        let values = [
+            work.candidate_count,
+            work.affected_cells,
+            work.catalog_shards,
+            work.catalog_pages,
+            work.control_reads,
+            work.follower_pages,
+            work.follower_frames,
+            work.follower_bytes,
+            work.peer_requests,
+            work.bundle_bytes,
+            work.object_reads,
+            work.object_writes,
+        ];
+        for (counter, value) in self.inner.node_log_recovery_work.iter().zip(values) {
+            counter.increment(value);
+        }
+    }
+
     pub(crate) fn record_node_log_rotation(&self, result: NodeLogRotationResult) {
         let index = match result {
             NodeLogRotationResult::Started => 0,
@@ -1762,6 +1804,11 @@ fn describe_metrics(recorder: &impl Recorder) {
     );
     describe_counter(
         recorder,
+        "crab_cell_node_log_recovery_work_total",
+        "Node-log recovery work totals by fixed work kind.",
+    );
+    describe_counter(
+        recorder,
         "crab_cell_node_log_rotations_total",
         "Node-log epoch rotation attempts by bounded result.",
     );
@@ -2043,6 +2090,20 @@ mod tests {
             Some(RecoveryFailureReason::Storage),
         );
         metrics.record_recovery_phase(RecoveryPhase::Witness, Duration::from_millis(20));
+        metrics.record_recovery_work(crab_cell_runtime::RecoveryWorkSummary {
+            candidate_count: 1,
+            affected_cells: 2,
+            catalog_shards: 1,
+            catalog_pages: 3,
+            control_reads: 2,
+            follower_pages: 4,
+            follower_frames: 5,
+            follower_bytes: 6,
+            peer_requests: 7,
+            bundle_bytes: 8,
+            object_reads: 9,
+            object_writes: 10,
+        });
         metrics.record_node_log_rotation(NodeLogRotationResult::Started);
         metrics.record_node_log_rotation(NodeLogRotationResult::Pending);
         metrics.record_node_log_rotation(NodeLogRotationResult::Failed);
@@ -2092,6 +2153,12 @@ mod tests {
         assert!(
             rendered
                 .contains("crab_cell_node_log_recovery_phase_seconds_count{phase=\"witness\"} 1")
+        );
+        assert!(
+            rendered.contains("crab_cell_node_log_recovery_work_total{kind=\"affected_cells\"} 2")
+        );
+        assert!(
+            rendered.contains("crab_cell_node_log_recovery_work_total{kind=\"object_writes\"} 10")
         );
         assert!(rendered.contains("crab_cell_durability_proofs_total{source=\"fleet\"} 1"));
         assert!(rendered.contains("crab_cell_durability_proofs_total{source=\"object\"} 1"));
