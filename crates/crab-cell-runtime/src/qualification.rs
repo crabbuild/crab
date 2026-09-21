@@ -1161,11 +1161,6 @@ impl QualificationRunArtifact {
                 .find(|expected| expected.primitive == counts.primitive)
                 .ok_or(Error::Control("qualification run primitive identity"))?;
             if counts.attempted != expected.attempted
-                || counts.acknowledged < expected.acknowledged
-                || counts.rejected < expected.rejected
-                || counts.ambiguous < expected.ambiguous
-                || counts.retried < expected.retried
-                || counts.verified < expected.verified
                 || !valid_primitive_counts(counts)
                 || counts.verified == 0
             {
@@ -1411,7 +1406,7 @@ impl QualificationWorkload {
             let execution = executor.execute(operation).await?;
             if require_case && execution.case() != Some(operation.case()) {
                 return Err(Error::Control(
-                    "qualification executor did not verify lifecycle case",
+                    "qualification executor did not report lifecycle case",
                 ));
             }
             Self::record_execution(
@@ -1499,7 +1494,7 @@ impl QualificationWorkload {
                     if require_case && execution.case() != Some(operation.case()) {
                         if first_error.is_none() {
                             first_error = Some(Error::Control(
-                                "qualification executor did not verify lifecycle case",
+                                "qualification executor did not report lifecycle case",
                             ));
                         }
                         continue;
@@ -3490,21 +3485,22 @@ mod tests {
             .value = 2;
         assert!(unordered_latency.encode().is_err());
 
-        let mut missing_scheduled_retry = artifact.clone();
-        let retrying = missing_scheduled_retry
-            .primitive_counts
-            .iter_mut()
-            .find(|counts| counts.retried > 0)
-            .unwrap();
-        retrying.retried -= 1;
-        missing_scheduled_retry.outcome_digest = *qualification_run_outcome_digest(
-            &missing_scheduled_retry.workload,
-            &missing_scheduled_retry.primitive_counts,
-            &missing_scheduled_retry.case_coverage,
+        let mut all_acknowledged = artifact.clone();
+        for counts in &mut all_acknowledged.primitive_counts {
+            counts.acknowledged = counts.attempted;
+            counts.rejected = 0;
+            counts.ambiguous = 0;
+            counts.retried = 0;
+            counts.verified = counts.attempted;
+        }
+        all_acknowledged.outcome_digest = *qualification_run_outcome_digest(
+            &all_acknowledged.workload,
+            &all_acknowledged.primitive_counts,
+            &all_acknowledged.case_coverage,
         )
         .unwrap()
         .as_bytes();
-        assert!(missing_scheduled_retry.encode().is_err());
+        all_acknowledged.verify_for_profile(&profile).unwrap();
 
         let mut throughput_profile =
             QualificationProfile::new("throughput-run".into(), 1, 8, 1, 1_000).unwrap();

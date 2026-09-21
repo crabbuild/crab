@@ -31,6 +31,107 @@
   implemented and tested; the protected ten-row profile workload and
   provider/Kubernetes/scale receipts remain open
 
+## Next execution slice: honest primitive case evidence
+
+The `public_cell_qualification.rs` test is a typed **smoke**, not a primitive
+fault matrix. It now reports measured acknowledgements without manufacturing
+retry, rejection, or ambiguity from workload hints. Its lifecycle bitset marks
+only observed happy paths and SQL, KV, Blob, Queue, and Cron duplicate checks
+(13 of 56 bits); the other scheduled cases remain unmarked. SQL, KV, Blob, and
+Cron replay the same mutation identity and compare the first receipt and
+outcome; Queue resends the same producer identity under a distinct request and
+checks one message and zero remaining ready or leased work. KV expiry is
+checked separately through the same public typed host because waiting for a
+real TTL inside one measured
+operation can exceed the PR latency threshold. The separate check does not
+claim a workload case bit or protected evidence.
+The workload's precomputed outcome counts are advisory; the run-artifact
+validator binds scheduled attempts and validates the measured outcomes. The
+local ten-row test still reuses the same primitive workload for every row.
+Neither test is protected evidence, including when the smoke runs against
+RustFS. Keep these tests useful for wiring, but do not promote their receipts
+or case counts.
+
+The smoke now checks observed SQL rows after a durable insert, KV value and
+duplicate result, Blob bytes/ETag, Queue message identity and final lease,
+Cron schedule, Workflow cancellation, Activity completion, and Effect lease
+settlement. The separate KV expiry check reads before and after its TTL; a
+duplicate request must retain the first receipt. It also checks the runtime
+reservation ledger after `CellNode` shutdown. Its test-only node lease renewal
+keeps slow provider smoke alive; it is not a substitute for authoritative fleet
+lease publication. On
+2026-09-21, the focused in-memory primitive workload, local ten-row matrix
+smoke, and ignored isolated-RustFS primitive workload passed with these
+checks. The latest RustFS run took 151 seconds with the 13 observed case bits,
+measured outcome counts, and the expiry wait outside profile timing. An earlier
+run with the TTL wait inside one operation failed the unchanged 5-second PR
+latency threshold. Scheduled retry, cancellation, owner-loss, recovery, and
+independently checked successor evidence remain open for every primitive;
+expiry still needs a separate case artifact tied to the scheduled operation.
+
+A separate `public_cell_takeover.rs` test now uses a fresh successor `CellNode` and
+empty local directory against the same object store. It checks the exact
+published root and a higher owner epoch for the six owned Cells. Typed
+successor reads confirm acknowledged SQL, KV, Blob, Cron, and Workflow state;
+the successor claims and settles the pending Queue message, Activity, and
+Effect, then checks their final state and leases. Stale source writes are
+rejected for every owned Cell and both nodes drain to zero reservations. The
+in-memory and isolated-RustFS versions passed on 2026-09-21. This is a
+test-controlled session fence while the source process remains alive; it is
+not a protected owner-kill or a scheduled qualification case. Every primitive
+still needs a dedicated fault boundary, independent process observer, and raw
+artifact before its owner-loss/recovery case bit can be claimed.
+
+Implement one fault-capable executor through `CellNode` and typed
+`ApplicationHandle` capabilities. Each operation writes a unique, bounded
+marker; an independent reader or successor checks the exact value, version,
+status, sequence, or effect/lease ledger after the fault. Do not set
+`QualificationExecution::verified(true)`, a retry count, or a case label until
+those observations exist. Unimplemented cases return an error instead of
+claiming coverage. Record fault-injection boundary and observation in raw
+artifacts; the bounded receipt cites their digests.
+
+| Primitive | Independent state and settlement check |
+| --- | --- |
+| SQL | Query the unique row/value after each command, then query it again from the successor's restored root. Compare receipt sequence and reject duplicate inserts/updates beyond one application. |
+| KV | Read the exact scope/key/value/version; check expired keys are absent and a repeated request preserves the first version. |
+| Blob | Read the entire published byte range and ETag; check incomplete/expired uploads stay invisible and no part or upload reservation remains. |
+| Queue | Check producer deduplication, exact message ID/payload/attempt, lease expiry/reclaim, final Ack/Dead state and zero live leases. |
+| Cron | Read schedule generation, enabled flag, next due time and occurrence; check one durable Tick effect per occurrence after replay or takeover. |
+| Workflow | Read run ID, status, event sequence, result and retained definition; check no duplicate transition and no pending local work after terminal cancellation. |
+| Activity | Check exact claim token/attempt, retry or expiry outcome, completion result in the workflow run, and no live activity lease. |
+| Effects | Check exact source effect ID/attempt/token, target inbox deduplication, final delivered/failed state and no live source lease. |
+
+For **each** row above, exercise the same six lifecycle boundaries:
+
+1. Retry: lose or delay the first response after commit or publication, resolve
+   its request ID, then retry only if the resolved state allows it. Verify one
+   logical effect and record the actual attempt count.
+2. Duplicate: submit the same mutation identity or producer/event identity
+   twice, compare the durable outcomes, and verify no second side effect.
+3. Expiry: expire the primitive's lease/TTL when it has one; also submit an
+   expired mutation identity. Verify rejection or reclaim and the final state.
+4. Cancellation: cancel at an injected await boundary, resolve the request ID
+   from a separate client, and verify either one committed outcome or no
+   outcome. Drain the operation and check reservations.
+5. Owner loss: kill the owner before and after publication, seal/recover its
+   node log, fence the stale session, and confirm that the old owner cannot
+   produce output.
+6. Recovery: start a successor with an empty local Cell directory, restore the
+   exact authoritative root plus any pinned tail, and recheck the primitive's
+   marker and lease/work state through its public capability.
+
+Run these cases first on an isolated real object-store prefix with a
+three-process native host; then repeat in the protected provider and Pod
+profiles. Use one unique namespace/prefix per run and retain immutable raw
+events outside Git. A case passes only when the fault is observed at its named
+boundary, a separate observer confirms the result, acknowledged outcomes are
+present exactly once, authority/root sequence is monotonic, and every Cell,
+job, activity, Queue, Effect, and restore reservation returns to zero after
+drain. A timeout, missing observer, or unresolved ambiguous operation fails
+the case. Run the receipt verifier in a fresh process; never infer a case from
+the deterministic schedule or a successful API call alone.
+
 ## Decision boundary
 
 The audit verifies source behavior and executable local tests. It does **not**
@@ -239,7 +340,7 @@ Run each Cargo command with a checkout-specific target directory under
 | --- | --- | --- |
 | Application contract | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-app RUSTC_WRAPPER= cargo test -p crab-cell-app --locked` | all unit and reference-application tests pass |
 | Host ownership | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-host RUSTC_WRAPPER= cargo test -p crab-cell-host --locked` | lifecycle/facility tests pass with no leaked tasks |
-| Public typed primitive host | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-public-host RUSTC_WRAPPER= cargo test -p crab-http-server --test public_cell_host_application --test public_cell_qualification --locked` | one `CellNode` boots every primitive Cell and the typed workload artifact verifies |
+| Public typed primitive host | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-public-host RUSTC_WRAPPER= cargo test -p crab-http-server --test public_cell_host_application --test public_cell_qualification --test public_cell_takeover --locked` | typed smoke and the fresh-successor takeover test pass |
 | Runtime regression | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-runtime RUSTC_WRAPPER= cargo test -p crab-cell-runtime --locked` | all runtime tests pass; ignored provider tests are reported, not fabricated |
 | Server composition | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-server RUSTC_WRAPPER= cargo test -p crab-http-server --lib --locked` | server library tests pass |
 | Strict lint | `CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-025-quality RUSTC_WRAPPER= cargo clippy -p crab-cell-app -p crab-cell-host -p crab-cell-runtime --all-targets --locked -- -D warnings` | exit 0 |
