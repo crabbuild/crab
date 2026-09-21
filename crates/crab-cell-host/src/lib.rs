@@ -185,6 +185,7 @@ pub struct CellNodeTaskGroup {
     node_shutdown: CancellationToken,
     tasks: Mutex<Vec<JoinHandle<FacilityResult>>>,
     failed: Arc<AtomicBool>,
+    draining: AtomicBool,
 }
 
 impl Drop for CellNodeTaskGroup {
@@ -201,6 +202,7 @@ impl Drop for CellNodeTaskGroup {
 
 impl CellNodeTaskGroup {
     fn cancel(&self) {
+        self.draining.store(true, Ordering::Release);
         self.cancellation.cancel();
         self.node_shutdown.cancel();
     }
@@ -213,11 +215,25 @@ impl CellNodeTaskGroup {
             node_shutdown,
             tasks: Mutex::new(Vec::new()),
             failed: Arc::new(AtomicBool::new(false)),
+            draining: AtomicBool::new(false),
         }
     }
 
     fn is_healthy(&self) -> bool {
-        !self.failed.load(Ordering::Acquire)
+        if self.failed.load(Ordering::Acquire) || self.draining.load(Ordering::Acquire) {
+            return false;
+        }
+        self.tasks
+            .lock()
+            .map(|tasks| tasks.iter().all(|task| !task.is_finished()))
+            .unwrap_or(false)
+    }
+
+    fn ensure_accepting_tasks(&self) -> crab_cell_runtime::Result<()> {
+        if self.draining.load(Ordering::Acquire) {
+            return Err(Error::CellDraining);
+        }
+        Ok(())
     }
 
     /// Spawns one bounded node task and retains its join handle for drain.
@@ -226,10 +242,12 @@ impl CellNodeTaskGroup {
         F: Future<Output = std::result::Result<(), E>> + Send + 'static,
         E: std::error::Error + Send + Sync + 'static,
     {
+        self.ensure_accepting_tasks()?;
         let mut tasks = match self.tasks.lock() {
             Ok(tasks) => tasks,
             Err(_) => return Err(Error::Control("CellNode task group lock poisoned")),
         };
+        self.ensure_accepting_tasks()?;
         if tasks.len() >= MAX_NODE_TASKS {
             return Err(Error::Capacity("CellNode task limit reached"));
         }
@@ -261,10 +279,12 @@ impl CellNodeTaskGroup {
     where
         F: Future<Output = FacilityResult> + Send + 'static,
     {
+        self.ensure_accepting_tasks()?;
         let mut tasks = match self.tasks.lock() {
             Ok(tasks) => tasks,
             Err(_) => return Err(Error::Control("CellNode task group lock poisoned")),
         };
+        self.ensure_accepting_tasks()?;
         if tasks.len() >= MAX_NODE_TASKS {
             return Err(Error::Capacity("CellNode task limit reached"));
         }
@@ -1455,6 +1475,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_node_task_removes_readiness() {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([33; 16]))
+            .build()
+            .unwrap();
+        let task_group = node
+            .install_task_group(CancellationToken::new(), CancellationToken::new())
+            .unwrap();
+        node.install_node_lease_for_startup(NodeLeaseGuard::new(0, 60_000).unwrap())
+            .unwrap();
+        node.start().unwrap();
+        assert!(node.is_ready());
+
+        task_group.spawn(async { Ok::<(), Error>(()) }).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while node.is_ready() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!node.is_ready());
+        node.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn panicked_node_task_removes_readiness_and_is_reported_during_drain() {
         let node = CellNodeBuilder::new(application())
             .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
@@ -1603,6 +1651,30 @@ mod tests {
         assert!(cancellation.is_cancelled());
         assert!(node_shutdown.is_cancelled());
         assert!(finished.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn task_group_rejects_new_tasks_after_drain_starts() {
+        let cancellation = CancellationToken::new();
+        let node_shutdown = CancellationToken::new();
+        let task_shutdown = node_shutdown.clone();
+        let tasks = CellNodeTaskGroup::new(cancellation, node_shutdown);
+        tasks
+            .spawn(async move {
+                task_shutdown.cancelled().await;
+                Ok::<(), Error>(())
+            })
+            .unwrap();
+        tasks.drain().await.unwrap();
+
+        assert!(matches!(
+            tasks.spawn(async { Ok::<(), Error>(()) }),
+            Err(Error::CellDraining)
+        ));
+        assert!(matches!(
+            tasks.spawn_boxed(async { Ok(()) }),
+            Err(Error::CellDraining)
+        ));
     }
 
     #[tokio::test]
