@@ -354,6 +354,51 @@ async fn caller_constructed_segment_uses_full_inspection_fallback() {
 }
 
 #[cfg(feature = "replica")]
+#[tokio::test(start_paused = true)]
+async fn prepare_overlaps_independent_immutable_uploads() {
+    let (_directory, _faults, _host, mut writer) = fixture();
+    let first = writer.capture_deferred().unwrap();
+    let backend = InMemory::new();
+    let layout = CellStorageLayout::new(
+        Store::new(Arc::new(backend.clone())),
+        ObjectPath::from("parallel-preparation"),
+        [71; 16],
+    );
+    let initial = CellReplica::new(layout, [72; 32], [73; 16], Limits::default()).unwrap();
+    let root = initial.prepare(None, &first, 1, 1).await.unwrap().root();
+    writer.prune_captured(&first).unwrap();
+    writer
+        .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(randomblob(4096))"))
+        .unwrap();
+    let captured = writer.capture_deferred().unwrap();
+
+    let delay = Duration::from_millis(100);
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(ThrottledStore::new(
+                backend,
+                ThrottleConfig {
+                    wait_put_per_call: delay,
+                    ..ThrottleConfig::default()
+                },
+            ))),
+            ObjectPath::from("parallel-preparation"),
+            [71; 16],
+        ),
+        [72; 32],
+        [73; 16],
+        Limits::default(),
+    )
+    .unwrap();
+    let started = tokio::time::Instant::now();
+
+    replica.prepare(Some(&root), &captured, 2, 1).await.unwrap();
+
+    assert_eq!(started.elapsed(), delay * 2);
+    writer.close().unwrap();
+}
+
+#[cfg(feature = "replica")]
 #[tokio::test(flavor = "multi_thread")]
 async fn cell_prepare_needs_no_scratch_or_local_durability_barrier() {
     let (_directory, faults, host, mut writer) = fixture();

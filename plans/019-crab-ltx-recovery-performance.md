@@ -1025,6 +1025,29 @@ than the shipped Celld path, consistent with Crab paying a parent-directory
 barrier on every capture while pinned Celld does not. These results reject a
 general "Crab is 1.5x--2x faster" or "Crab always has lower latency" claim.
 
+### Follow-up: overlap independent immutable uploads
+
+Root preparation previously serialized five object-store latency intervals for
+an ordinary mutation: LTX body, index, changed directory node, root segment
+page, and root document. These objects are independently content-addressed;
+only their successful completion, not their upload order, gates the private
+`PreparedRoot`. Preparation now overlaps body/index uploads, progresses up to
+four captured segments concurrently, uploads changed directory objects with an
+eight-object bound, and uploads the root document alongside its segment pages.
+The existing host I/O semaphore remains the shared process-wide request bound.
+If either dependency or metadata preparation fails, the other future is
+cancelled and no proposal is returned; any completed object is unreachable
+until a later authority CAS publishes its digest.
+
+A deterministic paused-clock integration test injects 100 ms into every object
+write on the real preparation call path. The sequential baseline required five
+intervals (500 ms); the bounded dependency DAG requires two (200 ms), a 2.5x
+latency reduction under the modeled provider delay. A zero-latency release
+probe was inconclusive because host load exceeded 46 on 12 logical CPUs, so it
+is intentionally not used as performance evidence. This is a Crab root-
+preparation optimization; Celld exposes no equivalent standalone root protocol
+in the retained local harness.
+
 ## Maintenance notes
 
 - Reviewers should trace one corrupt input through plan construction, one

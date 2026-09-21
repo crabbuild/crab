@@ -123,6 +123,12 @@ private provenance and retain the full inspection path.
 Index retention is capped at 1 MiB per pending `CaptureBatch`; larger capture
 cohorts fall back to decoding. The executor retains only one unpublished batch.
 
+Root preparation also overlaps independent content-addressed uploads. The LTX
+body and index, changed directory nodes, and root metadata use bounded
+concurrency under the runtime's shared I/O permits. The proposal remains private
+until every dependency upload completes, so authority cannot observe a partial
+root.
+
 ## Use receipts for read consistency
 
 A receipt identifies the Cell incarnation and commit sequence. A query with a minimum receipt runs only after the local owner reaches that position.

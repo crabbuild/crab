@@ -34,6 +34,10 @@ const MAX_COMPACTION_INPUTS: usize = 128;
 // These buffers schedule immutable reads; Host I/O permits remain the shared
 // admission boundary across roots, restores, and concurrent Cells.
 const OBJECT_FETCH_CONCURRENCY: usize = 8;
+const OBJECT_UPLOAD_CONCURRENCY: usize = 8;
+// Each body upload can retain four multipart chunks. Keep multi-segment
+// capture batches below the host-wide request ceiling and bounded in memory.
+const SEGMENT_UPLOAD_CONCURRENCY: usize = 4;
 pub(super) const RESTORE_IN_FLIGHT_WINDOWS: usize = 8;
 pub(super) const RESTORE_WINDOW_BYTES: u32 = 1 << 20;
 
@@ -981,36 +985,28 @@ impl CellReplica {
             .unwrap_or_default();
         descriptors.extend(prepared.iter().map(|segment| segment.descriptor.clone()));
         self.validate_chain(&descriptors, target)?;
-        if let Some(bundle) = bundle {
-            self.put_bundle(bundle).await?;
-        }
-        let mut directory_inputs = Vec::with_capacity(prepared.len());
-        for segment in prepared {
-            if segment.descriptor.object_kind() == CellObjectKind::Ltx {
-                let AppendBody::Native(source) = segment.body else {
-                    return Err(CrabError::InvalidState("native Cell body source missing"));
-                };
-                compaction::upload_source(
-                    self,
-                    source,
-                    segment.descriptor.info.size_bytes,
-                    &segment.descriptor.info.blake3,
-                    CellObjectKind::Ltx,
-                )
-                .await?;
+        let directory_inputs = prepared
+            .iter()
+            .map(|segment| DirectoryInput {
+                descriptor: segment.descriptor.clone(),
+                index: segment.index.clone(),
+            })
+            .collect::<Vec<_>>();
+        let dependency_uploads = async {
+            if let Some(bundle) = bundle {
+                self.put_bundle(bundle).await?;
             }
-            self.put_object(
-                &segment.descriptor.index_digest,
-                CellObjectKind::Index,
-                segment.index.clone(),
+            stream::iter(
+                prepared
+                    .into_iter()
+                    .map(|segment| self.upload_prepared_segment(segment)),
             )
+            .buffered(SEGMENT_UPLOAD_CONCURRENCY)
+            .try_collect::<Vec<_>>()
             .await?;
-            directory_inputs.push(DirectoryInput {
-                descriptor: segment.descriptor,
-                index: segment.index,
-            });
-        }
-        self.finish_preparation(
+            Ok::<(), CrabError>(())
+        };
+        let root_preparation = self.finish_preparation(
             base,
             base_graph,
             descriptors,
@@ -1018,8 +1014,13 @@ impl CellReplica {
             target,
             commit_sequence,
             schema,
-        )
-        .await
+        );
+        // Content-addressed dependencies and root metadata can upload in
+        // parallel. The private proposal is returned only after both branches
+        // finish, so a failed branch can leave only unreachable objects.
+        let (_, prepared) =
+            futures_util::future::try_join(dependency_uploads, root_preparation).await?;
+        Ok(prepared)
     }
 
     async fn finish_preparation(
@@ -1082,10 +1083,15 @@ impl CellReplica {
             }
             directory
         };
-        for node in directory.objects() {
-            self.put_object(&node.digest, CellObjectKind::Directory, node.bytes.clone())
-                .await?;
-        }
+        self.put_objects(
+            CellObjectKind::Directory,
+            directory
+                .objects()
+                .iter()
+                .map(|node| (node.digest, node.bytes.clone()))
+                .collect(),
+        )
+        .await?;
 
         self.finish_root(
             base,
@@ -1117,11 +1123,11 @@ impl CellReplica {
         }
 
         let mut segment_pages = Vec::new();
+        let mut root_objects = Vec::new();
         for page in descriptors.chunks(SEGMENTS_PER_PAGE) {
             let bytes = encode_segment_page(page)?;
             let digest = *blake3::hash(&bytes).as_bytes();
-            self.put_object(&digest, CellObjectKind::Root, bytes)
-                .await?;
+            root_objects.push((digest, bytes));
             segment_pages.push(digest);
         }
         if segment_pages.len() > MAX_SEGMENT_PAGES {
@@ -1142,8 +1148,10 @@ impl CellReplica {
         };
         let bytes = encode_root(&document)?;
         let digest = *blake3::hash(&bytes).as_bytes();
-        self.put_object(&digest, CellObjectKind::Root, bytes)
-            .await?;
+        root_objects.push((digest, bytes));
+        // The document and its immutable segment pages can be uploaded in
+        // parallel. The root digest remains private until all uploads finish.
+        self.put_objects(CellObjectKind::Root, root_objects).await?;
         let root = RootRef {
             cell: self.cell,
             incarnation: self.incarnation,
@@ -1498,6 +1506,49 @@ impl CellReplica {
                 &bytes,
             )?;
         }
+        Ok(())
+    }
+
+    async fn put_objects(
+        &self,
+        kind: CellObjectKind,
+        objects: Vec<([u8; 32], Vec<u8>)>,
+    ) -> Result<()> {
+        stream::iter(
+            objects
+                .into_iter()
+                .map(|(digest, bytes)| async move { self.put_object(&digest, kind, bytes).await }),
+        )
+        .buffer_unordered(OBJECT_UPLOAD_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+        Ok(())
+    }
+
+    async fn upload_prepared_segment(&self, segment: PreparedSegment) -> Result<()> {
+        let PreparedSegment {
+            descriptor,
+            index,
+            body,
+        } = segment;
+        let body_upload = async {
+            if descriptor.object_kind() != CellObjectKind::Ltx {
+                return Ok(());
+            }
+            let AppendBody::Native(source) = body else {
+                return Err(CrabError::InvalidState("native Cell body source missing"));
+            };
+            compaction::upload_source(
+                self,
+                source,
+                descriptor.info.size_bytes,
+                &descriptor.info.blake3,
+                CellObjectKind::Ltx,
+            )
+            .await
+        };
+        let index_upload = self.put_object(&descriptor.index_digest, CellObjectKind::Index, index);
+        futures_util::future::try_join(body_upload, index_upload).await?;
         Ok(())
     }
 
