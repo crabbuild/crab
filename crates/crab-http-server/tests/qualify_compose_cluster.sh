@@ -689,7 +689,10 @@ jq --exit-status \
   <<<"$control_continued" >/dev/null
 
 resume_service server
-"${compose[@]}" up --detach --no-build server server-b >/dev/null
+# The shared namespace provider is resumed in place. Including it in `up` lets
+# Compose recreate the provider while B is being attached, which races B's
+# network namespace and can make an otherwise healthy rejoin fail closed.
+"${compose[@]}" up --detach --no-build server-b >/dev/null
 wait_for_healthy server-b
 rejoin_ready=false
 control_after_rejoin=""
