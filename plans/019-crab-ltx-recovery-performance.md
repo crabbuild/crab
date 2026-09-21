@@ -1084,6 +1084,27 @@ before publication. The existing 1 MiB per-batch retention ceiling is
 unchanged, and an independent decoder comparison still verifies every retained
 byte before the zero-copy path is accepted.
 
+### Follow-up: coalesce Cell restore writes
+
+Cell restore previously wrote each verified SQLite page separately to its
+private scratch file. It now assembles one authenticated, checksum-linked
+window before writing it. The existing 1 MiB window bound also caps the new
+buffer; incomplete or oversized windows fail before their bytes are written.
+The final exact-length check, file sync, and no-replace atomic install remain
+unchanged. A 3 MB snapshot regression test failed before the change with 737
+local writes, then passed with at most 16 bounded writes while checking the
+restored BLOB byte-for-byte.
+
+An identical release probe compared merged `main` at `6df26f85adb` with this
+candidate in five alternating pairs. Each process restored a 16 MB random
+SQL BLOB seven times from an in-memory object store, checked the restored
+SQL value length, and excluded the first restore as warmup. The candidate won
+all five pairs;
+the median of per-process restore medians was 58 ms versus 175 ms (3.0x).
+The probe was removed after measurement. These are isolated Crab-versus-Crab
+Cell restore results, not a Crab-versus-Celld end-to-end or provider-network
+claim. The default per-capture directory-sync cost remains unchanged.
+
 ### Follow-up: overlap remote compaction transfers
 
 Cell compaction previously downloaded and authenticated every source index,
