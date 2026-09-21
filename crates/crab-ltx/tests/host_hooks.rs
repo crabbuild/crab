@@ -475,7 +475,16 @@ async fn prepare_opens_captured_segments_concurrently() {
 #[tokio::test(start_paused = true)]
 async fn compaction_overlaps_independent_remote_transfers() {
     let (_directory, _faults, _host, mut writer) = fixture();
-    let captured = writer.capture().unwrap();
+    let mut captured = writer.capture().unwrap();
+    for value in [2, 3, 4] {
+        writer
+            .transaction(|tx| tx.execute("INSERT INTO t VALUES(?1)", [value]))
+            .unwrap();
+        let next = writer.capture().unwrap();
+        captured.segments.extend(next.segments);
+        captured.position = next.position;
+    }
+    assert_eq!(captured.segments.len(), 4);
     let delay = Duration::from_millis(100);
     let backend = InMemory::new();
     let replica = CellReplica::new(
@@ -501,13 +510,13 @@ async fn compaction_overlaps_independent_remote_transfers() {
     let started = tokio::time::Instant::now();
 
     replica
-        .prepare_compaction(&root, 0..1, 9, scratch.path())
+        .prepare_compaction(&root, 0..4, 9, scratch.path())
         .await
         .unwrap();
 
     // Root and segment metadata need two ordered reads. The independent index
-    // and LTX body downloads, compacted body/index uploads, directory upload,
-    // and final root uploads then consume four more latency intervals.
+    // and LTX body cohorts, compacted body/index uploads, directory upload, and
+    // final root uploads then consume four more latency intervals.
     assert_eq!(started.elapsed(), delay * 6);
     writer.close().unwrap();
 }
@@ -625,19 +634,21 @@ async fn cell_compaction_uses_injected_filesystem_and_cleans_failed_scratch() {
         .root();
     writer.close().unwrap();
 
-    faults.arm(Some("write_all"));
-    injected(
-        replica
-            .prepare_compaction(&root, 0..1, 9, directory.path())
-            .await,
-    );
-    assert!(!std::fs::read_dir(directory.path()).unwrap().any(|entry| {
-        entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .contains(".crab-compaction-")
-    }));
+    for operation in ["write_all_at", "write_all"] {
+        faults.arm(Some(operation));
+        injected(
+            replica
+                .prepare_compaction(&root, 0..1, 9, directory.path())
+                .await,
+        );
+        assert!(!std::fs::read_dir(directory.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".crab-compaction-")
+        }));
+    }
 
     faults.arm(None);
     let compacted = replica

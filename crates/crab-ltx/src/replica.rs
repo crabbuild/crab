@@ -35,9 +35,9 @@ const MAX_COMPACTION_INPUTS: usize = 128;
 // admission boundary across roots, restores, and concurrent Cells.
 const OBJECT_FETCH_CONCURRENCY: usize = 8;
 pub(super) const OBJECT_UPLOAD_CONCURRENCY: usize = 8;
-// Each body upload can retain four multipart chunks. Keep multi-segment
-// capture batches below the host-wide request ceiling and bounded in memory.
-const SEGMENT_UPLOAD_CONCURRENCY: usize = 4;
+// A capture body upload can retain four multipart chunks. Bound each
+// multi-segment transfer cohort here; Host permits cap aggregate cohorts.
+pub(super) const SEGMENT_TRANSFER_CONCURRENCY: usize = 4;
 pub(super) const RESTORE_IN_FLIGHT_WINDOWS: usize = 8;
 pub(super) const RESTORE_WINDOW_BYTES: u32 = 1 << 20;
 
@@ -725,7 +725,7 @@ impl CellReplica {
         }))
         // Preserve descriptor order while overlapping independent file jobs.
         // Host job permits remain the shared process-wide admission boundary.
-        .buffered(SEGMENT_UPLOAD_CONCURRENCY)
+        .buffered(SEGMENT_TRANSFER_CONCURRENCY)
         .try_collect()
         .await
     }
@@ -1020,7 +1020,7 @@ impl CellReplica {
                     .into_iter()
                     .map(|segment| self.upload_prepared_segment(segment)),
             )
-            .buffered(SEGMENT_UPLOAD_CONCURRENCY)
+            .buffered(SEGMENT_TRANSFER_CONCURRENCY)
             .try_collect::<Vec<_>>()
             .await?;
             Ok::<(), CrabError>(())

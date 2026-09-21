@@ -1089,18 +1089,23 @@ byte before the zero-copy path is accepted.
 Cell compaction previously downloaded and authenticated every source index,
 then downloaded and authenticated the selected LTX bodies. Those phases write
 different scratch files and share the host's existing object-I/O admission, so
-they now run concurrently and both must finish before the local merge begins.
-Each stream still verifies its exact length, BLAKE3 digest, index structure,
-and final scratch-file length before the compacted output can be prepared. The
-resulting content-addressed LTX and index objects are also uploaded concurrently;
-neither becomes reachable unless both finish and the final root is prepared.
+they now run concurrently. Up to four descriptors in each cohort use disjoint
+positional scratch writes, while the host's I/O and blocking-job permits remain
+the process-wide admission boundary. Every admitted job is awaited even after
+a sibling fails, so scratch cleanup cannot race a detached write. Each stream
+still verifies its exact length, BLAKE3 digest, index structure, and final
+scratch-file length before the compacted output can be prepared. The resulting
+content-addressed LTX and index objects are also uploaded concurrently; neither
+becomes reachable unless both finish and the final root is prepared.
 
-A paused-clock integration test runs the complete one-segment compaction path
+A paused-clock integration test runs the complete four-segment compaction path
 with 100 ms added to every object read and write. Root and segment metadata
 still require two ordered reads, while the independent index/body downloads and
 compacted LTX/index uploads each share one latency interval. The original call
-graph took 800 ms and the candidate takes 600 ms, a 25% modeled end-to-end
-reduction (1.33x) for this remote compaction case. This is a Crab compaction
+graph requires 1,400 ms in this model. After the phase-level overlaps it still
+took 900 ms because each cohort processed its four descriptors serially; the
+bounded candidate takes 600 ms, a further 33% reduction (1.5x) and a 57%
+reduction (2.33x) from the original call graph. This is a Crab compaction
 improvement; the local Crab/Celld harness does not exercise either
 implementation's object-store compaction protocol.
 
