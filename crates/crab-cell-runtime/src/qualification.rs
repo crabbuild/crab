@@ -2436,6 +2436,11 @@ impl QualificationReceipt {
             && (self.fault.eq_ignore_ascii_case("none")
                 || self.fault_schedule_digest == *blake3::hash(b"none").as_bytes()
                 || self.ownership.len() < 2
+                // Two repeated samples prove no failover; require a real watermark advance.
+                || !self.ownership.windows(2).any(|observations| {
+                    observations[1].epoch > observations[0].epoch
+                        || observations[1].published_sequence > observations[0].published_sequence
+                })
                 || self.ownership.windows(2).any(|observations| {
                     observations[1].epoch < observations[0].epoch
                         || observations[1].published_sequence < observations[0].published_sequence
@@ -3587,6 +3592,59 @@ mod tests {
                 key.verifying_key().to_bytes(),
             )
             .unwrap();
+
+        let no_transition = runner
+            .emit_with_profile_and_evidence(
+                &profile,
+                "fault-source".into(),
+                image,
+                "s3".into(),
+                "failover".into(),
+                "owner-kill".into(),
+                vec![
+                    QualificationMetric::new("cells".into(), 256, "cells".into()).unwrap(),
+                    QualificationMetric::new("operations".into(), 1_000_000, "operations".into())
+                        .unwrap(),
+                    QualificationMetric::new("duration_secs".into(), 60, "seconds".into()).unwrap(),
+                    QualificationMetric::new("p99_latency_ms".into(), 1, "ms".into()).unwrap(),
+                    QualificationMetric::new("peak_local_disk_bytes".into(), 1, "bytes".into())
+                        .unwrap(),
+                    QualificationMetric::new("peak_file_descriptors".into(), 1, "count".into())
+                        .unwrap(),
+                ],
+                artifact,
+                true,
+                (
+                    "rustc".into(),
+                    "release".into(),
+                    "kubernetes".into(),
+                    7,
+                    1,
+                    1,
+                    false,
+                ),
+                1,
+                2,
+                b"fault=owner-kill;phase=after-publication",
+                vec![artifact_digest],
+                vec![
+                    QualificationOwnership::new(1, 1, Digest::from_bytes([36; 32])),
+                    QualificationOwnership::new(1, 1, Digest::from_bytes([36; 32])),
+                ],
+            )
+            .unwrap();
+        assert!(
+            no_transition
+                .verify_for_profile_with_signer(
+                    "fault-source",
+                    image,
+                    &profile,
+                    &[artifact],
+                    key.verifying_key().to_bytes(),
+                )
+                .is_err(),
+            "fault evidence must contain an actual ownership transition"
+        );
     }
 
     #[test]

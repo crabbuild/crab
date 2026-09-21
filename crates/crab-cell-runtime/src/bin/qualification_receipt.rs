@@ -385,7 +385,15 @@ fn resolve_manifest_path(base: &Path, value: &str) -> Result<PathBuf, String> {
     }
     let canonical_base = fs::canonicalize(base)
         .map_err(|error| format!("resolve matrix manifest directory: {error}"))?;
-    let candidate = canonical_base.join(path);
+    let mut candidate = canonical_base.clone();
+    for component in path.components() {
+        candidate.push(component.as_os_str());
+        let metadata = fs::symlink_metadata(&candidate)
+            .map_err(|error| format!("inspect matrix artifact path: {error}"))?;
+        if metadata.file_type().is_symlink() {
+            return Err("matrix paths must not be symlinks".into());
+        }
+    }
     let resolved = fs::canonicalize(&candidate)
         .map_err(|error| format!("resolve matrix artifact path: {error}"))?;
     if !resolved.starts_with(&canonical_base) {
@@ -472,9 +480,9 @@ fn usage() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{manifest_base, require_trusted_signer};
+    use super::{manifest_base, require_trusted_signer, resolve_manifest_path};
     use crab_cell_runtime::QualificationProfile;
-    use std::path::Path;
+    use std::{fs, path::Path};
 
     #[test]
     fn relative_manifest_uses_the_current_directory() {
@@ -498,5 +506,28 @@ mod tests {
         assert!(require_trusted_signer(Some(&protected), None).is_err());
         assert!(require_trusted_signer(Some(&QualificationProfile::pr_contract()), None).is_ok());
         assert!(require_trusted_signer(None, None).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn matrix_paths_reject_symlinks() {
+        let directory = tempfile::tempdir().expect("matrix directory");
+        fs::write(directory.path().join("artifact.json"), b"artifact").expect("artifact");
+        std::os::unix::fs::symlink(
+            directory.path().join("artifact.json"),
+            directory.path().join("linked.json"),
+        )
+        .expect("symlink");
+        fs::create_dir(directory.path().join("nested")).expect("nested directory");
+        std::os::unix::fs::symlink(
+            directory.path().join("nested"),
+            directory.path().join("linked-directory"),
+        )
+        .expect("directory symlink");
+        fs::write(directory.path().join("nested/artifact.json"), b"artifact")
+            .expect("nested artifact");
+        assert!(resolve_manifest_path(directory.path(), "linked.json").is_err());
+        assert!(resolve_manifest_path(directory.path(), "linked-directory/artifact.json").is_err());
+        assert!(resolve_manifest_path(directory.path(), "artifact.json").is_ok());
     }
 }
