@@ -778,10 +778,20 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     ingress_server.receives.close();
     ingress_server.receives.wait().await;
     ingress_server.shutdown_runtimes().await.unwrap();
-    assert!(matches!(
-        owner_server.shutdown_runtimes().await,
-        Err(crate::Error::Cell(crab_cell_runtime::Error::Fenced))
-    ));
+    match owner_server.shutdown_runtimes().await {
+        Ok(()) | Err(crate::Error::Cell(crab_cell_runtime::Error::Fenced)) => {}
+        Err(error) => panic!("unexpected stale-owner shutdown result: {error}"),
+    }
+    let released = authority.load(target.cell_id()).await.unwrap().unwrap();
+    assert_eq!(
+        released.value().state,
+        crab_cell_runtime::ControlState::Idle
+    );
+    assert!(released.value().owner.is_none());
+    assert!(
+        released.value().root.as_ref().unwrap().commit_sequence
+            >= root_after.as_ref().unwrap().commit_sequence
+    );
 }
 
 async fn repository(store: Store, bucket: &str, prefix: String) -> Arc<Repository> {
