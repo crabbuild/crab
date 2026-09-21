@@ -162,7 +162,6 @@ impl LocalStaging {
         Ok(())
     }
 
-    #[cfg(test)]
     pub(crate) fn available_bytes(&self) -> u64 {
         self.budget.available()
     }

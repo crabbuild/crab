@@ -18,14 +18,15 @@ use axum::{
 use bytes::Bytes;
 use crab_cell_runtime::{
     ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_NATIVE_BYTES, ACTIVE_CELL_PAGE_CACHE_BYTES,
-    CellRuntime, Digest, NodeDirectory, Owner, PeerRoundTrip, PeerSigner, ReleaseState,
-    ReleaseStore, ReplicaHost, ScratchMonitor, SessionId, SqlWorkerPool,
+    ApplicationIdentityStore, CellRuntime, Digest, NodeDirectory, Owner, PeerRoundTrip, PeerSigner,
+    ReleaseState, ReleaseStore, ReplicaHost, ScratchMonitor, SessionId, SqlWorkerPool,
 };
 use crab_metadata::manifest_store::read_manifest;
 use crab_remote_git::{
     OperationLimits, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
 };
 use crab_storage::{StorageError, Store, StoreLayout};
+use object_store::path::Path as ObjectPath;
 use serde::Serialize;
 use serde_json::json;
 use tokio::sync::{Mutex, Semaphore};
@@ -571,6 +572,13 @@ impl Repository {
         &self,
         server: &Server,
     ) -> Result<MaintenanceSchedule> {
+        if server
+            .git_import
+            .as_ref()
+            .is_some_and(|context| context.is_repository_importing(self.id))
+        {
+            return Ok(MaintenanceSchedule::Deferred);
+        }
         let completed = {
             let mut worker = self.maintenance.lock().await;
             worker
@@ -807,6 +815,9 @@ pub async fn serve(config: Config) -> Result<()> {
     let repository_cells = document
         .repositories
         .iter()
+        .filter(|record| {
+            record.application == crate::catalog::RepositoryApplicationState::CellReady
+        })
         .map(|record| (record.id, record.application))
         .collect::<Vec<_>>();
     let repositories = materialize_catalog(&catalog, document).await?;
@@ -836,8 +847,18 @@ pub async fn serve(config: Config) -> Result<()> {
     let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
     let session = SessionId::from_bytes(Uuid::now_v7().into_bytes());
     let registry = Arc::new(startup.registry);
+    // Keep node-directory CAS traffic on a separate HTTP client from bulk Git
+    // object writes. A large import must not starve the lease heartbeat until
+    // the ten-second advertisement expires and fences the whole process.
+    let control_root = crate::storage_root::StorageRoot::build(&config.storage)?;
+    let control_layout = ApplicationIdentityStore::new(
+        control_root.store.clone(),
+        ObjectPath::from(control_root.prefix.clone()),
+    )
+    .layout(startup.identity)
+    .await?;
     let directory = NodeDirectory::new(
-        startup.layout.clone(),
+        control_layout,
         peer_tls.fleet(),
         startup.image,
         registry.release_digest(),
@@ -1441,7 +1462,9 @@ pub(crate) async fn materialize_catalog(
     document: crate::catalog::CatalogDocument,
 ) -> Result<BTreeMap<(String, String), Arc<Repository>>> {
     let mut repositories = BTreeMap::new();
-    for record in document.repositories {
+    for record in document.repositories.into_iter().filter(|record| {
+        record.application == crate::catalog::RepositoryApplicationState::CellReady
+    }) {
         let store = catalog.root().store.clone();
         let prefix = catalog.root().repository_prefix(&record.prefix)?;
         let layout = StoreLayout::new(store.clone(), prefix.clone());
@@ -1518,6 +1541,9 @@ async fn refresh_catalog(server: Arc<Server>, mut version: u64) {
         let repository_cells = document
             .repositories
             .iter()
+            .filter(|record| {
+                record.application == crate::catalog::RepositoryApplicationState::CellReady
+            })
             .map(|record| (record.id, record.application))
             .collect::<Vec<_>>();
         let verified = match server.repository_cells.as_ref() {

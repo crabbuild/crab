@@ -1,5 +1,6 @@
 use crab_cell_runtime::{Committed, InvocationError, MutationIdentity, Observed, RequestId};
 use serde::{Deserialize, Serialize};
+use tokio::time::{Duration, Instant, sleep};
 use uuid::Uuid;
 
 use crate::{
@@ -21,6 +22,9 @@ use crate::{
 };
 
 const MAX_NUMBER: u64 = 9_007_199_254_740_991;
+const ROUTE_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
+const ROUTE_RETRY_BASE: Duration = Duration::from_millis(25);
+const ROUTE_RETRY_MAX_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -159,13 +163,41 @@ async fn route(
         .repository_cells
         .as_ref()
         .ok_or(Error::CellUnavailable)?;
-    router
-        .route(repository.id, principal, action)
-        .await
-        .map_err(|error| match error {
-            crate::Error::Cell(source) => Error::Cell(source),
-            source => Error::Repository(source),
-        })
+    let deadline = Instant::now() + ROUTE_RETRY_TIMEOUT;
+    let mut delay = ROUTE_RETRY_BASE;
+    loop {
+        match router.route(repository.id, principal, action).await {
+            Ok(cell) => return Ok(cell),
+            Err(crate::Error::Cell(source))
+                if retryable_route_error(&source) && Instant::now() < deadline =>
+            {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let wait = delay.min(remaining);
+                tokio::select! {
+                    () = server.cancellation.cancelled() => {
+                        return Err(Error::Cell(crab_cell_runtime::Error::RuntimeClosed));
+                    }
+                    () = sleep(wait) => {}
+                }
+                delay = delay
+                    .checked_mul(2)
+                    .unwrap_or(ROUTE_RETRY_MAX_DELAY)
+                    .min(ROUTE_RETRY_MAX_DELAY);
+            }
+            Err(crate::Error::Cell(source)) => return Err(Error::Cell(source)),
+            Err(source) => return Err(Error::Repository(source)),
+        }
+    }
+}
+
+fn retryable_route_error(error: &crab_cell_runtime::Error) -> bool {
+    matches!(
+        error,
+        crab_cell_runtime::Error::Capacity(_)
+            | crab_cell_runtime::Error::CellNotActive
+            | crab_cell_runtime::Error::CellDraining
+            | crab_cell_runtime::Error::Deadline
+    )
 }
 
 fn protection_record(rule: BranchProtection) -> BranchProtectionRecord {

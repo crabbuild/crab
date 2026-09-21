@@ -323,6 +323,10 @@ impl NodePublisher {
                         if let Err(error) =
                             lease.renew(now_ms, next.advertisement().expires_at_ms())
                         {
+                            tracing::error!(
+                                error = %error,
+                                "node heartbeat lease renewal failed; fencing node"
+                            );
                             if let Some(metrics) = &self.metrics {
                                 metrics.record_self_fence(crate::metrics::SelfFenceReason::Other);
                             }
@@ -338,6 +342,7 @@ impl NodePublisher {
                         break;
                     }
                     Err(error) => {
+                        tracing::warn!(error = %error, "node heartbeat refresh failed");
                         let retry_deadline = current
                             .advertisement()
                             .expires_at_ms()

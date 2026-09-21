@@ -22,6 +22,8 @@ use crate::{
 
 const TTL: Duration = Duration::from_secs(300);
 const MAX_ACTIVE_LFS_LOCKS: usize = 10_000;
+const MAX_IMPORT_REF_UPDATES: usize = 100_000;
+const MAX_IMPORT_COMMAND_BYTES: usize = 32 * 1024 * 1024;
 const MAX_RECEIVE_LOGICAL_OBJECTS: u64 = 5_000_000;
 const MAX_RECEIVE_STORAGE_REQUESTS: u64 = 6_000_000;
 
@@ -81,6 +83,7 @@ struct ReceiveInput {
     plan_id: Option<String>,
     publication: Publication,
     visibility_bases: BTreeMap<String, (String, gix_hash::ObjectId)>,
+    defer_readiness: bool,
 }
 
 struct PublishAttempt<'a> {
@@ -95,18 +98,35 @@ pub(super) async fn run(
     key: &(String, String),
     directory: crate::local_disk::StagingDirectory,
     body_digest: [u8; 32],
+    defer_readiness: bool,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>> {
     let path = directory.path().join("receive");
-    let (request, input) = tokio::task::spawn_blocking(move || -> Result<_> {
+    let (mut request, input) = tokio::task::spawn_blocking(move || -> Result<_> {
         let mut input = BufReader::new(std::fs::File::open(path)?);
-        let request = receive_wire::read_request(&mut input)?;
+        let request = if defer_readiness {
+            receive_wire::read_request_with_limits(
+                &mut input,
+                receive_wire::ReceiveRequestLimits {
+                    max_commands: MAX_IMPORT_REF_UPDATES,
+                    max_command_bytes: MAX_IMPORT_COMMAND_BYTES,
+                },
+            )?
+        } else {
+            receive_wire::read_request(&mut input)?
+        };
         if request.updates.is_empty() && !input.fill_buf()?.is_empty() {
             return Err(ReceiveError::Request("Unexpected data after receive probe"));
         }
         Ok((request, input))
     })
     .await??;
+    if defer_readiness {
+        // The loopback importer owns both ends of this exchange.  Always emit
+        // a terminal receive-pack report so a client that omitted the
+        // capability cannot wait indefinitely for an empty HTTP body.
+        request.report_status = true;
+    }
     if request.updates.is_empty() {
         return Ok(vec![]);
     }
@@ -122,6 +142,7 @@ pub(super) async fn run(
             plan_id: Some(plan_id),
             publication: Publication::NativePush,
             visibility_bases: BTreeMap::new(),
+            defer_readiness,
         },
         cancel,
     )
@@ -152,6 +173,7 @@ pub(crate) async fn publish_existing_objects(
             plan_id: None,
             publication,
             visibility_bases: BTreeMap::new(),
+            defer_readiness: false,
         },
         cancel,
     )
@@ -296,6 +318,7 @@ pub(super) async fn publish_pack(
             plan_id: None,
             publication: publication.kind,
             visibility_bases,
+            defer_readiness: false,
         },
         cancel,
     )
@@ -424,6 +447,7 @@ async fn publish_attempt<'a>(
     let repository = entry
         .open_current(server, repository_options(server)?, cancel)
         .await?;
+    let defer_readiness = input.defer_readiness;
     let snapshot = manifest_store::read_repository_snapshot(&entry.store, &entry.layout).await?;
     let refs: BTreeMap<_, _> = repository
         .refs()
@@ -470,6 +494,11 @@ async fn publish_attempt<'a>(
         input.pack,
         request.updates.clone(),
         visibility_bases,
+        if defer_readiness {
+            MAX_IMPORT_REF_UPDATES
+        } else {
+            1024
+        },
         cancel,
     )
     .await
@@ -583,15 +612,19 @@ async fn publish_attempt<'a>(
         return Err(ReceiveError::Write(*source));
     }
     // Acknowledge known ref commitment even if read indexes remain pending.
-    // A lost acknowledgement is indeterminate; matching refs cannot prove it.
-    let _readiness = crab_remote::publication::finish_committed(async {
+    // Imports explicitly defer this expensive rebuild until all refs arrive.
+    if defer_readiness {
         entry.invalidate().await;
-        let repository = entry
-            .open_current(server, repository_options(server)?, cancel)
-            .await?;
-        Ok::<_, crate::Error>(repository.generation())
-    })
-    .await;
+    } else {
+        let _readiness = crab_remote::publication::finish_committed(async {
+            entry.invalidate().await;
+            let repository = entry
+                .open_current(server, repository_options(server)?, cancel)
+                .await?;
+            Ok::<_, crate::Error>(repository.generation())
+        })
+        .await;
+    }
     let mut bytes = Vec::new();
     if request.report_status {
         receive_wire::report(&mut bytes, &request.updates, None, None)?;
