@@ -65,9 +65,10 @@ pub use application::{ApplicationIdentity, ApplicationIdentityStore};
 pub use authority::{CellAuthority, VersionedControl};
 pub use backup::{BackupPin, BackupPinStore, BackupRestore, PinnedCatalogShard};
 pub use blob::{
-    BlobArtifactStore, BlobCommand, BlobCondition, BlobMetadata, BlobModule, BlobMutation,
-    BlobMutationOutcome, BlobNamespace, BlobPage, BlobQuery, BlobQueryCommand, BlobQueryResult,
-    BlobRead, blob_cleanup_expired, blob_mutate, blob_query, install_blob_schema, register_blob,
+    BlobArtifactStore, BlobCommand, BlobCondition, BlobGarbageCollectionReport, BlobMetadata,
+    BlobModule, BlobMutation, BlobMutationOutcome, BlobNamespace, BlobPage, BlobQuery,
+    BlobQueryCommand, BlobQueryResult, BlobRead, blob_cleanup_expired, blob_mutate, blob_query,
+    install_blob_schema, register_blob,
 };
 pub use catalog::{
     CatalogEntry, CatalogProof, CatalogRole, CatalogScanPage, CatalogShardScan, CellCatalog,

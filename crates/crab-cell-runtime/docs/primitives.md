@@ -205,8 +205,11 @@ Blob bodies do not live in the Cell database. `BlobNamespace` uploads each
 bounded part to the configured object store before committing its digest and
 size in SQLite. The manifest is the durable publication boundary; unreferenced
 content-addressed parts are safe to retry. The configured object-store
-lifecycle policy must reclaim abandoned parts; a reachability collector is
-still required before production rollout.
+lifecycle policy must reclaim abandoned parts. A bounded
+`BlobArtifactStore::sweep_unreferenced` building block is provided for the
+product-level collector; the collector must pass references from every Cell
+sharing the object-store scope and use a grace cutoff before production
+rollout.
 
 ## Use Cron for failover-safe recurring triggers
 
