@@ -113,9 +113,11 @@ impl Db {
     /// Deletes this session's exact captured artifacts after their root publishes.
     ///
     /// Publication is the durability proof for selected deferred captures, so
-    /// they are reverified and removed without first flushing a local copy that
-    /// is about to be deleted. An error retains unfinished accounting so the
-    /// owner can retry or discard the complete local session.
+    /// they are reverified and unlinked without a local durability barrier.
+    /// Every session owns a fresh metadata directory, so a crash-resurrected
+    /// local name remains quarantined rather than becoming acknowledged state.
+    /// An error retains unfinished accounting so the owner can retry or discard
+    /// the complete local session.
     #[cfg(feature = "replica")]
     pub fn prune_captured(&mut self, batch: &crate::CaptureBatch) -> Result<usize> {
         self.prune_retained(|segment| {
@@ -138,17 +140,11 @@ impl Db {
                 index += 1;
                 continue;
             }
-            match self.host.read(segment.path(), segment.info().size_bytes) {
-                Ok(bytes) => {
-                    crate::recovery::verify_segment(&bytes, segment.info(), self.limits)?;
-                    self.host.filesystem.remove_file(segment.path())?;
-                }
-                // A previous removal may have succeeded before parent sync failed.
-                // Keep accounting until sync succeeds, including on retry.
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-            self.host.filesystem.sync_parent(segment.path())?;
+            let bytes = self.host.read(segment.path(), segment.info().size_bytes)?;
+            crate::recovery::verify_segment(&bytes, segment.info(), self.limits)?;
+            // The published immutable root, not durable local deletion, releases
+            // the result. A fresh session never adopts crash-resurrected residue.
+            self.host.filesystem.remove_file(segment.path())?;
             self.pending_durability
                 .retain(|pending| pending != segment.path());
             let segment = self.retained.remove(index);

@@ -102,8 +102,10 @@ file and directory flush. The actor then submits those exact bytes to the node
 log and object publisher. A follower fsync or authoritative object-root CAS—not
 the owner-local file—proves durability before a result can be observed. After
 the root publishes, the worker reverifies and deletes the matching local cut
-without first flushing a copy that is about to be removed. Standalone
-`crab_ltx::Db::capture()` remains synchronously durable.
+without first flushing either that copy or its deletion. Every activation owns
+a fresh local session, so a crash can leave only quarantined residue; it cannot
+turn that residue into acknowledged state. Standalone `crab_ltx::Db::capture()`
+remains synchronously durable.
 
 ## Use receipts for read consistency
 

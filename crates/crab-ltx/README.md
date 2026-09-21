@@ -250,7 +250,10 @@ exact deferred bytes to that boundary and call `prune_captured()` only after
 publication succeeds. This is how `crab-cell-runtime` avoids duplicating a
 follower fsync or authoritative object-root CAS with a soon-to-be-deleted local
 file barrier. Failure before the external proof remains an unknown outcome;
-the runtime never acknowledges the local cut alone.
+the runtime never acknowledges the local cut alone. Published-cut cleanup
+reverifies and unlinks the local file without making that deletion an
+acknowledgement barrier. A session always uses a fresh metadata directory, so
+crash-resurrected cleanup residue remains quarantined.
 
 ## Checkpoint without losing capture boundaries
 

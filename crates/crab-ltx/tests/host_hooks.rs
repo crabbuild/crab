@@ -677,19 +677,17 @@ fn unknown_sqlite_vfs_does_not_fall_back_to_the_platform_vfs() {
 
 #[cfg(feature = "replica")]
 #[test]
-fn captured_pruning_retries_after_removal_but_failed_parent_sync() {
-    let (_directory, faults, _host, mut writer) = fixture();
-    let batch = writer.capture().unwrap();
-    faults.arm(Some("sync_parent"));
-    injected(writer.prune_captured(&batch));
-    assert!(!batch.segments[0].path().exists());
-    faults.arm(None);
-    assert_eq!(writer.prune_captured(&batch).unwrap(), batch.segments.len());
-    assert_eq!(writer.prune_captured(&batch).unwrap(), 0);
-    writer
-        .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(3)"))
-        .unwrap();
-    writer.capture().unwrap();
+fn captured_pruning_retains_accounting_after_io_failure() {
+    for operation in ["read_exact_at", "remove_file"] {
+        let (_directory, faults, _host, mut writer) = fixture();
+        let batch = writer.capture().unwrap();
+        faults.arm(Some(operation));
+        injected(writer.prune_captured(&batch));
+        assert!(batch.segments[0].path().exists());
+        faults.arm(None);
+        assert_eq!(writer.prune_captured(&batch).unwrap(), batch.segments.len());
+        assert_eq!(writer.prune_captured(&batch).unwrap(), 0);
+    }
 }
 
 #[cfg(feature = "replica")]
@@ -700,13 +698,13 @@ fn published_deferred_capture_is_pruned_without_a_local_durability_barrier() {
 
     assert_eq!(faults.file_syncs.load(Ordering::Relaxed), 0);
     assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 0);
-    faults.arm(Some("sync_all"));
+    faults.arm(Some("sync_parent"));
     assert_eq!(writer.prune_captured(&batch).unwrap(), batch.segments.len());
     faults.arm(None);
     assert_eq!(faults.file_syncs.load(Ordering::Relaxed), 0);
-    assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 1);
+    assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 0);
 
     writer.close().unwrap();
     assert_eq!(faults.file_syncs.load(Ordering::Relaxed), 0);
-    assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 1);
+    assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 0);
 }

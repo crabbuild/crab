@@ -755,10 +755,13 @@ consume the same verified bytes.
 
 `Db::prune_captured()` already requires the exact root to have published. It
 now reverifies and deletes a selected deferred cut without first fsyncing a
-local copy that is about to be removed. It still syncs the deletion's parent
-directory and retains unfinished accounting after a failure. Standalone
-`Db::capture()` remains synchronous, and checkpoints, snapshots, close, and an
-explicit local durability barrier still flush every pending cut.
+local copy that is about to be removed. Published-cut deletion is
+non-authoritative cleanup and no longer waits for a parent-directory sync;
+every activation uses a fresh metadata directory, so crash-resurrected residue
+is quarantined rather than adopted. Read, verification, or removal failures
+still retain unfinished accounting. Standalone `Db::capture()` remains
+synchronous, and checkpoints, snapshots, close, and an explicit local
+durability barrier still flush every unpublished cut.
 
 The acknowledgement invariant is unchanged:
 
@@ -929,6 +932,23 @@ the lower medians show that the earlier 1.5x--2.0x result is not a stable floor.
 The performance gate therefore remains open. Do not claim that batch 8 is
 universally 1.5x faster, or that this local benchmark proves lower production
 acknowledgement latency.
+
+### Follow-up: remove the published-cleanup barrier
+
+The authoritative root already covers the exact cut before
+`Db::prune_captured()` runs, and every activation owns a fresh metadata
+directory that is never reused as acknowledged state. Synchronizing the parent
+after unlink therefore delayed the result only to make non-authoritative local
+cleanup survive a crash. The cleanup still rereads and verifies the exact LTX
+file before unlinking it, but no longer fsyncs that deletion.
+
+A release-mode differential loop over 128 published-cut cleanups reduced median
+cleanup time from 416.7 ms to 17.5 ms, a 23.7x improvement. A separate
+32-command loop including SQL, immutable-root preparation, in-memory object
+uploads, authority CAS, confirmation, and cleanup bracketed candidate medians
+at 343.9 ms and 373.8 ms around a 388.5 ms old-path run. That is a 4%--11%
+local publication-latency improvement on a noisy host. It is an incremental
+Crab-versus-Crab result, not a Crab-versus-Celld full-system claim.
 
 ## Maintenance notes
 
