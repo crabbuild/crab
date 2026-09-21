@@ -36,14 +36,16 @@
 The `public_cell_qualification.rs` test is a typed **smoke**, not a primitive
 fault matrix. It now reports measured acknowledgements without manufacturing
 retry, rejection, or ambiguity from workload hints. Its lifecycle bitset marks
-only observed happy paths and SQL, KV, Blob, Queue, and Cron duplicate checks
-(13 of 56 bits); the other scheduled cases remain unmarked. SQL, KV, Blob, and
-Cron replay the same mutation identity and compare the first receipt and
-outcome; Queue resends the same producer identity under a distinct request and
-checks one message and zero remaining ready or leased work. KV expiry is
+only observed happy paths and SQL, KV, Blob, Queue, Cron, Workflow, and Effects
+duplicate checks (15 of 56 bits); the other scheduled cases remain unmarked.
+SQL, KV, Blob, Cron, Workflow, and Effects replay the same mutation identity
+and compare the first receipt and outcome; Queue resends the same producer
+identity under a distinct request and checks one message and zero remaining
+ready or leased work. Workflow also checks the terminal event sequence and
+Effects checks the settled lease. KV expiry is
 checked separately through the same public typed host because waiting for a
-real TTL inside one measured
-operation can exceed the PR latency threshold. The separate check does not
+real TTL inside one measured operation can exceed the PR latency threshold.
+The separate check does not
 claim a workload case bit or protected evidence.
 The workload's precomputed outcome counts are advisory; the run-artifact
 validator binds scheduled attempts and validates the measured outcomes. The
@@ -59,15 +61,25 @@ settlement. The separate KV expiry check reads before and after its TTL; a
 duplicate request must retain the first receipt. It also checks the runtime
 reservation ledger after `CellNode` shutdown. Its test-only node lease renewal
 keeps slow provider smoke alive; it is not a substitute for authoritative fleet
-lease publication. On
-2026-09-21, the focused in-memory primitive workload, local ten-row matrix
+lease publication. On 2026-09-21, the focused in-memory primitive workload,
+local ten-row matrix
 smoke, and ignored isolated-RustFS primitive workload passed with these
-checks. The latest RustFS run took 151 seconds with the 13 observed case bits,
-measured outcome counts, and the expiry wait outside profile timing. An earlier
+checks. The 15-bit isolated RustFS run passed in 140 seconds after Workflow and
+Effects duplicate replay checks were added. The expiry wait remains outside
+profile timing. An earlier
 run with the TTL wait inside one operation failed the unchanged 5-second PR
 latency threshold. Scheduled retry, cancellation, owner-loss, recovery, and
 independently checked successor evidence remain open for every primitive;
 expiry still needs a separate case artifact tied to the scheduled operation.
+The public Activity capability runs claims and completions inside
+`ActivitySupervisor`; it does not expose the completion identity needed to
+replay one exact activity attempt. A second idle supervisor poll or duplicate
+Workflow start is not Activity duplicate evidence.
+`ApplicationHandle::resolve` now checks the pending target against the compiled
+application and forwards the existing request-ledger lookup. Fault executors
+can use it to distinguish a committed command from an absent or still-unknown
+attempt before deciding whether to retry; the current smoke does not inject a
+lost response or claim a retry bit.
 
 A separate `public_cell_takeover.rs` test now uses a fresh successor `CellNode` and
 empty local directory against the same object store. It checks the exact

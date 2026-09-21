@@ -10,9 +10,9 @@ use crab_cell_runtime::{
     ApplicationId, BlobArtifactStore, BlobModule, BlobNamespace, BuildDescriptor, CatalogRole,
     CellClient, CellModule, CellTarget, Command, Committed, CronModule, CronNamespace, Digest,
     EffectModule, EffectSource, Error, InvocationError, KvModule, KvNamespace, NamespaceId,
-    Observed, Query, QueueModule, QueueNamespace, Registry, RegistryBuilder, Result, SqlCell,
-    SqlModule, TenantId, WorkflowActivities, WorkflowActivityModule, WorkflowModule,
-    WorkflowNamespace, partition_for_shard,
+    Observed, PendingMutation, Query, QueueModule, QueueNamespace, Registry, RegistryBuilder,
+    Resolution, Result, SqlCell, SqlModule, TenantId, WorkflowActivities, WorkflowActivityModule,
+    WorkflowModule, WorkflowNamespace, partition_for_shard,
 };
 
 const DESCRIPTOR_MAGIC: &[u8] = b"crab.application.v1\0";
@@ -374,6 +374,19 @@ impl<A> ApplicationHandle<A> {
             return Err(InvocationError::NotStarted(error));
         }
         self.client.query::<Q>(target, minimum, input).await
+    }
+
+    /// Resolves a pending command against the current owner after checking its application scope.
+    ///
+    /// The caller must keep the pending mutation from its original typed invocation;
+    /// resolution can remain unknown until the owner recovers or the identity expires.
+    pub async fn resolve(
+        &self,
+        pending: &PendingMutation,
+    ) -> std::result::Result<Resolution, InvocationError<Vec<u8>>> {
+        self.validate_target(pending.target())
+            .map_err(InvocationError::NotStarted)?;
+        self.client.resolve(pending).await
     }
 
     /// Returns the typed KV capability for a compiled KV module.

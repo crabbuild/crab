@@ -435,16 +435,31 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor {
                     let WorkflowOutcome::Applied { run_id, .. } = started.output else {
                         return Err(Error::Control("public qualification Workflow not applied"));
                     };
+                    if operation.case() == QualificationCase::Duplicate {
+                        let duplicate = workflow
+                            .start(mutation, workflow_id.clone(), b"activity".to_vec())
+                            .await
+                            .map_err(|source| Error::Facility {
+                                name: "public qualification Workflow duplicate start",
+                                source: Box::new(source),
+                            })?;
+                        if duplicate.receipt != started.receipt
+                            || duplicate.output != started.output
+                        {
+                            return Err(Error::Control(
+                                "public qualification Workflow start replay differs",
+                            ));
+                        }
+                    }
+                    let cancel_identity = identity(mutation_index.saturating_add(1), now_ms);
+                    let signal = WorkflowSignal {
+                        workflow_id: workflow_id.clone(),
+                        run_id,
+                        signal_id: fixed_id(operation_id),
+                        event: b"cancel".to_vec(),
+                    };
                     let cancelled = workflow
-                        .cancel(
-                            identity(mutation_index.saturating_add(1), now_ms),
-                            WorkflowSignal {
-                                workflow_id: workflow_id.clone(),
-                                run_id,
-                                signal_id: fixed_id(operation_id),
-                                event: b"cancel".to_vec(),
-                            },
-                        )
+                        .cancel(cancel_identity, signal.clone())
                         .await
                         .map_err(|_| {
                             Error::Control("public qualification Workflow cancel failed")
@@ -460,6 +475,23 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor {
                             "public qualification Workflow not cancelled",
                         ));
                     }
+                    if operation.case() == QualificationCase::Duplicate {
+                        let duplicate =
+                            workflow
+                                .cancel(cancel_identity, signal)
+                                .await
+                                .map_err(|source| Error::Facility {
+                                    name: "public qualification Workflow duplicate cancel",
+                                    source: Box::new(source),
+                                })?;
+                        if duplicate.receipt != cancelled.receipt
+                            || duplicate.output != cancelled.output
+                        {
+                            return Err(Error::Control(
+                                "public qualification Workflow cancel replay differs",
+                            ));
+                        }
+                    }
                     let observed = workflow
                         .state(workflow_id, Some(cancelled.receipt))
                         .await
@@ -467,7 +499,11 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor {
                             Error::Control("public qualification Workflow verification failed")
                         })?;
                     if !matches!(observed.output, Some(ref run)
-                        if run.run_id == run_id && run.status == WorkflowStatus::Cancelled)
+                        if run.run_id == run_id
+                            && run.status == WorkflowStatus::Cancelled
+                            && matches!(cancelled.output, WorkflowOutcome::Applied {
+                                event_sequence, ..
+                            } if run.event_sequence == event_sequence))
                     {
                         return Err(Error::Control(
                             "public qualification Workflow state differs",
@@ -563,9 +599,10 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor {
                     if !validated.output {
                         return Err(Error::Control("public qualification Effects lease invalid"));
                     }
+                    let ack_identity = identity(mutation_index.saturating_add(2), now_ms);
                     let acked = effects
                         .ack(
-                            identity(mutation_index.saturating_add(2), now_ms),
+                            ack_identity,
                             claim.clone(),
                             b"public-effect-result".to_vec(),
                         )
@@ -573,6 +610,24 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor {
                         .map_err(|_| Error::Control("public qualification Effects ack failed"))?;
                     if acked.output != EffectLeaseOutcome::Delivered {
                         return Err(Error::Control("public qualification Effects not delivered"));
+                    }
+                    if operation.case() == QualificationCase::Duplicate {
+                        let duplicate = effects
+                            .ack(
+                                ack_identity,
+                                claim.clone(),
+                                b"public-effect-result".to_vec(),
+                            )
+                            .await
+                            .map_err(|source| Error::Facility {
+                                name: "public qualification Effects duplicate ack",
+                                source: Box::new(source),
+                            })?;
+                        if duplicate.receipt != acked.receipt || duplicate.output != acked.output {
+                            return Err(Error::Control(
+                                "public qualification Effects ack replay differs",
+                            ));
+                        }
                     }
                     let settled =
                         effects
@@ -595,9 +650,10 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor {
             let execution = QualificationExecution::acknowledged(true);
             match (operation.primitive(), operation.case()) {
                 (_, QualificationCase::Happy)
-                | ("sql" | "kv" | "blob" | "queue" | "cron", QualificationCase::Duplicate) => {
-                    Ok(execution.with_case(operation.case()))
-                }
+                | (
+                    "sql" | "kv" | "blob" | "queue" | "cron" | "workflow" | "effects",
+                    QualificationCase::Duplicate,
+                ) => Ok(execution.with_case(operation.case())),
                 _ => Ok(execution),
             }
         })
@@ -900,7 +956,7 @@ async fn run_public_typed_primitive_workload(
         .iter()
         .map(|byte| byte.count_ones())
         .sum::<u32>();
-    assert_eq!(covered, 13);
+    assert_eq!(covered, 15);
     let artifact = summary.artifact(&workload).expect("run artifact");
     artifact
         .verify_for_profile(&profile)
