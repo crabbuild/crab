@@ -308,6 +308,13 @@ impl QualificationProfile {
         self != &Self::pr_contract()
     }
 
+    /// Returns whether this profile requires an injected fault schedule and
+    /// ownership transition evidence.
+    #[must_use]
+    pub fn requires_fault_injection(&self) -> bool {
+        self.name == "fault-v1" || self.name.starts_with("fault-")
+    }
+
     /// Encodes the canonical threshold profile.
     pub fn encode(&self) -> Result<Vec<u8>> {
         self.validate()?;
@@ -2425,6 +2432,19 @@ impl QualificationReceipt {
                 "protected qualification evidence lacks measured environment proof",
             ));
         }
+        if profile.requires_fault_injection()
+            && (self.fault.eq_ignore_ascii_case("none")
+                || self.fault_schedule_digest == *blake3::hash(b"none").as_bytes()
+                || self.ownership.len() < 2
+                || self.ownership.windows(2).any(|observations| {
+                    observations[1].epoch < observations[0].epoch
+                        || observations[1].published_sequence < observations[0].published_sequence
+                }))
+        {
+            return Err(Error::Control(
+                "fault qualification evidence lacks an injected ownership transition",
+            ));
+        }
         Ok(())
     }
 }
@@ -3466,6 +3486,107 @@ mod tests {
                 "zero {metric_name} must not stand in for a protected measurement"
             );
         }
+    }
+
+    #[test]
+    fn fault_profiles_require_injected_schedule_and_monotonic_ownership() {
+        let profile = QualificationProfile::fault_s3();
+        assert!(profile.requires_fault_injection());
+        let image = Digest::from_bytes([34; 32]);
+        let artifact = b"fault-evidence";
+        let artifact_digest = Digest::from_bytes(*blake3::hash(artifact).as_bytes());
+        let metrics = vec![
+            QualificationMetric::new("cells".into(), 256, "cells".into()).unwrap(),
+            QualificationMetric::new("operations".into(), 1_000_000, "operations".into()).unwrap(),
+            QualificationMetric::new("duration_secs".into(), 60, "seconds".into()).unwrap(),
+            QualificationMetric::new("p99_latency_ms".into(), 1, "ms".into()).unwrap(),
+            QualificationMetric::new("peak_local_disk_bytes".into(), 1, "bytes".into()).unwrap(),
+            QualificationMetric::new("peak_file_descriptors".into(), 1, "count".into()).unwrap(),
+        ];
+        let key = SigningKey::from_bytes(&[35; 32]);
+        let runner = QualificationRunner::new(key.clone());
+        let incomplete = runner
+            .emit_with_profile_and_evidence(
+                &profile,
+                "fault-source".into(),
+                image,
+                "s3".into(),
+                "failover".into(),
+                "none".into(),
+                metrics.clone(),
+                artifact,
+                true,
+                (
+                    "rustc".into(),
+                    "release".into(),
+                    "kubernetes".into(),
+                    7,
+                    1,
+                    1,
+                    false,
+                ),
+                1,
+                2,
+                b"none",
+                vec![artifact_digest],
+                vec![QualificationOwnership::new(
+                    1,
+                    1,
+                    Digest::from_bytes([36; 32]),
+                )],
+            )
+            .unwrap();
+        assert!(
+            incomplete
+                .verify_for_profile_with_signer(
+                    "fault-source",
+                    image,
+                    &profile,
+                    &[artifact],
+                    key.verifying_key().to_bytes(),
+                )
+                .is_err()
+        );
+
+        let complete = runner
+            .emit_with_profile_and_evidence(
+                &profile,
+                "fault-source".into(),
+                image,
+                "s3".into(),
+                "failover".into(),
+                "owner-kill".into(),
+                metrics,
+                artifact,
+                true,
+                (
+                    "rustc".into(),
+                    "release".into(),
+                    "kubernetes".into(),
+                    7,
+                    1,
+                    1,
+                    false,
+                ),
+                1,
+                2,
+                b"fault=owner-kill;phase=after-publication",
+                vec![artifact_digest],
+                vec![
+                    QualificationOwnership::new(1, 1, Digest::from_bytes([36; 32])),
+                    QualificationOwnership::new(2, 2, Digest::from_bytes([37; 32])),
+                ],
+            )
+            .unwrap();
+        complete
+            .verify_for_profile_with_signer(
+                "fault-source",
+                image,
+                &profile,
+                &[artifact],
+                key.verifying_key().to_bytes(),
+            )
+            .unwrap();
     }
 
     #[test]

@@ -37,6 +37,9 @@ schema, signer, artifact-digest, and exact-source/image checks.
 - `crates/crab-cell-runtime/src/qualification.rs` defines schema-v5 signed
   receipts with profile digests and the ten required rows: protocol, storage, publication,
   warm-path, churn, fleet, failover, primitives, accounting, compatibility.
+  Protected fault profiles also require a named injected schedule and a
+  monotonic ownership transition; this validates evidence shape but does not
+  replace a real Kubernetes/provider run.
 - `.github/workflows/cell-runtime-qualification-contract.yml` validates fixture
   manifests but fixtures are explicitly not release evidence.
 - `advisor-plans/015-cell-runtime-qualification-receipts.md` records local

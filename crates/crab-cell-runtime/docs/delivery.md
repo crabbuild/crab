@@ -162,6 +162,9 @@ These commands are provider evidence for iteration, not release receipts;
 protected release jobs must consume a schema-v5 matrix signed by the pinned
 qualification key and bound to the tagged source, immutable image, profile,
 and every raw artifact.
+Fault profiles additionally require a named injected fault, a non-`none` fault
+schedule digest, and a monotonic ownership transition; a signed no-op receipt
+cannot stand in for Kubernetes fault evidence.
 
 ```bash
 AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
