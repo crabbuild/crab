@@ -13,7 +13,6 @@ blake3 = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 crab-read = { workspace = true }
 crab-cell-runtime = { workspace = true }
-crab-ltx = { workspace = true, features = ["replica"] }
 crab-lfs = { workspace = true }
 crab-git = { workspace = true }
 gix-hash = { workspace = true }
@@ -62,5 +61,6 @@ zip = { version = "6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+crab-ltx = { workspace = true, features = ["replica"] }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }

@@ -8,21 +8,22 @@ use std::{
     },
 };
 
-use crab_cell_runtime::{
-    RecoveryArtifact, RecoveryArtifactKey, RecoveryArtifactStore, ReplicaLimits,
+use crate::{
+    DiskBudget, DiskReservation, Error, RecoveryArtifact, RecoveryArtifactKey,
+    RecoveryArtifactStore, ReplicaLimits, Result,
 };
 
 const MAX_ARTIFACTS: usize = 256;
 
-/// One server-owned, digest-addressed recovery bundle cache.
+/// One node-owned, digest-addressed recovery bundle cache.
 ///
 /// Entries are never trusted on startup. They are admitted only after the
 /// immutable object and manifest have been published, and every hit reparses
 /// and rehashes the bundle before returning it.
-pub(crate) struct RecoveryArtifactRegistry {
+pub struct RecoveryArtifactRegistry {
     root: PathBuf,
     limits: ReplicaLimits,
-    budget: crab_cell_runtime::DiskBudget,
+    budget: DiskBudget,
     admission: Mutex<()>,
     entries: Mutex<BTreeMap<RecoveryArtifactKey, Arc<ArtifactEntry>>>,
     clock: AtomicU64,
@@ -31,7 +32,7 @@ pub(crate) struct RecoveryArtifactRegistry {
 struct ArtifactEntry {
     path: PathBuf,
     size: u64,
-    _reservation: crab_cell_runtime::DiskReservation,
+    _reservation: DiskReservation,
     last_used: AtomicU64,
 }
 
@@ -44,13 +45,9 @@ impl Drop for ArtifactEntry {
 }
 
 impl RecoveryArtifactRegistry {
-    pub(crate) fn new(
-        root: PathBuf,
-        limits: ReplicaLimits,
-        budget: crab_cell_runtime::DiskBudget,
-    ) -> crate::Result<Self> {
+    pub fn new(root: PathBuf, limits: ReplicaLimits, budget: DiskBudget) -> Result<Self> {
         if !root.is_absolute() || budget.capacity() == 0 {
-            return Err(crate::Error::Config(
+            return Err(Error::Node(
                 "recovery artifact registry requires an absolute path and disk budget",
             ));
         }
@@ -91,16 +88,14 @@ impl RecoveryArtifactRegistry {
         entries.remove(&key).is_some()
     }
 
-    fn reserve(&self, size: u64) -> crab_cell_runtime::Result<crab_cell_runtime::DiskReservation> {
+    fn reserve(&self, size: u64) -> Result<DiskReservation> {
         let mut entries = self
             .entries
             .lock()
-            .map_err(|_| crab_cell_runtime::Error::Node("recovery artifact lock poisoned"))?;
+            .map_err(|_| Error::Node("recovery artifact lock poisoned"))?;
         while entries.len() >= MAX_ARTIFACTS {
             if !Self::evict_one(&mut entries) {
-                return Err(crab_cell_runtime::Error::Capacity(
-                    "recovery artifact cache",
-                ));
+                return Err(Error::Capacity("recovery artifact cache"));
             }
         }
         drop(entries);
@@ -108,13 +103,12 @@ impl RecoveryArtifactRegistry {
             match self.budget.try_reserve(size) {
                 Ok(reservation) => return Ok(reservation),
                 Err(_) => {
-                    let mut entries = self.entries.lock().map_err(|_| {
-                        crab_cell_runtime::Error::Node("recovery artifact lock poisoned")
-                    })?;
+                    let mut entries = self
+                        .entries
+                        .lock()
+                        .map_err(|_| Error::Node("recovery artifact lock poisoned"))?;
                     if !Self::evict_one(&mut entries) {
-                        return Err(crab_cell_runtime::Error::Capacity(
-                            "recovery artifact cache",
-                        ));
+                        return Err(Error::Capacity("recovery artifact cache"));
                     }
                 }
             }
@@ -138,30 +132,24 @@ impl RecoveryArtifactRegistry {
 }
 
 impl RecoveryArtifactStore for RecoveryArtifactRegistry {
-    fn retain(
-        &self,
-        key: RecoveryArtifactKey,
-        bundle: crab_ltx::bundle::Bundle,
-    ) -> crab_cell_runtime::Result<()> {
+    fn retain(&self, key: RecoveryArtifactKey, bundle: crab_ltx::bundle::Bundle) -> Result<()> {
         let _admission = self
             .admission
             .lock()
-            .map_err(|_| crab_cell_runtime::Error::Node("recovery artifact lock poisoned"))?;
+            .map_err(|_| Error::Node("recovery artifact lock poisoned"))?;
         if bundle.is_empty() || bundle.len() > self.limits.max_plan_bytes {
-            return Err(crab_cell_runtime::Error::Capacity("recovery artifact size"));
+            return Err(Error::Capacity("recovery artifact size"));
         }
         let digest = key.bundle_digest();
         if bundle.digest() != digest {
-            return Err(crab_cell_runtime::Error::Ltx(
-                crab_ltx::CrabError::ChecksumMismatch,
-            ));
+            return Err(Error::Ltx(crab_ltx::CrabError::ChecksumMismatch));
         }
         let destination = self.destination(&key);
         let size = bundle.len();
         if let Some(existing) = self
             .entries
             .lock()
-            .map_err(|_| crab_cell_runtime::Error::Node("recovery artifact lock poisoned"))?
+            .map_err(|_| Error::Node("recovery artifact lock poisoned"))?
             .get(&key)
             .cloned()
         {
@@ -180,13 +168,11 @@ impl RecoveryArtifactStore for RecoveryArtifactRegistry {
         let reservation = self.reserve(size)?;
         let source = match bundle.detach_file() {
             Ok(path) => path,
-            Err(error) => return Err(crab_cell_runtime::Error::Ltx(error)),
+            Err(error) => return Err(Error::Ltx(error)),
         };
         if destination.exists() {
             let _ = fs::remove_file(&source);
-            return Err(crab_cell_runtime::Error::Node(
-                "recovery artifact destination already exists",
-            ));
+            return Err(Error::Node("recovery artifact destination already exists"));
         }
         let temporary = self.root.join(format!(
             ".{}.{}.tmp",
@@ -216,22 +202,19 @@ impl RecoveryArtifactStore for RecoveryArtifactRegistry {
         let mut entries = self
             .entries
             .lock()
-            .map_err(|_| crab_cell_runtime::Error::Node("recovery artifact lock poisoned"))?;
+            .map_err(|_| Error::Node("recovery artifact lock poisoned"))?;
         if let Some(previous) = entries.insert(key, Arc::clone(&entry)) {
             drop(previous);
         }
         Ok(())
     }
 
-    fn load(
-        &self,
-        key: &RecoveryArtifactKey,
-    ) -> crab_cell_runtime::Result<Option<RecoveryArtifact>> {
+    fn load(&self, key: &RecoveryArtifactKey) -> Result<Option<RecoveryArtifact>> {
         let entry = {
             let entries = self
                 .entries
                 .lock()
-                .map_err(|_| crab_cell_runtime::Error::Node("recovery artifact lock poisoned"))?;
+                .map_err(|_| Error::Node("recovery artifact lock poisoned"))?;
             entries.get(key).cloned()
         };
         let Some(entry) = entry else {
@@ -299,7 +282,7 @@ fn reclaim_stale_files(root: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crab_cell_runtime::{
+    use crate::{
         ApplicationId, CellId, Digest, IncarnationId, RecoveryArtifactKey, RootRef, SessionId,
     };
     use crab_ltx::{Limits, Position, bundle::BundleBuilder, bundle::BundleEntry};
@@ -365,7 +348,7 @@ mod tests {
         let registry = RecoveryArtifactRegistry::new(
             temporary.path().join("registry"),
             Limits::default(),
-            crab_cell_runtime::DiskBudget::new(1 << 20),
+            DiskBudget::new(1 << 20),
         )
         .unwrap();
         let bundle = bundle_fixture(temporary.path(), 7);
@@ -393,12 +376,9 @@ mod tests {
         std::fs::write(&temporary_file, b"stale").unwrap();
         std::fs::write(&unrelated, b"keep").unwrap();
 
-        let _registry = RecoveryArtifactRegistry::new(
-            root,
-            Limits::default(),
-            crab_cell_runtime::DiskBudget::new(1 << 20),
-        )
-        .unwrap();
+        let _registry =
+            RecoveryArtifactRegistry::new(root, Limits::default(), DiskBudget::new(1 << 20))
+                .unwrap();
         assert!(!stale.exists());
         assert!(!temporary_file.exists());
         assert!(unrelated.exists());
@@ -410,7 +390,7 @@ mod tests {
         let registry = RecoveryArtifactRegistry::new(
             temporary.path().join("registry"),
             Limits::default(),
-            crab_cell_runtime::DiskBudget::new((MAX_ARTIFACTS + 1) as u64),
+            DiskBudget::new((MAX_ARTIFACTS + 1) as u64),
         )
         .unwrap();
         let bundle = bundle_fixture(temporary.path(), 9);
@@ -432,9 +412,7 @@ mod tests {
 
         assert!(matches!(
             registry.reserve(1),
-            Err(crab_cell_runtime::Error::Capacity(
-                "recovery artifact cache"
-            ))
+            Err(Error::Capacity("recovery artifact cache"))
         ));
         drop(held);
     }

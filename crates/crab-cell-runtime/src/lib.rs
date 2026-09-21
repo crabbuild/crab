@@ -42,6 +42,7 @@ mod pressure;
 mod publication;
 mod qualification;
 mod queue;
+mod recovery_artifacts;
 mod recovery_manifest;
 mod registry;
 mod release;
@@ -168,6 +169,7 @@ pub use queue::{
     install_queue_schema, queue_apply_lease, queue_claim, queue_cleanup_expired, queue_control,
     queue_info, queue_send, queue_validate_claim, register_queue,
 };
+pub use recovery_artifacts::RecoveryArtifactRegistry;
 pub use recovery_manifest::{
     PinnedRecoveryCell, RecoveryArtifact, RecoveryArtifactKey, RecoveryArtifactStore,
     RecoveryManifestStore,
