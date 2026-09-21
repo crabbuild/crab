@@ -608,11 +608,11 @@ if [ -z "$control_after" ]; then
   exit 1
 fi
 recovery_sealed_ms="$(unix_millis)"
-first_served_check="$(curl --fail-with-body --silent --show-error \
-  "${node_c_origin}/${repository_path}/issues?state=all")"
-jq --exit-status \
+assert_json_eventually \
+  "$node_c_origin" \
+  "${repository_path}/issues?state=all" \
   '.items | length == 1 and .[0].title == "Owner loss qualification"' \
-  <<<"$first_served_check" >/dev/null
+  "Node C did not expose the recovered issue after the first owner loss."
 first_served_ms="$(unix_millis)"
 session_after="$(jq --raw-output '.owner.session' <<<"$control_after")"
 epoch_after="$(jq --raw-output '.epoch' <<<"$control_after")"
@@ -912,9 +912,11 @@ if [ -z "$control_after_second_loss" ]; then
   exit 1
 fi
 second_recovery_sealed_ms="$(unix_millis)"
-second_first_served_check="$(curl --fail-with-body --silent --show-error \
-  "${node_b_origin}/${repository_path}/issues?state=all")"
-jq --exit-status '.items | length == 3' <<<"$second_first_served_check" >/dev/null
+assert_json_eventually \
+  "$node_b_origin" \
+  "${repository_path}/issues?state=all" \
+  '.items | length == 3' \
+  "Node B did not expose all recovered issues after the second owner loss."
 second_first_served_ms="$(unix_millis)"
 session_after_second_loss="$(jq --raw-output '.owner.session' \
   <<<"$control_after_second_loss")"
@@ -1145,10 +1147,11 @@ if [ -z "$fallback_control_after" ]; then
   exit 1
 fi
 fallback_recovery_sealed_ms="$(unix_millis)"
-fallback_first_served_check="$(curl --fail-with-body --silent --show-error \
-  "${fallback_origin}/${repository_path}/labels")"
-jq --exit-status \
-  '.items | length == 3' <<<"$fallback_first_served_check" >/dev/null
+assert_json_eventually \
+  "$fallback_origin" \
+  "${repository_path}/labels" \
+  '.items | length == 3' \
+  "The non-member fallback candidate did not expose all recovered labels."
 fallback_first_served_ms="$(unix_millis)"
 fallback_session_after="$(jq --raw-output '.owner.session' <<<"$fallback_control_after")"
 fallback_epoch_before="$(jq --raw-output '.epoch' <<<"$control_before_fallback")"
