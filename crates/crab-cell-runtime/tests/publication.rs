@@ -237,6 +237,7 @@ async fn prepared_root_becomes_one_valid_control_successor() {
         Err(crab_cell_runtime::Error::PendingPublication)
     ));
     let pending = executor.pending().unwrap();
+    assert_eq!(pending.cuts().timing.fsync_nanos, 0);
     let prepared = replica
         .prepare(None, pending.cuts(), pending.outcome().commit_sequence(), 1)
         .await

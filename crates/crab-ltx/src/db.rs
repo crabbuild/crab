@@ -112,11 +112,12 @@ impl Db {
 
     /// Deletes this session's exact captured artifacts after their root publishes.
     ///
-    /// Every selected file is reverified before deletion. An error retains its
-    /// accounting so the owner can retry or discard the complete local session.
+    /// Publication is the durability proof for selected deferred captures, so
+    /// they are reverified and removed without first flushing a local copy that
+    /// is about to be deleted. An error retains unfinished accounting so the
+    /// owner can retry or discard the complete local session.
     #[cfg(feature = "replica")]
     pub fn prune_captured(&mut self, batch: &crate::CaptureBatch) -> Result<usize> {
-        self.durability_barrier()?;
         self.prune_retained(|segment| {
             batch.segments.iter().any(|published| {
                 published.path() == segment.path() && published.info() == segment.info()
@@ -148,6 +149,8 @@ impl Db {
                 Err(error) => return Err(error.into()),
             }
             self.host.filesystem.sync_parent(segment.path())?;
+            self.pending_durability
+                .retain(|pending| pending != segment.path());
             let segment = self.retained.remove(index);
             self.retained_bytes -= segment.info().size_bytes;
             self.retained_segments -= 1;
@@ -444,8 +447,10 @@ impl Db {
     /// LTX files are complete and readable when this returns, but their contents
     /// and names are not durable until [`Self::durability_barrier`] succeeds.
     /// This permits a host to group several captures behind one storage flush;
-    /// callers must complete the barrier before acknowledging or pruning any
-    /// returned batch. A failed barrier fences the session.
+    /// callers must complete the barrier before acknowledging a locally durable
+    /// batch. A higher-level protocol may instead publish the exact bytes to its
+    /// own durability boundary, then pass that published batch to
+    /// [`Self::prune_captured`]. A failed local barrier fences the session.
     pub fn capture_deferred(&mut self) -> Result<CaptureBatch> {
         self.ensure_active()?;
         let (result, timing) = self.capture_inner(true);

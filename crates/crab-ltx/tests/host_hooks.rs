@@ -691,3 +691,22 @@ fn captured_pruning_retries_after_removal_but_failed_parent_sync() {
         .unwrap();
     writer.capture().unwrap();
 }
+
+#[cfg(feature = "replica")]
+#[test]
+fn published_deferred_capture_is_pruned_without_a_local_durability_barrier() {
+    let (_directory, faults, _host, mut writer) = fixture();
+    let batch = writer.capture_deferred().unwrap();
+
+    assert_eq!(faults.file_syncs.load(Ordering::Relaxed), 0);
+    assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 0);
+    faults.arm(Some("sync_all"));
+    assert_eq!(writer.prune_captured(&batch).unwrap(), batch.segments.len());
+    faults.arm(None);
+    assert_eq!(faults.file_syncs.load(Ordering::Relaxed), 0);
+    assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 1);
+
+    writer.close().unwrap();
+    assert_eq!(faults.file_syncs.load(Ordering::Relaxed), 0);
+    assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 1);
+}

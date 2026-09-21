@@ -232,8 +232,8 @@ fn capture_group(database: &mut Db) -> crab_ltx::Result<()> {
     let first = database.capture_deferred()?;
     let second = database.capture_deferred()?;
 
-    // Do not acknowledge, prune, or close the session before this succeeds.
-    // It flushes every completed file, then seals their directory entries.
+    // Do not acknowledge local durability or close the session until this
+    // flushes every completed file and seals their directory entries.
     database.durability_barrier()?;
 
     assert!(second.position.txid >= first.position.txid);
@@ -244,6 +244,13 @@ fn capture_group(database: &mut Db) -> crab_ltx::Result<()> {
 The default `capture()` contract is unchanged. A failed barrier fences the
 session, so the host must not acknowledge either batch. Checkpoint and snapshot
 operations flush pending deferred files before changing the WAL lifecycle.
+
+An embedding protocol with a stronger external proof can instead publish the
+exact deferred bytes to that boundary and call `prune_captured()` only after
+publication succeeds. This is how `crab-cell-runtime` avoids duplicating a
+follower fsync or authoritative object-root CAS with a soon-to-be-deleted local
+file barrier. Failure before the external proof remains an unknown outcome;
+the runtime never acknowledges the local cut alone.
 
 ## Checkpoint without losing capture boundaries
 

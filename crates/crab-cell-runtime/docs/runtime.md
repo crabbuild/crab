@@ -97,6 +97,14 @@ Handler errors roll back the application savepoint. Runtime ledger updates still
 
 The actor never reruns a handler after SQLite may have started it. `Resolve` reads the durable ledger at an authoritative root.
 
+Runtime capture leaves each complete local LTX file readable but defers its
+file and directory flush. The actor then submits those exact bytes to the node
+log and object publisher. A follower fsync or authoritative object-root CAS—not
+the owner-local file—proves durability before a result can be observed. After
+the root publishes, the worker reverifies and deletes the matching local cut
+without first flushing a copy that is about to be removed. Standalone
+`crab_ltx::Db::capture()` remains synchronously durable.
+
 ## Use receipts for read consistency
 
 A receipt identifies the Cell incarnation and commit sequence. A query with a minimum receipt runs only after the local owner reaches that position.

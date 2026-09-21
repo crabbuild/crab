@@ -191,16 +191,17 @@ shard-zero scanner now inventories expired active node
 logs, claims at most two concurrently, scans at most 10,000 affected Cells,
 renews each recovery claim while gathering and pinning, seals the session, and
 leaves a takeover proof that another request can reload. For commands, the
-actor submits captured cuts before immutable-root preparation. Every selected
-follower must fsync the ticket before the shared node-session authority performs
-the exact `active=false -> active=true` CAS. Only then can fleet proof release
-the command response. The actor advances a logical head after that proof and
-may execute the next command while one separate publisher advances the exact
-object-backed root in order. A 64-entry queue and a 64 MiB retained-byte high
-water apply backpressure; the existing local-disk budget remains the hard byte
-admission boundary. Failure of the fleet path falls back to object proof, while
-a terminal publication failure fences the Cell and leaves any already released
-outcomes recoverable from the node log.
+actor keeps complete local cuts readable without making their directory entries
+durable, then submits those exact bytes before immutable-root preparation.
+Every selected follower must fsync the ticket before the shared node-session
+authority performs the exact `active=false -> active=true` CAS. Only then can
+fleet proof release the command response. The actor advances a logical head
+after that proof and may execute the next command while one separate publisher
+advances the exact object-backed root in order. A 64-entry queue and a 64 MiB
+retained-byte high water apply backpressure; the existing local-disk budget
+remains the hard byte admission boundary. Failure of the fleet path falls back
+to object proof, while a terminal publication failure fences the Cell and
+leaves any already released outcomes recoverable from the node log.
 Schema-migration cuts use the same follower/object race and recovery
 coverage. A successful fleet proof may release the successor handle before
 object publication; its admission is already installed, so requests queue

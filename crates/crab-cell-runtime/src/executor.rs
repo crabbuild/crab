@@ -276,7 +276,9 @@ impl CellExecutor {
                 return Err(error);
             }
         };
-        let cuts = match db.capture() {
+        // Bootstrap publishes these exact bytes before activation. Local file
+        // durability would duplicate the root publication proof.
+        let cuts = match db.capture_deferred() {
             Ok(cuts) if !cuts.segments.is_empty() => cuts,
             Ok(_) => {
                 let _ = db.close();
@@ -861,7 +863,9 @@ impl CellExecutor {
                 return Err(transaction_error(error));
             }
         };
-        let cuts = match self.db.capture() {
+        // Migration output stays gated on follower or object durability. Keep
+        // the local cut readable for publication without serially fsyncing it.
+        let cuts = match self.db.capture_deferred() {
             Ok(cuts) if !cuts.segments.is_empty() => cuts,
             Ok(_) => {
                 self.fenced = true;
@@ -1058,7 +1062,9 @@ impl CellExecutor {
                 logical_time_ms,
                 next_due_ms,
             } => {
-                let cuts = match self.db.capture() {
+                // The actor cannot expose this commit until the same cut is
+                // durable on followers or behind the authoritative root CAS.
+                let cuts = match self.db.capture_deferred() {
                     Ok(cuts) => cuts,
                     Err(error) => {
                         self.fenced = true;

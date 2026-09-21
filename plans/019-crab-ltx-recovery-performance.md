@@ -280,6 +280,10 @@ to a repository-local `target/` directory.
 - `crates/crab-ltx/perf/run.sh` only if needed to retain parseable reports
 - `crates/crab-ltx/perf/crab/src/main.rs`
 - `crates/crab-ltx/perf/celld/src/main.rs`
+- `crates/crab-cell-runtime/src/executor.rs`
+- `crates/crab-cell-runtime/tests/publication.rs`
+- `crates/crab-cell-runtime/docs/runtime.md`
+- `crates/crab-cell-runtime/docs/failover-and-followers.md`
 - `plans/README.md` for status only
 
 **Out of scope** (do not touch even if related):
@@ -734,10 +738,57 @@ contract boundary more reliable than the raw latency figures.
 Batch 8 does not prove lower independently durable acknowledgement latency.
 The first capture in a group can wait for seven later captures before the host
 may acknowledge it. It proves higher bounded-group throughput and lower batch
-completion time. The production `crab-cell-runtime` call sites still use
-synchronous `capture()`, so the current product does not receive this grouped
-win until its output gate deliberately adopts and proves the deferred-barrier
-contract.
+completion time. At the time of this matrix, the production
+`crab-cell-runtime` call sites still used synchronous `capture()`. The
+external-durability follow-up below removes that duplicate local barrier
+without grouping commands.
+
+## Follow-up iteration: hand local cuts to the external durability gate
+
+Every runtime mutation is already hidden until either all selected followers
+fsync its exact node-log frames or the immutable root is uploaded and accepted
+by the authoritative control CAS. A synchronous owner-local LTX file therefore
+duplicated, rather than supplied, the proof that releases a result. The runtime
+now uses `capture_deferred()` for bootstrap, commands, effects, and migrations.
+The complete local file remains readable while the node-log and object paths
+consume the same verified bytes.
+
+`Db::prune_captured()` already requires the exact root to have published. It
+now reverifies and deletes a selected deferred cut without first fsyncing a
+local copy that is about to be removed. It still syncs the deletion's parent
+directory and retains unfinished accounting after a failure. Standalone
+`Db::capture()` remains synchronous, and checkpoints, snapshots, close, and an
+explicit local durability barrier still flush every pending cut.
+
+The acknowledgement invariant is unchanged:
+
+```text
+successful runtime result
+    => exact follower fsync proof OR authoritative object-root proof
+```
+
+An owner crash before either external proof still yields an unknown outcome.
+An owner crash after follower proof is recovered from the sealed node log; an
+owner crash after object proof restores the authoritative root. No result is
+released merely because the deferred owner-local file exists.
+
+A throwaway release-mode differential loop exercised 32 sequential executor
+commands, in-memory immutable-root preparation, binding, confirmation, and
+published-cut pruning across 12 measured rounds. The temporary profiler was
+removed after the run. Two old-path executions reported 514.9 ms and 525.6 ms
+medians; three candidate executions reported 341.3 ms, 337.0 ms, and 348.9 ms.
+The non-overlapping ranges represent a 1.48x–1.56x speedup and 32%–36% lower
+local object-publication latency. The in-memory store omits provider and
+authority-network latency, so this proves the removed local barrier cost, not
+a production end-to-end SLO.
+
+The retained Crab/Celld batch-64 reports expose the same local stage directly:
+subtracting `capture_barrier_us` from Crab capture gives 9.6 ms, 42.2 ms, and
+193.8 ms for the small, medium, and large workloads, versus shipped Celld
+capture medians of 102.5 ms, 458.9 ms, and 1,774.9 ms. That is a 9.16x–10.88x
+local capture-stage advantage before Crab's follower or object proof. It must
+not be presented as an end-to-end result because the external proof latency is
+outside that local benchmark.
 
 ## Test plan
 
