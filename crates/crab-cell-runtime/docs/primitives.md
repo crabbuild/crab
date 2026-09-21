@@ -30,7 +30,10 @@ flowchart LR
     App --> LTX
 ```
 
-Runtime tables use the `sys_` prefix. The SQLite authorizer denies application SQL access to those tables, transaction control, connection configuration, and schema changes.
+Runtime tables use the `sys_` prefix; native primitive tables use reserved
+`kv_`, `blob_`, `queue_`, `cron_`, and `workflow_` prefixes. The SQLite
+authorizer denies application SQL access to every reserved table, transaction
+control, connection configuration, and schema changes.
 
 ## Deduplicate every mutation
 
