@@ -145,7 +145,10 @@ impl NodeDurability {
     /// Assigns and asynchronously ships one captured commit to every member.
     pub async fn submit(&self, submission: NodeLogSubmission) -> Result<CommitTicket> {
         self.node_lease.check()?;
-        let ticket = self.shipper.submit(submission).await?;
+        let ticket = tokio::select! {
+            result = self.shipper.submit(submission) => result?,
+            () = self.node_lease.wait_fenced() => return Err(Error::Fenced),
+        };
         self.node_lease.check()?;
         Ok(ticket)
     }
@@ -160,7 +163,10 @@ impl NodeDurability {
         self.activated
             .get_or_try_init(|| async {
                 self.node_lease.check()?;
-                self.authority.activate(ticket.log_epoch()).await?;
+                tokio::select! {
+                    result = self.authority.activate(ticket.log_epoch()) => result?,
+                    () = self.node_lease.wait_fenced() => return Err(Error::Fenced),
+                }
                 self.node_lease.check()?;
                 self.gate.activate_fleet()?;
                 Ok::<(), Error>(())
@@ -187,7 +193,10 @@ impl NodeDurability {
             self.activated
                 .get_or_try_init(|| async {
                     self.node_lease.check()?;
-                    self.authority.activate(ticket.log_epoch()).await?;
+                    tokio::select! {
+                        result = self.authority.activate(ticket.log_epoch()) => result?,
+                        () = self.node_lease.wait_fenced() => return Err(Error::Fenced),
+                    }
                     self.node_lease.check()?;
                     self.gate.activate_fleet()?;
                     Ok::<(), Error>(())
@@ -218,9 +227,10 @@ impl NodeDurability {
         let _coverage = self.object_coverage.lock().await;
         self.node_lease.check()?;
         let tiered_through = self.gate.preview_object(ticket)?;
-        self.authority
-            .advance_coverage(ticket.log_epoch(), tiered_through)
-            .await?;
+        tokio::select! {
+            result = self.authority.advance_coverage(ticket.log_epoch(), tiered_through) => result?,
+            () = self.node_lease.wait_fenced() => return Err(Error::Fenced),
+        }
         self.node_lease.check()?;
         self.gate.prove_object(ticket)?;
         let proof = self.gate.prove(ticket).await?;
@@ -251,6 +261,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use bytes::Bytes;
+    use tokio::sync::Notify;
 
     use super::*;
     use crate::{
@@ -293,6 +304,43 @@ mod tests {
                 }
                 state.coverage.push((log_epoch, tiered_through));
                 Ok(())
+            })
+        }
+
+        fn close<'a>(&'a self, _barrier: &'a NodeLogRotationBarrier) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct BlockingAuthority {
+        activation_started: Option<Arc<Notify>>,
+        coverage_started: Option<Arc<Notify>>,
+    }
+
+    impl NodeLogAuthority for BlockingAuthority {
+        fn activate<'a>(&'a self, _log_epoch: u64) -> BoxFuture<'a, Result<()>> {
+            let Some(started) = &self.activation_started else {
+                return Box::pin(async { Ok(()) });
+            };
+            let started = Arc::clone(started);
+            Box::pin(async move {
+                started.notify_one();
+                std::future::pending().await
+            })
+        }
+
+        fn advance_coverage<'a>(
+            &'a self,
+            _log_epoch: u64,
+            _tiered_through: u64,
+        ) -> BoxFuture<'a, Result<()>> {
+            let Some(started) = &self.coverage_started else {
+                return Box::pin(async { Ok(()) });
+            };
+            let started = Arc::clone(started);
+            Box::pin(async move {
+                started.notify_one();
+                std::future::pending().await
             })
         }
 
@@ -406,6 +454,86 @@ mod tests {
 
         assert_eq!(proof.source(), DurabilitySource::Fleet);
         assert_eq!(authority.0.lock().unwrap().activations, vec![2]);
+    }
+
+    #[tokio::test]
+    async fn fencing_cancels_a_blocked_fleet_activation() {
+        let gate = DurabilityGate::new(session(1), node(1), 2, [node(2)]).unwrap();
+        let transport: Arc<dyn NodeLogTransport> = Arc::new(ImmediateTransport);
+        let shipper = NodeLogShipper::new(
+            gate.clone(),
+            Arc::clone(&transport),
+            crab_ltx::Limits::default(),
+        )
+        .unwrap();
+        let activation_started = Arc::new(Notify::new());
+        let authority = Arc::new(BlockingAuthority {
+            activation_started: Some(Arc::clone(&activation_started)),
+            coverage_started: None,
+        });
+        let lease = lease();
+        let durability = Arc::new(NodeDurability::new(
+            gate,
+            shipper,
+            authority,
+            transport,
+            lease.clone(),
+        ));
+        let (_directory, cuts) = capture();
+        let ticket = durability.submit(submission(&cuts)).await.unwrap();
+        let task = tokio::spawn({
+            let durability = Arc::clone(&durability);
+            async move { durability.prove_fleet(ticket).await }
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            activation_started.notified(),
+        )
+        .await
+        .unwrap();
+        lease.fence();
+        assert!(matches!(task.await.unwrap(), Err(Error::Fenced)));
+        durability.shutdown().await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn fencing_cancels_a_blocked_object_coverage_cas() {
+        let gate = DurabilityGate::new(session(1), node(1), 2, [node(2)]).unwrap();
+        let transport: Arc<dyn NodeLogTransport> = Arc::new(ImmediateTransport);
+        let shipper = NodeLogShipper::new(
+            gate.clone(),
+            Arc::clone(&transport),
+            crab_ltx::Limits::default(),
+        )
+        .unwrap();
+        let coverage_started = Arc::new(Notify::new());
+        let authority = Arc::new(BlockingAuthority {
+            activation_started: None,
+            coverage_started: Some(Arc::clone(&coverage_started)),
+        });
+        let lease = lease();
+        let durability = Arc::new(NodeDurability::new(
+            gate,
+            shipper,
+            authority,
+            transport,
+            lease.clone(),
+        ));
+        let (_directory, cuts) = capture();
+        let ticket = durability.submit(submission(&cuts)).await.unwrap();
+        let task = tokio::spawn({
+            let durability = Arc::clone(&durability);
+            async move { durability.prove_object(ticket).await }
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            coverage_started.notified(),
+        )
+        .await
+        .unwrap();
+        lease.fence();
+        assert!(matches!(task.await.unwrap(), Err(Error::Fenced)));
+        durability.shutdown().await.unwrap_err();
     }
 
     #[tokio::test]
