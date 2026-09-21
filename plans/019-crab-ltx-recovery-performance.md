@@ -1147,6 +1147,33 @@ machine and in-memory object store. This does not include provider-network
 latency, change local `Db::capture()` acknowledgement latency, or establish
 superiority over Celld's remote protocol.
 
+### Follow-up: reuse authenticated root metadata
+
+Every warm Cell append previously fetched its just-uploaded predecessor root
+document and segment page in series. Root objects now share the directory
+nodes' authenticated, store-isolated process-cache contract, with a separate
+8 MiB root-metadata cap. Successful digest-checked uploads seed the cache;
+cold reads verify the object digest before insertion. Keys include the Store
+identity, scoped object path, and digest, so an independent Store still takes
+the cold path. A warm root open checks every cached root metadata object's
+current presence and size using one bounded parallel HEAD wave before the
+metadata can support another proposal. A removed predecessor root therefore
+fails publication preparation. This presence check relies on the immutable
+object contract; it is not a fresh content read after an external overwrite.
+Backup reachability inventory bypasses metadata caches and continues to
+authenticate current origin bytes, including a deleted or corrupted root.
+
+A paused-clock test adding 100 ms per origin operation measures three
+intervals for a warm successor append: one parallel metadata HEAD wave and
+two immutable upload waves. The uncached predecessor path requires two
+serial GET intervals before those uploads, or four intervals in this model.
+The same-store four-segment compaction path drops from six to five 100 ms
+intervals. Cold-open tests still use independent Store identities and retain
+their remote request/concurrency checks. This is a modeled provider-latency
+tradeoff, not a measured Crab-versus-Celld result or a change to default local
+capture durability. Warm requests replace two small GETs with two parallel
+HEADs; real providers could have different per-request costs.
+
 ## Maintenance notes
 
 - Reviewers should trace one corrupt input through plan construction, one

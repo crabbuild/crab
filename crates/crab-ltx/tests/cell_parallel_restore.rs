@@ -372,13 +372,19 @@ async fn cold_open_and_restore_improve_p95_under_object_latency() {
 
         let mut open_samples = Vec::new();
         for _ in 0..5 {
-            store.reset();
+            // Each independent Store identity exercises the cold origin path;
+            // repeated opens through one Store now reuse authenticated metadata.
+            let (cold_store, cold_replica) = delayed_replica(&fixture, delay, 8);
             let started = tokio::time::Instant::now();
-            replica.open_root(&fixture.root).await.unwrap();
+            cold_replica.open_root(&fixture.root).await.unwrap();
             open_samples.push(started.elapsed());
-            assert!(store.stats.peak.load(Ordering::SeqCst) >= 3);
+            assert!(cold_store.stats.peak.load(Ordering::SeqCst) >= 3);
         }
         assert!(p95(&mut open_samples) < delay * 4);
+
+        store.reset();
+        replica.open_root(&fixture.root).await.unwrap();
+        assert_eq!(store.stats.body_requests.load(Ordering::SeqCst), 0);
 
         let opened = replica.open_root(&fixture.root).await.unwrap();
         opened.paged().read_page(1).await.unwrap();
