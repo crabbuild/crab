@@ -19,6 +19,10 @@ mod qualification_fixture;
 #[path = "support/qualification_local_fixture.rs"]
 mod qualification_local_fixture;
 #[path = "support/qualification_peer.rs"]
+#[expect(
+    dead_code,
+    reason = "this test uses only the response-loss peer fault helper"
+)]
 mod qualification_peer;
 
 use qualification::{assert_zero_reservations, fixed_id, identity, rustfs_public_store};

@@ -402,13 +402,16 @@ async fn unknown_outcome_keeps_identity_and_digest_for_resolve() {
         expires_at_ms: now_ms + 60_000,
     };
 
-    let pending = match client
-        .command::<PendingCommand>(&target, identity, b"input".to_vec())
+    let prepared = client
+        .prepare_command::<PendingCommand>(&target, identity, b"input".to_vec())
         .await
-    {
+        .expect("prepare exact command");
+    let evidence = prepared.evidence().clone();
+    let pending = match prepared.execute().await {
         Err(InvocationError::Pending(pending)) => pending,
         outcome => panic!("unexpected command outcome: {outcome:?}"),
     };
+    assert_eq!(*pending, evidence);
     assert_eq!(pending.identity(), identity);
     assert_eq!(
         Some(pending.operation_digest()),

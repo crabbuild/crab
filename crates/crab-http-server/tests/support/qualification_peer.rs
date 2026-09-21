@@ -15,6 +15,7 @@ use crab_cell_runtime::{
     SessionId, VerifiedPeerRequest,
 };
 use ed25519_dalek::SigningKey;
+use tokio::sync::Notify;
 
 struct QualificationResolver(Arc<HashMap<CellId, CellHandle>>);
 
@@ -44,14 +45,34 @@ impl PeerAuthorizer for QualificationAuthorizer {
     }
 }
 
+#[derive(Clone)]
+enum MutationFault {
+    Drop {
+        before_dispatch: bool,
+        ordinal: usize,
+        dropped: Arc<AtomicUsize>,
+    },
+    Pause {
+        after_dispatch: bool,
+        entered: Arc<Notify>,
+    },
+}
+
+impl MutationFault {
+    fn ordinal(&self) -> usize {
+        match self {
+            Self::Drop { ordinal, .. } => *ordinal,
+            Self::Pause { .. } => 1,
+        }
+    }
+}
+
 struct FaultyMutationRoundTrip {
     verifier: Arc<PeerVerifier>,
     dispatcher: Arc<PeerDispatcher>,
-    dropped: Arc<AtomicUsize>,
     dispatched: Arc<AtomicUsize>,
     attempted: Arc<AtomicUsize>,
-    drop_before_dispatch: bool,
-    fault_ordinal: usize,
+    fault: MutationFault,
 }
 
 impl PeerRoundTrip for FaultyMutationRoundTrip {
@@ -63,11 +84,9 @@ impl PeerRoundTrip for FaultyMutationRoundTrip {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'static>> {
         let verifier = Arc::clone(&self.verifier);
         let dispatcher = Arc::clone(&self.dispatcher);
-        let dropped = Arc::clone(&self.dropped);
         let dispatched = Arc::clone(&self.dispatched);
         let attempted = Arc::clone(&self.attempted);
-        let drop_before_dispatch = self.drop_before_dispatch;
-        let fault_ordinal = self.fault_ordinal;
+        let fault = self.fault.clone();
         Box::pin(async move {
             let now_ms = i64::try_from(
                 SystemTime::now()
@@ -82,41 +101,68 @@ impl PeerRoundTrip for FaultyMutationRoundTrip {
             }
             let mutation = verified.operation_tag() == 10;
             let selected =
-                mutation && attempted.fetch_add(1, Ordering::AcqRel) + 1 == fault_ordinal;
-            let first_loss = || {
-                selected
-                    && dropped
-                        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-                        .is_ok()
-            };
-            if drop_before_dispatch && first_loss() {
-                return Err(Error::PeerTransportUnknown {
-                    context: "qualification request lost before dispatch",
-                    source: Box::new(Error::RuntimeClosed),
-                });
+                mutation && attempted.fetch_add(1, Ordering::AcqRel) + 1 == fault.ordinal();
+            if selected {
+                match &fault {
+                    MutationFault::Drop {
+                        before_dispatch: true,
+                        dropped,
+                        ..
+                    } => {
+                        dropped.store(1, Ordering::Release);
+                        return Err(Error::PeerTransportUnknown {
+                            context: "qualification request lost before dispatch",
+                            source: Box::new(Error::RuntimeClosed),
+                        });
+                    }
+                    MutationFault::Pause {
+                        after_dispatch: false,
+                        entered,
+                    } => {
+                        entered.notify_one();
+                        std::future::pending::<()>().await;
+                    }
+                    _ => {}
+                }
             }
             let reply = dispatcher.dispatch_bytes(&verified, now_ms).await?;
             if mutation {
                 dispatched.fetch_add(1, Ordering::AcqRel);
             }
-            if !drop_before_dispatch && first_loss() {
-                return Err(Error::PeerTransportUnknown {
-                    context: "qualification response lost after dispatch",
-                    source: Box::new(Error::RuntimeClosed),
-                });
+            if selected {
+                match &fault {
+                    MutationFault::Drop {
+                        before_dispatch: false,
+                        dropped,
+                        ..
+                    } => {
+                        dropped.store(1, Ordering::Release);
+                        return Err(Error::PeerTransportUnknown {
+                            context: "qualification response lost after dispatch",
+                            source: Box::new(Error::RuntimeClosed),
+                        });
+                    }
+                    MutationFault::Pause {
+                        after_dispatch: true,
+                        entered,
+                    } => {
+                        entered.notify_one();
+                        std::future::pending::<()>().await;
+                    }
+                    _ => {}
+                }
             }
             Ok(reply)
         })
     }
 }
 
-pub fn peer_client_with_one_lost_mutation(
+fn peer_client_with_fault(
     registry: Arc<Registry>,
     handles: Vec<CellHandle>,
-    drop_before_dispatch: bool,
-    fault_ordinal: usize,
-) -> (CellClient, Arc<AtomicUsize>, Arc<AtomicUsize>) {
-    assert!(fault_ordinal > 0, "fault ordinal must name a mutation");
+    fault: MutationFault,
+    dispatched: Arc<AtomicUsize>,
+) -> CellClient {
     let session = SessionId::from_bytes([96; 16]);
     let release = Digest::from_bytes([97; 32]);
     let signer = Arc::new(PeerSigner::new(
@@ -131,9 +177,6 @@ pub fn peer_client_with_one_lost_mutation(
             .map(|handle| (handle.cell_id(), handle))
             .collect(),
     ));
-    let dropped = Arc::new(AtomicUsize::new(0));
-    let dispatched = Arc::new(AtomicUsize::new(0));
-    let attempted = Arc::new(AtomicUsize::new(0));
     let round_trip = FaultyMutationRoundTrip {
         verifier: Arc::new(verifier),
         dispatcher: Arc::new(PeerDispatcher::new(
@@ -141,13 +184,11 @@ pub fn peer_client_with_one_lost_mutation(
             Arc::new(resolver),
             Arc::new(QualificationAuthorizer),
         )),
-        dropped: Arc::clone(&dropped),
-        dispatched: Arc::clone(&dispatched),
-        attempted,
-        drop_before_dispatch,
-        fault_ordinal,
+        dispatched,
+        attempted: Arc::new(AtomicUsize::new(0)),
+        fault,
     };
-    let client = CellClient::peer(
+    CellClient::peer(
         registry,
         signer,
         PeerPrincipal {
@@ -156,6 +197,46 @@ pub fn peer_client_with_one_lost_mutation(
             actions: vec!["cell.read".into(), "cell.write".into()],
         },
         Arc::new(round_trip),
+    )
+}
+
+pub fn peer_client_with_one_lost_mutation(
+    registry: Arc<Registry>,
+    handles: Vec<CellHandle>,
+    drop_before_dispatch: bool,
+    fault_ordinal: usize,
+) -> (CellClient, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    assert!(fault_ordinal > 0, "fault ordinal must name a mutation");
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    let client = peer_client_with_fault(
+        registry,
+        handles,
+        MutationFault::Drop {
+            before_dispatch: drop_before_dispatch,
+            ordinal: fault_ordinal,
+            dropped: Arc::clone(&dropped),
+        },
+        Arc::clone(&dispatched),
     );
     (client, dropped, dispatched)
+}
+
+pub fn peer_client_with_paused_mutation(
+    registry: Arc<Registry>,
+    handles: Vec<CellHandle>,
+    pause_after_dispatch: bool,
+) -> (CellClient, Arc<Notify>, Arc<AtomicUsize>) {
+    let entered = Arc::new(Notify::new());
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    let client = peer_client_with_fault(
+        registry,
+        handles,
+        MutationFault::Pause {
+            after_dispatch: pause_after_dispatch,
+            entered: Arc::clone(&entered),
+        },
+        Arc::clone(&dispatched),
+    );
+    (client, entered, dispatched)
 }

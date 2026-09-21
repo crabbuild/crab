@@ -122,6 +122,18 @@ replay path; durable handoff for that result remains open. These tests share a
 process with their observer and are not scheduled matrix cases or protected
 provider evidence, so they do not set retry or expiry case bits.
 
+`PreparedCommand` now retains exact encoded typed input, identity, digest, and owner
+incarnation before dispatch, so a cancelled caller can resolve the attempt
+through `ApplicationHandle::resolve`. Two SQL cancellation cases pause the signed
+peer request immediately before and after dispatch, cancel the task at that
+await boundary, resolve from a separate typed application handle, check the
+exact row after an absent-only retry or a committed outcome, and drain all
+reservations. Both cases passed in memory and on fresh isolated RustFS on
+2026-09-21. They establish the public cancellation mechanism but do not cover
+KV, Blob, Queue, Cron, Workflow, Activity, or Effects cancellation, independent
+process observation, or protected scheduled matrix evidence; no cancellation
+case bit is set yet.
+
 A separate `public_cell_takeover.rs` test now uses a fresh successor `CellNode` and
 empty local directory against the same object store. It checks the exact
 published root and a higher owner epoch for the six owned Cells. Typed

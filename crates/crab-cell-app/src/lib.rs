@@ -10,9 +10,9 @@ use crab_cell_runtime::{
     ApplicationId, BlobArtifactStore, BlobModule, BlobNamespace, BuildDescriptor, CatalogRole,
     CellClient, CellModule, CellTarget, Command, Committed, CronModule, CronNamespace, Digest,
     EffectModule, EffectSource, Error, InvocationError, KvModule, KvNamespace, NamespaceId,
-    Observed, PendingMutation, Query, QueueModule, QueueNamespace, Registry, RegistryBuilder,
-    Resolution, Result, SqlCell, SqlModule, TenantId, WorkflowActivities, WorkflowActivityModule,
-    WorkflowModule, WorkflowNamespace, partition_for_shard,
+    Observed, PendingMutation, PreparedCommand, Query, QueueModule, QueueNamespace, Registry,
+    RegistryBuilder, Resolution, Result, SqlCell, SqlModule, TenantId, WorkflowActivities,
+    WorkflowActivityModule, WorkflowModule, WorkflowNamespace, partition_for_shard,
 };
 
 const DESCRIPTOR_MAGIC: &[u8] = b"crab.application.v1\0";
@@ -361,6 +361,22 @@ impl<A> ApplicationHandle<A> {
             return Err(InvocationError::NotStarted(error));
         }
         self.client.command::<C>(target, identity, input).await
+    }
+
+    /// Prepares a scoped typed command whose evidence can be resolved after cancellation.
+    ///
+    /// Rejects a target outside this application before preparing the mutation.
+    pub async fn prepare_command<C: Command>(
+        &self,
+        target: &CellTarget,
+        identity: crab_cell_runtime::MutationIdentity,
+        input: C::Input,
+    ) -> std::result::Result<PreparedCommand<C>, InvocationError<C::Output>> {
+        self.validate_target_module(target, C::MODULE)
+            .map_err(InvocationError::NotStarted)?;
+        self.client
+            .prepare_command::<C>(target, identity, input)
+            .await
     }
 
     /// Executes one statically typed query after enforcing application scope.

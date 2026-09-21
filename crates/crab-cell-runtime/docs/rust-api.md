@@ -170,6 +170,15 @@ match result {
 
 `CellClient` validates namespace, role, code, schema, and incarnation. It chooses the local actor or authenticated peer path without changing command semantics.
 
+For a command whose caller may be cancelled while awaiting dispatch, use
+`ApplicationHandle::prepare_command::<C>` and retain a clone before calling
+`PreparedCommand::execute`. The prepared value fixes the exact input digest,
+identity, and owner incarnation before any mutation is sent. After cancellation,
+resolve its `evidence()` through a separate application handle. Retry the retained
+prepared command only when resolution is `Absent`; treat `Committed` as final and
+`Unknown`, `Expired`, or resolution failure as unresolved. Preparation itself has
+no mutation side effect.
+
 ## Stream mutable Cell state safely
 
 Use `CellStateStream` when a response producer must query mutable Cell state

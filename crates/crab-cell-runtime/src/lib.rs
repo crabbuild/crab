@@ -75,7 +75,7 @@ pub use catalog::{
 };
 pub use client::{
     CellClient, CellDescription, CellStateStream, Committed, InvocationError, Observed,
-    PendingMutation, Receipt, StateStreamCancellation, command_operation_digest,
+    PendingMutation, PreparedCommand, Receipt, StateStreamCancellation, command_operation_digest,
 };
 pub use cluster_qualification::validate_cluster_receipt;
 pub use codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
