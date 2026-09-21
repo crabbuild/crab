@@ -584,7 +584,8 @@ bounded ownership of the long-lived server coordination loops and production
 router/peer/follower/transport components, provider-neutral NodeDurability
 construction/recruitment/rotation ownership, required component slots,
 admission-before-facility-drain ordering, and deadline-aware drain. 024
-provides bounded profile constructors, deterministic streaming execution,
+provides bounded profile constructors, deterministic streaming execution with
+seed-bound per-primitive lifecycle case hints,
 per-primitive verified-progress validation with canonical attempted-count
 binding, measured run artifacts, preflight guards, pinned-signer validation,
 and fail-closed release packaging. 024 remains partial until protected

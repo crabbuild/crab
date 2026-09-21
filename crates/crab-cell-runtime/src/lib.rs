@@ -155,15 +155,16 @@ pub use pressure::{
 };
 pub use publication::CellPublisher;
 pub use qualification::{
-    QUALIFICATION_MATRIX_ROWS, QUALIFICATION_MATRIX_SCHEMA_VERSION, QUALIFICATION_PRIMITIVES,
+    QUALIFICATION_CASE_COVERAGE_OPERATIONS, QUALIFICATION_CASES, QUALIFICATION_MATRIX_ROWS,
+    QUALIFICATION_MATRIX_SCHEMA_VERSION, QUALIFICATION_PRIMITIVES,
     QUALIFICATION_PROFILE_SCHEMA_VERSION, QUALIFICATION_PROTECTED_EVIDENCE_MAX_AGE_MS,
     QUALIFICATION_PROTECTED_EVIDENCE_MAX_CLOCK_SKEW_MS, QUALIFICATION_RUN_ARTIFACT_SCHEMA_VERSION,
-    QUALIFICATION_SCHEMA_VERSION, QualificationExecution, QualificationMatrixEntry,
-    QualificationMatrixManifest, QualificationMetric, QualificationOperation,
-    QualificationOperationExecutor, QualificationOperationIter, QualificationOutcome,
-    QualificationOwnership, QualificationPrimitiveCounts, QualificationProfile,
-    QualificationReceipt, QualificationRunArtifact, QualificationRunSummary, QualificationRunner,
-    QualificationWorkload,
+    QUALIFICATION_SCHEMA_VERSION, QualificationCase, QualificationExecution,
+    QualificationMatrixEntry, QualificationMatrixManifest, QualificationMetric,
+    QualificationOperation, QualificationOperationExecutor, QualificationOperationIter,
+    QualificationOutcome, QualificationOwnership, QualificationPrimitiveCounts,
+    QualificationProfile, QualificationReceipt, QualificationRunArtifact, QualificationRunSummary,
+    QualificationRunner, QualificationWorkload,
 };
 pub use queue::{
     QueueClaimCommand, QueueClaimRequest, QueueControlAction, QueueControlCommand,

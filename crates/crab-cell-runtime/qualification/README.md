@@ -29,6 +29,13 @@ entry point when scheduled operations are independent or idempotent. The serial
 ordering dependencies; both paths retain the same streaming schedule, counters,
 latency histogram, and logical outcome digest.
 
+The default workload contains a deterministic, seed-bound case schedule for each
+primitive: `happy`, `retry`, `duplicate`, `expiry`, `cancellation`, `owner-loss`,
+and `recovery`. Adapters inspect `QualificationOperation::case()` (or its
+bounded hint accessors) to drive the corresponding primitive-specific behavior;
+the schedule is a case plan, not evidence that an external provider or owner
+fault actually occurred.
+
 The measured summary also emits `throughput_ops_per_sec` using a conservative
 rounded-up duration; protected profiles still verify the raw elapsed duration
 and their independent resource counters. Protected `primitives` receipts must

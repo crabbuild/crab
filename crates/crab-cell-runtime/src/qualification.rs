@@ -445,6 +445,51 @@ pub const QUALIFICATION_PRIMITIVES: &[&str] = &[
     "sql", "kv", "blob", "queue", "cron", "workflow", "activity", "effects",
 ];
 
+/// Lifecycle cases that a canonical qualification schedule exposes to its
+/// application-specific executor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum QualificationCase {
+    Happy = 0,
+    Retry = 1,
+    Duplicate = 2,
+    Expiry = 3,
+    Cancellation = 4,
+    OwnerLoss = 5,
+    Recovery = 6,
+}
+
+impl QualificationCase {
+    /// Returns the stable bounded label used by workload adapters.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Happy => "happy",
+            Self::Retry => "retry",
+            Self::Duplicate => "duplicate",
+            Self::Expiry => "expiry",
+            Self::Cancellation => "cancellation",
+            Self::OwnerLoss => "owner-loss",
+            Self::Recovery => "recovery",
+        }
+    }
+}
+
+/// Lifecycle cases in the deterministic order used by the qualification driver.
+pub const QUALIFICATION_CASES: &[QualificationCase] = &[
+    QualificationCase::Happy,
+    QualificationCase::Retry,
+    QualificationCase::Duplicate,
+    QualificationCase::Expiry,
+    QualificationCase::Cancellation,
+    QualificationCase::OwnerLoss,
+    QualificationCase::Recovery,
+];
+
+/// Minimum generated schedule length that gives every primitive every case.
+pub const QUALIFICATION_CASE_COVERAGE_OPERATIONS: u64 =
+    (QUALIFICATION_PRIMITIVES.len() * QUALIFICATION_CASES.len()) as u64;
+
 /// Bounded per-primitive counters emitted by the deterministic workload driver.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -519,6 +564,7 @@ pub struct QualificationOperation {
     primitive_index: u8,
     cell_index: u64,
     nonce: u64,
+    case: QualificationCase,
     retry_hint: bool,
     rejection_hint: bool,
     ambiguous_hint: bool,
@@ -547,6 +593,42 @@ impl QualificationOperation {
     #[must_use]
     pub const fn nonce(self) -> u64 {
         self.nonce
+    }
+
+    /// Returns the bounded lifecycle case assigned to this operation.
+    #[must_use]
+    pub const fn case(self) -> QualificationCase {
+        self.case
+    }
+
+    /// Returns whether this operation exercises producer/delivery duplicate handling.
+    #[must_use]
+    pub const fn duplicate_hint(self) -> bool {
+        matches!(self.case, QualificationCase::Duplicate)
+    }
+
+    /// Returns whether this operation exercises expiry handling.
+    #[must_use]
+    pub const fn expiry_hint(self) -> bool {
+        matches!(self.case, QualificationCase::Expiry)
+    }
+
+    /// Returns whether this operation exercises cancellation handling.
+    #[must_use]
+    pub const fn cancellation_hint(self) -> bool {
+        matches!(self.case, QualificationCase::Cancellation)
+    }
+
+    /// Returns whether this operation exercises owner-loss handling.
+    #[must_use]
+    pub const fn owner_loss_hint(self) -> bool {
+        matches!(self.case, QualificationCase::OwnerLoss)
+    }
+
+    /// Returns whether this operation exercises post-takeover recovery.
+    #[must_use]
+    pub const fn recovery_hint(self) -> bool {
+        matches!(self.case, QualificationCase::Recovery)
     }
 
     /// Returns whether this operation is scheduled to exercise a retry path.
@@ -1014,7 +1096,7 @@ impl QualificationWorkload {
             profile.minimum_cells(),
             profile
                 .minimum_operations()
-                .max(QUALIFICATION_PRIMITIVES.len() as u64),
+                .max(QUALIFICATION_CASE_COVERAGE_OPERATIONS),
             profile.minimum_duration_secs(),
         )
     }
@@ -1373,6 +1455,7 @@ fn qualification_workload_outcome_digest(seed: u64, cells: u64, operations: u64)
         hasher.update(&u64::from(operation.primitive_index).to_be_bytes());
         hasher.update(&operation.cell_index.to_be_bytes());
         hasher.update(&operation.nonce.to_be_bytes());
+        hasher.update(&[operation.case as u8]);
     }
     Digest::from_bytes(*hasher.finalize().as_bytes())
 }
@@ -1461,16 +1544,24 @@ impl Iterator for QualificationOperationIter {
 
 fn operation_from_state(index: u64, state: u64, cells: u64) -> QualificationOperation {
     let primitive_count = QUALIFICATION_PRIMITIVES.len() as u64;
-    let primitive_index = if index < primitive_count {
-        index as usize
+    let coverage_operations = QUALIFICATION_CASE_COVERAGE_OPERATIONS;
+    let (primitive_index, case_index) = if index < coverage_operations {
+        (
+            (index % primitive_count) as usize,
+            (index / primitive_count) as usize,
+        )
     } else {
-        (state as usize) % QUALIFICATION_PRIMITIVES.len()
+        (
+            (state as usize) % QUALIFICATION_PRIMITIVES.len(),
+            (state.rotate_left(19) as usize) % QUALIFICATION_CASES.len(),
+        )
     };
     QualificationOperation {
         index,
         primitive_index: primitive_index as u8,
         cell_index: state % cells,
         nonce: state,
+        case: QUALIFICATION_CASES[case_index],
         retry_hint: state & 0x1f == 0,
         rejection_hint: state & 0x3ff == 0,
         ambiguous_hint: state & 0x7ff == 0x200,
@@ -2865,6 +2956,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn qualification_schedule_covers_each_lifecycle_case_per_primitive() {
+        let profile = QualificationProfile::new("case-run".into(), 1, 1, 1, 1_000).unwrap();
+        let workload = QualificationWorkload::generate(&profile, 41).unwrap();
+        assert_eq!(
+            workload.operations(),
+            QUALIFICATION_CASE_COVERAGE_OPERATIONS
+        );
+        for primitive in QUALIFICATION_PRIMITIVES {
+            for case in QUALIFICATION_CASES {
+                assert!(
+                    workload
+                        .iter_operations()
+                        .any(|operation| operation.primitive() == *primitive
+                            && operation.case() == *case),
+                    "missing {} case for {primitive}",
+                    case.name()
+                );
+            }
+        }
+    }
+
     struct ContractExecutor {
         calls: u64,
     }
@@ -3964,7 +4077,7 @@ mod tests {
         let image = Digest::from_bytes([27; 32]);
         let key = SigningKey::from_bytes(&[28; 32]);
         let runner = QualificationRunner::new(key.clone());
-        let workload = QualificationWorkload::generate(&profile, 7).unwrap();
+        let workload = QualificationWorkload::generate_with_size(&profile, 7, 1, 8, 1).unwrap();
         let workload_artifact = workload.encode().unwrap();
         let run_artifact = QualificationRunArtifact {
             schema_version: QUALIFICATION_RUN_ARTIFACT_SCHEMA_VERSION,

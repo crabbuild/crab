@@ -22,7 +22,8 @@
 - **Implementation status**: local runtime, typed application, public host typed
   lifecycle smoke and complete ten-row matrix smoke,
   provider-neutral durability construction/recruitment/rotation, deterministic
-  workload, public `CellNode` typed all-primitive execution, public
+  workload with seed-bound lifecycle cases for every primitive, public `CellNode`
+  typed all-primitive execution, public
   receipt/matrix validation, protected-profile/run-artifact verifier coverage,
   release negative gates, exact tagged-source profile binding, and a
   fresh/clock-skew check for protected matrix consumption are implemented and
