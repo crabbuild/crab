@@ -1084,22 +1084,25 @@ before publication. The existing 1 MiB per-batch retention ceiling is
 unchanged, and an independent decoder comparison still verifies every retained
 byte before the zero-copy path is accepted.
 
-### Follow-up: overlap remote compaction downloads
+### Follow-up: overlap remote compaction transfers
 
 Cell compaction previously downloaded and authenticated every source index,
 then downloaded and authenticated the selected LTX bodies. Those phases write
 different scratch files and share the host's existing object-I/O admission, so
 they now run concurrently and both must finish before the local merge begins.
 Each stream still verifies its exact length, BLAKE3 digest, index structure,
-and final scratch-file length before the compacted output can be prepared.
+and final scratch-file length before the compacted output can be prepared. The
+resulting content-addressed LTX and index objects are also uploaded concurrently;
+neither becomes reachable unless both finish and the final root is prepared.
 
 A paused-clock integration test runs the complete one-segment compaction path
-with 100 ms added to every object read. Root and segment metadata still require
-two ordered reads, while the independent index and body reads now share one
-latency interval. The old call graph took 400 ms and the candidate takes
-300 ms, a 25% modeled end-to-end reduction (1.33x) for this remote compaction
-case. This is a Crab compaction improvement; the local Crab/Celld harness does
-not exercise either implementation's object-store compaction protocol.
+with 100 ms added to every object read and write. Root and segment metadata
+still require two ordered reads, while the independent index/body downloads and
+compacted LTX/index uploads each share one latency interval. The original call
+graph took 800 ms and the candidate takes 600 ms, a 25% modeled end-to-end
+reduction (1.33x) for this remote compaction case. This is a Crab compaction
+improvement; the local Crab/Celld harness does not exercise either
+implementation's object-store compaction protocol.
 
 ## Maintenance notes
 

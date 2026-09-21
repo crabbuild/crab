@@ -473,7 +473,7 @@ async fn prepare_opens_captured_segments_concurrently() {
 
 #[cfg(feature = "replica")]
 #[tokio::test(start_paused = true)]
-async fn compaction_overlaps_index_and_body_downloads() {
+async fn compaction_overlaps_independent_remote_transfers() {
     let (_directory, _faults, _host, mut writer) = fixture();
     let captured = writer.capture().unwrap();
     let delay = Duration::from_millis(100);
@@ -484,6 +484,7 @@ async fn compaction_overlaps_index_and_body_downloads() {
                 backend,
                 ThrottleConfig {
                     wait_get_per_call: delay,
+                    wait_put_per_call: delay,
                     ..ThrottleConfig::default()
                 },
             ))),
@@ -505,8 +506,9 @@ async fn compaction_overlaps_index_and_body_downloads() {
         .unwrap();
 
     // Root and segment metadata need two ordered reads. The independent index
-    // and LTX body downloads then share one provider-latency interval.
-    assert_eq!(started.elapsed(), delay * 3);
+    // and LTX body downloads, compacted body/index uploads, directory upload,
+    // and final root uploads then consume four more latency intervals.
+    assert_eq!(started.elapsed(), delay * 6);
     writer.close().unwrap();
 }
 

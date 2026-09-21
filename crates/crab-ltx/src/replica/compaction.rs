@@ -44,6 +44,8 @@ pub(super) async fn prepare(
     let compacted_ltx = scratch.create("compacted-ltx")?;
     let codec_index = scratch.create("codec-index")?;
     let compacted_index = scratch.create("compacted-index")?;
+    // The authenticated streams have separate scratch files. Both must finish
+    // before the merge, but neither depends on the other's transfer.
     let (spooled, body_inputs) = futures_util::future::try_join(
         spool_indexes(replica, &graph.descriptors, &original_indexes),
         spool_selected_bodies(replica, selected, &original_bodies),
@@ -79,18 +81,21 @@ pub(super) async fn prepare(
             .with_level(level);
     descriptor.validate_published(replica.limits)?;
 
-    upload(
-        replica,
-        &compacted_ltx,
-        &descriptor.info.blake3,
-        CellObjectKind::Ltx,
-    )
-    .await?;
-    upload(
-        replica,
-        &compacted_index,
-        &descriptor.index_digest,
-        CellObjectKind::Index,
+    // These immutable objects are unreachable until the final root is returned,
+    // so either upload may finish first without publishing a partial compaction.
+    futures_util::future::try_join(
+        upload(
+            replica,
+            &compacted_ltx,
+            &descriptor.info.blake3,
+            CellObjectKind::Ltx,
+        ),
+        upload(
+            replica,
+            &compacted_index,
+            &descriptor.index_digest,
+            CellObjectKind::Index,
+        ),
     )
     .await?;
 
