@@ -1124,38 +1124,44 @@ async fn fleet_proof_retains_owner_when_object_publication_fails_first() {
         .unwrap()
         .unwrap();
     assert_eq!(control.value().root.as_ref().unwrap().commit_sequence, 0);
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let value = handle
+        .query(64, 64, |connection| {
+            let value = connection
+                .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+            Ok(value.to_be_bytes().to_vec())
+        })
+        .await
+        .unwrap();
+    assert_eq!(i64::from_be_bytes(value.try_into().unwrap()), 1);
+    assert_eq!(runtime.stats().active_cells(), 1);
+    let pending = CellAuthority::new(fixture.layout.clone())
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.value().state, ControlState::Serving);
+    assert_eq!(pending.value().owner.as_ref().unwrap().session, session);
+    assert_eq!(pending.value().root.as_ref().unwrap().commit_sequence, 0);
+    assert!(runtime.stats().unpublished_node_log_bytes() > 0);
+    store.allow_puts();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            match handle.query(1, 1, |_| Ok(Vec::new())).await {
-                Err(crab_cell_runtime::Error::Fenced) => break,
-                Ok(_) => tokio::task::yield_now().await,
-                Err(error) => panic!("unexpected query result after publication failure: {error}"),
+            let control = CellAuthority::new(fixture.layout.clone())
+                .load(fixture.target.cell_id())
+                .await
+                .unwrap()
+                .unwrap();
+            if control.value().root.as_ref().unwrap().commit_sequence == 1
+                && runtime.stats().unpublished_node_log_bytes() == 0
+            {
+                break;
             }
-        }
-    })
-    .await
-    .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while runtime.stats().active_cells() != 0 {
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
-    let fenced = CellAuthority::new(fixture.layout.clone())
-        .load(fixture.target.cell_id())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(fenced.value().state, ControlState::Serving);
-    assert_eq!(fenced.value().owner.as_ref().unwrap().session, session);
-    assert_eq!(fenced.value().root.as_ref().unwrap().commit_sequence, 0);
-    assert!(runtime.stats().unpublished_node_log_bytes() > 0);
-    store.allow_puts();
-    assert!(matches!(
-        runtime.shutdown().await,
-        Err(crab_cell_runtime::Error::PendingPublication)
-    ));
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
