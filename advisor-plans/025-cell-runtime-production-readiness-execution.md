@@ -110,7 +110,9 @@ different contract, stop and split it into a reviewed API plan.
   fixture matrix for operation, migration, role, effect, dead-letter,
   Workflow, Activity, and resource-limit contracts;
 - driving all ten qualification rows through typed host/application APIs and
-  recording bounded metrics plus immutable raw artifacts;
+  recording bounded metrics plus immutable raw artifacts; protected primitive
+  run artifacts bind RSS, disk, file-descriptor, and object-store-call
+  measurements to the signed receipt;
 - protected three-process provider, dedicated scale, Kubernetes fault, every
   advertised object-store provider, and rolling-compatibility receipts;
 - release-gate negative tests, evidence freshness, exact image/source/profile
@@ -175,8 +177,9 @@ server internals or opens SQLite directly.
 
 ### 4. Implement measured typed qualification
 
-Extend the existing deterministic workload adapter, not the receipt schema, to
-run the matrix through `ApplicationHandle` and `CellNode`. Exercise every row
+Extend the existing deterministic workload adapter and its versioned run
+artifact (the receipt schema remains unchanged) to run the matrix through
+`ApplicationHandle` and `CellNode`. Exercise every row
 and every primitive with happy, retry, duplicate, expiry, cancellation,
 owner-loss, and recovery cases relevant to the contract. Record attempted,
 acknowledged, rejected, ambiguous, retried, and verified counts; p50/p95/p99;
@@ -257,6 +260,9 @@ flags. Never run bucket-wide GC.
   protected profile execution remains open.
 - [x] Same seed/profile reproduces the logical qualification digest and a
   changed seed changes it; labels remain bounded.
+- [x] Protected primitive run artifacts require bounded resource metrics and
+  the verifier rejects any receipt whose signed resource measurements differ
+  from the measured artifact.
 - [ ] Every required primitive fault/retry/duplicate/expiry/cancellation/
   owner-loss case passes for the named protected profile.
 - [ ] Mixed scale thresholds pass on fixed recorded hardware/provider without

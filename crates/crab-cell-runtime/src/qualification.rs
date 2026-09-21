@@ -322,6 +322,13 @@ impl QualificationProfile {
         self.requires_protected_evidence() && !self.provider.is_empty() && !self.topology.is_empty()
     }
 
+    fn requires_resource_measurements(&self) -> bool {
+        self.maximum_peak_rss_bytes != 0
+            || self.maximum_local_disk_bytes != 0
+            || self.maximum_file_descriptors != 0
+            || self.maximum_bucket_calls != 0
+    }
+
     /// Encodes the canonical threshold profile.
     pub fn encode(&self) -> Result<Vec<u8>> {
         self.validate()?;
@@ -450,6 +457,14 @@ impl QualificationProfile {
 /// Primitive rows exercised by the canonical mixed-load qualification driver.
 pub const QUALIFICATION_PRIMITIVES: &[&str] = &[
     "sql", "kv", "blob", "queue", "cron", "workflow", "activity", "effects",
+];
+
+/// Resource measurements that protected run artifacts must carry.
+pub const QUALIFICATION_RESOURCE_METRICS: &[(&str, &str)] = &[
+    ("peak_rss_bytes", "bytes"),
+    ("peak_local_disk_bytes", "bytes"),
+    ("peak_file_descriptors", "count"),
+    ("bucket_calls", "count"),
 ];
 
 /// Lifecycle cases that a canonical qualification schedule exposes to its
@@ -921,6 +936,20 @@ impl QualificationRunSummary {
 
     /// Encodes the measured result together with the exact canonical workload.
     pub fn artifact(&self, workload: &QualificationWorkload) -> Result<QualificationRunArtifact> {
+        self.artifact_with_resource_metrics(workload, &[])
+    }
+
+    /// Encodes a measured result and the resource observations captured for the same run.
+    ///
+    /// Protected profiles require every [`QUALIFICATION_RESOURCE_METRICS`]
+    /// observation. The receipt verifier compares these values with the signed
+    /// execution measurements, so a harness cannot substitute a different
+    /// machine's resource envelope after the workload has completed.
+    pub fn artifact_with_resource_metrics(
+        &self,
+        workload: &QualificationWorkload,
+        resource_metrics: &[QualificationMetric],
+    ) -> Result<QualificationRunArtifact> {
         if self.profile != workload.profile
             || self.profile_digest != workload.profile_digest()
             || self.seed != workload.seed
@@ -929,6 +958,10 @@ impl QualificationRunSummary {
         {
             return Err(Error::Control("qualification run workload identity"));
         }
+        validate_resource_metric_list(resource_metrics)?;
+        let mut metrics = self.metrics()?;
+        metrics.extend(resource_metrics.iter().cloned());
+        validate_metrics(&metrics)?;
         Ok(QualificationRunArtifact {
             schema_version: QUALIFICATION_RUN_ARTIFACT_SCHEMA_VERSION,
             workload: workload.clone(),
@@ -946,13 +979,13 @@ impl QualificationRunSummary {
                 &self.case_coverage,
             )?
             .as_bytes(),
-            metrics: self.metrics()?,
+            metrics,
         })
     }
 }
 
 /// Schema for a measured, typed execution artifact bound to one workload.
-pub const QUALIFICATION_RUN_ARTIFACT_SCHEMA_VERSION: u32 = 3;
+pub const QUALIFICATION_RUN_ARTIFACT_SCHEMA_VERSION: u32 = 4;
 
 /// Bounded measured outcome consumed by protected primitive qualification.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1043,6 +1076,7 @@ impl QualificationRunArtifact {
                 "qualification run throughput threshold failed",
             ));
         }
+        self.verify_resource_metrics(profile)?;
         Ok(())
     }
 
@@ -1071,6 +1105,29 @@ impl QualificationRunArtifact {
             }
         }
         value.ok_or(Error::Control("qualification run threshold metric missing"))
+    }
+
+    fn verify_resource_metrics(&self, profile: &QualificationProfile) -> Result<()> {
+        if !profile.requires_resource_measurements() {
+            return Ok(());
+        }
+        for (name, unit) in QUALIFICATION_RESOURCE_METRICS {
+            let value = self.threshold_metric(name, unit)?;
+            if value == 0 {
+                return Err(Error::Control("qualification resource metric is zero"));
+            }
+            let maximum = match *name {
+                "peak_rss_bytes" => profile.maximum_peak_rss_bytes(),
+                "peak_local_disk_bytes" => profile.maximum_local_disk_bytes(),
+                "peak_file_descriptors" => profile.maximum_file_descriptors(),
+                "bucket_calls" => profile.maximum_bucket_calls(),
+                _ => return Err(Error::Control("unknown qualification resource metric")),
+            };
+            if maximum != 0 && value > maximum {
+                return Err(Error::Control("qualification resource threshold failed"));
+            }
+        }
+        Ok(())
     }
 
     fn validate(&self) -> Result<()> {
@@ -1133,6 +1190,7 @@ impl QualificationRunArtifact {
             return Err(Error::Control("qualification run outcome"));
         }
         validate_metrics(&self.metrics)?;
+        validate_resource_metric_units(&self.metrics)?;
         validate_run_latency_metrics(&self.metrics)?;
         Ok(())
     }
@@ -1971,6 +2029,31 @@ fn validate_metrics(metrics: &[QualificationMetric]) -> Result<()> {
     Ok(())
 }
 
+fn validate_resource_metric_list(metrics: &[QualificationMetric]) -> Result<()> {
+    validate_metrics(metrics)?;
+    if metrics.iter().any(|metric| {
+        !QUALIFICATION_RESOURCE_METRICS
+            .iter()
+            .any(|(name, unit)| metric.name() == *name && metric.unit() == *unit)
+    }) {
+        return Err(Error::Control("unknown qualification resource metric"));
+    }
+    Ok(())
+}
+
+fn validate_resource_metric_units(metrics: &[QualificationMetric]) -> Result<()> {
+    for metric in metrics {
+        if let Some((_, expected_unit)) = QUALIFICATION_RESOURCE_METRICS
+            .iter()
+            .find(|(name, _)| metric.name() == *name)
+            && metric.unit() != *expected_unit
+        {
+            return Err(Error::Control("qualification resource metric unit"));
+        }
+    }
+    Ok(())
+}
+
 fn validate_run_latency_metrics(metrics: &[QualificationMetric]) -> Result<()> {
     let mut latency = [0_u64; 4];
     for (index, (name, unit)) in [
@@ -2358,30 +2441,38 @@ impl QualificationReceipt {
         {
             return Err(Error::Control("qualification throughput threshold failed"));
         }
-        if profile.maximum_peak_rss_bytes() != 0
-            && (self.peak_rss_bytes == 0 || self.peak_rss_bytes > profile.maximum_peak_rss_bytes())
+        let resource_envelope = profile.requires_resource_measurements();
+        if (profile.maximum_peak_rss_bytes() != 0 || resource_envelope)
+            && (self.peak_rss_bytes == 0
+                || (profile.maximum_peak_rss_bytes() != 0
+                    && self.peak_rss_bytes > profile.maximum_peak_rss_bytes()))
         {
             return Err(Error::Control("qualification RSS threshold failed"));
         }
-        if profile.maximum_local_disk_bytes() != 0 {
+        if profile.maximum_local_disk_bytes() != 0 || resource_envelope {
             let peak_local_disk_bytes = self.threshold_metric("peak_local_disk_bytes", "bytes")?;
             if peak_local_disk_bytes == 0
-                || peak_local_disk_bytes > profile.maximum_local_disk_bytes()
+                || (profile.maximum_local_disk_bytes() != 0
+                    && peak_local_disk_bytes > profile.maximum_local_disk_bytes())
             {
                 return Err(Error::Control("qualification disk threshold failed"));
             }
         }
-        if profile.maximum_file_descriptors() != 0 {
+        if profile.maximum_file_descriptors() != 0 || resource_envelope {
             let peak_file_descriptors = self.threshold_metric("peak_file_descriptors", "count")?;
             if peak_file_descriptors == 0
-                || peak_file_descriptors > profile.maximum_file_descriptors()
+                || (profile.maximum_file_descriptors() != 0
+                    && peak_file_descriptors > profile.maximum_file_descriptors())
             {
                 return Err(Error::Control(
                     "qualification file-descriptor threshold failed",
                 ));
             }
         }
-        if profile.maximum_bucket_calls() != 0 && self.bucket_calls > profile.maximum_bucket_calls()
+        if (profile.maximum_bucket_calls() != 0 || resource_envelope)
+            && (self.bucket_calls == 0
+                || (profile.maximum_bucket_calls() != 0
+                    && self.bucket_calls > profile.maximum_bucket_calls()))
         {
             return Err(Error::Control(
                 "qualification object-store threshold failed",
@@ -2681,6 +2772,23 @@ impl QualificationReceipt {
                 return Err(Error::Control(
                     "qualification receipt does not bind measured run metrics",
                 ));
+            }
+        }
+        if profile.requires_resource_measurements() {
+            for (name, unit) in QUALIFICATION_RESOURCE_METRICS {
+                let receipt_value = match *name {
+                    "peak_rss_bytes" => self.peak_rss_bytes,
+                    "bucket_calls" => self.bucket_calls,
+                    "peak_local_disk_bytes" | "peak_file_descriptors" => {
+                        self.threshold_metric(name, unit)?
+                    }
+                    _ => return Err(Error::Control("unknown qualification resource metric")),
+                };
+                if receipt_value != run.threshold_metric(name, unit)? {
+                    return Err(Error::Control(
+                        "qualification receipt does not bind resource measurements",
+                    ));
+                }
             }
         }
         Ok(())
@@ -3461,6 +3569,97 @@ mod tests {
         redistributed.primitive_counts[recipient].acknowledged += 1;
         redistributed.primitive_counts[recipient].verified += 1;
         assert!(redistributed.encode().is_err());
+    }
+
+    #[tokio::test]
+    async fn protected_run_artifact_binds_receipt_resource_measurements() {
+        let mut profile =
+            QualificationProfile::new("protected-resource-contract".into(), 1, 8, 1, 5_000)
+                .unwrap();
+        profile.maximum_peak_rss_bytes = 1_000;
+        profile.maximum_local_disk_bytes = 2_000;
+        profile.maximum_file_descriptors = 3_000;
+        profile.maximum_bucket_calls = 4_000;
+        let workload = QualificationWorkload::generate_with_size(&profile, 23, 1, 8, 1).unwrap();
+        let mut executor = ContractExecutor {
+            calls: 0,
+            case_coverage: false,
+        };
+        let summary = workload.run(&mut executor).await.unwrap();
+        assert!(
+            summary
+                .artifact(&workload)
+                .unwrap()
+                .verify_for_profile(&profile)
+                .is_err()
+        );
+
+        let resources = [
+            QualificationMetric::new("peak_rss_bytes".into(), 19, "bytes".into()).unwrap(),
+            QualificationMetric::new("peak_local_disk_bytes".into(), 29, "bytes".into()).unwrap(),
+            QualificationMetric::new("peak_file_descriptors".into(), 39, "count".into()).unwrap(),
+            QualificationMetric::new("bucket_calls".into(), 49, "count".into()).unwrap(),
+        ];
+        let mut run = summary
+            .artifact_with_resource_metrics(&workload, &resources)
+            .unwrap();
+        run.elapsed_ms = 1_000;
+        for (name, value) in [("duration_secs", 1), ("throughput_ops_per_sec", 8)] {
+            run.metrics
+                .iter_mut()
+                .find(|metric| metric.name() == name)
+                .unwrap()
+                .value = value;
+        }
+        run.verify_for_profile(&profile).unwrap();
+        let encoded = run.encode().unwrap();
+
+        let mut receipt_metrics = summary.metrics().unwrap();
+        receipt_metrics.extend(resources.iter().cloned());
+        let key = SigningKey::from_bytes(&[93; 32]);
+        let receipt = QualificationRunner::new(key)
+            .emit_with_profile_and_evidence(
+                &profile,
+                "resource-source".into(),
+                Digest::from_bytes([94; 32]),
+                "provider".into(),
+                "primitives".into(),
+                "none".into(),
+                receipt_metrics,
+                &encoded,
+                true,
+                (
+                    "rustc".into(),
+                    "release".into(),
+                    "three-process".into(),
+                    workload.seed(),
+                    49,
+                    19,
+                    false,
+                ),
+                1,
+                2,
+                b"none",
+                vec![Digest::from_bytes(*blake3::hash(&encoded).as_bytes())],
+                vec![QualificationOwnership::new(
+                    1,
+                    1,
+                    Digest::from_bytes([95; 32]),
+                )],
+            )
+            .unwrap();
+        receipt.verify_profile_thresholds(&profile).unwrap();
+        receipt
+            .verify_primitive_run_artifact(&profile, &[&encoded])
+            .unwrap();
+
+        let mut forged = receipt;
+        forged.bucket_calls += 1;
+        assert!(
+            forged
+                .verify_primitive_run_artifact(&profile, &[&encoded])
+                .is_err()
+        );
     }
 
     #[test]
