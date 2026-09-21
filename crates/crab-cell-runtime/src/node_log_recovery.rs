@@ -303,13 +303,42 @@ impl SealedSession {
     /// Returns authenticated frame scopes without materializing frame bodies.
     pub fn scopes(&self, limits: crab_ltx::Limits) -> Result<Vec<crab_ltx::NodeFrameScope>> {
         if let Some(witness) = &self.witness {
-            return witness
-                .reader(limits)?
-                .map(|frame| frame.map(|frame| frame.scope()))
-                .collect();
+            return unique_scopes(
+                witness
+                    .reader(limits)?
+                    .map(|frame| frame.map(|frame| frame.scope())),
+            );
         }
-        Ok(self.frames.iter().map(|frame| frame.scope()).collect())
+        unique_scopes(self.frames.iter().map(|frame| Ok(frame.scope())))
     }
+}
+
+/// Retains one authenticated generation per Cell while validating every frame
+/// in the witness. Recovery only needs the affected Cell set; retaining every
+/// frame scope would make catalog discovery grow with the uncovered tail.
+fn unique_scopes<I>(scopes: I) -> Result<Vec<crab_ltx::NodeFrameScope>>
+where
+    I: IntoIterator<Item = Result<crab_ltx::NodeFrameScope>>,
+{
+    let mut unique = BTreeMap::<[u8; 32], crab_ltx::NodeFrameScope>::new();
+    for scope in scopes {
+        let scope = scope?;
+        if let Some(existing) = unique.get(&scope.cell) {
+            if existing.leader_session != scope.leader_session
+                || existing.log_epoch != scope.log_epoch
+                || existing.application != scope.application
+                || existing.incarnation != scope.incarnation
+                || existing.cell_epoch != scope.cell_epoch
+            {
+                return Err(Error::Control(
+                    "recovery Cell scope has multiple generations",
+                ));
+            }
+            continue;
+        }
+        unique.insert(scope.cell, scope);
+    }
+    Ok(unique.into_values().collect())
 }
 
 /// Mechanical seal-and-gather coordinator for one already claimed dead session.
@@ -401,7 +430,7 @@ pub async fn recoverable_cells_from_frames(
     frames: &[crab_ltx::VerifiedNodeFrame],
     limit: usize,
 ) -> Result<Vec<RecoveryCell>> {
-    let scopes = frames.iter().map(|frame| frame.scope()).collect::<Vec<_>>();
+    let scopes = unique_scopes(frames.iter().map(|frame| Ok(frame.scope())))?;
     recoverable_cells_from_scopes(catalog, authority, owner, &scopes, limit).await
 }
 
@@ -1115,6 +1144,39 @@ mod tests {
     use crate::{
         AppendRequest, FollowerStore, LocalFollowerTransport, NodeLogTransport, RetireRequest,
     };
+
+    fn scope(cell: u8, sequence: u64) -> crab_ltx::NodeFrameScope {
+        crab_ltx::NodeFrameScope {
+            leader_session: [1; 16],
+            log_epoch: 3,
+            node_sequence: sequence,
+            application: [4; 16],
+            cell: [cell; 32],
+            incarnation: [6; 16],
+            cell_epoch: 7,
+            commit_sequence: sequence,
+        }
+    }
+
+    #[test]
+    fn scope_validation_keeps_one_generation_per_cell() {
+        let scopes = unique_scopes([Ok(scope(1, 1)), Ok(scope(1, 2)), Ok(scope(2, 3))]).unwrap();
+        assert_eq!(scopes.len(), 2);
+        assert_eq!(scopes[0].cell, [1; 32]);
+        assert_eq!(scopes[1].cell, [2; 32]);
+    }
+
+    #[test]
+    fn scope_validation_rejects_conflicting_cell_generations() {
+        let mut conflicting = scope(1, 2);
+        conflicting.cell_epoch = 8;
+        assert!(matches!(
+            unique_scopes([Ok(scope(1, 1)), Ok(conflicting)]),
+            Err(Error::Control(
+                "recovery Cell scope has multiple generations"
+            ))
+        ));
+    }
 
     struct FailingFirstTransport {
         failed: NodeId,

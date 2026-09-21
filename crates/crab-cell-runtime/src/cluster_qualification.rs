@@ -83,6 +83,11 @@ pub fn validate_cluster_receipt(
     validate_capacity(&receipt.capacity)?;
     validate_measured_disk(&receipt.measured_disk)?;
     validate_placement(&receipt.placement)?;
+    validate_follower_affinity(
+        &receipt.owner_loss,
+        &receipt.fleet_only_commit,
+        &receipt.placement,
+    )?;
     validate_metrics(&receipt.metrics)?;
     validate_metric_parity(&receipt.capacity_metric_parity)
 }
@@ -261,6 +266,62 @@ fn validate_placement(value: &Value) -> Result<()> {
     Ok(())
 }
 
+fn validate_follower_affinity(
+    owner_loss: &Value,
+    fleet_only_commit: &Value,
+    placement: &Value,
+) -> Result<()> {
+    let owner_loss = as_object(owner_loss, "owner loss")?;
+    let failed_session = session(owner_loss, "session_before")?;
+    let successor_session = session(owner_loss, "session_after")?;
+    let fleet_only_commit = as_object(fleet_only_commit, "fleet-only commit")?;
+    let placement = as_object(placement, "placement")?;
+    let mut failed_node = None;
+    let mut successor_node = None;
+    for (label, session_key) in [
+        ("node_a", "node_a_session"),
+        ("node_b", "node_b_session"),
+        ("node_c", "node_c_session"),
+    ] {
+        let placement_session = session(placement, session_key)?;
+        let node = as_object(object_value(placement, label)?, "placement node")?;
+        if session(node, "session")? != placement_session {
+            return Err(Error::Control("placement session identity"));
+        }
+        let advertisement = as_object(
+            object_value(node, "advertisement")?,
+            "placement advertisement",
+        )?;
+        let node_id = node_id(advertisement, "node")?;
+        if placement_session == failed_session {
+            failed_node = Some(node_id);
+        }
+        if placement_session == successor_session {
+            successor_node = Some(node_id);
+        }
+    }
+    let failed_node = failed_node.ok_or(Error::Control("failed owner placement"))?;
+    let successor_node = successor_node.ok_or(Error::Control("successor placement"))?;
+    if failed_node == successor_node {
+        return Err(Error::Control("successor reused failed owner node"));
+    }
+
+    let node_log = as_object(
+        object_value(fleet_only_commit, "node_log_before")?,
+        "node log",
+    )?;
+    let members = object_value(node_log, "member_nodes")?
+        .as_array()
+        .ok_or(Error::Control("cluster receipt array"))?;
+    if !members
+        .iter()
+        .any(|member| member.as_str() == Some(successor_node))
+    {
+        return Err(Error::Control("successor was not an original follower"));
+    }
+    Ok(())
+}
+
 fn validate_metrics(value: &Value) -> Result<()> {
     let object = as_object(value, "metrics")?;
     for node in ["node_a", "node_b", "node_c"] {
@@ -354,6 +415,14 @@ fn session<'a>(object: &'a Map<String, Value>, key: &str) -> Result<&'a str> {
     Ok(value)
 }
 
+fn node_id<'a>(object: &'a Map<String, Value>, key: &str) -> Result<&'a str> {
+    let value = string(object, key)?;
+    if value.len() != 32 || !value.bytes().all(is_lower_hex) {
+        return Err(Error::Control("cluster receipt node"));
+    }
+    Ok(value)
+}
+
 fn number(object: &Map<String, Value>, key: &str) -> Result<u64> {
     object_value(object, key)?
         .as_u64()
@@ -381,7 +450,7 @@ fn is_lower_hex(byte: u8) -> bool {
 mod tests {
     use serde_json::json;
 
-    use super::{validate_revision, validate_timing};
+    use super::{validate_follower_affinity, validate_revision, validate_timing};
 
     #[test]
     fn source_revision_requires_a_lowercase_commit_shape() {
@@ -411,5 +480,33 @@ mod tests {
             }
         });
         assert!(validate_timing(invalid.as_object().unwrap()).is_err());
+    }
+
+    #[test]
+    fn follower_affinity_requires_a_member_of_the_failed_log() {
+        let failed_session = "a".repeat(32);
+        let successor_session = "b".repeat(32);
+        let failed_node = "c".repeat(32);
+        let successor_node = "d".repeat(32);
+        let owner_loss = json!({
+            "session_before": failed_session,
+            "session_after": successor_session,
+        });
+        let fleet_only_commit = json!({
+            "node_log_before": {"member_nodes": [successor_node]}
+        });
+        let placement = json!({
+            "node_a_session": "e".repeat(32),
+            "node_b_session": "a".repeat(32),
+            "node_c_session": "b".repeat(32),
+            "node_a": {"session": "e".repeat(32), "advertisement": {"node": "f".repeat(32)}},
+            "node_b": {"session": "a".repeat(32), "advertisement": {"node": "c".repeat(32)}},
+            "node_c": {"session": "b".repeat(32), "advertisement": {"node": "d".repeat(32)}}
+        });
+        assert!(validate_follower_affinity(&owner_loss, &fleet_only_commit, &placement).is_ok());
+
+        let mut invalid_fleet = fleet_only_commit;
+        invalid_fleet["node_log_before"]["member_nodes"] = json!([failed_node]);
+        assert!(validate_follower_affinity(&owner_loss, &invalid_fleet, &placement).is_err());
     }
 }

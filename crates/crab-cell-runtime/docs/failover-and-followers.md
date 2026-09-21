@@ -250,7 +250,7 @@ Correctness boundaries exercised by regression tests:
 | Two witnesses return different valid bytes for one sequence | Fail closed, including overlapping evidence from shorter or partially readable witnesses |
 | A valid frame names another session or epoch | Reject it before building a recovery overlay |
 | A recovered suffix is awaiting immutable pinning | Retain its recovery admission until the result is pinned or discarded |
-| Recovery must inspect 256 catalog shard heads | Read heads with a fixed concurrency bound while still verifying every populated shard, page, and Cell control |
+| Recovery must discover affected Cells | Derive authenticated Cell scopes from the sealed tail, read only affected catalog shards once, and revalidate each current Cell control |
 | The claim CAS commits but its response never returns | Bound the storage wait, then resume the same persisted claim idempotently on the next scheduler scan |
 
 ## Use one multiplexed log per owner session
@@ -638,6 +638,9 @@ reader scans one frame at a time, retaining verified file locations and digests,
 then materializes only the requested page. It rechecks the digest after seeking.
 Metadata remains proportional to retained frame count, and each page still
 performs a full validation scan: payload memory is bounded, not total scan I/O.
+A sealed recovery witness is reduced to one authenticated generation per
+affected Cell before catalog lookup, so scope-validation memory is bounded by
+the affected-Cell admission limit rather than the retained tail length.
 A page with
 one frame may be larger than the 1 MiB network target, but that frame is still
 bounded by the configured capture limit; a multi-frame page may not exceed the
@@ -1598,6 +1601,9 @@ rejects server, transport, body-limit, latency-over-60-second, or target-rate
 failures. The eight-Cell schedule is the node-level aggregate profile (the
 receipt records a configured 125 target requests/s per Cell); retain a separate
 one-Cell run when measuring the hot-Cell admission limit.
+The typed cluster-receipt validator also maps the failed and successor sessions
+to their stable NodeIds and requires the first successor to be present in the
+failed log's original follower set.
 
 ## Deliver in dependency order
 
