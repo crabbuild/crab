@@ -115,6 +115,20 @@ impl Default for CatalogDocument {
 }
 
 impl CatalogDocument {
+    fn normalize_audit_paths(&mut self) -> Result<(), CatalogError> {
+        if let Some(head) = self.membership_audit_head.as_mut() {
+            *head = canonical_audit_reference(head)
+                .ok_or(CatalogError::Invalid("membership audit path is invalid"))?;
+        }
+        if let Some(event) = self.pending_membership_audit.as_mut()
+            && let Some(previous) = event.previous.as_mut()
+        {
+            *previous = canonical_audit_reference(previous)
+                .ok_or(CatalogError::Invalid("membership audit path is invalid"))?;
+        }
+        Ok(())
+    }
+
     fn validate(&self, root: &StorageRoot) -> Result<(), CatalogError> {
         if !matches!(self.schema_version, 2 | SCHEMA_VERSION)
             || self.repositories.len() > MAX_REPOSITORIES
@@ -200,18 +214,19 @@ fn valid_actor(actor: &MembershipActor) -> bool {
     })
 }
 
+fn canonical_audit_reference(path: &str) -> Option<String> {
+    let marker = format!("{MEMBERSHIP_AUDIT_RELATIVE_PREFIX}/");
+    let suffix = path.rsplit_once(&marker)?.1;
+    let file = suffix.strip_suffix(".json")?;
+    let (version, id) = file.split_once('-')?;
+    if !version.parse::<u64>().is_ok_and(|value| value > 0) || Uuid::parse_str(id).is_err() {
+        return None;
+    }
+    Some(format!("{MEMBERSHIP_AUDIT_RELATIVE_PREFIX}/{suffix}"))
+}
+
 fn valid_audit_path(path: &str) -> bool {
-    let prefix = format!("{MEMBERSHIP_AUDIT_RELATIVE_PREFIX}/");
-    let Some(file) = path
-        .strip_prefix(&prefix)
-        .and_then(|file| file.strip_suffix(".json"))
-    else {
-        return false;
-    };
-    let Some((version, id)) = file.split_once('-') else {
-        return false;
-    };
-    version.parse::<u64>().is_ok_and(|value| value > 0) && Uuid::parse_str(id).is_ok()
+    canonical_audit_reference(path).is_some_and(|canonical| canonical == path)
 }
 
 fn membership_digest(members: &[RepositoryMember]) -> Result<String, CatalogError> {
@@ -289,7 +304,8 @@ impl CatalogStore {
         if !matches!(schema.schema_version, 2 | SCHEMA_VERSION) {
             return Err(CatalogError::Invalid("unsupported catalog schema"));
         }
-        let document: CatalogDocument = serde_json::from_slice(&body)?;
+        let mut document: CatalogDocument = serde_json::from_slice(&body)?;
+        document.normalize_audit_paths()?;
         // Version 2 had no audit fields. It remains readable until its next write.
         document.validate(&self.root)?;
         Ok((document, Some(etag)))
@@ -874,7 +890,8 @@ mod tests {
 
     #[tokio::test]
     async fn membership_audit_chain_survives_storage_root_relocation() {
-        let source = catalog();
+        let store = crab_storage::Store::new(Arc::new(InMemory::new()));
+        let source = CatalogStore::new(StorageRoot::memory(store.clone(), "repositories/source"));
         source
             .create_repository(
                 "team".into(),
@@ -889,6 +906,12 @@ mod tests {
         let (document, _) = source.load().await.unwrap();
         let head = document.membership_audit_head.clone().unwrap();
         assert!(head.starts_with(MEMBERSHIP_AUDIT_RELATIVE_PREFIX));
+        let (catalog_body, _) = source
+            .root
+            .store
+            .get_with_etag_bounded(&source.path, MAX_CATALOG_BYTES)
+            .await
+            .unwrap();
         let (audit, _) = source
             .root
             .store
@@ -896,10 +919,13 @@ mod tests {
             .await
             .unwrap();
 
-        let restored = CatalogStore::new(StorageRoot::memory(
-            source.root.store.clone(),
-            "restored-repositories",
-        ));
+        let restored_root = StorageRoot::memory(store, "repositories/restored");
+        restored_root
+            .store
+            .put_overwrite(&restored_root.path(CATALOG_RELATIVE_PATH), catalog_body)
+            .await
+            .unwrap();
+        let restored = CatalogStore::new(restored_root.clone());
         restored
             .root
             .store
@@ -917,6 +943,21 @@ mod tests {
             .unwrap();
 
         assert_eq!(restored.load().await.unwrap().0, document);
+
+        let mut legacy = document;
+        legacy.membership_audit_head = Some(source.root.path(&head).to_string());
+        restored_root
+            .store
+            .put_overwrite(
+                &restored.path,
+                Bytes::from(serde_json::to_vec(&legacy).unwrap()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            restored.load().await.unwrap().0.membership_audit_head,
+            Some(head)
+        );
     }
 
     #[test]

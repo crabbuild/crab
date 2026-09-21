@@ -90,6 +90,12 @@ conditions so an executor can use it without relying on conversation history.
 | [015](015-cell-runtime-qualification-receipts.md) | Simulator, provider, fault, scale, latency, and primitive release evidence | P0 | XL | 006-014 | IN PROGRESS |
 | [016](016-standalone-replication-compatibility-decision.md) | Complete tagged-contract audit and named support decision | P1 | M | 015 | DONE — HARD REMOVE |
 | [017](017-execute-standalone-replication-decision.md) | Retain, deprecate, or remove exactly as approved | P1 | L-XL | 016 | DONE — HARD REMOVE |
+| [018](018-failover-phase-evidence.md) | Phase-level failover metrics, receipt baseline, and accurate operator docs | P0 | M | 015 infrastructure | PARTIAL — work counters/protected run pending |
+| [019](019-indexed-follower-tail-reads.md) | Crash-rebuildable follower index and seek-only tail pages | P0 | L | 012, 018 | IMPLEMENTED — protected scale evidence pending |
+| [020](020-tail-scoped-streaming-recovery.md) | Tail-derived affected-shard/Cell validation and bounded recovery streaming | P0 | XL | 010, 018, 019 | IMPLEMENTED — protected scale evidence pending |
+| [021](021-follower-affine-recovery-and-takeover.md) | Deterministic follower-first recovery and takeover with bounded fallback | P0 | XL | 013, 018, 020 | IMPLEMENTED — direct self-discovery; protected scale evidence pending |
+| [022](022-local-follower-recovery-fast-path.md) | Same-host follower transport and digest-verified recovery artifact reuse | P1 | L | 012, 019-021 | IMPLEMENTED — protected cache evidence pending |
+| [023](023-published-image-failover-qualification.md) | Qualify an immutable candidate image and promote the same digest | P0 release gate | L | 015, 018 | IMPLEMENTED — protected run pending |
 
 ### Dependency graph and execution waves
 
@@ -148,6 +154,65 @@ compatibility decision.
 - Plan 017 must follow the recorded decision and stop if its inventory drifts.
   The current decision is hard removal; no compatibility reader or alias may
   be introduced during execution.
+
+### Follower-affine failover hardening extension
+
+Created 2026-09-20 with the improve skill; planned against `origin/main` at
+`c86dd43423ae`. The architecture and safety boundary are recorded in
+[Follower-affine Cell failover hardening](follower-affine-failover-design.md).
+The source-backed review and remaining gates are recorded in
+[the 2026-09-20 audit](failover-design-audit-2026-09-20.md). These plans extend
+the canonical Cell track; they do not replace plans 009, 011, 013, or 015.
+
+```text
+010 streaming publication ──────────────┐
+012 resource/restart accounting ────┐   │
+013 signed placement ────────────┐  │   │
+                                 │  │   │
+015 qualification ──────┐        │  │   │
+018 phase evidence ─────┼─> 019 indexed reads
+                        │        └──────> 020 tail-scoped recovery
+                        │                  └─> 021 follower-affine takeover
+                        │                      └─> 022 local fast path
+                        └─────────────────────> 023 digest-bound release proof
+```
+
+Recommended execution:
+
+1. Finish the named plan-010/012/013 API prerequisites; protected qualification
+   is not required for their local APIs to be consumed.
+2. Land 018 and preserve its version-6 local baseline receipt.
+3. Land 019, then 020. They share follower/recovery contracts and are not a
+   parallel wave.
+4. Land 021 after 020 so scheduler signatures and phase boundaries are stable.
+5. Land 022 after follower affinity and canonical file-backed pinning exist.
+6. Land 023 before any release claim. It may develop after 018 in parallel with
+   019-022, but its protected proof gates promotion of the finished stack.
+
+Top-priority product outcome is 021: the surviving follower becomes the
+preferred recovery executor and owner candidate. Plans 018-020 precede or run
+before it because they make the change measurable and prevent follower-local
+recovery from retaining quadratic lane/catalog work. Plan 022 is the final RTO
+optimization; it must not bypass immutable object pinning. Plan 023 closes the
+release-evidence gap: current source-only Compose evidence cannot be relabeled
+as proof for a later-built image digest.
+
+Shared extension rules:
+
+- Follower-first is bounded preference. Any eligible node remains the explicit
+  availability fallback after the grace interval.
+- Stable physical `NodeId` identifies retained follower data; a fresh live boot
+  `SessionId` always owns the recovery claim and successor Cell.
+- Recovery hints and placement scores are advisory. Node claim CAS, takeover
+  proof, Cell control CAS, epoch increment, and actor admission remain authority.
+- Every recovered overlay is pinned in object storage before control names it.
+  Local bytes may accelerate verification/restore but are never sole authority.
+- The successor opens a fresh sparse `crab_ltx::Db`; old writable SQLite state
+  is never reopened.
+- Existing plan 011 directory-cache and plan 009 hydration work remain canonical.
+  Whole-database follower prewarm is deferred until phase evidence proves need.
+- No new env/config surface, wire format, or compatibility reader is implied.
+  Stop and record a shipped contract if execution discovers one.
 
 ### Implementation ledger — 2026-09-18
 
@@ -219,7 +284,7 @@ fixtures are explicitly not release evidence. Protected provider/Kubernetes
 and release receipts remain open.
 
 The current checkout also passed the full local Compose/RustFS cluster
-qualification (version-5 receipt) with two owner losses, exact-root monotonicity,
+qualification (version-6 receipt) with two owner losses, exact-root monotonicity,
 follower replacement, and follower-only commits under an immutable-object deny
 policy. The qualification harness now compares each node's capacity report
 with its runtime Prometheus disk and active-Cell ceilings, the signed placement

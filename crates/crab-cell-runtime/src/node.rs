@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use bytes::Bytes;
 use crab_ltx::CellStorageLayout;
 use crab_storage::{ETag, StorageError, map_object_store_error};
@@ -22,6 +24,7 @@ const MAX_ADVERTISEMENT_LIFETIME_MS: i64 = 15_000;
 const MAX_CLOCK_SKEW_MS: i64 = 5 * 60_000;
 const STALE_ADVERTISEMENT_RETENTION_MS: i64 = MAX_CLOCK_SKEW_MS + MAX_ADVERTISEMENT_LIFETIME_MS;
 const MAX_STALE_COLLECTION_ITEMS: usize = 1_024;
+const MAX_LIVE_NODE_RECORDS: usize = 10_000;
 const SIGNING_DOMAIN: &[u8] = b"crab.node.v1\0";
 const PLACEMENT_SIGNING_DOMAIN: &[u8] = b"crab.node-placement.v1\0";
 const NODE_LOG_SELECTION_DOMAIN: &[u8] = b"crab.node-log.member.v1\0";
@@ -844,6 +847,52 @@ impl NodeDirectory {
         Ok(ready.then_some(NodeTakeoverProof { session, claimant }))
     }
 
+    /// Resolves the deterministic live original-follower successor for a
+    /// sealed failed session. The returned advertisement is advisory; the
+    /// destination still rechecks takeover proof and Cell control CAS.
+    pub async fn preferred_recovery_node(
+        &self,
+        session: SessionId,
+        now_ms: i64,
+    ) -> Result<Option<NodeAdvertisement>> {
+        if now_ms < 0 {
+            return Err(Error::Node("node recovery time is invalid"));
+        }
+        let path = self.layout.node_path(session.as_bytes());
+        let Some((record, _)) = self.load_record_at(&path).await? else {
+            return Err(Error::Node("node recovery record is missing"));
+        };
+        let log = match record {
+            NodeRecord::Advertisement(advertisement) => {
+                self.validate_scope(&advertisement)?;
+                advertisement.validate_shape()?;
+                advertisement.verify_signature()?;
+                if advertisement.expires_at_ms > now_ms {
+                    return Ok(None);
+                }
+                advertisement.log
+            }
+            NodeRecord::Tombstone(tombstone) => tombstone.log,
+        };
+        let Some(log) = log else {
+            return Ok(None);
+        };
+        if !log.active() || !matches!(log.phase(), NodeLogPhase::Sealed | NodeLogPhase::Retired) {
+            return Ok(None);
+        }
+        let live = self.live(now_ms, MAX_LIVE_NODE_RECORDS).await?;
+        Ok(log
+            .members()
+            .iter()
+            .filter_map(|member| {
+                live.iter().find(|advertisement| {
+                    advertisement.node() == *member && recovery_executor_eligible(advertisement)
+                })
+            })
+            .min_by(|left, right| left.node().as_bytes().cmp(right.node().as_bytes()))
+            .cloned())
+    }
+
     /// Lists expired active logs whose claim is available to this live session.
     pub async fn recovery_candidates(
         &self,
@@ -851,12 +900,67 @@ impl NodeDirectory {
         now_ms: i64,
         limit: usize,
     ) -> Result<Vec<SessionId>> {
+        self.recovery_candidates_filtered(claimant, None, false, now_ms, limit)
+            .await
+    }
+
+    /// Lists expired logs for which this claimant is the deterministic live
+    /// original-follower successor. Stable NodeIds choose the winner; the
+    /// current boot SessionId remains the claim authority.
+    pub async fn recovery_candidates_for_node(
+        &self,
+        claimant: SessionId,
+        claimant_node: NodeId,
+        now_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<SessionId>> {
+        self.recovery_candidates_filtered(claimant, Some(claimant_node), false, now_ms, limit)
+            .await
+    }
+
+    /// Lists expired logs only when no enrolled original follower is live.
+    /// This is the bounded any-node fallback after follower-affine attempts.
+    pub async fn recovery_candidates_without_live_followers(
+        &self,
+        claimant: SessionId,
+        now_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<SessionId>> {
+        self.recovery_candidates_filtered(claimant, None, true, now_ms, limit)
+            .await
+    }
+
+    async fn recovery_candidates_filtered(
+        &self,
+        claimant: SessionId,
+        claimant_node: Option<NodeId>,
+        require_no_live_followers: bool,
+        now_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<SessionId>> {
         if now_ms < 0 || limit == 0 || limit > MAX_STALE_COLLECTION_ITEMS {
             return Err(Error::Node("node recovery candidate bound is invalid"));
         }
-        self.load(claimant, now_ms)
+        let claimant_advertisement = self
+            .load(claimant, now_ms)
             .await?
             .ok_or(Error::Node("node recovery claimant is not live"))?;
+        if !recovery_executor_eligible(claimant_advertisement.advertisement()) {
+            return Ok(Vec::new());
+        }
+        if claimant_node.is_some_and(|node| claimant_advertisement.advertisement.node() != node) {
+            return Err(Error::Node("node recovery claimant identity differs"));
+        }
+        let live_nodes = if claimant_node.is_some() || require_no_live_followers {
+            self.live(now_ms, MAX_LIVE_NODE_RECORDS)
+                .await?
+                .into_iter()
+                .filter(recovery_executor_eligible)
+                .map(|advertisement| advertisement.node())
+                .collect::<HashSet<_>>()
+        } else {
+            HashSet::new()
+        };
         let prefix = self.layout.node_directory_path();
         let mut stream = self.layout.store().inner().list(Some(&prefix));
         let mut candidates = Vec::new();
@@ -867,7 +971,7 @@ impl NodeDirectory {
             };
             let session = record.session();
             validate_record_path(&self.layout, session, &meta.location)?;
-            let eligible = match record {
+            let (eligible, members) = match record {
                 NodeRecord::Advertisement(advertisement) => {
                     self.validate_scope(&advertisement)?;
                     advertisement.validate_shape()?;
@@ -875,28 +979,49 @@ impl NodeDirectory {
                     if advertisement.issued_at_ms > now_ms.saturating_add(MAX_CLOCK_SKEW_MS) {
                         return Err(Error::Node("advertised node issue time differs"));
                     }
-                    advertisement.expires_at_ms <= now_ms
-                        && advertisement
-                            .log
-                            .as_ref()
-                            .is_some_and(NodeLogStatus::active)
+                    let log = advertisement.log.as_ref();
+                    (
+                        advertisement.expires_at_ms <= now_ms
+                            && log.is_some_and(NodeLogStatus::active)
+                            && log.is_some_and(|log| {
+                                matches!(log.phase(), NodeLogPhase::Open | NodeLogPhase::Recovering)
+                            }),
+                        log.map_or_else(Vec::new, |log| log.members().to_vec()),
+                    )
                 }
                 NodeRecord::Tombstone(tombstone) => {
                     let claim_available = tombstone.claimant == Some(claimant)
                         || tombstone
                             .claim_expires_at_ms
                             .is_none_or(|expires_at_ms| expires_at_ms <= now_ms);
-                    claim_available
-                        && tombstone.log.as_ref().is_some_and(|log| {
-                            log.active()
-                                && matches!(
-                                    log.phase(),
-                                    NodeLogPhase::Open | NodeLogPhase::Recovering
-                                )
-                        })
+                    let log = tombstone.log.as_ref();
+                    (
+                        claim_available
+                            && log.is_some_and(|log| {
+                                log.active()
+                                    && matches!(
+                                        log.phase(),
+                                        NodeLogPhase::Open | NodeLogPhase::Recovering
+                                    )
+                            }),
+                        log.map_or_else(Vec::new, |log| log.members().to_vec()),
+                    )
                 }
             };
             if !eligible || session == claimant {
+                continue;
+            }
+            if let Some(claimant_node) = claimant_node {
+                let preferred = members
+                    .iter()
+                    .filter(|member| live_nodes.contains(member))
+                    .min_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+                if preferred != Some(&claimant_node) {
+                    continue;
+                }
+            } else if require_no_live_followers
+                && members.iter().any(|member| live_nodes.contains(member))
+            {
                 continue;
             }
             candidates.push(session);
@@ -1786,6 +1911,19 @@ impl NodeDirectory {
         }
         Ok(())
     }
+}
+
+fn recovery_executor_eligible(advertisement: &NodeAdvertisement) -> bool {
+    let capacity = advertisement.capacity();
+    let placement_has_headroom = advertisement.placement_capacity().is_none_or(|placement| {
+        placement.active_cells < placement.max_active_cells
+            && placement.running_jobs < placement.job_capacity
+    });
+    capacity.log_protocol == NODE_LOG_PROTOCOL_VERSION
+        && capacity.free_memory_bytes != 0
+        && capacity.free_disk_bytes != 0
+        && capacity.job_credits != 0
+        && placement_has_headroom
 }
 
 fn validate_record_path(

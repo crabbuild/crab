@@ -1,19 +1,283 @@
 use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures_util::{StreamExt, future::join_all, stream};
 
 use crate::{
-    ApplicationId, CellAuthority, CellCatalog, Digest, Error, FencedNodeSession, NodeDirectory,
-    NodeId, NodeLogPhase, NodeLogTransport, NodeTakeoverProof, RecoveryBase, RecoveryManifestStore,
-    Result, SealRequest, SealedNodeLog, SessionId, TailRequest, Transition, VersionedControl,
-    build_recovery_overlays,
+    ApplicationId, CatalogProof, CellAuthority, CellCatalog, CellId, Digest, Error,
+    FencedNodeSession, FollowerReceipt, NodeDirectory, NodeId, NodeLogPhase, NodeLogTransport,
+    NodeTakeoverProof, RecoveryBase, RecoveryManifestStore, Result, SealRequest, SealedNodeLog,
+    SessionId, TailRequest, Transition, VersionedControl, build_recovery_overlays_file_backed,
+    build_recovery_overlays_file_backed_stream,
 };
 
 const MAX_RECOVERY_CATALOG_HEAD_READS: usize = 32;
 
 const MAX_RECOVERY_PAGE_BYTES: u64 = 1 << 20;
 const MAX_RECOVERY_PAGE_FRAMES: usize = 4_096;
+const WITNESS_RECORD_HEADER_BYTES: usize = 8 + 32;
+const WITNESS_DIGEST_RECORD_BYTES: u64 = 8 + 32;
+
+struct WitnessWriter {
+    path: tempfile::TempPath,
+    file: File,
+    first_sequence: Option<u64>,
+    last_sequence: Option<u64>,
+    frame_count: u64,
+}
+
+impl WitnessWriter {
+    fn new(directory: &Path) -> Result<Self> {
+        let temporary = tempfile::Builder::new()
+            .prefix(".crab-witness-")
+            .tempfile_in(directory)?;
+        let path = temporary.into_temp_path();
+        let file = OpenOptions::new().append(true).open(&path)?;
+        Ok(Self {
+            path,
+            file,
+            first_sequence: None,
+            last_sequence: None,
+            frame_count: 0,
+        })
+    }
+
+    fn push(&mut self, frame: &crab_ltx::VerifiedNodeFrame) -> Result<()> {
+        let encoded = frame.encoded();
+        let length = u64::try_from(encoded.len())
+            .map_err(|_| Error::Node("recovery witness frame length overflows"))?;
+        self.file.write_all(&length.to_le_bytes())?;
+        self.file.write_all(&frame.digest())?;
+        self.file.write_all(encoded)?;
+        self.first_sequence
+            .get_or_insert(frame.scope().node_sequence);
+        self.last_sequence = Some(frame.scope().node_sequence);
+        self.frame_count = self
+            .frame_count
+            .checked_add(1)
+            .ok_or(Error::Node("recovery witness frame count overflows"))?;
+        Ok(())
+    }
+
+    fn matches_range(&self, first: u64, last: u64) -> bool {
+        self.first_sequence == Some(first)
+            && self.last_sequence == Some(last)
+            && self.frame_count == last.saturating_sub(first).saturating_add(1)
+    }
+
+    fn finish(self) -> Result<SealedWitness> {
+        self.file.sync_all()?;
+        if self.first_sequence.is_none() || self.last_sequence.is_none() {
+            return Err(Error::Node("recovery witness is empty"));
+        }
+        Ok(SealedWitness {
+            path: self.path,
+            frame_count: self.frame_count,
+        })
+    }
+}
+
+struct SealedWitness {
+    path: tempfile::TempPath,
+    frame_count: u64,
+}
+
+impl SealedWitness {
+    fn reader(&self, limits: crab_ltx::Limits) -> Result<WitnessReader> {
+        Ok(WitnessReader {
+            file: File::open(&self.path)?,
+            limits,
+            remaining: self.frame_count,
+        })
+    }
+}
+
+/// Disk-backed sequence-to-digest table used to compare every reachable
+/// follower without retaining one digest map per recovered frame in memory.
+struct WitnessDigestWriter {
+    path: tempfile::TempPath,
+    file: File,
+    first_sequence: u64,
+    expected_frames: u64,
+    written_frames: u64,
+}
+
+struct SealedWitnessDigests {
+    _path: tempfile::TempPath,
+    file: File,
+    first_sequence: u64,
+    frame_count: u64,
+}
+
+impl WitnessDigestWriter {
+    fn new(directory: &Path, first_sequence: u64, expected_frames: u64) -> Result<Self> {
+        if expected_frames == 0 {
+            return Err(Error::Node("recovery witness digest range is empty"));
+        }
+        let temporary = tempfile::Builder::new()
+            .prefix(".crab-witness-digests-")
+            .tempfile_in(directory)?;
+        let path = temporary.into_temp_path();
+        let file = OpenOptions::new().append(true).open(&path)?;
+        Ok(Self {
+            path,
+            file,
+            first_sequence,
+            expected_frames,
+            written_frames: 0,
+        })
+    }
+
+    fn push(&mut self, sequence: u64, digest: [u8; 32]) -> Result<()> {
+        let expected = self
+            .first_sequence
+            .checked_add(self.written_frames)
+            .ok_or(Error::Node("recovery witness digest sequence overflow"))?;
+        if sequence != expected || self.written_frames == self.expected_frames {
+            return Err(Error::Node("recovery witness digest range differs"));
+        }
+        self.file.write_all(&sequence.to_le_bytes())?;
+        self.file.write_all(&digest)?;
+        self.written_frames = self
+            .written_frames
+            .checked_add(1)
+            .ok_or(Error::Node("recovery witness digest count overflow"))?;
+        Ok(())
+    }
+
+    fn finish(self) -> Result<SealedWitnessDigests> {
+        if self.written_frames != self.expected_frames {
+            return Err(Error::Node("recovery witness digest range is incomplete"));
+        }
+        self.file.sync_all()?;
+        drop(self.file);
+        let file = File::open(&self.path)?;
+        Ok(SealedWitnessDigests {
+            _path: self.path,
+            file,
+            first_sequence: self.first_sequence,
+            frame_count: self.written_frames,
+        })
+    }
+}
+
+impl SealedWitnessDigests {
+    fn matches(&mut self, sequence: u64, digest: [u8; 32]) -> Result<()> {
+        if sequence < self.first_sequence {
+            return Ok(());
+        }
+        let offset = sequence
+            .checked_sub(self.first_sequence)
+            .and_then(|index| index.checked_mul(WITNESS_DIGEST_RECORD_BYTES))
+            .ok_or(Error::Node("recovery witness digest offset overflow"))?;
+        if sequence
+            >= self
+                .first_sequence
+                .checked_add(self.frame_count)
+                .ok_or(Error::Node("recovery witness digest range overflow"))?
+        {
+            return Ok(());
+        }
+        self.file.seek(SeekFrom::Start(offset))?;
+        let mut record = [0_u8; WITNESS_DIGEST_RECORD_BYTES as usize];
+        self.file.read_exact(&mut record)?;
+        let stored_sequence = u64::from_le_bytes(
+            record[..8]
+                .try_into()
+                .map_err(|_| Error::Node("recovery witness digest record is invalid"))?,
+        );
+        if stored_sequence != sequence || record[8..] != digest {
+            return Err(Error::Node("follower witnesses disagree"));
+        }
+        Ok(())
+    }
+}
+
+struct WitnessReader {
+    file: File,
+    limits: crab_ltx::Limits,
+    remaining: u64,
+}
+
+impl Iterator for WitnessReader {
+    type Item = Result<crab_ltx::VerifiedNodeFrame>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let mut header = [0_u8; WITNESS_RECORD_HEADER_BYTES];
+        if let Err(error) = self.file.read_exact(&mut header) {
+            return Some(Err(error.into()));
+        }
+        let length = u64::from_le_bytes(header[..8].try_into().ok()?);
+        let max_encoded = self.limits.max_capture_bytes.saturating_add(240);
+        if length > max_encoded || length > usize::MAX as u64 {
+            return Some(Err(Error::Node("recovery witness frame exceeds limit")));
+        }
+        let mut encoded = vec![0_u8; length as usize];
+        if let Err(error) = self.file.read_exact(&mut encoded) {
+            return Some(Err(error.into()));
+        }
+        if *blake3::hash(&encoded).as_bytes() != header[8..] {
+            return Some(Err(Error::Node("recovery witness frame digest differs")));
+        }
+        self.remaining = self.remaining.saturating_sub(1);
+        Some(crab_ltx::inspect_node_frame(encoded.into(), self.limits).map_err(Into::into))
+    }
+}
+
+enum WitnessCollector {
+    Memory(Vec<crab_ltx::VerifiedNodeFrame>),
+    File(WitnessWriter),
+}
+
+enum WitnessMaterial {
+    Memory(Vec<crab_ltx::VerifiedNodeFrame>),
+    File(SealedWitness),
+}
+
+impl WitnessCollector {
+    fn file(directory: &Path) -> Result<Self> {
+        Ok(Self::File(WitnessWriter::new(directory)?))
+    }
+
+    fn push(&mut self, frames: Vec<crab_ltx::VerifiedNodeFrame>) -> Result<()> {
+        match self {
+            Self::Memory(existing) => existing.extend(frames),
+            Self::File(writer) => {
+                for frame in &frames {
+                    writer.push(frame)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn matches_range(&self, first: u64, last: u64) -> bool {
+        match self {
+            Self::Memory(frames) => {
+                frames.first().map(|frame| frame.scope().node_sequence) == Some(first)
+                    && frames.last().map(|frame| frame.scope().node_sequence) == Some(last)
+                    && frames.windows(2).all(|pair| {
+                        pair[0].scope().node_sequence.checked_add(1)
+                            == Some(pair[1].scope().node_sequence)
+                    })
+            }
+            Self::File(writer) => writer.matches_range(first, last),
+        }
+    }
+
+    fn finish(self) -> Result<WitnessMaterial> {
+        match self {
+            Self::Memory(frames) => Ok(WitnessMaterial::Memory(frames)),
+            Self::File(writer) => Ok(WitnessMaterial::File(writer.finish()?)),
+        }
+    }
+}
 
 /// Verified uncovered suffix gathered after every reachable follower is sealed.
 pub struct SealedSession {
@@ -22,9 +286,30 @@ pub struct SealedSession {
     pub tiered_through: u64,
     pub durable_through: u64,
     pub frames: Vec<crab_ltx::VerifiedNodeFrame>,
+    witness: Option<SealedWitness>,
     // Keep admission until the caller has pinned or discarded the recovered
     // bytes, not merely until their last network page arrives.
     _reservation: Option<crab_ltx::DiskReservation>,
+}
+
+impl SealedSession {
+    #[must_use]
+    pub fn frame_count(&self) -> u64 {
+        self.witness
+            .as_ref()
+            .map_or(self.frames.len() as u64, |witness| witness.frame_count)
+    }
+
+    /// Returns authenticated frame scopes without materializing frame bodies.
+    pub fn scopes(&self, limits: crab_ltx::Limits) -> Result<Vec<crab_ltx::NodeFrameScope>> {
+        if let Some(witness) = &self.witness {
+            return witness
+                .reader(limits)?
+                .map(|frame| frame.map(|frame| frame.scope()))
+                .collect();
+        }
+        Ok(self.frames.iter().map(|frame| frame.scope()).collect())
+    }
 }
 
 /// Mechanical seal-and-gather coordinator for one already claimed dead session.
@@ -41,6 +326,7 @@ pub struct NodeLogRecovery {
     active: bool,
     limits: crab_ltx::Limits,
     recovery_disk: crab_ltx::DiskBudget,
+    recovery_scratch: Option<PathBuf>,
 }
 
 /// One dead-session Cell control that may need a recovered tail attached.
@@ -105,6 +391,104 @@ pub async fn recoverable_cells(
     Ok(cells)
 }
 
+/// Loads only catalog entries whose authenticated node-frame scopes are present
+/// in a sealed witness. Each affected catalog shard is scanned once, then the
+/// exact current Cell control is revalidated before recovery may proceed.
+pub async fn recoverable_cells_from_frames(
+    catalog: &CellCatalog,
+    authority: &CellAuthority,
+    owner: SessionId,
+    frames: &[crab_ltx::VerifiedNodeFrame],
+    limit: usize,
+) -> Result<Vec<RecoveryCell>> {
+    let scopes = frames.iter().map(|frame| frame.scope()).collect::<Vec<_>>();
+    recoverable_cells_from_scopes(catalog, authority, owner, &scopes, limit).await
+}
+
+/// Loads only catalog entries named by authenticated witness scopes.
+pub async fn recoverable_cells_from_scopes(
+    catalog: &CellCatalog,
+    authority: &CellAuthority,
+    owner: SessionId,
+    frame_scopes: &[crab_ltx::NodeFrameScope],
+    limit: usize,
+) -> Result<Vec<RecoveryCell>> {
+    if owner.as_bytes().iter().all(|byte| *byte == 0) || limit == 0 {
+        return Err(Error::Node("node recovery inventory bound is invalid"));
+    }
+    type Scope = ([u8; 16], u64);
+    let mut scopes = BTreeMap::<[u8; 32], Scope>::new();
+    let application = *catalog.application().as_bytes();
+    for scope in frame_scopes {
+        if scope.leader_session != *owner.as_bytes() || scope.application != application {
+            return Err(Error::Node("recovery frame application or owner differs"));
+        }
+        let key = (scope.incarnation, scope.cell_epoch);
+        if let Some(existing) = scopes.get(&scope.cell) {
+            if *existing != key {
+                return Err(Error::Control(
+                    "recovery Cell scope has multiple generations",
+                ));
+            }
+        } else {
+            if scopes.len() == limit {
+                return Err(Error::Node(
+                    "node recovery Cell inventory exceeds its limit",
+                ));
+            }
+            scopes.insert(scope.cell, key);
+        }
+    }
+    if scopes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut needed = BTreeMap::<u8, Vec<[u8; 32]>>::new();
+    for cell in scopes.keys() {
+        needed.entry(cell[0]).or_default().push(*cell);
+    }
+    let mut entries = BTreeMap::<[u8; 32], CatalogProof>::new();
+    for (shard, cells) in needed {
+        let mut scan = catalog.scan_shard(shard).await?;
+        while let Some(page) = scan.next_page().await? {
+            for proof in page.entries() {
+                if cells.binary_search(proof.entry().cell().as_bytes()).is_ok() {
+                    entries.insert(*proof.entry().cell().as_bytes(), proof.clone());
+                }
+            }
+        }
+    }
+
+    let mut recovered = Vec::with_capacity(scopes.len());
+    for (cell_bytes, (incarnation, cell_epoch)) in scopes {
+        let cell = CellId::from_bytes(cell_bytes);
+        let proof = entries
+            .remove(&cell_bytes)
+            .ok_or(Error::Catalog("recovery frame Cell is not cataloged"))?;
+        if proof.entry().cell() != cell {
+            return Err(Error::Catalog("recovery catalog proof scope differs"));
+        }
+        let observed = authority
+            .load(cell)
+            .await?
+            .ok_or(Error::Control("recovery Cell control is missing"))?;
+        let control = observed.value();
+        if control.owner.as_ref().map(|current| current.session) != Some(owner)
+            || control.incarnation.as_bytes() != &incarnation
+            || control.epoch != cell_epoch
+            || control.ltx_root().is_none()
+        {
+            return Err(Error::Control("recovery Cell control scope differs"));
+        }
+        recovered.push(RecoveryCell {
+            application: catalog.application(),
+            authority: authority.clone(),
+            observed,
+        });
+    }
+    Ok(recovered)
+}
+
 impl RecoveryCoordinator {
     #[must_use]
     pub const fn new(recovery: NodeLogRecovery, manifests: RecoveryManifestStore) -> Self {
@@ -122,6 +506,20 @@ impl RecoveryCoordinator {
         &self,
         fenced: FencedNodeSession,
         cells: Vec<RecoveryCell>,
+    ) -> Result<Vec<VersionedControl>> {
+        self.recovery.validate_fence(&fenced)?;
+        let sealed = self.recovery.ensure_sealed().await?;
+        self.recover_sealed(fenced, cells, sealed).await
+    }
+
+    /// Attaches overlays from a witness that was already sealed by the caller.
+    /// Keeping the witness explicit lets orchestration derive affected Cells
+    /// from authenticated frame scopes before any catalog scan.
+    pub async fn recover_sealed(
+        &self,
+        fenced: FencedNodeSession,
+        cells: Vec<RecoveryCell>,
+        sealed: SealedSession,
     ) -> Result<Vec<VersionedControl>> {
         self.recovery.validate_fence(&fenced)?;
         let mut bases = Vec::with_capacity(cells.len());
@@ -146,11 +544,26 @@ impl RecoveryCoordinator {
             });
         }
 
-        let sealed = self.recovery.ensure_sealed().await?;
-        if sealed.frames.is_empty() {
+        if sealed.frame_count() == 0 {
             return Ok(Vec::new());
         }
-        let tails = build_recovery_overlays(sealed.frames, &bases, self.recovery.limits)?;
+        let scratch = self.manifests.recovery_scratch_directory();
+        let tails = if let Some(witness) = &sealed.witness {
+            let reader = witness.reader(self.recovery.limits)?;
+            build_recovery_overlays_file_backed_stream(
+                reader,
+                &bases,
+                self.recovery.limits,
+                &scratch,
+            )?
+        } else {
+            build_recovery_overlays_file_backed(
+                sealed.frames,
+                &bases,
+                self.recovery.limits,
+                &scratch,
+            )?
+        };
         if tails.is_empty() {
             return Ok(Vec::new());
         }
@@ -299,6 +712,7 @@ impl NodeLogRecovery {
             active,
             limits,
             recovery_disk: default_recovery_disk(limits),
+            recovery_scratch: None,
         })
     }
 
@@ -353,6 +767,12 @@ impl NodeLogRecovery {
         self
     }
 
+    /// Uses the runtime-owned session volume for the bounded witness file.
+    pub fn with_recovery_scratch(mut self, directory: PathBuf) -> Self {
+        self.recovery_scratch = Some(directory);
+        self
+    }
+
     fn validate_fence(&self, fenced: &FencedNodeSession) -> Result<()> {
         let log = fenced.log().ok_or(Error::Fenced)?;
         let claim = log.recovery().ok_or(Error::Fenced)?;
@@ -373,6 +793,16 @@ impl NodeLogRecovery {
 
     /// Seals all reachable members, rejects conflicts, and returns a complete witness.
     pub async fn ensure_sealed(&self) -> Result<SealedSession> {
+        self.ensure_sealed_with_mode(false).await
+    }
+
+    /// Seals all reachable members while retaining the selected witness on the
+    /// runtime scratch volume instead of the heap.
+    pub async fn ensure_sealed_bounded(&self) -> Result<SealedSession> {
+        self.ensure_sealed_with_mode(true).await
+    }
+
+    async fn ensure_sealed_with_mode(&self, bounded: bool) -> Result<SealedSession> {
         let receipts = join_all(self.members.iter().map(|member| {
             let transport = Arc::clone(&self.transport);
             let member = *member;
@@ -424,6 +854,7 @@ impl NodeLogRecovery {
                 tiered_through: self.tiered_through,
                 durable_through: self.tiered_through,
                 frames: Vec::new(),
+                witness: None,
                 _reservation: None,
             });
         }
@@ -432,162 +863,238 @@ impl NodeLogRecovery {
             .tiered_through
             .checked_add(1)
             .ok_or(Error::Node("node-log recovery sequence overflow"))?;
-        let reservation = self
-            .recovery_disk
-            .try_reserve(recovery_tail_reservation_bytes(self.limits))?;
-        let mut observed = BTreeMap::new();
-        let mut selected = None;
-        for (member, receipt) in receipts {
-            let Ok(receipt) = receipt else {
-                continue;
+        let scratch = self
+            .recovery_scratch
+            .clone()
+            .unwrap_or_else(std::env::temp_dir);
+        let expected_frames = durable_through
+            .checked_sub(required_first)
+            .and_then(|count| count.checked_add(1))
+            .ok_or(Error::Node("node-log recovery frame range overflows"))?;
+        let digest_bytes = expected_frames
+            .checked_mul(WITNESS_DIGEST_RECORD_BYTES)
+            .ok_or(Error::Capacity("recovery witness digest table"))?;
+        let digest_reservation = self.recovery_disk.try_reserve(digest_bytes)?;
+        let mut candidates = receipts
+            .iter()
+            .filter_map(|(member, receipt)| {
+                let receipt = receipt.as_ref().ok()?;
+                (receipt.durable_through == durable_through
+                    && receipt.base_sequence <= required_first)
+                    .then_some((*member, *receipt))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_unstable_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+
+        for (candidate_member, candidate_receipt) in candidates {
+            let candidate_reservation = self.recovery_disk.try_reserve(0)?;
+            let mut collector = if bounded {
+                WitnessCollector::file(&scratch)?
+            } else {
+                WitnessCollector::Memory(Vec::new())
             };
-            if receipt.durable_through < required_first {
-                continue;
-            }
-            let first = required_first.max(receipt.base_sequence);
-            if first > receipt.durable_through {
-                continue;
-            }
-            let retain = selected.is_none()
-                && first == required_first
-                && receipt.durable_through == durable_through;
-            let mut first_sequence = first;
-            let mut frames = Vec::new();
-            let mut tail_bytes = 0_u64;
-            let complete;
-            loop {
-                let Ok(page) = self
-                    .transport
-                    .tail_page(
-                        member,
-                        TailRequest {
-                            leader_session: self.leader_session,
-                            log_epoch: self.log_epoch,
-                            first_sequence,
-                        },
-                    )
-                    .await
-                else {
-                    complete = false;
-                    break;
-                };
-                if page.frames.is_empty() {
-                    complete = false;
-                    break;
-                }
-                let page_count = page.frames.len();
-                if page_count > MAX_RECOVERY_PAGE_FRAMES {
-                    complete = false;
-                    break;
-                }
-                let Ok(verified) = page
-                    .frames
-                    .into_iter()
-                    .map(|bytes| crab_ltx::inspect_node_frame(bytes, self.limits))
-                    .collect::<crab_ltx::Result<Vec<_>>>()
-                else {
-                    complete = false;
-                    break;
-                };
-                // A valid frame digest proves its bytes, not that it belongs to
-                // the claimed failed session. Bind every page to that lane and
-                // the sealed range before retaining it as recovery evidence.
-                if verified.iter().enumerate().any(|(offset, frame)| {
-                    let scope = frame.scope();
-                    scope.leader_session != *self.leader_session.as_bytes()
-                        || scope.log_epoch != self.log_epoch
-                        || first_sequence.checked_add(offset as u64) != Some(scope.node_sequence)
-                        || scope.node_sequence > receipt.durable_through
-                }) {
-                    complete = false;
-                    break;
-                }
-                let page_bytes = verified.iter().try_fold(0_u64, |bytes, frame| {
-                    bytes.checked_add(frame.encoded().len() as u64)
-                });
-                let Some(page_bytes) = page_bytes else {
-                    complete = false;
-                    break;
-                };
-                let page_limit = if page_count == 1 {
-                    // A single LTX frame may exceed the network page target;
-                    // keep the same bounded-one-frame exception as FollowerStore.
-                    MAX_RECOVERY_PAGE_BYTES.saturating_add(self.limits.max_capture_bytes)
-                } else {
-                    MAX_RECOVERY_PAGE_BYTES
-                };
-                if page_bytes > page_limit {
-                    complete = false;
-                    break;
-                }
-                tail_bytes = match tail_bytes.checked_add(page_bytes) {
-                    Some(bytes) if bytes <= recovery_tail_reservation_bytes(self.limits) => bytes,
-                    _ => {
-                        complete = false;
-                        break;
-                    }
-                };
-                // A shorter or partially readable follower may still expose
-                // a conflicting valid frame. Never choose a witness by order
-                // while silently ignoring that evidence from another member.
-                for frame in &verified {
-                    let digest = frame.digest();
-                    if observed
-                        .insert(frame.scope().node_sequence, digest)
-                        .is_some_and(|previous| previous != digest)
-                    {
-                        return Err(Error::Node("follower witnesses disagree"));
-                    }
-                }
-                let last_sequence = verified.last().map(|frame| frame.scope().node_sequence);
-                if retain {
-                    frames.extend(verified);
-                }
-                let Some(next_sequence) = page.next_sequence else {
-                    complete = last_sequence == Some(receipt.durable_through);
-                    break;
-                };
-                let Ok(page_count) = u64::try_from(page_count) else {
-                    complete = false;
-                    break;
-                };
-                let Some(expected_next) = first_sequence.checked_add(page_count) else {
-                    complete = false;
-                    break;
-                };
-                if next_sequence != expected_next || next_sequence > receipt.durable_through {
-                    complete = false;
-                    break;
-                }
-                first_sequence = next_sequence;
-            }
-            if !complete || !retain {
-                continue;
-            }
-            if frames.first().map(|frame| frame.scope().node_sequence) != Some(required_first)
-                || frames.last().map(|frame| frame.scope().node_sequence) != Some(durable_through)
-                || !frames.windows(2).all(|pair| {
-                    pair[0].scope().node_sequence.checked_add(1)
-                        == Some(pair[1].scope().node_sequence)
-                })
+            let mut digest_writer =
+                WitnessDigestWriter::new(&scratch, required_first, expected_frames)?;
+            if !collect_member_tail(
+                candidate_member,
+                candidate_receipt,
+                TailReadContext {
+                    transport: self.transport.as_ref(),
+                    leader_session: self.leader_session,
+                    log_epoch: self.log_epoch,
+                    required_first,
+                    limits: self.limits,
+                    reservation: Some(&candidate_reservation),
+                },
+                TailSinks {
+                    collector: Some(&mut collector),
+                    digests: Some(&mut digest_writer),
+                    compare: None,
+                },
+            )
+            .await?
             {
                 continue;
             }
-            selected = Some(frames);
-        }
-        if let Some(frames) = selected {
+            if !collector.matches_range(required_first, durable_through) {
+                continue;
+            }
+            let mut digests = digest_writer.finish()?;
+            for (member, receipt) in &receipts {
+                if *member == candidate_member {
+                    continue;
+                }
+                let Ok(receipt) = receipt else {
+                    continue;
+                };
+                if !collect_member_tail(
+                    *member,
+                    *receipt,
+                    TailReadContext {
+                        transport: self.transport.as_ref(),
+                        leader_session: self.leader_session,
+                        log_epoch: self.log_epoch,
+                        required_first,
+                        limits: self.limits,
+                        reservation: None,
+                    },
+                    TailSinks {
+                        collector: None,
+                        digests: None,
+                        compare: Some(&mut digests),
+                    },
+                )
+                .await?
+                {
+                    continue;
+                }
+            }
+            drop(digest_reservation);
+            let selected = collector.finish()?;
+            let (frames, witness) = match selected {
+                WitnessMaterial::Memory(frames) => (frames, None),
+                WitnessMaterial::File(witness) => (Vec::new(), Some(witness)),
+            };
             return Ok(SealedSession {
                 leader_session: self.leader_session,
                 log_epoch: self.log_epoch,
                 tiered_through: self.tiered_through,
                 durable_through,
                 frames,
-                _reservation: Some(reservation),
+                witness,
+                _reservation: Some(candidate_reservation),
             });
         }
+        drop(digest_reservation);
         Err(Error::Node(
             "active node log has no complete follower witness",
         ))
+    }
+}
+
+/// Streams one follower tail through the common page/framing checks. A
+/// transport or malformed-page failure returns `false` so another complete
+/// witness may be tried; digest disagreement remains a hard recovery error.
+struct TailReadContext<'a> {
+    transport: &'a dyn NodeLogTransport,
+    leader_session: SessionId,
+    log_epoch: u64,
+    required_first: u64,
+    limits: crab_ltx::Limits,
+    reservation: Option<&'a crab_ltx::DiskReservation>,
+}
+
+struct TailSinks<'a> {
+    collector: Option<&'a mut WitnessCollector>,
+    digests: Option<&'a mut WitnessDigestWriter>,
+    compare: Option<&'a mut SealedWitnessDigests>,
+}
+
+async fn collect_member_tail(
+    member: NodeId,
+    receipt: FollowerReceipt,
+    context: TailReadContext<'_>,
+    mut sinks: TailSinks<'_>,
+) -> Result<bool> {
+    let TailReadContext {
+        transport,
+        leader_session,
+        log_epoch,
+        required_first,
+        limits,
+        reservation,
+    } = context;
+    if receipt.durable_through < required_first {
+        return Ok(false);
+    }
+    let mut first_sequence = required_first.max(receipt.base_sequence);
+    if first_sequence > receipt.durable_through {
+        return Ok(false);
+    }
+    let mut tail_bytes = 0_u64;
+    loop {
+        let page = match transport
+            .tail_page(
+                member,
+                TailRequest {
+                    leader_session,
+                    log_epoch,
+                    first_sequence,
+                },
+            )
+            .await
+        {
+            Ok(page) => page,
+            Err(_) => return Ok(false),
+        };
+        if page.frames.is_empty() || page.frames.len() > MAX_RECOVERY_PAGE_FRAMES {
+            return Ok(false);
+        }
+        let page_count = page.frames.len();
+        let verified = match page
+            .frames
+            .into_iter()
+            .map(|bytes| crab_ltx::inspect_node_frame(bytes, limits))
+            .collect::<crab_ltx::Result<Vec<_>>>()
+        {
+            Ok(verified) => verified,
+            Err(_) => return Ok(false),
+        };
+        if verified.iter().enumerate().any(|(offset, frame)| {
+            let scope = frame.scope();
+            scope.leader_session != *leader_session.as_bytes()
+                || scope.log_epoch != log_epoch
+                || first_sequence.checked_add(offset as u64) != Some(scope.node_sequence)
+                || scope.node_sequence > receipt.durable_through
+        }) {
+            return Ok(false);
+        }
+        let Some(page_bytes) = verified.iter().try_fold(0_u64, |bytes, frame| {
+            bytes.checked_add(frame.encoded().len() as u64)
+        }) else {
+            return Ok(false);
+        };
+        let page_limit = if page_count == 1 {
+            MAX_RECOVERY_PAGE_BYTES.saturating_add(limits.max_capture_bytes)
+        } else {
+            MAX_RECOVERY_PAGE_BYTES
+        };
+        if page_bytes > page_limit {
+            return Ok(false);
+        }
+        tail_bytes = match tail_bytes.checked_add(page_bytes) {
+            Some(bytes) if bytes <= recovery_tail_reservation_bytes(limits) => bytes,
+            _ => return Ok(false),
+        };
+        if let Some(reservation) = reservation {
+            reservation.try_grow(page_bytes)?;
+        }
+        for frame in &verified {
+            let sequence = frame.scope().node_sequence;
+            let digest = frame.digest();
+            if let Some(writer) = sinks.digests.as_mut() {
+                writer.push(sequence, digest)?;
+            }
+            if let Some(table) = sinks.compare.as_mut() {
+                table.matches(sequence, digest)?;
+            }
+        }
+        let last_sequence = verified.last().map(|frame| frame.scope().node_sequence);
+        if let Some(output) = sinks.collector.as_mut() {
+            output.push(verified)?;
+        }
+        let Some(next_sequence) = page.next_sequence else {
+            return Ok(last_sequence == Some(receipt.durable_through));
+        };
+        let page_count = u64::try_from(page_count)
+            .map_err(|_| Error::Node("recovery page frame count overflows"))?;
+        let expected_next = first_sequence
+            .checked_add(page_count)
+            .ok_or(Error::Node("recovery page sequence overflows"))?;
+        if next_sequence != expected_next || next_sequence > receipt.durable_through {
+            return Ok(false);
+        }
+        first_sequence = next_sequence;
     }
 }
 
@@ -854,7 +1361,7 @@ mod tests {
         assert!(rejected.ensure_sealed().await.is_err());
         let budget = crab_ltx::DiskBudget::new(1 << 30);
         let recovery = NodeLogRecovery::new(
-            transport,
+            Arc::clone(&transport),
             NodeId::from_bytes([1; 16]),
             leader,
             3,
@@ -871,6 +1378,26 @@ mod tests {
         assert!(budget.used() > 0);
         drop(sealed);
         assert_eq!(budget.used(), 0);
+        let scratch = tempfile::TempDir::new().unwrap();
+        let bounded = NodeLogRecovery::new(
+            Arc::clone(&transport),
+            NodeId::from_bytes([1; 16]),
+            leader,
+            3,
+            vec![member],
+            0,
+            true,
+            limits,
+        )
+        .unwrap()
+        .with_recovery_disk(crab_ltx::DiskBudget::new(1 << 30))
+        .with_recovery_scratch(scratch.path().to_owned());
+        let sealed = bounded.ensure_sealed_bounded().await.unwrap();
+        assert!(sealed.frames.is_empty());
+        assert_eq!(sealed.frame_count(), 1);
+        assert_eq!(sealed.scopes(limits).unwrap().len(), 1);
+        drop(sealed);
+        assert!(scratch.path().read_dir().unwrap().next().is_none());
         database.close().unwrap();
     }
 

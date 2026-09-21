@@ -33,7 +33,7 @@ x-server-service: &server-service
 
 services:
   rustfs:
-    image: ${RUSTFS_IMAGE:-rustfs/rustfs:1.0.0-beta.8-glibc@sha256:040304b66e029a5cde4bed140b41513e925909839a9b912a40a98340610d1f66}
+    image: ${RUSTFS_IMAGE:-ghcr.io/rustfs/rustfs:1.0.0-beta.8-glibc@sha256:040304b66e029a5cde4bed140b41513e925909839a9b912a40a98340610d1f66}
     environment:
       RUSTFS_ACCESS_KEY: crab-local-access
       RUSTFS_SECRET_KEY: crab-local-secret-key
@@ -77,7 +77,7 @@ services:
     restart: "no"
 
   peer-pki-init:
-    image: ${RUSTFS_IMAGE:-rustfs/rustfs:1.0.0-beta.8-glibc@sha256:040304b66e029a5cde4bed140b41513e925909839a9b912a40a98340610d1f66}
+    image: ${RUSTFS_IMAGE:-ghcr.io/rustfs/rustfs:1.0.0-beta.8-glibc@sha256:040304b66e029a5cde4bed140b41513e925909839a9b912a40a98340610d1f66}
     user: "0:0"
     entrypoint: ["/bin/sh", "-ec"]
     command:
@@ -192,7 +192,7 @@ services:
     restart: unless-stopped
 
   metrics-probe:
-    image: ${RUSTFS_IMAGE:-rustfs/rustfs:1.0.0-beta.8-glibc@sha256:040304b66e029a5cde4bed140b41513e925909839a9b912a40a98340610d1f66}
+    image: ${RUSTFS_IMAGE:-ghcr.io/rustfs/rustfs:1.0.0-beta.8-glibc@sha256:040304b66e029a5cde4bed140b41513e925909839a9b912a40a98340610d1f66}
     network_mode: service:server
     user: "10001:10001"
     entrypoint: ["curl"]

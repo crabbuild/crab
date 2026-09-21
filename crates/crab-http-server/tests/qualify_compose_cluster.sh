@@ -4,6 +4,7 @@ set +x
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 crate_dir="$(cd "${script_dir}/.." && pwd)"
+repo_root="$(cd "${crate_dir}/../.." && pwd)"
 compose_file="${crate_dir}/deploy/compose.yaml"
 cluster_file="${crate_dir}/deploy/compose.cluster.yaml"
 project="${CRAB_HTTP_CLUSTER_PROJECT:-crab-http-cluster-qualification-$$}"
@@ -48,6 +49,26 @@ node_b_origin="http://127.0.0.1:${CRAB_HTTP_NODE_B_PORT}"
 node_c_origin="http://127.0.0.1:${CRAB_HTTP_NODE_C_PORT}"
 repository_path="api/repos/demo/hello"
 failed=false
+source_revision="$(git -C "$repo_root" rev-parse --verify HEAD)"
+qualified_image_ref="${CRAB_HTTP_QUALIFIED_IMAGE_REF:-source-only}"
+qualified_image_digest="${CRAB_HTTP_QUALIFIED_IMAGE_DIGEST:-$(docker image inspect \
+  "${CRAB_HTTP_SERVER_IMAGE:-crab-http-server:local}" --format '{{.Id}}')}"
+if [[ ! "$source_revision" =~ ^[0-9a-f]{40}$ ]] ||
+  [[ ! "$qualified_image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "qualification requires a Git source revision and image digest." >&2
+  exit 2
+fi
+
+unix_millis() {
+  local seconds fractional
+  seconds="$(date +%s)"
+  fractional="$(date +%N 2>/dev/null || true)"
+  if [[ "$fractional" =~ ^[0-9]{9}$ ]]; then
+    printf '%s\n' "$((seconds * 1000 + 10#${fractional:0:3}))"
+  else
+    printf '%s\n' "$((seconds * 1000))"
+  fi
+}
 
 cleanup() {
   result=$?
@@ -326,6 +347,7 @@ awk '$1 == "crab_cell_node_log_uncovered_bytes" && $2 + 0 > 0 { found = 1 }
 awk '$1 == "crab_cell_follower_retained_bytes" && $2 + 0 > 0 { found = 1 }
      END { exit !found }' <<<"$metrics_follower_fleet_only"
 
+owner_killed_ms="$(unix_millis)"
 "${compose[@]}" kill --signal KILL server-b >/dev/null
 "${compose[@]}" rm --force --stop server-b >/dev/null
 "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
@@ -338,6 +360,7 @@ for _ in $(seq 1 45); do
     --session "$session_before" --json)"
   if jq --exit-status '.live == false' <<<"$node_status" >/dev/null; then
     advertisement_expired=true
+    advertisement_expired_ms="$(unix_millis)"
     break
   fi
   sleep 1
@@ -395,6 +418,13 @@ if [ -z "$control_after" ]; then
   echo "Node C did not publish a serving status after owner takeover." >&2
   exit 1
 fi
+recovery_sealed_ms="$(unix_millis)"
+first_served_check="$(curl --fail-with-body --silent --show-error \
+  "${node_c_origin}/${repository_path}/issues?state=all")"
+jq --exit-status \
+  '.items | length == 1 and .[0].title == "Owner loss qualification"' \
+  <<<"$first_served_check" >/dev/null
+first_served_ms="$(unix_millis)"
 session_after="$(jq --raw-output '.owner.session' <<<"$control_after")"
 epoch_after="$(jq --raw-output '.epoch' <<<"$control_after")"
 root_after_state="$(jq --compact-output '.root' <<<"$control_after")"
@@ -540,11 +570,29 @@ control_before_second_loss="$("${compose[@]}" exec -T server-c crab-http-server 
   --config /etc/crab/server.toml cells status --owner demo --name hello)"
 root_before_second_loss="$(jq --compact-output '.root' <<<"$control_before_second_loss")"
 
+second_owner_killed_ms="$(unix_millis)"
 "${compose[@]}" kill --signal KILL server-c >/dev/null
 "${compose[@]}" rm --force --stop server-c >/dev/null
 "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
   --endpoint-url http://rustfs:9000 s3api delete-bucket-policy \
   --bucket crab-http-server >/dev/null
+
+second_advertisement_expired=false
+for _ in $(seq 1 60); do
+  node_status="$("${compose[@]}" exec -T server-b crab-http-server \
+    --config /etc/crab/server.toml cells node \
+    --session "$session_after" --json 2>/dev/null || true)"
+  if jq --exit-status '.live == false' <<<"$node_status" >/dev/null 2>&1; then
+    second_advertisement_expired=true
+    second_advertisement_expired_ms="$(unix_millis)"
+    break
+  fi
+  sleep 1
+done
+if ! $second_advertisement_expired; then
+  echo "The second killed owner's signed advertisement did not expire." >&2
+  exit 1
+fi
 
 second_restored_labels=""
 for _ in $(seq 1 60); do
@@ -588,6 +636,11 @@ if [ -z "$control_after_second_loss" ]; then
   echo "Node B did not publish a serving status after the second owner loss." >&2
   exit 1
 fi
+second_recovery_sealed_ms="$(unix_millis)"
+second_first_served_check="$(curl --fail-with-body --silent --show-error \
+  "${node_b_origin}/${repository_path}/issues?state=all")"
+jq --exit-status '.items | length == 3' <<<"$second_first_served_check" >/dev/null
+second_first_served_ms="$(unix_millis)"
 session_after_second_loss="$(jq --raw-output '.owner.session' \
   <<<"$control_after_second_loss")"
 epoch_after_second_loss="$(jq --raw-output '.epoch' \
@@ -596,8 +649,15 @@ root_after_second_loss="$(jq --compact-output '.root' \
   <<<"$control_after_second_loss")"
 jq --null-input \
   --arg project "$project" \
+  --arg source_revision "$source_revision" \
+  --arg qualified_image_ref "$qualified_image_ref" \
+  --arg qualified_image_digest "$qualified_image_digest" \
   --arg session_before "$session_before" \
   --arg session_after "$session_after" \
+  --argjson owner_killed_ms "$owner_killed_ms" \
+  --argjson advertisement_expired_ms "$advertisement_expired_ms" \
+  --argjson recovery_sealed_ms "$recovery_sealed_ms" \
+  --argjson first_served_ms "$first_served_ms" \
   --argjson root_before "$root_before_state" \
   --argjson root_after_restore "$root_after_state" \
   --argjson root_continued "$root_continued_state" \
@@ -632,17 +692,32 @@ jq --null-input \
   --argjson replacement_fleet_response "$replacement_fleet_response" \
   --argjson second_restored_labels "$second_restored_labels" \
   --arg session_after_second_loss "$session_after_second_loss" \
+  --argjson second_owner_killed_ms "$second_owner_killed_ms" \
+  --argjson second_advertisement_expired_ms "$second_advertisement_expired_ms" \
+  --argjson second_recovery_sealed_ms "$second_recovery_sealed_ms" \
+  --argjson second_first_served_ms "$second_first_served_ms" \
   --argjson epoch_after_second_loss "$epoch_after_second_loss" \
   --argjson root_before_second_loss "$root_before_second_loss" \
   --argjson root_after_second_loss "$root_after_second_loss" \
   '{
-    version: 5,
+    version: 6,
+    source_revision: $source_revision,
+    image: {
+      reference: $qualified_image_ref,
+      digest: $qualified_image_digest
+    },
     project: $project,
     owner_loss: {
       session_before: $session_before,
       session_after: $session_after,
       epoch_before: $epoch_before,
       epoch_after: $epoch_after,
+      timing: {
+        owner_killed_ms: $owner_killed_ms,
+        advertisement_expired_ms: $advertisement_expired_ms,
+        recovery_sealed_ms: $recovery_sealed_ms,
+        first_served_ms: $first_served_ms
+      },
       root_before: $root_before,
       root_after_restore: $root_after_restore,
       root_continued: $root_continued
@@ -669,6 +744,12 @@ jq --null-input \
       session_after: $session_after_second_loss,
       epoch_before: $epoch_after,
       epoch_after: $epoch_after_second_loss,
+      timing: {
+        owner_killed_ms: $second_owner_killed_ms,
+        advertisement_expired_ms: $second_advertisement_expired_ms,
+        recovery_sealed_ms: $second_recovery_sealed_ms,
+        first_served_ms: $second_first_served_ms
+      },
       root_before: $root_before_second_loss,
       root_after: $root_after_second_loss,
       restored_labels: $second_restored_labels

@@ -30,6 +30,7 @@ pub(crate) mod repository;
 mod router;
 mod scheduler;
 
+pub(crate) use crab_cell_runtime::RecoveryArtifactRegistry;
 #[cfg(test)]
 pub(crate) use initializer::initialize_repository_at;
 #[cfg(test)]

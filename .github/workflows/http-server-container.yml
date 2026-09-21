@@ -7,6 +7,14 @@ on:
         description: "Exact Git ref or commit to qualify"
         required: false
         type: string
+      image_ref:
+        description: "Immutable server image reference to qualify; empty builds the checked-out source"
+        required: false
+        type: string
+      image_digest:
+        description: "Expected digest for image_ref"
+        required: false
+        type: string
   pull_request:
     paths:
       - ".dockerignore"
@@ -20,6 +28,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 concurrency:
   group: http-server-container-${{ github.event.pull_request.number || github.ref }}
@@ -683,12 +692,51 @@ jobs:
                 "${terraform_image}" test
             fi
           done
-      - name: Build locked server image
-        run: >-
-          docker build
-          --file crates/crab-http-server/deploy/Dockerfile
-          --tag crab-http-server:test
-          .
+      - name: Sign in to GitHub Container Registry for an imported image
+        if: ${{ inputs.image_ref != '' }}
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build or import locked server image
+        id: image
+        env:
+          INPUT_IMAGE_DIGEST: ${{ inputs.image_digest }}
+          INPUT_IMAGE_REF: ${{ inputs.image_ref }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$INPUT_IMAGE_REF" ]; then
+            if [[ ! "$INPUT_IMAGE_REF" =~ ^ghcr\.io/[^@]+@sha256:[0-9a-f]{64}$ ]]; then
+              echo "image_ref must be an immutable GitHub Container Registry sha256 reference." >&2
+              exit 1
+            fi
+            if [[ ! "$INPUT_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "image_digest must be a sha256 digest when image_ref is set." >&2
+              exit 1
+            fi
+            ref_digest="${INPUT_IMAGE_REF##*@}"
+            test "$ref_digest" = "$INPUT_IMAGE_DIGEST"
+            docker pull "$INPUT_IMAGE_REF"
+            docker image inspect "$INPUT_IMAGE_REF" --format '{{json .RepoDigests}}' \
+              | jq --exit-status --arg digest "$INPUT_IMAGE_DIGEST" \
+                'any(.[]; endswith("@" + $digest))' >/dev/null
+            docker tag "$INPUT_IMAGE_REF" crab-http-server:test
+            digest="$INPUT_IMAGE_DIGEST"
+          else
+            if [ -n "$INPUT_IMAGE_DIGEST" ]; then
+              echo "image_digest requires image_ref." >&2
+              exit 1
+            fi
+            docker build \
+              --file crates/crab-http-server/deploy/Dockerfile \
+              --tag crab-http-server:test \
+              .
+            digest="$(docker image inspect crab-http-server:test --format '{{.Id}}')"
+          fi
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
       - name: Reject fixable high-severity image vulnerabilities
         run: >-
           docker run --rm
@@ -721,6 +769,8 @@ jobs:
       - name: Exercise Compose startup, restore, crash recovery, and restart
         env:
           CRAB_HTTP_SERVER_IMAGE: crab-http-server:test
+          CRAB_HTTP_QUALIFIED_IMAGE_REF: ${{ inputs.image_ref || 'source-only' }}
+          CRAB_HTTP_QUALIFIED_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           cleanup() {
             result=$?
@@ -821,9 +871,16 @@ jobs:
             crates/crab-http-server/tests/qualify_compose_cluster.sh \
             > "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json"
           jq --exit-status \
-            '.version == 5 and
+            '.version == 6 and
              .owner_loss.session_before != .owner_loss.session_after and
              .owner_loss.epoch_after > .owner_loss.epoch_before and
+             .owner_loss.timing.owner_killed_ms > 0 and
+             .owner_loss.timing.owner_killed_ms <=
+               .owner_loss.timing.advertisement_expired_ms and
+             .owner_loss.timing.advertisement_expired_ms <=
+               .owner_loss.timing.recovery_sealed_ms and
+             .owner_loss.timing.recovery_sealed_ms <=
+               .owner_loss.timing.first_served_ms and
              (.owner_loss.root_before | keys | sort) ==
                ["checksum", "commit_sequence", "digest", "txid"] and
              (.owner_loss.root_before.digest | test("^[0-9a-f]{64}$")) and
@@ -858,6 +915,13 @@ jobs:
              .follower_replacement.fleet_only_response.id == 2 and
              .second_owner_loss.session_before != .second_owner_loss.session_after and
              .second_owner_loss.epoch_after > .second_owner_loss.epoch_before and
+             .second_owner_loss.timing.owner_killed_ms > 0 and
+             .second_owner_loss.timing.owner_killed_ms <=
+               .second_owner_loss.timing.advertisement_expired_ms and
+             .second_owner_loss.timing.advertisement_expired_ms <=
+               .second_owner_loss.timing.recovery_sealed_ms and
+             .second_owner_loss.timing.recovery_sealed_ms <=
+               .second_owner_loss.timing.first_served_ms and
              (.second_owner_loss.root_before | keys | sort) ==
                ["checksum", "commit_sequence", "digest", "txid"] and
              (.second_owner_loss.root_after | keys | sort) ==
@@ -877,10 +941,11 @@ jobs:
           cp "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json" \
             "$evidence_dir/cluster-receipt.json"
           git rev-parse HEAD > "$evidence_dir/source-revision"
+          printf '%s\n' '${{ steps.image.outputs.digest }}' > "$evidence_dir/image-digest"
           sha256sum "$evidence_dir/cluster-receipt.json" > "$evidence_dir/artifact.sha256"
           jq --exit-status \
             --arg source "$(cat "$evidence_dir/source-revision")" \
-            '.version == 5 and ($source | length == 40)' \
+            '.version == 6 and ($source | length == 40)' \
             "$evidence_dir/cluster-receipt.json" >/dev/null
       - name: Upload exact-source qualification evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

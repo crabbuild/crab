@@ -27,6 +27,7 @@ const NODE_LOG_LANE_STATE_COUNT: usize = 3;
 const SELF_FENCE_REASON_COUNT: usize = 4;
 const RECOVERY_STATE_COUNT: usize = 2;
 const RECOVERY_FAILURE_REASON_COUNT: usize = 4;
+const RECOVERY_PHASE_COUNT: usize = 5;
 const NODE_LOG_ROTATION_RESULT_COUNT: usize = 4;
 const LTX_PHASE_COUNT: usize = 18;
 const LTX_READ_ORIGIN_COUNT: usize = 4;
@@ -79,6 +80,8 @@ const SELF_FENCE_REASON_LABELS: [&str; SELF_FENCE_REASON_COUNT] =
 const RECOVERY_STATE_LABELS: [&str; RECOVERY_STATE_COUNT] = ["running", "waiting"];
 const RECOVERY_FAILURE_REASON_LABELS: [&str; RECOVERY_FAILURE_REASON_COUNT] =
     ["storage", "capacity", "fenced", "other"];
+const RECOVERY_PHASE_LABELS: [&str; RECOVERY_PHASE_COUNT] =
+    ["claim", "witness", "scope_validation", "pin_attach", "seal"];
 const NODE_LOG_ROTATION_RESULT_LABELS: [&str; NODE_LOG_ROTATION_RESULT_COUNT] =
     ["started", "pending", "failed", "completed"];
 const PROJECTION_PROBE_RESULT_LABELS: [&str; PROJECTION_PROBE_RESULT_COUNT] =
@@ -170,6 +173,7 @@ struct MetricsInner {
     self_fences: [Counter; SELF_FENCE_REASON_COUNT],
     node_log_recoveries: [Gauge; RECOVERY_STATE_COUNT],
     node_log_recovery_seconds: Histogram,
+    node_log_recovery_phase_seconds: [Histogram; RECOVERY_PHASE_COUNT],
     node_log_recovery_failures: [Counter; RECOVERY_FAILURE_REASON_COUNT],
     node_log_rotations: [Counter; NODE_LOG_ROTATION_RESULT_COUNT],
     catalog_refresh_failures: Counter,
@@ -592,6 +596,15 @@ impl Metrics {
                     &Key::from_static_name("crab_cell_node_log_recovery_seconds"),
                     &METADATA,
                 ),
+                node_log_recovery_phase_seconds: RECOVERY_PHASE_LABELS.map(|phase| {
+                    recorder.register_histogram(
+                        &key(
+                            "crab_cell_node_log_recovery_phase_seconds",
+                            &[("phase", phase)],
+                        ),
+                        &METADATA,
+                    )
+                }),
                 node_log_recovery_failures: RECOVERY_FAILURE_REASON_LABELS.map(|reason| {
                     recorder.register_counter(
                         &key(
@@ -1101,6 +1114,15 @@ pub(crate) enum RecoveryFailureReason {
     Other,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum RecoveryPhase {
+    Claim = 0,
+    Witness = 1,
+    ScopeValidation = 2,
+    PinAttach = 3,
+    Seal = 4,
+}
+
 impl Metrics {
     pub(crate) fn update_node_log(
         &self,
@@ -1170,6 +1192,10 @@ impl Metrics {
             };
             self.inner.node_log_recovery_failures[index].increment(1);
         }
+    }
+
+    pub(crate) fn record_recovery_phase(&self, phase: RecoveryPhase, elapsed: Duration) {
+        self.inner.node_log_recovery_phase_seconds[phase as usize].record(elapsed.as_secs_f64());
     }
 
     pub(crate) fn record_node_log_rotation(&self, result: NodeLogRotationResult) {
@@ -1722,6 +1748,13 @@ fn describe_metrics(recorder: &impl Recorder) {
         Some(Unit::Seconds),
         "Node-log recovery duration from claim to sealed witness.".into(),
     );
+    for phase in RECOVERY_PHASE_LABELS {
+        recorder.describe_histogram(
+            KeyName::from_const_str("crab_cell_node_log_recovery_phase_seconds"),
+            Some(Unit::Seconds),
+            format!("Node-log recovery duration for the {phase} phase.").into(),
+        );
+    }
     describe_counter(
         recorder,
         "crab_cell_node_log_recovery_failures_total",
@@ -2009,6 +2042,7 @@ mod tests {
             Duration::from_millis(75),
             Some(RecoveryFailureReason::Storage),
         );
+        metrics.record_recovery_phase(RecoveryPhase::Witness, Duration::from_millis(20));
         metrics.record_node_log_rotation(NodeLogRotationResult::Started);
         metrics.record_node_log_rotation(NodeLogRotationResult::Pending);
         metrics.record_node_log_rotation(NodeLogRotationResult::Failed);
@@ -2055,6 +2089,10 @@ mod tests {
         assert!(rendered.contains("crab_http_server_cell_runtime_local_disk_capacity_bytes 8192"));
         assert!(rendered.contains("crab_cell_node_log_uncovered_bytes 128"));
         assert!(rendered.contains("crab_cell_follower_retained_bytes 256"));
+        assert!(
+            rendered
+                .contains("crab_cell_node_log_recovery_phase_seconds_count{phase=\"witness\"} 1")
+        );
         assert!(rendered.contains("crab_cell_durability_proofs_total{source=\"fleet\"} 1"));
         assert!(rendered.contains("crab_cell_durability_proofs_total{source=\"object\"} 1"));
         assert!(rendered.contains("crab_cell_node_log_append_bytes_total{result=\"acked\"} 512"));

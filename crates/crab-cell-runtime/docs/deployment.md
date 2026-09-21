@@ -10,10 +10,12 @@ Run one `crab-http-server` process per Kubernetes Pod or virtual machine. Nodes 
 
 [Back to the Cell runtime index](README.md)
 
-The current deployment does not yet enable follower fsync as a response proof.
-It creates the local follower store and exposes authenticated append handling on
-the private mTLS listener; session recovery, placement, recovery-only startup,
-and fleet-proof activation remain gated by
+The deployment enables follower fsync as one response-durability proof. It
+creates the local follower store, exposes authenticated append/seal/tail
+handling on the private mTLS listener, and starts recovery-only before serving
+public traffic. Object-root publication remains a valid alternative proof, and
+all recovery still goes through the existing claim, witness, pin, control-CAS,
+and fresh-database activation gates described in
 [Follower durability and warm failover](failover-and-followers.md).
 
 ## Configure one process per node

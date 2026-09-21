@@ -87,13 +87,26 @@ CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-b347-clippy \
 
 Use the checkout's actual stable target suffix when it differs from `b347`.
 
-Release jobs bind a schema-v3 qualification receipt to the exact tagged source,
-published image manifest, and raw cluster evidence. The receipt is emitted and
-verified by the crate-owned validator; the release job fails before publishing
-if the downloaded evidence belongs to another source or if the image digest is
-changed. The short-lived Ed25519 key in this step authenticates the canonical
-receipt bytes; GitHub's workflow attestation remains the trust anchor for the
-release job and source identity.
+Release jobs build a run-scoped immutable image candidate, qualify that exact
+manifest digest, and promote the same digest only after the raw cluster
+receipt passes the crate-owned validator. The schema-v3 signed receipt binds
+the exact tagged source, published image manifest, and raw cluster evidence;
+the release job fails before publishing if either identity changes. The
+short-lived Ed25519 key in this step authenticates the canonical receipt bytes;
+GitHub's workflow attestation remains the trust anchor for the release job and
+source identity.
+
+The raw three-node receipt is validated first with the fail-closed v6 command:
+
+```bash
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
+  cargo run -p crab-cell-runtime --bin qualification_receipt --locked -- \
+  validate-cluster cluster-receipt.json "$SOURCE_SHA" "$IMAGE_DIGEST" release
+```
+
+Local source-only receipts use `source-only` instead of `release`; release
+receipts must carry a `ghcr.io/...@sha256:<digest>` reference matching the
+candidate manifest.
 
 ```bash
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \

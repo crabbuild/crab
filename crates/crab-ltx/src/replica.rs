@@ -79,6 +79,7 @@ pub struct RecoveryOverlay {
     final_position: Position,
     final_commit_sequence: u64,
     _disk_reservation: Option<crate::DiskReservation>,
+    _bundle_lease: Option<Arc<dyn crate::bundle::BundleLease>>,
 }
 
 impl RecoveryOverlay {
@@ -95,6 +96,7 @@ impl RecoveryOverlay {
             final_position,
             final_commit_sequence,
             _disk_reservation: None,
+            _bundle_lease: None,
         }
     }
 
@@ -103,6 +105,23 @@ impl RecoveryOverlay {
     pub fn with_disk_reservation(mut self, reservation: crate::DiskReservation) -> Self {
         self._disk_reservation = Some(reservation);
         self
+    }
+
+    /// Keeps a server-owned verified artifact alive while this overlay is used.
+    #[must_use]
+    pub fn with_bundle_lease(mut self, lease: Arc<dyn crate::bundle::BundleLease>) -> Self {
+        self._bundle_lease = Some(lease);
+        self
+    }
+
+    /// Transfers an unleased verified bundle out after publication.
+    pub fn into_bundle(self) -> crate::Result<crate::bundle::Bundle> {
+        if self._disk_reservation.is_some() || self._bundle_lease.is_some() {
+            return Err(crate::CrabError::InvalidState(
+                "recovery overlay still owns bundle resources",
+            ));
+        }
+        Ok(self.bundle)
     }
 
     #[must_use]

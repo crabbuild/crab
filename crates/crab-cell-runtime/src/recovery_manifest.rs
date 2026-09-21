@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use bytes::Bytes;
 use crab_ltx::CellStorageLayout;
 use crab_storage::StorageError;
@@ -9,6 +11,7 @@ use crate::{
 };
 
 const MAX_MANIFEST_BYTES: u64 = 2 << 20;
+const MULTIPART_BYTES: usize = 8 << 20;
 
 /// One control-ready pointer returned after bundle and manifest publication.
 pub struct PinnedRecoveryCell {
@@ -19,6 +22,133 @@ pub struct PinnedRecoveryCell {
     pub recovery: RecoveryOverlayRef,
 }
 
+/// Exact immutable identity used for a local recovery-artifact cache entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RecoveryArtifactKey {
+    leader_session: [u8; 16],
+    log_epoch: u64,
+    application: [u8; 16],
+    cell: [u8; 32],
+    incarnation: [u8; 16],
+    cell_epoch: u64,
+    first_node_sequence: u64,
+    last_node_sequence: u64,
+    predecessor_digest: [u8; 32],
+    predecessor_txid: u64,
+    predecessor_checksum: u64,
+    predecessor_commit_sequence: u64,
+    final_txid: u64,
+    final_checksum: u64,
+    final_commit_sequence: u64,
+    bundle_digest: [u8; 32],
+}
+
+impl RecoveryArtifactKey {
+    /// Builds the exact scope and content identity used for cache admission.
+    #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the persisted recovery scope is explicit"
+    )]
+    pub fn new(
+        leader_session: SessionId,
+        log_epoch: u64,
+        application: ApplicationId,
+        cell: CellId,
+        incarnation: IncarnationId,
+        cell_epoch: u64,
+        first_node_sequence: u64,
+        last_node_sequence: u64,
+        predecessor: RootRef,
+        final_position: crab_ltx::Position,
+        final_commit_sequence: u64,
+        bundle_digest: Digest,
+    ) -> Self {
+        Self {
+            leader_session: *leader_session.as_bytes(),
+            log_epoch,
+            application: *application.as_bytes(),
+            cell: *cell.as_bytes(),
+            incarnation: *incarnation.as_bytes(),
+            cell_epoch,
+            first_node_sequence,
+            last_node_sequence,
+            predecessor_digest: *predecessor.digest.as_bytes(),
+            predecessor_txid: predecessor.txid,
+            predecessor_checksum: predecessor.checksum,
+            predecessor_commit_sequence: predecessor.commit_sequence,
+            final_txid: final_position.txid,
+            final_checksum: final_position.checksum,
+            final_commit_sequence,
+            bundle_digest: *bundle_digest.as_bytes(),
+        }
+    }
+
+    #[must_use]
+    pub const fn bundle_digest(&self) -> [u8; 32] {
+        self.bundle_digest
+    }
+
+    /// Derives a collision-resistant local filename identity from the full key.
+    #[must_use]
+    pub fn cache_digest(&self) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"crab.recovery-artifact.v1\0");
+        hasher.update(&self.leader_session);
+        hasher.update(&self.log_epoch.to_be_bytes());
+        hasher.update(&self.application);
+        hasher.update(&self.cell);
+        hasher.update(&self.incarnation);
+        hasher.update(&self.cell_epoch.to_be_bytes());
+        hasher.update(&self.first_node_sequence.to_be_bytes());
+        hasher.update(&self.last_node_sequence.to_be_bytes());
+        hasher.update(&self.predecessor_digest);
+        hasher.update(&self.predecessor_txid.to_be_bytes());
+        hasher.update(&self.predecessor_checksum.to_be_bytes());
+        hasher.update(&self.predecessor_commit_sequence.to_be_bytes());
+        hasher.update(&self.final_txid.to_be_bytes());
+        hasher.update(&self.final_checksum.to_be_bytes());
+        hasher.update(&self.final_commit_sequence.to_be_bytes());
+        hasher.update(&self.bundle_digest);
+        *hasher.finalize().as_bytes()
+    }
+}
+
+/// Keeps a retained local artifact alive while a recovery overlay reads it.
+pub struct RecoveryArtifact {
+    bundle: crab_ltx::bundle::Bundle,
+    lease: Arc<dyn crab_ltx::bundle::BundleLease>,
+}
+
+impl RecoveryArtifact {
+    /// Wraps a verified bundle with the lease that keeps its backing artifact alive.
+    #[must_use]
+    pub fn new(
+        bundle: crab_ltx::bundle::Bundle,
+        lease: Arc<dyn crab_ltx::bundle::BundleLease>,
+    ) -> Self {
+        Self { bundle, lease }
+    }
+
+    fn into_parts(
+        self,
+    ) -> (
+        crab_ltx::bundle::Bundle,
+        Arc<dyn crab_ltx::bundle::BundleLease>,
+    ) {
+        (self.bundle, self.lease)
+    }
+}
+
+/// Server-owned cache boundary for verified recovery bundles.
+pub trait RecoveryArtifactStore: Send + Sync {
+    /// Retains a bundle after its immutable object has been published.
+    fn retain(&self, key: RecoveryArtifactKey, bundle: crab_ltx::bundle::Bundle) -> Result<()>;
+
+    /// Loads and revalidates an exact retained artifact, or reports a miss.
+    fn load(&self, key: &RecoveryArtifactKey) -> Result<Option<RecoveryArtifact>>;
+}
+
 /// Immutable object-store owner for recovered follower bundles and manifests.
 #[derive(Clone)]
 pub struct RecoveryManifestStore {
@@ -26,6 +156,7 @@ pub struct RecoveryManifestStore {
     limits: crab_ltx::Limits,
     recovery_disk: crab_ltx::DiskBudget,
     recovery_scratch: Option<std::path::PathBuf>,
+    artifact_store: Option<Arc<dyn RecoveryArtifactStore>>,
 }
 
 impl RecoveryManifestStore {
@@ -37,6 +168,7 @@ impl RecoveryManifestStore {
             limits,
             recovery_disk,
             recovery_scratch: None,
+            artifact_store: None,
         }
     }
 
@@ -59,6 +191,20 @@ impl RecoveryManifestStore {
         self
     }
 
+    /// Shares one server-owned verified artifact cache with pinning and load.
+    /// Cache admission is opportunistic; object-store publication remains authoritative.
+    #[must_use]
+    pub fn with_recovery_artifacts(mut self, store: Arc<dyn RecoveryArtifactStore>) -> Self {
+        self.artifact_store = Some(store);
+        self
+    }
+
+    pub(crate) fn recovery_scratch_directory(&self) -> std::path::PathBuf {
+        self.recovery_scratch
+            .clone()
+            .unwrap_or_else(std::env::temp_dir)
+    }
+
     /// Publishes every verified bundle before one content-addressed manifest.
     pub async fn pin(
         &self,
@@ -73,16 +219,39 @@ impl RecoveryManifestStore {
             return Err(Error::Node("invalid recovery manifest scope"));
         }
         let mut rows = Vec::with_capacity(tails.len());
-        for tail in &tails {
-            let bundle = tail.overlay.bundle().read_all()?;
-            let bundle_digest = tail.overlay.bundle().digest();
+        let mut artifacts = Vec::with_capacity(tails.len());
+        for tail in tails {
+            let predecessor = tail.overlay.predecessor();
+            let cell = CellId::from_bytes(predecessor.cell);
+            let incarnation = IncarnationId::from_bytes(predecessor.incarnation);
+            let runtime_predecessor = RootRef::from_ltx(cell, incarnation, predecessor)?;
+            let final_position = tail.overlay.final_position();
+            let final_commit_sequence = tail.overlay.final_commit_sequence();
+            let bundle = tail.overlay.into_bundle()?;
+            let bundle_digest = bundle.digest();
             let path = self.layout.node_log_bundle_path(
                 leader_session.as_bytes(),
                 log_epoch,
                 &bundle_digest,
             );
-            publish_immutable(&self.layout, &path, &bundle, self.limits.max_plan_bytes).await?;
-            let predecessor = tail.overlay.predecessor();
+            publish_bundle_immutable(&self.layout, &path, &bundle).await?;
+            if self.artifact_store.is_some() {
+                let key = RecoveryArtifactKey::new(
+                    leader_session,
+                    log_epoch,
+                    ApplicationId::from_bytes(tail.application),
+                    cell,
+                    incarnation,
+                    tail.cell_epoch,
+                    tail.first_node_sequence,
+                    tail.last_node_sequence,
+                    runtime_predecessor,
+                    final_position,
+                    final_commit_sequence,
+                    Digest::from_bytes(bundle_digest),
+                );
+                artifacts.push((key, bundle));
+            }
             rows.push(ManifestCell {
                 application: tail.application,
                 cell: predecessor.cell,
@@ -91,8 +260,8 @@ impl RecoveryManifestStore {
                 first_node_sequence: tail.first_node_sequence,
                 last_node_sequence: tail.last_node_sequence,
                 predecessor,
-                final_position: tail.overlay.final_position(),
-                final_commit_sequence: tail.overlay.final_commit_sequence(),
+                final_position,
+                final_commit_sequence,
                 bundle_digest,
             });
         }
@@ -133,6 +302,14 @@ impl RecoveryManifestStore {
             &manifest_digest,
         );
         publish_immutable(&self.layout, &path, &body, MAX_MANIFEST_BYTES).await?;
+        if let Some(store) = &self.artifact_store {
+            for (key, bundle) in artifacts {
+                let store = Arc::clone(store);
+                // Both immutable objects are the correctness boundary; a local
+                // cache admission failure must not block control progress.
+                let _ = tokio::task::spawn_blocking(move || store.retain(key, bundle)).await;
+            }
+        }
         Ok(manifest
             .cells
             .into_iter()
@@ -206,6 +383,37 @@ impl RecoveryManifestStore {
             return Err(Error::Node(
                 "recovery control pointer differs from manifest",
             ));
+        }
+        if let Some(artifacts) = &self.artifact_store {
+            let runtime_predecessor = RootRef::from_ltx(cell, incarnation, row.predecessor)?;
+            let key = RecoveryArtifactKey::new(
+                recovery.leader_session,
+                recovery.log_epoch,
+                ApplicationId::from_bytes(*self.layout.application_id()),
+                cell,
+                incarnation,
+                row.cell_epoch,
+                row.first_node_sequence,
+                row.last_node_sequence,
+                runtime_predecessor,
+                row.final_position,
+                row.final_commit_sequence,
+                Digest::from_bytes(row.bundle_digest),
+            );
+            let artifacts = Arc::clone(artifacts);
+            let cached = tokio::task::spawn_blocking(move || artifacts.load(&key))
+                .await
+                .map_err(|_| Error::Node("recovery artifact worker failed"))?;
+            if let Ok(Some(artifact)) = cached {
+                let (bundle, lease) = artifact.into_parts();
+                return Ok(crab_ltx::RecoveryOverlay::new(
+                    row.predecessor,
+                    bundle,
+                    row.final_position,
+                    row.final_commit_sequence,
+                )
+                .with_bundle_lease(lease));
+            }
         }
         let bundle_path = self.layout.node_log_bundle_path(
             recovery.leader_session.as_bytes(),
@@ -437,6 +645,61 @@ async fn publish_immutable(
     }
 }
 
+async fn publish_bundle_immutable(
+    layout: &CellStorageLayout,
+    path: &object_store::path::Path,
+    bundle: &crab_ltx::bundle::Bundle,
+) -> Result<()> {
+    let store = layout.store();
+    let digest = bundle.digest();
+    let size = bundle.len();
+    match store.verify_size_and_hash(path, size, &digest).await {
+        Ok(()) => return Ok(()),
+        Err(StorageError::NotFound { .. }) => {}
+        Err(StorageError::CorruptObject { .. }) => {
+            return Err(Error::Node("recovery bundle path contains different bytes"));
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    let staged = object_store::path::Path::from(format!("{path}.staging"));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let upload = store
+        .put_multipart_source_retry(
+            &staged,
+            bundle.upload_source(),
+            size,
+            digest,
+            MULTIPART_BYTES,
+            &cancel,
+            None,
+        )
+        .await;
+    if let Err(error) = upload {
+        return match cleanup_staged(store, &staged).await {
+            Ok(()) => Err(error.into()),
+            Err(cleanup_error) => Err(cleanup_error),
+        };
+    }
+    let promotion = store
+        .promote_staged_content_addressed_object(&staged, path, digest, size)
+        .await;
+    match cleanup_staged(store, &staged).await {
+        Err(error) => Err(error),
+        Ok(()) => promotion.map(|_| ()).map_err(Into::into),
+    }
+}
+
+async fn cleanup_staged(
+    store: &crab_storage::Store,
+    path: &object_store::path::Path,
+) -> Result<()> {
+    match store.delete(path).await {
+        Ok(()) | Err(StorageError::NotFound { .. }) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn runtime_root(root: crab_ltx::RootRef) -> RootRef {
     RootRef {
         digest: Digest::from_bytes(root.digest),
@@ -487,7 +750,13 @@ fn nibble(value: u8) -> Result<u8> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        collections::BTreeMap,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicU64, Ordering},
+        },
+    };
 
     use object_store::{ObjectStoreExt, memory::InMemory, path::Path};
 
@@ -505,6 +774,55 @@ mod tests {
     }
 
     async fn recovery_fixture() -> RecoveryFixture {
+        recovery_fixture_with_store(None).await
+    }
+
+    struct MemoryArtifactStore {
+        limits: crab_ltx::Limits,
+        reject_retain: bool,
+        bundles: Mutex<BTreeMap<RecoveryArtifactKey, Vec<u8>>>,
+        loads: AtomicU64,
+    }
+
+    struct MemoryArtifactLease;
+
+    impl crab_ltx::bundle::BundleLease for MemoryArtifactLease {}
+
+    impl RecoveryArtifactStore for MemoryArtifactStore {
+        fn retain(&self, key: RecoveryArtifactKey, bundle: crab_ltx::bundle::Bundle) -> Result<()> {
+            if self.reject_retain {
+                return Err(Error::Capacity("artifact test store"));
+            }
+            let bytes = bundle.read_all()?;
+            self.bundles
+                .lock()
+                .map_err(|_| Error::Node("artifact test store lock poisoned"))?
+                .insert(key, bytes.to_vec());
+            Ok(())
+        }
+
+        fn load(&self, key: &RecoveryArtifactKey) -> Result<Option<RecoveryArtifact>> {
+            let bytes = self
+                .bundles
+                .lock()
+                .map_err(|_| Error::Node("artifact test store lock poisoned"))?
+                .get(key)
+                .cloned();
+            let Some(bytes) = bytes else {
+                return Ok(None);
+            };
+            self.loads.fetch_add(1, Ordering::Relaxed);
+            let bundle = crab_ltx::bundle::Bundle::decode(bytes, self.limits)?;
+            Ok(Some(RecoveryArtifact::new(
+                bundle,
+                Arc::new(MemoryArtifactLease),
+            )))
+        }
+    }
+
+    async fn recovery_fixture_with_store(
+        artifacts: Option<Arc<dyn RecoveryArtifactStore>>,
+    ) -> RecoveryFixture {
         let limits = crab_ltx::Limits::default();
         let directory = tempfile::TempDir::new().unwrap();
         let mut database =
@@ -557,6 +875,9 @@ mod tests {
         )
         .unwrap();
         let manifests = RecoveryManifestStore::new(layout.clone(), limits);
+        let manifests = artifacts.map_or(manifests.clone(), |store| {
+            manifests.with_recovery_artifacts(store)
+        });
         let mut pinned = manifests
             .pin(SessionId::from_bytes([1; 16]), 2, recovered)
             .await
@@ -629,6 +950,62 @@ mod tests {
         assert_eq!(published.state, crate::ControlState::Recovering);
         assert!(published.recovery.is_none());
         assert_eq!(published.root.unwrap().txid, fixture.final_position.txid);
+    }
+
+    #[tokio::test]
+    async fn verified_artifact_store_hit_reuses_the_pinned_bundle() {
+        let limits = crab_ltx::Limits::default();
+        let artifacts = Arc::new(MemoryArtifactStore {
+            limits,
+            reject_retain: false,
+            bundles: Mutex::new(BTreeMap::new()),
+            loads: AtomicU64::new(0),
+        });
+        let fixture = recovery_fixture_with_store(Some(
+            Arc::clone(&artifacts) as Arc<dyn RecoveryArtifactStore>
+        ))
+        .await;
+        let overlay = fixture
+            .manifests
+            .load_overlay(
+                fixture.pinned.cell,
+                fixture.pinned.incarnation,
+                &fixture.pinned.recovery,
+            )
+            .await
+            .unwrap();
+        assert_eq!(artifacts.loads.load(Ordering::Relaxed), 1);
+        let prepared = fixture
+            .replica
+            .prepare_recovered_overlay(&overlay, 1)
+            .await
+            .unwrap();
+        assert_eq!(prepared.root().position, fixture.final_position);
+    }
+
+    #[tokio::test]
+    async fn artifact_cache_failure_keeps_object_store_recovery_available() {
+        let artifacts = Arc::new(MemoryArtifactStore {
+            limits: crab_ltx::Limits::default(),
+            reject_retain: true,
+            bundles: Mutex::new(BTreeMap::new()),
+            loads: AtomicU64::new(0),
+        });
+        let fixture = recovery_fixture_with_store(Some(
+            Arc::clone(&artifacts) as Arc<dyn RecoveryArtifactStore>
+        ))
+        .await;
+        let overlay = fixture
+            .manifests
+            .load_overlay(
+                fixture.pinned.cell,
+                fixture.pinned.incarnation,
+                &fixture.pinned.recovery,
+            )
+            .await
+            .unwrap();
+        assert_eq!(artifacts.loads.load(Ordering::Relaxed), 0);
+        assert_eq!(overlay.final_position(), fixture.final_position);
     }
 
     #[tokio::test]

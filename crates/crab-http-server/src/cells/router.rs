@@ -28,6 +28,7 @@ pub(crate) struct RepositoryCellRouter {
     peer: RepositoryCellPeer,
     placement: PlacementPlanner,
     session_dir: PathBuf,
+    recovery_artifacts: Option<Arc<super::RecoveryArtifactRegistry>>,
     activation: Arc<[Mutex<()>]>,
     operation: Arc<[Arc<RwLock<()>>]>,
 }
@@ -85,6 +86,7 @@ impl RepositoryCellRouter {
             peer,
             placement: PlacementPlanner::default(),
             session_dir,
+            recovery_artifacts: None,
             activation: (0..ACTIVATION_SHARDS)
                 .map(|_| Mutex::new(()))
                 .collect::<Vec<_>>()
@@ -196,6 +198,39 @@ impl RepositoryCellRouter {
 
     pub(crate) fn recovery_scratch_directory(&self) -> PathBuf {
         self.session_dir.clone()
+    }
+
+    pub(crate) fn with_recovery_artifacts(
+        mut self,
+        registry: Arc<super::RecoveryArtifactRegistry>,
+    ) -> Self {
+        self.recovery_artifacts = Some(registry);
+        self
+    }
+
+    pub(crate) fn recovery_artifacts(&self) -> Option<Arc<super::RecoveryArtifactRegistry>> {
+        self.recovery_artifacts.clone()
+    }
+
+    pub(crate) fn recovery_disk_budget(&self) -> crab_cell_runtime::DiskBudget {
+        self.runtime.local_disk_budget()
+    }
+
+    fn recovery_manifest_store(
+        &self,
+        scratch: PathBuf,
+    ) -> crab_cell_runtime::RecoveryManifestStore {
+        let store = crab_cell_runtime::RecoveryManifestStore::new(
+            self.layout.clone(),
+            repository_replica_limits(),
+        )
+        .with_recovery_disk(self.runtime.local_disk_budget())
+        .with_recovery_scratch(scratch);
+        self.recovery_artifacts
+            .as_ref()
+            .map_or(store.clone(), |artifacts| {
+                store.with_recovery_artifacts(artifacts.clone())
+            })
     }
 
     pub(crate) fn effect_peer_client(&self) -> EffectPeerClient {
@@ -459,34 +494,43 @@ impl RepositoryCellRouter {
             return Ok(false);
         }
         let now_ms = super::unix_now_ms()?;
-        let Some(score) = self
-            .peer
-            .directory
-            .choose_advertised_placement(
-                &self.placement,
-                target.cell_id(),
-                now_ms,
-                self.peer.owner.session,
-                1_024,
-            )
-            .await?
-        else {
-            // A fully legacy fleet has no placement contract yet. Preserve
-            // ordinary local acquisition until the rollout has one signed
-            // observation to consume; mixed fleets never select legacy nodes.
-            return Ok(false);
+        let node = if let Some(owner) = observed.value().owner.as_ref()
+            && let Some(node) = self
+                .peer
+                .directory
+                .preferred_recovery_node(owner.session, now_ms)
+                .await?
+        {
+            node
+        } else {
+            let Some(score) = self
+                .peer
+                .directory
+                .choose_advertised_placement(
+                    &self.placement,
+                    target.cell_id(),
+                    now_ms,
+                    self.peer.owner.session,
+                    1_024,
+                )
+                .await?
+            else {
+                // A fully legacy fleet has no placement contract yet. Preserve
+                // ordinary local acquisition until the rollout has one signed
+                // observation to consume; mixed fleets never select legacy nodes.
+                return Ok(false);
+            };
+            self.peer
+                .directory
+                .load(score.session, now_ms)
+                .await?
+                .ok_or(crab_cell_runtime::Error::CellNotActive)?
+                .advertisement()
+                .clone()
         };
-        if score.session == self.peer.owner.session {
+        if node.session() == self.peer.owner.session {
             return Ok(false);
         }
-        let node = self
-            .peer
-            .directory
-            .load(score.session, now_ms)
-            .await?
-            .ok_or(crab_cell_runtime::Error::CellNotActive)?
-            .advertisement()
-            .clone();
         match self
             .peer
             .activate_remote(target.clone(), node, principal, now_ms)
@@ -656,12 +700,7 @@ impl RepositoryCellRouter {
                             self.authority.clone(),
                             observed,
                             takeover,
-                            crab_cell_runtime::RecoveryManifestStore::new(
-                                self.layout.clone(),
-                                repository_replica_limits(),
-                            )
-                            .with_recovery_disk(self.runtime.local_disk_budget())
-                            .with_recovery_scratch(recovery_scratch.clone()),
+                            self.recovery_manifest_store(recovery_scratch.clone()),
                             destination,
                             self.peer.owner.clone(),
                         )
@@ -673,12 +712,7 @@ impl RepositoryCellRouter {
                             replica,
                             self.authority.clone(),
                             observed,
-                            crab_cell_runtime::RecoveryManifestStore::new(
-                                self.layout.clone(),
-                                repository_replica_limits(),
-                            )
-                            .with_recovery_disk(self.runtime.local_disk_budget())
-                            .with_recovery_scratch(recovery_scratch),
+                            self.recovery_manifest_store(recovery_scratch),
                             destination,
                         )
                         .await?

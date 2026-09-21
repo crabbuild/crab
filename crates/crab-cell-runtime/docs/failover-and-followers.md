@@ -1,16 +1,16 @@
-# Add follower durability and warm failover
+# Follower durability and warm failover
 
-Crab will add a Celld-style replicated node log around the existing per-Cell
-SQLite/LTX runtime. The target keeps exactly one Cell owner, lets one or two
-other nodes durably retain the owner's recent LTX cuts, and recovers those cuts
-before a successor opens SQLite.
+Crab implements a Celld-style replicated node log around the existing per-Cell
+SQLite/LTX runtime. The implementation keeps exactly one Cell owner, lets one
+or two other nodes durably retain the owner's recent LTX cuts, and recovers
+those cuts before a successor opens SQLite.
 
 | Document intent | Value |
 | --- | --- |
 | Content type | Low-level target design |
 | Audience | `crab-ltx`, `crab-cell-runtime`, and `crab-http-server` implementers |
 | Goal | Define the persistence, wire, gating, recovery, lifecycle, and proof contracts needed for Celld-style follower durability |
-| Status | Non-streaming failover, bounded hot-Cell pipelining, state-observing stream gating, and online epoch rotation implemented; target-load and extended fault qualification remain |
+| Status | Follower durability, bounded recovery, follower-affine takeover, local fast paths, and digest-bound qualification implemented; protected scale, provider, and release runs remain |
 | Reference | Celld commit `10cb1303dac710dcb3b557e318e08c855261f68b` |
 
 [Back to the Cell runtime index](README.md)
@@ -153,7 +153,7 @@ recovery path.
 | Working now | Remaining target gaps |
 | --- | --- |
 | Strict frame codec plus capacity- and failure-domain-aware deterministic selection, retrying automatic enrollment, activation, coverage, recovery claims, object-covered epoch rotation, and clean log close | Signed small/medium/large live runs and the extended fault/telemetry matrix |
-| Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, authenticated remote append/seal/tail/retire transport, a bounded node-wide batched shipper, a recovery-first management-listener lifecycle, and startup lane scrub/quarantine | Disk scans retain verified locations rather than all payloads, but each page still scans the lane; indexed seek-only reads remain a large-tail I/O performance gap |
+| Crash-safe, node-budgeted follower store under a persisted physical `NodeId`, authenticated remote append/seal/tail/retire transport, a bounded node-wide batched shipper, a recovery-first management-listener lifecycle, startup lane scrub/quarantine, and crash-rebuildable bounded lane indexes | Protected large-tail, large-catalog, and mixed-failure evidence remains; the index is derived acceleration data and every selected record is reread and digest-checked |
 | Authoritative create and refresh drive a terminal monotonic node-lease guard; admission, actor dispatch, Cell-control CAS, durability proof, and output acceptance all check it | None for the current non-streaming Cell API |
 | Write-all durability gate, first-fsynced-batch activation, bounded dual-watermark command continuation, ordered object publication, object fallback, schema-migration barriers, and contiguous authoritative object watermark | None for this slice |
 | Complete-witness grouping, immutable recovery manifests, post-pin session seal CAS, non-forgeable persisted takeover proof, and bounded automatic dead-session recovery with renewable claims | None for this slice |

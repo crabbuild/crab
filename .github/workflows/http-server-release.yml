@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 concurrency:
   group: http-server-release-${{ github.ref_name }}
@@ -82,16 +83,96 @@ jobs:
             echo "source_sha=$source_sha"
           } >> "$GITHUB_OUTPUT"
 
+  candidate:
+    name: Build immutable qualification candidate
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    outputs:
+      image_digest: ${{ steps.build.outputs.digest }}
+      image_ref: ${{ steps.candidate_ref.outputs.image_ref }}
+    steps:
+      - name: Check out the release source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Set up emulation
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Sign in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Compute unique candidate reference
+        id: candidate_ref
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          reference="${REGISTRY}/${IMAGE_NAME}:candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SOURCE_SHA:0:12}"
+          printf 'image_ref=%s\n' "$reference" >> "$GITHUB_OUTPUT"
+
+      - name: Build and publish the candidate image
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: crates/crab-http-server/deploy/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          push: true
+          tags: ${{ steps.candidate_ref.outputs.image_ref }}
+          labels: |
+            org.opencontainers.image.title=crab-http-server
+            org.opencontainers.image.description=Self-hosted Crab repository HTTP application
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.source_sha }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+          cache-from: type=gha,scope=crab-http-server-release
+          cache-to: type=gha,mode=max,scope=crab-http-server-release
+          provenance: mode=max
+          sbom: true
+
+      - name: Verify candidate platform coverage
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_REF: ${{ steps.candidate_ref.outputs.image_ref }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "${IMAGE_REF}@${IMAGE_DIGEST}" \
+            --format '{{json .Manifest}}' > "${RUNNER_TEMP}/candidate-manifest.json"
+          jq --exit-status '
+            [.manifests[]?.platform
+              | select(.os == "linux")
+              | select(.architecture == "amd64" or .architecture == "arm64")
+              | .architecture]
+            | sort == ["amd64", "arm64"]
+          ' "${RUNNER_TEMP}/candidate-manifest.json"
+
   qualification:
     name: Qualify exact tagged source
-    needs: prepare
+    needs: [prepare, candidate]
     uses: ./.github/workflows/http-server-container.yml
     with:
       source_ref: ${{ needs.prepare.outputs.source_sha }}
+      image_ref: ${{ needs.candidate.outputs.image_ref }}@${{ needs.candidate.outputs.image_digest }}
+      image_digest: ${{ needs.candidate.outputs.image_digest }}
 
   image:
     name: Publish qualified release artifacts
-    needs: [prepare, qualification]
+    needs: [prepare, candidate, qualification]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -130,9 +211,6 @@ jobs:
             package crates/crab-http-server/deploy/helm/crab-http-server \
             --destination /dist
           test -s "${RUNNER_TEMP}/chart/crab-http-server-${VERSION}.tgz"
-
-      - name: Set up emulation
-        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
@@ -190,40 +268,47 @@ jobs:
             exit 1
           fi
 
-      - name: Build and publish the image
-        id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: crates/crab-http-server/deploy/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          pull: true
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ needs.prepare.outputs.source_sha }}
-          labels: |
-            org.opencontainers.image.title=crab-http-server
-            org.opencontainers.image.description=Self-hosted Crab repository HTTP application
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ needs.prepare.outputs.source_sha }}
-            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
-          cache-from: type=gha,scope=crab-http-server-release
-          cache-to: type=gha,mode=max,scope=crab-http-server-release
-          provenance: mode=max
-          sbom: true
+      - name: Promote the qualified candidate image
+        id: promote
+        env:
+          CANDIDATE_DIGEST: ${{ needs.candidate.outputs.image_digest }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$CANDIDATE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Candidate image did not report an immutable digest." >&2
+            exit 1
+          fi
+          source="${REGISTRY}/${IMAGE_NAME}@${CANDIDATE_DIGEST}"
+          docker buildx imagetools create \
+            --tag "${REGISTRY}/${IMAGE_NAME}:${VERSION}" \
+            --tag "${REGISTRY}/${IMAGE_NAME}:sha-${SOURCE_SHA}" \
+            "$source"
+          for reference in \
+            "${REGISTRY}/${IMAGE_NAME}:${VERSION}" \
+            "${REGISTRY}/${IMAGE_NAME}:sha-${SOURCE_SHA}"; do
+            actual="$(docker buildx imagetools inspect "$reference" \
+              --format '{{json .Manifest.Digest}}' | jq --raw-output .)"
+            if [ "$actual" != "$CANDIDATE_DIGEST" ]; then
+              echo "::error::$reference was promoted as $actual, expected $CANDIDATE_DIGEST."
+              exit 1
+            fi
+          done
+          printf 'digest=%s\n' "$CANDIDATE_DIGEST" >> "$GITHUB_OUTPUT"
 
       - name: Attest the registry image
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ steps.promote.outputs.digest }}
           push-to-registry: true
 
       - name: Verify the published manifest
         shell: bash
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.promote.outputs.digest }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
@@ -252,13 +337,14 @@ jobs:
       - name: Bind and verify the release qualification receipt
         shell: bash
         env:
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_DIGEST: ${{ steps.promote.outputs.digest }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
           set -euo pipefail
 
           evidence_dir="${RUNNER_TEMP}/crab-cell-runtime-qualification"
           test "$(cat "$evidence_dir/source-revision")" = "$SOURCE_SHA"
+          test "$(cat "$evidence_dir/image-digest")" = "$IMAGE_DIGEST"
           test -s "$evidence_dir/cluster-receipt.json"
           test -s "$evidence_dir/artifact.sha256"
           (cd "$evidence_dir" && sha256sum --check artifact.sha256)
@@ -266,6 +352,9 @@ jobs:
           release_dir="${RUNNER_TEMP}/crab-http-server-release"
           mkdir -p "$release_dir"
           export CARGO_TARGET_DIR="${RUNNER_TEMP}/crab-cell-runtime-target"
+          cargo run --locked --quiet -p crab-cell-runtime --bin qualification_receipt \
+            -- validate-cluster "$evidence_dir/cluster-receipt.json" \
+            "$SOURCE_SHA" "$IMAGE_DIGEST" release
           cargo run --locked --quiet -p crab-cell-runtime --bin qualification_receipt \
             -- emit "$release_dir/cell-runtime-qualification.json" \
             "$SOURCE_SHA" "$IMAGE_DIGEST" "$evidence_dir/cluster-receipt.json" \
@@ -319,7 +408,7 @@ jobs:
         shell: bash
         env:
           CHART_DIGEST: ${{ steps.chart.outputs.digest }}
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_DIGEST: ${{ steps.promote.outputs.digest }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           TAG: ${{ github.ref_name }}
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -371,7 +460,7 @@ jobs:
         env:
           CHART_DIGEST: ${{ steps.chart.outputs.digest }}
           GH_TOKEN: ${{ github.token }}
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_DIGEST: ${{ steps.promote.outputs.digest }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           TAG: ${{ github.ref_name }}
           VERSION: ${{ needs.prepare.outputs.version }}

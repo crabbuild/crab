@@ -830,6 +830,130 @@ async fn expired_enrolled_log_becomes_a_renewable_recovery_claim() {
 }
 
 #[tokio::test]
+async fn live_original_follower_is_the_only_affine_recovery_candidate() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let leader = SessionId::from_bytes([1; 16]);
+    let follower = SessionId::from_bytes([2; 16]);
+    let follower_node = NodeId::from_bytes([9; 16]);
+    let leader_record = directory
+        .create(advertisement_for(leader, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    let follower_record = directory
+        .create(
+            advertisement_for_node_capacity(
+                follower_node,
+                follower,
+                &key,
+                1,
+                NOW_MS,
+                NodeCapacity {
+                    free_memory_bytes: 1_000,
+                    free_disk_bytes: 2_000,
+                    follower_free_bytes: 2_000,
+                    follower_retained_bytes: 0,
+                    job_credits: 3,
+                    log_protocol: NODE_LOG_PROTOCOL_VERSION,
+                },
+            ),
+            NOW_MS,
+        )
+        .await
+        .unwrap();
+    let enrolled = directory
+        .recruit_log(&leader_record, 7, 1, 2, NOW_MS + 1)
+        .await
+        .unwrap();
+    directory.activate_log(&enrolled, NOW_MS + 2).await.unwrap();
+    let follower_record = directory
+        .refresh(
+            &follower_record,
+            advertisement_for_node_capacity(
+                follower_node,
+                follower,
+                &key,
+                2,
+                NOW_MS + 9_000,
+                NodeCapacity {
+                    free_memory_bytes: 1_000,
+                    free_disk_bytes: 2_000,
+                    follower_free_bytes: 2_000,
+                    follower_retained_bytes: 0,
+                    job_credits: 3,
+                    log_protocol: NODE_LOG_PROTOCOL_VERSION,
+                },
+            ),
+            NOW_MS + 9_000,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        directory
+            .recovery_candidates_for_node(follower, follower_node, NOW_MS + 10_000, 2)
+            .await
+            .unwrap(),
+        [leader]
+    );
+    assert!(
+        directory
+            .recovery_candidates_without_live_followers(follower, NOW_MS + 10_000, 2)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let fenced = directory
+        .claim_expired(leader, follower, NOW_MS + 10_000)
+        .await
+        .unwrap();
+    assert_eq!(fenced.claimant(), follower);
+    directory
+        .seal_recovery(&fenced, None, NOW_MS + 10_001)
+        .await
+        .unwrap();
+    assert_eq!(
+        directory
+            .preferred_recovery_node(leader, NOW_MS + 10_002)
+            .await
+            .unwrap()
+            .unwrap()
+            .session(),
+        follower
+    );
+    let drained = directory
+        .refresh(
+            &follower_record,
+            advertisement_for_node_capacity(
+                follower_node,
+                follower,
+                &key,
+                3,
+                NOW_MS + 10_003,
+                NodeCapacity {
+                    free_memory_bytes: 0,
+                    free_disk_bytes: 2_000,
+                    follower_free_bytes: 2_000,
+                    follower_retained_bytes: 0,
+                    job_credits: 3,
+                    log_protocol: NODE_LOG_PROTOCOL_VERSION,
+                },
+            ),
+            NOW_MS + 10_003,
+        )
+        .await
+        .unwrap();
+    assert!(
+        directory
+            .preferred_recovery_node(leader, NOW_MS + 10_004)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    drop(drained);
+}
+
+#[tokio::test]
 async fn expired_recovery_claim_moves_to_a_new_live_claimant_and_fences_the_old_one() {
     let key = SigningKey::from_bytes(&[7; 32]);
     let directory = directory();

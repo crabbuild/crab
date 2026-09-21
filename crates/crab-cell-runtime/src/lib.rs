@@ -13,6 +13,7 @@ mod backup;
 mod blob;
 mod catalog;
 mod client;
+mod cluster_qualification;
 mod codec;
 mod control;
 mod coordination;
@@ -41,6 +42,7 @@ mod pressure;
 mod publication;
 mod qualification;
 mod queue;
+mod recovery_artifacts;
 mod recovery_manifest;
 mod registry;
 mod release;
@@ -74,6 +76,7 @@ pub use client::{
     CellClient, CellDescription, CellStateStream, Committed, InvocationError, Observed,
     PendingMutation, Receipt, StateStreamCancellation, command_operation_digest,
 };
+pub use cluster_qualification::validate_cluster_receipt;
 pub use codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 pub use control::{Control, ControlState, Owner, RecoveryOverlayRef, RootRef, Transition};
 pub use crab_ltx::{
@@ -124,12 +127,13 @@ pub use node_durability::{NodeDurability, NodeLogAuthority};
 pub use node_lease::NodeLeaseGuard;
 pub use node_log::{
     CommitTicket, DurabilityGate, DurabilityProof, DurabilitySource, NodeLogRotationBarrier,
-    RecoveredCellTail, RecoveryBase, RotatedNodeLog, build_recovery_overlays, close_node_log,
-    rotate_node_log,
+    RecoveredCellTail, RecoveryBase, RotatedNodeLog, build_recovery_overlays,
+    build_recovery_overlays_file_backed, build_recovery_overlays_file_backed_stream,
+    close_node_log, rotate_node_log,
 };
 pub use node_log_recovery::{
     CompletedNodeRecovery, NodeLogRecovery, RecoveryCell, RecoveryCoordinator, SealedSession,
-    recoverable_cells,
+    recoverable_cells, recoverable_cells_from_frames, recoverable_cells_from_scopes,
 };
 pub use node_log_shipper::{NodeLogShipper, NodeLogSubmission};
 pub use node_log_state::{NodeLogPhase, NodeLogStatus, NodeRecoveryClaim};
@@ -165,7 +169,11 @@ pub use queue::{
     install_queue_schema, queue_apply_lease, queue_claim, queue_cleanup_expired, queue_control,
     queue_info, queue_send, queue_validate_claim, register_queue,
 };
-pub use recovery_manifest::{PinnedRecoveryCell, RecoveryManifestStore};
+pub use recovery_artifacts::RecoveryArtifactRegistry;
+pub use recovery_manifest::{
+    PinnedRecoveryCell, RecoveryArtifact, RecoveryArtifactKey, RecoveryArtifactStore,
+    RecoveryManifestStore,
+};
 pub use registry::{
     BuildDescriptor, CellModule, Command, CommandContext, CommandInvocation, CommandResult,
     MigrationDescriptor, MigrationPlan, ModuleDescriptor, NamespaceDescriptor, OperationDescriptor,

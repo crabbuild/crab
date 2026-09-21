@@ -918,12 +918,19 @@ pub async fn serve(config: Config) -> Result<()> {
         peer_tls.client_identity(),
         session,
     ));
-    let node_log_transport: Arc<dyn crab_cell_runtime::NodeLogTransport> =
-        Arc::new(crate::peer::NodeLogHttpTransport::new(
+    let node_log_transport: Arc<dyn crab_cell_runtime::NodeLogTransport> = Arc::new(
+        crate::peer::NodeLogHttpTransport::new(
             directory.clone(),
             peer_tls.client_identity(),
             session,
-        ));
+        )
+        .with_local_follower(node, follower_store.clone()),
+    );
+    let recovery_artifacts = Arc::new(crate::cells::RecoveryArtifactRegistry::new(
+        session_dir.join("recovery-artifacts"),
+        crate::cells::repository_replica_limits(),
+        local_disk.clone(),
+    )?);
     let release_store = ReleaseStore::new(startup.layout.clone(), startup.identity)?;
     let peer_receiver = crate::peer::PeerReceiver::new(
         node,
@@ -953,7 +960,8 @@ pub async fn serve(config: Config) -> Result<()> {
             },
         ),
         session_dir,
-    )?;
+    )?
+    .with_recovery_artifacts(Arc::clone(&recovery_artifacts));
     let cell_scheduler = crate::cells::RepositoryCellScheduler::new(
         startup.identity,
         startup.layout,
@@ -963,6 +971,7 @@ pub async fn serve(config: Config) -> Result<()> {
         scheduler_status.clone(),
     )?
     .with_node_recovery(Arc::clone(&node_log_transport))
+    .with_node(node)
     .with_node_recovery_disk(local_disk.clone())
     .with_metrics(metrics.clone());
     let durability_application = startup.identity.application();
