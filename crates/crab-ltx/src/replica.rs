@@ -661,10 +661,17 @@ impl CellReplica {
         if captured_bytes > self.limits.max_capture_bytes {
             return Err(CrabError::Limit("captured Cell LTX bytes"));
         }
-        let base_graph = match base {
-            Some(root) => Some(self.load_graph(root).await?),
-            None => None,
+        let load_base = async {
+            match base {
+                Some(root) => self.load_graph(root).await.map(Some),
+                None => Ok(None),
+            }
         };
+        // Local captures and the immutable predecessor cannot affect each
+        // other; chain validation still waits for both exact inputs.
+        let (base_graph, inputs) =
+            futures_util::future::try_join(load_base, self.prepare_captured_inputs(&cuts.segments))
+                .await?;
         self.validate_append_sequence(&base_graph, commit_sequence)?;
 
         // Admit the complete prospective chain from trusted capture metadata
@@ -683,22 +690,6 @@ impl CellReplica {
         // Keep each exact capture handle open through verification and upload.
         // A path replacement cannot redirect retries, while the inspected LTX
         // digest still rejects in-place mutation before authority may publish.
-        let mut inputs = Vec::with_capacity(cuts.segments.len());
-        for segment in &cuts.segments {
-            let source = segment.path().to_owned();
-            let info = segment.info().clone();
-            let source = PinnedCapture::open(&self.host, source, info.size_bytes).await?;
-            let index = match segment.captured_index() {
-                Some(index) => index.to_vec(),
-                None => inspect_segment_source(self, Arc::clone(&source), &info).await?,
-            };
-            inputs.push(AppendInput {
-                info,
-                location: BodyLocation::Native,
-                index,
-                body: AppendBody::Native(source),
-            });
-        }
         self.prepare_append(
             base,
             base_graph,
@@ -708,6 +699,32 @@ impl CellReplica {
             schema,
             None,
         )
+        .await
+    }
+
+    async fn prepare_captured_inputs(
+        &self,
+        segments: &[crate::LocalSegment],
+    ) -> Result<Vec<AppendInput>> {
+        stream::iter(segments.iter().cloned().map(|segment| async move {
+            let source = segment.path().to_owned();
+            let info = segment.info().clone();
+            let source = PinnedCapture::open(&self.host, source, info.size_bytes).await?;
+            let index = match segment.captured_index() {
+                Some(index) => index.to_vec(),
+                None => inspect_segment_source(self, Arc::clone(&source), &info).await?,
+            };
+            Ok(AppendInput {
+                info,
+                location: BodyLocation::Native,
+                index,
+                body: AppendBody::Native(source),
+            })
+        }))
+        // Preserve descriptor order while overlapping independent file jobs.
+        // Host job permits remain the shared process-wide admission boundary.
+        .buffered(SEGMENT_UPLOAD_CONCURRENCY)
+        .try_collect()
         .await
     }
 

@@ -1,4 +1,6 @@
 #[cfg(feature = "replica")]
+use crab_ltx::environment::{Executor, Worker};
+#[cfg(feature = "replica")]
 use crab_ltx::{CellReplica, CellStorageLayout, LocalSegment};
 use crab_ltx::{
     CheckpointMode, CrabError, Db, Host, Limits,
@@ -21,6 +23,39 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
+
+#[cfg(feature = "replica")]
+struct DelayedExecutor {
+    delay: Duration,
+}
+
+#[cfg(feature = "replica")]
+struct TestWorker(std::thread::JoinHandle<()>);
+
+#[cfg(feature = "replica")]
+impl Worker for TestWorker {
+    fn join(self: Box<Self>) -> io::Result<()> {
+        self.0
+            .join()
+            .map_err(|_| io::Error::other("test worker panicked"))
+    }
+}
+
+#[cfg(feature = "replica")]
+impl Executor for DelayedExecutor {
+    fn dispatch(&self, job: Box<dyn FnOnce() + Send>) -> io::Result<()> {
+        let delay = self.delay;
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = tokio::task::spawn_blocking(job).await;
+        });
+        Ok(())
+    }
+
+    fn start_worker(&self, job: Box<dyn FnOnce() + Send>) -> io::Result<Box<dyn Worker>> {
+        Ok(Box::new(TestWorker(std::thread::spawn(job))))
+    }
+}
 
 #[derive(Clone, Default)]
 struct Faults {
@@ -395,6 +430,44 @@ async fn prepare_overlaps_independent_immutable_uploads() {
     replica.prepare(Some(&root), &captured, 2, 1).await.unwrap();
 
     assert_eq!(started.elapsed(), delay * 2);
+    writer.close().unwrap();
+}
+
+#[cfg(feature = "replica")]
+#[tokio::test(start_paused = true)]
+async fn prepare_opens_captured_segments_concurrently() {
+    let (_directory, _faults, _host, mut writer) = fixture();
+    let mut captured = writer.capture_deferred().unwrap();
+    for value in [2, 3] {
+        writer
+            .transaction(|tx| tx.execute("INSERT INTO t VALUES(?1)", [value]))
+            .unwrap();
+        let next = writer.capture_deferred().unwrap();
+        captured.segments.extend(next.segments);
+        captured.position = next.position;
+    }
+    assert_eq!(captured.segments.len(), 3);
+
+    let delay = Duration::from_millis(100);
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("parallel-capture-inputs"),
+            [81; 16],
+        ),
+        [82; 32],
+        [83; 16],
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(Host::default().with_executor(Arc::new(DelayedExecutor { delay })));
+    let started = tokio::time::Instant::now();
+
+    replica.prepare(None, &captured, 1, 1).await.unwrap();
+
+    // One open wave plus size/read/size upload jobs. Serial opens would add
+    // two more delay intervals before the already-concurrent uploads begin.
+    assert_eq!(started.elapsed(), delay * 4);
     writer.close().unwrap();
 }
 

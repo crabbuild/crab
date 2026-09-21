@@ -375,7 +375,9 @@ metadata, and digest; multipart upload hashes the complete source again before
 publishing the immutable object and rechecks its length afterward. An in-place
 mutation fails one of those gates. This path needs no upload scratch or local
 write: immutable upload plus the embedding runtime's authority CAS remains the
-durability boundary.
+durability boundary. Up to four capture handles are opened and inspected in
+order-preserving parallel waves; predecessor verification progresses alongside
+that local work, and final chain validation still waits for both exact inputs.
 
 `Db` also carries the page index produced while it encodes each fresh capture.
 `CellReplica::prepare` can therefore publish that exact capture without decoding

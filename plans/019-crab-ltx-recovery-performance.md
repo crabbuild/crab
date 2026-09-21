@@ -1058,6 +1058,25 @@ intervals (370 ms), a 7.49x modeled provider-latency reduction. The test still
 compares the streamed root, height, checksum, empty retained-object set, and
 remote object count with the canonical in-memory tree.
 
+### Follow-up: overlap captured-input preparation
+
+Multi-cut root preparation previously opened and, for caller-constructed
+segments, inspected every local LTX source serially before immutable work could
+continue. The predecessor graph was also loaded before any local source work.
+Preparation now overlaps the predecessor load with capture preparation and
+opens or inspects up to four captures concurrently. Ordered buffering preserves
+the descriptor chain, pinned file handles still bind every retry to the selected
+artifact, and exact chain validation waits for both branches before upload can
+produce a proposal. Host blocking-job permits remain the process-wide bound.
+
+A deterministic paused-clock integration test prepares three managed captures
+through the real multipart path with 100 ms added to every blocking host job.
+The old call graph needed three serialized open intervals followed by the three
+already-concurrent size/read/size upload intervals: 600 ms. The bounded input
+wave needs one open interval plus those upload intervals: 400 ms, a 1.5x
+modeled host-job-latency improvement. This is a Crab root-preparation result;
+it does not change the direct local Celld comparison or its durability caveat.
+
 ## Maintenance notes
 
 - Reviewers should trace one corrupt input through plan construction, one

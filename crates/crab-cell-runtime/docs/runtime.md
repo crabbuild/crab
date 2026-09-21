@@ -113,7 +113,9 @@ the source. LTX inspection verifies its declared metadata and digest, and the
 multipart uploader hashes the complete file again before publishing the
 immutable object. The path performs no defensive local copy or scratch flush;
 the proposal cannot reach authority until all immutable dependencies upload
-successfully.
+successfully. Multi-cut batches open and inspect up to four pinned captures at
+once while the immutable predecessor graph is verified independently. The
+ordered descriptors are joined only before exact chain validation.
 
 Fresh `Db` captures privately retain the page index already authenticated by
 their encoder. Root preparation reuses it instead of decoding the same local
