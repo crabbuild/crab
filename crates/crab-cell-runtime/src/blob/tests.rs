@@ -1,5 +1,6 @@
 use super::*;
 use crab_ltx::rusqlite::Connection;
+use std::collections::BTreeSet;
 
 #[tokio::test]
 async fn multipart_publish_is_atomic_conditional_and_range_readable() {
@@ -111,6 +112,44 @@ async fn multipart_publish_is_atomic_conditional_and_range_readable() {
         )
         .unwrap(),
         BlobMutationOutcome::Conflict
+    );
+}
+
+#[tokio::test]
+async fn object_store_sweep_keeps_live_parts_and_reclaims_old_orphans() {
+    use crab_storage::{GLOBAL_PREFIX, Store, global_content_prefix};
+    use object_store::memory::InMemory;
+
+    let store = Store::new(std::sync::Arc::new(InMemory::new()));
+    let artifacts = BlobArtifactStore::new(store.clone());
+    let live_payload = b"live";
+    let orphan_payload = b"orphan";
+    let live_digest = part_digest(live_payload);
+    let orphan_digest = part_digest(orphan_payload);
+    artifacts.put_part(live_digest, live_payload).await.unwrap();
+    artifacts
+        .put_part(orphan_digest, orphan_payload)
+        .await
+        .unwrap();
+
+    let report = artifacts
+        .sweep_unreferenced(&BTreeSet::from([live_digest]), i64::MAX)
+        .await
+        .unwrap();
+    assert_eq!(report.scanned(), 2);
+    assert_eq!(report.deleted(), 1);
+    assert!(!report.has_more());
+
+    let objects = store
+        .list_prefix(&global_content_prefix(GLOBAL_PREFIX, BLOB_PART_KIND))
+        .await
+        .unwrap();
+    assert_eq!(objects.len(), 1);
+    assert!(
+        objects[0]
+            .location
+            .to_string()
+            .ends_with(&blake3::Hash::from_bytes(live_digest).to_hex().to_string())
     );
 }
 

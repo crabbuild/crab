@@ -1,5 +1,11 @@
+use std::collections::BTreeSet;
+
 use bytes::Bytes;
-use crab_storage::{GLOBAL_PREFIX, Store, global_content_path};
+use crab_storage::{
+    GLOBAL_PREFIX, StorageError, Store, content_hash_from_path, global_content_path,
+    global_content_prefix,
+};
+use futures_util::StreamExt;
 use object_store::path::Path as ObjectPath;
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
@@ -23,6 +29,7 @@ const MIN_UPLOAD_LIFETIME_MS: i64 = 60_000;
 const MAX_UPLOAD_LIFETIME_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 const BLOB_PART_KIND: &str = "blob-parts";
 const MAX_BLOB_READ_PARTS: usize = 8;
+const MAX_BLOB_GC_SCAN: usize = 128;
 
 #[derive(Clone, Copy)]
 struct BlobMutationTimes {
@@ -135,6 +142,34 @@ pub struct BlobArtifactStore {
     store: Store,
 }
 
+/// Bounded result from one Blob part reachability sweep.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlobGarbageCollectionReport {
+    scanned: u32,
+    deleted: u32,
+    has_more: bool,
+}
+
+impl BlobGarbageCollectionReport {
+    /// Returns the number of object-store entries inspected by the sweep.
+    #[must_use]
+    pub const fn scanned(self) -> u32 {
+        self.scanned
+    }
+
+    /// Returns the number of unreferenced part objects deleted by the sweep.
+    #[must_use]
+    pub const fn deleted(self) -> u32 {
+        self.deleted
+    }
+
+    /// Returns whether another bounded sweep should be scheduled.
+    #[must_use]
+    pub const fn has_more(self) -> bool {
+        self.has_more
+    }
+}
+
 impl BlobArtifactStore {
     /// Wraps a configured Crab object store for Blob artifact data.
     #[must_use]
@@ -169,6 +204,61 @@ impl BlobArtifactStore {
         Ok(bytes.to_vec())
     }
 
+    /// Reclaims old part objects absent from a complete cross-Cell reference set.
+    ///
+    /// Callers must build `live_digests` from every authoritative Cell database
+    /// sharing this object-store scope. `cutoff_ms` is a grace boundary: objects
+    /// newer than it are retained so an upload that has not committed its SQLite
+    /// manifest cannot be collected. At most 128 listings are inspected per call;
+    /// schedule another call while [`BlobGarbageCollectionReport::has_more`] is true.
+    pub async fn sweep_unreferenced(
+        &self,
+        live_digests: &BTreeSet<[u8; 32]>,
+        cutoff_ms: i64,
+    ) -> Result<BlobGarbageCollectionReport> {
+        if cutoff_ms < 0 {
+            return Err(Error::Command("negative blob garbage-collection cutoff"));
+        }
+        let prefix = self
+            .store
+            .storage_scope()
+            .map_or(GLOBAL_PREFIX, |scope| scope.global_prefix.as_str());
+        let mut objects = self
+            .store
+            .list_stream(&global_content_prefix(prefix, BLOB_PART_KIND));
+        let mut scanned = 0_u32;
+        let mut deleted = 0_u32;
+        let mut has_more = false;
+        while let Some(object) = objects.next().await {
+            if scanned as usize == MAX_BLOB_GC_SCAN {
+                has_more = true;
+                break;
+            }
+            let object = object?;
+            scanned += 1;
+            let Some(hash) = content_hash_from_path(object.location.as_ref(), BLOB_PART_KIND)
+            else {
+                continue;
+            };
+            let Some(digest) = decode_hex_digest(hash) else {
+                continue;
+            };
+            if live_digests.contains(&digest) || object.last_modified.timestamp_millis() > cutoff_ms
+            {
+                continue;
+            }
+            match self.store.delete(&object.location).await {
+                Ok(()) | Err(StorageError::NotFound { .. }) => deleted += 1,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(BlobGarbageCollectionReport {
+            scanned,
+            deleted,
+            has_more,
+        })
+    }
+
     fn part_path(&self, digest: &[u8; 32]) -> ObjectPath {
         let hash = blake3::Hash::from_bytes(*digest).to_hex().to_string();
         let prefix = self
@@ -176,6 +266,25 @@ impl BlobArtifactStore {
             .storage_scope()
             .map_or(GLOBAL_PREFIX, |scope| scope.global_prefix.as_str());
         global_content_path(prefix, BLOB_PART_KIND, &hash)
+    }
+}
+
+fn decode_hex_digest(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        digest[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
+    }
+    Some(digest)
+}
+
+fn hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        _ => None,
     }
 }
 
