@@ -2083,19 +2083,23 @@ impl QualificationReceipt {
         {
             return Err(Error::Control("qualification RSS threshold failed"));
         }
-        if profile.maximum_local_disk_bytes() != 0
-            && self.threshold_metric("peak_local_disk_bytes", "bytes")?
-                > profile.maximum_local_disk_bytes()
-        {
-            return Err(Error::Control("qualification disk threshold failed"));
+        if profile.maximum_local_disk_bytes() != 0 {
+            let peak_local_disk_bytes = self.threshold_metric("peak_local_disk_bytes", "bytes")?;
+            if peak_local_disk_bytes == 0
+                || peak_local_disk_bytes > profile.maximum_local_disk_bytes()
+            {
+                return Err(Error::Control("qualification disk threshold failed"));
+            }
         }
-        if profile.maximum_file_descriptors() != 0
-            && self.threshold_metric("peak_file_descriptors", "count")?
-                > profile.maximum_file_descriptors()
-        {
-            return Err(Error::Control(
-                "qualification file-descriptor threshold failed",
-            ));
+        if profile.maximum_file_descriptors() != 0 {
+            let peak_file_descriptors = self.threshold_metric("peak_file_descriptors", "count")?;
+            if peak_file_descriptors == 0
+                || peak_file_descriptors > profile.maximum_file_descriptors()
+            {
+                return Err(Error::Control(
+                    "qualification file-descriptor threshold failed",
+                ));
+            }
         }
         if profile.maximum_bucket_calls() != 0 && self.bucket_calls > profile.maximum_bucket_calls()
         {
@@ -3410,6 +3414,22 @@ mod tests {
                 key.verifying_key().to_bytes(),
             )
             .unwrap();
+
+        for metric_name in ["peak_local_disk_bytes", "peak_file_descriptors"] {
+            let mut missing_measurement = protected.clone();
+            missing_measurement
+                .metrics
+                .iter_mut()
+                .find(|metric| metric.name() == metric_name)
+                .expect("resource metric")
+                .value = 0;
+            assert!(
+                missing_measurement
+                    .verify_profile_thresholds(&profile)
+                    .is_err(),
+                "zero {metric_name} must not stand in for a protected measurement"
+            );
+        }
     }
 
     #[test]
