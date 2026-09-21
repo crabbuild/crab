@@ -66,7 +66,9 @@ async fn membership_cas_audit_and_current_authorization() {
     );
     let catalog = h.server.catalog.as_ref().unwrap();
     let (document, _) = catalog.load().await.unwrap();
-    let path = object_store::path::Path::from(document.membership_audit_head.unwrap());
+    let path = catalog
+        .root()
+        .path(&document.membership_audit_head.unwrap());
     let (event, _) = catalog
         .root()
         .store
