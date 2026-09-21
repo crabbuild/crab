@@ -7,7 +7,7 @@
 > when complete unless a reviewer owns the index.
 >
 > **Drift check (run first)**:
-> `git diff --stat 892720ce6a6..HEAD -- crates/crab-cell-runtime/src/scheduler.rs crates/crab-cell-runtime/src/queue.rs crates/crab-cell-runtime/tests/scheduler.rs crates/crab-http-server/src/cells/scheduler.rs crates/crab-http-server/src/cells/scheduler/tests.rs`
+> `git diff --stat 892720ce6a6..HEAD -- crates/crab-cell-runtime/src/scheduler.rs crates/crab-cell-runtime/src/queue.rs crates/crab-cell-runtime/src/migrations/queue.sql crates/crab-cell-runtime/docs/contracts/queue.sql crates/crab-cell-runtime/tests/scheduler.rs crates/crab-http-server/src/cells/scheduler.rs crates/crab-http-server/src/cells/scheduler/tests.rs`
 > If the Queue deadline or server scheduler paths changed, compare the current
 > code with the facts below and stop if ownership moved.
 
@@ -19,7 +19,9 @@
 - **Depends on**: none
 - **Category**: bug / performance
 - **Planned at**: commit `892720ce6a6`, 2026-09-19
-- **Implementation status**: implemented and verified in the runtime/server test gates
+- **Implementation status**: implemented and verified in the runtime/server test gates;
+  the terminal-attempt probe also has a dedicated `(state, attempt)` index in the
+  runtime and normative Queue schema
 
 ## Why this matters
 
@@ -57,6 +59,9 @@ The intended Queue maintenance deadlines are:
 3. immediate logical time for ready messages already at the maximum attempt;
 4. `retain_until_ms` for producer dedup rows.
 
+The terminal-attempt deadline uses `queue_attempts(state, attempt)` so the
+maintenance probe does not scan the ordinary ready-work ordering index.
+
 Ordinary ready-message `due_at_ms` is deliberately absent unless a real Queue
 consumer runner is later added as a separate, resource-admitted owner.
 
@@ -78,6 +83,8 @@ target directory is writable. Do not fall back to a repository-local target.
 **In scope**:
 
 - `crates/crab-cell-runtime/src/scheduler.rs`
+- `crates/crab-cell-runtime/src/migrations/queue.sql`
+- `crates/crab-cell-runtime/docs/contracts/queue.sql`
 - `crates/crab-cell-runtime/tests/scheduler.rs`
 - `crates/crab-http-server/src/cells/scheduler/tests.rs` only if necessary to
   prove the fleet-visible regression
@@ -164,7 +171,8 @@ Both commands exit 0; provider tests may remain explicitly ignored.
 - [x] No scheduler scan publishes a new root solely because claimable Queue work exists.
 - [x] Queue claimers still see and lease the same ready rows in the same order.
 - [x] Runtime, Queue, server scheduler, full server library, format, and Clippy gates pass.
-- [x] Only in-scope files and `advisor-plans/README.md` changed.
+- [x] Only the scheduler, its terminal-attempt index/schema contract, tests,
+  server regression surface, and `advisor-plans/README.md` changed.
 
 ## STOP conditions
 
