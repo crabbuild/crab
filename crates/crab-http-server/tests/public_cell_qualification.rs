@@ -77,7 +77,7 @@ impl QualificationOperationExecutor for PublicHostQualificationExecutor {
                         "public qualification rejection was accepted",
                     ));
                 }
-                return Ok(QualificationExecution::rejected());
+                return Ok(QualificationExecution::rejected().with_case(operation.case()));
             }
             match operation.primitive() {
                 "sql" => {
@@ -403,9 +403,10 @@ impl QualificationOperationExecutor for PublicHostQualificationExecutor {
             }
             tokio::time::sleep(Duration::from_millis(80)).await;
             if operation.ambiguous_hint() {
-                Ok(QualificationExecution::ambiguous(1))
+                Ok(QualificationExecution::ambiguous(1).with_case(operation.case()))
             } else {
                 Ok(QualificationExecution::acknowledged(true)
+                    .with_case(operation.case())
                     .with_retries(u64::from(operation.retry_hint())))
             }
         })
@@ -579,7 +580,10 @@ async fn public_cell_node_runs_typed_primitive_workload() {
         now_ms,
         run_tag: 0,
     };
-    let summary = workload.run(&mut executor).await.expect("typed workload");
+    let summary = workload
+        .run_with_case_coverage(&mut executor)
+        .await
+        .expect("typed workload");
     assert_eq!(summary.operations(), 64);
     assert!(summary.primitive_counts().iter().all(|counts| {
         counts.attempted() > 0 && counts.acknowledged() > 0 && counts.verified() > 0
@@ -688,7 +692,10 @@ async fn public_cell_node_runs_complete_matrix_through_typed_apis() {
             now_ms: row_now_ms,
             run_tag: row_index as u64 + 1,
         };
-        let summary = workload.run(&mut executor).await.expect("typed workload");
+        let summary = workload
+            .run_with_case_coverage(&mut executor)
+            .await
+            .expect("typed workload");
         let run_artifact = summary.artifact(&workload).expect("run artifact");
         run_artifact
             .verify_for_profile(&profile)

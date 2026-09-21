@@ -315,6 +315,13 @@ impl QualificationProfile {
         self.name == "fault-v1" || self.name.starts_with("fault-")
     }
 
+    /// Returns whether this named deployment profile requires every primitive
+    /// lifecycle case to be observed by the typed executor.
+    #[must_use]
+    pub fn requires_lifecycle_case_coverage(&self) -> bool {
+        self.requires_protected_evidence() && !self.provider.is_empty() && !self.topology.is_empty()
+    }
+
     /// Encodes the canonical threshold profile.
     pub fn encode(&self) -> Result<Vec<u8>> {
         self.validate()?;
@@ -489,6 +496,27 @@ pub const QUALIFICATION_CASES: &[QualificationCase] = &[
 /// Minimum generated schedule length that gives every primitive every case.
 pub const QUALIFICATION_CASE_COVERAGE_OPERATIONS: u64 =
     (QUALIFICATION_PRIMITIVES.len() * QUALIFICATION_CASES.len()) as u64;
+/// Number of bytes needed to retain one bit for every primitive/lifecycle pair.
+pub const QUALIFICATION_CASE_COVERAGE_BYTES: usize =
+    (QUALIFICATION_PRIMITIVES.len() * QUALIFICATION_CASES.len()).div_ceil(8);
+
+fn case_coverage_index(operation: QualificationOperation) -> usize {
+    operation.primitive_index as usize * QUALIFICATION_CASES.len() + operation.case as usize
+}
+
+fn mark_case_coverage(coverage: &mut [u8], operation: QualificationOperation) {
+    let index = case_coverage_index(operation);
+    coverage[index / 8] |= 1 << (index % 8);
+}
+
+fn has_complete_case_coverage(coverage: &[u8]) -> bool {
+    (0..QUALIFICATION_PRIMITIVES.len()).all(|primitive| {
+        (0..QUALIFICATION_CASES.len()).all(|case| {
+            let index = primitive * QUALIFICATION_CASES.len() + case;
+            coverage[index / 8] & (1 << (index % 8)) != 0
+        })
+    })
+}
 
 /// Bounded per-primitive counters emitted by the deterministic workload driver.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -664,6 +692,7 @@ pub struct QualificationExecution {
     outcome: QualificationOutcome,
     verified: bool,
     retries: u64,
+    case: Option<QualificationCase>,
 }
 
 impl QualificationExecution {
@@ -674,6 +703,7 @@ impl QualificationExecution {
             outcome: QualificationOutcome::Acknowledged,
             verified,
             retries: 0,
+            case: None,
         }
     }
 
@@ -684,6 +714,7 @@ impl QualificationExecution {
             outcome: QualificationOutcome::Rejected,
             verified: false,
             retries: 0,
+            case: None,
         }
     }
 
@@ -694,6 +725,7 @@ impl QualificationExecution {
             outcome: QualificationOutcome::Ambiguous,
             verified: false,
             retries,
+            case: None,
         }
     }
 
@@ -701,6 +733,13 @@ impl QualificationExecution {
     #[must_use]
     pub const fn with_retries(mut self, retries: u64) -> Self {
         self.retries = retries;
+        self
+    }
+
+    /// Binds the executor result to the lifecycle case it actually exercised.
+    #[must_use]
+    pub const fn with_case(mut self, case: QualificationCase) -> Self {
+        self.case = Some(case);
         self
     }
 
@@ -717,6 +756,11 @@ impl QualificationExecution {
     #[must_use]
     pub const fn retries(self) -> u64 {
         self.retries
+    }
+
+    #[must_use]
+    pub const fn case(self) -> Option<QualificationCase> {
+        self.case
     }
 }
 
@@ -781,6 +825,7 @@ pub struct QualificationRunSummary {
     operations: u64,
     elapsed: Duration,
     primitive_counts: Vec<QualificationPrimitiveCounts>,
+    case_coverage: Vec<u8>,
     outcome_digest: Digest,
     latency: QualificationLatencyHistogram,
 }
@@ -819,6 +864,12 @@ impl QualificationRunSummary {
     #[must_use]
     pub fn primitive_counts(&self) -> &[QualificationPrimitiveCounts] {
         &self.primitive_counts
+    }
+
+    /// Returns one bounded bitset of observed primitive/lifecycle pairs.
+    #[must_use]
+    pub fn case_coverage(&self) -> &[u8] {
+        &self.case_coverage
     }
 
     #[must_use]
@@ -888,15 +939,20 @@ impl QualificationRunSummary {
             operations: self.operations,
             elapsed_ms: self.elapsed.as_millis().max(1).min(u128::from(u64::MAX)) as u64,
             primitive_counts: self.primitive_counts.clone(),
-            outcome_digest: *qualification_run_outcome_digest(workload, &self.primitive_counts)?
-                .as_bytes(),
+            case_coverage: self.case_coverage.clone(),
+            outcome_digest: *qualification_run_outcome_digest(
+                workload,
+                &self.primitive_counts,
+                &self.case_coverage,
+            )?
+            .as_bytes(),
             metrics: self.metrics()?,
         })
     }
 }
 
 /// Schema for a measured, typed execution artifact bound to one workload.
-pub const QUALIFICATION_RUN_ARTIFACT_SCHEMA_VERSION: u32 = 2;
+pub const QUALIFICATION_RUN_ARTIFACT_SCHEMA_VERSION: u32 = 3;
 
 /// Bounded measured outcome consumed by protected primitive qualification.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -911,6 +967,7 @@ pub struct QualificationRunArtifact {
     operations: u64,
     elapsed_ms: u64,
     primitive_counts: Vec<QualificationPrimitiveCounts>,
+    case_coverage: Vec<u8>,
     outcome_digest: [u8; 32],
     metrics: Vec<QualificationMetric>,
 }
@@ -953,6 +1010,11 @@ impl QualificationRunArtifact {
             || self.operations != self.workload.operations()
         {
             return Err(Error::Control("qualification run profile identity"));
+        }
+        if profile.requires_lifecycle_case_coverage()
+            && !has_complete_case_coverage(&self.case_coverage)
+        {
+            return Err(Error::Control("qualification run lifecycle case coverage"));
         }
         let duration_secs = self.elapsed_ms.saturating_add(999) / 1_000;
         for (name, unit, expected) in [
@@ -1017,6 +1079,7 @@ impl QualificationRunArtifact {
             || self.outcome_digest.iter().all(|byte| *byte == 0)
             || self.elapsed_ms == 0
             || self.primitive_counts.len() != QUALIFICATION_PRIMITIVES.len()
+            || self.case_coverage.len() != QUALIFICATION_CASE_COVERAGE_BYTES
         {
             return Err(Error::Control("invalid qualification run artifact"));
         }
@@ -1061,8 +1124,11 @@ impl QualificationRunArtifact {
             return Err(Error::Control("qualification run counters"));
         }
         self.workload.validate()?;
-        if qualification_run_outcome_digest(&self.workload, &self.primitive_counts)?
-            != self.outcome_digest()
+        if qualification_run_outcome_digest(
+            &self.workload,
+            &self.primitive_counts,
+            &self.case_coverage,
+        )? != self.outcome_digest()
         {
             return Err(Error::Control("qualification run outcome"));
         }
@@ -1251,24 +1317,54 @@ impl QualificationWorkload {
     where
         E: QualificationOperationExecutor,
     {
+        self.run_internal(executor, false).await
+    }
+
+    /// Executes the schedule and fails unless every executor result identifies
+    /// the lifecycle case assigned to that operation.
+    pub async fn run_with_case_coverage<E>(
+        &self,
+        executor: &mut E,
+    ) -> Result<QualificationRunSummary>
+    where
+        E: QualificationOperationExecutor,
+    {
+        self.run_internal(executor, true).await
+    }
+
+    async fn run_internal<E>(
+        &self,
+        executor: &mut E,
+        require_case: bool,
+    ) -> Result<QualificationRunSummary>
+    where
+        E: QualificationOperationExecutor,
+    {
         let started = Instant::now();
         let mut counts = QUALIFICATION_PRIMITIVES
             .iter()
             .map(|primitive| QualificationPrimitiveCounts::new(primitive))
             .collect::<Vec<_>>();
+        let mut case_coverage = vec![0; QUALIFICATION_CASE_COVERAGE_BYTES];
         let mut latency = QualificationLatencyHistogram::default();
         for operation in self.iter_operations() {
             let operation_started = Instant::now();
             let execution = executor.execute(operation).await?;
+            if require_case && execution.case() != Some(operation.case()) {
+                return Err(Error::Control(
+                    "qualification executor did not verify lifecycle case",
+                ));
+            }
             Self::record_execution(
                 &mut counts,
+                &mut case_coverage,
                 &mut latency,
                 operation,
                 execution,
                 operation_started.elapsed(),
             );
         }
-        self.summary(counts, latency, started.elapsed())
+        self.summary(counts, case_coverage, latency, started.elapsed())
     }
 
     /// Executes the schedule with bounded in-flight operations through cloned
@@ -1283,6 +1379,33 @@ impl QualificationWorkload {
     where
         E: QualificationOperationExecutor + Clone + Send + 'static,
     {
+        self.run_concurrent_internal(executor, concurrency, false)
+            .await
+    }
+
+    /// Executes a concurrent schedule and requires case identity from every
+    /// completed operation before emitting a measured result.
+    pub async fn run_concurrent_with_case_coverage<E>(
+        &self,
+        executor: E,
+        concurrency: usize,
+    ) -> Result<QualificationRunSummary>
+    where
+        E: QualificationOperationExecutor + Clone + Send + 'static,
+    {
+        self.run_concurrent_internal(executor, concurrency, true)
+            .await
+    }
+
+    async fn run_concurrent_internal<E>(
+        &self,
+        executor: E,
+        concurrency: usize,
+        require_case: bool,
+    ) -> Result<QualificationRunSummary>
+    where
+        E: QualificationOperationExecutor + Clone + Send + 'static,
+    {
         if concurrency == 0 || concurrency > MAX_QUALIFICATION_CONCURRENCY {
             return Err(Error::Control("qualification concurrency is out of bounds"));
         }
@@ -1291,6 +1414,7 @@ impl QualificationWorkload {
             .iter()
             .map(|primitive| QualificationPrimitiveCounts::new(primitive))
             .collect::<Vec<_>>();
+        let mut case_coverage = vec![0; QUALIFICATION_CASE_COVERAGE_BYTES];
         let mut latency = QualificationLatencyHistogram::default();
         let mut operations = self.iter_operations();
         let mut pending = FuturesUnordered::new();
@@ -1313,8 +1437,17 @@ impl QualificationWorkload {
             };
             match result {
                 Ok((operation, execution, elapsed)) => {
+                    if require_case && execution.case() != Some(operation.case()) {
+                        if first_error.is_none() {
+                            first_error = Some(Error::Control(
+                                "qualification executor did not verify lifecycle case",
+                            ));
+                        }
+                        continue;
+                    }
                     Self::record_execution(
                         &mut counts,
+                        &mut case_coverage,
                         &mut latency,
                         operation,
                         execution,
@@ -1331,16 +1464,20 @@ impl QualificationWorkload {
         if let Some(error) = first_error {
             return Err(error);
         }
-        self.summary(counts, latency, started.elapsed())
+        self.summary(counts, case_coverage, latency, started.elapsed())
     }
 
     fn record_execution(
         counts: &mut [QualificationPrimitiveCounts],
+        case_coverage: &mut [u8],
         latency: &mut QualificationLatencyHistogram,
         operation: QualificationOperation,
         execution: QualificationExecution,
         elapsed: Duration,
     ) {
+        if execution.case() == Some(operation.case()) {
+            mark_case_coverage(case_coverage, operation);
+        }
         latency.record(elapsed);
         let primitive_index = usize::from(operation.primitive_index);
         let primitive = &mut counts[primitive_index];
@@ -1367,10 +1504,12 @@ impl QualificationWorkload {
     fn summary(
         &self,
         primitive_counts: Vec<QualificationPrimitiveCounts>,
+        case_coverage: Vec<u8>,
         latency: QualificationLatencyHistogram,
         elapsed: Duration,
     ) -> Result<QualificationRunSummary> {
-        let outcome_digest = qualification_run_outcome_digest(self, &primitive_counts)?;
+        let outcome_digest =
+            qualification_run_outcome_digest(self, &primitive_counts, &case_coverage)?;
         Ok(QualificationRunSummary {
             profile: self.profile.clone(),
             profile_digest: self.profile_digest(),
@@ -1379,6 +1518,7 @@ impl QualificationWorkload {
             operations: self.operations,
             elapsed,
             primitive_counts,
+            case_coverage,
             outcome_digest,
             latency,
         })
@@ -1463,14 +1603,19 @@ fn qualification_workload_outcome_digest(seed: u64, cells: u64, operations: u64)
 fn qualification_run_outcome_digest(
     workload: &QualificationWorkload,
     counts: &[QualificationPrimitiveCounts],
+    case_coverage: &[u8],
 ) -> Result<Digest> {
+    if case_coverage.len() != QUALIFICATION_CASE_COVERAGE_BYTES {
+        return Err(Error::Control("qualification run case coverage"));
+    }
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"crab-cell-runtime/qualification/run-v2");
+    hasher.update(b"crab-cell-runtime/qualification/run-v3");
     hasher.update(workload.outcome_digest().as_bytes());
     hasher.update(workload.profile_digest().as_bytes());
     hasher.update(&workload.seed.to_be_bytes());
     hasher.update(&workload.cells.to_be_bytes());
     hasher.update(&workload.operations.to_be_bytes());
+    hasher.update(case_coverage);
     for primitive in QUALIFICATION_PRIMITIVES {
         let primitive_counts = counts
             .iter()
@@ -2787,6 +2932,12 @@ mod tests {
         );
         assert!(contract.minimum_operations() < local.minimum_operations());
         assert!(local.minimum_cells() < scale.minimum_cells());
+        assert!(!contract.requires_lifecycle_case_coverage());
+        assert!(local.requires_lifecycle_case_coverage());
+        assert!(scale.requires_lifecycle_case_coverage());
+        assert!(fault.requires_lifecycle_case_coverage());
+        assert!(provider.requires_lifecycle_case_coverage());
+        assert!(compatibility.requires_lifecycle_case_coverage());
         assert_eq!(fault.name(), "fault-v1");
         assert_eq!(provider.name(), "provider-v1");
         assert_eq!(compatibility.name(), "compatibility-v1");
@@ -2980,6 +3131,7 @@ mod tests {
 
     struct ContractExecutor {
         calls: u64,
+        case_coverage: bool,
     }
 
     impl QualificationOperationExecutor for ContractExecutor {
@@ -2994,6 +3146,11 @@ mod tests {
             } else {
                 QualificationExecution::acknowledged(true)
                     .with_retries(u64::from(operation.retry_hint()))
+            };
+            let execution = if self.case_coverage {
+                execution.with_case(operation.case())
+            } else {
+                execution
             };
             std::future::ready(Ok(execution))
         }
@@ -3044,7 +3201,10 @@ mod tests {
         for (index, operation) in operations.iter().copied().enumerate() {
             assert_eq!(workload.operation_at(index as u64).unwrap(), operation);
         }
-        let mut executor = ContractExecutor { calls: 0 };
+        let mut executor = ContractExecutor {
+            calls: 0,
+            case_coverage: false,
+        };
         let summary = workload.run(&mut executor).await.unwrap();
         assert_eq!(executor.calls, workload.operations());
         assert_eq!(summary.operations(), workload.operations());
@@ -3063,6 +3223,25 @@ mod tests {
                 .any(|metric| { metric.name() == "p99_latency_ms" && metric.unit() == "ms" })
         );
         assert_ne!(summary.outcome_digest(), workload.outcome_digest());
+    }
+
+    #[tokio::test]
+    async fn case_coverage_runner_rejects_unverified_lifecycle_hints() {
+        let profile = QualificationProfile::pr_contract();
+        let workload = QualificationWorkload::generate(&profile, 41).unwrap();
+        let mut missing = ContractExecutor {
+            calls: 0,
+            case_coverage: false,
+        };
+        assert!(workload.run_with_case_coverage(&mut missing).await.is_err());
+
+        let mut covered = ContractExecutor {
+            calls: 0,
+            case_coverage: true,
+        };
+        let summary = workload.run_with_case_coverage(&mut covered).await.unwrap();
+        assert!(summary.case_coverage().iter().all(|byte| *byte == u8::MAX));
+        summary.artifact(&workload).unwrap();
     }
 
     #[tokio::test]
@@ -3120,9 +3299,14 @@ mod tests {
             operations: workload.operations(),
             elapsed_ms: 1_000,
             primitive_counts: workload.primitives.clone(),
-            outcome_digest: *qualification_run_outcome_digest(&workload, &workload.primitives)
-                .unwrap()
-                .as_bytes(),
+            case_coverage: vec![0; QUALIFICATION_CASE_COVERAGE_BYTES],
+            outcome_digest: *qualification_run_outcome_digest(
+                &workload,
+                &workload.primitives,
+                &[0; QUALIFICATION_CASE_COVERAGE_BYTES],
+            )
+            .unwrap()
+            .as_bytes(),
             metrics: vec![
                 QualificationMetric::new("cells".into(), 1, "cells".into()).unwrap(),
                 QualificationMetric::new("operations".into(), 64, "operations".into()).unwrap(),
@@ -3149,6 +3333,7 @@ mod tests {
         missing_scheduled_retry.outcome_digest = *qualification_run_outcome_digest(
             &missing_scheduled_retry.workload,
             &missing_scheduled_retry.primitive_counts,
+            &missing_scheduled_retry.case_coverage,
         )
         .unwrap()
         .as_bytes();
@@ -3169,9 +3354,11 @@ mod tests {
             operations: throughput_workload.operations(),
             elapsed_ms: 2_000,
             primitive_counts: throughput_workload.primitives.clone(),
+            case_coverage: vec![0; QUALIFICATION_CASE_COVERAGE_BYTES],
             outcome_digest: *qualification_run_outcome_digest(
                 &throughput_workload,
                 &throughput_workload.primitives,
+                &[0; QUALIFICATION_CASE_COVERAGE_BYTES],
             )
             .unwrap()
             .as_bytes(),
@@ -3220,6 +3407,44 @@ mod tests {
         redistributed.primitive_counts[recipient].acknowledged += 1;
         redistributed.primitive_counts[recipient].verified += 1;
         assert!(redistributed.encode().is_err());
+    }
+
+    #[test]
+    fn protected_run_artifacts_require_complete_lifecycle_case_coverage() {
+        let mut profile =
+            QualificationProfile::new("protected-case-coverage".into(), 1, 8, 1, 1_000).unwrap();
+        profile.provider = "rustfs".into();
+        profile.topology = "three-process".into();
+        let workload = QualificationWorkload::generate_with_size(&profile, 19, 1, 56, 1).unwrap();
+        let artifact = QualificationRunArtifact {
+            schema_version: QUALIFICATION_RUN_ARTIFACT_SCHEMA_VERSION,
+            workload: workload.clone(),
+            profile: profile.name.clone(),
+            profile_digest: *profile.digest().unwrap().as_bytes(),
+            seed: workload.seed(),
+            cells: workload.cells(),
+            operations: workload.operations(),
+            elapsed_ms: 1_000,
+            primitive_counts: workload.primitives.clone(),
+            case_coverage: vec![0; QUALIFICATION_CASE_COVERAGE_BYTES],
+            outcome_digest: *qualification_run_outcome_digest(
+                &workload,
+                &workload.primitives,
+                &[0; QUALIFICATION_CASE_COVERAGE_BYTES],
+            )
+            .unwrap()
+            .as_bytes(),
+            metrics: vec![
+                QualificationMetric::new("cells".into(), 1, "cells".into()).unwrap(),
+                QualificationMetric::new("operations".into(), 56, "operations".into()).unwrap(),
+                QualificationMetric::new("duration_secs".into(), 1, "seconds".into()).unwrap(),
+                QualificationMetric::new("throughput_ops_per_sec".into(), 56, "ops/s".into())
+                    .unwrap(),
+                QualificationMetric::new("p99_latency_ms".into(), 1, "ms".into()).unwrap(),
+            ],
+        };
+        artifact.encode().unwrap();
+        assert!(artifact.verify_for_profile(&profile).is_err());
     }
 
     #[test]
@@ -3286,9 +3511,14 @@ mod tests {
             operations: workload.operations(),
             elapsed_ms: 1_000,
             primitive_counts: workload.primitives.clone(),
-            outcome_digest: *qualification_run_outcome_digest(&workload, &workload.primitives)
-                .unwrap()
-                .as_bytes(),
+            case_coverage: vec![0; QUALIFICATION_CASE_COVERAGE_BYTES],
+            outcome_digest: *qualification_run_outcome_digest(
+                &workload,
+                &workload.primitives,
+                &[0; QUALIFICATION_CASE_COVERAGE_BYTES],
+            )
+            .unwrap()
+            .as_bytes(),
             metrics: vec![
                 QualificationMetric::new("p99_latency_ms".into(), 1, "ms".into()).unwrap(),
                 QualificationMetric::new("p99_latency_ms".into(), 2, "ms".into()).unwrap(),
@@ -4089,9 +4319,14 @@ mod tests {
             operations: workload.operations(),
             elapsed_ms: 1_000,
             primitive_counts: workload.primitives.clone(),
-            outcome_digest: *qualification_run_outcome_digest(&workload, &workload.primitives)
-                .unwrap()
-                .as_bytes(),
+            case_coverage: vec![0; QUALIFICATION_CASE_COVERAGE_BYTES],
+            outcome_digest: *qualification_run_outcome_digest(
+                &workload,
+                &workload.primitives,
+                &[0; QUALIFICATION_CASE_COVERAGE_BYTES],
+            )
+            .unwrap()
+            .as_bytes(),
             metrics: vec![
                 QualificationMetric::new("cells".into(), 1, "cells".into()).unwrap(),
                 QualificationMetric::new("operations".into(), 8, "operations".into()).unwrap(),

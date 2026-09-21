@@ -27,7 +27,9 @@ Typed qualification adapters may use the bounded `QualificationWorkload::run_con
 entry point when scheduled operations are independent or idempotent. The serial
 `run` entry point remains the safe choice for workloads with application-level
 ordering dependencies; both paths retain the same streaming schedule, counters,
-latency histogram, and logical outcome digest.
+latency histogram, and logical outcome digest. Protected adapters should use
+`run_with_case_coverage` or `run_concurrent_with_case_coverage`, which require
+each result to bind the lifecycle case it exercised.
 
 The default workload contains a deterministic, seed-bound case schedule for each
 primitive: `happy`, `retry`, `duplicate`, `expiry`, `cancellation`, `owner-loss`,
@@ -41,6 +43,8 @@ rounded-up duration; protected profiles still verify the raw elapsed duration
 and their independent resource counters. Protected `primitives` receipts must
 also match the measured run artifact's cells, operations, duration, throughput,
 and p99 metrics; a signed receipt with substituted threshold values is rejected.
+Measured run artifacts use schema 3 and include a bounded primitive/case bitset;
+named provider/topology profiles reject artifacts missing any lifecycle case.
 The PR profile is a correctness gate.
 `local-provider-v1`, `fault-v1`, `provider-v1`, `compatibility-v1`, and
 `scale-v1` are release-candidate inputs only. The provider-specific
