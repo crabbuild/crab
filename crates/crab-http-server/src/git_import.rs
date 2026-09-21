@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io,
     net::SocketAddr,
     path::Path,
@@ -40,9 +40,9 @@ const JOB_RETENTION: Duration = Duration::from_secs(60 * 60);
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_TOKEN_BYTES: usize = 512;
 const MAX_DESCRIPTION_CHARS: usize = 1_000;
-const PUSH_REF_BATCH_SIZE: usize = 512;
 const MAX_IMPORT_REFS: usize = 100_000;
 const MAX_IMPORT_MIRROR_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const IMPORT_MIRROR_RESERVE_MARGIN: u64 = 64 * 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PUSH_ATTEMPTS: usize = 3;
 const PUSH_RETRY_DELAY: Duration = Duration::from_secs(2);
@@ -54,6 +54,7 @@ pub(crate) struct ImportContext {
     internal_key: [u8; 32],
     allowed_hosts: Arc<[String]>,
     jobs: ImportJobs,
+    importing: Arc<std::sync::Mutex<HashSet<Uuid>>>,
 }
 
 impl ImportContext {
@@ -71,6 +72,25 @@ impl ImportContext {
             internal_key: rand::random(),
             allowed_hosts,
             jobs: ImportJobs::default(),
+            importing: Arc::new(std::sync::Mutex::new(HashSet::new())),
+        }
+    }
+
+    pub(crate) fn is_repository_importing(&self, repository: Uuid) -> bool {
+        self.importing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&repository)
+    }
+
+    fn begin_repository(&self, repository: Uuid) -> ImportGuard {
+        self.importing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(repository);
+        ImportGuard {
+            importing: Arc::clone(&self.importing),
+            repository,
         }
     }
 
@@ -142,6 +162,20 @@ impl ImportContext {
             .trim_end_matches(']')
             .parse::<std::net::IpAddr>()
             .is_ok_and(|address| address == expected)
+    }
+}
+
+struct ImportGuard {
+    importing: Arc<std::sync::Mutex<HashSet<Uuid>>>,
+    repository: Uuid,
+}
+
+impl Drop for ImportGuard {
+    fn drop(&mut self) {
+        self.importing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.repository);
     }
 }
 
@@ -259,7 +293,7 @@ impl IntoResponse for ImportError {
             Self::Git(_) => (
                 StatusCode::BAD_GATEWAY,
                 "git_source_unavailable",
-                "The Git source could not be cloned; verify the URL, access, and token",
+                "The Git source could not be cloned or published; verify the URL, access, token, and server capacity",
             ),
             Self::Setup(_) | Self::Catalog(_) | Self::Io(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -383,7 +417,7 @@ impl ImportJobs {
     async fn succeed(&self, id: Uuid, repository: ImportedRepository) {
         if let Some(job) = self.entries.write().await.get_mut(&id) {
             job.status.state = JobState::Succeeded;
-            job.status.message = "Repository imported".into();
+            job.status.message = "Repository imported; indexing in background".into();
             job.status.repository = Some(repository);
         }
     }
@@ -417,7 +451,7 @@ async fn run_import(
         Err(error) => {
             let message = match &error {
                 ImportError::Git(_) => {
-                    "The Git source could not be cloned; verify the URL, access, and token".into()
+                    "The Git source could not be cloned or published; verify the URL, access, token, and server capacity".into()
                 }
                 ImportError::Cancelled | ImportError::Timeout => {
                     "The import did not finish; retry it to continue".into()
@@ -451,24 +485,25 @@ async fn import_repository(
     }
 
     let cancellation = server.cancellation.child_token();
+    // Leave the receiver's initial pack reservation available while cloning.
+    // A fixed 8 GiB reservation rejects small imports on a constrained node
+    // before the mirror size is known, even though the mirror would fit.
+    let clone_reservation = MAX_IMPORT_MIRROR_BYTES.min(
+        server
+            .local_staging
+            .available_bytes()
+            .saturating_sub(crate::receive::IMPORT_RECEIVE_INITIAL_RESERVATION),
+    );
+    if clone_reservation == 0 {
+        return Err(ImportError::Busy);
+    }
     let directory = match server
         .local_staging
-        .create(MAX_IMPORT_MIRROR_BYTES, &cancellation)
+        .create(clone_reservation, &cancellation)
         .await
     {
         Ok(directory) => directory,
-        Err(crate::local_disk::Error::Busy) => return Err(ImportError::Busy),
-        Err(crate::local_disk::Error::Cancelled) => return Err(ImportError::Cancelled),
-        Err(crate::local_disk::Error::TooLarge) => {
-            return Err(ImportError::Git(
-                "Git source exceeds the import storage limit".into(),
-            ));
-        }
-        Err(error) => {
-            return Err(ImportError::Setup(crate::Error::LocalStaging {
-                source: Box::new(error),
-            }));
-        }
+        Err(error) => return Err(map_staging_error(error)),
     };
     let mirror = directory.path().join("repository.git");
     let mut clone = Command::new("git");
@@ -478,6 +513,21 @@ async fn import_repository(
         .arg(&mirror);
     configure_git(&mut clone, request.token.as_deref(), None);
     run_git(clone, &cancellation, request.token.as_deref()).await?;
+
+    // The upper bound protects the clone while it is being created, but keeping
+    // that reservation during publication double-counts the local mirror and
+    // incoming receive pack. Shrink it to the measured mirror plus a small
+    // command margin before the first internal push so normal-sized imports can
+    // share the node's bounded staging budget with the receiver.
+    let mirror_bytes = mirror_size(&mirror).await?;
+    let mirror_reservation = mirror_bytes
+        .checked_add(IMPORT_MIRROR_RESERVE_MARGIN)
+        .filter(|reservation| *reservation <= MAX_IMPORT_MIRROR_BYTES)
+        .ok_or_else(|| ImportError::Git("Git source exceeds the import storage limit".into()))?;
+    server
+        .local_staging
+        .resize(&directory, mirror_reservation)
+        .map_err(map_staging_error)?;
 
     let default_branch = default_branch(&mirror, &cancellation).await?;
     context
@@ -517,6 +567,7 @@ async fn import_repository(
         )
         .await
         .map_err(ImportError::Catalog)?;
+    let maintenance_guard = context.begin_repository(record.id);
     crate::cells::initialize_repository(&context.config, record.id)
         .await
         .map_err(ImportError::Setup)?;
@@ -532,37 +583,82 @@ async fn import_repository(
         .update(id, JobState::Running, "Publishing Git history".into())
         .await;
     let destination = context.destination_url(&request.owner, &request.name);
-    let batches = refs.len().div_ceil(PUSH_REF_BATCH_SIZE);
     let internal_key = context.internal_key_hex();
-    for (index, batch) in refs.chunks(PUSH_REF_BATCH_SIZE).enumerate() {
-        context
-            .jobs
-            .update(
-                id,
-                JobState::Running,
-                format!("Publishing Git history ({}/{batches})", index + 1),
-            )
-            .await;
-        let refspecs = batch
-            .iter()
-            .map(|name| format!("+{name}:{name}"))
-            .collect::<Vec<_>>();
-        push_batch(
-            &mirror,
-            &destination,
-            refspecs,
-            &internal_key,
-            &cancellation,
+    context
+        .jobs
+        .update(
+            id,
+            JobState::Running,
+            format!("Publishing Git history ({} refs)", refs.len()),
         )
-        .await?;
+        .await;
+    push_mirror(&mirror, &destination, &internal_key, &cancellation).await?;
+
+    // Internal import receives acknowledge the durable journal without waiting
+    // for read projection. Start one projection after all refs are committed.
+    drop(maintenance_guard);
+    if let Some(repository) = server
+        .repositories
+        .get(&(request.owner.clone(), request.name.clone()))
+    {
+        repository.invalidate().await;
+        if let Err(error) = repository.schedule_maintenance(server).await {
+            tracing::warn!(repository_id = %repository.id, error = ?error, "import projection scheduling deferred");
+        }
     }
     Ok(())
 }
 
-async fn push_batch(
+fn map_staging_error(error: crate::local_disk::Error) -> ImportError {
+    match error {
+        crate::local_disk::Error::Busy => ImportError::Busy,
+        crate::local_disk::Error::Cancelled => ImportError::Cancelled,
+        crate::local_disk::Error::TooLarge => {
+            ImportError::Git("Git source exceeds the import storage limit".into())
+        }
+        error => ImportError::Setup(crate::Error::LocalStaging {
+            source: Box::new(error),
+        }),
+    }
+}
+
+async fn mirror_size(path: &Path) -> Result<u64, ImportError> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || directory_size(&path))
+        .await
+        .map_err(|error| ImportError::Io(io::Error::other(error)))?
+        .map_err(ImportError::Io)
+}
+
+fn directory_size(path: &Path) -> io::Result<u64> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Git mirror contains a symbolic link",
+        ));
+    }
+    if file_type.is_file() {
+        return Ok(metadata.len());
+    }
+    if !file_type.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Git mirror contains a special file",
+        ));
+    }
+    std::fs::read_dir(path)?.try_fold(0_u64, |total, entry| {
+        let size = directory_size(&entry?.path())?;
+        total
+            .checked_add(size)
+            .ok_or_else(|| io::Error::other("Git mirror size overflowed"))
+    })
+}
+
+async fn push_mirror(
     mirror: &Path,
     destination: &str,
-    refspecs: Vec<String>,
     internal_key: &str,
     cancellation: &CancellationToken,
 ) -> Result<(), ImportError> {
@@ -570,9 +666,8 @@ async fn push_batch(
     loop {
         let mut push = Command::new("git");
         push.current_dir(mirror)
-            .args(["push", "--quiet", "--atomic"])
-            .arg(destination)
-            .args(&refspecs);
+            .args(["push", "--quiet", "--atomic", "--mirror"])
+            .arg(destination);
         configure_git(&mut push, None, Some(internal_key));
         match run_git(push, cancellation, Some(internal_key)).await {
             Ok(_) => return Ok(()),
@@ -584,7 +679,7 @@ async fn push_batch(
                     attempt,
                     max_attempts = MAX_PUSH_ATTEMPTS,
                     error = ?error,
-                    "Git import ref batch failed; retrying"
+                    "Git import publication failed; retrying"
                 );
                 let delay = PUSH_RETRY_DELAY
                     .checked_mul(attempt as u32)
@@ -700,10 +795,10 @@ async fn run_git(
 ) -> Result<String, ImportError> {
     command
         .kill_on_drop(true)
-        .env("GIT_TRACE", "0")
-        .env("GIT_TRACE_CURL", "0")
-        .env("GIT_CURL_VERBOSE", "0")
-        .env("GIT_TRACE_PACKET", "0")
+        .env_remove("GIT_TRACE")
+        .env_remove("GIT_TRACE_CURL")
+        .env_remove("GIT_CURL_VERBOSE")
+        .env_remove("GIT_TRACE_PACKET")
         .env("LC_ALL", "C")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

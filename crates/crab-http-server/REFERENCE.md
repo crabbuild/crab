@@ -593,14 +593,23 @@ boundary for private deployments.
 
 On success, the importing identity is the new repository's administrator in an
 OIDC deployment. A local-trust deployment uses the local operator. Imports are
-bounded to four concurrent jobs; cloning and each push batch have a 30-minute
-deadline, each batch uses the server's atomic receive capability, and failed
-push batches retry with bounded backoff. The runtime image
-includes `git`; each import reserves up to 8 GiB from the Cell local-disk
-budget, and `TMPDIR` must still have room for Git's process scratch files.
+published only after the repository Cell has been initialized, its root verified,
+and its control record released to idle. The catalog keeps the repository out of
+serving indexes until that readiness gate passes; transient Cell activation
+errors are retried by request paths. The import job becomes `succeeded` once all
+refs are durably committed; Git browse indexes and attribution are then rebuilt
+in the background. A mirror preserves every advertised ref (including provider
+pull-request refs), so large GitHub mirrors can take longer during verified
+visibility planning even though the repository is already durable. Jobs are
+bounded to four concurrent imports; cloning and publication have a 30-minute
+deadline, publication uses the server's atomic receive capability, and failed
+publications retry with bounded backoff. The runtime image includes `git`; each
+import reserves up to 8 GiB from the Cell local-disk budget while cloning, then
+shrinks that reservation to the measured mirror plus a command margin. `TMPDIR`
+must still have room for Git's process scratch files.
 The server also needs outbound access to the configured Git host (or the
 configured network proxy). Transient push failures are retried at the Git
-batch boundary; a terminal failure leaves the destination name reserved until
+publication boundary; a terminal failure leaves the destination name reserved until
 an operator removes the repository that was created before the failure.
 
 ### Render repository content safely

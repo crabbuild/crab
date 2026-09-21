@@ -18,6 +18,7 @@ pub(super) async fn prepare(
     input: Option<std::io::BufReader<std::fs::File>>,
     updates: Vec<crab_git::receive_plan::RefUpdate>,
     visibility_bases: std::collections::BTreeMap<String, (String, gix_hash::ObjectId)>,
+    max_ref_updates: usize,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> super::Result<Prepared> {
     let default_branch = repository
@@ -35,7 +36,7 @@ pub(super) async fn prepare(
         crab_remote::prepare::Options {
             layout,
             graph: GraphLimits {
-                max_ref_updates: 1024,
+                max_ref_updates,
                 max_graph_steps: MAX_GRAPH_STEPS,
                 max_object_bytes: MAX_OBJECT_BYTES,
                 // A full-history create visits each unique object. This is a

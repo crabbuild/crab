@@ -31,6 +31,24 @@ pub struct ReceiveRequest {
     pub report_status: bool,
 }
 
+/// Bounds used while parsing a receive command section.
+#[derive(Clone, Copy, Debug)]
+pub struct ReceiveRequestLimits {
+    /// Maximum shallow declarations plus ref commands.
+    pub max_commands: usize,
+    /// Maximum combined packet bytes, excluding the following pack.
+    pub max_command_bytes: usize,
+}
+
+impl Default for ReceiveRequestLimits {
+    fn default() -> Self {
+        Self {
+            max_commands: MAX_COMMANDS,
+            max_command_bytes: MAX_COMMAND_BYTES,
+        }
+    }
+}
+
 /// Errors in receive command and response framing.
 #[derive(Debug, thiserror::Error)]
 pub enum ReceiveWireError {
@@ -61,6 +79,14 @@ type Result<T> = std::result::Result<T, ReceiveWireError>;
 /// certificates and unadvertised capabilities are rejected. Pack completeness,
 /// ref policy and old-value checks belong to the receiver, not this parser.
 pub fn read_request(reader: &mut impl Read) -> Result<ReceiveRequest> {
+    read_request_with_limits(reader, ReceiveRequestLimits::default())
+}
+
+/// Read a receive command section with an explicitly bounded command budget.
+pub fn read_request_with_limits(
+    reader: &mut impl Read,
+    limits: ReceiveRequestLimits,
+) -> Result<ReceiveRequest> {
     let mut request = ReceiveRequest {
         updates: Vec::new(),
         report_status: false,
@@ -89,7 +115,10 @@ pub fn read_request(reader: &mut impl Read) -> Result<ReceiveRequest> {
             }
         };
         total = total.saturating_add(len + 4);
-        if len > MAX_PACKET_DATA || total > MAX_COMMAND_BYTES || records >= MAX_COMMANDS {
+        if len > MAX_PACKET_DATA
+            || total > limits.max_command_bytes
+            || records >= limits.max_commands
+        {
             return Err(ReceiveWireError::Protocol(
                 "receive command section exceeds its limit",
             ));

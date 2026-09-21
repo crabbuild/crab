@@ -18,7 +18,9 @@ mod publish;
 mod validate;
 
 const MAX_BODY: u64 = 8 * 1024 * 1024 * 1024;
-const INITIAL_RECEIVE_RESERVATION: u64 = 2 * 1024 * 1024 * 1024;
+pub(crate) const INITIAL_RECEIVE_RESERVATION: u64 = 2 * 1024 * 1024 * 1024;
+pub(crate) const IMPORT_RECEIVE_INITIAL_RESERVATION: u64 = 64 * 1024 * 1024;
+const IMPORT_RECEIVE_RESERVE_MARGIN: u64 = 64 * 1024 * 1024;
 const RECEIVE_RESERVATION_GROWTH: u64 = 256 * 1024 * 1024;
 const REQUEST_BUDGET: Duration = Duration::from_secs(30 * 60);
 const REF_UPDATE_BUDGET: Duration = Duration::from_secs(30);
@@ -179,7 +181,7 @@ async fn publish_generated_objects(
     let worker_server = Arc::clone(&server);
     let (send, result) = tokio::sync::oneshot::channel();
     server.receives.spawn(async move {
-        let _permit = permit;
+        let permit = permit;
         let work = async {
             let directory = worker_server
                 .local_staging
@@ -225,6 +227,7 @@ async fn publish_generated_objects(
         if let Err(Err(error)) = send.send(completed) {
             tracing::error!(error = ?error, "disconnected browser Git publication failed");
         }
+        permit.release().await;
     });
     result
         .await
@@ -359,6 +362,7 @@ pub(crate) async fn receive(
         ));
     }
     check_cancelled(&server.cancellation)?;
+    let internal_import = headers.contains_key("x-crab-internal-import");
     let cancel = server.cancellation.child_token();
     let permit = server.acquire_transfer(&cancel).await?;
     let _guard = cancel.clone().drop_guard();
@@ -368,18 +372,29 @@ pub(crate) async fn receive(
     // The tracker owns the worker even if the HTTP response future disappears.
     // Shutdown cancels and drains it before closing remote readers.
     server.receives.spawn(async move {
-        let _permit = permit;
+        let permit = permit;
         let work = async {
             let directory = worker_server
                 .local_staging
-                .create(INITIAL_RECEIVE_RESERVATION, &worker_cancel)
+                .create(
+                    if internal_import {
+                        IMPORT_RECEIVE_INITIAL_RESERVATION
+                    } else {
+                        INITIAL_RECEIVE_RESERVATION
+                    },
+                    &worker_cancel,
+                )
                 .await?;
             let path = directory.path().join("receive");
             let mut file = tokio::fs::File::create(&path).await?;
             let mut stream = request.into_body().into_data_stream();
             let mut body_hasher = blake3::Hasher::new_derive_key("crab http receive body v1");
             let mut size = 0_u64;
-            let mut reserved = INITIAL_RECEIVE_RESERVATION;
+            let mut reserved = if internal_import {
+                IMPORT_RECEIVE_INITIAL_RESERVATION
+            } else {
+                INITIAL_RECEIVE_RESERVATION
+            };
             loop {
                 let chunk = tokio::select! {
                     () = worker_cancel.cancelled() => return Err(ReceiveError::Cancelled),
@@ -404,13 +419,23 @@ pub(crate) async fn receive(
             }
             file.flush().await?;
             drop(file);
-            worker_server.local_staging.resize(&directory, MAX_BODY)?;
+            let final_reservation = if internal_import {
+                size.saturating_mul(2)
+                    .saturating_add(IMPORT_RECEIVE_RESERVE_MARGIN)
+                    .clamp(IMPORT_RECEIVE_INITIAL_RESERVATION, MAX_BODY)
+            } else {
+                MAX_BODY
+            };
+            worker_server
+                .local_staging
+                .resize(&directory, final_reservation)?;
             publish::run(
                 &worker_server,
                 &principal,
                 &(owner, name),
                 directory,
                 *body_hasher.finalize().as_bytes(),
+                internal_import,
                 &worker_cancel,
             )
             .await
@@ -426,6 +451,7 @@ pub(crate) async fn receive(
         if let Err(Err(error)) = send.send(completed) {
             tracing::error!(error = ?error, "disconnected Git receive failed");
         }
+        permit.release().await;
     });
     let bytes = result
         .await
@@ -575,7 +601,7 @@ async fn publish_ref(
     let worker_server = Arc::clone(&server);
     let (send, result) = tokio::sync::oneshot::channel();
     server.receives.spawn(async move {
-        let _permit = permit;
+        let permit = permit;
         let work = async {
             match publication {
                 RefPublication::Update {
@@ -621,6 +647,7 @@ async fn publish_ref(
         if let Err(Err(error)) = send.send(completed) {
             tracing::error!(error = ?error, "disconnected ref publication failed");
         }
+        permit.release().await;
     });
     result
         .await

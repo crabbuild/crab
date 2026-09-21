@@ -225,6 +225,37 @@ fn packet_and_aggregate_limits_stop_unbounded_command_sections() {
 }
 
 #[test]
+fn explicitly_bounded_import_sections_can_exceed_native_push_limits() {
+    let mut body = Vec::new();
+    for i in 0..=receive_wire::MAX_COMMANDS {
+        packet(
+            &command(
+                &"0".repeat(40),
+                &"a".repeat(40),
+                &format!("refs/heads/import-{i}"),
+                (i == 0).then_some("report-status"),
+            ),
+            &mut body,
+        );
+    }
+    encode::flush_to_write(&mut body).unwrap();
+    body.extend_from_slice(b"PACK untouched bytes");
+    let mut reader = Cursor::new(body);
+    let request = receive_wire::read_request_with_limits(
+        &mut reader,
+        receive_wire::ReceiveRequestLimits {
+            max_commands: receive_wire::MAX_COMMANDS + 1,
+            max_command_bytes: receive_wire::MAX_COMMAND_BYTES * 2,
+        },
+    )
+    .unwrap();
+    assert_eq!(request.updates.len(), receive_wire::MAX_COMMANDS + 1);
+    let mut tail = Vec::new();
+    reader.read_to_end(&mut tail).unwrap();
+    assert_eq!(tail, b"PACK untouched bytes");
+}
+
+#[test]
 fn advertisement_and_status_are_native_packet_lines() {
     let mut empty = Vec::new();
     receive_wire::advertise(&mut empty, &BTreeMap::new()).unwrap();

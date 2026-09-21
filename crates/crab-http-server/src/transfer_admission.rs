@@ -111,7 +111,7 @@ impl TransferAdmission {
 }
 
 pub(crate) struct TransferPermit {
-    _local: OwnedSemaphorePermit,
+    local: Option<OwnedSemaphorePermit>,
     stop: CancellationToken,
     _stop_on_drop: tokio_util::sync::DropGuard,
     _worker: Option<tokio::task::JoinHandle<()>>,
@@ -150,16 +150,18 @@ impl TransferPermit {
             }
         });
         Self {
-            _local: local,
+            local: Some(local),
             stop: stop.clone(),
             _stop_on_drop: stop.drop_guard(),
             _worker: Some(worker),
         }
     }
 
-    #[cfg(test)]
     pub(crate) async fn release(mut self) {
         self.stop.cancel();
+        // A slow object-store lease cleanup must not hold a node-local request
+        // slot after the response has been completed.
+        self.local.take();
         if let Some(worker) = self._worker.take() {
             let _ = worker.await;
         }
