@@ -1036,6 +1036,10 @@ stop_fallback_member() {
 # any-node path and still restore exact data from RustFS.
 resume_service server
 resume_service server-d
+# A stale process fences itself once its lease is renewed after the freeze.
+# Recreate the node to model the orchestrator restart that makes the old
+# owner eligible to rejoin; unfreezing alone cannot restart an exited node.
+"${compose[@]}" up --detach --no-build --force-recreate server >/dev/null
 "${compose[@]}" up --detach --no-build server-c >/dev/null
 wait_for_healthy server
 wait_for_healthy server-c
