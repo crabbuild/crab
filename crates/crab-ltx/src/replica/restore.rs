@@ -92,29 +92,38 @@ pub(super) async fn run(database: &CellPagedDatabase, destination: &Path) -> Res
         let write = host
             .run(move || {
                 let mut next = u64::from(first);
+                let end = next + u64::from(count);
+                let window_bytes = (count as usize)
+                    .checked_mul(page_size as usize)
+                    .filter(|bytes| *bytes <= RESTORE_WINDOW_BYTES as usize)
+                    .ok_or(CrabError::LTXCorrupted)?;
+                let mut window = Vec::with_capacity(window_bytes);
                 match downloaded {
                     DownloadedWindow::Lock => {
-                        file.write_all(&vec![0; page_size as usize])?;
+                        window.resize(page_size as usize, 0);
                         next += 1;
                     }
                     DownloadedWindow::Remote(spans) => {
                         for span in spans {
                             span.try_for_each_page(page_size, |number, bytes| {
-                                if u64::from(number) != next {
+                                if u64::from(number) != next || next >= end {
                                     return Err(CrabError::LTXCorrupted);
                                 }
                                 checksum = (checksum ^ crate::ltx::checksum_page(number, &bytes))
                                     | crate::CHECKSUM_FLAG;
-                                file.write_all(&bytes)?;
+                                window.extend_from_slice(&bytes);
                                 next += 1;
                                 Ok(())
                             })?;
                         }
                     }
                 }
-                if next != u64::from(first) + u64::from(count) {
+                if next != end || window.len() != window_bytes {
                     return Err(CrabError::LTXCorrupted);
                 }
+                // Commit only fully verified windows to the private scratch file;
+                // the 1 MiB window bound also caps this coalescing buffer.
+                file.write_all(&window)?;
                 Ok::<_, CrabError>((file, checksum))
             })
             .await;
