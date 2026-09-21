@@ -1331,14 +1331,29 @@ impl GitVisibilityIndex {
         BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
         BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
     )> {
+        self.validate()?;
+        // Ref updates append unseen objects to preserve existing ordinals; the wire
+        // snapshot still needs canonical OID order, so remap every ordinal here.
+        let (objects, remap) = canonical_ordinal_dictionary(&self.objects)?;
         let refs = self
             .refs
             .iter()
-            .map(|(name, closure)| (name.clone(), closure.positions()))
-            .collect();
-        let transitions = ordinal_transitions(&self.transitions, &self.positions)?;
-        let incremental_history = ordinal_transitions(&self.incremental_history, &self.positions)?;
-        Ok((self.objects.clone(), refs, transitions, incremental_history))
+            .map(|(name, closure)| {
+                Ok((
+                    name.clone(),
+                    remap_ordinal_positions(closure.positions(), &remap)?,
+                ))
+            })
+            .collect::<Result<_>>()?;
+        let transitions = remap_ordinal_transitions(
+            ordinal_transitions(&self.transitions, &self.positions)?,
+            &remap,
+        )?;
+        let incremental_history = remap_ordinal_transitions(
+            ordinal_transitions(&self.incremental_history, &self.positions)?,
+            &remap,
+        )?;
+        Ok((objects, refs, transitions, incremental_history))
     }
 
     /// Restore a validated visibility index from an ordinal proof.
@@ -1609,6 +1624,86 @@ fn ordinal_transitions(
             Ok((name.clone(), transitions))
         })
         .collect()
+}
+
+fn canonical_ordinal_dictionary(
+    objects: &[GitVisibilityOid],
+) -> Result<(Vec<GitVisibilityOid>, Vec<u32>)> {
+    if objects.windows(2).all(|window| window[0] < window[1]) {
+        let remap = (0..objects.len())
+            .map(|position| {
+                u32::try_from(position)
+                    .map_err(|_| corrupt("visibility object dictionary is too large"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        return Ok((objects.to_vec(), remap));
+    }
+    let mut order = (0..objects.len()).collect::<Vec<_>>();
+    order.sort_unstable_by_key(|position| objects[*position]);
+    let mut remap = vec![0_u32; objects.len()];
+    let mut canonical = Vec::with_capacity(objects.len());
+    for (canonical_position, original_position) in order.into_iter().enumerate() {
+        let canonical_position = u32::try_from(canonical_position)
+            .map_err(|_| corrupt("visibility object dictionary is too large"))?;
+        remap[original_position] = canonical_position;
+        canonical.push(objects[original_position]);
+    }
+    Ok((canonical, remap))
+}
+
+fn remap_ordinal_positions(positions: Vec<u32>, remap: &[u32]) -> Result<Vec<u32>> {
+    let mut remapped = positions
+        .into_iter()
+        .map(|position| {
+            let position = usize::try_from(position)
+                .map_err(|_| corrupt("visibility ordinal cannot be represented"))?;
+            remap
+                .get(position)
+                .copied()
+                .ok_or_else(|| corrupt("visibility ordinal is outside its dictionary"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    remapped.sort_unstable();
+    remapped.dedup();
+    Ok(remapped)
+}
+
+fn remap_ordinal_transitions(
+    source: BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
+    remap: &[u32],
+) -> Result<BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>> {
+    source
+        .into_iter()
+        .map(|(name, transitions)| {
+            let transitions = transitions
+                .into_iter()
+                .map(|mut transition| {
+                    transition.from_ordinal = remap_ordinal(
+                        transition.from_ordinal,
+                        remap,
+                        "visibility transition source ordinal",
+                    )?;
+                    transition.to_ordinal = remap_ordinal(
+                        transition.to_ordinal,
+                        remap,
+                        "visibility transition target ordinal",
+                    )?;
+                    transition.objects = remap_ordinal_positions(transition.objects, remap)?;
+                    Ok(transition)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok((name, transitions))
+        })
+        .collect()
+}
+
+fn remap_ordinal(position: u32, remap: &[u32], field: &str) -> Result<u32> {
+    let position =
+        usize::try_from(position).map_err(|_| corrupt(format!("{field} cannot be represented")))?;
+    remap
+        .get(position)
+        .copied()
+        .ok_or_else(|| corrupt(format!("{field} is outside its dictionary")))
 }
 
 fn restore_ordinal_transitions(
@@ -4172,6 +4267,57 @@ mod tests {
             index.object_count_for_refs(["refs/heads/main", "refs/heads/main"]),
             2
         );
+    }
+
+    #[test]
+    fn ordinal_parts_canonicalize_unsorted_dictionary_and_remap_closures() {
+        let objects = vec![
+            decode_oid(&"b".repeat(40)).expect("valid object"),
+            decode_oid(&"a".repeat(40)).expect("valid object"),
+            decode_oid(&"c".repeat(40)).expect("valid object"),
+        ];
+        let refs = BTreeMap::from([(
+            "refs/heads/main".to_owned(),
+            GitVisibilityClosure::from_positions(vec![0, 1, 2], objects.len())
+                .expect("valid closure"),
+        )]);
+        let transitions = BTreeMap::from([(
+            "refs/heads/main".to_owned(),
+            vec![GitVisibilityTransition {
+                from_oid: objects[0],
+                to_oid: objects[2],
+                objects: GitVisibilityClosure::from_positions(vec![1], objects.len())
+                    .expect("valid closure"),
+            }],
+        )]);
+        let index = GitVisibilityIndex::from_parts(
+            GIT_VISIBILITY_INDEX_VERSION,
+            4,
+            "a".repeat(64),
+            "c".repeat(64),
+            objects,
+            refs,
+            transitions,
+        )
+        .expect("unsorted in-memory dictionary is valid");
+
+        let (canonical, refs, transitions, history) = index
+            .ordinal_parts()
+            .expect("ordinal projection canonicalizes the dictionary");
+        assert_eq!(
+            canonical,
+            vec![
+                decode_oid(&"a".repeat(40)).expect("valid object"),
+                decode_oid(&"b".repeat(40)).expect("valid object"),
+                decode_oid(&"c".repeat(40)).expect("valid object"),
+            ]
+        );
+        assert_eq!(refs["refs/heads/main"], vec![0, 1, 2]);
+        let transition = &transitions["refs/heads/main"][0];
+        assert_eq!(transition.from_ordinal, 1);
+        assert_eq!(transition.to_ordinal, 2);
+        assert_eq!(transition.objects, vec![0]);
+        assert!(history.is_empty());
     }
 
     #[test]
