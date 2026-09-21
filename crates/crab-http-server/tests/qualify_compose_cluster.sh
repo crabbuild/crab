@@ -1039,7 +1039,7 @@ resume_service server-d
 # A stale process fences itself once its lease is renewed after the freeze.
 # Recreate the node to model the orchestrator restart that makes the old
 # owner eligible to rejoin; unfreezing alone cannot restart an exited node.
-"${compose[@]}" up --detach --no-build --force-recreate server server-d >/dev/null
+"${compose[@]}" up --detach --no-build --force-recreate server proxy server-d >/dev/null
 "${compose[@]}" up --detach --no-build server-c >/dev/null
 wait_for_healthy server
 wait_for_healthy server-c
