@@ -658,7 +658,7 @@ impl RepositoryCellScheduler {
                 Ok(Ok(session)) => {
                     tracing::info!(?session, "sealed recovered Cell node log");
                 }
-                Ok(Err(error)) => tracing::warn!(error = %error, "Cell node-log recovery failed"),
+                Ok(Err(error)) => tracing::warn!(error = ?error, "Cell node-log recovery failed"),
                 Err(error) if !error.is_cancelled() => {
                     tracing::warn!(error = %error, "Cell node-log recovery task failed");
                 }
