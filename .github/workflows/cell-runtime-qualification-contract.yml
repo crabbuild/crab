@@ -98,7 +98,7 @@ jobs:
             crates/crab-http-server/tests/qualify_compose_cluster.sh | head -1)"
           test -n "$harness_version"
           test "$harness_version" = 6
-          grep -F -- 'validate-cluster "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json"' \
+          grep -F -- "validate-cluster \"\${RUNNER_TEMP}/crab-http-server-cluster-receipt.json\"" \
             .github/workflows/http-server-container.yml
       - name: Keep release qualification bound to the promoted image
         shell: bash
