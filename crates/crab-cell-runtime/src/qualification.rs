@@ -1133,6 +1133,7 @@ impl QualificationRunArtifact {
             return Err(Error::Control("qualification run outcome"));
         }
         validate_metrics(&self.metrics)?;
+        validate_run_latency_metrics(&self.metrics)?;
         Ok(())
     }
 }
@@ -1965,6 +1966,25 @@ fn validate_metrics(metrics: &[QualificationMetric]) -> Result<()> {
         validate_label(&metric.unit, "qualification metric unit")?;
         if !identities.insert((metric.name.as_str(), metric.unit.as_str())) {
             return Err(Error::Control("duplicate qualification metric"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_run_latency_metrics(metrics: &[QualificationMetric]) -> Result<()> {
+    for (name, unit) in [
+        ("p50_latency_ms", "ms"),
+        ("p95_latency_ms", "ms"),
+        ("p99_latency_ms", "ms"),
+        ("max_latency_ms", "ms"),
+    ] {
+        if metrics
+            .iter()
+            .filter(|metric| metric.name() == name && metric.unit() == unit)
+            .count()
+            != 1
+        {
+            return Err(Error::Control("qualification run latency metrics"));
         }
     }
     Ok(())
@@ -3316,7 +3336,10 @@ mod tests {
                 QualificationMetric::new("duration_secs".into(), 1, "seconds".into()).unwrap(),
                 QualificationMetric::new("throughput_ops_per_sec".into(), 64, "ops/s".into())
                     .unwrap(),
+                QualificationMetric::new("p50_latency_ms".into(), 1, "ms".into()).unwrap(),
+                QualificationMetric::new("p95_latency_ms".into(), 1, "ms".into()).unwrap(),
                 QualificationMetric::new("p99_latency_ms".into(), 1, "ms".into()).unwrap(),
+                QualificationMetric::new("max_latency_ms".into(), 1, "ms".into()).unwrap(),
             ],
         };
         let encoded = artifact.encode().unwrap();
@@ -3325,6 +3348,12 @@ mod tests {
             artifact
         );
         artifact.verify_for_profile(&profile).unwrap();
+
+        let mut missing_latency = artifact.clone();
+        missing_latency
+            .metrics
+            .retain(|metric| metric.name() != "p95_latency_ms");
+        assert!(missing_latency.encode().is_err());
 
         let mut missing_scheduled_retry = artifact.clone();
         let retrying = missing_scheduled_retry
@@ -3371,7 +3400,10 @@ mod tests {
                 QualificationMetric::new("duration_secs".into(), 2, "seconds".into()).unwrap(),
                 QualificationMetric::new("throughput_ops_per_sec".into(), 4, "ops/s".into())
                     .unwrap(),
+                QualificationMetric::new("p50_latency_ms".into(), 1, "ms".into()).unwrap(),
+                QualificationMetric::new("p95_latency_ms".into(), 1, "ms".into()).unwrap(),
                 QualificationMetric::new("p99_latency_ms".into(), 1, "ms".into()).unwrap(),
+                QualificationMetric::new("max_latency_ms".into(), 1, "ms".into()).unwrap(),
             ],
         };
         assert!(slow.verify_for_profile(&throughput_profile).is_err());
@@ -3443,7 +3475,10 @@ mod tests {
                 QualificationMetric::new("duration_secs".into(), 1, "seconds".into()).unwrap(),
                 QualificationMetric::new("throughput_ops_per_sec".into(), 56, "ops/s".into())
                     .unwrap(),
+                QualificationMetric::new("p50_latency_ms".into(), 1, "ms".into()).unwrap(),
+                QualificationMetric::new("p95_latency_ms".into(), 1, "ms".into()).unwrap(),
                 QualificationMetric::new("p99_latency_ms".into(), 1, "ms".into()).unwrap(),
+                QualificationMetric::new("max_latency_ms".into(), 1, "ms".into()).unwrap(),
             ],
         };
         artifact.encode().unwrap();
@@ -4339,7 +4374,10 @@ mod tests {
                 QualificationMetric::new("duration_secs".into(), 1, "seconds".into()).unwrap(),
                 QualificationMetric::new("throughput_ops_per_sec".into(), 8, "ops/s".into())
                     .unwrap(),
+                QualificationMetric::new("p50_latency_ms".into(), 1, "ms".into()).unwrap(),
+                QualificationMetric::new("p95_latency_ms".into(), 1, "ms".into()).unwrap(),
                 QualificationMetric::new("p99_latency_ms".into(), 1, "ms".into()).unwrap(),
+                QualificationMetric::new("max_latency_ms".into(), 1, "ms".into()).unwrap(),
             ],
         }
         .encode()
