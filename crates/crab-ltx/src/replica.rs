@@ -4,10 +4,7 @@ use std::{
     collections::BTreeMap,
     io,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex},
 };
 
 use crate::{CellObjectKind, CellStorageLayout};
@@ -679,53 +676,20 @@ impl CellReplica {
         );
         self.validate_chain(&descriptors, cuts.position)?;
 
-        // Capture files are copied into owned, replayable scratch files. The
-        // copy is chunked so a large WAL cut never becomes an in-memory upload
-        // body and a retry can reopen the same verified source. Scratch is
-        // process-lifetime upload state, not a durability proof: authority
-        // cannot publish until the verified immutable upload completes.
-        let _scratch = self.host.for_scratch(captured_bytes).await?;
+        // Keep each exact capture handle open through verification and upload.
+        // A path replacement cannot redirect retries, while the inspected LTX
+        // digest still rejects in-place mutation before authority may publish.
         let mut inputs = Vec::with_capacity(cuts.segments.len());
         for segment in &cuts.segments {
             let source = segment.path().to_owned();
             let info = segment.info().clone();
-            let directory = source
-                .parent()
-                .ok_or(CrabError::InvalidState("capture path has no parent"))?;
-            let scratch = ScratchFile::new(&self.host, directory, "segment")?;
-            let scratch_path = scratch.path().to_owned();
-            let filesystem = Arc::clone(&self.host.filesystem);
-            let expected = info.size_bytes;
-            self.host
-                .run(move || {
-                    let mut source_file = filesystem.open(&source)?;
-                    let mut destination = filesystem.open_rw(&scratch_path)?;
-                    let mut offset = 0_u64;
-                    while offset < expected {
-                        let length =
-                            usize::try_from((expected - offset).min(STREAM_COPY_BYTES as u64))
-                                .map_err(io::Error::other)?;
-                        let bytes = source_file.read_exact_at(offset, length)?;
-                        destination.write_all(&bytes)?;
-                        offset = offset
-                            .checked_add(length as u64)
-                            .ok_or_else(|| io::Error::other("capture offset overflow"))?;
-                    }
-                    if source_file.file_len()? != expected {
-                        return Err(io::Error::new(
-                            io::ErrorKind::UnexpectedEof,
-                            "capture size changed while copying",
-                        ));
-                    }
-                    Ok::<_, io::Error>(())
-                })
-                .await??;
-            let index = inspect_segment_file(self, scratch.path(), &info).await?;
+            let source = PinnedCapture::open(&self.host, source, info.size_bytes).await?;
+            let index = inspect_segment_source(self, Arc::clone(&source), &info).await?;
             inputs.push(AppendInput {
                 info,
                 location: BodyLocation::Native,
                 index,
-                body: AppendBody::Native(scratch),
+                body: AppendBody::Native(source),
             });
         }
         self.prepare_append(
@@ -1023,9 +987,10 @@ impl CellReplica {
                 let AppendBody::Native(source) = segment.body else {
                     return Err(CrabError::InvalidState("native Cell body source missing"));
                 };
-                compaction::upload(
+                compaction::upload_source(
                     self,
-                    source.path(),
+                    source,
+                    segment.descriptor.info.size_bytes,
                     &segment.descriptor.info.blake3,
                     CellObjectKind::Ltx,
                 )
@@ -1678,7 +1643,7 @@ struct AppendInput {
 }
 
 enum AppendBody {
-    Native(ScratchFile),
+    Native(Arc<PinnedCapture>),
     Bundle,
 }
 
@@ -1699,7 +1664,6 @@ struct DirectoryInput {
     index: Vec<u8>,
 }
 
-const STREAM_COPY_BYTES: usize = 1 << 20;
 const MULTIPART_BYTES: usize = 8 << 20;
 
 async fn cleanup_staged(
@@ -1712,70 +1676,107 @@ async fn cleanup_staged(
     }
 }
 
-struct ScratchFile {
-    filesystem: Arc<dyn crate::environment::FileSystem>,
-    path: PathBuf,
+struct PinnedCapture {
+    host: Host,
+    file: Arc<Mutex<Box<dyn crate::environment::FileIo>>>,
+    size: u64,
 }
 
-impl ScratchFile {
-    fn new(host: &Host, directory: &Path, label: &str) -> Result<Self> {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        for _ in 0..16 {
-            let path = directory.join(format!(
-                ".crab-cell-{label}-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
-            match host.filesystem.create(&path) {
-                Ok(file) => {
-                    drop(file);
-                    return Ok(Self {
-                        filesystem: Arc::clone(&host.filesystem),
-                        path,
-                    });
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error.into()),
+impl PinnedCapture {
+    async fn open(host: &Host, path: PathBuf, expected_size: u64) -> Result<Arc<Self>> {
+        let source_host = host.clone();
+        let filesystem = Arc::clone(&host.filesystem);
+        host.run(move || {
+            let file = filesystem.open(&path)?;
+            if file.file_len()? != expected_size {
+                return Err(CrabError::ChecksumMismatch);
             }
+            Ok(Arc::new(Self {
+                host: source_host,
+                file: Arc::new(Mutex::new(file)),
+                size: expected_size,
+            }))
+        })
+        .await?
+    }
+
+    fn read_exact(&self, offset: u64, length: usize) -> io::Result<Vec<u8>> {
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| io::Error::other("capture file lock poisoned"))?;
+        file.read_exact_at(offset, length)
+    }
+}
+
+struct PinnedCaptureReader {
+    source: Arc<PinnedCapture>,
+    offset: u64,
+}
+
+impl io::Read for PinnedCaptureReader {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        let remaining = self.source.size.saturating_sub(self.offset);
+        let length =
+            usize::try_from(remaining.min(bytes.len() as u64)).map_err(io::Error::other)?;
+        if length == 0 {
+            return Ok(0);
         }
-        Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "Cell publication scratch namespace exhausted",
-        )
-        .into())
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
+        let read = self.source.read_exact(self.offset, length)?;
+        bytes[..length].copy_from_slice(&read);
+        self.offset = self
+            .offset
+            .checked_add(length as u64)
+            .ok_or_else(|| io::Error::other("capture offset overflow"))?;
+        Ok(length)
     }
 }
 
-impl Drop for ScratchFile {
-    fn drop(&mut self) {
-        // A fresh session never adopts unpublished scratch, so durable cleanup
-        // would only delay the immutable upload path.
-        let _ = self.filesystem.remove_file(&self.path);
+#[async_trait::async_trait]
+impl crab_storage::MultipartUploadSource for PinnedCapture {
+    async fn byte_len(&self) -> crab_storage::Result<u64> {
+        let file = Arc::clone(&self.file);
+        self.host
+            .run(move || {
+                let file = file
+                    .lock()
+                    .map_err(|_| io::Error::other("capture file lock poisoned"))?;
+                file.file_len()
+            })
+            .await
+            .map_err(pinned_storage_error)?
+            .map_err(|error| crab_storage::StorageError::ReadRejected {
+                source: Box::new(error),
+            })
+    }
+
+    async fn read_exact(&self, offset: u64, length: usize) -> crab_storage::Result<Bytes> {
+        let file = Arc::clone(&self.file);
+        self.host
+            .run(move || {
+                let mut file = file
+                    .lock()
+                    .map_err(|_| io::Error::other("capture file lock poisoned"))?;
+                file.read_exact_at(offset, length).map(Bytes::from)
+            })
+            .await
+            .map_err(pinned_storage_error)?
+            .map_err(|error| crab_storage::StorageError::ReadRejected {
+                source: Box::new(error),
+            })
     }
 }
 
-async fn inspect_segment_file(
+async fn inspect_segment_source(
     replica: &CellReplica,
-    path: &Path,
+    source: Arc<PinnedCapture>,
     expected: &crate::SegmentInfo,
 ) -> Result<Vec<u8>> {
-    let host = replica.host.clone();
-    let limits = replica.limits;
-    let path = path.to_owned();
     let expected = expected.clone();
     replica
         .host
         .run(move || {
-            let reader = crate::host::LtxHost {
-                facilities: host.clone(),
-                max_database_bytes: limits.max_database_bytes,
-                max_file_bytes: expected.size_bytes,
-            }
-            .open(&path)?;
+            let reader = PinnedCaptureReader { source, offset: 0 };
             let (file, size, digest, pages) = crate::ltx::inspect_reader_with_index(reader)?;
             if size != expected.size_bytes || digest != expected.blake3 {
                 return Err(CrabError::ChecksumMismatch);
@@ -1786,6 +1787,12 @@ async fn inspect_segment_file(
             crate::paged::encode_index_from_pages(&pages)
         })
         .await?
+}
+
+fn pinned_storage_error(error: CrabError) -> crab_storage::StorageError {
+    crab_storage::StorageError::ReadRejected {
+        source: Box::new(error),
+    }
 }
 
 impl VerifiedRoot {
@@ -1888,4 +1895,31 @@ fn directory_changes(
         }
     }
     Ok((changes, retain_through))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::io::Read as _;
+
+    use super::{Host, PinnedCapture, PinnedCaptureReader};
+
+    #[tokio::test]
+    async fn pinned_capture_ignores_later_path_replacement() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("capture.ltx");
+        let displaced = directory.path().join("original.ltx");
+        let original = b"verified capture bytes";
+        std::fs::write(&path, original).unwrap();
+        let source = PinnedCapture::open(&Host::default(), path.clone(), original.len() as u64)
+            .await
+            .unwrap();
+
+        std::fs::rename(&path, &displaced).unwrap();
+        std::fs::write(&path, b"replacement contents!").unwrap();
+
+        let mut reader = PinnedCaptureReader { source, offset: 0 };
+        let mut observed = Vec::new();
+        reader.read_to_end(&mut observed).unwrap();
+        assert_eq!(observed, original);
+    }
 }

@@ -13,7 +13,7 @@ use crate::{CellObjectKind, CrabError, Result, SegmentInfo, Txid, environment::F
 
 pub(super) mod scratch;
 use scratch::ScratchFiles;
-pub(super) use scratch::upload;
+pub(super) use scratch::{upload, upload_source};
 
 const INDEX_READ_BYTES: u64 = 60 * 8_192;
 const FRAME_READ_BYTES: u64 = 1 << 20;

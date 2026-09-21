@@ -131,11 +131,11 @@ path when every capture must cross its own durability boundary.
 ## Scope
 
 This is a local mechanics benchmark, not a claim about the complete durability
-protocol. It does not measure object-store latency, network retries, Cell
-authority/owner-head CAS, acknowledgement ordering, retention, scheduled
-multi-level compaction, or either implementation's paged VFS. Those paths have
-different contracts and need a second harness with the same object-store and
-authority model before they can be compared fairly.
+protocol. It does not measure immutable-root preparation, object-store latency,
+network retries, Cell authority/owner-head CAS, acknowledgement ordering,
+retention, scheduled multi-level compaction, or either implementation's paged
+VFS. Those paths have different contracts and need a second harness with the
+same object-store and authority model before they can be compared fairly.
 
 The runners also use the implementations' pinned bundled SQLite versions:
 Crab currently links SQLite 3.49.1 while the pinned Celld revision links SQLite

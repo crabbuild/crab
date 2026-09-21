@@ -372,7 +372,8 @@ impl Drop for DiskReservation {
 /// An open local artifact/WAL handle supplied by a host filesystem.
 ///
 /// Positional reads and writes use their explicit offsets. A handle returned by
-/// `FileSystem::open_rw` supports both operations.
+/// `FileSystem::open_rw` supports both operations. An open handle remains bound
+/// to the selected artifact even if its namespace path is later replaced.
 pub trait FileIo: Send {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()>;
     fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()>;

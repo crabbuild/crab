@@ -950,31 +950,45 @@ at 343.9 ms and 373.8 ms around a 388.5 ms old-path run. That is a 4%--11%
 local publication-latency improvement on a noisy host. It is an incremental
 Crab-versus-Crab result, not a Crab-versus-Celld full-system claim.
 
-### Follow-up: keep defensive upload scratch ephemeral
+### Follow-up: pin the capture instead of copying upload scratch
 
-`CellReplica::prepare()` copies each caller-retained capture into private,
-bounded scratch before inspecting and uploading it. The copy prevents later
-path replacement and gives provider retries one stable source, but it is not
-recovery state: the proposal remains unreachable until every immutable object
-uploads and authority accepts the root. The old path nevertheless fsynced each
-scratch file and then fsynced the parent again after unlinking it. Preparation
-now preserves the copy, exact inspection, digest verification, upload retry,
-and scratch admission while leaving the temporary file and deletion
-uncommitted. A fresh activation never adopts crash-left scratch.
+`CellReplica::prepare()` now opens each caller-retained capture once and keeps
+that exact handle through inspection and every multipart retry. The `FileIo`
+contract binds an open handle to the selected artifact, so later namespace
+replacement cannot redirect a retry. Inspection verifies exact LTX metadata,
+length, and digest. Multipart upload hashes the complete source before object
+completion and rechecks its length afterward, so same-artifact mutation still
+fails publication. This removes the defensive create/copy/delete path and its
+scratch admission without weakening the immutable-object or authority gates.
 
-A release-mode 32-command loop covered SQL, capture, scratch copy and
-inspection, in-memory immutable uploads, authority CAS, confirmation, and
-cleanup. Two baseline/candidate pairs reported median improvements from
-557.4 ms to 172.9 ms (3.22x) and from 340.8 ms to 126.1 ms (2.70x). All 24
-retained candidate samples were faster than all 24 retained baseline samples.
-The temporary profiler was removed. This isolates avoidable local barriers;
-it still does not compare real provider or authority latency with Celld.
+The retained host tests prove that preparation performs bounded reads with no
+local writes or scratch capacity, cancellation drops the pinned handle, and a
+later path replacement does not change bytes read from the open artifact. A
+throwaway release profiler covered 32 sequential SQL, deferred-capture,
+immutable-prepare, and published-cut cleanup cycles against an in-memory
+object store. The original scratch-copy path reported an 81.3 ms median; the
+first pinned-source run reported 40.9 ms, a 1.99x local improvement. A second
+candidate run was faster again but ran after the host and build artifacts were
+warm, so it is not used as the headline. The profiler was removed. This
+isolates local publication mechanics; the retained Crab/Celld harness does not
+exercise either system's external object/authority protocol.
+
+A fresh direct local-filesystem matrix reran the retained Crab/Celld harness
+with seven measured rounds, two warmups, and Crab durability batch 8 in both
+execution orders. With Crab first, total speedups were 1.38x, 2.01x, and 2.28x
+for small, medium, and large; recovery speedups were 1.10x, 2.12x, and 5.28x.
+With Celld first, totals were 2.60x, 2.13x, and 1.50x, while recovery was 4.93x,
+4.88x, and 2.55x. Crab won all six total comparisons, but the wide small-run
+variance and one 1.38x result still reject a universal 1.5x floor. The stable
+claim remains narrower: bounded-group Crab throughput is faster in these
+workloads, medium total time exceeded 2x in both orders, and independently
+durable per-capture latency is not represented by this grouped mode.
 
 ## Maintenance notes
 
 - Reviewers should trace one corrupt input through plan construction, one
-  scratch-write failure through cleanup, and one ambiguous install error. The
-  happy-path benchmark alone is insufficient proof.
+  pinned-source read failure through cancellation, and one ambiguous install
+  error. The happy-path benchmark alone is insufficient proof.
 - Keep `verify_segment` as the reusable single-segment verifier. The one-pass
   plan builder is an optimization for a complete explicit chain, not a new
   trust boundary for bundles or node frames.

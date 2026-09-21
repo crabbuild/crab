@@ -368,12 +368,14 @@ embedding runtime publishes `PreparedRoot::root()` through `crab-cell-runtime`
 authority. After durable publication it may call
 `Db::prune_captured(&captured)` for that exact acknowledged batch.
 
-Preparation copies each selected capture into bounded private scratch before
-verification and upload, so later caller path replacement cannot change the
-proposal and provider retries can reread the same bytes. That scratch is
-process-lifetime staging, not recovery state: it and its deletion are not
-fsynced. The immutable upload plus the embedding runtime's authority CAS is the
-durability boundary, and a fresh session never adopts crash-left scratch.
+Preparation opens each selected capture once and keeps that exact file handle
+through verification and every provider retry. Replacing its path therefore
+cannot redirect the proposal. The LTX inspection verifies the declared size,
+metadata, and digest; multipart upload hashes the complete source again before
+publishing the immutable object and rechecks its length afterward. An in-place
+mutation fails one of those gates. This path needs no upload scratch or local
+write: immutable upload plus the embedding runtime's authority CAS remains the
+durability boundary.
 
 The live RustFS example exercises Cell publication, sparse activation,
 compaction, source deletion, and exact recovery. See the

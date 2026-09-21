@@ -276,7 +276,7 @@ fn failed_deferred_barrier_fences_before_acknowledgement() {
 
 #[cfg(feature = "replica")]
 #[tokio::test(flavor = "multi_thread")]
-async fn cell_prepare_bounds_source_and_scratch_transfers() {
+async fn cell_prepare_bounds_source_transfers_without_local_writes() {
     let (directory, faults, host, mut writer) = fixture();
     writer
         .transaction(|tx| {
@@ -308,20 +308,17 @@ async fn cell_prepare_bounds_source_and_scratch_transfers() {
         "largest source read was {} bytes",
         faults.largest_read.load(Ordering::Relaxed)
     );
-    assert!(
-        faults.largest_write.load(Ordering::Relaxed) <= 1 << 20,
-        "largest scratch write was {} bytes",
-        faults.largest_write.load(Ordering::Relaxed)
-    );
+    assert_eq!(faults.largest_write.load(Ordering::Relaxed), 0);
     writer.close().unwrap();
     drop(directory);
 }
 
 #[cfg(feature = "replica")]
 #[tokio::test(flavor = "multi_thread")]
-async fn cell_prepare_does_not_flush_ephemeral_upload_scratch() {
+async fn cell_prepare_needs_no_scratch_or_local_durability_barrier() {
     let (_directory, faults, host, mut writer) = fixture();
     let captured = writer.capture_deferred().unwrap();
+    let scratch_slots = Arc::new(tokio::sync::Semaphore::new(0));
     let replica = CellReplica::new(
         CellStorageLayout::new(
             Store::new(Arc::new(InMemory::new())),
@@ -333,7 +330,10 @@ async fn cell_prepare_does_not_flush_ephemeral_upload_scratch() {
         Limits::default(),
     )
     .unwrap()
-    .with_host(host);
+    .with_host(
+        host.with_scratch_slots(scratch_slots)
+            .with_local_disk_budget(crab_ltx::DiskBudget::new(0)),
+    );
     faults.calls.lock().unwrap().clear();
     faults.file_syncs.store(0, Ordering::Relaxed);
     faults.parent_syncs.store(0, Ordering::Relaxed);
@@ -341,6 +341,9 @@ async fn cell_prepare_does_not_flush_ephemeral_upload_scratch() {
     replica.prepare(None, &captured, 1, 1).await.unwrap();
 
     let calls = faults.calls.lock().unwrap();
+    assert!(!calls.contains("create"));
+    assert!(!calls.contains("open_rw"));
+    assert!(!calls.contains("write_all"));
     assert!(!calls.contains("sync_all"));
     assert!(!calls.contains("sync_parent"));
     assert_eq!(faults.file_syncs.load(Ordering::Relaxed), 0);
@@ -448,7 +451,7 @@ async fn cell_compaction_uses_injected_filesystem_and_cleans_failed_scratch() {
 
 #[cfg(feature = "replica")]
 #[tokio::test(flavor = "multi_thread")]
-async fn cancelled_cell_prepare_releases_scratch_without_publishing_a_root() {
+async fn cancelled_cell_prepare_releases_pinned_source_without_publishing_a_root() {
     let directory = tempfile::TempDir::new().unwrap();
     let mut writer = Db::open(&directory.path().join("source.sqlite"), Limits::default()).unwrap();
     writer
@@ -465,7 +468,6 @@ async fn cancelled_cell_prepare_releases_scratch_without_publishing_a_root() {
             ..ThrottleConfig::default()
         },
     ));
-    let scratch_slots = Arc::new(tokio::sync::Semaphore::new(64));
     let replica = CellReplica::new(
         CellStorageLayout::new(
             Store::new(backend),
@@ -477,11 +479,7 @@ async fn cancelled_cell_prepare_releases_scratch_without_publishing_a_root() {
         Limits::default(),
     )
     .unwrap()
-    .with_host(
-        Host::default()
-            .with_scratch_slots(Arc::clone(&scratch_slots))
-            .with_local_disk_budget(crab_ltx::DiskBudget::new(64 * 1024 * 1024)),
-    );
+    .with_host(Host::default());
 
     let result = tokio::time::timeout(
         Duration::from_millis(250),
@@ -492,14 +490,14 @@ async fn cancelled_cell_prepare_releases_scratch_without_publishing_a_root() {
         result.is_err(),
         "the throttled immutable upload must be cancelled"
     );
-    assert_eq!(scratch_slots.available_permits(), 64);
-    assert!(!std::fs::read_dir(directory.path()).unwrap().any(|entry| {
-        entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".crab-cell-segment-")
-    }));
+    writer.prune_captured(&captures).unwrap();
+    assert!(
+        captures
+            .segments
+            .iter()
+            .all(|segment| !segment.path().exists())
+    );
+    writer.close().unwrap();
 }
 
 #[cfg(feature = "replica")]
