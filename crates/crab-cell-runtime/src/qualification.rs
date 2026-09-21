@@ -2316,6 +2316,9 @@ impl QualificationReceipt {
         let operations = self.threshold_metric("operations", "operations")?;
         let duration_secs = self.threshold_metric("duration_secs", "seconds")?;
         let p99_latency_ms = self.threshold_metric("p99_latency_ms", "ms")?;
+        if duration_secs == 0 {
+            return Err(Error::Control("qualification duration threshold is zero"));
+        }
         if cells < profile.minimum_cells()
             || operations < profile.minimum_operations()
             || duration_secs < profile.minimum_duration_secs()
@@ -3690,6 +3693,9 @@ mod tests {
         );
         let mut below_threshold = receipt.clone();
         below_threshold.metrics[1].value = 0;
+        assert!(below_threshold.verify_profile_thresholds(&profile).is_err());
+        below_threshold.metrics[1].value = 1;
+        below_threshold.metrics[2].value = 0;
         assert!(below_threshold.verify_profile_thresholds(&profile).is_err());
     }
 
