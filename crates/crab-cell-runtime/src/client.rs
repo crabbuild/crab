@@ -924,6 +924,39 @@ fn decode_committed<T: crate::WireValue>(
     Ok(Committed { output, receipt })
 }
 
+pub(crate) fn decode_pending<T: crate::WireValue>(
+    pending: &PendingMutation,
+    outcome: StoredOutcome,
+) -> std::result::Result<Committed<T>, InvocationError<T>> {
+    let limit = u32::try_from(pending.max_result_bytes).map_err(|_| {
+        InvocationError::NotStarted(Error::Command("pending result limit overflow"))
+    })?;
+    let decode = |result: Vec<u8>, commit_sequence| {
+        decode_committed(
+            &result,
+            limit,
+            Receipt {
+                cell: pending.target.cell_id(),
+                incarnation: pending.incarnation,
+                commit_sequence,
+            },
+        )
+    };
+    match outcome {
+        StoredOutcome::Success {
+            result,
+            commit_sequence,
+        } => decode(result, commit_sequence),
+        StoredOutcome::Rejected {
+            result,
+            commit_sequence,
+        } => Err(InvocationError::Rejected(Box::new(decode(
+            result,
+            commit_sequence,
+        )?))),
+    }
+}
+
 fn validate_description(
     registry: &Registry,
     module: &str,

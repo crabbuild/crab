@@ -15,8 +15,8 @@ use rand::RngCore;
 use crate::{
     ApplicationId, BlockingActivityReservation, CatalogRole, CellClient, CellTarget, Command,
     CommandContext, CommandResult, Committed, Error, InvocationError, MutationIdentity, Observed,
-    PendingMutation, Query, QueryContext, Receipt, RegistryBuilder, RequestId, TenantId,
-    partition_for_shard,
+    PendingMutation, Query, QueryContext, Receipt, RegistryBuilder, RequestId, Resolution,
+    TenantId, partition_for_shard,
 };
 
 use super::{
@@ -669,11 +669,36 @@ impl<M: WorkflowActivityModule> ActivitySupervisor<M> {
             failed,
             retryable,
         };
-        let committed = match self
+        let completion_identity = internal_identity()?;
+        let result = self
             .activities
-            .complete(internal_identity()?, shard, completion)
-            .await
-        {
+            .complete(completion_identity, shard, completion.clone())
+            .await;
+        let result = match result {
+            Err(InvocationError::Pending(pending)) => {
+                // Resolve the exact completion before returning or retrying: rerunning the
+                // handler could repeat an external side effect after its result committed.
+                let resolution = match self.activities.client.resolve(&pending).await {
+                    Ok(resolution) => resolution,
+                    Err(_) => return Err(ActivitySupervisorError::Pending(pending)),
+                };
+                match resolution {
+                    Resolution::Committed(outcome) => crate::client::decode_pending::<
+                        ActivityCompletionOutcome,
+                    >(&pending, outcome),
+                    Resolution::Absent => {
+                        self.activities
+                            .complete(completion_identity, shard, completion)
+                            .await
+                    }
+                    Resolution::Unknown | Resolution::Expired => {
+                        return Err(ActivitySupervisorError::Pending(pending));
+                    }
+                }
+            }
+            result => result,
+        };
+        let committed = match result {
             Ok(committed) => committed,
             Err(InvocationError::Rejected(committed)) => {
                 return match committed.output {

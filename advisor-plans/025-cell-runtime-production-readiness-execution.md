@@ -72,9 +72,10 @@ latency threshold. Scheduled lifecycle cases and independently checked
 protected evidence remain open for every primitive; expiry still needs a
 separate case artifact tied to the scheduled operation.
 The public Activity capability runs claims and completions inside
-`ActivitySupervisor`; it does not expose the completion identity needed to
-replay one exact activity attempt. A second idle supervisor poll or duplicate
-Workflow start is not Activity duplicate evidence.
+`ActivitySupervisor`. It now resolves an ambiguous completion in the request
+ledger and retries an absent request with the same identity and result. A
+second idle supervisor poll or duplicate Workflow start is not Activity
+duplicate evidence.
 `ApplicationHandle::resolve` now checks the pending target against the compiled
 application and forwards the existing request-ledger lookup. Fault executors
 can use it to distinguish a committed command from an absent or still-unknown
@@ -111,11 +112,15 @@ once; a post-dispatch lost response resolves `Committed`, the 5-second lease
 expires, and the next run reclaims and completes the Activity once. Both
 passed on in-memory and fresh RustFS storage on 2026-09-21, with an
 independent typed Workflow read, an idle follow-up, and zero reservations.
-Exact Activity completion retry remains open: `ActivitySupervisor` owns the
-completion identity and input and does not expose a way to replay a pending
-exact completion through its public capability. These tests share a process
-with their observer and are not scheduled matrix cases or protected provider
-evidence, so they do not set retry or expiry case bits.
+Four Activity fault cases now cover pre-dispatch and post-dispatch loss at both
+claim and completion. The completion cases check an exact same-identity retry
+after `Absent`, or return the committed result after `Committed`, without
+rerunning the handler. All four passed in memory and on fresh isolated RustFS
+on 2026-09-21. If completion resolution remains `Unknown`, expires, or fails,
+`run_once` still returns pending evidence without a public exact completion
+replay path; durable handoff for that result remains open. These tests share a
+process with their observer and are not scheduled matrix cases or protected
+provider evidence, so they do not set retry or expiry case bits.
 
 A separate `public_cell_takeover.rs` test now uses a fresh successor `CellNode` and
 empty local directory against the same object store. It checks the exact

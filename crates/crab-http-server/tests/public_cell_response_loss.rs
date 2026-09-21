@@ -41,7 +41,7 @@ async fn rustfs_public_sql_lost_response_resolves_committed_without_replay() {
 async fn run_public_sql_lost_response(
     (node, local, tenant, application, _directory, registry, handles, _store): PublicHostFixture,
 ) {
-    let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false);
+    let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false, 1);
     let peer =
         node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
     let target = CellTarget::new(
@@ -118,7 +118,7 @@ async fn rustfs_public_kv_lost_response_resolves_committed_without_replay() {
 async fn run_public_kv_lost_response(
     (node, local, tenant, application, _directory, registry, handles, _store): PublicHostFixture,
 ) {
-    let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false);
+    let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false, 1);
     let peer =
         node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
     let peer_kv = peer
@@ -190,7 +190,7 @@ async fn rustfs_public_queue_lost_response_resolves_one_message_without_replay()
 async fn run_public_queue_lost_response(
     (node, local, tenant, application, _directory, registry, handles, _store): PublicHostFixture,
 ) {
-    let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false);
+    let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false, 1);
     let peer =
         node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
     let peer_queue = peer.queue::<fixture::ReferenceQueue>().expect("peer Queue");
@@ -287,7 +287,7 @@ async fn rustfs_public_cron_lost_response_resolves_schedule_without_replay() {
 async fn run_public_cron_lost_response(
     (node, local, tenant, application, _directory, registry, handles, _store): PublicHostFixture,
 ) {
-    let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false);
+    let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false, 1);
     let peer =
         node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
     let peer_cron = peer.cron::<fixture::ReferenceCron>().expect("peer Cron");
@@ -364,7 +364,7 @@ async fn rustfs_public_workflow_lost_response_resolves_terminal_run_without_repl
 async fn run_public_workflow_lost_response(
     (node, local, tenant, application, _directory, registry, handles, _store): PublicHostFixture,
 ) {
-    let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false);
+    let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false, 1);
     let peer =
         node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
     let peer_workflow = peer
@@ -432,7 +432,7 @@ async fn rustfs_public_effect_lost_response_resolves_settled_lease_without_repla
 async fn run_public_effect_lost_response(
     (node, local, tenant, application, _directory, registry, handles, _store): PublicHostFixture,
 ) {
-    let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false);
+    let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false, 1);
     let peer =
         node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
     let target = CellTarget::new(
@@ -542,7 +542,7 @@ async fn rustfs_public_blob_lost_response_resolves_published_bytes_without_repla
 async fn run_public_blob_lost_response(
     (node, local, tenant, application, _directory, registry, handles, store): PublicHostFixture,
 ) {
-    let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false);
+    let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false, 1);
     let peer = node
         .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
         .with_blob_artifact_store(BlobArtifactStore::new(store));

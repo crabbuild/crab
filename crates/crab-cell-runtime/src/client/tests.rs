@@ -11,7 +11,7 @@ use tokio::sync::Notify;
 
 use super::{
     CellClient, CellDescription, CellTransport, EncodedCommand, EncodedObservation, EncodedQuery,
-    EncodedResolve, InvocationError,
+    EncodedResolve, InvocationError, PendingMutation, decode_pending,
 };
 use crate::{
     ApplicationId, BuildDescriptor, CatalogRole, CellModule, CellTarget, Command, CommandContext,
@@ -25,6 +25,50 @@ const MODULE: &str = "pending-test";
 const NAMESPACE: NamespaceId = NamespaceId::from_bytes([3; 16]);
 const MIGRATION: &str = "CREATE TABLE pending_test(value BLOB NOT NULL)";
 const RETAINED_CODE: Digest = Digest::from_bytes([14; 32]);
+
+#[test]
+fn pending_rejection_preserves_published_receipt() {
+    let target = CellTarget::new(
+        TenantId::from_bytes([1; 16]),
+        ApplicationId::from_bytes([2; 16]),
+        NAMESPACE,
+        b"pending",
+    )
+    .expect("valid pending target");
+    let incarnation = IncarnationId::from_bytes([3; 16]);
+    let pending = PendingMutation {
+        target: target.clone(),
+        incarnation,
+        identity: MutationIdentity {
+            request_id: RequestId::from_bytes([4; 16]),
+            issued_at_ms: 1_000,
+            expires_at_ms: 61_000,
+        },
+        operation_digest: Digest::from_bytes([5; 32]),
+        max_result_bytes: 64,
+    };
+    let result =
+        crate::codec::encode_wire(&b"lease-lost".to_vec(), 64).expect("bounded rejection result");
+
+    let decoded = decode_pending::<Vec<u8>>(
+        &pending,
+        StoredOutcome::Rejected {
+            result,
+            commit_sequence: 42,
+        },
+    );
+
+    assert!(matches!(
+        decoded,
+        Err(InvocationError::Rejected(committed))
+            if committed.output == b"lease-lost"
+                && committed.receipt == Receipt {
+                    cell: target.cell_id(),
+                    incarnation,
+                    commit_sequence: 42,
+                }
+    ));
+}
 
 struct PendingCommand;
 

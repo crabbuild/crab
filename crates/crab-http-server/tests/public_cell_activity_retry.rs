@@ -53,7 +53,7 @@ async fn run_activity_claim_fault(
     drop_before_dispatch: bool,
 ) {
     let (peer_client, dropped, dispatched) =
-        peer_client_with_one_lost_mutation(registry, handles, drop_before_dispatch);
+        peer_client_with_one_lost_mutation(registry, handles, drop_before_dispatch, 1);
     let peer =
         node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
     let peer_activity = ActivitySupervisor::new(
@@ -133,6 +133,105 @@ async fn run_activity_claim_fault(
     let run = observed.output.expect("completed Activity workflow");
     assert_eq!(run.run_id, run_id);
     assert_eq!(run.status, WorkflowStatus::Completed);
+    assert!(run.result.as_deref().is_some_and(
+        |result| result.starts_with(b"activity\0") && result.ends_with(b"activity-result")
+    ));
+    assert!(matches!(
+        peer_activity
+            .run_once(0, None)
+            .await
+            .expect("Activity settled check"),
+        ActivityRunOutcome::Idle { .. }
+    ));
+
+    drop(peer);
+    drop(observer);
+    node.shutdown().await.expect("qualification shutdown");
+    assert_zero_reservations(&node);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn public_activity_absent_completion_retries_exact_attempt() {
+    run_activity_completion_fault(public_host_fixture().await, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_public_activity_absent_completion_retries_exact_attempt() {
+    let (store, root) = rustfs_public_store();
+    run_activity_completion_fault(public_host_fixture_with_store(store, root).await, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn public_activity_lost_committed_completion_resolves_exact_attempt() {
+    run_activity_completion_fault(public_host_fixture().await, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_public_activity_lost_committed_completion_resolves_exact_attempt() {
+    let (store, root) = rustfs_public_store();
+    run_activity_completion_fault(public_host_fixture_with_store(store, root).await, false).await;
+}
+
+async fn run_activity_completion_fault(
+    (node, observer, tenant, application, _directory, registry, handles, _store): PublicHostFixture,
+    drop_before_dispatch: bool,
+) {
+    let (peer_client, dropped, dispatched) =
+        peer_client_with_one_lost_mutation(registry, handles, drop_before_dispatch, 2);
+    let peer =
+        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer_activity = ActivitySupervisor::new(
+        peer.activities::<fixture::ReferenceWorkflow>()
+            .expect("peer Activity"),
+        5_000,
+    )
+    .expect("peer Activity supervisor");
+    let workflow = observer
+        .workflow::<fixture::ReferenceWorkflow>()
+        .expect("observer Workflow");
+    let now_ms = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("qualification clock")
+            .as_millis(),
+    )
+    .expect("qualification clock bounds");
+    let workflow_id = b"activity-completion-response-loss".to_vec();
+    let started = workflow
+        .start(
+            identity(221, now_ms),
+            workflow_id.clone(),
+            b"activity".to_vec(),
+        )
+        .await
+        .expect("source Activity workflow start");
+    let WorkflowOutcome::Applied {
+        run_id,
+        status: WorkflowStatus::Running,
+        ..
+    } = started.output
+    else {
+        panic!("Activity workflow did not start running");
+    };
+    let outcome = peer_activity
+        .run_once(0, None)
+        .await
+        .expect("Activity completion fault recovery");
+    let ActivityRunOutcome::Completed { receipt, .. } = outcome else {
+        panic!("Activity did not complete after response fault: {outcome:?}");
+    };
+    assert_eq!(dropped.load(Ordering::Acquire), 1);
+    assert_eq!(dispatched.load(Ordering::Acquire), 2);
+    let observed = workflow
+        .state(workflow_id, Some(receipt))
+        .await
+        .expect("independent Activity completion observation");
+    let run = observed.output.expect("completed Activity workflow");
+    assert_eq!(run.run_id, run_id);
+    assert_eq!(run.status, WorkflowStatus::Completed);
+    assert_eq!(run.event_sequence, 2);
     assert!(run.result.as_deref().is_some_and(
         |result| result.starts_with(b"activity\0") && result.ends_with(b"activity-result")
     ));

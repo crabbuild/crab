@@ -49,7 +49,9 @@ struct FaultyMutationRoundTrip {
     dispatcher: Arc<PeerDispatcher>,
     dropped: Arc<AtomicUsize>,
     dispatched: Arc<AtomicUsize>,
+    attempted: Arc<AtomicUsize>,
     drop_before_dispatch: bool,
+    fault_ordinal: usize,
 }
 
 impl PeerRoundTrip for FaultyMutationRoundTrip {
@@ -63,7 +65,9 @@ impl PeerRoundTrip for FaultyMutationRoundTrip {
         let dispatcher = Arc::clone(&self.dispatcher);
         let dropped = Arc::clone(&self.dropped);
         let dispatched = Arc::clone(&self.dispatched);
+        let attempted = Arc::clone(&self.attempted);
         let drop_before_dispatch = self.drop_before_dispatch;
+        let fault_ordinal = self.fault_ordinal;
         Box::pin(async move {
             let now_ms = i64::try_from(
                 SystemTime::now()
@@ -77,8 +81,10 @@ impl PeerRoundTrip for FaultyMutationRoundTrip {
                 return Err(Error::Peer("qualification peer target differs"));
             }
             let mutation = verified.operation_tag() == 10;
+            let selected =
+                mutation && attempted.fetch_add(1, Ordering::AcqRel) + 1 == fault_ordinal;
             let first_loss = || {
-                mutation
+                selected
                     && dropped
                         .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
                         .is_ok()
@@ -108,7 +114,9 @@ pub fn peer_client_with_one_lost_mutation(
     registry: Arc<Registry>,
     handles: Vec<CellHandle>,
     drop_before_dispatch: bool,
+    fault_ordinal: usize,
 ) -> (CellClient, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    assert!(fault_ordinal > 0, "fault ordinal must name a mutation");
     let session = SessionId::from_bytes([96; 16]);
     let release = Digest::from_bytes([97; 32]);
     let signer = Arc::new(PeerSigner::new(
@@ -125,6 +133,7 @@ pub fn peer_client_with_one_lost_mutation(
     ));
     let dropped = Arc::new(AtomicUsize::new(0));
     let dispatched = Arc::new(AtomicUsize::new(0));
+    let attempted = Arc::new(AtomicUsize::new(0));
     let round_trip = FaultyMutationRoundTrip {
         verifier: Arc::new(verifier),
         dispatcher: Arc::new(PeerDispatcher::new(
@@ -134,7 +143,9 @@ pub fn peer_client_with_one_lost_mutation(
         )),
         dropped: Arc::clone(&dropped),
         dispatched: Arc::clone(&dispatched),
+        attempted,
         drop_before_dispatch,
+        fault_ordinal,
     };
     let client = CellClient::peer(
         registry,

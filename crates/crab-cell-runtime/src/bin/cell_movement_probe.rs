@@ -133,7 +133,7 @@ fn decode_fixed<const N: usize>(value: &str) -> Result<[u8; N], String> {
         return Err(format!("expected {} hexadecimal characters", N * 2));
     }
     let mut bytes = [0_u8; N];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         bytes[index] = (decode_nibble(pair[0])? << 4) | decode_nibble(pair[1])?;
     }
     Ok(bytes)

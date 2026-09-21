@@ -259,7 +259,7 @@ impl ActivityHandler for PublishRelease {
 
 Async activities run under a CPU-derived bound. Blocking activities reserve a slot in a joined fixed operating-system thread pool before claim.
 
-The supervisor validates the exact published lease, heartbeats through durable commands, and records completion or retry. Panic becomes activity failure and does not kill the pool.
+The supervisor validates the exact published lease, heartbeats through durable commands, and records completion or retry. If a completion response is lost, it checks the request ledger: a committed result is returned without rerunning the handler, while an absent request is retried with the same identity and result. If the ledger remains unknown or cannot be read, `run_once` returns pending evidence; the caller must treat that activity result as unresolved. Panic becomes activity failure and does not kill the pool.
 
 ## Forward only private registered messages
 

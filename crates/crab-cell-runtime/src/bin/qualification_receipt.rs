@@ -540,7 +540,7 @@ fn parse_digest(value: &str) -> Result<Digest, String> {
         return Err("image digest must be 64 lowercase hexadecimal characters".into());
     }
     let mut bytes = [0_u8; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         bytes[index] = (hex(pair[0])? << 4) | hex(pair[1])?;
     }
     Ok(Digest::from_bytes(bytes))
@@ -557,7 +557,7 @@ fn parse_signer(value: &str) -> Result<[u8; 32], String> {
         return Err("trusted signer must be 64 lowercase hexadecimal characters".into());
     }
     let mut bytes = [0_u8; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         bytes[index] = (hex(pair[0])? << 4) | hex(pair[1])?;
     }
     if bytes.iter().all(|byte| *byte == 0) {
