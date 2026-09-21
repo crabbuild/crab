@@ -202,6 +202,25 @@ fn applied(outcome: WorkflowOutcome) -> ([u8; 16], WorkflowStatus, u64) {
 }
 
 #[test]
+fn workflow_event_counter_tracks_history_and_reports_drift() {
+    let mut connection = connection();
+    let source = source_target();
+    let definition = Definition {
+        digest: Digest::from_bytes([4; 32]),
+    };
+    let transaction = connection.transaction().unwrap();
+    workflow_start(&transaction, &source, 10, &start(5), &definition).unwrap();
+    crab_cell_runtime::verify_workflow_event_count(&transaction).unwrap();
+    transaction
+        .execute(
+            "UPDATE workflow_control SET event_count = event_count + 1 WHERE singleton = 1",
+            [],
+        )
+        .unwrap();
+    assert!(crab_cell_runtime::verify_workflow_event_count(&transaction).is_err());
+}
+
+#[test]
 fn start_allocates_stable_actions_and_signal_identity_is_conflict_safe() {
     let mut connection = connection();
     let source = source_target();

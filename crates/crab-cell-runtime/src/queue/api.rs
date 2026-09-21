@@ -198,11 +198,12 @@ impl<M: QueueModule> Command for QueueClaimCommand<M> {
             .map_err(|_| crate::Error::Command("queue claim limit overflow"))?;
         let mut tokens = SystemQueueTokens;
         let claimed = if let Some(target) = M::QUEUE_DEAD_LETTER {
-            let mut effects = context.effect_batch()?;
-            let mut writer = QueueDeadLetterWriter::new(target, &mut effects);
+            let now_ms = context.now_ms();
+            let (transaction, effects) = context.primitive_effects()?;
+            let mut writer = QueueDeadLetterWriter::new(target, effects);
             queue_claim_with_dead_letter(
-                context.primitive_transaction(),
-                context.now_ms(),
+                transaction,
+                now_ms,
                 limit,
                 input.lease_ms,
                 &mut tokens,
@@ -244,11 +245,12 @@ impl<M: QueueModule> Command for QueueLeaseCommand<M> {
         input: Self::Input,
     ) -> crate::Result<CommandResult<Self::Output>> {
         let outcome = if let Some(target) = M::QUEUE_DEAD_LETTER {
-            let mut effects = context.effect_batch()?;
-            let mut writer = QueueDeadLetterWriter::new(target, &mut effects);
+            let now_ms = context.now_ms();
+            let (transaction, effects) = context.primitive_effects()?;
+            let mut writer = QueueDeadLetterWriter::new(target, effects);
             queue_apply_lease_with_dead_letter(
-                context.primitive_transaction(),
-                context.now_ms(),
+                transaction,
+                now_ms,
                 input.message_id,
                 input.token,
                 input.action,

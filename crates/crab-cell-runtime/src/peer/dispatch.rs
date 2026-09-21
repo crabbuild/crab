@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use prost::Message;
 
@@ -61,6 +61,7 @@ impl PeerDispatcher {
         };
         let transport = LocalCellTransport {
             registry: Arc::clone(&self.registry),
+            handles: Arc::new(HashMap::from([(handle.cell_id(), handle.clone())])),
             handle,
         };
         match request.operation() {
@@ -719,6 +720,7 @@ fn error_reply(error: Error) -> wire::PeerReply {
         | Error::ActivityPanic
         | Error::NativePanic
         | Error::RuntimeStart(_)
+        | Error::Facility { .. }
         | Error::CellAlreadyActive => (
             wire::error::Code::Internal,
             wire::error::Outcome::Unknown,

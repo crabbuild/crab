@@ -90,14 +90,13 @@ pub use cron::{
     cron_query, install_cron_schema, register_cron,
 };
 pub use effects::{
-    EffectAckRequest, EffectBatch, EffectClaim, EffectClaimCommand, EffectClaimRequest,
-    EffectCommandIntent, EffectLease, EffectLeaseCommand, EffectLeaseOutcome, EffectLeaseRequest,
-    EffectModule, EffectRunOutcome, EffectSource, EffectState, EffectSupervisor,
-    EffectSupervisorError, EffectTokenSource, EffectValidateClaimQuery, EffectValidateRequest,
-    InboxApplyOutcome, InboxDelivery, SystemEffectTokens, effect_ack_delivered, effect_claim,
-    effect_cleanup_terminal, effect_extend, effect_id, effect_operation_digest, effect_retry,
-    effect_validate_claim, inbox_apply, inbox_cleanup_expired, inbox_resolve,
-    register_effect_delivery,
+    EffectAckRequest, EffectClaim, EffectClaimCommand, EffectClaimRequest, EffectCommandIntent,
+    EffectLease, EffectLeaseCommand, EffectLeaseOutcome, EffectLeaseRequest, EffectModule,
+    EffectRunOutcome, EffectSource, EffectState, EffectSupervisor, EffectSupervisorError,
+    EffectTokenSource, EffectValidateClaimQuery, EffectValidateRequest, InboxApplyOutcome,
+    InboxDelivery, SystemEffectTokens, effect_ack_delivered, effect_claim, effect_cleanup_terminal,
+    effect_extend, effect_id, effect_operation_digest, effect_retry, effect_validate_claim,
+    inbox_apply, inbox_cleanup_expired, inbox_resolve, register_effect_delivery,
 };
 pub use error::{Error, Result};
 pub use executor::{
@@ -123,7 +122,7 @@ pub use node::{
     NodeFailureDomain, NodePlacementCapacity, NodeTakeoverProof, SealedNodeLog,
     VersionedNodeAdvertisement,
 };
-pub use node_durability::{NodeDurability, NodeLogAuthority};
+pub use node_durability::{NodeDurability, NodeDurabilityConfig, NodeLogAuthority};
 pub use node_lease::NodeLeaseGuard;
 pub use node_log::{
     CommitTicket, DurabilityGate, DurabilityProof, DurabilitySource, NodeLogRotationBarrier,
@@ -156,9 +155,16 @@ pub use pressure::{
 };
 pub use publication::CellPublisher;
 pub use qualification::{
-    QUALIFICATION_MATRIX_ROWS, QUALIFICATION_MATRIX_SCHEMA_VERSION, QUALIFICATION_SCHEMA_VERSION,
+    QUALIFICATION_CASE_COVERAGE_BYTES, QUALIFICATION_CASE_COVERAGE_OPERATIONS, QUALIFICATION_CASES,
+    QUALIFICATION_MATRIX_ROWS, QUALIFICATION_MATRIX_SCHEMA_VERSION, QUALIFICATION_PRIMITIVES,
+    QUALIFICATION_PROFILE_SCHEMA_VERSION, QUALIFICATION_PROTECTED_EVIDENCE_MAX_AGE_MS,
+    QUALIFICATION_PROTECTED_EVIDENCE_MAX_CLOCK_SKEW_MS, QUALIFICATION_RUN_ARTIFACT_SCHEMA_VERSION,
+    QUALIFICATION_SCHEMA_VERSION, QualificationCase, QualificationExecution,
     QualificationMatrixEntry, QualificationMatrixManifest, QualificationMetric,
-    QualificationOwnership, QualificationReceipt, QualificationRunner,
+    QualificationOperation, QualificationOperationExecutor, QualificationOperationIter,
+    QualificationOutcome, QualificationOwnership, QualificationPrimitiveCounts,
+    QualificationProfile, QualificationReceipt, QualificationRunArtifact, QualificationRunSummary,
+    QualificationRunner, QualificationWorkload,
 };
 pub use queue::{
     QueueClaimCommand, QueueClaimRequest, QueueControlAction, QueueControlCommand,
@@ -167,7 +173,7 @@ pub use queue::{
     QueueModule, QueueNamespace, QueueSendCommand, QueueSendOutcome, QueueSendRequest, QueueState,
     QueueTokenSource, QueueValidateClaimQuery, QueueValidateRequest, SystemQueueTokens,
     install_queue_schema, queue_apply_lease, queue_claim, queue_cleanup_expired, queue_control,
-    queue_info, queue_send, queue_validate_claim, register_queue,
+    queue_info, queue_send, queue_validate_claim, register_queue, verify_queue_counts,
 };
 pub use recovery_artifacts::RecoveryArtifactRegistry;
 pub use recovery_manifest::{
@@ -213,8 +219,8 @@ pub use workflow::{
     WorkflowGetRequest, WorkflowModule, WorkflowNamespace, WorkflowOutcome, WorkflowRun,
     WorkflowSignal, WorkflowSignalCommand, WorkflowStart, WorkflowStartCommand, WorkflowStatus,
     install_workflow_schema, register_activity, register_blocking_activity, register_workflow,
-    register_workflow_activities, workflow_cancel, workflow_claim_activities,
-    workflow_cleanup_terminal, workflow_complete_activity, workflow_control,
-    workflow_extend_activity, workflow_fire_timer, workflow_signal, workflow_start, workflow_state,
-    workflow_validate_activity_claim,
+    register_workflow_activities, verify_workflow_event_count, workflow_cancel,
+    workflow_claim_activities, workflow_cleanup_terminal, workflow_complete_activity,
+    workflow_control, workflow_extend_activity, workflow_fire_timer, workflow_signal,
+    workflow_start, workflow_state, workflow_validate_activity_claim,
 };

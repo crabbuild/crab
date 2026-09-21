@@ -11,15 +11,20 @@ resolution, and owner-loss recovery.
 | Content type | End-to-end target API example |
 | Audience | Application owners and framework implementers |
 | Goal | Make the proposed application framework concrete enough to implement and evaluate |
-| Status | Illustrative; `crab-cell-app`, code generation, `CellNode`, and several convenience methods do not exist yet |
+| Status | Mixed status: the handwritten `crab-cell-app` reference test registers SQL, KV, Blob, Queue, Cron, Workflow, Activity, and Effects through one descriptor, and `CellNode` is used by the server; the Commerce snippets below remain an illustrative target while generated clients, full operator ownership, and protected owner-loss evidence remain open |
 
 [Back to the application framework design](application-framework.md)
 
-The example is an executable design target, not a claim that the snippets
-compile today. Existing low-level contracts named here—`Command`, `Query`,
+The example is an executable design target, not a claim that every snippet
+compiles today. Existing low-level contracts named here—`Command`, `Query`,
 `CellClient`, primitive mechanics, receipts, effects, activities, exact roots,
-and runtime publication—are implemented. The example adds only the proposed
-application-owner and node-facade layers.
+and runtime publication—are implemented. The current `crab-cell-app` reference
+test proves registration and one successful typed invocation for SQL, KV, Blob,
+Queue, Cron, Workflow, Activity, and Effects through a bounded local multi-Cell
+router, while
+`crab-cell-host` and `crab-http-server` prove the initial node-facade adoption;
+generated clients, complete operator ownership, and protected provider
+qualification still require the remaining plans.
 
 ## Follow the application flow
 
@@ -281,8 +286,7 @@ impl Command for PlaceOrder {
         insert_order(context, &input)?;
         insert_lines(context, &input.lines)?;
 
-        let mut effects = context.effect_batch()?;
-        effects.command(CheckoutRuns::start_command(
+        context.emit_effect(&CheckoutRuns::start_effect(
             input.order_id,
             CheckoutState::new(&input),
         )?)?;
@@ -406,8 +410,7 @@ impl Command for ReserveInventory {
         input: Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
         let outcome = reserve_if_available(context, &input)?;
-        let mut effects = context.effect_batch()?;
-        effects.command(CheckoutRuns::inventory_result_command(
+        context.emit_effect(&CheckoutRuns::inventory_result_effect(
             input.order_id,
             input.line_number,
             outcome.clone(),

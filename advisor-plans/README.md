@@ -234,7 +234,7 @@ Local proof completed:
   passes the Queue/Workflow retained-work, exact-root restore, and
   capacity-reuse proof against an isolated RustFS prefix. The shared
   runtime/SQL/hydration/primitive-job ledger (including exported hydration-job
-  usage/capacity metrics) and schema-v3 receipt evidence path are covered by
+  usage/capacity metrics) and schema-v5/profile-digest receipt evidence path are covered by
   focused tests; user SQL commands now hold bounded worker
   reservations for their full queued/executing lifetime, and pending
   publication bytes remain ledger-reserved until publication completes. Active
@@ -533,20 +533,70 @@ by the actor takeover suite, and
 the durable effect ledger before claim/ack. These are local in-memory
 ownership receipts; protected three-Pod primitive-fault evidence remains open.
 
-## Repository product implementation track
+## Production application hardening track
 
 Created 2026-09-19 with the improve skill; planned against `892720ce6a6`.
-This track is independent of the canonical Cell runtime plans above, but its
-durable collaboration state uses the repository Cell's migration and operation
-contracts. Do not execute it concurrently with another repository schema or
-operation-ID change without rebasing and reconciling the plan.
+This track reconciles the current source implementation—not the aspirational
+documentation—with the requirements for a supported large-scale Cell
+application platform. It supplements plan 015's existing qualification
+infrastructure; it does not create a second receipt format or scheduler.
 
 | Plan | Outcome | Priority | Effort | Depends on | Status |
 | --- | --- | --- | --- | --- | --- |
-| [018](018-inline-pull-review-threads.md) | Durable line/range review threads, replies, resolution, outdated handling, and exact-blob suggestions | P1 | XL | None | IMPLEMENTED |
+| [018](018-fix-queue-scheduler-deadline.md) | Queue consumer readiness no longer causes maintenance commit loops | P0 | S | — | IMPLEMENTED |
+| [019](019-command-scoped-effect-ledger.md) | One command-owned effect allocator enforces limits without retained-table scans | P0 | M | — | IMPLEMENTED |
+| [020](020-cache-sealed-follower-tail-index.md) | Recovery tail pagination scans a sealed lane at most once per process | P1 | M | — | IMPLEMENTED |
+| [021](021-constant-time-primitive-accounting.md) | Workflow capacity and Queue status use transactionally maintained counters | P1 | L | 018 | IMPLEMENTED |
+| [022](022-freeze-cell-application-contract.md) | The supported author/operator API and scale envelope are executable contracts | P0 | L | 018–021 | IMPLEMENTED — handwritten API; code generation deferred |
+| [023](023-production-cell-node-host.md) | One host facade owns runtime composition and a full-primitive application path | P0 | XL | 022 | IMPLEMENTED locally — protected qualification remains |
+| [024](024-large-scale-primitive-qualification.md) | Release qualification proves every primitive, mixed load, faults, and resource bounds | P0 | XL | 018–023, 015 infrastructure | PARTIAL |
+| [025](025-cell-runtime-production-readiness-execution.md) | Close host-ownership and protected qualification gates for named production profiles | P0 | XL | 022–024 | IN PROGRESS |
 
-Plan 018 deliberately keeps inline comments immediately published and separate
-from general approval reviews. It reuses the existing `/contents` mutation for
-suggestion commits and stops if the pinned diff renderer cannot supply public
-selection/annotation contracts; neither pending-review drafts nor dependency
-upgrades are implicit follow-up work.
+### Execution waves
+
+```text
+018 Queue deadline ownership ───────┐
+019 effect ledger ─────────────────┼─> 022 supported contract
+020 follower tail index ───────────┤       └─> 023 CellNode host
+021 primitive counters <── 018 ────┘              └─> 024 release qualification
+
+015 receipt/qualification infrastructure ────────────────┘
+```
+
+1. Execute 018 first because the current Queue state can create unbounded
+   maintenance publications without useful work.
+2. Execute 019 and 020 in parallel after 018 starts; they do not share files.
+3. Execute 021 after 018 so Queue state transitions and their deadline
+   semantics are stable before counters are attached.
+4. Freeze the public support contract in 022 only after the implementation
+   behavior is corrected. Do not encode current bugs as contracts.
+5. Execute 023 as a bounded composition refactor: one facade becomes canonical
+   before the old server assembly is removed.
+6. Execute 024 against the integrated candidate. A green unit suite cannot
+   mark any production-readiness row complete.
+
+Current boundary: 018–023 are implemented and locally verified. 022 provides a
+handwritten full-primitive author contract, deterministic descriptor and
+relationship validation, typed capability scope checks, and the owner/source-loss
+takeover proof for SQL, KV, Blob, Queue, Cron, Workflow, Activity, and Effects.
+023 provides fail-closed serving/maintenance host `start`/`status`, readiness,
+bounded ownership of the long-lived server coordination loops and production
+router/peer/follower/transport components, provider-neutral NodeDurability
+construction/recruitment/rotation ownership, required component slots,
+admission-before-facility-drain ordering, and deadline-aware drain. 024
+provides bounded profile constructors, deterministic streaming execution with
+seed-bound per-primitive lifecycle case hints,
+per-primitive verified-progress validation with canonical attempted-count
+binding, measured run artifacts, preflight guards, pinned-signer validation,
+and fail-closed release packaging. 024 remains partial until protected
+provider/Kubernetes/scale and signed release receipts exist.
+
+### Shared release rule
+
+`crab-cell-runtime` may be called production-ready for a named profile only
+after plan 024 produces a complete, validated matrix for the exact source and
+image. "Large scale" must name workload cardinality, topology, resources,
+provider, duration, and latency/error thresholds. The platform must continue
+to state its semantic exclusions: no multi-Cell ACID, no exactly-once external
+effects, no transparent hot-key splitting, and no general-purpose unbounded
+SQL or Blob service.

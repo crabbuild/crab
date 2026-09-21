@@ -363,6 +363,84 @@ jobs:
             -- verify "$release_dir/cell-runtime-qualification.json" \
             "$SOURCE_SHA" "$IMAGE_DIGEST" "$evidence_dir/cluster-receipt.json"
 
+      - name: Require protected Cell runtime qualification matrix
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ steps.promote.outputs.digest }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          QUALIFICATION_SIGNER: ${{ vars.CRAB_CELL_RUNTIME_QUALIFICATION_SIGNER }}
+        run: |
+          set -euo pipefail
+
+          evidence_dir="${RUNNER_TEMP}/crab-cell-runtime-qualification"
+          protected_dir="$evidence_dir/protected"
+          if [[ ! "$QUALIFICATION_SIGNER" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::CRAB_CELL_RUNTIME_QUALIFICATION_SIGNER must be a pinned 32-byte lowercase Ed25519 public key."
+            exit 1
+          fi
+          export CARGO_TARGET_DIR="${RUNNER_TEMP}/crab-cell-runtime-target"
+          required_profiles=(
+            "local-provider-v1|qualification-matrix-local-provider.json"
+            "scale-v1|qualification-matrix.json"
+            "compatibility-v1|qualification-matrix-compatibility.json"
+            "provider-s3-v1|qualification-matrix-provider-s3.json"
+            "provider-gcs-v1|qualification-matrix-provider-gcs.json"
+            "provider-azure-v1|qualification-matrix-provider-azure.json"
+            "fault-s3-v1|qualification-matrix-fault-s3.json"
+            "fault-gcs-v1|qualification-matrix-fault-gcs.json"
+            "fault-azure-v1|qualification-matrix-fault-azure.json"
+          )
+          for requirement in "${required_profiles[@]}"; do
+            IFS='|' read -r profile_name matrix_name <<< "$requirement"
+            matrix="$protected_dir/$matrix_name"
+            profile="$protected_dir/$profile_name.json"
+            tracked_profile="crates/crab-cell-runtime/qualification/profiles/$profile_name.json"
+            test -s "$matrix" || {
+              echo "::error::Protected Cell runtime matrix is required at $matrix; fixture receipts cannot qualify a release."
+              exit 1
+            }
+            test -s "$profile" || {
+              echo "::error::Protected profile is required at $profile."
+              exit 1
+            }
+            test -f "$tracked_profile" || {
+              echo "::error::The checked-out source is missing the tracked $profile_name qualification profile."
+              exit 1
+            }
+            if [[ -L "$matrix" || -L "$profile" ]]; then
+              echo "::error::Protected qualification evidence must not contain symlinks."
+              exit 1
+            fi
+            cmp -- "$profile" "$tracked_profile" || {
+              echo "::error::Protected $profile_name profile does not match the exact tagged source."
+              exit 1
+            }
+            cargo run --locked --quiet -p crab-cell-runtime --bin qualification_receipt \
+              -- verify-matrix "$matrix" \
+              "$SOURCE_SHA" "$IMAGE_DIGEST" "$profile" "$QUALIFICATION_SIGNER"
+          done
+
+      - name: Package verified Cell runtime qualification evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          evidence_dir="${RUNNER_TEMP}/crab-cell-runtime-qualification"
+          protected_dir="$evidence_dir/protected"
+          release_dir="${RUNNER_TEMP}/crab-http-server-release"
+          bundle="$release_dir/cell-runtime-qualification.tar.gz"
+          mkdir -p "$release_dir"
+          if find "$protected_dir" -type l -print -quit | grep --quiet .; then
+            echo "::error::Protected qualification evidence must not contain symlinks."
+            exit 1
+          fi
+          tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+            -cf - -C "$protected_dir" . | gzip --no-name > "$bundle"
+          (
+            cd "$release_dir"
+            sha256sum "$(basename "$bundle")" > "$(basename "$bundle").sha256"
+          )
+
       - name: Publish and verify the Helm chart
         id: chart
         shell: bash
@@ -479,12 +557,17 @@ jobs:
           - Helm chart: \`oci://${CHART_REGISTRY}/crab-http-server@${CHART_DIGEST}\`
           - Chart package: \`crab-http-server-${VERSION}.tgz\` (\`${chart_package_digest}\`)
           - Platforms: \`linux/amd64\`, \`linux/arm64\`
-          - Cell runtime qualification: \`cell-runtime-qualification.json\`, bound to the source and image above.
+          - Cell runtime qualification: \`cell-runtime-qualification.tar.gz\` and its SHA-256 sidecar; the bundle contains the verified matrix, profile, receipts, and raw artifacts bound to the source and image above.
 
           Download and verify the signed deployment record:
 
           \`\`\`sh
-          gh release download ${TAG} --repo ${GITHUB_REPOSITORY} --pattern 'crab-http-server-*'
+          gh release download ${TAG} --repo ${GITHUB_REPOSITORY} \\
+            --pattern 'crab-http-server-*' \\
+            --pattern 'cell-runtime-qualification.tar.gz*'
+          sha256sum --check cell-runtime-qualification.tar.gz.sha256
+          mkdir cell-runtime-qualification
+          tar -xzf cell-runtime-qualification.tar.gz -C cell-runtime-qualification
           gh attestation verify crab-http-server-release.json \\
             --bundle crab-http-server-release.attestation.json \\
             --repo ${GITHUB_REPOSITORY} \\
@@ -498,7 +581,8 @@ jobs:
           gh release create "$TAG" \
             "$release_dir/crab-http-server-release.json" \
             "$release_dir/crab-http-server-release.attestation.json" \
-            "$release_dir/cell-runtime-qualification.json" \
+            "$release_dir/cell-runtime-qualification.tar.gz" \
+            "$release_dir/cell-runtime-qualification.tar.gz.sha256" \
             "${RUNNER_TEMP}/chart/crab-http-server-${VERSION}.tgz" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \

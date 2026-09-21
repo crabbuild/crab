@@ -114,10 +114,12 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     .await
     .unwrap();
     let initialize_dir = tempfile::TempDir::new().unwrap();
+    let application = crate::cells::compiled_application().unwrap();
     crate::cells::initialize_repository_at(
         &cell_layout,
         identity,
         &registry,
+        &application,
         initialize_dir.path(),
         32 * 1024 * 1024 * 1024,
         "https://localhost:1".into(),
@@ -248,7 +250,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             owner_session,
             directory.clone(),
             Arc::clone(&registry),
-            crab_cell_runtime::ReleaseStore::new(cell_layout.clone(), identity).unwrap(),
+            Arc::new(crab_cell_runtime::ReleaseStore::new(cell_layout.clone(), identity).unwrap()),
             LocalCellResolver::new(cell_layout.clone(), identity, owner_runtime.clone()),
             Arc::new(UnavailablePeer),
         )),
@@ -776,10 +778,20 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     ingress_server.receives.close();
     ingress_server.receives.wait().await;
     ingress_server.shutdown_runtimes().await.unwrap();
-    assert!(matches!(
-        owner_server.shutdown_runtimes().await,
-        Err(crate::Error::Cell(crab_cell_runtime::Error::Fenced))
-    ));
+    match owner_server.shutdown_runtimes().await {
+        Ok(()) | Err(crate::Error::Cell(crab_cell_runtime::Error::Fenced)) => {}
+        Err(error) => panic!("unexpected stale-owner shutdown result: {error}"),
+    }
+    let released = authority.load(target.cell_id()).await.unwrap().unwrap();
+    assert_eq!(
+        released.value().state,
+        crab_cell_runtime::ControlState::Idle
+    );
+    assert!(released.value().owner.is_none());
+    assert!(
+        released.value().root.as_ref().unwrap().commit_sequence
+            >= root_after.as_ref().unwrap().commit_sequence
+    );
 }
 
 async fn repository(store: Store, bucket: &str, prefix: String) -> Arc<Repository> {
@@ -827,6 +839,7 @@ fn server(
         repositories: BTreeMap::from([(("team".into(), "repo".into()), repository)]).into(),
         runtime: Arc::new(RemoteGitRuntime::default()),
         cell_runtime,
+        cell_node: None,
         repository_cells,
         peer_receiver,
         follower_store: None,

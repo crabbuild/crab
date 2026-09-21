@@ -30,7 +30,10 @@ flowchart LR
     App --> LTX
 ```
 
-Runtime tables use the `sys_` prefix. The SQLite authorizer denies application SQL access to those tables, transaction control, connection configuration, and schema changes.
+Runtime tables use the `sys_` prefix; native primitive tables use reserved
+`kv_`, `blob_`, `queue_`, `cron_`, and `workflow_` prefixes. The SQLite
+authorizer denies application SQL access to every reserved table, transaction
+control, connection configuration, and schema changes.
 
 ## Deduplicate every mutation
 
@@ -288,7 +291,9 @@ The quiescent-pause rule avoids converting an already-running external side effe
 
 ## Deliver cross-Cell effects through an inbox
 
-A command may create an `EffectBatch`. Effects carry typed Cell commands only and inherit the source tenant and application.
+A command emits typed Cell effects through `CommandContext::emit_effect`, which
+uses the command-owned allocator. Effects carry typed Cell commands only and
+inherit the source tenant and application.
 
 ```mermaid
 flowchart LR

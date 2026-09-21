@@ -30,7 +30,48 @@ CREATE TABLE queue_control (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     paused INTEGER NOT NULL CHECK (paused IN (0, 1)),
     generation INTEGER NOT NULL CHECK (generation >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0)
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
+    ready_count INTEGER NOT NULL CHECK (ready_count >= 0),
+    leased_count INTEGER NOT NULL CHECK (leased_count >= 0),
+    acked_count INTEGER NOT NULL CHECK (acked_count >= 0),
+    dead_count INTEGER NOT NULL CHECK (dead_count >= 0)
 ) STRICT;
-INSERT INTO queue_control(singleton, paused, generation, updated_at_ms)
-VALUES (1, 0, 0, 0);
+INSERT INTO queue_control(
+    singleton, paused, generation, updated_at_ms,
+    ready_count, leased_count, acked_count, dead_count
+)
+VALUES (1, 0, 0, 0, 0, 0, 0, 0);
+
+CREATE TRIGGER queue_messages_count_insert
+AFTER INSERT ON queue_messages
+BEGIN
+    UPDATE queue_control
+    SET ready_count = ready_count + (NEW.state = 0),
+        leased_count = leased_count + (NEW.state = 1),
+        acked_count = acked_count + (NEW.state = 2),
+        dead_count = dead_count + (NEW.state = 3)
+    WHERE singleton = 1;
+END;
+
+CREATE TRIGGER queue_messages_count_delete
+AFTER DELETE ON queue_messages
+BEGIN
+    UPDATE queue_control
+    SET ready_count = ready_count - (OLD.state = 0),
+        leased_count = leased_count - (OLD.state = 1),
+        acked_count = acked_count - (OLD.state = 2),
+        dead_count = dead_count - (OLD.state = 3)
+    WHERE singleton = 1;
+END;
+
+CREATE TRIGGER queue_messages_count_state_update
+AFTER UPDATE OF state ON queue_messages
+WHEN OLD.state <> NEW.state
+BEGIN
+    UPDATE queue_control
+    SET ready_count = ready_count - (OLD.state = 0) + (NEW.state = 0),
+        leased_count = leased_count - (OLD.state = 1) + (NEW.state = 1),
+        acked_count = acked_count - (OLD.state = 2) + (NEW.state = 2),
+        dead_count = dead_count - (OLD.state = 3) + (NEW.state = 3)
+    WHERE singleton = 1;
+END;

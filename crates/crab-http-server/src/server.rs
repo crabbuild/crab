@@ -16,6 +16,10 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
+use crab_cell_host::{
+    CellNode, CellNodeBuilder, CellNodeFacility, FOLLOWER_STORE_COMPONENT,
+    NODE_DURABILITY_PROVIDER_COMPONENT, NodeDurabilitySupervisorConfig,
+};
 use crab_cell_runtime::{
     ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_NATIVE_BYTES, ACTIVE_CELL_PAGE_CACHE_BYTES,
     ApplicationIdentityStore, CellRuntime, Digest, NodeDirectory, Owner, PeerRoundTrip, PeerSigner,
@@ -61,10 +65,6 @@ const MAX_BLOCKING_JOBS: usize = 16;
 const MAX_RECOVERY_JOBS: usize = 2;
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(110);
 const RELEASE_POLL_INTERVAL: Duration = Duration::from_secs(1);
-const NODE_LOG_RECRUIT_INTERVAL: Duration = Duration::from_secs(3);
-const NODE_LOG_LIVE_NODE_LIMIT: usize = 1_024;
-const NODE_LOG_ROTATION_INTERVAL: Duration = Duration::from_secs(5);
-const NODE_LOG_ROTATION_FRAMES: u64 = 1_000_000;
 const RETIRED_FOLLOWER_COLLECTION_INTERVAL: Duration = Duration::from_secs(60);
 const RETIRED_FOLLOWER_GRACE_MS: i64 = 10 * 60 * 1_000;
 const RETIRED_FOLLOWER_BATCH: usize = 64;
@@ -72,6 +72,14 @@ const PROJECTION_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 const PROJECTION_SWEEP_BATCH: usize = 16;
 const PROJECTION_RETRY_BASE: Duration = Duration::from_secs(10);
 const PROJECTION_RETRY_MAX: Duration = Duration::from_secs(5 * 60);
+const CELL_COMPONENT_REPOSITORY_ROUTER: &str = "repository-cell-router";
+const CELL_COMPONENT_PEER_RECEIVER: &str = "peer-receiver";
+const CELL_COMPONENT_NODE_LOG_TRANSPORT: &str = "node-log-transport";
+const CELL_COMPONENT_NODE_PUBLISHER: &str = "node-publisher";
+const CELL_COMPONENT_CATALOG: &str = "repository-catalog";
+const CELL_COMPONENT_SCHEDULER_STATUS: &str = "scheduler-status";
+const CELL_COMPONENT_RELEASE_STORE: &str = "release-store";
+const CELL_COMPONENT_CAPACITY: &str = "capacity-report";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CellRuntimeBudget {
@@ -328,21 +336,6 @@ fn transfer_admission(catalog: &CatalogStore) -> TransferAdmission {
     )
 }
 
-fn start_cell_runtime(
-    session: SessionId,
-    budget: CellRuntimeBudget,
-    local_disk: crab_cell_runtime::DiskBudget,
-    scratch_root: PathBuf,
-) -> Result<CellRuntime> {
-    crate::cells::compiled_registry()?;
-    Ok(CellRuntime::new_with_replica_host_requiring_node_lease(
-        SqlWorkerPool::for_system(budget.max_active_cells)?,
-        budget.node_retained_bytes,
-        session,
-        budget.replica_host(local_disk, scratch_root),
-    )?)
-}
-
 async fn before_shutdown_deadline<T>(
     deadline: Instant,
     future: impl Future<Output = T>,
@@ -368,7 +361,7 @@ fn release_admits_process(
 }
 
 async fn watch_release(
-    releases: ReleaseStore,
+    releases: Arc<ReleaseStore>,
     compiled: Digest,
     cancellation: CancellationToken,
 ) -> Result<()> {
@@ -612,11 +605,10 @@ impl Repository {
             Some(permit),
             server.cancellation.clone(),
             server
-                .repository_cells
-                .clone()
+                .repository_cells()
                 .map(|router| maintenance::ProjectionContext {
                     repository_id: self.id,
-                    router,
+                    router: (*router).clone(),
                     metrics: server.metrics.clone(),
                 }),
         )));
@@ -698,11 +690,10 @@ impl Repository {
                 None,
                 server.cancellation.clone(),
                 server
-                    .repository_cells
-                    .clone()
+                    .repository_cells()
                     .map(|router| maintenance::ProjectionContext {
                         repository_id: self.id,
-                        router,
+                        router: (*router).clone(),
                         metrics: server.metrics.clone(),
                     }),
             )));
@@ -724,10 +715,16 @@ impl Repository {
 pub(crate) struct Server {
     pub repositories: RepositorySet,
     pub runtime: Arc<RemoteGitRuntime>,
-    pub cell_runtime: CellRuntime,
+    pub(crate) cell_node: Option<Arc<CellNode>>,
+    #[cfg(test)]
+    pub(crate) cell_runtime: CellRuntime,
+    #[cfg(test)]
     pub(crate) repository_cells: Option<crate::cells::RepositoryCellRouter>,
+    #[cfg(test)]
     pub(crate) peer_receiver: Option<crate::peer::PeerReceiver>,
+    #[cfg(test)]
     pub(crate) follower_store: Option<crab_cell_runtime::FollowerStore>,
+    #[cfg(test)]
     pub(crate) node_log_transport: Option<Arc<dyn crab_cell_runtime::NodeLogTransport>>,
     pub options: RepositoryOptions,
     pub cursor_key: [u8; 32],
@@ -740,17 +737,153 @@ pub(crate) struct Server {
     pub receives: tokio_util::task::TaskTracker,
     pub auth: Option<Authentication>,
     pub(crate) git_import: Option<git_import::ImportContext>,
+    #[cfg(test)]
     pub(crate) catalog: Option<CatalogStore>,
     catalog_healthy: AtomicBool,
     pub(crate) node_healthy: AtomicBool,
-    scheduler_status: crate::cells::SchedulerStatus,
-    cell_capacity: CellCapacityReport,
+    #[cfg(test)]
+    pub(crate) scheduler_status: crate::cells::SchedulerStatus,
+    #[cfg(test)]
+    pub(crate) cell_capacity: CellCapacityReport,
     pub(crate) metrics: crate::metrics::Metrics,
 }
 
 impl Server {
+    pub(crate) fn cell_runtime(&self) -> Result<CellRuntime> {
+        self.cell_node
+            .as_ref()
+            .map(|node| node.runtime())
+            .or_else(|| {
+                #[cfg(test)]
+                {
+                    Some(self.cell_runtime.clone())
+                }
+                #[cfg(not(test))]
+                {
+                    None
+                }
+            })
+            .ok_or(crate::Error::Config("Cell runtime host is unavailable"))
+    }
+
+    fn node_component<T>(&self, name: &str) -> Option<Arc<T>>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.cell_node
+            .as_ref()
+            .and_then(|node| node.owned_component(name))
+    }
+
+    pub(crate) fn repository_cells(&self) -> Option<Arc<crate::cells::RepositoryCellRouter>> {
+        self.node_component(CELL_COMPONENT_REPOSITORY_ROUTER)
+            .or_else(|| {
+                #[cfg(test)]
+                {
+                    self.repository_cells.clone().map(Arc::new)
+                }
+                #[cfg(not(test))]
+                {
+                    None
+                }
+            })
+    }
+
+    pub(crate) fn peer_receiver(&self) -> Option<Arc<crate::peer::PeerReceiver>> {
+        self.node_component(CELL_COMPONENT_PEER_RECEIVER)
+            .or_else(|| {
+                #[cfg(test)]
+                {
+                    self.peer_receiver.clone().map(Arc::new)
+                }
+                #[cfg(not(test))]
+                {
+                    None
+                }
+            })
+    }
+
+    pub(crate) fn follower_store(&self) -> Option<Arc<crab_cell_runtime::FollowerStore>> {
+        self.node_component(FOLLOWER_STORE_COMPONENT).or_else(|| {
+            #[cfg(test)]
+            {
+                self.follower_store.clone().map(Arc::new)
+            }
+            #[cfg(not(test))]
+            {
+                None
+            }
+        })
+    }
+
+    pub(crate) fn node_log_transport(
+        &self,
+    ) -> Option<Arc<dyn crab_cell_runtime::NodeLogTransport>> {
+        self.node_component::<Arc<dyn crab_cell_runtime::NodeLogTransport>>(
+            CELL_COMPONENT_NODE_LOG_TRANSPORT,
+        )
+        .map(|transport| transport.as_ref().clone())
+        .or_else(|| {
+            #[cfg(test)]
+            {
+                self.node_log_transport.clone()
+            }
+            #[cfg(not(test))]
+            {
+                None
+            }
+        })
+    }
+
+    pub(crate) fn catalog(&self) -> Option<CatalogStore> {
+        self.node_component::<CatalogStore>(CELL_COMPONENT_CATALOG)
+            .map(|catalog| catalog.as_ref().clone())
+            .or_else(|| {
+                #[cfg(test)]
+                {
+                    self.catalog.clone()
+                }
+                #[cfg(not(test))]
+                {
+                    None
+                }
+            })
+    }
+
+    fn scheduler_status(&self) -> Option<crate::cells::SchedulerStatus> {
+        self.node_component::<crate::cells::SchedulerStatus>(CELL_COMPONENT_SCHEDULER_STATUS)
+            .map(|status| status.as_ref().clone())
+            .or({
+                #[cfg(test)]
+                {
+                    Some(self.scheduler_status.clone())
+                }
+                #[cfg(not(test))]
+                {
+                    None
+                }
+            })
+    }
+
+    fn cell_capacity(&self) -> Option<CellCapacityReport> {
+        self.node_component::<CellCapacityReport>(CELL_COMPONENT_CAPACITY)
+            .map(|capacity| capacity.as_ref().clone())
+            .or({
+                #[cfg(test)]
+                {
+                    Some(self.cell_capacity.clone())
+                }
+                #[cfg(not(test))]
+                {
+                    None
+                }
+            })
+    }
+
     pub(crate) fn accepts_application_peers(&self) -> bool {
-        self.node_healthy.load(Ordering::Acquire) && !self.cancellation.is_cancelled()
+        self.node_healthy.load(Ordering::Acquire)
+            && !self.cancellation.is_cancelled()
+            && self.cell_node.as_ref().is_none_or(|node| node.is_ready())
     }
 
     pub(crate) async fn acquire_transfer(
@@ -789,7 +922,17 @@ impl Server {
     }
 
     async fn shutdown_runtimes(&self) -> Result<()> {
-        let cells = self.cell_runtime.shutdown().await;
+        self.shutdown_runtimes_until(None).await
+    }
+
+    async fn shutdown_runtimes_until(&self, deadline: Option<Instant>) -> Result<()> {
+        let cells = match self.cell_node.as_ref() {
+            Some(node) => match deadline {
+                Some(deadline) => node.shutdown_until(deadline).await,
+                None => node.shutdown().await,
+            },
+            None => self.cell_runtime()?.shutdown().await,
+        };
         self.runtime.shutdown().await;
         cells.map_err(Into::into)
     }
@@ -902,18 +1045,40 @@ pub async fn serve(config: Config) -> Result<()> {
     let public_address = listener.local_addr()?;
     let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
     let metrics = crate::metrics::Metrics::new()?;
-    let cell_runtime = start_cell_runtime(
-        session,
-        cell_budget,
-        local_disk.clone(),
-        session_dir.clone(),
-    )?;
-    cell_runtime.install_telemetry(Arc::new(metrics.clone()))?;
-    let follower_store = crab_cell_runtime::FollowerStore::open(
-        config.cells.data_dir.clone(),
-        crate::cells::repository_replica_limits(),
-        local_disk.clone(),
-    )?;
+    let node_shutdown = CancellationToken::new();
+    let cell_node = Arc::new(
+        CellNodeBuilder::new(crate::cells::compiled_application()?)
+            .with_runtime(
+                SqlWorkerPool::for_system(cell_budget.max_active_cells)?,
+                cell_budget.node_retained_bytes,
+            )
+            .with_replica_host(cell_budget.replica_host(local_disk.clone(), session_dir.clone()))
+            .with_session(session)
+            .with_follower_store(
+                config.cells.data_dir.clone(),
+                crate::cells::repository_replica_limits(),
+                local_disk.clone(),
+            )
+            .with_required_owned_components([
+                CELL_COMPONENT_REPOSITORY_ROUTER,
+                CELL_COMPONENT_PEER_RECEIVER,
+                FOLLOWER_STORE_COMPONENT,
+                CELL_COMPONENT_NODE_LOG_TRANSPORT,
+                CELL_COMPONENT_NODE_PUBLISHER,
+                NODE_DURABILITY_PROVIDER_COMPONENT,
+                CELL_COMPONENT_CATALOG,
+                CELL_COMPONENT_SCHEDULER_STATUS,
+                CELL_COMPONENT_RELEASE_STORE,
+                CELL_COMPONENT_CAPACITY,
+            ])?
+            .build()?,
+    );
+    let cell_tasks = cell_node.install_task_group(cancellation.clone(), node_shutdown.clone())?;
+    cell_node.install_telemetry(Arc::new(metrics.clone()))?;
+    let cell_runtime = cell_node.runtime();
+    let follower_store = cell_node
+        .owned_component::<crab_cell_runtime::FollowerStore>(FOLLOWER_STORE_COMPONENT)
+        .ok_or(crate::Error::Config("follower store is unavailable"))?;
     if follower_store.quarantined_entries() != 0 {
         tracing::warn!(
             entries = follower_store.quarantined_entries(),
@@ -922,7 +1087,7 @@ pub async fn serve(config: Config) -> Result<()> {
     }
     let node_publisher = Arc::new(
         node_publisher
-            .with_follower_store(follower_store.clone())
+            .with_follower_store((*follower_store).clone())
             .with_runtime(cell_runtime.clone())
             .with_telemetry(cell_runtime.telemetry_handle())
             .with_metrics(metrics.clone()),
@@ -945,20 +1110,33 @@ pub async fn serve(config: Config) -> Result<()> {
             peer_tls.client_identity(),
             session,
         )
-        .with_local_follower(node, follower_store.clone()),
+        .with_local_follower(node, (*follower_store).clone()),
     );
+    node_publisher.install_node_log_transport(Arc::clone(&node_log_transport))?;
+    cell_node.install_node_durability_provider(
+        Arc::clone(&node_publisher),
+        NodeDurabilitySupervisorConfig::new(
+            startup.identity.application(),
+            crate::cells::repository_replica_limits(),
+            crate::cells::repository_replica_limits().max_capture_bytes,
+            1_024,
+            Duration::from_secs(3),
+            Duration::from_secs(5),
+            1_000_000,
+        )?,
+    )?;
     let recovery_artifacts = Arc::new(crate::cells::RecoveryArtifactRegistry::new(
         session_dir.join("recovery-artifacts"),
         crate::cells::repository_replica_limits(),
         local_disk.clone(),
     )?);
-    let release_store = ReleaseStore::new(startup.layout.clone(), startup.identity)?;
+    let release_store = Arc::new(ReleaseStore::new(startup.layout.clone(), startup.identity)?);
     let peer_receiver = crate::peer::PeerReceiver::new(
         node,
         session,
         directory.clone(),
         Arc::clone(&registry),
-        release_store.clone(),
+        Arc::clone(&release_store),
         cell_resolver,
         Arc::clone(&peer_round_trip),
     );
@@ -995,15 +1173,62 @@ pub async fn serve(config: Config) -> Result<()> {
     .with_node(node)
     .with_node_recovery_disk(local_disk.clone())
     .with_metrics(metrics.clone());
-    let durability_application = startup.identity.application();
+    cell_node.install_facilities([
+        CellNodeFacility::owned(
+            CELL_COMPONENT_REPOSITORY_ROUTER,
+            Arc::new(repository_cells.clone()),
+            || async { Ok(()) },
+        )?,
+        CellNodeFacility::owned(
+            CELL_COMPONENT_PEER_RECEIVER,
+            Arc::new(peer_receiver.clone()),
+            || async { Ok(()) },
+        )?,
+        CellNodeFacility::owned(
+            CELL_COMPONENT_NODE_LOG_TRANSPORT,
+            Arc::new(node_log_transport.clone()),
+            || async { Ok(()) },
+        )?,
+        CellNodeFacility::owned(
+            CELL_COMPONENT_NODE_PUBLISHER,
+            Arc::clone(&node_publisher),
+            || async { Ok(()) },
+        )?,
+        CellNodeFacility::owned(
+            CELL_COMPONENT_CATALOG,
+            Arc::new(catalog.clone()),
+            || async { Ok(()) },
+        )?,
+        CellNodeFacility::owned(
+            CELL_COMPONENT_SCHEDULER_STATUS,
+            Arc::new(scheduler_status.clone()),
+            || async { Ok(()) },
+        )?,
+        CellNodeFacility::owned(
+            CELL_COMPONENT_RELEASE_STORE,
+            Arc::clone(&release_store),
+            || async { Ok(()) },
+        )?,
+        CellNodeFacility::owned(
+            CELL_COMPONENT_CAPACITY,
+            Arc::new(cell_capacity.clone()),
+            || async { Ok(()) },
+        )?,
+    ])?;
     let server = Arc::new(Server {
         repositories: repositories.into(),
         runtime: Arc::clone(&runtime),
-        cell_runtime,
-        repository_cells: Some(repository_cells),
-        peer_receiver: Some(peer_receiver),
-        follower_store: Some(follower_store.clone()),
-        node_log_transport: Some(node_log_transport),
+        #[cfg(test)]
+        cell_runtime: cell_runtime.clone(),
+        cell_node: Some(Arc::clone(&cell_node)),
+        #[cfg(test)]
+        repository_cells: None,
+        #[cfg(test)]
+        peer_receiver: None,
+        #[cfg(test)]
+        follower_store: None,
+        #[cfg(test)]
+        node_log_transport: None,
         cancellation: cancellation.clone(),
         receives: tokio_util::task::TaskTracker::new(),
         options,
@@ -1021,10 +1246,13 @@ pub async fn serve(config: Config) -> Result<()> {
             config.clone(),
             public_address,
         )),
-        catalog: Some(catalog.clone()),
+        #[cfg(test)]
+        catalog: None,
         catalog_healthy: AtomicBool::new(true),
         node_healthy: AtomicBool::new(false),
+        #[cfg(test)]
         scheduler_status,
+        #[cfg(test)]
         cell_capacity,
         metrics,
     });
@@ -1047,7 +1275,7 @@ pub async fn serve(config: Config) -> Result<()> {
             probe_storage_contract(&catalog, &server.transfer_admission).await?;
             node_publisher.publish_initial().await?;
             let node_lease = node_publisher.lease_guard()?;
-            server.cell_runtime.install_node_lease(node_lease.clone())?;
+            cell_node.install_node_lease_for_startup(node_lease.clone())?;
             Ok::<_, crate::Error>(node_lease)
         };
         tokio::pin!(startup);
@@ -1085,99 +1313,74 @@ pub async fn serve(config: Config) -> Result<()> {
         }
     };
     let signal_cancellation = cancellation.clone();
-    let signal = tokio::spawn(async move {
-        shutdown_signal().await;
-        signal_cancellation.cancel();
-    });
+    cell_tasks.spawn(async move {
+        tokio::select! {
+            () = shutdown_signal() => signal_cancellation.cancel(),
+            () = signal_cancellation.cancelled() => {}
+        }
+        Ok::<(), crate::Error>(())
+    })?;
     let refresh_server = Arc::clone(&server);
-    let refresh =
-        tokio::spawn(async move { refresh_catalog(refresh_server, catalog_version).await });
+    cell_tasks.spawn(async move {
+        refresh_catalog(refresh_server, catalog_version).await;
+        Ok::<(), crate::Error>(())
+    })?;
     let projection_sweep_server = Arc::clone(&server);
-    let projection_sweep =
-        tokio::spawn(async move { sweep_projections(projection_sweep_server).await });
-    let durability_publisher = Arc::clone(&node_publisher);
-    let durability_runtime = server.cell_runtime.clone();
-    let durability_transport = Arc::clone(
-        server
-            .node_log_transport
-            .as_ref()
-            .ok_or(crate::Error::Config("node-log transport is unavailable"))?,
-    );
-    let durability_cancellation = cancellation.clone();
-    let durability_recruiter = tokio::spawn(async move {
-        recruit_node_durability(
-            durability_publisher,
-            durability_runtime,
-            durability_application,
-            durability_transport,
-            durability_cancellation,
-        )
-        .await
-    });
-    let rotation_publisher = Arc::clone(&node_publisher);
-    let rotation_runtime = server.cell_runtime.clone();
-    let rotation_transport = Arc::clone(
-        server
-            .node_log_transport
-            .as_ref()
-            .ok_or(crate::Error::Config("node-log transport is unavailable"))?,
-    );
-    let rotation_cancellation = cancellation.clone();
-    let rotation_metrics = server.metrics.clone();
-    let durability_rotator = tokio::spawn(async move {
-        rotate_node_durability(
-            rotation_publisher,
-            rotation_runtime,
-            durability_application,
-            rotation_transport,
-            rotation_cancellation,
-            rotation_metrics,
-        )
-        .await
-    });
-    let follower_collection_store = follower_store;
+    cell_tasks.spawn(async move { sweep_projections(projection_sweep_server).await })?;
+    let follower_collection_store = (*follower_store).clone();
     let follower_collection_directory = directory.clone();
     let follower_collection_cancellation = cancellation.clone();
-    let follower_collection = tokio::spawn(async move {
+    cell_tasks.spawn(async move {
         collect_retired_follower_lanes(
             follower_collection_store,
             follower_collection_directory,
             follower_collection_cancellation,
         )
         .await
-    });
-    let node_shutdown = CancellationToken::new();
+    })?;
     let node_server = Arc::clone(&server);
     let heartbeat_shutdown = node_shutdown.clone();
     let heartbeat_publisher = Arc::clone(&node_publisher);
-    let heartbeat = tokio::spawn(async move {
+    cell_tasks.spawn(async move {
         heartbeat_publisher
             .run_shared(node_server, heartbeat_shutdown)
             .await
-    });
+    })?;
     let lease_server = Arc::clone(&server);
     let lease_cancellation = cancellation.clone();
-    let lease_watch = tokio::spawn(async move {
-        node_lease.wait_fenced().await;
-        if lease_server.node_healthy.load(Ordering::Acquire) {
-            lease_server
-                .metrics
-                .record_self_fence(crate::metrics::SelfFenceReason::Expiry);
-        } else if lease_cancellation.is_cancelled() {
-            lease_server
-                .metrics
-                .record_self_fence(crate::metrics::SelfFenceReason::Shutdown);
+    let lease_watch = async move {
+        tokio::select! {
+            () = node_lease.wait_fenced() => {
+                if lease_server.node_healthy.load(Ordering::Acquire) {
+                    lease_server
+                        .metrics
+                        .record_self_fence(crate::metrics::SelfFenceReason::Expiry);
+                } else if lease_cancellation.is_cancelled() {
+                    lease_server
+                        .metrics
+                        .record_self_fence(crate::metrics::SelfFenceReason::Shutdown);
+                }
+                lease_server.node_healthy.store(false, Ordering::Release);
+                lease_cancellation.cancel();
+            }
+            () = lease_cancellation.cancelled() => {
+                lease_server
+                    .metrics
+                    .record_self_fence(crate::metrics::SelfFenceReason::Shutdown);
+                lease_server.node_healthy.store(false, Ordering::Release);
+            }
         }
-        lease_server.node_healthy.store(false, Ordering::Release);
-        lease_cancellation.cancel();
-    });
+        Ok::<(), crate::Error>(())
+    };
+    cell_tasks.spawn(lease_watch)?;
     let release_cancellation = cancellation.clone();
     let compiled_release = registry.release_digest();
-    let release_watch = tokio::spawn(async move {
-        watch_release(release_store, compiled_release, release_cancellation).await
-    });
+    let release_watch =
+        async move { watch_release(release_store, compiled_release, release_cancellation).await };
+    cell_tasks.spawn(release_watch)?;
     let scheduler_cancellation = cancellation.clone();
-    let scheduler = tokio::spawn(async move { cell_scheduler.run(scheduler_cancellation).await });
+    cell_tasks.spawn(async move { cell_scheduler.run(scheduler_cancellation).await })?;
+    cell_node.start()?;
     server.node_healthy.store(true, Ordering::Release);
     let app = router(Arc::clone(&server));
     tracing::info!(address = %listener.local_addr()?, "public listener started");
@@ -1207,42 +1410,12 @@ pub async fn serve(config: Config) -> Result<()> {
         }
         () = cancellation.cancelled() => {
             server.node_healthy.store(false, Ordering::Release);
-            signal.abort();
             let deadline = Instant::now() + SHUTDOWN_DEADLINE;
             (before_shutdown_deadline(deadline, &mut public).await, deadline)
         }
     };
-    signal.abort();
     let result = public_result?;
     before_shutdown_deadline(shutdown_deadline, async move {
-        let _cancel_heartbeat_on_drop = node_shutdown.clone().drop_guard();
-        if let Err(error) = refresh.await {
-            tracing::warn!(error = %error, "repository catalog refresh task failed");
-        }
-        let projection_sweep = match projection_sweep.await {
-            Ok(result) => result,
-            Err(error) => Err(error.into()),
-        };
-        let durability_recruiter = match durability_recruiter.await {
-            Ok(result) => result,
-            Err(error) => Err(error.into()),
-        };
-        let durability_rotator = match durability_rotator.await {
-            Ok(result) => result,
-            Err(error) => Err(error.into()),
-        };
-        let follower_collection = match follower_collection.await {
-            Ok(result) => result,
-            Err(error) => Err(error.into()),
-        };
-        let scheduler = match scheduler.await {
-            Ok(result) => result,
-            Err(error) => Err(error.into()),
-        };
-        let release_watch = match release_watch.await {
-            Ok(result) => result,
-            Err(error) => Err(error.into()),
-        };
         // Axum has drained its connections, so no handler can register a new
         // receive after the tracker becomes empty. Close readers only after that drain.
         server.cancellation.cancel();
@@ -1251,16 +1424,9 @@ pub async fn serve(config: Config) -> Result<()> {
         server.transfer_admission.close();
         server.transfer_admission.wait().await;
         let maintenance = server.finish_maintenance().await;
-        let runtimes = server.shutdown_runtimes().await;
-        node_shutdown.cancel();
-        let heartbeat = match heartbeat.await {
-            Ok(result) => result,
-            Err(error) => Err(error.into()),
-        };
-        let lease_watch = match lease_watch.await {
-            Ok(()) => Ok(()),
-            Err(error) => Err(error.into()),
-        };
+        let runtimes = server
+            .shutdown_runtimes_until(Some(shutdown_deadline))
+            .await;
         recovery_shutdown.cancel();
         let management = match management_result {
             Some(result) => result,
@@ -1270,14 +1436,6 @@ pub async fn serve(config: Config) -> Result<()> {
             .map(|_| ())
             .map_err(crate::Error::from)
             .and(management)
-            .and(heartbeat)
-            .and(lease_watch)
-            .and(scheduler)
-            .and(release_watch)
-            .and(durability_recruiter)
-            .and(durability_rotator)
-            .and(follower_collection)
-            .and(projection_sweep)
             .and(maintenance)
             .and(runtimes)
     })
@@ -1325,123 +1483,6 @@ async fn collect_retired_follower_lanes(
                 }
             }
         }
-    }
-}
-
-async fn recruit_node_durability(
-    publisher: Arc<crate::peer::NodePublisher>,
-    runtime: CellRuntime,
-    application: crab_cell_runtime::ApplicationId,
-    transport: Arc<dyn crab_cell_runtime::NodeLogTransport>,
-    cancellation: CancellationToken,
-) -> Result<()> {
-    let limits = crate::cells::repository_replica_limits();
-    loop {
-        let recruited = publisher
-            .recruit_node_durability(
-                Arc::clone(&transport),
-                limits,
-                limits.max_capture_bytes,
-                NODE_LOG_LIVE_NODE_LIMIT,
-            )
-            .await;
-        match recruited {
-            Ok(Some(durability)) => {
-                runtime.install_node_durability(application, durability)?;
-                tracing::info!("node-log follower durability recruited");
-                return Ok(());
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(error = %error, "node-log follower recruitment failed");
-            }
-        }
-        tokio::select! {
-            () = cancellation.cancelled() => return Ok(()),
-            () = tokio::time::sleep(NODE_LOG_RECRUIT_INTERVAL) => {}
-        }
-    }
-}
-
-async fn rotate_node_durability(
-    publisher: Arc<crate::peer::NodePublisher>,
-    runtime: CellRuntime,
-    application: crab_cell_runtime::ApplicationId,
-    transport: Arc<dyn crab_cell_runtime::NodeLogTransport>,
-    cancellation: CancellationToken,
-    metrics: crate::metrics::Metrics,
-) -> Result<()> {
-    let limits = crate::cells::repository_replica_limits();
-    loop {
-        tokio::select! {
-            () = cancellation.cancelled() => return Ok(()),
-            () = tokio::time::sleep(NODE_LOG_ROTATION_INTERVAL) => {}
-        }
-        let Some((installed_application, durability)) = runtime.node_durability() else {
-            continue;
-        };
-        if installed_application != application {
-            return Err(crate::Error::Config(
-                "node-log durability application changed during rotation",
-            ));
-        }
-        if !durability.needs_rotation(NODE_LOG_ROTATION_FRAMES) {
-            continue;
-        }
-        metrics.record_node_log_rotation(crate::metrics::NodeLogRotationResult::Started);
-        loop {
-            match durability.shutdown().await {
-                Ok(()) => break,
-                Err(crab_cell_runtime::Error::PendingPublication) => {
-                    metrics
-                        .record_node_log_rotation(crate::metrics::NodeLogRotationResult::Pending);
-                    tokio::select! {
-                        () = cancellation.cancelled() => return Ok(()),
-                        () = tokio::time::sleep(NODE_LOG_RECRUIT_INTERVAL) => {}
-                    }
-                }
-                Err(error) => {
-                    metrics.record_node_log_rotation(crate::metrics::NodeLogRotationResult::Failed);
-                    return Err(crate::Error::Cell(error));
-                }
-            }
-        }
-        if cancellation.is_cancelled() {
-            return Ok(());
-        }
-        let replacement = loop {
-            match publisher
-                .recruit_node_durability(
-                    Arc::clone(&transport),
-                    limits,
-                    limits.max_capture_bytes,
-                    NODE_LOG_LIVE_NODE_LIMIT,
-                )
-                .await
-            {
-                Ok(Some(durability)) => break durability,
-                Ok(None) => {}
-                Err(error) => {
-                    metrics.record_node_log_rotation(crate::metrics::NodeLogRotationResult::Failed);
-                    tracing::warn!(error = %error, "node-log epoch rotation recruitment failed");
-                }
-            }
-            tokio::select! {
-                () = cancellation.cancelled() => return Ok(()),
-                () = tokio::time::sleep(NODE_LOG_RECRUIT_INTERVAL) => {}
-            }
-        };
-        if cancellation.is_cancelled() {
-            replacement.shutdown().await?;
-            return Ok(());
-        }
-        if let Err(error) = runtime.replace_node_durability(application, Arc::clone(&replacement)) {
-            metrics.record_node_log_rotation(crate::metrics::NodeLogRotationResult::Failed);
-            replacement.shutdown().await?;
-            return Err(crate::Error::Cell(error));
-        }
-        metrics.record_node_log_rotation(crate::metrics::NodeLogRotationResult::Completed);
-        tracing::info!("node-log epoch rotated after object coverage");
     }
 }
 
@@ -1504,7 +1545,7 @@ pub(crate) async fn materialize_catalog(
 }
 
 async fn refresh_catalog(server: Arc<Server>, mut version: u64) {
-    let Some(catalog) = server.catalog.clone() else {
+    let Some(catalog) = server.catalog() else {
         return;
     };
     loop {
@@ -1546,7 +1587,7 @@ async fn refresh_catalog(server: Arc<Server>, mut version: u64) {
             })
             .map(|record| (record.id, record.application))
             .collect::<Vec<_>>();
-        let verified = match server.repository_cells.as_ref() {
+        let verified = match server.repository_cells() {
             Some(router) => router.verify_repositories(repository_cells).await,
             None => Err(crate::Error::Config(
                 "repository catalog refresh requires Cell routing",
@@ -1845,30 +1886,45 @@ async fn application_peer_admission(
 }
 
 async fn render_capacity(State(server): State<Arc<Server>>) -> Response {
+    let Some(capacity) = server.cell_capacity() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     (
         [(axum::http::header::CACHE_CONTROL, "no-store")],
-        Json(server.cell_capacity.clone()),
+        Json(capacity),
     )
         .into_response()
 }
 
 async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
     let scheduler_now_ms = crate::cells::unix_now_ms().unwrap_or(0);
-    let cell_runtime = server.cell_runtime.stats();
+    let cell_runtime = match server.cell_runtime() {
+        Ok(runtime) => runtime.stats(),
+        Err(error) => {
+            tracing::error!(error = %error, "Cell runtime host is unavailable for metrics");
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    };
     let body = server.metrics.render(
         crate::metrics::RuntimeSnapshot {
             repositories: server.repositories.len(),
             catalog_healthy: server.catalog_healthy.load(Ordering::Acquire),
-            scheduler_healthy: server.scheduler_status.is_healthy(scheduler_now_ms),
-            scheduler_progress: server.scheduler_status.progress(),
-            scheduler_lag_seconds: server.scheduler_status.lag_ms(scheduler_now_ms) as f64
+            scheduler_healthy: server
+                .scheduler_status()
+                .is_some_and(|status| status.is_healthy(scheduler_now_ms)),
+            scheduler_progress: server
+                .scheduler_status()
+                .map_or(0, |status| status.progress()),
+            scheduler_lag_seconds: server
+                .scheduler_status()
+                .map_or(0, |status| status.lag_ms(scheduler_now_ms))
+                as f64
                 / 1_000.0,
             draining: server.cancellation.is_cancelled(),
             receive_workers: server.receives.len(),
             cell_follower_retained_bytes: server
-                .follower_store
-                .as_ref()
-                .map_or(0, crab_cell_runtime::FollowerStore::retained_bytes),
+                .follower_store()
+                .map_or(0, |store| store.retained_bytes()),
             admission_available: [
                 server.admission.available_permits(),
                 server.transfer_admission.available_permits(),
@@ -1916,27 +1972,26 @@ async fn check_readiness(server: &Server) -> Result<()> {
     if server.cancellation.is_cancelled() {
         return Err(crate::Error::Config("server is draining"));
     }
-    if server.cell_runtime.is_shutting_down() {
+    if server.cell_runtime()?.is_shutting_down() {
         return Err(crate::Error::Config("embedded Cell runtime is draining"));
     }
-    if server.catalog.is_some() && server.peer_receiver.is_none() {
+    if server.catalog().is_some() && server.peer_receiver().is_none() {
         return Err(crate::Error::Config("Cell peer receiver is unavailable"));
     }
     if !server.accepts_application_peers() {
         return Err(crate::Error::Config("Cell node advertisement is unhealthy"));
     }
-    if !server
-        .scheduler_status
-        .is_healthy(crate::cells::unix_now_ms()?)
-    {
+    let scheduler_status = server
+        .scheduler_status()
+        .ok_or(crate::Error::Config("Cell scheduler status is unavailable"))?;
+    if !scheduler_status.is_healthy(crate::cells::unix_now_ms()?) {
         return Err(crate::Error::Config("Cell scheduler is unhealthy"));
     }
     if !server.catalog_healthy.load(Ordering::Acquire) {
         return Err(crate::Error::Config("catalog refresh is unhealthy"));
     }
     let catalog = server
-        .catalog
-        .as_ref()
+        .catalog()
         .ok_or(crate::Error::Config("catalog is unavailable"))?;
     catalog.load().await?;
     for repository in server.repositories.values() {
@@ -2222,6 +2277,7 @@ mod peer_e2e_tests;
 mod tests {
     use super::*;
     use axum::body::Body;
+    use crab_cell_host::CellNodeTaskGroup;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -2317,8 +2373,10 @@ mod tests {
             reserve_bytes: available,
         };
 
+        // Request the measured free-space sample itself so unrelated cleanup
+        // cannot make this capacity proof pass or fail by a one-byte race.
         assert!(matches!(
-            monitor.ensure_available(1),
+            monitor.ensure_available(available),
             Err(error) if error.kind() == io::ErrorKind::StorageFull
         ));
     }
@@ -2451,6 +2509,25 @@ mod tests {
         assert!(dropped.load(Ordering::Acquire));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cell_task_facility_aborts_unfinished_tasks_when_deadline_expires() {
+        let facility = CellNodeTaskGroup::new(CancellationToken::new(), CancellationToken::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let signal = DropSignal(Arc::clone(&dropped));
+        facility
+            .spawn(async move {
+                let _signal = signal;
+                std::future::pending::<()>().await;
+                Ok::<(), crate::Error>(())
+            })
+            .unwrap();
+
+        let result = tokio::time::timeout(Duration::from_millis(10), facility.drain()).await;
+        assert!(result.is_err());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
     #[tokio::test]
     async fn storage_preflight_leaves_no_live_probe_object() {
         let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
@@ -2506,6 +2583,7 @@ mod tests {
             repositories: RepositorySet::from(BTreeMap::<(String, String), Repository>::new()),
             runtime: Arc::clone(&runtime),
             cell_runtime: start_test_cell_runtime(),
+            cell_node: None,
             repository_cells: None,
             peer_receiver: None,
             follower_store: None,

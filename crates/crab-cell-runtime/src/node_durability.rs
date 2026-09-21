@@ -4,8 +4,8 @@ use futures_util::future::BoxFuture;
 use tokio::sync::{Mutex, OnceCell};
 
 use crate::{
-    CommitTicket, DurabilityGate, DurabilityProof, DurabilitySource, Error, NodeLeaseGuard,
-    NodeLogRotationBarrier, NodeLogShipper, NodeLogSubmission, NodeLogTransport, Result,
+    CommitTicket, DurabilityGate, DurabilityProof, DurabilitySource, Error, NodeId, NodeLeaseGuard,
+    NodeLogRotationBarrier, NodeLogShipper, NodeLogSubmission, NodeLogTransport, Result, SessionId,
 };
 
 /// Authoritative node-session mutations required by follower durability.
@@ -22,6 +22,79 @@ pub trait NodeLogAuthority: Send + Sync {
     ) -> BoxFuture<'a, Result<()>>;
 
     fn close<'a>(&'a self, barrier: &'a NodeLogRotationBarrier) -> BoxFuture<'a, Result<()>>;
+}
+
+/// Provider-neutral inputs for constructing one node-log durability epoch.
+///
+/// Providers own enrollment and the authority/transport implementations. The
+/// host owns turning these inputs into the runtime durability object so the
+/// product boundary cannot accidentally create a second shipping path.
+pub struct NodeDurabilityConfig {
+    session: SessionId,
+    node: NodeId,
+    log_epoch: u64,
+    members: Vec<NodeId>,
+    transport: Arc<dyn NodeLogTransport>,
+    authority: Arc<dyn NodeLogAuthority>,
+    node_lease: NodeLeaseGuard,
+    limits: crab_ltx::Limits,
+    telemetry: crate::CellTelemetryHandle,
+}
+
+impl NodeDurabilityConfig {
+    /// Binds provider enrollment to one exact node session and log epoch.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the provider-neutral boundary keeps every enrollment contract explicit"
+    )]
+    pub fn new(
+        session: SessionId,
+        node: NodeId,
+        log_epoch: u64,
+        members: Vec<NodeId>,
+        transport: Arc<dyn NodeLogTransport>,
+        authority: Arc<dyn NodeLogAuthority>,
+        node_lease: NodeLeaseGuard,
+        limits: crab_ltx::Limits,
+        telemetry: crate::CellTelemetryHandle,
+    ) -> Result<Self> {
+        if session.as_bytes().iter().all(|byte| *byte == 0)
+            || node.as_bytes().iter().all(|byte| *byte == 0)
+            || log_epoch == 0
+            || members.is_empty()
+        {
+            return Err(Error::Node("invalid node-log durability configuration"));
+        }
+        Ok(Self {
+            session,
+            node,
+            log_epoch,
+            members,
+            transport,
+            authority,
+            node_lease,
+            limits,
+            telemetry,
+        })
+    }
+
+    /// Constructs the runtime-owned durability object for this epoch.
+    pub fn build(self) -> Result<Arc<NodeDurability>> {
+        let gate = DurabilityGate::new(self.session, self.node, self.log_epoch, self.members)?;
+        let shipper = NodeLogShipper::new_with_telemetry(
+            gate.clone(),
+            Arc::clone(&self.transport),
+            self.limits,
+            self.telemetry,
+        )?;
+        Ok(Arc::new(NodeDurability::new(
+            gate,
+            shipper,
+            self.authority,
+            self.transport,
+            self.node_lease,
+        )))
+    }
 }
 
 /// One enrolled node-log epoch and its non-forgeable durability proof boundary.

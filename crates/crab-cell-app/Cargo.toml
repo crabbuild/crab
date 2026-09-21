@@ -1,0 +1,21 @@
+[package]
+name = "crab-cell-app"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Dependency-light author API for Crab Cell applications"
+
+[dependencies]
+blake3.workspace = true
+crab-cell-runtime.workspace = true
+
+[dev-dependencies]
+crab-ltx = { workspace = true, features = ["replica"] }
+crab-storage.workspace = true
+ed25519-dalek.workspace = true
+object_store.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

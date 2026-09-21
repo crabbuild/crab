@@ -5,6 +5,8 @@ use std::{
     time::Duration,
 };
 
+use crab_cell_app::{ApplicationBuilder, CellApplication, CellType, CompiledApplication};
+use crab_cell_host::CellNodeBuilder;
 use crab_cell_runtime::CellStorageLayout;
 use crab_cell_runtime::{
     ApplicationId, ApplicationIdentity, ApplicationIdentityStore, BackupPin, BackupPinStore,
@@ -244,18 +246,47 @@ impl EffectModule for RepositoryModule {
 }
 
 pub(crate) fn compiled_registry() -> crab_cell_runtime::Result<Registry> {
-    let mut builder = RegistryBuilder::new(BuildDescriptor {
+    let application = compiled_application()?;
+    Ok((*application.registry()).clone())
+}
+
+/// Compiles the repository module through the supported author boundary used
+/// by the production node host. Release and migration inspection consume the
+/// same compiled registry through [`compiled_registry`].
+pub(crate) fn compiled_application() -> crab_cell_runtime::Result<Arc<CompiledApplication>> {
+    struct RepositoryApplication;
+
+    impl CellApplication for RepositoryApplication {
+        const NAME: &'static str = "crab-repository";
+
+        fn register(builder: &mut ApplicationBuilder) -> crab_cell_runtime::Result<()> {
+            builder.register(RepositoryModule)?;
+            builder.cell_type(
+                CellType::new(
+                    RepositoryModule::NAME,
+                    "repository",
+                    REPOSITORY_NAMESPACE,
+                    CatalogRole::Repository,
+                    1,
+                )?
+                .with_schema_range(1, 2)?
+                .with_limits(REPOSITORY_MAX_DATABASE_BYTES, REPOSITORY_MAX_CAPTURE_BYTES)?,
+            )?;
+            Ok(())
+        }
+    }
+
+    Ok(Arc::new(RepositoryApplication::compile(BuildDescriptor {
         source_revision: source_revision().to_owned(),
         cargo_lock_digest: digest(include_bytes!("../../../Cargo.lock")),
-    });
-    builder.register(RepositoryModule)?;
-    builder.finish()
+    })?))
 }
 
 pub(crate) struct VerifiedStartupCells {
     pub(crate) identity: ApplicationIdentity,
     pub(crate) layout: CellStorageLayout,
     pub(crate) registry: Registry,
+    pub(crate) application: Arc<CompiledApplication>,
     pub(crate) image: Digest,
 }
 
@@ -1210,12 +1241,14 @@ pub(crate) async fn verify_startup_release(config: &Config) -> Result<VerifiedSt
         .await?
         .ok_or(Error::Config("Cell application is not initialized"))?;
     let layout = identities.layout(identity).await?;
-    let registry = compiled_registry()?;
+    let application = compiled_application()?;
+    let registry = (*application.registry()).clone();
     let image = verify_startup_release_at(&layout, identity, &registry).await?;
     Ok(VerifiedStartupCells {
         identity,
         layout,
         registry,
+        application,
         image,
     })
 }
@@ -1348,7 +1381,8 @@ pub(crate) async fn enter_maintenance(
         .await?
         .ok_or(Error::Config("Cell application is not initialized"))?;
     let layout = identities.layout(identity).await?;
-    let registry = Arc::new(compiled_registry()?);
+    let application = crate::cells::compiled_application()?;
+    let registry = Arc::new((*application.registry()).clone());
     let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
     let releases = ReleaseStore::new(layout.clone(), identity)?;
     let observed = releases
@@ -1395,12 +1429,12 @@ pub(crate) async fn enter_maintenance(
     )?)?;
     let local_disk = budget.local_disk();
     let retention_host = budget.replica_host(local_disk.clone(), session_dir.path().to_owned());
-    let runtime = CellRuntime::new_with_replica_host(
-        SqlWorkerPool::new(1, 1)?,
-        MAINTENANCE_RUNTIME_BYTES,
-        session,
-        budget.replica_host(local_disk, session_dir.path().to_owned()),
-    )?;
+    let cell_node = CellNodeBuilder::new(application)
+        .with_runtime(SqlWorkerPool::new(1, 1)?, MAINTENANCE_RUNTIME_BYTES)
+        .with_replica_host(budget.replica_host(local_disk, session_dir.path().to_owned()))
+        .with_session(session)
+        .build_unleased_for_maintenance()?;
+    let runtime = cell_node.runtime();
     let router = RepositoryCellRouter::new(
         identity,
         layout.clone(),
@@ -1436,11 +1470,11 @@ pub(crate) async fn enter_maintenance(
     let advertised = match lease.publish_initial().await {
         Ok(advertised) => advertised,
         Err(error) => {
-            runtime.shutdown().await?;
+            cell_node.shutdown().await?;
             return Err(error);
         }
     };
-    complete_maintenance_inventory(
+    let completed = complete_maintenance_inventory(
         &layout,
         identity,
         &releases,
@@ -1456,7 +1490,13 @@ pub(crate) async fn enter_maintenance(
         retention_host,
         session_dir.path(),
     )
-    .await
+    .await;
+    let shutdown = cell_node.shutdown().await;
+    match (completed, shutdown) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error.into()),
+        (Ok(completed), Ok(())) => Ok(completed),
+    }
 }
 
 #[expect(
@@ -2230,8 +2270,17 @@ mod tests {
     fn release_inspection_is_canonical_and_matches_repository_inventory() {
         let first = compiled_registry().unwrap();
         let second = compiled_registry().unwrap();
+        let application = compiled_application().unwrap();
         assert_eq!(first.release_bytes(), second.release_bytes());
         assert_eq!(first.release_digest(), second.release_digest());
+        assert_eq!(
+            first.release_bytes(),
+            application.registry().release_bytes()
+        );
+        assert_eq!(
+            first.release_digest(),
+            application.registry().release_digest()
+        );
 
         let descriptor: Value = serde_json::from_slice(first.release_bytes()).unwrap();
         assert_eq!(descriptor["runtime"], "crab-http-server");

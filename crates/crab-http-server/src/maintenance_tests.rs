@@ -58,6 +58,7 @@ async fn fixture_without_cells() -> Arc<Server> {
         .into(),
         runtime: Arc::new(RemoteGitRuntime::default()),
         cell_runtime: start_test_cell_runtime(),
+        cell_node: None,
         repository_cells: None,
         peer_receiver: None,
         follower_store: None,
@@ -116,10 +117,12 @@ pub(super) async fn fixture() -> Arc<Server> {
     .await
     .unwrap();
     let cell_dir = tempfile::TempDir::new().unwrap();
+    let application = crate::cells::compiled_application().unwrap();
     crate::cells::initialize_repository_at(
         &layout,
         identity,
         &registry,
+        &application,
         cell_dir.path(),
         32 * 1024 * 1024 * 1024,
         "https://initializer.test:8081".into(),
@@ -266,7 +269,7 @@ fn enable_catalog_readiness(server: &mut Arc<Server>) {
             registry.release_digest(),
         ),
         registry,
-        releases,
+        Arc::new(releases),
         resolver,
         Arc::new(UnavailableRoundTrip),
     ));

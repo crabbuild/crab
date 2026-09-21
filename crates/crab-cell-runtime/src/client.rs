@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fmt,
     future::Future,
     pin::Pin,
@@ -388,11 +389,46 @@ impl CellClient {
     /// Builds the canonical single-owner transport used by embedded routes.
     #[must_use]
     pub fn local(registry: Arc<Registry>, handle: CellHandle) -> Self {
+        let primary = handle.clone();
         let transport = Arc::new(LocalCellTransport {
             registry: registry.clone(),
-            handle,
+            handles: Arc::new(HashMap::from([(handle.cell_id(), handle)])),
+            handle: primary,
         });
         Self::new(registry, transport)
+    }
+
+    /// Builds a bounded in-process transport for a set of locally owned Cells.
+    ///
+    /// This is the qualification and single-process embedding path. Production
+    /// multi-node routing still uses [`Self::peer`], while every target remains
+    /// checked against the exact local Cell identity before execution.
+    pub fn local_many(
+        registry: Arc<Registry>,
+        handles: impl IntoIterator<Item = CellHandle>,
+    ) -> Result<Self> {
+        let mut local = HashMap::new();
+        for handle in handles {
+            if local.insert(handle.cell_id(), handle).is_some() {
+                return Err(Error::Identity("duplicate local Cell handle"));
+            }
+        }
+        if local.is_empty() {
+            return Err(Error::Identity("local transport has no Cell handles"));
+        }
+        let primary = local
+            .values()
+            .next()
+            .cloned()
+            .ok_or(Error::Identity("local transport has no Cell handles"))?;
+        Ok(Self::new(
+            registry.clone(),
+            Arc::new(LocalCellTransport {
+                registry,
+                handles: Arc::new(local),
+                handle: primary,
+            }),
+        ))
     }
 
     /// Builds a typed capability over authenticated private peer routing.
@@ -459,6 +495,22 @@ impl CellClient {
             ));
         }
         Ok(descriptor.shards)
+    }
+
+    /// Builds a typed source-effect capability after validating the compiled
+    /// module and its source namespace. This keeps effect operation IDs inside
+    /// the registry instead of allowing callers to construct arbitrary ones.
+    pub fn effect_source<M: crate::EffectModule>(
+        &self,
+        target: CellTarget,
+    ) -> Result<crate::EffectSource<M>> {
+        let Some((module, _)) = self.registry.namespace_contract(target.namespace()) else {
+            return Err(Error::Registry("effect source namespace is not registered"));
+        };
+        if module != M::MODULE || !self.registry.has_effect_runner(target.namespace()) {
+            return Err(Error::Registry("effect source module is not registered"));
+        }
+        Ok(crate::EffectSource::new(self.clone(), target))
     }
 
     pub(crate) fn activity_support(
@@ -660,6 +712,7 @@ impl CellClient {
 
 pub(super) struct LocalCellTransport {
     pub(super) registry: Arc<Registry>,
+    pub(super) handles: Arc<HashMap<CellId, CellHandle>>,
     pub(super) handle: CellHandle,
 }
 
@@ -668,8 +721,9 @@ impl CellTransport for LocalCellTransport {
         &self,
         target: CellTarget,
     ) -> Pin<Box<dyn Future<Output = Result<CellDescription>> + Send + 'static>> {
-        let handle = self.handle.clone();
+        let handles = Arc::clone(&self.handles);
         Box::pin(async move {
+            let handle = local_handle(&handles, &target)?;
             validate_local_target(&handle, &target)?;
             Ok(local_description(&handle))
         })
@@ -680,8 +734,9 @@ impl CellTransport for LocalCellTransport {
         command: EncodedCommand,
     ) -> Pin<Box<dyn Future<Output = Result<StoredOutcome>> + Send + 'static>> {
         let registry = self.registry.clone();
-        let handle = self.handle.clone();
+        let handles = Arc::clone(&self.handles);
         Box::pin(async move {
+            let handle = local_handle(&handles, &command.target)?;
             validate_local_target(&handle, &command.target)?;
             validate_expected(&handle, command.expected)?;
             if command.input.len() > command.input_limit as usize {
@@ -724,8 +779,9 @@ impl CellTransport for LocalCellTransport {
         query: EncodedQuery,
     ) -> Pin<Box<dyn Future<Output = Result<EncodedObservation>> + Send + 'static>> {
         let registry = self.registry.clone();
-        let handle = self.handle.clone();
+        let handles = Arc::clone(&self.handles);
         Box::pin(async move {
+            let handle = local_handle(&handles, &query.target)?;
             validate_local_target(&handle, &query.target)?;
             validate_expected(&handle, query.expected)?;
             validate_minimum(query.expected, query.minimum)?;
@@ -775,8 +831,9 @@ impl CellTransport for LocalCellTransport {
         &self,
         resolve: EncodedResolve,
     ) -> Pin<Box<dyn Future<Output = Result<Resolution>> + Send + 'static>> {
-        let handle = self.handle.clone();
+        let handles = Arc::clone(&self.handles);
         Box::pin(async move {
+            let handle = local_handle(&handles, &resolve.target)?;
             validate_local_target(&handle, &resolve.target)?;
             validate_expected(&handle, resolve.expected)?;
             handle
@@ -789,6 +846,13 @@ impl CellTransport for LocalCellTransport {
                 .await
         })
     }
+}
+
+fn local_handle(handles: &HashMap<CellId, CellHandle>, target: &CellTarget) -> Result<CellHandle> {
+    handles
+        .get(&target.cell_id())
+        .cloned()
+        .ok_or(Error::Control("target Cell is not locally owned"))
 }
 
 /// Computes a typed command digest from validated metadata and encoded input.

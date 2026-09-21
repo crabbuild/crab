@@ -2,10 +2,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crab_ltx::rusqlite::Transaction;
 
+use crate::effects::EffectBatch;
 use crate::{
-    CatalogProof, CatalogShardScan, CellAuthority, CellCatalog, CellTarget, CronTarget,
-    EffectBatch, Error, NodeAdvertisement, QueueDeadLetterTarget, Result, SessionId,
-    VersionedControl, WorkflowDefinition,
+    CatalogProof, CatalogShardScan, CellAuthority, CellCatalog, CellTarget, CronTarget, Error,
+    NodeAdvertisement, QueueDeadLetterTarget, Result, SessionId, VersionedControl,
+    WorkflowDefinition,
     blob::blob_cleanup_expired,
     cron::cron_fire_due_bounded,
     effects::{
@@ -14,9 +15,9 @@ use crate::{
     },
     kv::kv_cleanup_expired_bounded,
     queue::{
-        QueueDeadLetterWriter, queue_cleanup_expired_bounded, queue_expire_ready_bounded,
-        queue_expire_ready_bounded_with_dead_letter, queue_reclaim_expired_bounded,
-        queue_reclaim_expired_bounded_with_dead_letter,
+        MAX_ATTEMPTS, QueueDeadLetterWriter, queue_cleanup_expired_bounded,
+        queue_expire_ready_bounded, queue_expire_ready_bounded_with_dead_letter,
+        queue_reclaim_expired_bounded, queue_reclaim_expired_bounded_with_dead_letter,
     },
     workflow::{
         workflow_cleanup_terminal_bounded, workflow_fail_one_expired_activity,
@@ -560,12 +561,14 @@ pub fn scheduler_next_due_ms(
         )?;
     }
     if tables.contains("queue_messages") {
-        include_minimum(
-            transaction,
-            "SELECT min(due_at_ms) FROM queue_messages INDEXED BY queue_ready WHERE state = 0",
-            logical_time_ms,
-            &mut next,
+        let exhausted_ready: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM queue_messages INDEXED BY queue_ready WHERE state = 0 AND attempt >= ?1)",
+            [i64::from(MAX_ATTEMPTS)],
+            |row| row.get(0),
         )?;
+        if exhausted_ready {
+            merge_due(logical_time_ms, logical_time_ms, &mut next)?;
+        }
         include_minimum(
             transaction,
             "SELECT min(lease_until_ms) FROM queue_messages INDEXED BY queue_leases WHERE state = 1",

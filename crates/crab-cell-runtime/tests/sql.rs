@@ -6,7 +6,8 @@ use crab_cell_runtime::{
     InvocationError, MigrationDescriptor, ModuleDescriptor, MutationIdentity, NamespaceDescriptor,
     NamespaceId, OperationDescriptor, Owner, RegistryBuilder, RequestId, SessionId, SqlBatch,
     SqlCell, SqlModule, SqlResultSet, SqlStatement, SqlValue, SqlWorkerPool, TenantId,
-    install_runtime_schema, register_sql, sql_batch, sql_query_batch,
+    install_blob_schema, install_cron_schema, install_runtime_schema, register_sql, sql_batch,
+    sql_query_batch,
 };
 use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits, rusqlite::Connection};
@@ -196,8 +197,14 @@ fn typed_batch_mutates_and_materializes_in_order() {
 fn authorizer_blocks_runtime_tables_and_indirect_trigger_or_view_access() {
     let mut connection = connection();
     let transaction = connection.transaction().unwrap();
+    install_blob_schema(&transaction).unwrap();
+    install_cron_schema(&transaction).unwrap();
     for sql in [
         "SELECT commit_sequence FROM sys_meta",
+        "SELECT object_key FROM blob_objects",
+        "SELECT schedule_id FROM cron_schedules",
+        "DELETE FROM blob_objects",
+        "DELETE FROM cron_schedules",
         "SELECT commit_sequence FROM app_runtime_metadata",
         "INSERT INTO app_items(id, name) VALUES (1, 'blocked by trigger')",
         "PRAGMA user_version",

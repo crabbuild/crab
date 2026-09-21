@@ -1,0 +1,1 @@
+{"schema_version":2,"name":"compatibility-v1","minimum_cells":256,"minimum_operations":1000000,"minimum_duration_secs":60,"maximum_p99_latency_ms":1000,"minimum_throughput_ops_per_sec":1,"maximum_peak_rss_bytes":8589934592,"maximum_local_disk_bytes":21474836480,"maximum_file_descriptors":10000,"maximum_bucket_calls":10000000,"provider":"rustfs","topology":"rolling"}

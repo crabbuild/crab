@@ -1,9 +1,10 @@
 use rand::RngCore;
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
+use crate::effects::EffectBatch;
 use crate::{
-    BoundedEncoder, CellId, CellTarget, EffectBatch, EffectCommandIntent, Error, IncarnationId,
-    NamespaceId, Result, WireValue, partition_for_shard, shard_for_scope,
+    BoundedEncoder, CellId, CellTarget, EffectCommandIntent, Error, IncarnationId, NamespaceId,
+    Result, WireValue, partition_for_shard, shard_for_scope,
 };
 
 mod api;
@@ -20,7 +21,7 @@ const MAX_PAYLOAD_BYTES: usize = 256 * 1024;
 pub(crate) const QUEUE_SEND_MAX_INPUT_BYTES: u32 = MAX_PAYLOAD_BYTES as u32 + 32;
 const MAX_CLAIM_BYTES: usize = 512 * 1024;
 const MAX_CLAIM_ITEMS: usize = 32;
-const MAX_ATTEMPTS: u32 = 20;
+pub(crate) const MAX_ATTEMPTS: u32 = 20;
 const MAX_RECLAIM_ITEMS: usize = 128;
 const MIN_LEASE_MS: u32 = 5_000;
 const MAX_LEASE_MS: u32 = 300_000;
@@ -450,13 +451,8 @@ pub fn queue_control(
 
 /// Returns aggregate state for one queue shard.
 pub fn queue_info(connection: &Connection) -> Result<QueueInfo> {
-    let (paused, generation) = connection.query_row(
-        "SELECT paused, generation FROM queue_control WHERE singleton = 1",
-        [],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-    )?;
-    let (ready, leased, acked, dead) = connection.query_row(
-        "SELECT count(*) FILTER (WHERE state = 0), count(*) FILTER (WHERE state = 1), count(*) FILTER (WHERE state = 2), count(*) FILTER (WHERE state = 3) FROM queue_messages",
+    let (paused, generation, ready, leased, acked, dead) = connection.query_row(
+        "SELECT paused, generation, ready_count, leased_count, acked_count, dead_count FROM queue_control WHERE singleton = 1",
         [],
         |row| {
             Ok((
@@ -464,6 +460,8 @@ pub fn queue_info(connection: &Connection) -> Result<QueueInfo> {
                 row.get::<_, i64>(1)?,
                 row.get::<_, i64>(2)?,
                 row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
             ))
         },
     )?;
@@ -475,6 +473,38 @@ pub fn queue_info(connection: &Connection) -> Result<QueueInfo> {
         acked: nonnegative_u64(acked, "invalid acked queue count")?,
         dead: nonnegative_u64(dead, "invalid dead queue count")?,
     })
+}
+
+/// Verifies Queue's transactionally maintained state counters without repairing them.
+pub fn verify_queue_counts(connection: &Connection) -> Result<()> {
+    let stored = connection.query_row(
+        "SELECT ready_count, leased_count, acked_count, dead_count FROM queue_control WHERE singleton = 1",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        },
+    )?;
+    let computed = connection.query_row(
+        "SELECT count(*) FILTER (WHERE state = 0), count(*) FILTER (WHERE state = 1), count(*) FILTER (WHERE state = 2), count(*) FILTER (WHERE state = 3) FROM queue_messages",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        },
+    )?;
+    if stored != computed {
+        return Err(Error::Command("queue state counters do not match messages"));
+    }
+    Ok(())
 }
 
 /// Applies an ack, retry or extension only to the exact live lease token.

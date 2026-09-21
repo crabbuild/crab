@@ -1748,6 +1748,8 @@ DELETED_WORKFLOW_REEXPORT_ADAPTER_FORBIDDEN_PATTERNS = {
     "pub use yaml::",
 }
 PRIVATE_INTERNAL_PACKAGES = {
+    "crab-cell-app",
+    "crab-cell-host",
     "crab-cell-runtime",
     "crab-http-server",
     "crab-ltx",
@@ -1794,6 +1796,26 @@ ALLOWED_SERVER_DEV_FIXTURES = {
 }
 CELL_RUNTIME_SERVER_SOURCE_PATHS = ("crates/crab-http-server/src",)
 CELL_RUNTIME_SERVER_IMPORT_PATTERN = "crab_ltx::"
+CELL_RUNTIME_SERVER_CONSTRUCTOR_PATTERNS = (
+    "CellRuntime::new(",
+    "CellRuntime::new_with_replica_host(",
+    "CellRuntime::new_with_replica_host_requiring_node_lease(",
+    "DurabilityGate::new(",
+    "NodeDurability::new(",
+    "NodeLogShipper::new_with_telemetry(",
+)
+CELL_RUNTIME_SERVER_COMPONENT_FIELDS = frozenset(
+    {
+        "cell_runtime",
+        "catalog",
+        "scheduler_status",
+        "cell_capacity",
+        "repository_cells",
+        "peer_receiver",
+        "follower_store",
+        "node_log_transport",
+    }
+)
 RETIRED_STANDALONE_LTX_SOURCE_PATHS = (
     "crates/crab-ltx/src",
     "crates/crab-ltx/examples",
@@ -1848,6 +1870,11 @@ CELL_RUNTIME_COORDINATION_FORBIDDEN_KERNEL_PATTERNS = (
     "Command::new(",
 )
 WORKSPACE_DEPENDENCY_POLICY = {
+    "crab-cell-app": {
+        "normal": {"crab-cell-runtime"},
+        "dev": {"crab-ltx", "crab-storage"},
+    },
+    "crab-cell-host": {"normal": {"crab-cell-app", "crab-cell-runtime"}},
     "crab-cell-runtime": {"normal": {"crab-ltx", "crab-storage"}},
     "crab-ltx": {"normal": {"crab-storage"}},
     "crab-remote": {
@@ -1862,6 +1889,8 @@ WORKSPACE_DEPENDENCY_POLICY = {
     # metadata, write, coordination, LFS, and remote-read behavior.
     "crab-http-server": {
         "normal": {
+            "crab-cell-app",
+            "crab-cell-host",
             "crab-coordination",
             "crab-cell-runtime",
             "crab-git",
@@ -1992,6 +2021,8 @@ WORKSPACE_DEPENDENCY_POLICY = {
     "crab-xet": {},
 }
 WORKSPACE_DEPENDENCY_PATHS = {
+    "crab-cell-app": "crates/crab-cell-app",
+    "crab-cell-host": "crates/crab-cell-host",
     "crab-cell-runtime": "crates/crab-cell-runtime",
     "crab-ltx": "crates/crab-ltx",
     "crab-write": "crates/crab-write",
@@ -2407,6 +2438,56 @@ def rust_test_only_lines(text: str) -> set[int]:
     return allowed
 
 
+def rust_struct_body(text: str, name: str) -> list[str] | None:
+    """Return one Rust struct body without interpreting nested item bodies."""
+    lines = text.splitlines()
+    start = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if re.search(rf"\bstruct\s+{re.escape(name)}\s*\{{", line)
+        ),
+        None,
+    )
+    if start is None:
+        return None
+    state: dict[str, object] = {"block_comment": 0, "raw_hashes": None, "string": None}
+    depth = 0
+    body: list[str] = []
+    for index in range(start, len(lines)):
+        delta = rust_brace_delta(lines[index], state)
+        if index > start:
+            body.append(lines[index])
+        depth += delta
+        if index > start and depth == 0:
+            return body[:-1]
+    return None
+
+
+def production_struct_fields(text: str, name: str) -> set[str]:
+    """Find unguarded fields in one production struct."""
+    body = rust_struct_body(text, name)
+    if body is None:
+        return set()
+    fields: set[str] = set()
+    cfg_test = False
+    for line in body:
+        stripped = line.strip()
+        if re.search(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]", stripped):
+            cfg_test = True
+            continue
+        if stripped.startswith("#") or not stripped:
+            continue
+        match = re.match(r"(?:pub(?:\([^)]*\))?\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:", stripped)
+        if match:
+            if not cfg_test:
+                fields.add(match.group(1))
+            cfg_test = False
+        elif not stripped.startswith(","):
+            cfg_test = False
+    return fields
+
+
 def check_cell_runtime_server_boundary(root: Path, metadata: dict) -> bool:
     """Keep crab-http-server's production Cell ownership behind crab-cell-runtime."""
     violations: list[str] = []
@@ -2430,11 +2511,28 @@ def check_cell_runtime_server_boundary(root: Path, metadata: dict) -> bool:
             relative = rel(root, candidate)
             text = candidate.read_text(encoding="utf-8")
             allowed_lines = rust_test_only_lines(text)
-            if candidate.name == "tests.rs" or "tests" in candidate.parts:
+            if (
+                candidate.name == "tests.rs"
+                or candidate.name.endswith("_tests.rs")
+                or "tests" in candidate.parts
+            ):
                 allowed_lines.update(range(1, len(text.splitlines()) + 1))
             for number, line in enumerate(text.splitlines(), start=1):
                 if CELL_RUNTIME_SERVER_IMPORT_PATTERN in line and number not in allowed_lines:
                     violations.append(f"{relative}:{number}: {line.strip()}")
+                if (
+                    any(pattern in line for pattern in CELL_RUNTIME_SERVER_CONSTRUCTOR_PATTERNS)
+                    and number not in allowed_lines
+                ):
+                    violations.append(
+                        f"{relative}:{number}: direct CellRuntime construction must use CellNodeBuilder"
+                    )
+            if relative == "crates/crab-http-server/src/server.rs":
+                escaped = production_struct_fields(text, "Server") & CELL_RUNTIME_SERVER_COMPONENT_FIELDS
+                for field in sorted(escaped):
+                    violations.append(
+                        f"{relative}: production Server field {field!r} must be retained by CellNode"
+                    )
 
     if not violations:
         print("ok: crab-http-server production Cell ownership stays behind crab-cell-runtime")

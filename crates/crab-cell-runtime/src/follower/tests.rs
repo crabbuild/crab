@@ -278,6 +278,138 @@ async fn restarted_lane_returns_only_the_requested_large_frame_page() {
         let frame = crab_ltx::inspect_node_frame(page.frames[0].clone(), limits).unwrap();
         assert_eq!(frame.scope().node_sequence, sequence);
     }
+    assert_eq!(store.scan_count(), 1);
+    database.close().unwrap();
+}
+
+#[tokio::test]
+async fn cached_tail_rechecks_mutated_frame_bytes() {
+    let limits = crab_ltx::Limits::default();
+    let source = tempfile::TempDir::new().unwrap();
+    let mut database = Db::open(&source.path().join("source.sqlite"), limits).unwrap();
+    database
+        .transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE values_(v); INSERT INTO values_ VALUES(randomblob(2097152))",
+            )
+        })
+        .unwrap();
+    let capture = database.capture().unwrap();
+    let root = tempfile::TempDir::new().unwrap();
+    let leader = SessionId::from_bytes([1; 16]);
+    let store = FollowerStore::open(
+        root.path().to_owned(),
+        limits,
+        crab_ltx::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
+    for sequence in 1..=2 {
+        store
+            .append(
+                leader,
+                2,
+                vec![frame(sequence, &capture.segments[0], limits)],
+                0,
+            )
+            .await
+            .unwrap();
+    }
+    store.seal(leader, 2).await.unwrap();
+    drop(store);
+    let store = FollowerStore::open(
+        root.path().to_owned(),
+        limits,
+        crab_ltx::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
+    assert_eq!(
+        store
+            .read_tail_page(leader, 2, 1)
+            .await
+            .unwrap()
+            .next_sequence,
+        Some(2)
+    );
+    let chunks = lane_directory(root.path(), Lane { leader, epoch: 2 }).join("chunks");
+    let chunk = std::fs::read_dir(chunks)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().and_then(|value| value.to_str()) == Some("log"))
+        .unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(chunk)
+        .unwrap();
+    file.seek(SeekFrom::End(-1)).unwrap();
+    let mut byte = [0_u8; 1];
+    file.read_exact(&mut byte).unwrap();
+    file.seek(SeekFrom::End(-1)).unwrap();
+    byte[0] ^= 0xff;
+    file.write_all(&byte).unwrap();
+    file.sync_data().unwrap();
+    assert!(store.read_tail_page(leader, 2, 2).await.is_err());
+    assert_eq!(store.scan_count(), 1);
+    database.close().unwrap();
+}
+
+#[tokio::test]
+async fn cached_tail_fails_when_its_chunk_is_deleted() {
+    let limits = crab_ltx::Limits::default();
+    let source = tempfile::TempDir::new().unwrap();
+    let mut database = Db::open(&source.path().join("source.sqlite"), limits).unwrap();
+    database
+        .transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE values_(v); INSERT INTO values_ VALUES(randomblob(2097152))",
+            )
+        })
+        .unwrap();
+    let capture = database.capture().unwrap();
+    let root = tempfile::TempDir::new().unwrap();
+    let leader = SessionId::from_bytes([1; 16]);
+    let store = FollowerStore::open(
+        root.path().to_owned(),
+        limits,
+        crab_ltx::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
+    for sequence in 1..=2 {
+        store
+            .append(
+                leader,
+                2,
+                vec![frame(sequence, &capture.segments[0], limits)],
+                0,
+            )
+            .await
+            .unwrap();
+    }
+    store.seal(leader, 2).await.unwrap();
+    drop(store);
+    let store = FollowerStore::open(
+        root.path().to_owned(),
+        limits,
+        crab_ltx::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
+    assert_eq!(
+        store
+            .read_tail_page(leader, 2, 1)
+            .await
+            .unwrap()
+            .next_sequence,
+        Some(2)
+    );
+    let chunks = lane_directory(root.path(), Lane { leader, epoch: 2 }).join("chunks");
+    let chunk = std::fs::read_dir(chunks)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().and_then(|value| value.to_str()) == Some("log"))
+        .unwrap();
+    std::fs::remove_file(chunk).unwrap();
+    assert!(store.read_tail_page(leader, 2, 2).await.is_err());
+    assert_eq!(store.scan_count(), 1);
     database.close().unwrap();
 }
 

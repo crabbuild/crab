@@ -18,7 +18,7 @@ use crate::{
     assignees::{self, Assignee},
     auth::{Identity, Principal},
     cells::{
-        RepositoryCell, RepositoryCellRouter,
+        RepositoryCell,
         repository::{
             CommentKey, CommentPage, CommentRecord, CreateComment, CreateCommentInput,
             CreateCommentOutcome, CreateIssue, CreateIssueInput, CreateIssueOutcome, GetComment,
@@ -549,10 +549,7 @@ async fn route(
     principal: &Identity,
     action: &'static str,
 ) -> Result<RepositoryCell> {
-    let router: &RepositoryCellRouter = server
-        .repository_cells
-        .as_ref()
-        .ok_or(Error::CellUnavailable)?;
+    let router = server.repository_cells().ok_or(Error::CellUnavailable)?;
     router
         .route(repository.id, principal, action)
         .await

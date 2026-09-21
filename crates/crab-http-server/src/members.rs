@@ -61,7 +61,7 @@ async fn authorized(
             "Repository not found.",
         ));
     }
-    let catalog = server.catalog.clone().ok_or_else(|| {
+    let catalog = server.catalog().ok_or_else(|| {
         boxed_error(
             StatusCode::NOT_FOUND,
             "repository_not_found",

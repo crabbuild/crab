@@ -1,8 +1,8 @@
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
+use crate::effects::EffectBatch;
 use crate::{
-    BoundedEncoder, CellTarget, EffectBatch, EffectCommandIntent, Error, NamespaceId, Result,
-    WireValue,
+    BoundedEncoder, CellTarget, EffectCommandIntent, Error, NamespaceId, Result, WireValue,
 };
 
 mod api;

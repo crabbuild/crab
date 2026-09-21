@@ -165,6 +165,38 @@ fn later_production_code() {}
                 relative="crates/crab-http-server/src/cells/scheduler/tests.rs",
             )
         )
+
+    def test_production_server_component_fields_are_rejected(self):
+        for field in (
+            "cell_runtime",
+            "catalog",
+            "scheduler_status",
+            "cell_capacity",
+            "repository_cells",
+            "peer_receiver",
+            "follower_store",
+            "node_log_transport",
+        ):
+            with self.subTest(field=field):
+                self.assertFalse(
+                    self.check_source(
+                        "pub(crate) struct Server {\n"
+                        f"    {field}: usize,\n"
+                        "}\n",
+                        relative="crates/crab-http-server/src/server.rs",
+                    )
+                )
+
+    def test_test_only_server_component_fields_are_admitted(self):
+        self.assertTrue(
+            self.check_source(
+                "pub(crate) struct Server {\n"
+                "    #[cfg(test)]\n"
+                "    repository_cells: usize,\n"
+                "}\n",
+                relative="crates/crab-http-server/src/server.rs",
+            )
+        )
         self.assertFalse(
             self.check_source(
                 "#[cfg(test)]\nmod tests { use crab_ltx::CellReplica; }\n"

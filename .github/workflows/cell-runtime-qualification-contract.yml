@@ -4,7 +4,13 @@ on:
   pull_request:
     paths:
       - "crates/crab-cell-runtime/**"
+      - "crates/crab-cell-app/**"
+      - "crates/crab-cell-host/**"
+      - "crates/crab-http-server/**"
       - "crates/crab-ltx/**"
+      - "packages/ui/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "crab/scripts/check-architecture-gates.py"
       - "crates/crab-http-server/tests/qualify_compose_cluster.sh"
       - ".github/workflows/http-server-container.yml"
@@ -14,7 +20,13 @@ on:
     branches: [main]
     paths:
       - "crates/crab-cell-runtime/**"
+      - "crates/crab-cell-app/**"
+      - "crates/crab-cell-host/**"
+      - "crates/crab-http-server/**"
       - "crates/crab-ltx/**"
+      - "packages/ui/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "crab/scripts/check-architecture-gates.py"
       - "crates/crab-http-server/tests/qualify_compose_cluster.sh"
       - ".github/workflows/http-server-container.yml"
@@ -34,6 +46,12 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: packages/ui/package-lock.json
+      - name: Build embedded repository frontend
+        run: |
+          npm ci --prefix packages/ui
+          npm run build --prefix packages/ui
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: stable
@@ -41,6 +59,36 @@ jobs:
         run: python3 crab/scripts/check-architecture-gates.py
       - name: Validate executable design contracts
         run: node crates/crab-cell-runtime/docs/validate.mjs
+      - name: Verify tracked qualification profiles
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/qualification-profiles"
+          mkdir -p "$root"
+          for profile in \
+            pr-contract local-provider scale fault fault-s3 fault-gcs fault-azure \
+            provider provider-s3 provider-gcs provider-azure compatibility; do
+            generated="$root/${profile}.json"
+            cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
+              profile "$generated" "$profile"
+            jq -S . "$generated" > "$root/${profile}.generated"
+            jq -S . "crates/crab-cell-runtime/qualification/profiles/${profile}-v1.json" \
+              > "$root/${profile}.tracked"
+            cmp "$root/${profile}.generated" "$root/${profile}.tracked"
+          done
+      - name: Run production hot-path preflight guards
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
+        run: cargo test -p crab-cell-runtime --test qualification_preflight --locked
+      - name: Verify application and host boundaries
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
+        run: cargo test -p crab-cell-app -p crab-cell-host --locked
+      - name: Verify public CellNode typed primitive workload
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
+        run: cargo test -p crab-http-server --test public_cell_host_application --test public_cell_qualification --locked
       - name: Keep Compose receipt schema gate synchronized
         shell: bash
         run: |
@@ -94,15 +142,27 @@ jobs:
           source_revision=0123456789abcdef0123456789abcdef01234567
           image_digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
           fixture="$root/fixture.json"
+          profile="$root/pr-contract-profile.json"
           jq -cn '{schema: 1, kind: "qualification-matrix-contract-fixture"}' > "$fixture"
+          cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
+            profile "$profile" pr-contract
+          canonical_workload="$root/pr-contract-workload.json"
+          cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
+            workload "$canonical_workload" "$profile" 7
+          cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
+            verify-workload "$canonical_workload" "$profile"
           entries='[]'
           for workload in protocol storage publication warm-path churn fleet failover primitives accounting compatibility; do
             artifact="$root/artifacts/${workload}.json"
             receipt="$root/receipts/${workload}.json"
-            cp "$fixture" "$artifact"
+            if [ "$workload" = primitives ]; then
+              cp "$canonical_workload" "$artifact"
+            else
+              cp "$fixture" "$artifact"
+            fi
             cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
               emit "$receipt" "$source_revision" "$image_digest" "$artifact" \
-              github-actions "$workload" none
+              github-actions "$workload" none "$profile"
             entries="$(jq -c \
               --arg workload "$workload" \
               --arg receipt "receipts/${workload}.json" \
@@ -116,5 +176,6 @@ jobs:
             cd "$root"
             cargo run --quiet --locked --manifest-path "${GITHUB_WORKSPACE}/Cargo.toml" \
               -p crab-cell-runtime --bin qualification_receipt -- \
-              verify-matrix qualification-matrix.json "$source_revision" "$image_digest"
+              verify-matrix qualification-matrix.json "$source_revision" "$image_digest" \
+              pr-contract-profile.json
           )

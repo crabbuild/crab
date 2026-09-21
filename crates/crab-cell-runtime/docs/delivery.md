@@ -87,56 +87,62 @@ CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-b347-clippy \
 
 Use the checkout's actual stable target suffix when it differs from `b347`.
 
-Release jobs build a run-scoped immutable image candidate, qualify that exact
-manifest digest, and promote the same digest only after the raw cluster
-receipt passes the crate-owned validator. The schema-v3 signed receipt binds
-the exact tagged source, published image manifest, and raw cluster evidence;
-the release job fails before publishing if either identity changes. The
-short-lived Ed25519 key in this step authenticates the canonical receipt bytes;
+Release jobs bind schema-v5 qualification matrices and threshold-profile
+digests to the exact tagged source, published image manifest, and raw cluster
+evidence. The protected bundle must contain exact matrices for
+`local-provider-v1`, `scale-v1`, `compatibility-v1`, each of
+`provider-{s3,gcs,azure}-v1`, and each of `fault-{s3,gcs,azure}-v1`.
+The crate-owned validator requires a pinned Ed25519 qualification public key,
+canonical receipts, passing thresholds, exact source/image identity, and every
+matrix row. Protected receipts also retain and verify a `release` execution
+profile; debug or otherwise non-release runs cannot satisfy the release gate.
+Fixture or self-signed evidence cannot satisfy the release gate.
+The release job also compares the supplied protected profile byte-for-byte with
+the checked-in profile from the tagged source before invoking the validator.
 GitHub's workflow attestation remains the trust anchor for the release job and
 source identity.
 
-The raw three-node receipt is validated first with the fail-closed v6 command:
-
 ```bash
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
   cargo run -p crab-cell-runtime --bin qualification_receipt --locked -- \
-  validate-cluster cluster-receipt.json "$SOURCE_SHA" "$IMAGE_DIGEST" release
+  verify-matrix qualification-matrix.json "$SOURCE_SHA" "$IMAGE_DIGEST" \
+    scale-v1.json "$QUALIFICATION_SIGNER"
 ```
 
-Local source-only receipts use `source-only` instead of `release`; release
-receipts must carry a `ghcr.io/...@sha256:<digest>` reference matching the
-candidate manifest.
+This command verifies pinned attestation, canonical encoding, passed threshold
+metrics, source/image identity, and BLAKE3 digests of every raw artifact. It
+does not turn local or in-memory evidence into provider qualification; the
+release matrix still needs the real RustFS/Kubernetes and multi-GiB runs below.
+When a threshold profile other than `pr-contract-v1` is supplied, the CLI
+requires the pinned signer argument and applies the protected freshness and
+clock-skew gate. The profile-less form below is retained only for generic
+historical receipt inspection and is not a release decision.
 
-```bash
-CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
-  cargo run -p crab-cell-runtime --bin qualification_receipt --locked -- \
-  verify receipt.json "$SOURCE_SHA" "$IMAGE_DIGEST" cluster-receipt.json
-```
-
-This command verifies the receipt signature, canonical encoding, passed status,
-source/image identity, and BLAKE3 digest of the exact raw artifact. It does not
-turn local or in-memory evidence into provider qualification; the release
-matrix still needs the real RustFS/Kubernetes and multi-GiB runs below.
-
-Release qualification can be verified as one bounded matrix instead of a
-caller-owned loop. `QualificationMatrixManifest` requires exactly one entry for
-each of these rows: `protocol`, `storage`, `publication`, `warm-path`, `churn`,
+Each profile is verified as one bounded matrix instead of a caller-owned row
+loop. `QualificationMatrixManifest` requires exactly one entry for each of
+these rows: `protocol`, `storage`, `publication`, `warm-path`, `churn`,
 `fleet`, `failover`, `primitives`, `accounting`, and `compatibility`. Each entry
 binds a relative receipt path and one or more relative raw-artifact paths. The
 manifest and every receipt are canonical JSON; absolute paths, parent-directory
 components, duplicate rows, missing rows, dirty receipts, source/image drift,
-and any artifact digest mismatch fail closed.
+and any artifact digest mismatch fail closed. The release job runs this
+verification independently for every required profile, so a valid scale matrix
+cannot substitute for provider or Kubernetes fault evidence.
 
-After the release job writes the ten receipts and their raw artifacts beside the
-manifest, verify the complete set in a fresh process:
+After the release job writes the ten row receipts and their raw artifacts into
+each protected matrix directory, verify one profile-bound matrix in a fresh
+process:
 
 ```bash
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
   cargo run -p crab-cell-runtime --bin qualification_receipt --locked -- \
-  verify-matrix qualification-matrix.json "$SOURCE_SHA" "$IMAGE_DIGEST"
+  verify-matrix \
+  protected/qualification-matrix.json "$SOURCE_SHA" "$IMAGE_DIGEST" \
+  protected/scale-v1.json "$QUALIFICATION_SIGNER"
 ```
 
+Repeat that command for every matrix/profile pair listed above; the release
+workflow does not accept a scale matrix as a substitute for any other profile.
 The matrix verifier recomputes every raw digest, checks the primary artifact
 digest for each receipt, and requires all rows to use the supplied source and
 image identity. It is a release-evidence check only; it does not promote local
@@ -153,8 +159,12 @@ The provider-backed
 passed Queue/Workflow retained-work protection, exact-root restore, and
 capacity reuse against its isolated prefix.
 These commands are provider evidence for iteration, not release receipts;
-protected release jobs must emit the schema-v3 receipt bound to the tagged
-source and immutable image.
+protected release jobs must consume a schema-v5 matrix signed by the pinned
+qualification key and bound to the tagged source, immutable image, profile,
+and every raw artifact.
+Fault profiles additionally require a named injected fault, a non-`none` fault
+schedule digest, and a monotonic ownership transition; a signed no-op receipt
+cannot stand in for Kubernetes fault evidence.
 
 ```bash
 AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
@@ -327,6 +337,13 @@ cargo test -p crab-cell-runtime --test actor \
 CRAB_CELL_TEST_BUCKET="$BUCKET" \
 CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
 CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
+cargo test -p crab-http-server --test public_cell_qualification \
+  rustfs_public_cell_node_runs_typed_primitive_workload \
+  -- --ignored --exact --nocapture
+
+CRAB_CELL_TEST_BUCKET="$BUCKET" \
+CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
+CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
 cargo test -p crab-cell-runtime --lib \
   retention::tests::rustfs_maintenance_collection_preserves_live_and_pinned_graphs \
   -- --ignored --exact
@@ -341,8 +358,11 @@ cargo test -p crab-http-server --lib \
 
 The Cell test publishes a command on one session, removes its local database,
 takes over from a second session, resolves the original request from the exact
-root, and publishes the next sequence. CI runs both tests against a pinned
-RustFS image.
+root, and publishes the next sequence. The public-host test drives SQL, KV,
+Blob, Queue, Cron, Workflow, Activity, and Effects through the typed
+`CellNode` application handle against the same real provider. CI runs these
+tests against a pinned RustFS image; they remain iteration evidence until the
+protected provider, Kubernetes, and scale matrix receipts pass.
 
 The same CI job also runs `crab-http-server` through public HTTP and private
 mTLS forwarding to a heartbeat-renewed remote owner. Native Git creates main

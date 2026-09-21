@@ -1,22 +1,20 @@
-use crab_cell_runtime::{
-    ApplicationId, CellId, CellTarget, Digest, EffectBatch, EffectCommandIntent,
-    EffectLeaseOutcome, EffectTokenSource, HandlerOutcome, InboxApplyOutcome, InboxDelivery,
-    IncarnationId, NamespaceId, TenantId, effect_ack_delivered, effect_claim,
-    effect_cleanup_terminal, effect_validate_claim, inbox_apply, inbox_cleanup_expired,
-    install_runtime_schema, peer_wire,
+use super::EffectBatch;
+use crate::{
+    ApplicationId, CellId, CellTarget, Digest, EffectCommandIntent, EffectLeaseOutcome,
+    EffectTokenSource, HandlerOutcome, InboxApplyOutcome, InboxDelivery, IncarnationId,
+    NamespaceId, TenantId, effect_ack_delivered, effect_claim, effect_cleanup_terminal,
+    effect_validate_claim, inbox_apply, inbox_cleanup_expired, install_runtime_schema, peer_wire,
 };
 use prost::Message;
 
 struct Tokens(u8);
 
 impl EffectTokenSource for Tokens {
-    fn next_token(&mut self) -> crab_cell_runtime::Result<[u8; 16]> {
+    fn next_token(&mut self) -> crate::Result<[u8; 16]> {
         self.0 = self
             .0
             .checked_add(1)
-            .ok_or(crab_cell_runtime::Error::Command(
-                "test effect token overflow",
-            ))?;
+            .ok_or(crate::Error::Command("test effect token overflow"))?;
         Ok([self.0; 16])
     }
 }
@@ -73,8 +71,8 @@ fn command_effect_is_canonical_and_does_not_pin_destination_incarnation() {
     let mut source = source_connection();
     let source_target = source_target();
     let target = CellTarget::new(
-        TenantId::from_bytes([3; 16]),
-        ApplicationId::from_bytes([4; 16]),
+        source_target.tenant(),
+        source_target.application(),
         NamespaceId::from_bytes([5; 16]),
         b"target-partition",
     )
@@ -128,13 +126,41 @@ fn command_effect_rejects_a_source_target_for_another_cell() {
 }
 
 #[test]
+fn command_effect_rejects_a_foreign_application_before_writes() {
+    let mut source = source_connection();
+    let source_target = source_target();
+    let target = CellTarget::new(
+        TenantId::from_bytes([3; 16]),
+        ApplicationId::from_bytes([4; 16]),
+        NamespaceId::from_bytes([5; 16]),
+        b"foreign-application",
+    )
+    .unwrap();
+    let transaction = source.transaction().unwrap();
+    let result = EffectBatch::new(&transaction, &source_target, 1, 10)
+        .unwrap()
+        .insert_command(&transaction, &command_intent(target, b"foreign", 10_000));
+    assert!(matches!(
+        result,
+        Err(crate::Error::Identity(
+            "effect target is outside the source application scope"
+        ))
+    ));
+    let count: i64 = transaction
+        .query_row("SELECT COUNT(*) FROM sys_effects", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    transaction.rollback().unwrap();
+}
+
+#[test]
 fn target_commit_and_lost_response_retry_execute_destination_once() {
     const EXPIRES_AT_MS: i64 = 10_000;
     const INBOX_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
     let source_target = source_target();
     let destination = CellTarget::new(
-        TenantId::from_bytes([3; 16]),
-        ApplicationId::from_bytes([4; 16]),
+        source_target.tenant(),
+        source_target.application(),
         NamespaceId::from_bytes([5; 16]),
         b"destination",
     )
@@ -322,8 +348,8 @@ fn rejected_effect_rolls_back_target_writes_but_publishes_inbox_result() {
 fn one_command_cannot_exceed_effect_count_or_byte_limits() {
     let source_target = source_target();
     let destination = CellTarget::new(
-        TenantId::from_bytes([3; 16]),
-        ApplicationId::from_bytes([4; 16]),
+        source_target.tenant(),
+        source_target.application(),
         NamespaceId::from_bytes([5; 16]),
         b"destination",
     )
@@ -366,11 +392,53 @@ fn one_command_cannot_exceed_effect_count_or_byte_limits() {
 }
 
 #[test]
+fn byte_limit_rejection_does_not_consume_the_next_effect_ordinal() {
+    let source_target = source_target();
+    let destination = CellTarget::new(
+        source_target.tenant(),
+        source_target.application(),
+        NamespaceId::from_bytes([5; 16]),
+        b"destination",
+    )
+    .unwrap();
+    let mut source = source_connection();
+    let transaction = source.transaction().unwrap();
+    let mut effects = EffectBatch::new(&transaction, &source_target, 1, 0).unwrap();
+    let large = vec![0; 9_000];
+    let mut successful = 0_u32;
+    while effects
+        .insert_command(
+            &transaction,
+            &command_intent(destination.clone(), &large, 10_000),
+        )
+        .is_ok()
+    {
+        successful += 1;
+    }
+    let effect_id = effects
+        .insert_command(
+            &transaction,
+            &command_intent(destination, b"after-limit", 10_000),
+        )
+        .unwrap();
+    let operation: Vec<u8> = transaction
+        .query_row(
+            "SELECT operation FROM sys_effects WHERE effect_id = ?1",
+            [effect_id.as_slice()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let request = peer_wire::EffectRequest::decode(operation.as_slice()).unwrap();
+    assert_eq!(request.identity.unwrap().ordinal, successful);
+    transaction.commit().unwrap();
+}
+
+#[test]
 fn manual_retry_preserves_identity_and_never_reopens_terminal_effect() {
     let source_target = source_target();
     let destination = CellTarget::new(
-        TenantId::from_bytes([3; 16]),
-        ApplicationId::from_bytes([4; 16]),
+        source_target.tenant(),
+        source_target.application(),
         NamespaceId::from_bytes([5; 16]),
         b"destination",
     )
@@ -386,7 +454,7 @@ fn manual_retry_preserves_identity_and_never_reopens_terminal_effect() {
         .unwrap()
         .remove(0);
     assert_eq!(
-        crab_cell_runtime::effect_retry(&transaction, 4_999, &claim).unwrap(),
+        crate::effect_retry(&transaction, 4_999, &claim).unwrap(),
         EffectLeaseOutcome::Failed
     );
     assert!(

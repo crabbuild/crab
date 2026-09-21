@@ -10,6 +10,10 @@ use crate::{
 mod api;
 mod supervisor;
 
+#[cfg(test)]
+#[path = "effects_tests.rs"]
+mod tests;
+
 pub use api::{
     EffectAckRequest, EffectClaimCommand, EffectClaimRequest, EffectLeaseCommand,
     EffectLeaseRequest, EffectModule, EffectSource, EffectValidateClaimQuery,
@@ -86,17 +90,18 @@ pub struct EffectCommandIntent {
 ///
 /// One batch must be shared by every primitive transition performed by the
 /// same Cell command so each emitted effect receives a unique ordinal.
-pub struct EffectBatch {
+pub(crate) struct EffectBatch {
     source: CellTarget,
     incarnation: IncarnationId,
     sequence: u64,
     now_ms: i64,
     next_ordinal: u32,
+    operation_bytes: usize,
 }
 
 impl EffectBatch {
     /// Verifies the supplied source against the authoritative command transaction.
-    pub fn new(
+    pub(crate) fn new(
         transaction: &Transaction<'_>,
         source: &CellTarget,
         sequence: u64,
@@ -141,17 +146,28 @@ impl EffectBatch {
             sequence,
             now_ms,
             next_ordinal: 0,
+            operation_bytes: 0,
         })
     }
 
     /// Inserts one canonical Cell command without pinning a destination owner incarnation.
-    pub fn insert_command(
+    pub(crate) fn insert_command(
         &mut self,
         transaction: &Transaction<'_>,
         intent: &EffectCommandIntent,
     ) -> Result<[u8; 32]> {
+        if intent.target.tenant() != self.source.tenant()
+            || intent.target.application() != self.source.application()
+        {
+            return Err(Error::Identity(
+                "effect target is outside the source application scope",
+            ));
+        }
         validate_effect_command_intent(self.now_ms, intent)?;
-        let ordinal = self.take_ordinal()?;
+        if self.next_ordinal as usize >= MAX_EFFECTS_PER_COMMAND {
+            return Err(Error::Command("command effects exceed limits"));
+        }
+        let ordinal = self.next_ordinal;
         let id = effect_id(
             self.source.cell_id(),
             self.incarnation,
@@ -185,7 +201,18 @@ impl EffectBatch {
             )),
         }
         .encode_to_vec();
-        effect_insert(
+        let operation_len = operation.len();
+        let prospective = self
+            .operation_bytes
+            .checked_add(operation_len)
+            .ok_or(Error::Command("effect byte count overflow"))?;
+        if prospective > MAX_EFFECT_BYTES {
+            return Err(Error::Command("command effects exceed limits"));
+        }
+        let next_ordinal = ordinal
+            .checked_add(1)
+            .ok_or(Error::Command("effect ordinal overflow"))?;
+        let id = effect_insert(
             transaction,
             self.source.cell_id(),
             self.incarnation,
@@ -197,7 +224,10 @@ impl EffectBatch {
                 operation,
                 expires_at_ms: intent.expires_at_ms,
             },
-        )
+        )?;
+        self.next_ordinal = next_ordinal;
+        self.operation_bytes = prospective;
+        Ok(id)
     }
 
     pub(crate) const fn source_incarnation(&self) -> IncarnationId {
@@ -206,15 +236,6 @@ impl EffectBatch {
 
     pub(crate) const fn source_target(&self) -> &CellTarget {
         &self.source
-    }
-
-    fn take_ordinal(&mut self) -> Result<u32> {
-        let ordinal = self.next_ordinal;
-        self.next_ordinal = self
-            .next_ordinal
-            .checked_add(1)
-            .ok_or(Error::Command("effect ordinal overflow"))?;
-        Ok(ordinal)
     }
 }
 
@@ -338,18 +359,6 @@ fn effect_insert(
         return Err(Error::Command(
             "effect ordinal was reused for different bytes",
         ));
-    }
-    let (count, bytes): (i64, i64) = transaction.query_row(
-        "SELECT count(*), COALESCE(sum(length(operation)), 0) FROM sys_effects WHERE created_sequence = ?1",
-        [sequence as i64],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    let prospective = usize::try_from(bytes)
-        .ok()
-        .and_then(|bytes| bytes.checked_add(intent.operation.len()))
-        .ok_or(Error::Command("effect byte count overflow"))?;
-    if count < 0 || count as usize >= MAX_EFFECTS_PER_COMMAND || prospective > MAX_EFFECT_BYTES {
-        return Err(Error::Command("command effects exceed limits"));
     }
     transaction.execute(
         "INSERT INTO sys_effects(effect_id, destination, operation, state, attempt, due_at_ms, expires_at_ms, token, lease_until_ms, created_sequence, result) VALUES (?1, ?2, ?3, 0, 0, ?4, ?5, NULL, NULL, ?6, NULL)",

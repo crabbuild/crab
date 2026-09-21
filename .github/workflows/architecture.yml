@@ -247,6 +247,9 @@ jobs:
           cargo test -p crab-http-server --locked --lib \
             server::peer_e2e_tests::rustfs_public_collaboration_reaches_remote_owner_and_publishes_ltx \
             -- --ignored --exact --nocapture
+          cargo test -p crab-http-server --locked --test public_cell_qualification \
+            rustfs_public_cell_node_runs_typed_primitive_workload \
+            -- --ignored --exact --nocapture
 
   binary-contracts:
     name: Binary and integration contracts

@@ -14,6 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
+use crab_cell_host::{NodeDurabilityProvider, NodeDurabilityRotation};
 use crab_cell_runtime::CellStorageLayout;
 use crab_cell_runtime::{
     ApplicationIdentity, CellAuthority, CellCatalog, CellHandle, CellRuntime, CellTarget, Digest,
@@ -53,7 +54,7 @@ pub(crate) struct PeerReceiver {
     session: SessionId,
     directory: NodeDirectory,
     registry: Arc<Registry>,
-    releases: ReleaseStore,
+    releases: Arc<ReleaseStore>,
     resolver: LocalCellResolver,
     round_trip: Arc<dyn PeerRoundTrip>,
 }
@@ -64,7 +65,7 @@ impl PeerReceiver {
         session: SessionId,
         directory: NodeDirectory,
         registry: Arc<Registry>,
-        releases: ReleaseStore,
+        releases: Arc<ReleaseStore>,
         resolver: LocalCellResolver,
         round_trip: Arc<dyn PeerRoundTrip>,
     ) -> Self {
@@ -99,6 +100,7 @@ pub(crate) struct NodePublisher {
     runtime: Option<CellRuntime>,
     telemetry: crab_cell_runtime::CellTelemetryHandle,
     metrics: Option<crate::metrics::Metrics>,
+    node_log_transport: OnceLock<Arc<dyn crab_cell_runtime::NodeLogTransport>>,
     lease: OnceLock<crab_cell_runtime::NodeLeaseGuard>,
     observed: OnceLock<tokio::sync::Mutex<VersionedNodeAdvertisement>>,
 }
@@ -160,6 +162,7 @@ impl NodePublisher {
             runtime: None,
             telemetry: crab_cell_runtime::CellTelemetryHandle::default(),
             metrics: None,
+            node_log_transport: OnceLock::new(),
             lease: OnceLock::new(),
             observed: OnceLock::new(),
         })
@@ -189,6 +192,15 @@ impl NodePublisher {
     pub(crate) fn with_metrics(mut self, metrics: crate::metrics::Metrics) -> Self {
         self.metrics = Some(metrics);
         self
+    }
+
+    pub(crate) fn install_node_log_transport(
+        &self,
+        transport: Arc<dyn crab_cell_runtime::NodeLogTransport>,
+    ) -> crate::Result<()> {
+        self.node_log_transport
+            .set(transport)
+            .map_err(|_| crate::Error::Config("node-log transport was initialized twice"))
     }
 
     pub(crate) async fn publish_initial(&self) -> crate::Result<VersionedNodeAdvertisement> {
@@ -242,13 +254,13 @@ impl NodePublisher {
         local_resources(&self.data_dir, self.local_disk_limit_bytes)
     }
 
-    pub(crate) async fn recruit_node_durability(
+    pub(crate) async fn recruit_node_durability_config(
         self: &Arc<Self>,
         transport: Arc<dyn crab_cell_runtime::NodeLogTransport>,
         limits: crab_cell_runtime::ReplicaLimits,
         required_follower_bytes: u64,
         live_node_limit: usize,
-    ) -> crate::Result<Option<Arc<crab_cell_runtime::NodeDurability>>> {
+    ) -> crate::Result<Option<crab_cell_runtime::NodeDurabilityConfig>> {
         let now_ms = now_ms()?;
         let mut observed = self.observed().map_err(crate::Error::from)?.lock().await;
         if observed.advertisement().log().is_none() {
@@ -275,27 +287,19 @@ impl NodePublisher {
             .advertisement()
             .log()
             .ok_or(CellError::Node("enrolled node session lost its log"))?;
-        let gate = crab_cell_runtime::DurabilityGate::new(
+        let authority: Arc<dyn NodeLogAuthority> = self.clone();
+        let config = crab_cell_runtime::NodeDurabilityConfig::new(
             self.session,
             self.node,
             log.epoch(),
-            log.members().iter().copied(),
-        )?;
-        let shipper = crab_cell_runtime::NodeLogShipper::new_with_telemetry(
-            gate.clone(),
-            Arc::clone(&transport),
+            log.members().to_vec(),
+            transport,
+            authority,
+            self.lease_guard()?,
             limits,
             self.telemetry.clone(),
         )?;
-        let authority: Arc<dyn NodeLogAuthority> = self.clone();
-        let durability = crab_cell_runtime::NodeDurability::new(
-            gate,
-            shipper,
-            authority,
-            transport,
-            self.lease_guard()?,
-        );
-        Ok(Some(Arc::new(durability)))
+        Ok(Some(config))
     }
 
     pub(crate) async fn run_shared(
@@ -581,6 +585,55 @@ impl NodeLogAuthority for NodePublisher {
     }
 }
 
+impl NodeDurabilityProvider for NodePublisher {
+    fn recruit(
+        self: Arc<Self>,
+        limits: crab_cell_runtime::ReplicaLimits,
+        required_follower_bytes: u64,
+        live_node_limit: usize,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = crab_cell_host::FacilityResult<
+                        Option<crab_cell_runtime::NodeDurabilityConfig>,
+                    >,
+                > + Send,
+        >,
+    > {
+        let Some(transport) = self.node_log_transport.get().cloned() else {
+            return Box::pin(async {
+                Err(
+                    Box::new(crate::Error::Config("node-log transport is unavailable"))
+                        as Box<dyn std::error::Error + Send + Sync>,
+                )
+            });
+        };
+        Box::pin(async move {
+            self.recruit_node_durability_config(
+                transport,
+                limits,
+                required_follower_bytes,
+                live_node_limit,
+            )
+            .await
+            .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
+        })
+    }
+
+    fn rotation_event(&self, event: NodeDurabilityRotation) {
+        let Some(metrics) = &self.metrics else {
+            return;
+        };
+        let result = match event {
+            NodeDurabilityRotation::Started => crate::metrics::NodeLogRotationResult::Started,
+            NodeDurabilityRotation::Pending => crate::metrics::NodeLogRotationResult::Pending,
+            NodeDurabilityRotation::Failed => crate::metrics::NodeLogRotationResult::Failed,
+            NodeDurabilityRotation::Completed => crate::metrics::NodeLogRotationResult::Completed,
+        };
+        metrics.record_node_log_rotation(result);
+    }
+}
+
 /// Resolves peer requests only when this process still owns the exact active Cell.
 #[derive(Clone)]
 pub(crate) struct LocalCellResolver {
@@ -643,7 +696,7 @@ impl PeerCellResolver for LocalCellResolver {
 
 impl PeerAuthorizer for Server {
     fn authorize(&self, request: &VerifiedPeerRequest) -> crab_cell_runtime::Result<()> {
-        let receiver = self.peer_receiver.as_ref().ok_or_else(denied)?;
+        let receiver = self.peer_receiver().ok_or_else(denied)?;
         if matches!(
             request.operation(),
             Some(
@@ -758,7 +811,7 @@ pub(crate) async fn forward(
     {
         return peer_http_error(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
-    let Some(receiver) = server.peer_receiver.as_ref() else {
+    let Some(receiver) = server.peer_receiver() else {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     };
     let now_ms = match now_ms() {
@@ -766,7 +819,10 @@ pub(crate) async fn forward(
         Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
     };
     let request = {
-        let Some(_codec) = reserve_peer_codec(&server.cell_runtime) else {
+        let Ok(runtime) = server.cell_runtime() else {
+            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+        };
+        let Some(_codec) = reserve_peer_codec(&runtime) else {
             return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
         };
         match receiver
@@ -803,7 +859,7 @@ pub(crate) async fn forward(
         Err(CellError::CellNotActive | CellError::Fenced | CellError::CellDraining)
     );
     if local_unavailable && request.permits("cell.activate") {
-        let Some(router) = server.repository_cells.as_ref() else {
+        let Some(router) = server.repository_cells() else {
             return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
         };
         if router
@@ -840,7 +896,10 @@ pub(crate) async fn forward(
         Arc::clone(&server) as Arc<dyn PeerAuthorizer>,
     );
     let reply = dispatcher.dispatch(&request, now_ms).await;
-    let Some(_codec) = reserve_peer_codec(&server.cell_runtime) else {
+    let Ok(runtime) = server.cell_runtime() else {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let Some(_codec) = reserve_peer_codec(&runtime) else {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     };
     match encode_peer_reply(&reply) {
@@ -864,9 +923,9 @@ pub(crate) async fn append_node_log(
         return peer_http_error(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
     let (Some(receiver), Some(store), Some(_transport)) = (
-        server.peer_receiver.as_ref(),
-        server.follower_store.as_ref(),
-        server.node_log_transport.as_ref(),
+        server.peer_receiver(),
+        server.follower_store(),
+        server.node_log_transport(),
     ) else {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     };
@@ -878,14 +937,17 @@ pub(crate) async fn append_node_log(
         Ok(now_ms) => now_ms,
         Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
     };
-    if !receiver_is_current(receiver, now_ms).await {
+    if !receiver_is_current(&receiver, now_ms).await {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     }
-    if !authenticated_session(receiver, leader, &identity, now_ms).await {
+    if !authenticated_session(&receiver, leader, &identity, now_ms).await {
         return peer_http_error(StatusCode::UNAUTHORIZED);
     }
     let (covered_through, frames) = {
-        let Some(_codec) = reserve_peer_codec(&server.cell_runtime) else {
+        let Ok(runtime) = server.cell_runtime() else {
+            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+        };
+        let Some(_codec) = reserve_peer_codec(&runtime) else {
             return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
         };
         match decode_append_batch(body) {
@@ -915,9 +977,9 @@ pub(crate) async fn seal_node_log(
     AxumPath((leader, epoch, claimant)): AxumPath<(String, u64, String)>,
 ) -> Response {
     let (Some(receiver), Some(store), Some(_transport)) = (
-        server.peer_receiver.as_ref(),
-        server.follower_store.as_ref(),
-        server.node_log_transport.as_ref(),
+        server.peer_receiver(),
+        server.follower_store(),
+        server.node_log_transport(),
     ) else {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     };
@@ -930,7 +992,7 @@ pub(crate) async fn seal_node_log(
     };
     // Recovery must work before this follower publishes a new boot session.
     // The recovery claim below binds the request to its persisted physical node.
-    if !authenticated_session(receiver, claimant, &identity, now_ms).await {
+    if !authenticated_session(&receiver, claimant, &identity, now_ms).await {
         return peer_http_error(StatusCode::UNAUTHORIZED);
     }
     if receiver
@@ -954,9 +1016,9 @@ pub(crate) async fn retire_node_log(
     AxumPath((leader, epoch, covered_through)): AxumPath<(String, u64, u64)>,
 ) -> Response {
     let (Some(receiver), Some(store), Some(_transport)) = (
-        server.peer_receiver.as_ref(),
-        server.follower_store.as_ref(),
-        server.node_log_transport.as_ref(),
+        server.peer_receiver(),
+        server.follower_store(),
+        server.node_log_transport(),
     ) else {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     };
@@ -968,10 +1030,10 @@ pub(crate) async fn retire_node_log(
         Ok(now_ms) => now_ms,
         Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
     };
-    if !receiver_is_current(receiver, now_ms).await {
+    if !receiver_is_current(&receiver, now_ms).await {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     }
-    if !authenticated_session(receiver, leader, &identity, now_ms).await {
+    if !authenticated_session(&receiver, leader, &identity, now_ms).await {
         return peer_http_error(StatusCode::UNAUTHORIZED);
     }
     if receiver
@@ -995,9 +1057,9 @@ pub(crate) async fn tail_node_log(
     AxumPath((leader, epoch, claimant, first)): AxumPath<(String, u64, String, u64)>,
 ) -> Response {
     let (Some(receiver), Some(store), Some(_transport)) = (
-        server.peer_receiver.as_ref(),
-        server.follower_store.as_ref(),
-        server.node_log_transport.as_ref(),
+        server.peer_receiver(),
+        server.follower_store(),
+        server.node_log_transport(),
     ) else {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     };
@@ -1010,7 +1072,7 @@ pub(crate) async fn tail_node_log(
     };
     // Recovery must work before this follower publishes a new boot session.
     // The recovery claim below binds the request to its persisted physical node.
-    if !authenticated_session(receiver, claimant, &identity, now_ms).await {
+    if !authenticated_session(&receiver, claimant, &identity, now_ms).await {
         return peer_http_error(StatusCode::UNAUTHORIZED);
     }
     if receiver
@@ -1023,7 +1085,10 @@ pub(crate) async fn tail_node_log(
     }
     match store.read_tail_page(leader, epoch, first).await {
         Ok(page) => {
-            let Some(_codec) = reserve_peer_codec(&server.cell_runtime) else {
+            let Ok(runtime) = server.cell_runtime() else {
+                return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+            };
+            let Some(_codec) = reserve_peer_codec(&runtime) else {
                 return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
             };
             match encode_tail_page(page) {
@@ -2246,9 +2311,16 @@ mod tests {
             crab_cell_runtime::LocalFollowerTransport::new(follower.node(), follower_store),
         );
         let first = publisher
-            .recruit_node_durability(Arc::clone(&transport), crab_ltx::Limits::default(), 1, 10)
+            .recruit_node_durability_config(
+                Arc::clone(&transport),
+                crab_ltx::Limits::default(),
+                1,
+                10,
+            )
             .await
             .unwrap()
+            .unwrap()
+            .build()
             .unwrap();
         let first_epoch = directory
             .load(session, now_ms().unwrap())
@@ -2261,9 +2333,11 @@ mod tests {
             .epoch();
         first.shutdown().await.unwrap();
         let second = publisher
-            .recruit_node_durability(transport, crab_ltx::Limits::default(), 1, 10)
+            .recruit_node_durability_config(transport, crab_ltx::Limits::default(), 1, 10)
             .await
             .unwrap()
+            .unwrap()
+            .build()
             .unwrap();
         assert!(
             directory

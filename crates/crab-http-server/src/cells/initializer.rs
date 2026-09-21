@@ -1,9 +1,11 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
+use crab_cell_app::CompiledApplication;
+use crab_cell_host::CellNodeBuilder;
 use crab_cell_runtime::CellStorageLayout;
 use crab_cell_runtime::{
     ApplicationIdentity, CatalogEntry, CatalogProof, CatalogRole, CellAuthority, CellCatalog,
-    CellHandle, CellReplica, CellRuntime, CellTarget, ControlState, IncarnationId, Owner, Registry,
+    CellHandle, CellReplica, CellTarget, ControlState, IncarnationId, Owner, Registry,
     ReleaseState, ReleaseStore, SessionId, SqlWorkerPool,
 };
 use uuid::Uuid;
@@ -36,6 +38,7 @@ pub(crate) async fn initialize_repository(config: &Config, repository: Uuid) -> 
         &startup.layout,
         startup.identity,
         &startup.registry,
+        &startup.application,
         &config.cells.data_dir,
         config.cells.local_disk_limit_bytes,
         config.cells.peer_advertise.to_string(),
@@ -50,6 +53,7 @@ pub(crate) async fn initialize_repository_at(
     layout: &CellStorageLayout,
     identity: ApplicationIdentity,
     registry: &Registry,
+    application: &Arc<CompiledApplication>,
     data_dir: &Path,
     local_disk_limit_bytes: u64,
     endpoint: String,
@@ -85,12 +89,12 @@ pub(crate) async fn initialize_repository_at(
         local_disk_limit_bytes,
     )?)?;
     let local_disk = budget.local_disk();
-    let runtime = CellRuntime::new_with_replica_host(
-        SqlWorkerPool::new(1, 1)?,
-        INITIALIZE_MAILBOX_BYTES,
-        session,
-        budget.replica_host(local_disk, directory.path().to_owned()),
-    )?;
+    let cell_node = CellNodeBuilder::new(Arc::clone(application))
+        .with_runtime(SqlWorkerPool::new(1, 1)?, INITIALIZE_MAILBOX_BYTES)
+        .with_replica_host(budget.replica_host(local_disk, directory.path().to_owned()))
+        .with_session(session)
+        .build_unleased_for_maintenance()?;
+    let runtime = cell_node.runtime();
     let replica = CellReplica::new(
         layout.clone(),
         *target.cell_id().as_bytes(),
@@ -168,7 +172,7 @@ pub(crate) async fn initialize_repository_at(
         Ok(())
     }
     .await;
-    let shutdown = runtime.shutdown().await;
+    let shutdown = cell_node.shutdown().await;
     match (result, shutdown) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), _) => Err(error),
@@ -307,12 +311,14 @@ mod tests {
         .unwrap();
         let repository = Uuid::from_bytes([33; 16]);
         let local = tempfile::TempDir::new().unwrap();
+        let application = super::super::compiled_application().unwrap();
 
         for _ in 0..2 {
             initialize_repository_at(
                 &layout,
                 identity,
                 &registry,
+                &application,
                 local.path(),
                 32 * 1024 * 1024 * 1024,
                 "https://initializer.internal:8081".into(),

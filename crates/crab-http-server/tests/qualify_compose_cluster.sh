@@ -347,6 +347,25 @@ awk '$1 == "crab_cell_node_log_uncovered_bytes" && $2 + 0 > 0 { found = 1 }
 awk '$1 == "crab_cell_follower_retained_bytes" && $2 + 0 > 0 { found = 1 }
      END { exit !found }' <<<"$metrics_follower_fleet_only"
 
+# Keep node C as the deterministic surviving follower: node A remains in the
+# log, but its signed advertisement must expire before the owner is killed.
+"${compose[@]}" pause server >/dev/null
+a_advertisement_expired=false
+for _ in $(seq 1 45); do
+  node_a_status="$("${compose[@]}" exec -T server-c crab-http-server \
+    --config /etc/crab/server.toml cells node \
+    --session "$session_a" --json 2>/dev/null || true)"
+  if jq --exit-status '.live == false' <<<"$node_a_status" >/dev/null 2>&1; then
+    a_advertisement_expired=true
+    break
+  fi
+  sleep 1
+done
+if ! $a_advertisement_expired; then
+  echo "Paused node A did not leave the live advertisement set." >&2
+  exit 1
+fi
+
 owner_killed_ms="$(unix_millis)"
 "${compose[@]}" kill --signal KILL server-b >/dev/null
 "${compose[@]}" rm --force --stop server-b >/dev/null
@@ -464,6 +483,7 @@ jq --exit-status \
    .root.commit_sequence > $sequence_before' \
   <<<"$control_continued" >/dev/null
 
+"${compose[@]}" unpause server >/dev/null
 "${compose[@]}" up --detach --no-build server server-b >/dev/null
 wait_for_healthy server-b
 assert_json_eventually \

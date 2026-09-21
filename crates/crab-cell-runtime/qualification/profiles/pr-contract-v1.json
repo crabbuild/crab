@@ -1,0 +1,1 @@
+{"schema_version":2,"name":"pr-contract-v1","minimum_cells":1,"minimum_operations":1,"minimum_duration_secs":1,"maximum_p99_latency_ms":5000,"minimum_throughput_ops_per_sec":0,"maximum_peak_rss_bytes":0,"maximum_local_disk_bytes":0,"maximum_file_descriptors":0,"maximum_bucket_calls":0,"provider":"","topology":""}
