@@ -66,7 +66,6 @@ pub(crate) const REPOSITORY_PULL_REVIEW_REPLY_GET_QUERY_ID: u32 = 32;
 pub(crate) const REPOSITORY_PULL_REVIEW_REPLY_LIST_QUERY_ID: u32 = 33;
 pub(crate) const REPOSITORY_PULL_REVIEW_REPLY_SUBMISSION_QUERY_ID: u32 = 34;
 
-#[cfg(test)]
 pub(crate) fn initialize_repository_schema(
     transaction: &rusqlite::Transaction<'_>,
 ) -> rusqlite::Result<()> {

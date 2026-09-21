@@ -465,15 +465,17 @@ impl RemoteGitRepository {
         let runtime_cancellation = runtime.background_cancellation();
         let operation_cancellation = cancellation.child_token();
         let _cancel_on_drop = operation_cancellation.clone().drop_guard();
-        let worker = Self::open_inner(
+        // Repository opening performs a bounded but deep metadata handshake.
+        // Keep its state machine on the heap so ready futures cannot exhaust
+        // the Tokio worker stack on low-latency stores.
+        let mut worker = Box::pin(Self::open_inner(
             store,
             layout,
             identity,
             runtime,
             options,
             &operation_cancellation,
-        );
-        tokio::pin!(worker);
+        ));
         let timed_out = tokio::select! {
             biased;
             () = cancellation.cancelled() => false,
