@@ -912,7 +912,7 @@ for _ in $(seq 1 60); do
   fallback_uncovered_bytes="$(awk \
     '$1 == "crab_cell_node_log_uncovered_bytes" { print $2 }' \
     <<<"$fallback_owner_metrics")"
-  if [ "${fallback_uncovered_bytes:-1}" = 0 ]; then
+  if awk -v value="${fallback_uncovered_bytes:-1}" 'BEGIN { exit !(value + 0 == 0) }'; then
     fallback_object_covered=true
     break
   fi
