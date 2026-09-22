@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use crab_ltx::{CaptureBatch, Db, TransactionError, rusqlite::OptionalExtension};
 
+use crate::maintenance::TransferWorkInventory;
 use crate::{
     CatalogRole, CellId, Digest, Error, IncarnationId, PersistedWorkInventory, RequestId, Result,
 };
@@ -628,6 +629,35 @@ impl CellExecutor {
         let result = self
             .db
             .query_with(|connection| crate::maintenance::inspect_persisted_work(connection, role));
+        if let Some(error) = self.db.take_io_error() {
+            self.fenced = true;
+            return Err(ltx_error(error));
+        }
+        match result {
+            Ok(inventory) => Ok(inventory),
+            Err(crab_ltx::QueryError::Operation(error)) => Err(error),
+            Err(crab_ltx::QueryError::Sqlite(error)) => {
+                self.fenced = true;
+                Err(error.into())
+            }
+            Err(crab_ltx::QueryError::State(error)) => {
+                self.fenced = true;
+                Err(error.into())
+            }
+        }
+    }
+
+    pub(crate) fn transfer_work_inventory(
+        &mut self,
+        role: CatalogRole,
+        now_ms: i64,
+    ) -> Result<TransferWorkInventory> {
+        if self.fenced {
+            return Err(Error::Fenced);
+        }
+        let result = self.db.query_with(|connection| {
+            crate::maintenance::inspect_transfer_work(connection, role, now_ms)
+        });
         if let Some(error) = self.db.take_io_error() {
             self.fenced = true;
             return Err(ltx_error(error));

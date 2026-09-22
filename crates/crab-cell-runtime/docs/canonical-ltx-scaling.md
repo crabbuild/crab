@@ -606,20 +606,26 @@ tick at two Cells and 8 GiB of projected disk restore, with absolute receiver
 memory, disk, Cell-slot, and job-credit checks. It requires two stable samples
 and a 60-second residence/cooldown for ordinary movement; explicit drain and
 sustained shedding bypass the score-gain gate only. These are advisory limits;
-the actor still rechecks the exact Cell generation and persisted work inventory
-before release. Retained request/inbox outcomes, Blob metadata, and Queue
-producer identities may follow the exact root. Any source effect, Queue
-message, Workflow run, Cron schedule, or unknown inventory blocks movement.
+the actor still rechecks the exact Cell generation and a transfer-specific,
+indexed durable-work inspection before release. Retained request/inbox
+outcomes, Blob metadata, Queue producer identities, and future Cron schedules
+may follow the exact root. Live or due source effects, ready or leased Queue
+messages, pending Workflow activities/timers, due Cron delivery, and unknown
+inspection state block movement; the maintenance-release inventory remains
+conservative and unchanged.
 The private server controller runs every 15 seconds, samples signed live nodes
 and actor-approved local candidates, then releases exact generations through
 the actor before sending an authenticated receiver activation hint. If receiver
 activation fails, the exact unowned root remains available for normal routing.
 Each tick reports confirmed source releases and successful receiver activations
 separately; a started drain is not counted as a completed move.
-The scale-down host state stops new acquisition and reports confirmed remaining
-Cell ownership without terminating service. Operator wiring, measured per-Cell
-disk demand, a narrower state-aware SQL settlement check, and shared fleet-wide
-movement accounting remain qualification work before production rollout.
+The scale-down host state stops new acquisition, paces exact actor releases,
+and reports released, blocked, and remaining Cell counts while retaining the
+node lease and facilities for incomplete deadlines. A successful drain invokes
+the existing terminal shutdown only after ownership reaches zero. Measured
+per-Cell disk demand, shared fleet-wide movement accounting, and protected
+provider/Kubernetes evidence remain qualification work before production
+rollout.
 
 ### Weight Cells by measured cost
 

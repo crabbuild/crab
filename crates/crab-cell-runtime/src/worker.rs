@@ -9,6 +9,7 @@ use std::{
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
+use crate::maintenance::TransferWorkInventory;
 use crate::resource::{
     ACTIVE_CELL_NATIVE_BYTES, HYDRATION_JOB_CAPACITY, ResourceLedger, ResourceReservation,
 };
@@ -395,6 +396,26 @@ impl SqlWorkerPool {
         let (reply, response) = oneshot::channel();
         self.send_worker_job(cell, WorkerCommand::PersistedWork { cell, role, reply })
             .await?;
+        receive(response).await
+    }
+
+    pub(crate) async fn transfer_work_inventory(
+        &self,
+        cell: CellId,
+        role: CatalogRole,
+        now_ms: i64,
+    ) -> Result<TransferWorkInventory> {
+        let (reply, response) = oneshot::channel();
+        self.send_worker_job(
+            cell,
+            WorkerCommand::TransferWork {
+                cell,
+                role,
+                now_ms,
+                reply,
+            },
+        )
+        .await?;
         receive(response).await
     }
 
@@ -814,6 +835,12 @@ enum WorkerCommand {
         role: CatalogRole,
         reply: oneshot::Sender<Result<PersistedWorkInventory>>,
     },
+    TransferWork {
+        cell: CellId,
+        role: CatalogRole,
+        now_ms: i64,
+        reply: oneshot::Sender<Result<TransferWorkInventory>>,
+    },
     Resolve {
         cell: CellId,
         identity: MutationIdentity,
@@ -1127,6 +1154,19 @@ fn run_worker_command(
                 .get_mut(&cell)
                 .ok_or(Error::CellNotActive)
                 .and_then(|active| active.executor.persisted_work_inventory(role));
+            drop(reservation.take());
+            let _ = reply.send(result);
+        }
+        WorkerCommand::TransferWork {
+            cell,
+            role,
+            now_ms,
+            reply,
+        } => {
+            let result = cells
+                .get_mut(&cell)
+                .ok_or(Error::CellNotActive)
+                .and_then(|active| active.executor.transfer_work_inventory(role, now_ms));
             drop(reservation.take());
             let _ = reply.send(result);
         }

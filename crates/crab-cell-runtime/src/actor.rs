@@ -1768,7 +1768,7 @@ enum TaskResult {
         cell: CellId,
         generation: u64,
         effect_id: u64,
-        result: crate::Result<crate::PersistedWorkInventory>,
+        result: crate::Result<crate::maintenance::TransferWorkInventory>,
     },
     Executed {
         cell: CellId,
@@ -2294,7 +2294,11 @@ fn handle_message(
                 return;
             };
             if !Arc::ptr_eq(&active.admission, &admission) {
-                let _ = reply.send(Err(Error::CellNotActive));
+                let _ = reply.send(Err(if active.transfer.is_some() {
+                    Error::CellDraining
+                } else {
+                    Error::CellNotActive
+                }));
                 return;
             }
             if active.transfer.is_some() {
@@ -2350,7 +2354,7 @@ fn handle_message(
             let candidates = cells
                 .iter()
                 .filter_map(|(cell, active)| {
-                    eviction_observation(*cell, active)
+                    transfer_candidate_observation(*cell, active)
                         .eligible()
                         .then_some(active)
                         .filter(|active| !active.draining())
@@ -2380,7 +2384,7 @@ fn handle_message(
                 || active.transfer.is_some()
                 || active.inventory_refreshing
                 || !active.coordination.can_deactivate()
-                || !eviction_observation(cell, active).eligible()
+                || !transfer_candidate_observation(cell, active).eligible()
             {
                 let _ = reply.send(Err(Error::CellDraining));
                 return;
@@ -2439,6 +2443,10 @@ fn handle_message(
                 }
                 let effect_id = active.begin_task(CoordinationEffect::Inventory);
                 active.inventory_refreshing = true;
+                active.admission.draining.store(true, Ordering::Release);
+                active.admission.requests.close();
+                active.admission.bytes.close();
+                active.admission = new_cell_admission();
                 active.transfer = Some(TransferPreflight { reply });
                 effect_id
             };
@@ -2448,7 +2456,7 @@ fn handle_message(
                 let deadline = std::time::Instant::now() + SQL_WALL_DEADLINE;
                 let result = tokio::time::timeout_at(
                     deadline.into(),
-                    pool.persisted_work_inventory(cell, role),
+                    pool.transfer_work_inventory(cell, role, unix_millis()),
                 )
                 .await
                 .map_err(|_| Error::Deadline)
@@ -2606,6 +2614,25 @@ fn eviction_observation(cell: CellId, active: &ActiveCell) -> EvictionObservatio
         primitive_obligation: !active.persisted_work.is_transfer_settled(),
         accounting_known: !active.persisted_work.is_unknown(),
     }
+}
+
+fn transfer_candidate_observation(cell: CellId, active: &ActiveCell) -> EvictionObservation {
+    let mut observation = eviction_observation(cell, active);
+    if !active.persisted_work.is_unknown() {
+        observation.primitive_obligation = false;
+    }
+    observation
+}
+
+fn transfer_observation(
+    cell: CellId,
+    active: &ActiveCell,
+    inventory: crate::maintenance::TransferWorkInventory,
+) -> EvictionObservation {
+    let mut observation = eviction_observation(cell, active);
+    observation.primitive_obligation = !inventory.is_settled();
+    observation.accounting_known = true;
+    observation
 }
 
 fn begin_idle_cell_eviction(
@@ -3810,16 +3837,15 @@ fn handle_task(
                         let mut fenced = false;
                         let transfer_result = match result {
                             Ok(inventory) => {
-                                active.persisted_work = inventory;
                                 if node_lease.check().is_err() {
                                     fenced = true;
                                     active.coordination.step(CoordinationInput::Fence);
                                     fence_active(active);
                                     Err(Error::Fenced)
-                                } else if inventory.is_transfer_settled()
+                                } else if inventory.is_settled()
                                     && active.queue.is_empty()
                                     && active.coordination.can_deactivate()
-                                    && eviction_observation(cell, active).eligible()
+                                    && transfer_observation(cell, active, inventory).eligible()
                                 {
                                     start_drain = true;
                                     Ok(())

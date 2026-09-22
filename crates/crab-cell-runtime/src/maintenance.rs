@@ -17,6 +17,11 @@ const WORKFLOWS: u8 = 1 << 5;
 const BLOBS: u8 = 1 << 6;
 const CRON_SCHEDULES: u8 = 1 << 7;
 
+const TRANSFER_EFFECTS: u8 = 1 << 0;
+const TRANSFER_QUEUE: u8 = 1 << 1;
+const TRANSFER_WORKFLOW: u8 = 1 << 2;
+const TRANSFER_CRON: u8 = 1 << 3;
+
 /// Conservative inventory of rows that can retain executable release contracts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PersistedWorkInventory {
@@ -94,6 +99,27 @@ impl PersistedWorkInventory {
     }
 }
 
+/// Transfer-only view of durable work that still needs the current owner.
+///
+/// This deliberately has a separate contract from [`PersistedWorkInventory`]:
+/// retained outcomes and immutable state can travel with an exact root, while
+/// executable work must remain on its current owner until it settles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TransferWorkInventory {
+    bits: u8,
+}
+
+impl TransferWorkInventory {
+    pub(crate) const fn is_settled(self) -> bool {
+        self.bits == 0
+    }
+
+    #[cfg(test)]
+    const fn bits(self) -> u8 {
+        self.bits
+    }
+}
+
 pub(crate) fn inspect_persisted_work(
     connection: &Connection,
     role: CatalogRole,
@@ -119,6 +145,60 @@ pub(crate) fn inspect_persisted_work(
         bits,
         unknown: false,
     })
+}
+
+/// Inspects only executable rows that cannot safely move with an exact root.
+///
+/// Every probe is an indexed `EXISTS` query and therefore has bounded result
+/// memory. Any SQL/schema error is returned to the actor, which refuses the
+/// transfer rather than treating an unknown inspection as settled.
+pub(crate) fn inspect_transfer_work(
+    connection: &Connection,
+    role: CatalogRole,
+    now_ms: i64,
+) -> crate::Result<TransferWorkInventory> {
+    if now_ms < 0 {
+        return Err(Error::Command("invalid transfer inspection time"));
+    }
+    let effects = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sys_effects INDEXED BY sys_effects_due WHERE state = 1 OR (state = 0 AND due_at_ms <= ?1) LIMIT 1)",
+        [now_ms],
+        |row| row.get::<_, i64>(0),
+    )?;
+    let mut bits = match effects {
+        0 => 0,
+        1 => TRANSFER_EFFECTS,
+        _ => return Err(Error::Command("invalid transfer effect existence result")),
+    };
+    if role == CatalogRole::Queue {
+        bits |= exists(
+            connection,
+            "SELECT EXISTS(SELECT 1 FROM queue_messages INDEXED BY queue_ready WHERE state IN (0, 1) LIMIT 1)",
+        )? * TRANSFER_QUEUE;
+    }
+    if role == CatalogRole::Workflow {
+        bits |= exists(
+            connection,
+            "SELECT EXISTS(SELECT 1 FROM workflow_activities INDEXED BY activities_due WHERE state IN (0, 1) LIMIT 1)",
+        )? * TRANSFER_WORKFLOW;
+        bits |= exists(
+            connection,
+            "SELECT EXISTS(SELECT 1 FROM workflow_timers INDEXED BY timers_due WHERE state = 0 LIMIT 1)",
+        )? * TRANSFER_WORKFLOW;
+    }
+    if role == CatalogRole::Cron {
+        let due = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM cron_schedules INDEXED BY cron_due WHERE enabled = 1 AND next_due_ms <= ?1 LIMIT 1)",
+            [now_ms],
+            |row| row.get::<_, i64>(0),
+        )?;
+        bits |= match due {
+            0 => 0,
+            1 => TRANSFER_CRON,
+            _ => return Err(Error::Command("invalid transfer cron existence result")),
+        };
+    }
+    Ok(TransferWorkInventory { bits })
 }
 
 fn exists(connection: &Connection, sql: &str) -> crate::Result<u8> {
@@ -245,7 +325,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        CellId, IncarnationId, install_queue_schema, install_runtime_schema,
+        CellId, IncarnationId, install_cron_schema, install_queue_schema, install_runtime_schema,
         install_workflow_schema,
     };
 
@@ -357,6 +437,153 @@ mod tests {
                 .unwrap()
                 .first_blocker(),
             Some("maintenance release is blocked by retained Workflow runs")
+        );
+    }
+
+    #[test]
+    fn transfer_inventory_allows_settled_rows_and_future_cron() {
+        let mut queue = Connection::open_in_memory().unwrap();
+        install_runtime_schema(
+            &mut queue,
+            CellId::from_bytes([14; 32]),
+            IncarnationId::from_bytes([15; 16]),
+            1,
+        )
+        .unwrap();
+        let transaction = queue.transaction().unwrap();
+        install_queue_schema(&transaction).unwrap();
+        install_cron_schema(&transaction).unwrap();
+        transaction.commit().unwrap();
+        queue
+            .execute(
+                "INSERT INTO queue_messages(message_id, payload, state, attempt, due_at_ms, expires_at_ms, token, lease_until_ms, result_code) VALUES (?1, X'', 2, 0, 0, 100, NULL, NULL, 0)",
+                [[16_u8; 16].as_slice()],
+            )
+            .unwrap();
+        queue
+            .execute(
+                "INSERT INTO queue_dedup VALUES (?1, ?2, ?3, 100)",
+                (
+                    [17_u8; 16].as_slice(),
+                    [18_u8; 32].as_slice(),
+                    [16_u8; 16].as_slice(),
+                ),
+            )
+            .unwrap();
+        queue
+            .execute(
+                "INSERT INTO cron_schedules VALUES (?1, 0, X'', X'', 1000, 2000, 0, 1, 1, 0)",
+                [[19_u8; 16].as_slice()],
+            )
+            .unwrap();
+
+        assert!(
+            inspect_transfer_work(&queue, CatalogRole::Queue, 1000)
+                .unwrap()
+                .is_settled()
+        );
+        assert!(
+            inspect_transfer_work(&queue, CatalogRole::Cron, 1000)
+                .unwrap()
+                .is_settled()
+        );
+    }
+
+    #[test]
+    fn transfer_inventory_blocks_effects_and_queue_leases() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        install_runtime_schema(
+            &mut connection,
+            CellId::from_bytes([20; 32]),
+            IncarnationId::from_bytes([21; 16]),
+            1,
+        )
+        .unwrap();
+        let transaction = connection.transaction().unwrap();
+        install_queue_schema(&transaction).unwrap();
+        transaction.commit().unwrap();
+        connection
+            .execute(
+                "INSERT INTO sys_effects(effect_id, destination, operation, state, attempt, due_at_ms, expires_at_ms, token, lease_until_ms, created_sequence, result) VALUES (?1, ?2, X'01', 0, 0, 50, 100, NULL, NULL, 1, NULL)",
+                ([22_u8; 32].as_slice(), [23_u8; 32].as_slice()),
+            )
+            .unwrap();
+        assert!(
+            inspect_transfer_work(&connection, CatalogRole::Repository, 10)
+                .unwrap()
+                .is_settled()
+        );
+        connection
+            .execute(
+                "UPDATE sys_effects SET due_at_ms = 0 WHERE effect_id = ?1",
+                [[22_u8; 32].as_slice()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO queue_messages(message_id, payload, state, attempt, due_at_ms, expires_at_ms, token, lease_until_ms, result_code) VALUES (?1, X'', 1, 1, 0, 100, ?2, 50, NULL)",
+                ([24_u8; 16].as_slice(), [25_u8; 16].as_slice()),
+            )
+            .unwrap();
+
+        let inventory = inspect_transfer_work(&connection, CatalogRole::Queue, 10).unwrap();
+        assert_eq!(inventory.bits(), TRANSFER_EFFECTS | TRANSFER_QUEUE);
+        assert!(!inventory.is_settled());
+    }
+
+    #[test]
+    fn transfer_inventory_blocks_pending_workflow_and_due_cron() {
+        let mut workflow = Connection::open_in_memory().unwrap();
+        install_runtime_schema(
+            &mut workflow,
+            CellId::from_bytes([26; 32]),
+            IncarnationId::from_bytes([27; 16]),
+            1,
+        )
+        .unwrap();
+        let transaction = workflow.transaction().unwrap();
+        install_workflow_schema(&transaction).unwrap();
+        transaction.commit().unwrap();
+        workflow
+            .execute(
+                "INSERT INTO workflow_runs VALUES (X'01', ?1, ?2, 0, X'', 0, NULL, NULL)",
+                ([28_u8; 16].as_slice(), [29_u8; 32].as_slice()),
+            )
+            .unwrap();
+        workflow
+            .execute(
+                "INSERT INTO workflow_activities(run_id, activity_id, activity_type, input, state, attempt, due_at_ms, expires_at_ms, token, lease_until_ms, completion_token, completion_digest, result) VALUES (?1, ?2, 'test', X'', 0, 0, 0, 100, NULL, NULL, NULL, NULL, NULL)",
+                ([28_u8; 16].as_slice(), [30_u8; 16].as_slice()),
+            )
+            .unwrap();
+        assert_eq!(
+            inspect_transfer_work(&workflow, CatalogRole::Workflow, 10)
+                .unwrap()
+                .bits(),
+            TRANSFER_WORKFLOW
+        );
+
+        let mut cron = Connection::open_in_memory().unwrap();
+        install_runtime_schema(
+            &mut cron,
+            CellId::from_bytes([31; 32]),
+            IncarnationId::from_bytes([32; 16]),
+            1,
+        )
+        .unwrap();
+        let transaction = cron.transaction().unwrap();
+        install_cron_schema(&transaction).unwrap();
+        transaction.commit().unwrap();
+        cron.execute(
+            "INSERT INTO cron_schedules VALUES (?1, 0, X'', X'', 1000, 10, 0, 1, 1, 0)",
+            [[33_u8; 16].as_slice()],
+        )
+        .unwrap();
+        assert_eq!(
+            inspect_transfer_work(&cron, CatalogRole::Cron, 10)
+                .unwrap()
+                .bits(),
+            TRANSFER_CRON
         );
     }
 }

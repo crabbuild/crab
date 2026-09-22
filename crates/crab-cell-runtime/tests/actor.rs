@@ -2095,19 +2095,24 @@ async fn exact_idle_release_refuses_persisted_work() {
     let session = SessionId::from_bytes([93; 16]);
     let runtime =
         CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 * 1024 * 1024, session).unwrap();
-    let handle = bootstrap_on(&runtime, &fixture, session).await;
-    let (_, generation, _, _) = runtime.idle_transfer_candidates().await.unwrap()[0];
-    handle
-        .execute(identity(94), Digest::from_bytes([94; 32]), 20, 64, 64, |transaction| {
+    let handle = bootstrap_role_on(
+        &runtime,
+        &fixture,
+        session,
+        CatalogRole::Repository,
+        |transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE counter(value INTEGER NOT NULL); INSERT INTO counter VALUES (0)",
+            )?;
             transaction.execute(
                 "INSERT INTO sys_effects(effect_id, destination, operation, state, attempt, due_at_ms, expires_at_ms, token, lease_until_ms, created_sequence, result) VALUES (?1, ?2, ?3, 0, 0, 20, 1000, NULL, NULL, 1, NULL)",
                 crab_ltx::rusqlite::params![&[1_u8; 32], &[2_u8; 32], &[3_u8]],
             )?;
-            Ok(HandlerOutcome::Success(Vec::new()))
-        })
-        .await
-        .unwrap();
-    assert!(runtime.idle_transfer_candidates().await.unwrap().is_empty());
+            Ok(())
+        },
+    )
+    .await;
+    let (_, generation, _, _) = runtime.idle_transfer_candidates().await.unwrap()[0];
     assert!(
         runtime
             .release_idle_cell(fixture.target.cell_id(), session, generation)
@@ -2115,7 +2120,44 @@ async fn exact_idle_release_refuses_persisted_work() {
             .is_err()
     );
     assert_eq!(runtime.stats().active_cells(), 1);
-    handle.drain().await.unwrap();
+    assert!(matches!(
+        handle.drain().await,
+        Err(crab_cell_runtime::Error::CellDraining)
+    ));
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn exact_idle_release_allows_settled_queue_rows() {
+    let fixture = fixture_for(b"exact-idle-settled-queue");
+    let session = SessionId::from_bytes([98; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 * 1024 * 1024, session).unwrap();
+    let _handle = bootstrap_role_on(
+        &runtime,
+        &fixture,
+        session,
+        CatalogRole::Queue,
+        |transaction| {
+            install_queue_schema(transaction)?;
+            transaction.execute(
+                "INSERT INTO queue_messages(message_id, payload, state, attempt, due_at_ms, expires_at_ms, token, lease_until_ms, result_code) VALUES (zeroblob(16), X'', 2, 0, 0, 1000, NULL, NULL, 0)",
+                [],
+            )?;
+            transaction.execute(
+                "INSERT INTO queue_dedup VALUES (zeroblob(16), zeroblob(32), zeroblob(16), 1000)",
+                [],
+            )?;
+            Ok(())
+        },
+    )
+    .await;
+    let (_, generation, _, _) = runtime.idle_transfer_candidates().await.unwrap()[0];
+    runtime
+        .release_idle_cell(fixture.target.cell_id(), session, generation)
+        .await
+        .unwrap();
+    assert_eq!(runtime.stats().active_cells(), 0);
     runtime.shutdown().await.unwrap();
 }
 
