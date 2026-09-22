@@ -297,7 +297,7 @@ different contract, stop and split it into a reviewed API plan.
 | Primitive | Source contract to qualify | Evidence |
 | --- | --- | --- |
 | SQL | Parameterized bounded batches (128 statements), at most 1,000 rows and 1 MiB operation/result; protected runtime tables are denied by the authorizer. | `crates/crab-cell-runtime/src/sql.rs:14-18`, `:168-204`, `:284-313` |
-| KV | Values and keys are bounded (64 KiB value, 1 KiB key), atomic batches are capped at 128 items/1 MiB, and list pages are bounded. | `crates/crab-cell-runtime/src/kv.rs:15-23`, `:313-350`, `:357-408` |
+| KV | Values and keys are bounded (4 MiB value, 1 KiB key), atomic batches are capped at 128 items and 4 MiB plus 64 KiB of input, and list pages are bounded. | `crates/crab-cell-runtime/src/kv.rs:15-24`, `:225-274`, `:307-355`, `:408-421` |
 | Blob | Multipart parts are 256 KiB, at most 4,096 parts (1 GiB object ceiling), reads are range-bounded, and uploads have a seven-day maximum lifetime. | `crates/crab-cell-runtime/src/blob.rs:11-20`, `:280-304`, `:420-433`, `:510-545` |
 | Queue | Payloads are 256 KiB, claims are capped at 32 items/512 KiB, leases and attempts are bounded, producer deduplication exists, delivery is at-least-once, and selection is by due time/message ID rather than a FIFO guarantee. | `crates/crab-cell-runtime/src/queue.rs:18-31`, `:211-263`, `:274-372` |
 | Cron | Durable schedules use a fixed interval between 1 second and 365 days, with bounded payload/future windows and durable Tick effects; timezone/general-cron expressions are not implemented. | `crates/crab-cell-runtime/src/cron.rs:12-17`, `:142-203`, `:250-322` |

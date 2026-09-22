@@ -21,7 +21,7 @@ use protobuf::{
 
 const PROTOCOL_VERSION: u32 = 1;
 const MAX_AUTHORIZATION_BYTES: usize = 16 * 1024;
-const MAX_OPERATION_BYTES: usize = 1024 * 1024;
+const MAX_OPERATION_BYTES: usize = crate::codec::MAX_WIRE_BYTES;
 pub const MAX_PEER_REQUEST_BYTES: usize = MAX_AUTHORIZATION_BYTES + MAX_OPERATION_BYTES + 128;
 const MAX_ACTIONS: usize = 128;
 const MAX_PRINCIPAL_BYTES: usize = 512;
@@ -126,7 +126,7 @@ impl PeerSigner {
         let tag = operation.tag();
         let payload = operation.encode();
         if payload.len() > MAX_OPERATION_BYTES {
-            return Err(Error::Peer("operation exceeds one MiB"));
+            return Err(Error::Peer("operation exceeds wire limit"));
         }
         validate_operation(tag, &payload)?;
         let payload_digest = blake3::hash(&payload);
@@ -173,7 +173,7 @@ impl PeerVerifier {
         require_fields(&fields, &[1, 2, 3, 4])?;
         let (tag, payload) = oneof_payload(input, &fields, &[10, 11, 12, 13, 14, 15])?;
         if payload.len() > MAX_OPERATION_BYTES {
-            return Err(Error::Peer("operation exceeds one MiB"));
+            return Err(Error::Peer("operation exceeds wire limit"));
         }
         validate_operation(tag, payload)?;
         let request = wire::PeerRequest::decode(input)?;
@@ -379,7 +379,7 @@ fn validate_mutation_reply(reply: &wire::MutationReply) -> Result<()> {
                 Ok(())
             }
             Some(wire::mutation_result::Result::CommandOutput(_)) => {
-                Err(Error::Peer("mutation result exceeds one MiB"))
+                Err(Error::Peer("mutation result exceeds wire limit"))
             }
             None => Err(Error::Peer("mutation result is missing")),
         },
@@ -412,7 +412,7 @@ fn validate_read_reply(reply: &wire::ReadReply) -> Result<()> {
                     .ok_or(Error::Peer("read reply receipt is missing"))?,
             )?;
             if output.len() > MAX_OPERATION_BYTES {
-                return Err(Error::Peer("read result exceeds one MiB"));
+                return Err(Error::Peer("read result exceeds wire limit"));
             }
             Ok(())
         }

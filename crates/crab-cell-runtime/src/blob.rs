@@ -29,7 +29,7 @@ const MIN_UPLOAD_LIFETIME_MS: i64 = 60_000;
 const MAX_UPLOAD_LIFETIME_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 const BLOB_PART_KIND: &str = "blob-parts";
 const MAX_BLOB_READ_PARTS: usize = 8;
-const MAX_BLOB_GC_SCAN: usize = 128;
+const MAX_BLOB_GC_DELETIONS: u32 = 128;
 
 #[derive(Clone, Copy)]
 struct BlobMutationTimes {
@@ -142,10 +142,10 @@ pub struct BlobArtifactStore {
     store: Store,
 }
 
-/// Bounded result from one Blob part reachability sweep.
+/// Result from one Blob part reachability sweep.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlobGarbageCollectionReport {
-    scanned: u32,
+    scanned: u64,
     deleted: u32,
     has_more: bool,
 }
@@ -153,7 +153,7 @@ pub struct BlobGarbageCollectionReport {
 impl BlobGarbageCollectionReport {
     /// Returns the number of object-store entries inspected by the sweep.
     #[must_use]
-    pub const fn scanned(self) -> u32 {
+    pub const fn scanned(self) -> u64 {
         self.scanned
     }
 
@@ -163,7 +163,7 @@ impl BlobGarbageCollectionReport {
         self.deleted
     }
 
-    /// Returns whether another bounded sweep should be scheduled.
+    /// Returns whether the deletion budget was reached and another sweep may be needed.
     #[must_use]
     pub const fn has_more(self) -> bool {
         self.has_more
@@ -206,11 +206,13 @@ impl BlobArtifactStore {
 
     /// Reclaims old part objects absent from a complete cross-Cell reference set.
     ///
-    /// Callers must build `live_digests` from every authoritative Cell database
-    /// sharing this object-store scope. `cutoff_ms` is a grace boundary: objects
-    /// newer than it are retained so an upload that has not committed its SQLite
-    /// manifest cannot be collected. At most 128 listings are inspected per call;
-    /// schedule another call while [`BlobGarbageCollectionReport::has_more`] is true.
+    /// Callers must quiesce Blob writes in this object-store scope and build
+    /// `live_digests` from every authoritative Cell database sharing it. A grace
+    /// boundary alone cannot protect an old part reused by a concurrent upload.
+    /// Objects newer than `cutoff_ms` are retained for uploads whose SQLite
+    /// manifests have not committed. Each call inspects the complete unordered
+    /// listing until 128 parts have been deleted; schedule another call while
+    /// [`BlobGarbageCollectionReport::has_more`] is true.
     pub async fn sweep_unreferenced(
         &self,
         live_digests: &BTreeSet<[u8; 32]>,
@@ -226,16 +228,11 @@ impl BlobArtifactStore {
         let mut objects = self
             .store
             .list_stream(&global_content_prefix(prefix, BLOB_PART_KIND));
-        let mut scanned = 0_u32;
-        let mut deleted = 0_u32;
-        let mut has_more = false;
+        let mut scanned = 0_u64;
+        let mut candidates = Vec::with_capacity(MAX_BLOB_GC_DELETIONS as usize);
         while let Some(object) = objects.next().await {
-            if scanned as usize == MAX_BLOB_GC_SCAN {
-                has_more = true;
-                break;
-            }
             let object = object?;
-            scanned += 1;
+            scanned = scanned.saturating_add(1);
             let Some(hash) = content_hash_from_path(object.location.as_ref(), BLOB_PART_KIND)
             else {
                 continue;
@@ -247,7 +244,16 @@ impl BlobArtifactStore {
             {
                 continue;
             }
-            match self.store.delete(&object.location).await {
+            candidates.push(object.location);
+            if candidates.len() == MAX_BLOB_GC_DELETIONS as usize {
+                break;
+            }
+        }
+        drop(objects);
+        let has_more = candidates.len() == MAX_BLOB_GC_DELETIONS as usize;
+        let mut deleted = 0_u32;
+        for path in candidates {
+            match self.store.delete(&path).await {
                 Ok(()) | Err(StorageError::NotFound { .. }) => deleted += 1,
                 Err(error) => return Err(error.into()),
             }

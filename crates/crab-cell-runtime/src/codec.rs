@@ -1,4 +1,5 @@
-const MAX_WIRE_BYTES: usize = 1024 * 1024;
+// Global ceiling; each operation still declares its own, usually smaller, limit.
+pub(crate) const MAX_WIRE_BYTES: usize = 4 * 1024 * 1024 + 64 * 1024;
 
 /// Canonical bounded wire-codec failure.
 #[derive(Debug, thiserror::Error)]

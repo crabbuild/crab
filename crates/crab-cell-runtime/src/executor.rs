@@ -6,7 +6,7 @@ use crate::{
     CatalogRole, CellId, Digest, Error, IncarnationId, PersistedWorkInventory, RequestId, Result,
 };
 
-const MAX_RESULT_BYTES: usize = 1 << 20;
+const MAX_RESULT_BYTES: usize = crate::codec::MAX_WIRE_BYTES;
 const MAX_REQUEST_LIFETIME_MS: i64 = 24 * 60 * 60 * 1000;
 const MAX_ISSUED_FUTURE_MS: i64 = 5 * 60 * 1000;
 const REQUEST_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
@@ -380,7 +380,7 @@ impl CellExecutor {
             return Err(Error::PendingPublication);
         }
         if max_result_bytes > MAX_RESULT_BYTES {
-            return Err(Error::Command("result limit exceeds 1 MiB"));
+            return Err(Error::Command("result exceeds wire limit"));
         }
         identity.validate(now_ms)?;
         let cell = self.cell;
@@ -486,7 +486,7 @@ impl CellExecutor {
             return Err(Error::PendingPublication);
         }
         if max_result_bytes > MAX_RESULT_BYTES {
-            return Err(Error::Command("effect result limit exceeds 1 MiB"));
+            return Err(Error::Command("effect result exceeds wire limit"));
         }
         let cell = self.cell;
         let incarnation = self.incarnation;
@@ -570,7 +570,7 @@ impl CellExecutor {
             return Err(Error::PendingPublication);
         }
         if max_result_bytes > MAX_RESULT_BYTES {
-            return Err(Error::Command("result limit exceeds 1 MiB"));
+            return Err(Error::Command("result exceeds wire limit"));
         }
         let result = self.db.query_with(handler);
         if let Some(error) = self.db.take_io_error() {
@@ -664,7 +664,7 @@ impl CellExecutor {
             return Ok(Resolution::Expired);
         }
         if max_result_bytes > MAX_RESULT_BYTES {
-            return Err(Error::Command("result limit exceeds 1 MiB"));
+            return Err(Error::Command("result exceeds wire limit"));
         }
         let result = self.db.query_with(|connection| {
             connection

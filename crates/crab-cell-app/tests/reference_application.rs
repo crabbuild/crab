@@ -90,7 +90,13 @@ fn descriptor(
         commands
             .iter()
             .copied()
-            .map(operation)
+            .map(|id| {
+                let mut descriptor = operation(id);
+                if module == KV_MODULE {
+                    descriptor.input_limit = 4 * 1024 * 1024 + 64 * 1024;
+                }
+                descriptor
+            })
             .collect::<Vec<_>>()
             .into_boxed_slice(),
     );
@@ -98,7 +104,13 @@ fn descriptor(
         queries
             .iter()
             .copied()
-            .map(operation)
+            .map(|id| {
+                let mut descriptor = operation(id);
+                if module == KV_MODULE {
+                    descriptor.output_limit = 4 * 1024 * 1024 + 64 * 1024;
+                }
+                descriptor
+            })
             .collect::<Vec<_>>()
             .into_boxed_slice(),
     );

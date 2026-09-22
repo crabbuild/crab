@@ -10,6 +10,39 @@ fn signer() -> PeerSigner {
     )
 }
 
+#[test]
+fn signed_peer_request_carries_maximum_kv_value() {
+    let input = crate::KvAtomicRequest {
+        scope: b"scope".to_vec(),
+        checks: Vec::new(),
+        mutations: vec![crate::KvMutation::Put {
+            key: b"key".to_vec(),
+            value: vec![7; 4 * 1024 * 1024],
+            expires_at_ms: None,
+        }],
+    };
+    let mut encoder = crate::BoundedEncoder::new(crate::codec::MAX_WIRE_BYTES as u32).unwrap();
+    crate::WireValue::encode(&input, &mut encoder).unwrap();
+    let mut request = mutation();
+    let Some(wire::mutation_request::Operation::CellCommand(command)) = &mut request.operation
+    else {
+        panic!("expected Cell command");
+    };
+    command.input = encoder.finish();
+    let signing = signer();
+    let encoded = signing
+        .sign(
+            principal(),
+            NOW_MS,
+            NOW_MS + 60_000,
+            30_000,
+            PeerOperation::Mutate(request),
+        )
+        .unwrap();
+    let verified = verifier(&signing).verify(&encoded, NOW_MS + 1_000).unwrap();
+    assert_eq!(verified.operation_tag(), 10);
+}
+
 fn principal() -> PeerPrincipal {
     PeerPrincipal {
         issuer: "https://identity.example".into(),
