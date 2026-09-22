@@ -25,7 +25,9 @@
   workload with seed-bound lifecycle cases for every primitive, public `CellNode`
   typed all-primitive execution, public
   receipt/matrix validation, protected-profile/run-artifact verifier coverage,
-  release negative gates, exact tagged-source profile binding, a
+  release negative gates, exact tagged-source profile binding, a canonical
+  protected execution-evidence file codec and fail-closed `bind-protected`
+  receipt command, a
   schema-2 canonical manifest builder, readiness-frozen host facility
   ownership, and a fresh/clock-skew check for protected matrix consumption are
   implemented and tested; the protected ten-row profile workload and
