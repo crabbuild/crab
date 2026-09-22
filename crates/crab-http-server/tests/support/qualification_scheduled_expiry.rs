@@ -260,7 +260,7 @@ impl<'a> ExpiryCase<'a> {
         Ok(acknowledged.receipt.commit_sequence)
     }
 
-    pub async fn cron(self, operation_id: u64, nonce: u64) -> Result<()> {
+    pub async fn cron(self, operation_id: u64, nonce: u64) -> Result<(u64, u64, i64)> {
         let Self {
             writer,
             peer,
@@ -376,7 +376,11 @@ impl<'a> ExpiryCase<'a> {
         {
             return Err(Error::Control("public scheduled Cron expiry state differs"));
         }
-        Ok(())
+        Ok((
+            acknowledged.receipt.commit_sequence,
+            generation,
+            next_due_ms,
+        ))
     }
 
     pub async fn workflow(self, operation_id: u64, nonce: u64) -> Result<()> {

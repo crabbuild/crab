@@ -88,12 +88,15 @@ const AFTER_LEASE: &str = "after-lease";
 const AFTER_SETTLEMENT: &str = "after-settlement";
 const AFTER_SQL_EXPIRY: &str = "after-sql-expiry";
 const AFTER_KV_EXPIRY: &str = "after-kv-expiry";
+const AFTER_CRON_EXPIRY: &str = "after-cron-expiry";
 const SQL_PAYLOAD: &[u8] = b"acknowledged-before-owner-kill";
 const SQL_EXPIRY_OPERATION_ID: u64 = 900_150;
 const SQL_EXPIRY_NONCE: u64 = 900_152;
 const KV_EXPIRY_OPERATION_ID: u64 = 900_160;
 const KV_EXPIRY_NONCE: u64 = 900_162;
 const KV_EXPIRY_SCOPE: &[u8] = b"public-qualification-scheduled-expiry";
+const CRON_EXPIRY_OPERATION_ID: u64 = 900_170;
+const CRON_EXPIRY_NONCE: u64 = 900_172;
 const KV_SCOPE: &[u8] = b"process-fault";
 const KV_KEY: &[u8] = b"acknowledged";
 const KV_PAYLOAD: &[u8] = b"published-kv-before-owner-kill";
@@ -114,6 +117,7 @@ struct Acknowledgement {
     sql_sequence: u64,
     expiry_sql_sequence: Option<u64>,
     expiry_kv_sequence: Option<u64>,
+    expiry_cron: Option<CronExpiryEvidence>,
     kv_sequence: u64,
     kv_version: Vec<u8>,
     blob_sequence: u64,
@@ -133,6 +137,13 @@ struct Acknowledgement {
     effect_run_id: [u8; 16],
     leases: Option<LeaseEvidence>,
     settlements: Option<SettlementEvidence>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct CronExpiryEvidence {
+    sequence: u64,
+    generation: u64,
+    next_due_ms: i64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -198,7 +209,8 @@ fn process_case() -> String {
             || case == AFTER_LEASE
             || case == AFTER_SETTLEMENT
             || case == AFTER_SQL_EXPIRY
-            || case == AFTER_KV_EXPIRY,
+            || case == AFTER_KV_EXPIRY
+            || case == AFTER_CRON_EXPIRY,
         "unknown fault case"
     );
     case
@@ -357,6 +369,21 @@ async fn filesystem_owner_kill_preserves_expired_kv_ttl_and_rejected_mutation() 
     let mut expected = acknowledged_payload(true);
     expected.extend_from_slice(&KV_EXPIRY_NONCE.to_be_bytes());
     run_filesystem_process_fault(AFTER_KV_EXPIRY, "ack", &expected).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_owner_kill_preserves_cron_schedule_after_expired_pause() {
+    let mut expected = acknowledged_payload(true);
+    expected.extend_from_slice(&CRON_EXPIRY_NONCE.to_be_bytes());
+    run_process_fault(AFTER_CRON_EXPIRY, "ack", &expected).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn filesystem_owner_kill_preserves_cron_schedule_after_expired_pause() {
+    let mut expected = acknowledged_payload(true);
+    expected.extend_from_slice(&CRON_EXPIRY_NONCE.to_be_bytes());
+    run_filesystem_process_fault(AFTER_CRON_EXPIRY, "ack", &expected).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

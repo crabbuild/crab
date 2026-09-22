@@ -1323,7 +1323,10 @@ async fn run_scheduled_expiry_case(
     );
     let result = match primitive {
         "workflow" => case.workflow(operation.index(), operation.nonce()).await,
-        "cron" => case.cron(operation.index(), operation.nonce()).await,
+        "cron" => case
+            .cron(operation.index(), operation.nonce())
+            .await
+            .map(|_| ()),
         "sql" => case
             .sql(operation.index(), operation.nonce())
             .await

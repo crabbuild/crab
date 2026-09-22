@@ -196,8 +196,8 @@ pub(super) async fn run() {
     else {
         panic!("source Effect workflow did not complete");
     };
-    let (expiry_sql_sequence, expiry_kv_sequence) =
-        if case == AFTER_SQL_EXPIRY || case == AFTER_KV_EXPIRY {
+    let (expiry_sql_sequence, expiry_kv_sequence, expiry_cron) =
+        if case == AFTER_SQL_EXPIRY || case == AFTER_KV_EXPIRY || case == AFTER_CRON_EXPIRY {
             let observer_client = CellClient::local_many(Arc::clone(&registry), handles.clone())
                 .expect("source expiry observer client");
             let observer = node.application_handle::<fixture::ReferenceApplication>(
@@ -234,8 +234,9 @@ pub(super) async fn run() {
                             .expect("source scheduled SQL expiry"),
                     ),
                     None,
+                    None,
                 )
-            } else {
+            } else if case == AFTER_KV_EXPIRY {
                 (
                     None,
                     Some(
@@ -244,10 +245,25 @@ pub(super) async fn run() {
                             .await
                             .expect("source scheduled KV expiry"),
                     ),
+                    None,
+                )
+            } else {
+                let (sequence, generation, next_due_ms) = expiry
+                    .cron(CRON_EXPIRY_OPERATION_ID, CRON_EXPIRY_NONCE)
+                    .await
+                    .expect("source scheduled Cron expiry");
+                (
+                    None,
+                    None,
+                    Some(CronExpiryEvidence {
+                        sequence,
+                        generation,
+                        next_due_ms,
+                    }),
                 )
             }
         } else {
-            (None, None)
+            (None, None, None)
         };
     let leases = if case == AFTER_LEASE {
         let claimed = queue
@@ -484,6 +500,7 @@ pub(super) async fn run() {
         sql_sequence: committed.receipt.commit_sequence,
         expiry_sql_sequence,
         expiry_kv_sequence,
+        expiry_cron,
         kv_sequence: written.receipt.commit_sequence,
         kv_version: version.to_vec(),
         blob_sequence: published.receipt.commit_sequence,

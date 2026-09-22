@@ -356,6 +356,13 @@ absent at or after the acknowledged put sequence, preserve the unrelated
 acknowledged KV value/version, and drain to zero reservations. Filesystem and
 isolated RustFS three-process cases passed on 2026-09-22. The scheduled KV
 expiry artifact and protected provider evidence remain open.
+The Cron expiry boundary now commits a schedule, holds a signed pause past its
+identity expiry, and confirms that the pause was rejected before owner kill.
+Fresh successor and third processes restore from durable storage and each
+check the exact schedule payload, generation, next due time, enabled state,
+occurrence, and commit sequence, along with zero reservations after drain.
+Filesystem and isolated RustFS three-process cases passed on 2026-09-22. The
+scheduled Cron expiry artifact and protected provider evidence remain open.
 
 Implement one fault-capable executor through `CellNode` and typed
 `ApplicationHandle` capabilities. Each operation writes a unique, bounded
