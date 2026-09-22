@@ -27,8 +27,12 @@ use tokio_util::sync::CancellationToken;
 
 #[path = "support/reference_application.rs"]
 mod fixture;
+#[path = "support/qualification_process_cron.rs"]
+mod process_cron;
 #[path = "support/qualification_process_duplicate.rs"]
 mod process_duplicate;
+#[path = "support/qualification_process_effect.rs"]
+mod process_effect;
 #[path = "support/qualification_process_owner.rs"]
 mod process_owner;
 #[path = "support/qualification_process_successor.rs"]
@@ -57,6 +61,7 @@ const SYNC_ENV: &str = "CRAB_CELL_PROCESS_FAULT_SYNC";
 const BEFORE_WRITE: &str = "before-write";
 const AFTER_ACK: &str = "after-ack";
 const AFTER_LEASE: &str = "after-lease";
+const AFTER_SETTLEMENT: &str = "after-settlement";
 const SQL_PAYLOAD: &[u8] = b"acknowledged-before-owner-kill";
 const KV_SCOPE: &[u8] = b"process-fault";
 const KV_KEY: &[u8] = b"acknowledged";
@@ -94,6 +99,7 @@ struct Acknowledgement {
     effect_sequence: u64,
     effect_run_id: [u8; 16],
     leases: Option<LeaseEvidence>,
+    settlements: Option<SettlementEvidence>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -115,6 +121,27 @@ struct LeaseEvidence {
     effect_sequence: u64,
 }
 
+#[derive(Deserialize, Serialize)]
+struct SettlementEvidence {
+    queue_token: [u8; 16],
+    queue_ack_sequence: u64,
+    activity_id: [u8; 16],
+    activity_attempt: u32,
+    activity_token: [u8; 16],
+    activity_completion_token: [u8; 16],
+    activity_input: Vec<u8>,
+    activity_complete_sequence: u64,
+    activity_event_sequence: u64,
+    activity_result: Vec<u8>,
+    effect_id: [u8; 32],
+    effect_attempt: u32,
+    effect_token: [u8; 16],
+    effect_expires_at_ms: i64,
+    effect_result: Vec<u8>,
+    effect_destination_sequence: u64,
+    effect_ack_sequence: u64,
+}
+
 struct ChildGuard(Child);
 
 impl Drop for ChildGuard {
@@ -133,7 +160,10 @@ fn process_input() -> (Path, std::path::PathBuf) {
 fn process_case() -> String {
     let case = env::var(CASE_ENV).expect("fault case");
     assert!(
-        case == BEFORE_WRITE || case == AFTER_ACK || case == AFTER_LEASE,
+        case == BEFORE_WRITE
+            || case == AFTER_ACK
+            || case == AFTER_LEASE
+            || case == AFTER_SETTLEMENT,
         "unknown fault case"
     );
     case
@@ -225,6 +255,21 @@ async fn rustfs_owner_kill_after_three_leases_reclaims_exact_attempts() {
     expected.extend_from_slice(EFFECT_RESULT);
     expected.extend_from_slice(CRON_PAYLOAD);
     run_process_fault(AFTER_LEASE, "ack", &expected).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_owner_kill_preserves_three_acknowledged_settlements() {
+    let mut expected = Vec::from(SQL_PAYLOAD);
+    expected.extend_from_slice(KV_PAYLOAD);
+    expected.extend_from_slice(BLOB_PAYLOAD);
+    expected.extend_from_slice(QUEUE_PAYLOAD);
+    expected.extend_from_slice(CRON_PAYLOAD);
+    expected.extend_from_slice(WORKFLOW_RESULT);
+    expected.extend_from_slice(b"activity-result");
+    expected.extend_from_slice(EFFECT_RESULT);
+    expected.extend_from_slice(CRON_PAYLOAD);
+    run_process_fault(AFTER_SETTLEMENT, "ack", &expected).await;
 }
 
 async fn run_process_fault(case: &str, barrier: &str, expected: &[u8]) {

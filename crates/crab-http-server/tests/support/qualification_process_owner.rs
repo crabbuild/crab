@@ -220,8 +220,8 @@ pub(super) async fn run() {
             &partition_for_shard(0),
         )
         .expect("source Workflow target");
-        let activity_client =
-            CellClient::local_many(registry, handles).expect("source Activity client");
+        let activity_client = CellClient::local_many(Arc::clone(&registry), handles.clone())
+            .expect("source Activity client");
         let activity_claimed = activity_client
             .command::<WorkflowActivityClaimCommand<fixture::ReferenceWorkflow>>(
                 &workflow_target,
@@ -275,6 +275,156 @@ pub(super) async fn run() {
     } else {
         None
     };
+    let settlements = if case == AFTER_SETTLEMENT {
+        let claimed = queue
+            .claim(
+                identity(900_135, now_ms()),
+                0,
+                QueueClaimRequest {
+                    limit: 1,
+                    lease_ms: 30_000,
+                },
+            )
+            .await
+            .expect("owner Queue settlement claim");
+        let [queue_claim] = claimed.output.as_slice() else {
+            panic!("owner Queue settlement claim did not select one message");
+        };
+        assert_eq!(queue_claim.message_id, message_id);
+        let queue_acked = queue
+            .ack(
+                replay_identity(900_136, replay_issued_at_ms),
+                0,
+                queue_claim.message_id,
+                queue_claim.token,
+            )
+            .await
+            .expect("acknowledged owner Queue settlement");
+        assert!(matches!(
+            queue_acked.output,
+            QueueLeaseOutcome::Applied {
+                state: QueueState::Acked,
+                ..
+            }
+        ));
+
+        let workflow_target = CellTarget::new(
+            tenant,
+            application,
+            fixture::WORKFLOW_NAMESPACE,
+            &partition_for_shard(0),
+        )
+        .expect("owner Workflow settlement target");
+        let activity_claimed = typed
+            .command::<WorkflowActivityClaimCommand<fixture::ReferenceWorkflow>>(
+                &workflow_target,
+                identity(900_137, now_ms()),
+                WorkflowActivityClaimRequest {
+                    limit: 1,
+                    lease_ms: 30_000,
+                },
+            )
+            .await
+            .expect("owner Activity settlement claim");
+        let [activity_claim] = activity_claimed.output.as_slice() else {
+            panic!("owner Activity settlement claim did not select one attempt");
+        };
+        assert_eq!(activity_claim.run_id, activity_run_id);
+        let completed = typed
+            .command::<WorkflowActivityCompleteCommand<fixture::ReferenceWorkflow>>(
+                &workflow_target,
+                replay_identity(900_138, replay_issued_at_ms),
+                ActivityCompletion {
+                    run_id: activity_claim.run_id,
+                    activity_id: activity_claim.activity_id,
+                    attempt: activity_claim.attempt,
+                    lease_token: activity_claim.token,
+                    completion_token: fixed_id(900_138),
+                    result: activity_claim.input.clone(),
+                    failed: false,
+                    retryable: false,
+                },
+            )
+            .await
+            .expect("acknowledged owner Activity completion");
+        assert!(matches!(
+            completed.output,
+            ActivityCompletionOutcome::Applied(WorkflowOutcome::Applied {
+                status: WorkflowStatus::Completed,
+                event_sequence: 2,
+                ..
+            })
+        ));
+        let activity_state = workflow
+            .state(ACTIVITY_WORKFLOW_ID.to_vec(), Some(completed.receipt))
+            .await
+            .expect("owner Activity settlement read");
+        let activity_run = activity_state.output.expect("completed owner Activity run");
+        let activity_result = activity_run
+            .result
+            .expect("completed owner Activity result");
+        assert_eq!(activity_run.event_sequence, 2);
+
+        let effects = typed
+            .effects::<fixture::ReferenceWorkflow>(workflow_target)
+            .expect("owner settlement Effects");
+        let effect_claimed = effects
+            .claim(
+                identity(900_139, now_ms()),
+                EffectClaimRequest {
+                    limit: 1,
+                    lease_ms: 30_000,
+                },
+            )
+            .await
+            .expect("owner Effect settlement claim");
+        let [effect] = effect_claimed.output.as_slice() else {
+            panic!("owner Effect settlement claim did not select one delivery");
+        };
+        let peer_effect = qualification_peer::peer_effect_client(registry, handles);
+        let destination = peer_effect
+            .deliver(effect, now_ms())
+            .await
+            .expect("acknowledged owner destination delivery");
+        assert!(matches!(destination, StoredOutcome::Success { .. }));
+        assert_eq!(
+            peer_effect
+                .resolve(effect, now_ms())
+                .await
+                .expect("owner destination inbox resolution"),
+            Resolution::Committed(destination.clone())
+        );
+        let effect_acked = effects
+            .ack(
+                replay_identity(900_140, replay_issued_at_ms),
+                effect.clone(),
+                destination.result().to_vec(),
+            )
+            .await
+            .expect("acknowledged owner Effect settlement");
+        assert_eq!(effect_acked.output, EffectLeaseOutcome::Delivered);
+        Some(SettlementEvidence {
+            queue_token: queue_claim.token,
+            queue_ack_sequence: queue_acked.receipt.commit_sequence,
+            activity_id: activity_claim.activity_id,
+            activity_attempt: activity_claim.attempt,
+            activity_token: activity_claim.token,
+            activity_completion_token: fixed_id(900_138),
+            activity_input: activity_claim.input.clone(),
+            activity_complete_sequence: completed.receipt.commit_sequence,
+            activity_event_sequence: activity_run.event_sequence,
+            activity_result,
+            effect_id: effect.effect_id,
+            effect_attempt: effect.attempt,
+            effect_token: effect.token,
+            effect_expires_at_ms: effect.expires_at_ms,
+            effect_result: destination.result().to_vec(),
+            effect_destination_sequence: destination.commit_sequence(),
+            effect_ack_sequence: effect_acked.receipt.commit_sequence,
+        })
+    } else {
+        None
+    };
     let acknowledgement = Acknowledgement {
         replay_issued_at_ms,
         queue_available_at_ms,
@@ -297,6 +447,7 @@ pub(super) async fn run() {
         effect_sequence: effect_started.receipt.commit_sequence,
         effect_run_id,
         leases,
+        settlements,
     };
     let bytes = serde_json::to_vec(&acknowledgement).expect("encode acknowledgement");
     publish_marker(&sync, "ack", &bytes);
