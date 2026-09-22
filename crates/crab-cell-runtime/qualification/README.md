@@ -55,7 +55,12 @@ primitive: `happy`, `retry`, `duplicate`, `expiry`, `cancellation`, `owner-loss`
 and `recovery`. Adapters inspect `QualificationOperation::case()` (or its
 bounded hint accessors) to drive the corresponding primitive-specific behavior;
 the schedule is a case plan, not evidence that an external provider or owner
-fault actually occurred.
+fault actually occurred. The workload's outcome counts are forecasts used to
+describe that schedule. A measured run binds the scheduled attempt count for
+each primitive and records actual acknowledgements, rejections, ambiguity,
+retries, and verification independently; it need not reproduce those
+forecasts. A PR wiring smoke marks only the primitive/case pairs it actually
+exercises and checks; other scheduled pairs stay unmarked.
 
 The measured summary also emits `throughput_ops_per_sec` using a conservative
 rounded-up duration; protected profiles still verify the raw elapsed duration
@@ -63,7 +68,7 @@ and their independent resource counters. Protected `primitives` receipts must
 also match the measured run artifact's cells, operations, duration, throughput,
 and p50/p95/p99/max latency metrics in non-decreasing order; a signed receipt
 with substituted threshold values is rejected.
-Measured run artifacts use schema 3 and include a bounded primitive/case bitset;
+Measured run artifacts use schema 4 and include a bounded primitive/case bitset;
 named provider/topology profiles reject artifacts missing any lifecycle case.
 The PR profile is a correctness gate.
 `local-provider-v1`, `fault-v1`, `provider-v1`, `compatibility-v1`, and

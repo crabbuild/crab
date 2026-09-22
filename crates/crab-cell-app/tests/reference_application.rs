@@ -1184,6 +1184,23 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
             "namespace module differs from capability"
         )))
     ));
+    let wrong_prepared = typed
+        .prepare_command::<KvAtomicCommand<ReferenceKv>>(
+            &sql_target,
+            reference_identity(50, now_ms),
+            KvAtomicRequest {
+                scope: b"wrong-module".to_vec(),
+                checks: Vec::new(),
+                mutations: Vec::new(),
+            },
+        )
+        .await;
+    assert!(matches!(
+        wrong_prepared,
+        Err(InvocationError::NotStarted(Error::Registry(
+            "namespace module differs from capability"
+        )))
+    ));
     let wrong_query = typed
         .query::<KvGetQuery<ReferenceKv>>(
             &sql_target,

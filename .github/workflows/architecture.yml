@@ -250,6 +250,15 @@ jobs:
           cargo test -p crab-http-server --locked --test public_cell_qualification \
             rustfs_public_cell_node_runs_typed_primitive_workload \
             -- --ignored --exact --nocapture
+          cargo test -p crab-http-server --locked --test public_cell_process_fault \
+            -- --ignored --nocapture
+          cargo test -p crab-http-server --locked \
+            --test public_cell_response_loss --test public_cell_retry \
+            -- --ignored --nocapture
+          cargo test -p crab-http-server --locked --test public_cell_activity_retry \
+            -- --ignored --nocapture
+          cargo test -p crab-http-server --locked --test public_cell_cancellation \
+            -- --ignored --nocapture
 
   binary-contracts:
     name: Binary and integration contracts

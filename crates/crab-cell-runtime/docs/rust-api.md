@@ -170,6 +170,15 @@ match result {
 
 `CellClient` validates namespace, role, code, schema, and incarnation. It chooses the local actor or authenticated peer path without changing command semantics.
 
+For a command whose caller may be cancelled while awaiting dispatch, use
+`ApplicationHandle::prepare_command::<C>` and retain a clone before calling
+`PreparedCommand::execute`. The prepared value fixes the exact input digest,
+identity, and owner incarnation before any mutation is sent. After cancellation,
+resolve its `evidence()` through a separate application handle. Retry the retained
+prepared command only when resolution is `Absent`; treat `Committed` as final and
+`Unknown`, `Expired`, or resolution failure as unresolved. Preparation itself has
+no mutation side effect.
+
 ## Stream mutable Cell state safely
 
 Use `CellStateStream` when a response producer must query mutable Cell state
@@ -259,7 +268,7 @@ impl ActivityHandler for PublishRelease {
 
 Async activities run under a CPU-derived bound. Blocking activities reserve a slot in a joined fixed operating-system thread pool before claim.
 
-The supervisor validates the exact published lease, heartbeats through durable commands, and records completion or retry. Panic becomes activity failure and does not kill the pool.
+The supervisor validates the exact published lease, heartbeats through durable commands, and records completion or retry. If a completion response is lost, it checks the request ledger: a committed result is returned without rerunning the handler, while an absent request is retried with the same identity and result. If the ledger remains unknown or cannot be read, `run_once` returns pending evidence; the caller must treat that activity result as unresolved. Panic becomes activity failure and does not kill the pool.
 
 ## Forward only private registered messages
 

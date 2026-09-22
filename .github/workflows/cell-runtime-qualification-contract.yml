@@ -88,7 +88,7 @@ jobs:
       - name: Verify public CellNode typed primitive workload
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
-        run: cargo test -p crab-http-server --test public_cell_host_application --test public_cell_qualification --locked
+        run: cargo test -p crab-http-server --test public_cell_host_application --test public_cell_qualification --test public_cell_response_loss --test public_cell_retry --test public_cell_activity_retry --test public_cell_cancellation --locked
       - name: Keep Compose receipt schema gate synchronized
         shell: bash
         run: |
