@@ -265,6 +265,8 @@ jobs:
             -- --ignored --nocapture
           cargo test -p crab-http-server --locked --test public_cell_effect_delivery_cancellation \
             -- --ignored --nocapture
+          cargo test -p crab-http-server --locked --test public_cell_lease_expiry \
+            -- --ignored --nocapture
 
   binary-contracts:
     name: Binary and integration contracts
