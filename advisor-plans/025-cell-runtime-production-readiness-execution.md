@@ -29,9 +29,10 @@
   protected execution-evidence file codec and fail-closed `bind-protected`
   receipt command, a
   schema-2 canonical manifest builder, readiness-frozen host facility
-  ownership, and a fresh/clock-skew check for protected matrix consumption are
-  implemented and tested; the protected ten-row profile workload and
-  provider/Kubernetes/scale receipts remain open
+  ownership, a fresh/clock-skew check for protected matrix consumption, and the
+  canonical manual protected-qualification workflow are implemented and tested;
+  the protected ten-row profile workload and provider/Kubernetes/scale receipts
+  remain open
 
 ## Next execution slice: honest primitive case evidence
 

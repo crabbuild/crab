@@ -125,6 +125,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test -f .github/workflows/cell-runtime-protected-qualification.yml
+          grep -F 'name: Cell runtime protected qualification' \
+            .github/workflows/cell-runtime-protected-qualification.yml
+          grep -F 'runs-on: [self-hosted, linux, crab-cell-runtime-protected]' \
+            .github/workflows/cell-runtime-protected-qualification.yml
+          grep -F '/opt/crab/bin/crab-cell-runtime-protected-qualifier' \
+            .github/workflows/cell-runtime-protected-qualification.yml
+          grep -F 'cell-runtime-protected-${{ github.run_id }}-${{ github.run_attempt }}' \
+            .github/workflows/cell-runtime-protected-qualification.yml
           grep -F 'cell_runtime_evidence_run_id:' .github/workflows/http-server-release.yml
           grep -F 'cell_runtime_evidence_artifact:' .github/workflows/http-server-release.yml
           grep -F 'actions: read' .github/workflows/http-server-release.yml
