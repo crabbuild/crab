@@ -1237,73 +1237,44 @@ async fn run_scheduled_retry_cases(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn public_scheduled_cron_expiry_rejects_delayed_mutation() {
+    run_scheduled_expiry_case(public_host_fixture().await, "cron").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_public_scheduled_cron_expiry_rejects_delayed_mutation() {
+    let (store, root) = rustfs_public_store();
+    run_scheduled_expiry_case(public_host_fixture_with_store(store, root).await, "cron").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn public_scheduled_sql_expiry_rejects_delayed_mutation() {
-    run_scheduled_sql_expiry_case(public_host_fixture().await).await;
+    run_scheduled_expiry_case(public_host_fixture().await, "sql").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
 async fn rustfs_public_scheduled_sql_expiry_rejects_delayed_mutation() {
     let (store, root) = rustfs_public_store();
-    run_scheduled_sql_expiry_case(public_host_fixture_with_store(store, root).await).await;
-}
-
-async fn run_scheduled_sql_expiry_case(
-    (node, writer, tenant, application, _directory, registry, handles, store): PublicHostFixture,
-) {
-    let workload = QualificationWorkload::generate_with_size(
-        &QualificationProfile::pr_contract(),
-        41,
-        1,
-        QUALIFICATION_CASE_COVERAGE_OPERATIONS,
-        1,
-    )
-    .expect("qualification case schedule");
-    let operation = workload
-        .iter_operations()
-        .find(|operation| {
-            operation.primitive() == "sql" && operation.case() == QualificationCase::Expiry
-        })
-        .expect("scheduled SQL expiry case");
-    let observer = independent_observer(&node, &registry, &handles, &store, tenant, application);
-    let (client, entered, release, dispatched) =
-        peer_client_with_delayed_mutation_receive(registry, handles);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(client, tenant, application);
-    qualification_scheduled_expiry::ExpiryCase::new(
-        &writer,
-        &peer,
-        &observer,
-        &entered,
-        &release,
-        &dispatched,
-        tenant,
-        application,
-    )
-    .sql(operation.index(), operation.nonce())
-    .await
-    .expect("scheduled SQL expiry");
-    drop(writer);
-    drop(peer);
-    drop(observer);
-    node.shutdown().await.expect("qualification shutdown");
-    assert_zero_reservations(&node);
+    run_scheduled_expiry_case(public_host_fixture_with_store(store, root).await, "sql").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn public_scheduled_kv_expiry_rejects_delayed_mutation() {
-    run_scheduled_kv_expiry_case(public_host_fixture().await).await;
+    run_scheduled_expiry_case(public_host_fixture().await, "kv").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
 async fn rustfs_public_scheduled_kv_expiry_rejects_delayed_mutation() {
     let (store, root) = rustfs_public_store();
-    run_scheduled_kv_expiry_case(public_host_fixture_with_store(store, root).await).await;
+    run_scheduled_expiry_case(public_host_fixture_with_store(store, root).await, "kv").await;
 }
 
-async fn run_scheduled_kv_expiry_case(
+async fn run_scheduled_expiry_case(
     (node, writer, tenant, application, _directory, registry, handles, store): PublicHostFixture,
+    primitive: &str,
 ) {
     let workload = QualificationWorkload::generate_with_size(
         &QualificationProfile::pr_contract(),
@@ -1316,15 +1287,15 @@ async fn run_scheduled_kv_expiry_case(
     let operation = workload
         .iter_operations()
         .find(|operation| {
-            operation.primitive() == "kv" && operation.case() == QualificationCase::Expiry
+            operation.primitive() == primitive && operation.case() == QualificationCase::Expiry
         })
-        .expect("scheduled KV expiry case");
+        .expect("scheduled expiry case");
     let observer = independent_observer(&node, &registry, &handles, &store, tenant, application);
     let (client, entered, release, dispatched) =
         peer_client_with_delayed_mutation_receive(registry, handles);
     let peer =
         node.application_handle::<fixture::ReferenceApplication>(client, tenant, application);
-    qualification_scheduled_expiry::ExpiryCase::new(
+    let case = qualification_scheduled_expiry::ExpiryCase::new(
         &writer,
         &peer,
         &observer,
@@ -1333,10 +1304,14 @@ async fn run_scheduled_kv_expiry_case(
         &dispatched,
         tenant,
         application,
-    )
-    .kv(operation.index(), operation.nonce())
-    .await
-    .expect("scheduled KV expiry");
+    );
+    match primitive {
+        "cron" => case.cron(operation.index(), operation.nonce()).await,
+        "sql" => case.sql(operation.index(), operation.nonce()).await,
+        "kv" => case.kv(operation.index(), operation.nonce()).await,
+        _ => panic!("unknown scheduled expiry primitive: {primitive}"),
+    }
+    .expect("scheduled expiry");
     drop(writer);
     drop(peer);
     drop(observer);

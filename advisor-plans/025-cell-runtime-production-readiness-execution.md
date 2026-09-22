@@ -159,6 +159,14 @@ the rejected row is absent, and resolution reports `Expired`. The in-memory
 and isolated RustFS cases passed on 2026-09-22 with zero reservations after
 shutdown. The observer shares the owner process, and this focused test does
 not produce a run artifact or mark the SQL expiry bit in the matrix.
+A focused scheduled Cron expiry test now publishes a durable schedule and reads
+its exact payload, generation, due time, occurrence, and enabled state. It
+delays a signed Pause at peer receive until the identity expires, verifies
+rejection before dispatch and `Expired` resolution, then confirms the schedule
+is unchanged through a separate typed reader. The in-memory and isolated
+RustFS cases passed on 2026-09-22 with zero reservations after shutdown. Its
+observer shares the owner process; the focused test does not produce a run
+artifact or mark Cron expiry in the matrix.
 A subsequent fresh-prefix 64-operation RustFS smoke completed every typed
 operation but failed the unchanged five-second profile gate: p99 was 32,341 ms
 over 236 seconds. Slow cases included Queue happy (7,733 ms), Queue duplicate
