@@ -1012,6 +1012,41 @@ service_session() {
   node_session "$1"
 }
 
+fallback_session() {
+  local service="$1"
+  local session=""
+  for _ in $(seq 1 45); do
+    if session="$(service_session "$service" 2>/dev/null)" &&
+      [[ "$session" =~ ^[0-9a-f]{32}$ ]]; then
+      printf '%s\n' "$session"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "${service} did not expose a cell session after restart." >&2
+  return 1
+}
+
+fallback_node_json() {
+  local service="$1"
+  local session="$2"
+  local node_json=""
+  for _ in $(seq 1 45); do
+    node_json="$(service_cli "$service" cells node --session "$session" --json \
+      2>/dev/null || true)"
+    if jq --exit-status --arg session "$session" \
+      '.session == $session and has("advertisement")' \
+      <<<"$node_json" >/dev/null 2>&1; then
+      printf '%s\n' "$node_json"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "${service} did not expose node session ${session} after restart." >&2
+  printf '%s\n' "$node_json" >&2
+  return 1
+}
+
 stop_fallback_member() {
   case "$1" in
     server)
@@ -1046,20 +1081,23 @@ done
 wait_for_healthy server
 wait_for_healthy server-c
 wait_for_healthy server-d
-session_a_fallback="$(service_session server)"
-session_c_fallback="$(service_session server-c)"
-session_d_fallback="$(service_session server-d)"
-node_a_fallback="$(service_cli server cells node --session "$session_a_fallback" --json)"
-node_c_fallback="$(service_cli server-c cells node --session "$session_c_fallback" --json)"
-node_d_fallback="$(service_cli server-d cells node --session "$session_d_fallback" --json)"
-node_b_before_fallback="$(service_cli server-b cells node \
-  --session "$session_after_second_loss" --json)"
+session_a_fallback="$(fallback_session server)"
+session_c_fallback="$(fallback_session server-c)"
+session_d_fallback="$(fallback_session server-d)"
+node_a_fallback="$(fallback_node_json server "$session_a_fallback")"
+node_c_fallback="$(fallback_node_json server-c "$session_c_fallback")"
+node_d_fallback="$(fallback_node_json server-d "$session_d_fallback")"
+node_b_before_fallback="$(fallback_node_json server-b "$session_after_second_loss")"
 fallback_members="$(jq -c '.advertisement.log.member_nodes' <<<"$node_b_before_fallback")"
-jq --exit-status \
+if ! jq --exit-status \
   '.live == true and .advertisement.log.state == "open" and
    .advertisement.log.active == true and
    (.advertisement.log.member_nodes | length > 0)' \
-  <<<"$node_b_before_fallback" >/dev/null
+  <<<"$node_b_before_fallback" >/dev/null; then
+  echo "Fallback owner B did not expose an open live durability log." >&2
+  jq . <<<"$node_b_before_fallback" >&2 || true
+  exit 1
+fi
 
 fallback_response="$(post_json_eventually \
   "$node_b_origin" \
