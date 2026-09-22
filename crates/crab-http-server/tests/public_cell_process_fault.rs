@@ -38,6 +38,12 @@ mod process_cron;
 mod process_duplicate;
 #[path = "support/qualification_process_effect.rs"]
 mod process_effect;
+#[path = "support/qualification_scheduled_expiry.rs"]
+#[expect(
+    dead_code,
+    reason = "the process fault test uses the scheduled SQL expiry case"
+)]
+mod process_expiry;
 #[path = "support/qualification_process_observer.rs"]
 mod process_observer;
 #[path = "support/qualification_process_owner.rs"]
@@ -48,6 +54,12 @@ mod process_restore;
 mod process_successor;
 #[path = "support/qualification.rs"]
 mod qualification;
+#[path = "support/qualification_cancellation.rs"]
+#[expect(
+    dead_code,
+    reason = "the process expiry case uses the shared clock helper"
+)]
+mod qualification_cancellation;
 #[path = "support/qualification_fence.rs"]
 mod qualification_fence;
 #[path = "support/qualification_fixture.rs"]
@@ -74,7 +86,10 @@ const BEFORE_WRITE: &str = "before-write";
 const AFTER_ACK: &str = "after-ack";
 const AFTER_LEASE: &str = "after-lease";
 const AFTER_SETTLEMENT: &str = "after-settlement";
+const AFTER_SQL_EXPIRY: &str = "after-sql-expiry";
 const SQL_PAYLOAD: &[u8] = b"acknowledged-before-owner-kill";
+const SQL_EXPIRY_OPERATION_ID: u64 = 900_150;
+const SQL_EXPIRY_NONCE: u64 = 900_152;
 const KV_SCOPE: &[u8] = b"process-fault";
 const KV_KEY: &[u8] = b"acknowledged";
 const KV_PAYLOAD: &[u8] = b"published-kv-before-owner-kill";
@@ -93,6 +108,7 @@ struct Acknowledgement {
     replay_issued_at_ms: i64,
     queue_available_at_ms: i64,
     sql_sequence: u64,
+    expiry_sql_sequence: Option<u64>,
     kv_sequence: u64,
     kv_version: Vec<u8>,
     blob_sequence: u64,
@@ -175,7 +191,8 @@ fn process_case() -> String {
         case == BEFORE_WRITE
             || case == AFTER_ACK
             || case == AFTER_LEASE
-            || case == AFTER_SETTLEMENT,
+            || case == AFTER_SETTLEMENT
+            || case == AFTER_SQL_EXPIRY,
         "unknown fault case"
     );
     case
@@ -304,6 +321,21 @@ async fn rustfs_owner_kill_preserves_three_acknowledged_settlements() {
     expected.extend_from_slice(EFFECT_RESULT);
     expected.extend_from_slice(CRON_PAYLOAD);
     run_process_fault(AFTER_SETTLEMENT, "ack", &expected).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_owner_kill_preserves_rejected_sql_expiry_and_acknowledged_row() {
+    let mut expected = acknowledged_payload(true);
+    expected.extend_from_slice(&SQL_EXPIRY_NONCE.to_be_bytes());
+    run_process_fault(AFTER_SQL_EXPIRY, "ack", &expected).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn filesystem_owner_kill_preserves_rejected_sql_expiry_and_acknowledged_row() {
+    let mut expected = acknowledged_payload(true);
+    expected.extend_from_slice(&SQL_EXPIRY_NONCE.to_be_bytes());
+    run_filesystem_process_fault(AFTER_SQL_EXPIRY, "ack", &expected).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

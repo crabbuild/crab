@@ -80,6 +80,19 @@ pub(super) async fn run() {
                         sql: "SELECT schedule_id, generation, occurrence, scheduled_at_ms, payload FROM qualification_cron_invocations".into(),
                         parameters: Vec::new(),
                     },
+                    SqlStatement {
+                        sql: "SELECT payload FROM qualification_rows WHERE id = ?1".into(),
+                        parameters: vec![SqlValue::Integer(
+                            i64::try_from(SQL_EXPIRY_OPERATION_ID).expect("expiry row ID bounds"),
+                        )],
+                    },
+                    SqlStatement {
+                        sql: "SELECT payload FROM qualification_rows WHERE id = ?1".into(),
+                        parameters: vec![SqlValue::Integer(
+                            i64::try_from(SQL_EXPIRY_OPERATION_ID + 1)
+                                .expect("delayed expiry row ID bounds"),
+                        )],
+                    },
                 ],
             },
         )
@@ -154,6 +167,18 @@ pub(super) async fn run() {
             ]]
         );
         assert!(rows.receipt.commit_sequence >= acknowledged.sql_sequence);
+        if let Some(sequence) = acknowledged.expiry_sql_sequence {
+            assert_eq!(
+                rows.output[4].rows,
+                vec![vec![SqlValue::Blob(
+                    SQL_EXPIRY_NONCE.to_be_bytes().to_vec()
+                )]]
+            );
+            assert!(rows.receipt.commit_sequence >= sequence);
+        } else {
+            assert!(rows.output[4].rows.is_empty());
+        }
+        assert!(rows.output[5].rows.is_empty());
         let entry = kv.output.expect("acknowledged KV value");
         assert_eq!(entry.value, KV_PAYLOAD);
         assert_eq!(entry.version.as_slice(), acknowledged.kv_version);
@@ -293,6 +318,8 @@ pub(super) async fn run() {
         assert!(rows.output[1].rows.is_empty());
         assert_eq!(rows.output[2].rows, vec![vec![SqlValue::Integer(0)]]);
         assert!(rows.output[3].rows.is_empty());
+        assert!(rows.output[4].rows.is_empty());
+        assert!(rows.output[5].rows.is_empty());
         assert!(kv.output.is_none());
         assert!(matches!(blob.output, BlobQueryResult::Read(None)));
         assert_eq!(queue_info.output.acked, 0);
@@ -336,6 +363,13 @@ pub(super) async fn run() {
         values.extend_from_slice(b"activity-result");
         values.extend_from_slice(EFFECT_RESULT);
         values.extend_from_slice(CRON_PAYLOAD);
+        if acknowledgement
+            .as_ref()
+            .and_then(|acknowledged| acknowledged.expiry_sql_sequence)
+            .is_some()
+        {
+            values.extend_from_slice(&SQL_EXPIRY_NONCE.to_be_bytes());
+        }
         values
     } else {
         b"absent".to_vec()

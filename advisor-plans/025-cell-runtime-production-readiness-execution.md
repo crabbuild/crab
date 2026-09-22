@@ -339,6 +339,15 @@ current, but the same scheduled-artifact and protected-profile gaps remain.
 The third process also checks exact terminal source Effect status and SQL result
 bytes after recovered lease expiry or an owner-acknowledged settlement. Both
 focused three-process RustFS cases passed on 2026-09-21.
+The SQL expiry boundary now runs inside the owner before its acknowledgement
+marker: it commits one row, holds a signed peer mutation past its expiry, and
+checks that the delayed row never appears. After the owner is killed, a fresh
+successor and then an independent third process restore from durable storage.
+Both check the exact acknowledged row bytes and receipt sequence, absence of
+the rejected row, the existing eight-primitive state, and zero reservations
+after drain. The three-process case passed on filesystem storage and isolated
+RustFS on 2026-09-22. It still lacks a scheduled case artifact and protected
+provider evidence, so the SQL expiry matrix bit remains unset.
 
 Implement one fault-capable executor through `CellNode` and typed
 `ApplicationHandle` capabilities. Each operation writes a unique, bounded

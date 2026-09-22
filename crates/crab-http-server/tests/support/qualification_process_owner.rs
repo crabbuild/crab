@@ -196,6 +196,42 @@ pub(super) async fn run() {
     else {
         panic!("source Effect workflow did not complete");
     };
+    let expiry_sql_sequence = if case == AFTER_SQL_EXPIRY {
+        let observer_client = CellClient::local_many(Arc::clone(&registry), handles.clone())
+            .expect("source expiry observer client");
+        let observer = node.application_handle::<fixture::ReferenceApplication>(
+            observer_client,
+            tenant,
+            application,
+        );
+        let (peer_client, entered, release, dispatched) =
+            qualification_peer::peer_client_with_delayed_mutation_receive(
+                Arc::clone(&registry),
+                handles.clone(),
+            );
+        let peer = node.application_handle::<fixture::ReferenceApplication>(
+            peer_client,
+            tenant,
+            application,
+        );
+        Some(
+            process_expiry::ExpiryCase::new(
+                &typed,
+                &peer,
+                &observer,
+                &entered,
+                &release,
+                &dispatched,
+                tenant,
+                application,
+            )
+            .sql(SQL_EXPIRY_OPERATION_ID, SQL_EXPIRY_NONCE)
+            .await
+            .expect("source scheduled SQL expiry"),
+        )
+    } else {
+        None
+    };
     let leases = if case == AFTER_LEASE {
         let claimed = queue
             .claim(
@@ -429,6 +465,7 @@ pub(super) async fn run() {
         replay_issued_at_ms,
         queue_available_at_ms,
         sql_sequence: committed.receipt.commit_sequence,
+        expiry_sql_sequence,
         kv_sequence: written.receipt.commit_sequence,
         kv_version: version.to_vec(),
         blob_sequence: published.receipt.commit_sequence,
