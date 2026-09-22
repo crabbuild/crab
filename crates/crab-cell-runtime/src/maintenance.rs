@@ -177,6 +177,14 @@ pub(crate) fn inspect_transfer_work(
         )? * TRANSFER_QUEUE;
     }
     if role == CatalogRole::Workflow {
+        // A running workflow can be waiting on an external event without a
+        // materialized activity or timer. Its durable state is still an
+        // executable contract for the current owner, so the exact-root
+        // handoff must remain deferred until the run is terminal or paused.
+        bits |= exists(
+            connection,
+            "SELECT EXISTS(SELECT 1 FROM workflow_runs WHERE status = 0 LIMIT 1)",
+        )? * TRANSFER_WORKFLOW;
         bits |= exists(
             connection,
             "SELECT EXISTS(SELECT 1 FROM workflow_activities INDEXED BY activities_due WHERE state IN (0, 1) LIMIT 1)",
@@ -550,6 +558,12 @@ mod tests {
                 ([28_u8; 16].as_slice(), [29_u8; 32].as_slice()),
             )
             .unwrap();
+        assert_eq!(
+            inspect_transfer_work(&workflow, CatalogRole::Workflow, 10)
+                .unwrap()
+                .bits(),
+            TRANSFER_WORKFLOW
+        );
         workflow
             .execute(
                 "INSERT INTO workflow_activities(run_id, activity_id, activity_type, input, state, attempt, due_at_ms, expires_at_ms, token, lease_until_ms, completion_token, completion_digest, result) VALUES (?1, ?2, 'test', X'', 0, 0, 0, 100, NULL, NULL, NULL, NULL, NULL)",

@@ -13,7 +13,7 @@
 
 - Priority: P0; effort: L; risk: HIGH; category: correctness/feature.
 - Depends on: none. Planned at `cebc909940f137e4bd8445e524e77a154bf51a29`, 2026-09-21.
-- Status: IN PROGRESS; implementation in this branch, acceptance gates pending.
+- Status: IMPLEMENTED; local focused gates pass. Protected end-to-end qualification remains plan 032.
 
 ## Why and current state
 

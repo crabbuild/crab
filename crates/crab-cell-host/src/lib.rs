@@ -749,7 +749,7 @@ impl CellNode {
         }
         self.begin_scale_down()?;
         let mut released_cells = 0_usize;
-        let mut blocked_cells = 0_usize;
+        let mut blocked = HashSet::new();
         loop {
             let candidates = self.runtime.idle_transfer_candidates().await?;
             for (cell, generation, _, _) in candidates.iter().copied() {
@@ -763,18 +763,31 @@ impl CellNode {
                 )
                 .await;
                 match result {
-                    Ok(Ok(())) => released_cells = released_cells.saturating_add(1),
-                    Ok(Err(_)) => blocked_cells = blocked_cells.saturating_add(1),
+                    Ok(Ok(())) => {
+                        released_cells = released_cells.saturating_add(1);
+                        blocked.remove(&cell);
+                    }
+                    Ok(Err(_)) => {
+                        blocked.insert(cell);
+                    }
                     Err(_) => break,
                 }
             }
             let remaining_cells = self.runtime.unreleased_cell_count().await?;
-            let settled_candidates = self.runtime.idle_transfer_candidates().await?.len();
+            let current_candidates = self.runtime.idle_transfer_candidates().await?;
+            let settled_candidates = current_candidates.len();
+            let candidate_ids = current_candidates
+                .iter()
+                .map(|(cell, _, _, _)| *cell)
+                .collect::<HashSet<_>>();
+            blocked.retain(|cell| candidate_ids.contains(cell));
             let status = ScaleDownStatus {
                 remaining_cells,
                 settled_candidates,
                 released_cells,
-                blocked_cells,
+                blocked_cells: blocked
+                    .len()
+                    .saturating_add(remaining_cells.saturating_sub(settled_candidates)),
             };
             if status.ready_to_stop() {
                 if Instant::now() >= deadline {

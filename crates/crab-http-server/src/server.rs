@@ -886,6 +886,19 @@ impl Server {
             && self.cell_node.as_ref().is_none_or(|node| node.is_ready())
     }
 
+    /// Reports whether this node may receive new Cell placement traffic.
+    ///
+    /// A planned scale-down keeps peer forwarding and owned Cells live, but
+    /// must leave readiness before the host starts moving ownership so a load
+    /// balancer does not send new cold activations to a draining node.
+    pub(crate) fn accepts_new_cells(&self) -> bool {
+        self.accepts_application_peers()
+            && self
+                .cell_node
+                .as_ref()
+                .is_none_or(|node| node.runtime().is_acquiring())
+    }
+
     pub(crate) async fn acquire_transfer(
         &self,
         cancellation: &CancellationToken,
@@ -2034,7 +2047,7 @@ async fn check_readiness(server: &Server) -> Result<()> {
     if server.catalog().is_some() && server.peer_receiver().is_none() {
         return Err(crate::Error::Config("Cell peer receiver is unavailable"));
     }
-    if !server.accepts_application_peers() {
+    if !server.accepts_new_cells() {
         return Err(crate::Error::Config("Cell node advertisement is unhealthy"));
     }
     let scheduler_status = server

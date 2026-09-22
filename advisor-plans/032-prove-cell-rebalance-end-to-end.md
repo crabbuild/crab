@@ -14,7 +14,7 @@
 - Priority: P0; effort: XL; risk: HIGH; category: tests/release evidence.
 - Depends on: plans 027–031. Planned at
   `cebc909940f137e4bd8445e524e77a154bf51a29`, 2026-09-21.
-- Status: TODO.
+- Status: IN PROGRESS; local implementation gates pass, while protected provider/Kubernetes and multi-process evidence remain open.
 
 ## Why and current state
 
