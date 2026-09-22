@@ -1237,6 +1237,60 @@ async fn run_scheduled_retry_cases(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn public_scheduled_sql_expiry_rejects_delayed_mutation() {
+    run_scheduled_sql_expiry_case(public_host_fixture().await).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_public_scheduled_sql_expiry_rejects_delayed_mutation() {
+    let (store, root) = rustfs_public_store();
+    run_scheduled_sql_expiry_case(public_host_fixture_with_store(store, root).await).await;
+}
+
+async fn run_scheduled_sql_expiry_case(
+    (node, writer, tenant, application, _directory, registry, handles, store): PublicHostFixture,
+) {
+    let workload = QualificationWorkload::generate_with_size(
+        &QualificationProfile::pr_contract(),
+        41,
+        1,
+        QUALIFICATION_CASE_COVERAGE_OPERATIONS,
+        1,
+    )
+    .expect("qualification case schedule");
+    let operation = workload
+        .iter_operations()
+        .find(|operation| {
+            operation.primitive() == "sql" && operation.case() == QualificationCase::Expiry
+        })
+        .expect("scheduled SQL expiry case");
+    let observer = independent_observer(&node, &registry, &handles, &store, tenant, application);
+    let (client, entered, release, dispatched) =
+        peer_client_with_delayed_mutation_receive(registry, handles);
+    let peer =
+        node.application_handle::<fixture::ReferenceApplication>(client, tenant, application);
+    qualification_scheduled_expiry::ExpiryCase::new(
+        &writer,
+        &peer,
+        &observer,
+        &entered,
+        &release,
+        &dispatched,
+        tenant,
+        application,
+    )
+    .sql(operation.index(), operation.nonce())
+    .await
+    .expect("scheduled SQL expiry");
+    drop(writer);
+    drop(peer);
+    drop(observer);
+    node.shutdown().await.expect("qualification shutdown");
+    assert_zero_reservations(&node);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn public_scheduled_kv_expiry_rejects_delayed_mutation() {
     run_scheduled_kv_expiry_case(public_host_fixture().await).await;
 }
@@ -1296,21 +1350,33 @@ async fn run_public_typed_primitive_workload(
     let profile = QualificationProfile::pr_contract();
     let workload = QualificationWorkload::generate_with_size(&profile, 41, 1, 64, 1)
         .expect("qualification workload");
-    let mut executor = smoke_executor(
-        &node,
-        typed.clone(),
-        &registry,
-        &handles,
-        &store,
-        tenant,
-        application_id,
-        0,
-    );
+    let mut executor = TimedSmokeExecutor {
+        inner: smoke_executor(
+            &node,
+            typed.clone(),
+            &registry,
+            &handles,
+            &store,
+            tenant,
+            application_id,
+            0,
+        ),
+        maximum_latency: Duration::from_millis(profile.maximum_p99_latency_ms()),
+    };
     assert!(node.is_ready());
-    let summary = node
+    let summary = match node
         .run_qualification_observed(&workload, &mut executor)
         .await
-        .expect("typed workload");
+    {
+        Ok(summary) => summary,
+        Err(error) => {
+            drop(executor);
+            drop(typed);
+            node.shutdown().await.expect("qualification shutdown");
+            assert_zero_reservations(&node);
+            panic!("typed workload: {error:?}");
+        }
+    };
     assert!(node.is_ready());
     assert_eq!(summary.operations(), 64);
     assert!(summary.primitive_counts().iter().all(|counts| {
@@ -1331,9 +1397,14 @@ async fn run_public_typed_primitive_workload(
     assert!(covered < QUALIFICATION_CASE_COVERAGE_OPERATIONS as u32);
     let artifact = summary.artifact(&workload).expect("run artifact");
     if let Err(error) = artifact.verify_for_profile(&profile) {
+        let metrics = summary.metrics().expect("measured qualification metrics");
+        drop(executor);
+        drop(typed);
+        node.shutdown().await.expect("qualification shutdown");
+        assert_zero_reservations(&node);
         panic!(
             "run artifact profile: {error}; measured metrics: {:?}",
-            summary.metrics().expect("measured qualification metrics")
+            metrics
         );
     }
     let artifact_bytes = artifact.encode().expect("run artifact encoding");
