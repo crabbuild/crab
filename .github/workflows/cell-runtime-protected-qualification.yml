@@ -26,7 +26,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-protected-target
   QUALIFICATION_SIGNER: ${{ vars.CRAB_CELL_RUNTIME_QUALIFICATION_SIGNER }}
   QUALIFICATION_KEY_FILE: /run/secrets/crab-cell-runtime-qualification-signing-key
   QUALIFICATION_HARNESS: /opt/crab/bin/crab-cell-runtime-protected-qualifier
@@ -75,9 +74,10 @@ jobs:
             exit 1
           }
           test -z "$(git status --porcelain)"
-          mkdir -p "$CARGO_TARGET_DIR"
-          test -d "$CARGO_TARGET_DIR"
-          test -w "$(dirname "$CARGO_TARGET_DIR")"
+          cargo_target_dir="$RUNNER_TEMP/crab-cell-runtime-protected-target"
+          mkdir -p "$cargo_target_dir"
+          test -d "$cargo_target_dir"
+          test -w "$(dirname "$cargo_target_dir")"
           test -x "$QUALIFICATION_HARNESS" || {
             echo "::error::Protected harness is missing: $QUALIFICATION_HARNESS" >&2
             echo "Install the provider/Kubernetes harness on the protected runner; no local or synthetic fallback is accepted." >&2
@@ -138,6 +138,7 @@ jobs:
             "fault-gcs-v1|qualification-matrix-fault-gcs.json"
             "fault-azure-v1|qualification-matrix-fault-azure.json"
           )
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/crab-cell-runtime-protected-target"
           for requirement in "${required_profiles[@]}"; do
             IFS='|' read -r profile_name matrix_name <<< "$requirement"
             profile="$protected_dir/$profile_name.json"
