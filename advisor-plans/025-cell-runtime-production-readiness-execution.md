@@ -132,10 +132,15 @@ an exact-identity retry or observes the committed result, then checks the exact
 row, value/version, Blob bytes/size/ETag, message and final Queue lease,
 schedule generation, terminal Workflow result, or settled Effect lease. All
 fourteen cases passed in memory and on isolated RustFS on 2026-09-21; each node
-drained runtime reservations. Activity cancellation, destination Effect
-delivery cancellation, independent-process observation, and protected scheduled
-matrix evidence remain open. The tests share a process with their observer, so
-no cancellation case bit is set yet.
+drained runtime reservations. Four more cases cancel the public typed Activity
+claim and completion commands before and after signed-peer dispatch. A separate
+typed application handle resolves the exact request, validates the claim lease,
+checks a terminal Workflow result and event sequence, and verifies duplicate
+completion leaves one transition. All four passed in memory and on isolated
+RustFS on 2026-09-21 with zero reservations. Cancellation while the native
+handler executes, destination Effect delivery cancellation, independent-process
+observation, and protected scheduled matrix evidence remain open. These tests
+share a process with their observer, so no cancellation case bit is set yet.
 
 A separate `public_cell_takeover.rs` test now uses a fresh successor `CellNode` and
 empty local directory against the same object store. It checks the exact
