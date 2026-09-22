@@ -137,10 +137,15 @@ claim and completion commands before and after signed-peer dispatch. A separate
 typed application handle resolves the exact request, validates the claim lease,
 checks a terminal Workflow result and event sequence, and verifies duplicate
 completion leaves one transition. All four passed in memory and on isolated
-RustFS on 2026-09-21 with zero reservations. Cancellation while the native
-handler executes, destination Effect delivery cancellation, independent-process
-observation, and protected scheduled matrix evidence remain open. These tests
-share a process with their observer, so no cancellation case bit is set yet.
+RustFS on 2026-09-21 with zero reservations. Two destination Effect cases cancel
+the signed delivery before and after inbox dispatch. The retained source claim
+resolves the destination inbox, retries only an absent delivery, and checks an
+exactly-once typed SQL row, identical inbox replay result, source settlement,
+and zero reservations. Both passed in memory and on isolated RustFS on
+2026-09-21. Cancellation while the native Activity handler or Effect supervisor
+executes, independent-process observation, and protected scheduled matrix
+evidence remain open. These tests share a process with their observer, so no
+cancellation case bit is set yet.
 
 A separate `public_cell_takeover.rs` test now uses a fresh successor `CellNode` and
 empty local directory against the same object store. It checks the exact
