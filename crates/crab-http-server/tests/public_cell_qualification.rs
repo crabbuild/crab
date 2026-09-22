@@ -1,21 +1,23 @@
 use std::{
     future::Future,
     pin::Pin,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crab_cell_app::ApplicationHandle;
+use crab_cell_host::CellNode;
 use crab_cell_runtime::{
     ActivityRunOutcome, ActivitySupervisor, ApplicationId, BlobCondition, BlobMutation, BlobQuery,
-    BlobQueryResult, CellTarget, CronMutation, CronQueryResult, Digest, EffectClaimRequest,
-    EffectLeaseOutcome, Error, KvAtomicOutcome, KvAtomicRequest, KvMutation,
+    BlobQueryResult, CellClient, CellHandle, CellTarget, CronMutation, CronQueryResult, Digest,
+    EffectClaimRequest, EffectLeaseOutcome, Error, KvAtomicOutcome, KvAtomicRequest, KvMutation,
     QUALIFICATION_CASE_COVERAGE_OPERATIONS, QUALIFICATION_MATRIX_ROWS, QUALIFICATION_PRIMITIVES,
     QualificationCase, QualificationExecution, QualificationMatrixEntry,
     QualificationMatrixManifest, QualificationOperation, QualificationOperationExecutor,
     QualificationProfile, QualificationReceipt, QualificationRunner, QualificationWorkload,
-    QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome, QueueSendRequest, QueueState, Result,
-    SqlBatch, SqlStatement, SqlValue, TenantId, WorkflowOutcome, WorkflowSignal, WorkflowStatus,
-    partition_for_shard,
+    QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome, QueueSendRequest, QueueState, Registry,
+    Result, SqlBatch, SqlStatement, SqlValue, TenantId, WorkflowOutcome, WorkflowSignal,
+    WorkflowStatus, partition_for_shard,
 };
 use ed25519_dalek::SigningKey;
 
@@ -23,6 +25,8 @@ use ed25519_dalek::SigningKey;
 mod fixture;
 #[path = "support/qualification.rs"]
 mod qualification;
+#[path = "support/qualification_activity_duplicate.rs"]
+mod qualification_activity_duplicate;
 #[path = "support/qualification_fixture.rs"]
 mod qualification_fixture;
 #[path = "support/qualification_local_fixture.rs"]
@@ -34,6 +38,7 @@ use qualification_local_fixture::public_host_fixture;
 
 struct PublicHostSmokeExecutor {
     handle: ApplicationHandle<fixture::ReferenceApplication>,
+    observer: ApplicationHandle<fixture::ReferenceApplication>,
     tenant: TenantId,
     application: ApplicationId,
     run_tag: u64,
@@ -43,11 +48,24 @@ fn operation_id(run_tag: u64, index: u64) -> u64 {
     run_tag.saturating_mul(1_000_000).saturating_add(index)
 }
 
+fn independent_observer(
+    node: &CellNode,
+    registry: &Arc<Registry>,
+    handles: &[CellHandle],
+    tenant: TenantId,
+    application: ApplicationId,
+) -> ApplicationHandle<fixture::ReferenceApplication> {
+    let client = CellClient::local_many(Arc::clone(registry), handles.to_vec())
+        .expect("independent qualification client");
+    node.application_handle::<fixture::ReferenceApplication>(client, tenant, application)
+}
+
 impl QualificationOperationExecutor for PublicHostSmokeExecutor {
     type Future<'a> = Pin<Box<dyn Future<Output = Result<QualificationExecution>> + Send + 'a>>;
 
     fn execute<'a>(&'a mut self, operation: QualificationOperation) -> Self::Future<'a> {
         let handle = self.handle.clone();
+        let observer = self.observer.clone();
         let tenant = self.tenant;
         let application = self.application;
         let run_tag = self.run_tag;
@@ -511,53 +529,68 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor {
                     }
                 }
                 "activity" => {
-                    let workflow = handle.workflow::<fixture::ReferenceWorkflow>()?;
-                    let workflow_id =
-                        format!("public-activity-{run_tag}-{}", operation.index()).into_bytes();
-                    workflow
-                        .start(mutation, workflow_id.clone(), b"activity".to_vec())
-                        .await
-                        .map_err(|_| {
-                            Error::Control("public qualification Activity start failed")
-                        })?;
-                    let supervisor = ActivitySupervisor::new(
-                        handle.activities::<fixture::ReferenceWorkflow>()?,
-                        5_000,
-                    )?;
-                    let outcome = supervisor.run_once(0, None).await.map_err(|_| {
-                        Error::Control("public qualification Activity invocation failed")
-                    })?;
-                    if !matches!(
-                        outcome,
-                        ActivityRunOutcome::Completed {
-                            workflow: WorkflowOutcome::Applied {
-                                status: WorkflowStatus::Completed,
-                                ..
-                            },
-                            ..
-                        }
-                    ) {
-                        return Err(Error::Control(
-                            "public qualification Activity not completed",
-                        ));
-                    }
-                    let observed =
+                    if operation.case() == QualificationCase::Duplicate {
+                        qualification_activity_duplicate::run(
+                            &handle,
+                            &observer,
+                            tenant,
+                            application,
+                            operation_id,
+                            operation.nonce(),
+                            now_ms,
+                        )
+                        .await?;
+                    } else {
+                        let workflow = handle.workflow::<fixture::ReferenceWorkflow>()?;
+                        let workflow_id =
+                            format!("public-activity-{run_tag}-{}", operation.index()).into_bytes();
                         workflow
-                            .state(workflow_id.clone(), None)
+                            .start(mutation, workflow_id.clone(), b"activity".to_vec())
                             .await
                             .map_err(|_| {
-                                Error::Control("public qualification Activity verification failed")
+                                Error::Control("public qualification Activity start failed")
                             })?;
-                    if !matches!(observed.output, Some(ref run)
+                        let supervisor = ActivitySupervisor::new(
+                            handle.activities::<fixture::ReferenceWorkflow>()?,
+                            5_000,
+                        )?;
+                        let outcome = supervisor.run_once(0, None).await.map_err(|_| {
+                            Error::Control("public qualification Activity invocation failed")
+                        })?;
+                        if !matches!(
+                            outcome,
+                            ActivityRunOutcome::Completed {
+                                workflow: WorkflowOutcome::Applied {
+                                    status: WorkflowStatus::Completed,
+                                    ..
+                                },
+                                ..
+                            }
+                        ) {
+                            return Err(Error::Control(
+                                "public qualification Activity not completed",
+                            ));
+                        }
+                        let observed =
+                            workflow
+                                .state(workflow_id.clone(), None)
+                                .await
+                                .map_err(|_| {
+                                    Error::Control(
+                                        "public qualification Activity verification failed",
+                                    )
+                                })?;
+                        if !matches!(observed.output, Some(ref run)
                         if run.status == WorkflowStatus::Completed
                             && run.workflow_id == workflow_id
                             && run.result.as_deref().is_some_and(|result|
                                 result.starts_with(b"activity\0")
                                     && result.ends_with(b"activity-result")))
-                    {
-                        return Err(Error::Control(
-                            "public qualification Activity state differs",
-                        ));
+                        {
+                            return Err(Error::Control(
+                                "public qualification Activity state differs",
+                            ));
+                        }
                     }
                 }
                 "effects" => {
@@ -651,7 +684,7 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor {
             match (operation.primitive(), operation.case()) {
                 (_, QualificationCase::Happy)
                 | (
-                    "sql" | "kv" | "blob" | "queue" | "cron" | "workflow" | "effects",
+                    "sql" | "kv" | "blob" | "queue" | "cron" | "workflow" | "activity" | "effects",
                     QualificationCase::Duplicate,
                 ) => Ok(execution.with_case(operation.case())),
                 _ => Ok(execution),
@@ -740,14 +773,55 @@ async fn rustfs_public_cell_node_runs_typed_primitive_workload() {
     run_public_typed_primitive_workload(public_host_fixture_with_store(store, root).await).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_public_activity_duplicate_case_preserves_one_completion() {
+    let (store, root) = rustfs_public_store();
+    let (node, typed, tenant, application, _directory, registry, handles, _store) =
+        public_host_fixture_with_store(store, root).await;
+    let observer = independent_observer(&node, &registry, &handles, tenant, application);
+    let workload = QualificationWorkload::generate_with_size(
+        &QualificationProfile::pr_contract(),
+        41,
+        1,
+        QUALIFICATION_CASE_COVERAGE_OPERATIONS as u64,
+        1,
+    )
+    .expect("qualification case schedule");
+    let operation = workload
+        .iter_operations()
+        .find(|operation| {
+            operation.primitive() == "activity" && operation.case() == QualificationCase::Duplicate
+        })
+        .expect("scheduled Activity duplicate case");
+    let mut executor = PublicHostSmokeExecutor {
+        handle: typed.clone(),
+        observer,
+        tenant,
+        application,
+        run_tag: 0,
+    };
+    let execution = executor
+        .execute(operation)
+        .await
+        .expect("Activity duplicate case");
+    assert!(execution.verified());
+    assert_eq!(execution.case(), Some(QualificationCase::Duplicate));
+    drop(executor);
+    drop(typed);
+    node.shutdown().await.expect("qualification shutdown");
+    assert_zero_reservations(&node);
+}
+
 async fn run_public_typed_primitive_workload(
-    (node, typed, tenant, application_id, _directory, _registry, _handles, _store): PublicHostFixture,
+    (node, typed, tenant, application_id, _directory, registry, handles, _store): PublicHostFixture,
 ) {
     let profile = QualificationProfile::pr_contract();
     let workload = QualificationWorkload::generate_with_size(&profile, 41, 1, 64, 1)
         .expect("qualification workload");
     let mut executor = PublicHostSmokeExecutor {
         handle: typed.clone(),
+        observer: independent_observer(&node, &registry, &handles, tenant, application_id),
         tenant,
         application: application_id,
         run_tag: 0,
@@ -772,13 +846,16 @@ async fn run_public_typed_primitive_workload(
         .iter()
         .map(|byte| byte.count_ones())
         .sum::<u32>();
-    let observed_smoke_cases = (QUALIFICATION_PRIMITIVES.len() * 2 - 1) as u32;
+    let observed_smoke_cases = (QUALIFICATION_PRIMITIVES.len() * 2) as u32;
     assert_eq!(covered, observed_smoke_cases);
     assert!(covered < QUALIFICATION_CASE_COVERAGE_OPERATIONS as u32);
     let artifact = summary.artifact(&workload).expect("run artifact");
-    artifact
-        .verify_for_profile(&profile)
-        .expect("run artifact profile");
+    if let Err(error) = artifact.verify_for_profile(&profile) {
+        panic!(
+            "run artifact profile: {error}; measured metrics: {:?}",
+            summary.metrics().expect("measured qualification metrics")
+        );
+    }
     let artifact_bytes = artifact.encode().expect("run artifact encoding");
     let signing_key = SigningKey::from_bytes(&[75; 32]);
     let trusted_signer = signing_key.verifying_key().to_bytes();
@@ -840,7 +917,7 @@ struct MatrixRowEvidence {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn public_cell_node_runs_complete_matrix_through_typed_apis() {
-    let (node, typed, tenant, application_id, _directory, _registry, _handles, _store) =
+    let (node, typed, tenant, application_id, _directory, registry, handles, _store) =
         public_host_fixture().await;
     let profile = QualificationProfile::pr_contract();
     let image = Digest::from_bytes([74; 32]);
@@ -862,6 +939,7 @@ async fn public_cell_node_runs_complete_matrix_through_typed_apis() {
         .expect("qualification workload");
         let mut executor = PublicHostSmokeExecutor {
             handle: typed.clone(),
+            observer: independent_observer(&node, &registry, &handles, tenant, application_id),
             tenant,
             application: application_id,
             run_tag: row_index as u64 + 1,
