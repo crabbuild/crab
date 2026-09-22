@@ -9,7 +9,7 @@ pub(super) async fn run() {
     } else {
         None
     };
-    let (store, _) = rustfs_public_store();
+    let (store, _) = process_store();
     let application = Arc::new(fixture::compiled());
     let tenant = TenantId::from_bytes([71; 16]);
     let application_id = ApplicationId::from_bytes([72; 16]);

@@ -22,9 +22,13 @@ use crab_cell_runtime::{
     WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand, WorkflowOutcome, WorkflowStatus,
     partition_for_shard,
 };
+use crab_storage::Store;
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
+
+#[path = "../../crab-cell-runtime/src/process_store.rs"]
+mod process_store;
 
 #[path = "support/reference_application.rs"]
 mod fixture;
@@ -63,6 +67,9 @@ const ROLE_ENV: &str = "CRAB_CELL_PROCESS_FAULT_ROLE";
 const CASE_ENV: &str = "CRAB_CELL_PROCESS_FAULT_CASE";
 const ROOT_ENV: &str = "CRAB_CELL_PROCESS_FAULT_ROOT";
 const SYNC_ENV: &str = "CRAB_CELL_PROCESS_FAULT_SYNC";
+const STORE_BACKEND_ENV: &str = "CRAB_CELL_PROCESS_FAULT_STORE_BACKEND";
+const STORE_PATH_ENV: &str = "CRAB_CELL_PROCESS_FAULT_STORE_PATH";
+const FILESYSTEM_STORE_BACKEND: &str = "filesystem";
 const BEFORE_WRITE: &str = "before-write";
 const AFTER_ACK: &str = "after-ack";
 const AFTER_LEASE: &str = "after-lease";
@@ -174,6 +181,19 @@ fn process_case() -> String {
     case
 }
 
+fn process_store() -> (Store, Path) {
+    if env::var(STORE_BACKEND_ENV).ok().as_deref() == Some(FILESYSTEM_STORE_BACKEND) {
+        let path = env::var(STORE_PATH_ENV).expect("filesystem fault store path");
+        let store = process_store::FilesystemCasStore::new(FilePath::new(&path))
+            .expect("filesystem fault store");
+        return (
+            Store::new(Arc::new(store)),
+            Path::from("public-process-fault"),
+        );
+    }
+    rustfs_public_store()
+}
+
 fn publish_marker(sync: &FilePath, name: &str, bytes: &[u8]) {
     let temporary = sync.join(format!("{name}.tmp"));
     std::fs::write(&temporary, bytes).expect("fault marker");
@@ -213,13 +233,21 @@ fn spawn_role(
     case: &str,
     root: &Path,
     sync: &FilePath,
+    backend: &str,
+    store_path: Option<&FilePath>,
 ) -> ChildGuard {
-    let child = Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .args(["--exact", "process_role", "--nocapture"])
         .env(ROLE_ENV, role)
         .env(CASE_ENV, case)
         .env(ROOT_ENV, root.to_string())
         .env(SYNC_ENV, sync)
+        .env(STORE_BACKEND_ENV, backend);
+    if let Some(store_path) = store_path {
+        command.env(STORE_PATH_ENV, store_path);
+    }
+    let child = command
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
@@ -278,11 +306,60 @@ async fn rustfs_owner_kill_preserves_three_acknowledged_settlements() {
     run_process_fault(AFTER_SETTLEMENT, "ack", &expected).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn filesystem_owner_kill_preserves_three_acknowledged_settlements() {
+    let mut expected = Vec::from(SQL_PAYLOAD);
+    expected.extend_from_slice(KV_PAYLOAD);
+    expected.extend_from_slice(BLOB_PAYLOAD);
+    expected.extend_from_slice(QUEUE_PAYLOAD);
+    expected.extend_from_slice(CRON_PAYLOAD);
+    expected.extend_from_slice(WORKFLOW_RESULT);
+    expected.extend_from_slice(b"activity-result");
+    expected.extend_from_slice(EFFECT_RESULT);
+    expected.extend_from_slice(CRON_PAYLOAD);
+    run_filesystem_process_fault(AFTER_SETTLEMENT, "ack", &expected).await;
+}
+
 async fn run_process_fault(case: &str, barrier: &str, expected: &[u8]) {
-    let (_, root) = rustfs_public_store();
+    run_process_fault_with_backend(case, barrier, expected, "rustfs", None).await;
+}
+
+async fn run_filesystem_process_fault(case: &str, barrier: &str, expected: &[u8]) {
+    let store = tempfile::tempdir().expect("filesystem fault store directory");
+    run_process_fault_with_backend(
+        case,
+        barrier,
+        expected,
+        FILESYSTEM_STORE_BACKEND,
+        Some(store.path()),
+    )
+    .await;
+}
+
+async fn run_process_fault_with_backend(
+    case: &str,
+    barrier: &str,
+    expected: &[u8],
+    backend: &str,
+    store_path: Option<&FilePath>,
+) {
+    let root = if backend == FILESYSTEM_STORE_BACKEND {
+        Path::from("public-process-fault")
+    } else {
+        let (_, root) = rustfs_public_store();
+        root
+    };
     let sync = tempfile::tempdir().expect("fault synchronization directory");
     let binary = env::current_exe().expect("test binary");
-    let mut owner = spawn_role(&binary, "owner", case, &root, sync.path());
+    let mut owner = spawn_role(
+        &binary,
+        "owner",
+        case,
+        &root,
+        sync.path(),
+        backend,
+        store_path,
+    );
     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     while !sync.path().join(barrier).exists() {
         assert!(
@@ -297,7 +374,15 @@ async fn run_process_fault(case: &str, barrier: &str, expected: &[u8]) {
     }
     owner.0.kill().expect("kill owner at fault boundary");
     assert!(!owner.0.wait().expect("owner exit").success());
-    let mut successor = spawn_role(&binary, "successor", case, &root, sync.path());
+    let mut successor = spawn_role(
+        &binary,
+        "successor",
+        case,
+        &root,
+        sync.path(),
+        backend,
+        store_path,
+    );
     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     loop {
         if let Some(status) = successor.0.try_wait().expect("successor status") {
@@ -317,7 +402,15 @@ async fn run_process_fault(case: &str, barrier: &str, expected: &[u8]) {
         std::fs::read(sync.path().join("observation")).expect("successor observation marker"),
         expected
     );
-    let mut observer = spawn_role(&binary, "observer", case, &root, sync.path());
+    let mut observer = spawn_role(
+        &binary,
+        "observer",
+        case,
+        &root,
+        sync.path(),
+        backend,
+        store_path,
+    );
     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     loop {
         if let Some(status) = observer.0.try_wait().expect("observer status") {

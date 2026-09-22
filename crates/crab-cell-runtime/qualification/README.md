@@ -109,3 +109,37 @@ watermark proof. The command-line `emit` helper only creates threshold metrics
 for the PR correctness profile; protected evidence must come from the real
 provider/fault/scale harness so it cannot be promoted from a synthetic local
 receipt.
+
+## Release handoff
+
+The HTTP server release workflow consumes protected evidence from a separate
+manual workflow run. The protected workflow must be named `Cell runtime
+protected qualification`, run against the exact release commit, and upload an
+artifact named `cell-runtime-protected-<run-id>-<attempt>` (or the explicit
+artifact name supplied to the release workflow). The artifact must contain one
+`protected/` directory with the tracked profiles, verified matrix manifests,
+receipts, and raw artifacts. The release job checks the run status, workflow
+name, manual-dispatch event, run ID, attempt, and commit before moving that
+directory beside the exact-source Compose receipt; the existing pinned-signer
+and image/profile-bound matrix verifier remains authoritative.
+
+For tag-triggered releases, set repository variables
+`CRAB_CELL_RUNTIME_PROTECTED_EVIDENCE_RUN_ID` and, when the default artifact
+name is not used, `CRAB_CELL_RUNTIME_PROTECTED_EVIDENCE_ARTIFACT`. A manually
+dispatched release can provide the same values as inputs. Missing, failed,
+stale, wrong-workflow, wrong-commit, symlinked, or malformed evidence fails
+closed; no synthetic receipt is accepted as a substitute.
+
+The public host's local process-fault smoke can be run without credentials:
+
+```text
+cargo test --locked -p crab-http-server --test public_cell_process_fault \
+  filesystem_owner_kill_preserves_three_acknowledged_settlements -- \
+  --exact --nocapture
+```
+
+It starts an owner, successor, and independent observer as separate processes,
+kills the owner after acknowledged leases and settlements, and verifies all
+primitive outcomes through the typed `CellNode` handle. The filesystem CAS
+backend is a deterministic lifecycle regression fixture only; it is not a
+provider, Kubernetes, or large-scale qualification receipt.

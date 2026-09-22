@@ -3,7 +3,7 @@ use super::*;
 pub(super) async fn run() {
     let (root, sync) = process_input();
     let case = process_case();
-    let (store, _) = rustfs_public_store();
+    let (store, _) = process_store();
     let (node, typed, tenant, application, _directory, registry, handles, _store) =
         public_host_fixture_with_store(store.clone(), root.clone()).await;
     if case == BEFORE_WRITE {
