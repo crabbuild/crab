@@ -222,17 +222,21 @@ impl PeerHttpRoundTrip {
         };
         match response.status() {
             StatusCode::OK => {}
-            StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE => {
-                return Ok(PeerHttpAttempt::Retry(CellError::CellNotActive));
-            }
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
                 return Err(CellError::PeerAuthorization(
                     "remote node rejected the enrolled peer",
                 ));
             }
+            // The receiver may emit 503 after dispatch; HTTP status alone
+            // cannot prove that a mutation was never accepted.
             status if status.is_server_error() => {
                 return Ok(PeerHttpAttempt::Unknown(CellError::Peer(
                     "remote peer returned a server error",
+                )));
+            }
+            StatusCode::TOO_MANY_REQUESTS => {
+                return Ok(PeerHttpAttempt::Unknown(CellError::Peer(
+                    "remote peer returned a rate limit",
                 )));
             }
             _ => return Err(CellError::Peer("remote peer rejected the HTTP request")),

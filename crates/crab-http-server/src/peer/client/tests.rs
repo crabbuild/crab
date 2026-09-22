@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use axum::{
     Router,
@@ -8,9 +11,9 @@ use axum::{
 use bytes::Bytes;
 use cellule_runtime::CellStorageLayout;
 use cellule_runtime::{
-    ApplicationId, ApplicationIdentity, CellAuthority, CellTarget, Control, Digest, IncarnationId,
-    NamespaceId, NodeAdvertisement, NodeCapacity, NodeDirectory, Owner, PeerRoundTrip, SessionId,
-    TenantId, peer_wire,
+    ApplicationId, ApplicationIdentity, CellAuthority, CellTarget, Control, Digest,
+    Error as CellError, IncarnationId, NamespaceId, NodeAdvertisement, NodeCapacity, NodeDirectory,
+    Owner, PeerRoundTrip, SessionId, TenantId, peer_wire,
 };
 use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path as ObjectPath};
@@ -22,7 +25,7 @@ use crate::{
 };
 
 #[tokio::test]
-async fn reloads_a_stale_owner_and_pins_mtls_identity() {
+async fn preserves_ambiguous_status_and_retries_explicit_not_started() {
     let files = IdentityFiles::generate();
     let first_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let second_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -120,12 +123,23 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
         .await
         .unwrap();
 
+    let retry_reply = cellule_runtime::encode_peer_reply(&peer_wire::PeerReply {
+        outcome: Some(peer_wire::peer_reply::Outcome::Error(peer_wire::Error {
+            code: peer_wire::error::Code::Unavailable as i32,
+            outcome: peer_wire::error::Outcome::NotStarted as i32,
+            message: "owner moved".into(),
+            retry_after_ms: 0,
+            application_details: Vec::new(),
+        })),
+    })
+    .unwrap();
     let first_layout = layout.clone();
     let first_app = Router::new().route(
         "/internal/cells/v1/forward",
-        post(move || {
+        post(move |body: Bytes| {
             let layout = first_layout.clone();
             let control = second_control.clone();
+            let retry_reply = retry_reply.clone();
             async move {
                 layout
                     .store()
@@ -135,7 +149,19 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
                     )
                     .await
                     .unwrap();
-                StatusCode::SERVICE_UNAVAILABLE
+                let (status, reply) = if body == Bytes::from_static(b"retry") {
+                    (StatusCode::OK, retry_reply)
+                } else {
+                    (StatusCode::SERVICE_UNAVAILABLE, Vec::new())
+                };
+                (
+                    status,
+                    [
+                        (header::CONTENT_TYPE, PROTOBUF_MEDIA_TYPE),
+                        (header::CACHE_CONTROL, "no-store"),
+                    ],
+                    reply,
+                )
             }
         }),
     );
@@ -149,13 +175,17 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
         })),
     })
     .unwrap();
+    let second_calls = Arc::new(AtomicUsize::new(0));
     let second_app = Router::new().route(
         "/internal/cells/v1/forward",
         post({
             let expected = expected.clone();
+            let second_calls = Arc::clone(&second_calls);
             move || {
                 let expected = expected.clone();
+                let second_calls = Arc::clone(&second_calls);
                 async move {
+                    second_calls.fetch_add(1, Ordering::SeqCst);
                     (
                         StatusCode::OK,
                         [
@@ -197,15 +227,36 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
             TenantId::from_bytes([27; 16]),
             ApplicationId::from_bytes([21; 16]),
         ),
-        CellAuthority::new(layout),
+        CellAuthority::new(layout.clone()),
         directory,
         loaded.client_identity(),
         SessionId::from_bytes([31; 16]),
     );
 
-    let actual = round_trip.send(target, vec![1, 2, 3], 5_000).await.unwrap();
+    let ambiguous = round_trip
+        .send(target.clone(), b"unknown".to_vec(), 5_000)
+        .await;
+    assert!(matches!(
+        ambiguous,
+        Err(CellError::PeerTransportUnknown { .. })
+    ));
+    assert_eq!(second_calls.load(Ordering::SeqCst), 0);
+
+    layout
+        .store()
+        .put_overwrite(
+            &layout.control_path(target.cell_id().as_bytes()),
+            Bytes::from(first_control.encode().unwrap()),
+        )
+        .await
+        .unwrap();
+    let actual = round_trip
+        .send(target, b"retry".to_vec(), 5_000)
+        .await
+        .unwrap();
 
     assert_eq!(actual, expected);
+    assert_eq!(second_calls.load(Ordering::SeqCst), 1);
     first_stop.send(()).unwrap();
     second_stop.send(()).unwrap();
     first_server.await.unwrap().unwrap();
