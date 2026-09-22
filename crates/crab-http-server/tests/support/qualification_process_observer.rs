@@ -131,6 +131,14 @@ pub(super) async fn run() {
         )
         .await
         .expect("observer Blob value");
+    process_blob_expiry::observer(
+        &typed,
+        &sync,
+        acknowledgement
+            .as_ref()
+            .and_then(|ack| ack.expiry_blob.as_ref()),
+    )
+    .await;
     let queue = typed
         .queue::<fixture::ReferenceQueue>()
         .expect("observer Queue");
@@ -459,6 +467,13 @@ pub(super) async fn run() {
             .is_some()
         {
             values.extend_from_slice(&WORKFLOW_EXPIRY_NONCE.to_be_bytes());
+        }
+        if acknowledgement
+            .as_ref()
+            .and_then(|acknowledged| acknowledged.expiry_blob.as_ref())
+            .is_some()
+        {
+            values.extend_from_slice(BLOB_EXPIRY_PUBLISHED_PAYLOAD);
         }
         values
     } else {

@@ -32,6 +32,8 @@ mod process_store;
 
 #[path = "support/reference_application.rs"]
 mod fixture;
+#[path = "support/qualification_process_blob_expiry.rs"]
+mod process_blob_expiry;
 #[path = "support/qualification_process_cron.rs"]
 mod process_cron;
 #[path = "support/qualification_process_duplicate.rs"]
@@ -86,6 +88,7 @@ const AFTER_SQL_EXPIRY: &str = "after-sql-expiry";
 const AFTER_KV_EXPIRY: &str = "after-kv-expiry";
 const AFTER_CRON_EXPIRY: &str = "after-cron-expiry";
 const AFTER_WORKFLOW_EXPIRY: &str = "after-workflow-expiry";
+const AFTER_BLOB_EXPIRY: &str = "after-blob-expiry";
 const SQL_PAYLOAD: &[u8] = b"acknowledged-before-owner-kill";
 const SQL_EXPIRY_OPERATION_ID: u64 = 900_150;
 const SQL_EXPIRY_NONCE: u64 = 900_152;
@@ -101,6 +104,10 @@ const KV_KEY: &[u8] = b"acknowledged";
 const KV_PAYLOAD: &[u8] = b"published-kv-before-owner-kill";
 const BLOB_KEY: &[u8] = b"acknowledged-blob";
 const BLOB_PAYLOAD: &[u8] = b"published-blob-before-owner-kill";
+const BLOB_EXPIRY_KEY: &[u8] = b"expired-upload-after-owner-kill";
+const BLOB_EXPIRY_OLD_PAYLOAD: &[u8] = b"unpublished-before-owner-kill";
+const BLOB_EXPIRY_PUBLISHED_PAYLOAD: &[u8] = b"published-after-owner-kill";
+const BLOB_EXPIRY_OPERATION_ID: u64 = 900_190;
 const QUEUE_PAYLOAD: &[u8] = b"published-queue-before-owner-kill";
 const CRON_PAYLOAD: &[u8] = b"published-cron-before-owner-kill";
 const WORKFLOW_ID: &[u8] = b"published-workflow-before-owner-kill";
@@ -123,6 +130,7 @@ struct Acknowledgement {
     blob_sequence: u64,
     blob_etag: [u8; 32],
     blob_size: u64,
+    expiry_blob: Option<BlobExpiryEvidence>,
     queue_sequence: u64,
     queue_message_id: [u8; 16],
     cron_sequence: u64,
@@ -150,6 +158,19 @@ struct CronExpiryEvidence {
 struct WorkflowExpiryEvidence {
     sequence: u64,
     run_id: [u8; 16],
+}
+
+#[derive(Deserialize, Serialize)]
+struct BlobExpiryEvidence {
+    part_sequence: u64,
+    expires_at_ms: i64,
+}
+
+#[derive(Deserialize, Serialize)]
+struct BlobExpiryPublication {
+    sequence: u64,
+    etag: [u8; 32],
+    size: u64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -217,7 +238,8 @@ fn process_case() -> String {
             || case == AFTER_SQL_EXPIRY
             || case == AFTER_KV_EXPIRY
             || case == AFTER_CRON_EXPIRY
-            || case == AFTER_WORKFLOW_EXPIRY,
+            || case == AFTER_WORKFLOW_EXPIRY
+            || case == AFTER_BLOB_EXPIRY,
         "unknown fault case"
     );
     case
@@ -406,6 +428,21 @@ async fn filesystem_owner_kill_preserves_workflow_run_after_expired_start() {
     let mut expected = acknowledged_payload(true);
     expected.extend_from_slice(&WORKFLOW_EXPIRY_NONCE.to_be_bytes());
     run_filesystem_process_fault(AFTER_WORKFLOW_EXPIRY, "ack", &expected).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_owner_kill_reclaims_expired_blob_upload_and_publishes_fresh_blob() {
+    let mut expected = acknowledged_payload(true);
+    expected.extend_from_slice(BLOB_EXPIRY_PUBLISHED_PAYLOAD);
+    run_process_fault(AFTER_BLOB_EXPIRY, "ack", &expected).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn filesystem_owner_kill_reclaims_expired_blob_upload_and_publishes_fresh_blob() {
+    let mut expected = acknowledged_payload(true);
+    expected.extend_from_slice(BLOB_EXPIRY_PUBLISHED_PAYLOAD);
+    run_filesystem_process_fault(AFTER_BLOB_EXPIRY, "ack", &expected).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
