@@ -1024,7 +1024,7 @@ impl NodeDirectory {
         if let Some(snapshot) = self.recovery_scan.read().await.as_ref()
             && now_ms >= snapshot.observed_at_ms
             && now_ms.saturating_sub(snapshot.observed_at_ms) < RECOVERY_SCAN_CACHE_TTL_MS
-            && (!include_live_nodes || !snapshot.live_nodes.is_empty())
+            && (!include_live_nodes || snapshot.includes_live_nodes)
         {
             return Ok(Arc::clone(snapshot));
         }
@@ -1033,7 +1033,7 @@ impl NodeDirectory {
         if let Some(snapshot) = cached.as_ref()
             && now_ms >= snapshot.observed_at_ms
             && now_ms.saturating_sub(snapshot.observed_at_ms) < RECOVERY_SCAN_CACHE_TTL_MS
-            && (!include_live_nodes || !snapshot.live_nodes.is_empty())
+            && (!include_live_nodes || snapshot.includes_live_nodes)
         {
             return Ok(Arc::clone(snapshot));
         }
@@ -1131,6 +1131,7 @@ impl NodeDirectory {
         }
         let snapshot = Arc::new(RecoveryScanSnapshot {
             observed_at_ms: now_ms,
+            includes_live_nodes: include_live_nodes,
             live_nodes,
             records: candidates,
         });
@@ -1989,6 +1990,7 @@ impl NodeDirectory {
 
 struct RecoveryScanSnapshot {
     observed_at_ms: i64,
+    includes_live_nodes: bool,
     live_nodes: HashSet<NodeId>,
     records: Vec<RecoveryCandidateRecord>,
 }
