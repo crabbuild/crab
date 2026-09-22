@@ -107,6 +107,36 @@ fn smoke_executor<'n>(
     }
 }
 
+struct TimedSmokeExecutor<'n> {
+    inner: PublicHostSmokeExecutor<'n>,
+    maximum_latency: Duration,
+}
+
+impl QualificationOperationExecutor for TimedSmokeExecutor<'_> {
+    type Future<'a>
+        = Pin<Box<dyn Future<Output = Result<QualificationExecution>> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn execute<'a>(&'a mut self, operation: QualificationOperation) -> Self::Future<'a> {
+        Box::pin(async move {
+            let started = std::time::Instant::now();
+            let result = self.inner.execute(operation).await;
+            let elapsed = started.elapsed();
+            if elapsed > self.maximum_latency {
+                eprintln!(
+                    "slow qualification operation: primitive={} case={} index={} elapsed_ms={} result={result:?}",
+                    operation.primitive(),
+                    operation.case().name(),
+                    operation.index(),
+                    elapsed.as_millis()
+                );
+            }
+            result
+        })
+    }
+}
+
 impl QualificationOperationExecutor for PublicHostSmokeExecutor<'_> {
     type Future<'a>
         = Pin<Box<dyn Future<Output = Result<QualificationExecution>> + Send + 'a>>
@@ -479,7 +509,7 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor<'_> {
                             0,
                             QueueClaimRequest {
                                 limit: 1,
-                                lease_ms: 5_000,
+                                lease_ms: 60_000,
                             },
                         )
                         .await
@@ -524,7 +554,7 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor<'_> {
                             0,
                             QueueClaimRequest {
                                 limit: 1,
-                                lease_ms: 5_000,
+                                lease_ms: 60_000,
                             },
                         )
                         .await
@@ -551,7 +581,10 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor<'_> {
                             retried_message.token,
                         )
                         .await
-                        .map_err(|_| Error::Control("public qualification Queue ack failed"))?;
+                        .map_err(|source| Error::Facility {
+                            name: "public qualification Queue ack",
+                            source: Box::new(source),
+                        })?;
                     if !matches!(
                         acked.output,
                         QueueLeaseOutcome::Applied {
@@ -580,10 +613,13 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor<'_> {
                         interval_ms: 1_000,
                         next_due_ms: now_ms + 1_000,
                     };
-                    let scheduled = cron
-                        .mutate(mutation, upsert.clone())
-                        .await
-                        .map_err(|_| Error::Control("public qualification Cron upsert failed"))?;
+                    let scheduled =
+                        cron.mutate(mutation, upsert.clone())
+                            .await
+                            .map_err(|source| Error::Facility {
+                                name: "public qualification Cron upsert",
+                                source: Box::new(source),
+                            })?;
                     if operation.case() == QualificationCase::Duplicate {
                         let duplicate = cron.mutate(mutation, upsert).await.map_err(|source| {
                             Error::Facility {
@@ -602,7 +638,10 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor<'_> {
                         CronMutation::Pause { schedule_id },
                     )
                     .await
-                    .map_err(|_| Error::Control("public qualification Cron pause failed"))?;
+                    .map_err(|source| Error::Facility {
+                        name: "public qualification Cron pause",
+                        source: Box::new(source),
+                    })?;
                     cron.mutate(
                         identity(mutation_index.saturating_add(2), now_ms),
                         CronMutation::Resume {
@@ -611,10 +650,17 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor<'_> {
                         },
                     )
                     .await
-                    .map_err(|_| Error::Control("public qualification Cron resume failed"))?;
-                    let observed = cron.get(schedule_id, None).await.map_err(|_| {
-                        Error::Control("public qualification Cron verification failed")
+                    .map_err(|source| Error::Facility {
+                        name: "public qualification Cron resume",
+                        source: Box::new(source),
                     })?;
+                    let observed =
+                        cron.get(schedule_id, None)
+                            .await
+                            .map_err(|source| Error::Facility {
+                                name: "public qualification Cron verification",
+                                source: Box::new(source),
+                            })?;
                     if !matches!(observed.output, CronQueryResult::Get(Some(ref schedule))
                         if schedule.enabled
                             && schedule.schedule_id == schedule_id
@@ -735,10 +781,13 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor<'_> {
                             })?;
                         let supervisor = ActivitySupervisor::new(
                             handle.activities::<fixture::ReferenceWorkflow>()?,
-                            5_000,
+                            60_000,
                         )?;
-                        let outcome = supervisor.run_once(0, None).await.map_err(|_| {
-                            Error::Control("public qualification Activity invocation failed")
+                        let outcome = supervisor.run_once(0, None).await.map_err(|source| {
+                            Error::Facility {
+                                name: "public qualification Activity invocation",
+                                source: Box::new(source),
+                            }
                         })?;
                         if !matches!(
                             outcome,
@@ -796,7 +845,7 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor<'_> {
                             identity(mutation_index.saturating_add(1), now_ms),
                             EffectClaimRequest {
                                 limit: 1,
-                                lease_ms: 5_000,
+                                lease_ms: 60_000,
                             },
                         )
                         .await
@@ -823,7 +872,10 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor<'_> {
                             b"public-effect-result".to_vec(),
                         )
                         .await
-                        .map_err(|_| Error::Control("public qualification Effects ack failed"))?;
+                        .map_err(|source| Error::Facility {
+                            name: "public qualification Effects ack",
+                            source: Box::new(source),
+                        })?;
                     if acked.output != EffectLeaseOutcome::Delivered {
                         return Err(Error::Control("public qualification Effects not delivered"));
                     }
@@ -1344,9 +1396,71 @@ struct MatrixRowEvidence {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_public_protocol_matrix_row_meets_profile() {
+    let (store, root) = rustfs_public_store();
+    let (node, typed, tenant, application, _directory, registry, handles, store) =
+        public_host_fixture_with_store(store, root).await;
+    let profile = QualificationProfile::pr_contract();
+    let workload = QualificationWorkload::generate_with_size(&profile, 41, 1, 64, 1)
+        .expect("protocol row workload");
+    let mut executor = TimedSmokeExecutor {
+        inner: smoke_executor(
+            &node,
+            typed.clone(),
+            &registry,
+            &handles,
+            &store,
+            tenant,
+            application,
+            1,
+        ),
+        maximum_latency: Duration::from_millis(profile.maximum_p99_latency_ms()),
+    };
+    let summary = match node
+        .run_qualification_observed(&workload, &mut executor)
+        .await
+    {
+        Ok(summary) => summary,
+        Err(error) => {
+            drop(executor);
+            drop(typed);
+            node.shutdown().await.expect("qualification shutdown");
+            assert_zero_reservations(&node);
+            panic!("protocol row typed workload: {error:?}");
+        }
+    };
+    let artifact = summary.artifact(&workload).expect("protocol row artifact");
+    let profile_error = artifact.verify_for_profile(&profile).err().map(|error| {
+        format!(
+            "protocol row profile: {error}; measured metrics: {:?}",
+            summary.metrics().expect("protocol row metrics")
+        )
+    });
+    drop(executor);
+    drop(typed);
+    node.shutdown().await.expect("qualification shutdown");
+    assert_zero_reservations(&node);
+    if let Some(error) = profile_error {
+        panic!("{error}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn public_cell_node_runs_complete_matrix_through_typed_apis() {
-    let (node, typed, tenant, application_id, _directory, registry, handles, store) =
-        public_host_fixture().await;
+    run_public_typed_matrix(public_host_fixture().await).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_public_cell_node_runs_complete_matrix_through_typed_apis() {
+    let (store, root) = rustfs_public_store();
+    run_public_typed_matrix(public_host_fixture_with_store(store, root).await).await;
+}
+
+async fn run_public_typed_matrix(
+    (node, typed, tenant, application_id, _directory, registry, handles, store): PublicHostFixture,
+) {
     let profile = QualificationProfile::pr_contract();
     let image = Digest::from_bytes([74; 32]);
     let signing_key_bytes = [76; 32];
@@ -1365,26 +1479,46 @@ async fn public_cell_node_runs_complete_matrix_through_typed_apis() {
             1,
         )
         .expect("qualification workload");
-        let mut executor = smoke_executor(
-            &node,
-            typed.clone(),
-            &registry,
-            &handles,
-            &store,
-            tenant,
-            application_id,
-            row_index as u64 + 1,
-        );
+        let mut executor = TimedSmokeExecutor {
+            inner: smoke_executor(
+                &node,
+                typed.clone(),
+                &registry,
+                &handles,
+                &store,
+                tenant,
+                application_id,
+                row_index as u64 + 1,
+            ),
+            maximum_latency: Duration::from_millis(profile.maximum_p99_latency_ms()),
+        };
         assert!(node.is_ready());
-        let summary = node
+        let summary = match node
             .run_qualification_observed(&workload, &mut executor)
             .await
-            .expect("typed workload");
+        {
+            Ok(summary) => summary,
+            Err(error) => {
+                drop(executor);
+                drop(typed);
+                node.shutdown().await.expect("qualification shutdown");
+                assert_zero_reservations(&node);
+                panic!("matrix row {row} typed workload: {error:?}");
+            }
+        };
         assert!(node.is_ready());
         let run_artifact = summary.artifact(&workload).expect("run artifact");
-        run_artifact
-            .verify_for_profile(&profile)
-            .expect("run artifact profile");
+        if let Err(error) = run_artifact.verify_for_profile(&profile) {
+            let metrics = summary.metrics().expect("measured qualification metrics");
+            drop(executor);
+            drop(typed);
+            node.shutdown().await.expect("qualification shutdown");
+            assert_zero_reservations(&node);
+            panic!(
+                "matrix row {row} run artifact profile: {error}; measured metrics: {:?}",
+                metrics
+            );
+        }
         let workload_bytes = workload.encode().expect("workload encoding");
         let run_bytes = run_artifact.encode().expect("run artifact encoding");
         let artifacts = if *row == "primitives" {
@@ -1477,4 +1611,5 @@ async fn public_cell_node_runs_complete_matrix_through_typed_apis() {
     drop(typed);
     node.shutdown().await.expect("qualification shutdown");
     assert!(!node.is_ready());
+    assert_zero_reservations(&node);
 }

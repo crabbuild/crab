@@ -798,42 +798,61 @@ pub trait QualificationOperationExecutor {
 /// Bounded latency histogram used by a qualification run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct QualificationLatencyHistogram {
-    buckets: [u64; 64],
+    buckets: Vec<u64>,
     samples: u64,
+    maximum_ms: u64,
 }
+
+// Built-in profile limits are at most five seconds. Keep millisecond precision
+// beyond every gate and fail conservatively for longer samples.
+const MAX_EXACT_LATENCY_MS: usize = 10_000;
 
 impl Default for QualificationLatencyHistogram {
     fn default() -> Self {
         Self {
-            buckets: [0; 64],
+            buckets: vec![0; MAX_EXACT_LATENCY_MS + 2],
             samples: 0,
+            maximum_ms: 0,
         }
     }
 }
 
 impl QualificationLatencyHistogram {
     fn record(&mut self, latency: Duration) {
-        let micros = latency.as_micros().max(1).min(u128::from(u64::MAX)) as u64;
-        let bucket = (u64::BITS - micros.leading_zeros() - 1) as usize;
-        self.buckets[bucket.min(self.buckets.len() - 1)] =
-            self.buckets[bucket.min(self.buckets.len() - 1)].saturating_add(1);
+        let milliseconds = latency
+            .as_millis()
+            .saturating_add(u128::from(
+                !latency.subsec_nanos().is_multiple_of(1_000_000),
+            ))
+            .max(1)
+            .min(u128::from(u64::MAX)) as u64;
+        let bucket = usize::try_from(milliseconds)
+            .unwrap_or(MAX_EXACT_LATENCY_MS + 1)
+            .min(MAX_EXACT_LATENCY_MS + 1);
+        self.buckets[bucket] = self.buckets[bucket].saturating_add(1);
         self.samples = self.samples.saturating_add(1);
+        self.maximum_ms = self.maximum_ms.max(milliseconds);
     }
 
     fn percentile_ms(&self, percentile: u64) -> u64 {
         if self.samples == 0 {
             return 0;
         }
-        let rank = self.samples.saturating_mul(percentile).saturating_add(99) / 100;
+        let rank = (self.samples.saturating_mul(percentile).saturating_add(99) / 100).max(1);
         let mut seen = 0_u64;
         for (bucket, count) in self.buckets.iter().copied().enumerate() {
             seen = seen.saturating_add(count);
             if seen >= rank {
-                let micros = 1_u64 << bucket.min(63);
-                return micros.saturating_add(999) / 1_000;
+                // The overflow bucket reports its observed maximum so a slow
+                // sample can never pass a profile threshold by rounding down.
+                return if bucket > MAX_EXACT_LATENCY_MS {
+                    self.maximum_ms
+                } else {
+                    bucket as u64
+                };
             }
         }
-        u64::MAX / 1_000
+        self.maximum_ms
     }
 }
 
@@ -3464,6 +3483,26 @@ fn validate_path(value: &str, field: &'static str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qualification_p99_never_rounds_a_slow_operation_below_the_gate() {
+        let mut latency = QualificationLatencyHistogram::default();
+        for _ in 0..63 {
+            latency.record(Duration::from_millis(80));
+        }
+        latency.record(Duration::from_millis(6_082));
+        assert_eq!(latency.percentile_ms(99), 6_082);
+    }
+
+    #[test]
+    fn qualification_p99_uses_the_measured_overflow_maximum() {
+        let mut latency = QualificationLatencyHistogram::default();
+        for _ in 0..63 {
+            latency.record(Duration::from_millis(80));
+        }
+        latency.record(Duration::from_millis(16_778));
+        assert_eq!(latency.percentile_ms(99), 16_778);
+    }
 
     #[test]
     fn execution_evidence_round_trip_is_canonical_and_bounded() {
