@@ -1,13 +1,15 @@
 use std::{
+    future::Future,
     sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
 
 use crab_cell_app::ApplicationHandle;
 use crab_cell_runtime::{
-    ApplicationId, CellTarget, CronCommand, CronMutation, CronMutationOutcome, CronQueryResult,
-    Error, InvocationError, KvAtomicCommand, KvAtomicOutcome, KvAtomicRequest, KvMutation,
-    Resolution, Result, SqlBatch, SqlBatchCommand, SqlStatement, SqlValue, TenantId,
+    ApplicationId, CellTarget, Command, CronCommand, CronMutation, CronMutationOutcome,
+    CronQueryResult, Error, InvocationError, KvAtomicCommand, KvAtomicOutcome, KvAtomicRequest,
+    KvMutation, PreparedCommand, Resolution, Result, SqlBatch, SqlBatchCommand, SqlStatement,
+    SqlValue, TenantId, WorkflowOutcome, WorkflowStart, WorkflowStartCommand, WorkflowStatus,
     partition_for_shard,
 };
 use tokio::sync::Notify;
@@ -17,6 +19,86 @@ use crate::{
     qualification::{fixed_id, identity},
     qualification_cancellation::now_ms,
 };
+
+struct ExpiryBoundary<'a> {
+    observer: &'a ApplicationHandle<fixture::ReferenceApplication>,
+    entered: &'a Notify,
+    release: &'a Notify,
+    dispatched: &'a AtomicUsize,
+}
+
+impl ExpiryBoundary<'_> {
+    async fn reject<C: Command>(
+        &self,
+        prepared: PreparedCommand<C>,
+        expires_at_ms: i64,
+        verify_before_release: impl Future<Output = Result<()>>,
+    ) -> Result<()> {
+        let evidence = prepared.evidence().clone();
+        let delayed = tokio::spawn(async move { prepared.execute().await });
+        let before_release = async {
+            tokio::time::timeout(Duration::from_secs(20), self.entered.notified())
+                .await
+                .map_err(|_| {
+                    Error::Control("public scheduled expiry signed receive not reached")
+                })?;
+            if self.dispatched.load(Ordering::Acquire) != 0 {
+                return Err(Error::Control("public scheduled expiry dispatched early"));
+            }
+            // Observe state while the signed command is still held at receive;
+            // otherwise a later rejection could hide an earlier side effect.
+            verify_before_release.await?;
+            if self.dispatched.load(Ordering::Acquire) != 0 {
+                return Err(Error::Control("public scheduled expiry dispatched early"));
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = before_release {
+            delayed.abort();
+            let _ = delayed.await;
+            return Err(error);
+        }
+        let remaining_ms = expires_at_ms
+            .saturating_sub(now_ms())
+            .max(0)
+            .saturating_add(100);
+        tokio::time::sleep(Duration::from_millis(remaining_ms.unsigned_abs())).await;
+        self.release.notify_one();
+        let outcome = delayed.await.map_err(|source| Error::Facility {
+            name: "public scheduled expiry delayed command join",
+            source: Box::new(source),
+        })?;
+        if !matches!(
+            outcome,
+            Err(InvocationError::NotStarted(Error::Peer(
+                "invalid or expired mutation identity"
+            )))
+        ) {
+            return Err(Error::Control(
+                "public scheduled expired identity was accepted",
+            ));
+        }
+        if self.dispatched.load(Ordering::Acquire) != 0 {
+            return Err(Error::Control(
+                "public scheduled expired command dispatched",
+            ));
+        }
+        if self
+            .observer
+            .resolve(&evidence)
+            .await
+            .map_err(|source| Error::Facility {
+                name: "public scheduled expiry resolution",
+                source: Box::new(source),
+            })?
+            != Resolution::Expired
+        {
+            return Err(Error::Control("public scheduled identity not expired"));
+        }
+        Ok(())
+    }
+}
 
 pub struct ExpiryCase<'a> {
     writer: &'a ApplicationHandle<fixture::ReferenceApplication>,
@@ -133,65 +215,26 @@ impl<'a> ExpiryCase<'a> {
                 name: "public scheduled SQL expiring command prepare",
                 source: Box::new(source),
             })?;
-        let evidence = prepared.evidence().clone();
-        let delayed = tokio::spawn(async move { prepared.execute().await });
-        tokio::time::timeout(Duration::from_secs(20), entered.notified())
-            .await
-            .map_err(|_| Error::Control("public scheduled SQL signed receive not reached"))?;
-        if dispatched.load(Ordering::Acquire) != 0 {
-            return Err(Error::Control(
-                "public scheduled SQL expiry dispatched early",
-            ));
+        ExpiryBoundary {
+            observer,
+            entered,
+            release,
+            dispatched,
         }
-        let absent = observer_sql
-            .query(None, observe(delayed_row_id))
-            .await
-            .map_err(|source| Error::Facility {
-                name: "public scheduled SQL delayed row observation",
-                source: Box::new(source),
-            })?;
-        if absent.output.len() != 1 || !absent.output[0].rows.is_empty() {
-            return Err(Error::Control("public scheduled SQL delayed row appeared"));
-        }
-        let remaining_ms = expires_at_ms
-            .saturating_sub(now_ms())
-            .max(0)
-            .saturating_add(100);
-        tokio::time::sleep(Duration::from_millis(u64::try_from(remaining_ms).map_err(
-            |_| Error::Control("public scheduled SQL expiry wait overflow"),
-        )?))
-        .await;
-        release.notify_one();
-        let outcome = delayed.await.map_err(|source| Error::Facility {
-            name: "public scheduled SQL delayed command join",
-            source: Box::new(source),
-        })?;
-        if !matches!(
-            outcome,
-            Err(InvocationError::NotStarted(Error::Peer(
-                "invalid or expired mutation identity"
-            )))
-        ) {
-            return Err(Error::Control(
-                "public scheduled SQL expired identity was accepted",
-            ));
-        }
-        if dispatched.load(Ordering::Acquire) != 0 {
-            return Err(Error::Control(
-                "public scheduled SQL expired command dispatched",
-            ));
-        }
-        if observer
-            .resolve(&evidence)
-            .await
-            .map_err(|source| Error::Facility {
-                name: "public scheduled SQL expiry resolution",
-                source: Box::new(source),
-            })?
-            != Resolution::Expired
-        {
-            return Err(Error::Control("public scheduled SQL identity not expired"));
-        }
+        .reject(prepared, expires_at_ms, async {
+            let absent = observer_sql
+                .query(None, observe(delayed_row_id))
+                .await
+                .map_err(|source| Error::Facility {
+                    name: "public scheduled SQL delayed row observation",
+                    source: Box::new(source),
+                })?;
+            if absent.output.len() != 1 || !absent.output[0].rows.is_empty() {
+                return Err(Error::Control("public scheduled SQL delayed row appeared"));
+            }
+            Ok(())
+        })
+        .await?;
         let after = observer_sql
             .query(None, observe(row_id))
             .await
@@ -299,67 +342,28 @@ impl<'a> ExpiryCase<'a> {
                 name: "public scheduled Cron expiring command prepare",
                 source: Box::new(source),
             })?;
-        let evidence = prepared.evidence().clone();
-        let delayed = tokio::spawn(async move { prepared.execute().await });
-        tokio::time::timeout(Duration::from_secs(20), entered.notified())
-            .await
-            .map_err(|_| Error::Control("public scheduled Cron signed receive not reached"))?;
-        if dispatched.load(Ordering::Acquire) != 0 {
-            return Err(Error::Control(
-                "public scheduled Cron expiry dispatched early",
-            ));
+        ExpiryBoundary {
+            observer,
+            entered,
+            release,
+            dispatched,
         }
-        let pending = observer_cron
-            .get(schedule_id, None)
-            .await
-            .map_err(|source| Error::Facility {
-                name: "public scheduled Cron delayed mutation observation",
-                source: Box::new(source),
-            })?;
-        if pending.output != CronQueryResult::Get(Some(schedule.clone())) {
-            return Err(Error::Control(
-                "public scheduled Cron delayed mutation appeared",
-            ));
-        }
-        let remaining_ms = expires_at_ms
-            .saturating_sub(now_ms())
-            .max(0)
-            .saturating_add(100);
-        tokio::time::sleep(Duration::from_millis(u64::try_from(remaining_ms).map_err(
-            |_| Error::Control("public scheduled Cron expiry wait overflow"),
-        )?))
-        .await;
-        release.notify_one();
-        let outcome = delayed.await.map_err(|source| Error::Facility {
-            name: "public scheduled Cron delayed command join",
-            source: Box::new(source),
-        })?;
-        if !matches!(
-            outcome,
-            Err(InvocationError::NotStarted(Error::Peer(
-                "invalid or expired mutation identity"
-            )))
-        ) {
-            return Err(Error::Control(
-                "public scheduled Cron expired identity was accepted",
-            ));
-        }
-        if dispatched.load(Ordering::Acquire) != 0 {
-            return Err(Error::Control(
-                "public scheduled Cron expired command dispatched",
-            ));
-        }
-        if observer
-            .resolve(&evidence)
-            .await
-            .map_err(|source| Error::Facility {
-                name: "public scheduled Cron expiry resolution",
-                source: Box::new(source),
-            })?
-            != Resolution::Expired
-        {
-            return Err(Error::Control("public scheduled Cron identity not expired"));
-        }
+        .reject(prepared, expires_at_ms, async {
+            let pending = observer_cron
+                .get(schedule_id, None)
+                .await
+                .map_err(|source| Error::Facility {
+                    name: "public scheduled Cron delayed mutation observation",
+                    source: Box::new(source),
+                })?;
+            if pending.output != CronQueryResult::Get(Some(schedule.clone())) {
+                return Err(Error::Control(
+                    "public scheduled Cron delayed mutation appeared",
+                ));
+            }
+            Ok(())
+        })
+        .await?;
         let after = observer_cron
             .get(schedule_id, None)
             .await
@@ -371,6 +375,138 @@ impl<'a> ExpiryCase<'a> {
             || after.receipt.commit_sequence < acknowledged.receipt.commit_sequence
         {
             return Err(Error::Control("public scheduled Cron expiry state differs"));
+        }
+        Ok(())
+    }
+
+    pub async fn workflow(self, operation_id: u64, nonce: u64) -> Result<()> {
+        let Self {
+            writer,
+            peer,
+            observer,
+            entered,
+            release,
+            dispatched,
+            tenant,
+            application,
+        } = self;
+        let target = CellTarget::new(
+            tenant,
+            application,
+            fixture::WORKFLOW_NAMESPACE,
+            &partition_for_shard(0),
+        )?;
+        let workflow_id = format!("public-workflow-expiry-{operation_id}").into_bytes();
+        let delayed_id = format!("public-workflow-expiry-rejected-{operation_id}").into_bytes();
+        let event = nonce.to_be_bytes().to_vec();
+        let writer_workflow = writer.workflow::<fixture::ReferenceWorkflow>()?;
+        let observer_workflow = observer.workflow::<fixture::ReferenceWorkflow>()?;
+        let acknowledged = writer_workflow
+            .start(
+                identity(operation_id.saturating_mul(100), now_ms()),
+                workflow_id.clone(),
+                event.clone(),
+            )
+            .await
+            .map_err(|source| Error::Facility {
+                name: "public scheduled Workflow expiry acknowledged start",
+                source: Box::new(source),
+            })?;
+        let WorkflowOutcome::Applied {
+            run_id,
+            status: WorkflowStatus::Completed,
+            event_sequence: 1,
+        } = acknowledged.output
+        else {
+            return Err(Error::Control(
+                "public scheduled Workflow acknowledged start differs",
+            ));
+        };
+        let before = observer_workflow
+            .state(workflow_id.clone(), Some(acknowledged.receipt))
+            .await
+            .map_err(|source| Error::Facility {
+                name: "public scheduled Workflow pre-expiry observation",
+                source: Box::new(source),
+            })?;
+        let Some(run) = before.output else {
+            return Err(Error::Control("public scheduled Workflow run missing"));
+        };
+        if run.workflow_id != workflow_id
+            || run.run_id != run_id
+            || run.definition_digest != fixture::WORKFLOW_DIGEST
+            || run.status != WorkflowStatus::Completed
+            || run.event_sequence != 1
+            || run.result.as_deref() != Some(event.as_slice())
+        {
+            return Err(Error::Control("public scheduled Workflow run differs"));
+        }
+
+        let issued_at_ms = now_ms();
+        let expires_at_ms = issued_at_ms.saturating_add(15_000);
+        let mut expired_identity = identity(
+            operation_id.saturating_mul(100).saturating_add(1),
+            issued_at_ms,
+        );
+        expired_identity.expires_at_ms = expires_at_ms;
+        let prepared = peer
+            .prepare_command::<WorkflowStartCommand<fixture::ReferenceWorkflow>>(
+                &target,
+                expired_identity,
+                WorkflowStart {
+                    workflow_id: delayed_id.clone(),
+                    request_id: expired_identity.request_id,
+                    event,
+                },
+            )
+            .await
+            .map_err(|source| Error::Facility {
+                name: "public scheduled Workflow expiring command prepare",
+                source: Box::new(source),
+            })?;
+        ExpiryBoundary {
+            observer,
+            entered,
+            release,
+            dispatched,
+        }
+        .reject(prepared, expires_at_ms, async {
+            let pending = observer_workflow
+                .state(delayed_id.clone(), None)
+                .await
+                .map_err(|source| Error::Facility {
+                    name: "public scheduled Workflow delayed run observation",
+                    source: Box::new(source),
+                })?;
+            if pending.output.is_some() {
+                return Err(Error::Control(
+                    "public scheduled Workflow delayed run appeared",
+                ));
+            }
+            Ok(())
+        })
+        .await?;
+        let after = observer_workflow
+            .state(workflow_id, None)
+            .await
+            .map_err(|source| Error::Facility {
+                name: "public scheduled Workflow acknowledged run after expiry",
+                source: Box::new(source),
+            })?;
+        let rejected = observer_workflow
+            .state(delayed_id, None)
+            .await
+            .map_err(|source| Error::Facility {
+                name: "public scheduled Workflow rejected run observation",
+                source: Box::new(source),
+            })?;
+        if after.output != Some(run)
+            || after.receipt.commit_sequence < acknowledged.receipt.commit_sequence
+            || rejected.output.is_some()
+        {
+            return Err(Error::Control(
+                "public scheduled Workflow expiry state differs",
+            ));
         }
         Ok(())
     }
@@ -463,67 +599,28 @@ impl<'a> ExpiryCase<'a> {
                 name: "public scheduled KV expiring command prepare",
                 source: Box::new(source),
             })?;
-        let evidence = prepared.evidence().clone();
-        let delayed = tokio::spawn(async move { prepared.execute().await });
-        tokio::time::timeout(Duration::from_secs(20), entered.notified())
-            .await
-            .map_err(|_| Error::Control("public scheduled KV signed receive not reached"))?;
-        if dispatched.load(Ordering::Acquire) != 0 {
-            return Err(Error::Control(
-                "public scheduled KV expiry dispatched early",
-            ));
+        ExpiryBoundary {
+            observer,
+            entered,
+            release,
+            dispatched,
         }
-        let absent = observer_kv
-            .get(scope.clone(), delayed_key.clone(), None)
-            .await
-            .map_err(|source| Error::Facility {
-                name: "public scheduled KV delayed mutation observation",
-                source: Box::new(source),
-            })?;
-        if absent.output.is_some() {
-            return Err(Error::Control(
-                "public scheduled KV delayed mutation appeared",
-            ));
-        }
-        let remaining_ms = expires_at_ms
-            .saturating_sub(now_ms())
-            .max(0)
-            .saturating_add(100);
-        tokio::time::sleep(Duration::from_millis(
-            u64::try_from(remaining_ms)
-                .map_err(|_| Error::Control("public scheduled KV expiry wait overflow"))?,
-        ))
-        .await;
-        release.notify_one();
-        let outcome = delayed.await.map_err(|source| Error::Facility {
-            name: "public scheduled KV delayed command join",
-            source: Box::new(source),
-        })?;
-        if !matches!(
-            outcome,
-            Err(InvocationError::NotStarted(Error::Peer(
-                "invalid or expired mutation identity"
-            )))
-        ) {
-            return Err(Error::Control(
-                "public scheduled KV expired identity was accepted",
-            ));
-        }
-        if dispatched.load(Ordering::Acquire) != 0 {
-            return Err(Error::Control(
-                "public scheduled KV expired command dispatched",
-            ));
-        }
-        let resolution = observer
-            .resolve(&evidence)
-            .await
-            .map_err(|source| Error::Facility {
-                name: "public scheduled KV expiry resolution",
-                source: Box::new(source),
-            })?;
-        if resolution != Resolution::Expired {
-            return Err(Error::Control("public scheduled KV identity not expired"));
-        }
+        .reject(prepared, expires_at_ms, async {
+            let absent = observer_kv
+                .get(scope.clone(), delayed_key.clone(), None)
+                .await
+                .map_err(|source| Error::Facility {
+                    name: "public scheduled KV delayed mutation observation",
+                    source: Box::new(source),
+                })?;
+            if absent.output.is_some() {
+                return Err(Error::Control(
+                    "public scheduled KV delayed mutation appeared",
+                ));
+            }
+            Ok(())
+        })
+        .await?;
         let expired = observer_kv
             .get(scope.clone(), ttl_key, None)
             .await

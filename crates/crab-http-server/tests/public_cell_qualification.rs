@@ -1237,6 +1237,22 @@ async fn run_scheduled_retry_cases(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn public_scheduled_workflow_expiry_rejects_delayed_mutation() {
+    run_scheduled_expiry_case(public_host_fixture().await, "workflow").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_public_scheduled_workflow_expiry_rejects_delayed_mutation() {
+    let (store, root) = rustfs_public_store();
+    run_scheduled_expiry_case(
+        public_host_fixture_with_store(store, root).await,
+        "workflow",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn public_scheduled_cron_expiry_rejects_delayed_mutation() {
     run_scheduled_expiry_case(public_host_fixture().await, "cron").await;
 }
@@ -1305,18 +1321,19 @@ async fn run_scheduled_expiry_case(
         tenant,
         application,
     );
-    match primitive {
+    let result = match primitive {
+        "workflow" => case.workflow(operation.index(), operation.nonce()).await,
         "cron" => case.cron(operation.index(), operation.nonce()).await,
         "sql" => case.sql(operation.index(), operation.nonce()).await,
         "kv" => case.kv(operation.index(), operation.nonce()).await,
-        _ => panic!("unknown scheduled expiry primitive: {primitive}"),
-    }
-    .expect("scheduled expiry");
+        _ => Err(Error::Control("unknown scheduled expiry primitive")),
+    };
     drop(writer);
     drop(peer);
     drop(observer);
     node.shutdown().await.expect("qualification shutdown");
     assert_zero_reservations(&node);
+    result.unwrap_or_else(|error| panic!("scheduled {primitive} expiry: {error:?}"));
 }
 
 async fn run_public_typed_primitive_workload(
