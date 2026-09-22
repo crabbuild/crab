@@ -101,6 +101,38 @@ pub(super) async fn run() {
             "unacknowledged SQL row appeared"
         );
     }
+    let expiry_rows = sql
+        .query(
+            None,
+            SqlBatch {
+                statements: [SQL_EXPIRY_OPERATION_ID, SQL_EXPIRY_OPERATION_ID + 1]
+                    .into_iter()
+                    .map(|id| SqlStatement {
+                        sql: "SELECT payload FROM qualification_rows WHERE id = ?1".into(),
+                        parameters: vec![SqlValue::Integer(
+                            i64::try_from(id).expect("expiry row ID bounds"),
+                        )],
+                    })
+                    .collect(),
+            },
+        )
+        .await
+        .expect("successor SQL expiry rows");
+    if let Some(sequence) = acknowledgement
+        .as_ref()
+        .and_then(|ack| ack.expiry_sql_sequence)
+    {
+        assert_eq!(
+            expiry_rows.output[0].rows,
+            vec![vec![SqlValue::Blob(
+                SQL_EXPIRY_NONCE.to_be_bytes().to_vec()
+            )]]
+        );
+        assert!(expiry_rows.receipt.commit_sequence >= sequence);
+    } else {
+        assert!(expiry_rows.output[0].rows.is_empty());
+    }
+    assert!(expiry_rows.output[1].rows.is_empty());
     let kv = typed
         .kv::<fixture::ReferenceKv>(fixture::KV_NAMESPACE)
         .expect("successor KV");
@@ -564,6 +596,13 @@ pub(super) async fn run() {
         values.extend_from_slice(b"activity-result");
         values.extend_from_slice(EFFECT_RESULT);
         values.extend_from_slice(CRON_PAYLOAD);
+        if acknowledgement
+            .as_ref()
+            .and_then(|ack| ack.expiry_sql_sequence)
+            .is_some()
+        {
+            values.extend_from_slice(&SQL_EXPIRY_NONCE.to_be_bytes());
+        }
         values
     } else {
         b"absent".to_vec()
