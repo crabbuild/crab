@@ -22,7 +22,7 @@ use crate::{
 use super::{
     ActivityClaim, ActivityCompletion, ActivityCompletionOutcome, ActivityLeaseOutcome,
     ActivitySupport, SystemActivityTokens, WorkflowModule, WorkflowOutcome,
-    activity::MAX_ACTIVITY_PAYLOAD_BYTES,
+    activity::{MAX_ACTIVITY_PAYLOAD_BYTES, MAX_LEASE_MS},
     api::{definition, definitions},
     workflow_claim_activities, workflow_complete_activity, workflow_definition_digest_by_run,
     workflow_extend_activity, workflow_validate_activity_claim,
@@ -659,6 +659,39 @@ impl<M: WorkflowActivityModule> ActivitySupervisor<M> {
                 "activity handler result exceeds 256 KiB",
             )));
         }
+
+        if self.lease_ms < MAX_LEASE_MS {
+            // Provider-backed completion can take longer than the handler. Reserve a fresh
+            // bounded lease before submitting the terminal mutation, or the result can be
+            // rejected as expired while the owner is still durably completing it.
+            let extended = self
+                .activities
+                .extend(internal_identity()?, shard, claim.clone(), MAX_LEASE_MS)
+                .await;
+            let extended = match extended {
+                Ok(committed) => committed,
+                Err(InvocationError::Rejected(committed))
+                    if committed.output == ActivityLeaseOutcome::LeaseLost =>
+                {
+                    return Ok(ActivityRunOutcome::LeaseLost {
+                        receipt: committed.receipt,
+                    });
+                }
+                Err(error) => return Err(unexpected_invocation(error)),
+            };
+            match extended.output {
+                ActivityLeaseOutcome::Extended { lease_until_ms } => {
+                    claim.lease_until_ms = lease_until_ms;
+                    lease_deadline.store(lease_until_ms, Ordering::Release);
+                }
+                ActivityLeaseOutcome::LeaseLost => {
+                    return Ok(ActivityRunOutcome::LeaseLost {
+                        receipt: extended.receipt,
+                    });
+                }
+            }
+        }
+
         let completion = ActivityCompletion {
             run_id: claim.run_id,
             activity_id: claim.activity_id,
