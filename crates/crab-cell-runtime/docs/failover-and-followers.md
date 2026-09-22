@@ -188,7 +188,8 @@ epoch. Recruitment retries while the node remains healthy and leaves a
 one-node fleet on the object path.
 The preferred
 shard-zero scanner now inventories expired active node
-logs, claims at most two concurrently, scans at most 10,000 affected Cells,
+logs with at most 32 concurrent record reads, selects a bounded rotating
+window, claims at most two concurrently, scans at most 10,000 affected Cells,
 renews each recovery claim while gathering and pinning, refreshes the claim
 once more before the final seal, and bounds that seal's object-store CAS so a
 stalled store returns a retryable deadline instead of holding an unbounded

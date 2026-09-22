@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use bytes::Bytes;
 use crab_ltx::CellStorageLayout;
@@ -23,9 +23,11 @@ const MAX_CLOCK_SKEW_MS: i64 = 5 * 60_000;
 const STALE_ADVERTISEMENT_RETENTION_MS: i64 = MAX_CLOCK_SKEW_MS + MAX_ADVERTISEMENT_LIFETIME_MS;
 const MAX_STALE_COLLECTION_ITEMS: usize = 1_024;
 const MAX_LIVE_NODE_RECORDS: usize = 10_000;
+const NODE_DIRECTORY_READ_CONCURRENCY: usize = 32;
 const SIGNING_DOMAIN: &[u8] = b"crab.node.v1\0";
 const PLACEMENT_SIGNING_DOMAIN: &[u8] = b"crab.node-placement.v1\0";
 const NODE_LOG_SELECTION_DOMAIN: &[u8] = b"crab.node-log.member.v1\0";
+const RECOVERY_CANDIDATE_ROTATION_DOMAIN: &[u8] = b"crab.node-recovery-candidate.v1\0";
 const PLACEMENT_SCHEMA_VERSION: u32 = 2;
 
 /// Current private follower-log wire and persistence protocol.
@@ -958,51 +960,67 @@ impl NodeDirectory {
             HashSet::new()
         };
         let prefix = self.layout.node_directory_path();
-        let mut stream = self.layout.store().inner().list(Some(&prefix));
-        let mut candidates = Vec::new();
-        while let Some(item) = stream.next().await {
-            let meta = item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?;
-            let Some((record, _)) = self.load_record_at(&meta.location).await? else {
+        let stream = self.layout.store().inner().list(Some(&prefix));
+        let mut records = stream
+            .map(|item| {
+                let prefix = prefix.clone();
+                async move {
+                    let meta =
+                        item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?;
+                    let Some((record, _)) = self.load_record_at(&meta.location).await? else {
+                        return Ok(None);
+                    };
+                    let session = record.session();
+                    validate_record_path(&self.layout, session, &meta.location)?;
+                    let (eligible, members) = match record {
+                        NodeRecord::Advertisement(advertisement) => {
+                            self.validate_scope(&advertisement)?;
+                            advertisement.validate_shape()?;
+                            advertisement.verify_signature()?;
+                            if advertisement.issued_at_ms > now_ms.saturating_add(MAX_CLOCK_SKEW_MS)
+                            {
+                                return Err(Error::Node("advertised node issue time differs"));
+                            }
+                            let log = advertisement.log.as_ref();
+                            (
+                                advertisement.expires_at_ms <= now_ms
+                                    && log.is_some_and(NodeLogStatus::active)
+                                    && log.is_some_and(|log| {
+                                        matches!(
+                                            log.phase(),
+                                            NodeLogPhase::Open | NodeLogPhase::Recovering
+                                        )
+                                    }),
+                                log.map_or_else(Vec::new, |log| log.members().to_vec()),
+                            )
+                        }
+                        NodeRecord::Tombstone(tombstone) => {
+                            let claim_available = tombstone.claimant == Some(claimant)
+                                || tombstone
+                                    .claim_expires_at_ms
+                                    .is_none_or(|expires_at_ms| expires_at_ms <= now_ms);
+                            let log = tombstone.log.as_ref();
+                            (
+                                claim_available
+                                    && log.is_some_and(|log| {
+                                        log.active()
+                                            && matches!(
+                                                log.phase(),
+                                                NodeLogPhase::Open | NodeLogPhase::Recovering
+                                            )
+                                    }),
+                                log.map_or_else(Vec::new, |log| log.members().to_vec()),
+                            )
+                        }
+                    };
+                    Ok(Some((session, eligible, members)))
+                }
+            })
+            .buffer_unordered(NODE_DIRECTORY_READ_CONCURRENCY);
+        let mut candidates = RecoveryCandidateWindow::new(now_ms, limit)?;
+        while let Some(record) = records.next().await {
+            let Some((session, eligible, members)) = record? else {
                 continue;
-            };
-            let session = record.session();
-            validate_record_path(&self.layout, session, &meta.location)?;
-            let (eligible, members) = match record {
-                NodeRecord::Advertisement(advertisement) => {
-                    self.validate_scope(&advertisement)?;
-                    advertisement.validate_shape()?;
-                    advertisement.verify_signature()?;
-                    if advertisement.issued_at_ms > now_ms.saturating_add(MAX_CLOCK_SKEW_MS) {
-                        return Err(Error::Node("advertised node issue time differs"));
-                    }
-                    let log = advertisement.log.as_ref();
-                    (
-                        advertisement.expires_at_ms <= now_ms
-                            && log.is_some_and(NodeLogStatus::active)
-                            && log.is_some_and(|log| {
-                                matches!(log.phase(), NodeLogPhase::Open | NodeLogPhase::Recovering)
-                            }),
-                        log.map_or_else(Vec::new, |log| log.members().to_vec()),
-                    )
-                }
-                NodeRecord::Tombstone(tombstone) => {
-                    let claim_available = tombstone.claimant == Some(claimant)
-                        || tombstone
-                            .claim_expires_at_ms
-                            .is_none_or(|expires_at_ms| expires_at_ms <= now_ms);
-                    let log = tombstone.log.as_ref();
-                    (
-                        claim_available
-                            && log.is_some_and(|log| {
-                                log.active()
-                                    && matches!(
-                                        log.phase(),
-                                        NodeLogPhase::Open | NodeLogPhase::Recovering
-                                    )
-                            }),
-                        log.map_or_else(Vec::new, |log| log.members().to_vec()),
-                    )
-                }
             };
             if !eligible || session == claimant {
                 continue;
@@ -1021,12 +1039,8 @@ impl NodeDirectory {
                 continue;
             }
             candidates.push(session);
-            if candidates.len() == limit {
-                break;
-            }
         }
-        candidates.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-        Ok(candidates)
+        Ok(candidates.finish())
     }
 
     /// Extends an exact recovery claim while its claimant remains live.
@@ -1358,42 +1372,58 @@ impl NodeDirectory {
             }));
         }
         let prefix = self.layout.node_directory_path();
-        let mut stream = self.layout.store().inner().list(Some(&prefix));
+        let stream = self.layout.store().inner().list(Some(&prefix));
+        let mut records = stream
+            .map(|item| {
+                let prefix = prefix.clone();
+                async move {
+                    let meta =
+                        item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?;
+                    let (body, _) = match self
+                        .layout
+                        .store()
+                        .get_with_etag_bounded(&meta.location, MAX_NODE_BYTES)
+                        .await
+                    {
+                        Ok(value) => value,
+                        Err(StorageError::NotFound { .. }) => return Ok(None),
+                        Err(error) => return Err(error.into()),
+                    };
+                    let NodeRecord::Advertisement(advertisement) =
+                        NodeRecord::decode_canonical(&body)?
+                    else {
+                        return Ok(None);
+                    };
+                    validate_record_path(&self.layout, advertisement.session, &meta.location)?;
+                    match scan {
+                        AdvertisementScan::LiveRelease => {
+                            if advertisement.expires_at_ms <= now_ms {
+                                return Ok(None);
+                            }
+                            self.validate(&advertisement, now_ms)?;
+                        }
+                        AdvertisementScan::AdvertisedFleet => {
+                            advertisement.validate_shape()?;
+                            advertisement.verify_signature()?;
+                            if advertisement.fleet != self.fleet
+                                || advertisement.issued_at_ms
+                                    > now_ms.saturating_add(MAX_CLOCK_SKEW_MS)
+                            {
+                                return Err(Error::Node(
+                                    "advertised node fleet or issue time differs",
+                                ));
+                            }
+                        }
+                    }
+                    Ok(Some(*advertisement))
+                }
+            })
+            .buffer_unordered(NODE_DIRECTORY_READ_CONCURRENCY);
         let mut advertisements = Vec::new();
-        while let Some(item) = stream.next().await {
-            let meta = item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?;
-            let (body, _) = match self
-                .layout
-                .store()
-                .get_with_etag_bounded(&meta.location, MAX_NODE_BYTES)
-                .await
-            {
-                Ok(value) => value,
-                Err(StorageError::NotFound { .. }) => continue,
-                Err(error) => return Err(error.into()),
-            };
-            let NodeRecord::Advertisement(advertisement) = NodeRecord::decode_canonical(&body)?
-            else {
+        while let Some(advertisement) = records.next().await {
+            let Some(advertisement) = advertisement? else {
                 continue;
             };
-            validate_record_path(&self.layout, advertisement.session, &meta.location)?;
-            match scan {
-                AdvertisementScan::LiveRelease => {
-                    if advertisement.expires_at_ms <= now_ms {
-                        continue;
-                    }
-                    self.validate(&advertisement, now_ms)?;
-                }
-                AdvertisementScan::AdvertisedFleet => {
-                    advertisement.validate_shape()?;
-                    advertisement.verify_signature()?;
-                    if advertisement.fleet != self.fleet
-                        || advertisement.issued_at_ms > now_ms.saturating_add(MAX_CLOCK_SKEW_MS)
-                    {
-                        return Err(Error::Node("advertised node fleet or issue time differs"));
-                    }
-                }
-            }
             if advertisements.len() == limit {
                 return Err(Error::Node(match scan {
                     AdvertisementScan::LiveRelease => "live node directory exceeds its limit",
@@ -1402,7 +1432,7 @@ impl NodeDirectory {
                     }
                 }));
             }
-            advertisements.push(*advertisement);
+            advertisements.push(advertisement);
         }
         advertisements
             .sort_unstable_by(|left, right| left.session.as_bytes().cmp(right.session.as_bytes()));
@@ -1859,6 +1889,76 @@ impl NodeDirectory {
             return Err(Error::Node("advertisement fleet, image or release differs"));
         }
         Ok(())
+    }
+}
+
+/// Bounded rotating window over the expired sessions discovered in one scan.
+///
+/// Object-store listings are not a durable work queue. Keeping only the first
+/// page lets a permanently failing early session starve every later session,
+/// so the window rotates its start key while retaining at most `2 * limit`
+/// session IDs.
+struct RecoveryCandidateWindow {
+    start: [u8; 16],
+    limit: usize,
+    after: BTreeSet<[u8; 16]>,
+    before: BTreeSet<[u8; 16]>,
+}
+
+impl RecoveryCandidateWindow {
+    fn new(now_ms: i64, limit: usize) -> Result<Self> {
+        if now_ms < 0 || limit == 0 {
+            return Err(Error::Node("node recovery candidate window is invalid"));
+        }
+        let bucket = u64::try_from(now_ms / 1_000)
+            .map_err(|_| Error::Node("node recovery candidate rotation overflows"))?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(RECOVERY_CANDIDATE_ROTATION_DOMAIN);
+        hasher.update(&bucket.to_be_bytes());
+        let digest = hasher.finalize();
+        let mut start = [0_u8; 16];
+        start.copy_from_slice(&digest.as_bytes()[..16]);
+        Ok(Self::with_start(start, limit))
+    }
+
+    fn with_start(start: [u8; 16], limit: usize) -> Self {
+        Self {
+            start,
+            limit,
+            after: BTreeSet::new(),
+            before: BTreeSet::new(),
+        }
+    }
+
+    fn push(&mut self, session: SessionId) {
+        let key = *session.as_bytes();
+        let window = if key >= self.start {
+            &mut self.after
+        } else {
+            &mut self.before
+        };
+        if !window.insert(key) {
+            return;
+        }
+        if window.len() > self.limit {
+            let evicted = if key >= self.start {
+                window.iter().next_back().copied()
+            } else {
+                window.iter().next().copied()
+            };
+            if let Some(evicted) = evicted {
+                window.remove(&evicted);
+            }
+        }
+    }
+
+    fn finish(self) -> Vec<SessionId> {
+        self.after
+            .into_iter()
+            .chain(self.before.into_iter().rev())
+            .take(self.limit)
+            .map(SessionId::from_bytes)
+            .collect()
     }
 }
 
