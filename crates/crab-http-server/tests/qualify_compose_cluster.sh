@@ -665,7 +665,7 @@ root_after_state="$(jq --compact-output '.root' <<<"$control_after")"
 metrics_first=""
 for _ in $(seq 1 45); do
   candidate_metrics="$("${compose[@]}" exec -T server-c crab-http-server \
-    --config /etc/crab/server.toml cells metrics)"
+    --config /etc/crab/server.toml cells metrics 2>/dev/null || true)"
   if [ "$(metric_counter "$candidate_metrics" candidate_count)" -gt \
     "$(metric_counter "$metrics_c" candidate_count)" ]; then
     metrics_first="$candidate_metrics"
@@ -969,7 +969,7 @@ root_after_second_loss="$(jq --compact-output '.root' \
 metrics_second=""
 for _ in $(seq 1 45); do
   candidate_metrics="$("${compose[@]}" exec -T server-b crab-http-server \
-    --config /etc/crab/server.toml cells metrics)"
+    --config /etc/crab/server.toml cells metrics 2>/dev/null || true)"
   if [ "$(metric_counter "$candidate_metrics" candidate_count)" -gt \
     "$(metric_counter "$metrics_second_before" candidate_count)" ]; then
     metrics_second="$candidate_metrics"
