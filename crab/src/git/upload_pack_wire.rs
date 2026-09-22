@@ -764,11 +764,16 @@ where
                         return reject_protocol_request(writer, error, cancellation).await;
                     }
                 };
-                if fetch_snapshot.as_ref().is_some_and(|(_, proof)| {
+                let tip_bound = fetch_snapshot.as_ref().is_some_and(|(_, proof)| {
                     proof.as_ref().is_some_and(|proof| {
                         matches!(proof, UploadPackVisibilityProof::TipBound { .. })
                     })
-                }) && !tip_bound_fetch_eligible(&fetch, fetch_policy, &visible_ref_names)
+                });
+                let cold_clone_needs_complete_view =
+                    fetch.done && fetch.haves.is_empty() && cold_clone_pack.is_none();
+                if tip_bound
+                    && (cold_clone_needs_complete_view
+                        || !tip_bound_fetch_eligible(&fetch, fetch_policy, &visible_ref_names))
                 {
                     let Some(root) = layered_root.clone() else {
                         return reject_protocol_request(
@@ -1358,10 +1363,11 @@ async fn open_repository_snapshot(
 
 /// Open one authenticated capsule root for protocol-v2 upload-pack.
 ///
-/// Layered ordinary fetches use only the checkpoint/run controls and a
-/// tip-bound proof. Requests that need the complete visibility semantics call
-/// this helper with `footer_only = false`, retaining the existing full-proof
-/// path without weakening authorization.
+/// Layered ordinary fetches use the checkpoint/run controls and a tip-bound
+/// proof only when the exact one-pack stream can be sent directly. A
+/// multi-member cold clone is promoted to the complete visibility view so
+/// protocol-v2 can consolidate the authenticated pack inventory into its
+/// singular `packfile` response without falling back to per-object reads.
 async fn open_capsule_repository_from_root(
     store: &crab_storage::Store,
     prefix: &str,
@@ -1380,22 +1386,28 @@ async fn open_capsule_repository_from_root(
         max_capsule_bytes: maximum,
         max_frontier_bytes: maximum,
     };
-    let view = if footer_only {
-        crab_read::capsule_protocol::open_view_from_root_with_layered_control(&layout, root, limits)
-            .await?
+    let (view, direct_pack, tip_bound) = if footer_only {
+        let footer_view = crab_read::capsule_protocol::open_view_from_root_with_layered_control(
+            &layout,
+            root.clone(),
+            limits,
+        )
+        .await?;
+        let direct_pack = footer_view
+            .layered_cold_clone_pack(&layout, options.operation_limits().max_response_bytes)
+            .map_err(remote_error)?;
+        (footer_view, direct_pack, true)
     } else {
-        crab_read::capsule_protocol::open_view_from_root_with_control(&layout, root, limits).await?
+        (
+            crab_read::capsule_protocol::open_view_from_root(&layout, root, limits).await?,
+            None,
+            false,
+        )
     };
     let bucket = store.bucket_identity();
     let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
     let identity = RepositoryIdentity::new(provider, prefix.to_owned(), 1).map_err(remote_error)?;
-    let direct_pack = if footer_only {
-        view.layered_cold_clone_pack(&layout, options.operation_limits().max_response_bytes)
-            .map_err(remote_error)?
-    } else {
-        None
-    };
-    let proof = if footer_only {
+    let proof = if tip_bound {
         UploadPackVisibilityProof::TipBound {
             transitions: Arc::new(view.tip_bound_transitions().clone()),
         }

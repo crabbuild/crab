@@ -1380,13 +1380,11 @@ async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
     // and verified legacy manifests. Advertising it for legacy repositories
     // preserves clone/fetch without pretending the legacy store is v2.
     //
-    // A new clone does not have a local object base. For the narrow
-    // one-member layered case, the classic remote-helper fetch contract can
-    // install the authenticated pack, index, and reverse index directly. Do
-    // not force that clone through protocol-v2's pack stream, which makes Git
-    // re-index a pack that Crab already has indexed. Existing repositories
-    // retain stateless-connect for filters, shallow history, and incremental
-    // negotiation.
+    // A new clone does not have a local object base. The classic
+    // remote-helper fetch contract can install one authenticated layered pack
+    // directly. Multi-member checkpoints stay on protocol-v2 so filtered and
+    // shallow clones retain their negotiated semantics; the wire path uses
+    // the authenticated pack inventory to consolidate a complete response.
     let mut v2_ready = true;
     if !cache.legacy_v1 && local_git_object_store_is_empty() {
         let layout = crab_storage::StoreLayout::with_global_prefix(

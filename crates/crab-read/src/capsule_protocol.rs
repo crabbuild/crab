@@ -343,25 +343,22 @@ impl CapsuleRepositoryView {
         &self.tip_bound_transitions
     }
 
-    /// Admit the one-pack cold-clone fast path for this exact layered view.
+    /// Admit the complete layered cold-clone pack set for this exact view.
     ///
-    /// Multiple members, post-checkpoint capsules, or external delta bases
-    /// remain on the normal upload-pack path because they need response-pack
-    /// consolidation to preserve Git's one-pack wire contract.
-    pub fn layered_cold_clone_pack(
+    /// The classic remote-helper fetch contract can install several immutable
+    /// packs directly into the local object database. Protocol-v2's wire
+    /// response still uses the singular member method below, because its
+    /// `packfile` response cannot concatenate multiple complete packs.
+    pub fn layered_cold_clone_packs(
         &self,
         layout: &StoreLayout<Store>,
         max_bytes: u64,
-    ) -> Result<Option<LayeredColdClonePack>> {
-        let source = if let Some(checkpoint) = self.layered_checkpoint() {
-            if !self.capsules.is_empty()
-                || !self.capsule_controls.is_empty()
-                || checkpoint.source_count() != 1
-                || checkpoint.pack_count()? != 1
-            {
+    ) -> Result<Option<Vec<LayeredColdClonePack>>> {
+        let sources = if let Some(checkpoint) = self.layered_checkpoint() {
+            if !self.capsules.is_empty() || !self.capsule_controls.is_empty() {
                 return Ok(None);
             }
-            checkpoint.sources().first()
+            checkpoint.sources()
         } else if self.checkpoint.is_none()
             && self.capsules.is_empty()
             && self.capsule_controls.is_empty()
@@ -369,50 +366,81 @@ impl CapsuleRepositoryView {
             && self.capsule_run_sources.len() == 1
         {
             // Before the first checkpoint the run footer and detached controls
-            // still authenticate a complete source directory. Restrict this
-            // shortcut to one run so later frontiers cannot omit another pack.
-            self.capsule_run_sources.first()
+            // still authenticate the complete source directory. Restrict this
+            // shortcut to one run so a later frontier cannot omit a source.
+            self.capsule_run_sources.as_slice()
         } else {
             return Ok(None);
         };
-        let source =
-            source.ok_or_else(|| ReadError::internal("layered cold clone has no pack source"))?;
-        if source.members().len() != 1 {
+
+        let mut total_pack_bytes = 0_u64;
+        let mut packs = Vec::new();
+        for source in sources {
+            let source_path = match source.kind() {
+                PackSourceKind::CapsuleRun => layout.capsule_path(source.object_hash()),
+                PackSourceKind::PackLayer => layout.capsule_pack_layer_path(source.object_hash()),
+            };
+            for member in source.members() {
+                // A direct install preserves the immutable pack bytes exactly;
+                // an external delta base would require response-pack repair or
+                // a separately proven local base, so fail closed here.
+                if !member.external_delta_bases().is_empty() {
+                    return Ok(None);
+                }
+                let pack_end = member
+                    .pack()
+                    .offset()
+                    .checked_add(member.pack().length())
+                    .ok_or_else(|| corrupt_path("layered cold clone", "pack range overflowed"))?;
+                if pack_end > source.object_size() {
+                    return Err(corrupt_path(
+                        "layered cold clone",
+                        "pack range exceeds its authenticated source",
+                    ));
+                }
+                total_pack_bytes = total_pack_bytes
+                    .checked_add(member.pack().length())
+                    .ok_or_else(|| {
+                        corrupt_path("layered cold clone", "pack byte count overflowed")
+                    })?;
+                if max_bytes > 0 && total_pack_bytes > max_bytes {
+                    return Ok(None);
+                }
+                packs.push(LayeredColdClonePack {
+                    source_path: source_path.clone(),
+                    pack_range: member.pack().offset()..pack_end,
+                    content_hash: member.pack().blake3().to_owned(),
+                    git_checksum: member.git_checksum().to_owned(),
+                    object_count: member.object_count(),
+                    object_set_digest: self
+                        .layered_checkpoint()
+                        .and_then(|checkpoint| checkpoint.cold_clone_object_set_digest())
+                        .map(str::to_owned),
+                    object_set_count: self
+                        .layered_checkpoint()
+                        .and_then(LayeredCheckpoint::cold_clone_object_count),
+                });
+            }
+        }
+        if packs.is_empty() {
             return Ok(None);
         }
-        let member = source
-            .members()
-            .first()
-            .ok_or_else(|| ReadError::internal("layered cold clone has no pack member"))?;
-        let pack_end = member
-            .pack()
-            .offset()
-            .checked_add(member.pack().length())
-            .ok_or_else(|| corrupt_path("layered cold clone", "pack range overflowed"))?;
-        if pack_end > source.object_size()
-            || member.pack().length() > max_bytes
-            || !member.external_delta_bases().is_empty()
-        {
+        Ok(Some(packs))
+    }
+
+    /// Admit the one-pack cold-clone fast path for protocol-v2's wire format.
+    pub fn layered_cold_clone_pack(
+        &self,
+        layout: &StoreLayout<Store>,
+        max_bytes: u64,
+    ) -> Result<Option<LayeredColdClonePack>> {
+        let Some(mut packs) = self.layered_cold_clone_packs(layout, max_bytes)? else {
             return Ok(None);
-        }
-        let source_path = match source.kind() {
-            PackSourceKind::CapsuleRun => layout.capsule_path(source.object_hash()),
-            PackSourceKind::PackLayer => layout.capsule_pack_layer_path(source.object_hash()),
         };
-        Ok(Some(LayeredColdClonePack {
-            source_path,
-            pack_range: member.pack().offset()..pack_end,
-            content_hash: member.pack().blake3().to_owned(),
-            git_checksum: member.git_checksum().to_owned(),
-            object_count: member.object_count(),
-            object_set_digest: self
-                .layered_checkpoint()
-                .and_then(|checkpoint| checkpoint.cold_clone_object_set_digest())
-                .map(str::to_owned),
-            object_set_count: self
-                .layered_checkpoint()
-                .and_then(LayeredCheckpoint::cold_clone_object_count),
-        }))
+        if packs.len() != 1 {
+            return Ok(None);
+        }
+        Ok(packs.pop())
     }
 
     fn layered_cold_clone_source(&self) -> Option<&PackSourceDescriptor> {
@@ -1151,7 +1179,7 @@ impl CapsuleRepositoryView {
         identity: crab_remote_git::RepositoryIdentity,
         runtime: Arc<crab_remote_git::RemoteGitRuntime>,
         options: crab_remote_git::RepositoryOptions,
-        _max_input_bytes: u64,
+        max_input_bytes: u64,
         cancellation: &CancellationToken,
     ) -> Result<crab_remote_git::RemoteGitRepository> {
         if cancellation.is_cancelled() {
@@ -1273,6 +1301,71 @@ impl CapsuleRepositoryView {
                     member: member.clone(),
                 };
                 all_members.push(member_read);
+            }
+        }
+        if !checkpoint.is_control_only() && !all_members.is_empty() {
+            // A complete layered checkpoint authenticates a kind-bearing
+            // locator range for every member. Load those compact sidecars as
+            // one coalesced window per source so filtered planning can use
+            // OID/kind locators instead of issuing one object read per OID.
+            let payload_members = all_members
+                .iter()
+                .cloned()
+                .map(|member| LayeredPayloadMemberRead {
+                    member,
+                    complete_local: false,
+                })
+                .collect::<Vec<_>>();
+            let selected_members = (0..payload_members.len()).collect::<BTreeSet<_>>();
+            let windows = plan_layered_payload_windows_for_members(
+                &payload_members,
+                &selected_members,
+                LayeredPayloadWindowMode::Sidecars,
+            )?;
+            let window_bytes = windows.iter().try_fold(0_u64, |total, window| {
+                total
+                    .checked_add(window.range.end.saturating_sub(window.range.start))
+                    .ok_or_else(|| corrupt_path("capsule Git locator", "sidecar bytes overflowed"))
+            })?;
+            if max_input_bytes > 0 && window_bytes > max_input_bytes {
+                return Err(ReadError::CapsuleReadLimit {
+                    resource: "layered Git locator sidecars",
+                    maximum: max_input_bytes,
+                });
+            }
+            let (fetched_windows, _) =
+                fetch_layered_payload_windows(layout.store(), &windows).await?;
+            for (member_index, member_read) in all_members.iter().enumerate() {
+                let window_index = payload_window_for_member(&windows, member_index)?;
+                let body = fetched_windows
+                    .get(&window_index)
+                    .ok_or_else(|| corrupt_path("capsule Git locator", "sidecar window missing"))?;
+                let window = windows
+                    .get(window_index)
+                    .ok_or_else(|| corrupt_path("capsule Git locator", "sidecar window missing"))?;
+                let index =
+                    layered_range_bytes(body, window.range.start, member_read.member.index())?;
+                let reverse_index = layered_range_bytes(
+                    body,
+                    window.range.start,
+                    member_read.member.reverse_index(),
+                )?;
+                let locator =
+                    layered_range_bytes(body, window.range.start, member_read.member.locator())?;
+                let pack_id = member_read.pack_id;
+                let index_path = workspace.path().join(format!("{pack_id}-layered.idx"));
+                let reverse_path = workspace.path().join(format!("{pack_id}-layered.rev"));
+                std::fs::write(&index_path, &index)?;
+                std::fs::write(&reverse_path, &reverse_index)?;
+                inline_locators.extend(inline_locators_for_pack(
+                    member_read.member.object_count(),
+                    member_read.member.git_checksum(),
+                    pack_id,
+                    &index_path,
+                    &reverse_path,
+                    &locator,
+                    member_read.member.pack().length(),
+                )?);
             }
         }
         // Keep every layered member source lazy. Incremental fetches first

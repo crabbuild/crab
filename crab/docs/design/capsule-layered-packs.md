@@ -1518,6 +1518,36 @@ Accordingly, this re-audit claims only the ordinal correctness fix and the
 ten-push incremental smoke. It does not claim a passing 5,000-commit replay,
 multi-pack cold clone, or v1 retirement.
 
+### 2.5.46 September 21 authenticated multi-member cold-clone fix
+
+The multi-member cold-clone failure above was traced to the complete layered
+reader keeping every member index lazy. Filtered planning therefore fell back
+to visibility traversal and, for the Kubernetes-derived fixture, issued
+millions of small object reads while materializing a response pack. The fix
+keeps the cheap footer/tip-bound view for ordinary incremental fetches, but
+promotes a cold clone or a request with filter, shallow, or tag semantics to a
+complete layered view. That view coalesces each source's authenticated index,
+reverse-index, and kind-bearing locator ranges, verifies each range hash, and
+builds inline object locators before Git planning. No pack body is loaded just
+to answer incremental haves.
+
+The local-RustFS requalification used the same 5,000-commit Kubernetes-derived
+fixture and the PR-208 release binary. A filtered `blob:none` clone reached the
+source tip in 14.50 s with catalog planning in 173 ms; a cache-miss shallow
+`blob:none` clone completed in 6.12 s, with 1,095 planning reads and 372
+terminal response-pack reads. An unfiltered multi-member cold clone completed
+in 85.94 s, reached the exact source tip, and passed native `git fsck --full`.
+The response pack was 1.12 GiB; the remaining wall time was local Git
+pack/index installation, not the previous millions-of-range-read visibility
+fallback. The three clone destinations (full, filtered, and shallow) all
+matched the source tip and passed full fsck.
+
+This closes the previously observed complete-view request-amplification path,
+but it is not a blanket few-second or 5,000-push qualification claim. The
+fresh 5,000-commit replay, repeated fetch/repack matrix, hosted-provider
+latency, and v1-retirement gates remain open until they are run on the final
+branch and recorded below.
+
 ## 3. Goals
 
 The implementation MUST:
