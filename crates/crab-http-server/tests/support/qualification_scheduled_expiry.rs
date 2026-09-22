@@ -5,9 +5,10 @@ use std::{
 
 use crab_cell_app::ApplicationHandle;
 use crab_cell_runtime::{
-    ApplicationId, CellTarget, Error, InvocationError, KvAtomicCommand, KvAtomicOutcome,
-    KvAtomicRequest, KvMutation, Resolution, Result, SqlBatch, SqlBatchCommand, SqlStatement,
-    SqlValue, TenantId, partition_for_shard,
+    ApplicationId, CellTarget, CronCommand, CronMutation, CronMutationOutcome, CronQueryResult,
+    Error, InvocationError, KvAtomicCommand, KvAtomicOutcome, KvAtomicRequest, KvMutation,
+    Resolution, Result, SqlBatch, SqlBatchCommand, SqlStatement, SqlValue, TenantId,
+    partition_for_shard,
 };
 use tokio::sync::Notify;
 
@@ -212,6 +213,164 @@ impl<'a> ExpiryCase<'a> {
             || !rejected.output[0].rows.is_empty()
         {
             return Err(Error::Control("public scheduled SQL expiry state differs"));
+        }
+        Ok(())
+    }
+
+    pub async fn cron(self, operation_id: u64, nonce: u64) -> Result<()> {
+        let Self {
+            writer,
+            peer,
+            observer,
+            entered,
+            release,
+            dispatched,
+            tenant,
+            application,
+        } = self;
+        let target = CellTarget::new(
+            tenant,
+            application,
+            fixture::CRON_NAMESPACE,
+            &partition_for_shard(0),
+        )?;
+        let schedule_id = fixed_id(operation_id);
+        let payload = nonce.to_be_bytes().to_vec();
+        let next_due_ms = now_ms().saturating_add(300_000);
+        let writer_cron = writer.cron::<fixture::ReferenceCron>()?;
+        let observer_cron = observer.cron::<fixture::ReferenceCron>()?;
+        let acknowledged = writer_cron
+            .mutate(
+                identity(operation_id.saturating_mul(100), now_ms()),
+                CronMutation::Upsert {
+                    schedule_id,
+                    target_index: 0,
+                    target_partition: partition_for_shard(0).to_vec(),
+                    payload: payload.clone(),
+                    interval_ms: 60_000,
+                    next_due_ms,
+                },
+            )
+            .await
+            .map_err(|source| Error::Facility {
+                name: "public scheduled Cron expiry acknowledged upsert",
+                source: Box::new(source),
+            })?;
+        let CronMutationOutcome::Applied { generation } = acknowledged.output else {
+            return Err(Error::Control(
+                "public scheduled Cron acknowledged upsert differs",
+            ));
+        };
+        let before = observer_cron
+            .get(schedule_id, Some(acknowledged.receipt))
+            .await
+            .map_err(|source| Error::Facility {
+                name: "public scheduled Cron pre-expiry observation",
+                source: Box::new(source),
+            })?;
+        let CronQueryResult::Get(Some(schedule)) = before.output else {
+            return Err(Error::Control("public scheduled Cron schedule missing"));
+        };
+        if schedule.schedule_id != schedule_id
+            || schedule.payload != payload
+            || schedule.generation != generation
+            || schedule.next_due_ms != next_due_ms
+            || schedule.occurrence != 0
+            || !schedule.enabled
+        {
+            return Err(Error::Control("public scheduled Cron schedule differs"));
+        }
+
+        let issued_at_ms = now_ms();
+        let expires_at_ms = issued_at_ms.saturating_add(15_000);
+        let mut expired_identity = identity(
+            operation_id.saturating_mul(100).saturating_add(1),
+            issued_at_ms,
+        );
+        expired_identity.expires_at_ms = expires_at_ms;
+        let prepared = peer
+            .prepare_command::<CronCommand<fixture::ReferenceCron>>(
+                &target,
+                expired_identity,
+                CronMutation::Pause { schedule_id },
+            )
+            .await
+            .map_err(|source| Error::Facility {
+                name: "public scheduled Cron expiring command prepare",
+                source: Box::new(source),
+            })?;
+        let evidence = prepared.evidence().clone();
+        let delayed = tokio::spawn(async move { prepared.execute().await });
+        tokio::time::timeout(Duration::from_secs(20), entered.notified())
+            .await
+            .map_err(|_| Error::Control("public scheduled Cron signed receive not reached"))?;
+        if dispatched.load(Ordering::Acquire) != 0 {
+            return Err(Error::Control(
+                "public scheduled Cron expiry dispatched early",
+            ));
+        }
+        let pending = observer_cron
+            .get(schedule_id, None)
+            .await
+            .map_err(|source| Error::Facility {
+                name: "public scheduled Cron delayed mutation observation",
+                source: Box::new(source),
+            })?;
+        if pending.output != CronQueryResult::Get(Some(schedule.clone())) {
+            return Err(Error::Control(
+                "public scheduled Cron delayed mutation appeared",
+            ));
+        }
+        let remaining_ms = expires_at_ms
+            .saturating_sub(now_ms())
+            .max(0)
+            .saturating_add(100);
+        tokio::time::sleep(Duration::from_millis(u64::try_from(remaining_ms).map_err(
+            |_| Error::Control("public scheduled Cron expiry wait overflow"),
+        )?))
+        .await;
+        release.notify_one();
+        let outcome = delayed.await.map_err(|source| Error::Facility {
+            name: "public scheduled Cron delayed command join",
+            source: Box::new(source),
+        })?;
+        if !matches!(
+            outcome,
+            Err(InvocationError::NotStarted(Error::Peer(
+                "invalid or expired mutation identity"
+            )))
+        ) {
+            return Err(Error::Control(
+                "public scheduled Cron expired identity was accepted",
+            ));
+        }
+        if dispatched.load(Ordering::Acquire) != 0 {
+            return Err(Error::Control(
+                "public scheduled Cron expired command dispatched",
+            ));
+        }
+        if observer
+            .resolve(&evidence)
+            .await
+            .map_err(|source| Error::Facility {
+                name: "public scheduled Cron expiry resolution",
+                source: Box::new(source),
+            })?
+            != Resolution::Expired
+        {
+            return Err(Error::Control("public scheduled Cron identity not expired"));
+        }
+        let after = observer_cron
+            .get(schedule_id, None)
+            .await
+            .map_err(|source| Error::Facility {
+                name: "public scheduled Cron post-expiry observation",
+                source: Box::new(source),
+            })?;
+        if after.output != CronQueryResult::Get(Some(schedule))
+            || after.receipt.commit_sequence < acknowledged.receipt.commit_sequence
+        {
+            return Err(Error::Control("public scheduled Cron expiry state differs"));
         }
         Ok(())
     }
