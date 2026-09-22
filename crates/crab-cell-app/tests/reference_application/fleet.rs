@@ -1,4 +1,4 @@
-use super::performance::now_ms;
+use super::performance_fixture::now_ms;
 use super::*;
 use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
@@ -45,6 +45,10 @@ impl PeerAuthorizer for FleetAuthorizer {
 }
 
 struct TcpRoundTrip(Arc<HashMap<CellId, SocketAddr>>);
+
+pub(super) fn peer_round_trip(endpoints: HashMap<CellId, SocketAddr>) -> Arc<dyn PeerRoundTrip> {
+    Arc::new(TcpRoundTrip(Arc::new(endpoints)))
+}
 
 impl PeerRoundTrip for TcpRoundTrip {
     fn send(
@@ -104,36 +108,45 @@ pub(super) async fn start_peer_servers(
     let mut endpoints = HashMap::new();
     let mut servers = Vec::new();
     for handles in owned {
-        let dispatcher = Arc::new(PeerDispatcher::new(
-            Arc::clone(registry),
-            Arc::new(FleetResolver(Arc::new(
-                handles
-                    .iter()
-                    .cloned()
-                    .map(|handle| (handle.cell_id(), handle))
-                    .collect(),
-            ))),
-            Arc::new(FleetAuthorizer),
-        ));
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let ids = handles.iter().map(CellHandle::cell_id).collect::<Vec<_>>();
+        let (address, server) = start_peer_server(registry, Arc::clone(&verifier), handles).await;
         // Pin routing for this run; the receiving resolver rejects a target
         // it does not own, so a wrong route cannot pass the action checks.
-        for handle in handles {
-            endpoints.insert(handle.cell_id(), address);
+        for id in ids {
+            endpoints.insert(id, address);
         }
-        let verifier = Arc::clone(&verifier);
-        servers.push(tokio::spawn(async move {
-            while let Ok((socket, _)) = listener.accept().await {
-                let verifier = Arc::clone(&verifier);
-                let dispatcher = Arc::clone(&dispatcher);
-                tokio::spawn(async move {
-                    let _ = serve_peer(socket, verifier, dispatcher).await;
-                });
-            }
-        }));
+        servers.push(server);
     }
-    (Arc::new(TcpRoundTrip(Arc::new(endpoints))), servers)
+    (peer_round_trip(endpoints), servers)
+}
+
+pub(super) async fn start_peer_server(
+    registry: &Arc<Registry>,
+    verifier: Arc<PeerVerifier>,
+    handles: Vec<CellHandle>,
+) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let dispatcher = Arc::new(PeerDispatcher::new(
+        Arc::clone(registry),
+        Arc::new(FleetResolver(Arc::new(
+            handles
+                .into_iter()
+                .map(|handle| (handle.cell_id(), handle))
+                .collect(),
+        ))),
+        Arc::new(FleetAuthorizer),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            let verifier = Arc::clone(&verifier);
+            let dispatcher = Arc::clone(&dispatcher);
+            tokio::spawn(async move {
+                let _ = serve_peer(socket, verifier, dispatcher).await;
+            });
+        }
+    });
+    (address, server)
 }
 
 async fn serve_peer(

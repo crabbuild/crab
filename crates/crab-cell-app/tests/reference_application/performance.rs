@@ -1,315 +1,8 @@
-use super::fleet::start_peer_servers;
+use super::performance_fixture::{PerfFixture, identity, item_id, now_ms};
 use super::*;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
-use crab_cell_runtime::{
-    EffectPeerClient, EffectRunOutcome, MaintenanceTickOutcome, MaintenanceTickRequest,
-    PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerRoundTrip, PeerSigner,
-    PeerVerifier, VerifiedPeerRequest,
-};
-
-pub(super) fn now_ms() -> i64 {
-    i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap()
-}
-
-fn identity(phase: u8, index: usize, step: u8) -> MutationIdentity {
-    let mut bytes = [0; 16];
-    bytes[0] = phase;
-    bytes[1] = step;
-    bytes[8..].copy_from_slice(&(index as u64).to_be_bytes());
-    let now = now_ms();
-    MutationIdentity {
-        request_id: RequestId::from_bytes(bytes),
-        issued_at_ms: now,
-        expires_at_ms: now + 300_000,
-    }
-}
-
-fn item_id(index: usize) -> [u8; 16] {
-    let mut id = [0; 16];
-    id[8..].copy_from_slice(&(index as u64).to_be_bytes());
-    id
-}
-
-fn install_sql_tables(tx: &crab_ltx::rusqlite::Transaction<'_>) -> Result<()> {
-    tx.execute_batch(
-        "CREATE TABLE orders(id INTEGER PRIMARY KEY, total_cents INTEGER NOT NULL); \
-         CREATE TABLE invoice_receipts(schedule_id BLOB NOT NULL, occurrence INTEGER NOT NULL, payload BLOB NOT NULL, PRIMARY KEY(schedule_id, occurrence));",
-    )?;
-    Ok(())
-}
-
-struct PerfFixture {
-    _directory: tempfile::TempDir,
-    runtimes: Vec<CellRuntime>,
-    typed: ApplicationHandle<ReferenceApplication>,
-    registry: Arc<Registry>,
-    client: CellClient,
-    sql_target: CellTarget,
-    cron_target: CellTarget,
-    peer: EffectPeerClient,
-    servers: Vec<tokio::task::JoinHandle<()>>,
-}
-
-impl PerfFixture {
-    async fn start(nodes: usize) -> Self {
-        assert!(nodes == 1 || nodes == 3);
-        let application = Arc::new(compiled());
-        let registry = application.registry();
-        let tenant = TenantId::from_bytes([81; 16]);
-        let application_id = ApplicationId::from_bytes([82; 16]);
-        let store = Store::new(Arc::new(InMemory::new()));
-        let layout = CellStorageLayout::new(
-            store.clone(),
-            object_store::path::Path::from("reference-performance"),
-            *application_id.as_bytes(),
-        );
-        let directory = tempfile::TempDir::new().unwrap();
-        let runtimes = (0..nodes)
-            .map(|node| {
-                CellRuntime::new_with_replica_host(
-                    SqlWorkerPool::new(4, 32).unwrap(),
-                    64 * 1024 * 1024,
-                    node_session(node),
-                    reference_host(),
-                )
-                .unwrap()
-            })
-            .collect::<Vec<_>>();
-        type Schema = for<'a> fn(&crab_ltx::rusqlite::Transaction<'a>) -> Result<()>;
-        let cells: [(NamespaceId, CatalogRole, &'static str, u8, Schema); 7] = [
-            (
-                SQL_NAMESPACE,
-                CatalogRole::Sql,
-                SQL_MODULE,
-                40,
-                install_sql_tables,
-            ),
-            (
-                KV_NAMESPACE,
-                CatalogRole::Kv,
-                KV_MODULE,
-                41,
-                install_kv_schema,
-            ),
-            (
-                BLOB_NAMESPACE,
-                CatalogRole::Blob,
-                BLOB_MODULE,
-                42,
-                install_blob_schema,
-            ),
-            (
-                QUEUE_NAMESPACE,
-                CatalogRole::Queue,
-                QUEUE_MODULE,
-                43,
-                install_queue_schema,
-            ),
-            (
-                DEAD_LETTER_NAMESPACE,
-                CatalogRole::Queue,
-                DEAD_LETTER_MODULE,
-                44,
-                install_queue_schema,
-            ),
-            (
-                CRON_NAMESPACE,
-                CatalogRole::Cron,
-                CRON_MODULE,
-                45,
-                install_cron_schema,
-            ),
-            (
-                WORKFLOW_NAMESPACE,
-                CatalogRole::Workflow,
-                WORKFLOW_MODULE,
-                46,
-                install_workflow_schema,
-            ),
-        ];
-        let mut handles = Vec::new();
-        let mut owned = vec![Vec::new(); nodes];
-        for (cell_index, (namespace, role, module, incarnation, schema)) in
-            cells.into_iter().enumerate()
-        {
-            let node = cell_index % nodes;
-            let handle = bootstrap_reference_cell(
-                &runtimes[node],
-                &registry,
-                &layout,
-                &directory,
-                tenant,
-                application_id,
-                node_session(node),
-                namespace,
-                role,
-                module,
-                incarnation,
-                schema,
-            )
-            .await
-            .unwrap();
-            owned[node].push(handle.clone());
-            handles.push(handle);
-        }
-        let sql_handle = handles[0].clone();
-        let signer = Arc::new(PeerSigner::new(
-            crab_cell_runtime::SessionId::from_bytes([77; 16]),
-            registry.release_digest(),
-            SigningKey::from_bytes(&[78; 32]),
-        ));
-        let principal = PeerPrincipal {
-            issuer: "reference-performance".into(),
-            subject: "fleet-driver".into(),
-            actions: vec![
-                "cell.read".into(),
-                "cell.write".into(),
-                "reference.cron.deliver".into(),
-            ],
-        };
-        let verifier = Arc::new(PeerVerifier::new(
-            crab_cell_runtime::SessionId::from_bytes([77; 16]),
-            registry.release_digest(),
-            signer.verifying_key(),
-        ));
-        let (client, peer, servers) = if nodes == 1 {
-            let client = CellClient::local_many(Arc::clone(&registry), handles).unwrap();
-            let dispatcher = Arc::new(PeerDispatcher::new(
-                Arc::clone(&registry),
-                Arc::new(SqlResolver {
-                    target: CellTarget::new(
-                        tenant,
-                        application_id,
-                        SQL_NAMESPACE,
-                        &partition_for_shard(0),
-                    )
-                    .unwrap(),
-                    handle: sql_handle,
-                }),
-                Arc::new(CronAuthorizer),
-            ));
-            let peer = EffectPeerClient::new(
-                signer,
-                principal,
-                Arc::new(Loopback {
-                    verifier,
-                    dispatcher,
-                }),
-            );
-            (client, peer, Vec::new())
-        } else {
-            let (round_trip, servers) = start_peer_servers(&registry, verifier, owned).await;
-            let client = CellClient::peer(
-                Arc::clone(&registry),
-                Arc::clone(&signer),
-                principal.clone(),
-                Arc::clone(&round_trip),
-            );
-            let peer = EffectPeerClient::new(signer, principal, round_trip);
-            (client, peer, servers)
-        };
-        let typed = ApplicationHandle::new(client.clone(), application, tenant, application_id)
-            .with_blob_artifact_store(BlobArtifactStore::new(store));
-        let sql_target = CellTarget::new(
-            tenant,
-            application_id,
-            SQL_NAMESPACE,
-            &partition_for_shard(0),
-        )
-        .unwrap();
-        let cron_target = CellTarget::new(
-            tenant,
-            application_id,
-            CRON_NAMESPACE,
-            &partition_for_shard(0),
-        )
-        .unwrap();
-        Self {
-            _directory: directory,
-            runtimes,
-            typed,
-            registry,
-            client,
-            sql_target,
-            cron_target,
-            peer,
-            servers,
-        }
-    }
-
-    fn cron_peer(&self) -> EffectPeerClient {
-        self.peer.clone()
-    }
-}
-
-fn node_session(node: usize) -> crab_cell_runtime::SessionId {
-    crab_cell_runtime::SessionId::from_bytes([24 + node as u8; 16])
-}
-
-struct SqlResolver {
-    target: CellTarget,
-    handle: CellHandle,
-}
-
-impl PeerCellResolver for SqlResolver {
-    fn resolve(
-        &self,
-        target: CellTarget,
-    ) -> Pin<Box<dyn Future<Output = Result<CellHandle>> + Send + 'static>> {
-        let allowed = target == self.target;
-        let handle = self.handle.clone();
-        Box::pin(async move {
-            if allowed {
-                Ok(handle)
-            } else {
-                Err(Error::CellNotActive)
-            }
-        })
-    }
-}
-
-struct CronAuthorizer;
-
-impl PeerAuthorizer for CronAuthorizer {
-    fn authorize(&self, request: &VerifiedPeerRequest) -> Result<()> {
-        if request.permits("reference.cron.deliver") {
-            Ok(())
-        } else {
-            Err(Error::PeerAuthorization("missing cron delivery action"))
-        }
-    }
-}
-
-struct Loopback {
-    verifier: Arc<PeerVerifier>,
-    dispatcher: Arc<PeerDispatcher>,
-}
-
-impl PeerRoundTrip for Loopback {
-    fn send(
-        &self,
-        target: CellTarget,
-        request: Vec<u8>,
-        _remaining_ms: u32,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'static>> {
-        let verifier = Arc::clone(&self.verifier);
-        let dispatcher = Arc::clone(&self.dispatcher);
-        Box::pin(async move {
-            let verified = verifier.verify(&request, now_ms())?;
-            if verified.target() != &target {
-                return Err(Error::Peer("round trip target changed"));
-            }
-            dispatcher.dispatch_bytes(&verified, now_ms()).await
-        })
-    }
-}
+use crab_cell_runtime::{EffectRunOutcome, MaintenanceTickOutcome, MaintenanceTickRequest};
 
 async fn measure<F, Fut>(name: &str, iterations: usize, mut action: F) -> Vec<Duration>
 where
@@ -343,22 +36,29 @@ where
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "manual end-to-end performance run"]
 async fn reference_primitive_end_to_end_performance() {
-    run_reference_primitive_performance(1, false).await;
+    let fixture = PerfFixture::start(1).await;
+    run_reference_primitive_performance(&fixture, false, "single_runtime").await;
+    fixture.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "manual three-node end-to-end performance run"]
 async fn reference_three_node_fleet_end_to_end_performance() {
-    run_reference_primitive_performance(3, true).await;
+    let fixture = PerfFixture::start(3).await;
+    run_reference_primitive_performance(&fixture, true, "fleet_three_runtime_mixed").await;
+    fixture.shutdown().await;
 }
 
-async fn run_reference_primitive_performance(nodes: usize, concurrent: bool) {
+pub(super) async fn run_reference_primitive_performance(
+    fixture: &PerfFixture,
+    concurrent: bool,
+    fleet_label: &str,
+) {
     let iterations = std::env::var("CRAB_CELL_PERF_ITERATIONS")
         .ok()
         .map(|value| value.parse::<usize>().unwrap())
         .unwrap_or(30);
     assert!((1..=1_000).contains(&iterations));
-    let fixture = PerfFixture::start(nodes).await;
     let sql = fixture
         .typed
         .sql::<ReferenceSql>(fixture.sql_target.clone())
@@ -382,7 +82,6 @@ async fn run_reference_primitive_performance(nodes: usize, concurrent: bool) {
     let activity = &activity;
     let cron = &cron;
     let peer = &peer;
-    let fixture = &fixture;
 
     let sql_run = measure("sql_order_insert_read", iterations, |index| async move {
         let committed = sql
@@ -671,7 +370,7 @@ async fn run_reference_primitive_performance(nodes: usize, concurrent: bool) {
                 * 1_000.0
         };
         println!(
-            "PERF fleet_three_node_mixed: count={} elapsed_s={:.3} ops_per_s={:.2} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3}",
+            "PERF {fleet_label}: count={} elapsed_s={:.3} ops_per_s={:.2} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3}",
             samples.len(),
             elapsed.as_secs_f64(),
             samples.len() as f64 / elapsed.as_secs_f64(),
@@ -687,12 +386,5 @@ async fn run_reference_primitive_performance(nodes: usize, concurrent: bool) {
         queue_run.await;
         workflow_run.await;
         cron_run.await;
-    }
-
-    for server in &fixture.servers {
-        server.abort();
-    }
-    for runtime in &fixture.runtimes {
-        runtime.shutdown().await.unwrap();
     }
 }

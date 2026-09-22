@@ -13,9 +13,12 @@ blake3.workspace = true
 crab-cell-runtime.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 crab-ltx = { workspace = true, features = ["replica"] }
 crab-storage.workspace = true
 ed25519-dalek.workspace = true
+fs4 = "0.13"
+futures-util.workspace = true
 object_store.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread"] }
