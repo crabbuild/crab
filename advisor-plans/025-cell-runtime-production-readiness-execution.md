@@ -363,6 +363,14 @@ check the exact schedule payload, generation, next due time, enabled state,
 occurrence, and commit sequence, along with zero reservations after drain.
 Filesystem and isolated RustFS three-process cases passed on 2026-09-22. The
 scheduled Cron expiry artifact and protected provider evidence remain open.
+The Workflow expiry boundary now commits a completed run, holds a signed
+second start past its identity expiry, and confirms that the delayed run was
+rejected before owner kill. Fresh successor and third processes restore from
+durable storage and check the exact acknowledged run ID, definition digest,
+terminal status, event count, result bytes, and commit sequence, plus absence
+of the rejected run and zero reservations after drain. Filesystem and isolated
+RustFS three-process cases passed on 2026-09-22. The scheduled Workflow
+expiry artifact and protected provider evidence remain open.
 
 Implement one fault-capable executor through `CellNode` and typed
 `ApplicationHandle` capabilities. Each operation writes a unique, bounded

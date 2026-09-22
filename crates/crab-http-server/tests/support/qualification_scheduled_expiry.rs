@@ -383,7 +383,7 @@ impl<'a> ExpiryCase<'a> {
         ))
     }
 
-    pub async fn workflow(self, operation_id: u64, nonce: u64) -> Result<()> {
+    pub async fn workflow(self, operation_id: u64, nonce: u64) -> Result<(u64, [u8; 16])> {
         let Self {
             writer,
             peer,
@@ -512,7 +512,7 @@ impl<'a> ExpiryCase<'a> {
                 "public scheduled Workflow expiry state differs",
             ));
         }
-        Ok(())
+        Ok((acknowledged.receipt.commit_sequence, run_id))
     }
 
     pub async fn kv(self, operation_id: u64, nonce: u64) -> Result<u64> {

@@ -377,6 +377,39 @@ pub(super) async fn run() {
             "unacknowledged Workflow appeared"
         );
     }
+    let expiry_id = format!("public-workflow-expiry-{WORKFLOW_EXPIRY_OPERATION_ID}").into_bytes();
+    let rejected_id =
+        format!("public-workflow-expiry-rejected-{WORKFLOW_EXPIRY_OPERATION_ID}").into_bytes();
+    let expiry_run = workflow
+        .state(expiry_id.clone(), None)
+        .await
+        .expect("successor Workflow expiry run");
+    if let Some(evidence) = acknowledgement
+        .as_ref()
+        .and_then(|ack| ack.expiry_workflow.as_ref())
+    {
+        let run = expiry_run.output.expect("acknowledged Workflow expiry run");
+        assert_eq!(run.workflow_id, expiry_id);
+        assert_eq!(run.run_id, evidence.run_id);
+        assert_eq!(run.definition_digest, fixture::WORKFLOW_DIGEST);
+        assert_eq!(run.status, WorkflowStatus::Completed);
+        assert_eq!(run.event_sequence, 1);
+        assert_eq!(
+            run.result,
+            Some(WORKFLOW_EXPIRY_NONCE.to_be_bytes().to_vec())
+        );
+        assert!(expiry_run.receipt.commit_sequence >= evidence.sequence);
+    } else {
+        assert!(expiry_run.output.is_none());
+    }
+    assert!(
+        workflow
+            .state(rejected_id, None)
+            .await
+            .expect("successor rejected Workflow expiry run")
+            .output
+            .is_none()
+    );
     let activity_state = workflow
         .state(ACTIVITY_WORKFLOW_ID.to_vec(), None)
         .await
@@ -651,6 +684,13 @@ pub(super) async fn run() {
             .is_some()
         {
             values.extend_from_slice(&CRON_EXPIRY_NONCE.to_be_bytes());
+        }
+        if acknowledgement
+            .as_ref()
+            .and_then(|ack| ack.expiry_workflow.as_ref())
+            .is_some()
+        {
+            values.extend_from_slice(&WORKFLOW_EXPIRY_NONCE.to_be_bytes());
         }
         values
     } else {
