@@ -780,6 +780,7 @@ mod tests {
     use super::{
         PROTECTED_BUNDLE_PROFILES, bind_protected, build_manifest, manifest_base, read_signing_key,
         reject_symlinks, require_manifest_output, require_trusted_signer, resolve_manifest_path,
+        verify_protected_bundle,
     };
     use crab_cell_runtime::{
         Digest, QUALIFICATION_MATRIX_ROWS, QualificationExecution, QualificationExecutionEvidence,
@@ -848,6 +849,27 @@ mod tests {
             assert_eq!(profile.name(), *name);
             assert!(profile.requires_protected_evidence());
         }
+    }
+
+    #[test]
+    fn protected_bundle_rejects_a_noncanonical_profile_before_matrix_reads() {
+        let directory = tempfile::tempdir().expect("bundle directory");
+        fs::write(
+            directory.path().join("local-provider-v1.json"),
+            QualificationProfile::pr_contract()
+                .encode()
+                .expect("profile encoding"),
+        )
+        .expect("profile");
+        let mut args = vec![
+            directory.path().display().to_string(),
+            "0123456789abcdef0123456789abcdef01234567".into(),
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20".into(),
+        ]
+        .into_iter();
+        let error = verify_protected_bundle(&mut args).expect_err("noncanonical profile");
+        assert!(error.contains("protected profile name mismatch"));
     }
 
     #[test]
