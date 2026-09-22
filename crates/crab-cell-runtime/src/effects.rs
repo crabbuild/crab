@@ -16,8 +16,8 @@ mod tests;
 
 pub use api::{
     EffectAckRequest, EffectClaimCommand, EffectClaimRequest, EffectLeaseCommand,
-    EffectLeaseRequest, EffectModule, EffectSource, EffectValidateClaimQuery,
-    EffectValidateRequest, register_effect_delivery,
+    EffectLeaseRequest, EffectModule, EffectSource, EffectStatusQuery, EffectStatusRequest,
+    EffectValidateClaimQuery, EffectValidateRequest, register_effect_delivery,
 };
 pub use supervisor::{EffectRunOutcome, EffectSupervisor, EffectSupervisorError};
 
@@ -48,6 +48,17 @@ pub enum EffectState {
     Failed,
 }
 
+/// Durable source-side effect outcome and lease state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectStatus {
+    pub state: EffectState,
+    pub attempt: u32,
+    pub token_present: bool,
+    pub lease_until_ms: Option<i64>,
+    pub expires_at_ms: i64,
+    pub result: Option<Vec<u8>>,
+}
+
 /// Business outcome of a source-side effect lease mutation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EffectLeaseOutcome {
@@ -67,6 +78,54 @@ impl EffectState {
             Self::Failed => 3,
         }
     }
+
+    fn decode(value: i64) -> Result<Self> {
+        match value {
+            0 => Ok(Self::Ready),
+            1 => Ok(Self::Leased),
+            2 => Ok(Self::Delivered),
+            3 => Ok(Self::Failed),
+            _ => Err(Error::Command("invalid stored effect state")),
+        }
+    }
+}
+
+/// Reads one exact durable source effect without exposing its lease token.
+pub fn effect_status(connection: &Connection, effect_id: [u8; 32]) -> Result<Option<EffectStatus>> {
+    let row = connection
+        .query_row(
+            "SELECT state, attempt, token IS NOT NULL, lease_until_ms, expires_at_ms, result FROM sys_effects WHERE effect_id = ?1",
+            [effect_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, bool>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<Vec<u8>>>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((state, attempt, token_present, lease_until_ms, expires_at_ms, result)) = row else {
+        return Ok(None);
+    };
+    if result
+        .as_ref()
+        .is_some_and(|result| result.len() > MAX_EFFECT_RESULT_BYTES)
+    {
+        return Err(Error::Command("stored effect result exceeds wire limit"));
+    }
+    Ok(Some(EffectStatus {
+        state: EffectState::decode(state)?,
+        attempt: u32::try_from(attempt)
+            .map_err(|_| Error::Command("invalid stored effect attempt"))?,
+        token_present,
+        lease_until_ms,
+        expires_at_ms,
+        result,
+    }))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -417,6 +417,11 @@ sequenceDiagram
 
 This supplies durable at-least-once delivery and idempotent destination
 execution. It does not supply an atomic transaction across Order and Inventory.
+`EffectSource::status(effect_id, minimum_receipt)` reads the source state,
+attempt, lease deadline, expiry, and recorded result through the typed host.
+It reports whether a lease token exists without returning the token. A source
+effect can be removed after its delivery horizon, so callers must treat an
+absent status as unknown rather than proof that delivery never happened.
 
 Application owners choose one of three outcomes:
 

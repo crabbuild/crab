@@ -99,6 +99,14 @@ const QUERIES: &[OperationDescriptor] = &[
         input_limit: 1 << 20,
         output_limit: 1,
     },
+    OperationDescriptor {
+        id: 3,
+        codec_version: 1,
+        schema_min: 1,
+        schema_max: 1,
+        input_limit: 36,
+        output_limit: 1 << 20,
+    },
 ];
 
 struct RepositoryModule;
@@ -127,6 +135,7 @@ impl EffectModule for RepositoryModule {
     const CLAIM_COMMAND_ID: u32 = 4;
     const LEASE_COMMAND_ID: u32 = 5;
     const VALIDATE_QUERY_ID: u32 = 2;
+    const STATUS_QUERY_ID: u32 = 3;
 }
 
 struct CreateComment;

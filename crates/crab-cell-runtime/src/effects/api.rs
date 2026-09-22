@@ -7,9 +7,9 @@ use crate::{
 };
 
 use super::{
-    EffectClaim, EffectLease, EffectLeaseOutcome, MAX_EFFECT_OPERATION_BYTES,
-    MAX_EFFECT_RESULT_BYTES, SystemEffectTokens, effect_ack_lease, effect_claim,
-    effect_retry_lease, effect_validate_claim,
+    EffectClaim, EffectLease, EffectLeaseOutcome, EffectState, EffectStatus,
+    MAX_EFFECT_OPERATION_BYTES, MAX_EFFECT_RESULT_BYTES, SystemEffectTokens, effect_ack_lease,
+    effect_claim, effect_retry_lease, effect_status, effect_validate_claim,
 };
 
 const ACK_TAG: u8 = 0;
@@ -27,6 +27,7 @@ pub trait EffectModule: Send + Sync + 'static {
     const CLAIM_COMMAND_ID: u32;
     const LEASE_COMMAND_ID: u32;
     const VALIDATE_QUERY_ID: u32;
+    const STATUS_QUERY_ID: u32;
 }
 
 /// Registers source effect claim, lease transition and validation bindings.
@@ -36,7 +37,8 @@ pub fn register_effect_delivery<M: EffectModule>(
     registry.bind_effect_runner::<M>()?;
     registry.bind_command::<EffectClaimCommand<M>>()?;
     registry.bind_command::<EffectLeaseCommand<M>>()?;
-    registry.bind_query::<EffectValidateClaimQuery<M>>()
+    registry.bind_query::<EffectValidateClaimQuery<M>>()?;
+    registry.bind_query::<EffectStatusQuery<M>>()
 }
 
 /// Bounded claim parameters for one source Cell.
@@ -95,6 +97,27 @@ impl<M: EffectModule> Query for EffectValidateClaimQuery<M> {
             context.now_ms(),
             &input.claimed,
         )
+    }
+}
+
+/// Selects one exact source effect by its stable ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EffectStatusRequest {
+    pub effect_id: [u8; 32],
+}
+
+/// Reads the durable source outcome without exposing the lease token.
+pub struct EffectStatusQuery<M>(PhantomData<fn() -> M>);
+
+impl<M: EffectModule> Query for EffectStatusQuery<M> {
+    const MODULE: &'static str = M::MODULE;
+    const ID: u32 = M::STATUS_QUERY_ID;
+    const CODEC_VERSION: u32 = M::CODEC_VERSION;
+    type Input = EffectStatusRequest;
+    type Output = Option<EffectStatus>;
+
+    fn execute(context: &mut QueryContext<'_>, input: Self::Input) -> crate::Result<Self::Output> {
+        effect_status(context.primitive_connection(), input.effect_id)
     }
 }
 
@@ -188,6 +211,18 @@ impl<M: EffectModule> EffectSource<M> {
                 Some(minimum),
                 EffectValidateRequest { claimed },
             )
+            .await
+    }
+
+    /// Reads one source effect at or after the requested receipt.
+    pub async fn status(
+        &self,
+        effect_id: [u8; 32],
+        minimum: Option<Receipt>,
+    ) -> std::result::Result<Observed<Option<EffectStatus>>, InvocationError<Option<EffectStatus>>>
+    {
+        self.client
+            .query::<EffectStatusQuery<M>>(&self.target, minimum, EffectStatusRequest { effect_id })
             .await
     }
 
@@ -328,6 +363,72 @@ impl WireValue for EffectValidateRequest {
         Ok(Self {
             claimed: Vec::<EffectClaim>::decode(decoder)?,
         })
+    }
+}
+
+impl WireValue for EffectStatusRequest {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        encoder.write_bytes(&self.effect_id)
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        Ok(Self {
+            effect_id: read_fixed(decoder, "effect ID length")?,
+        })
+    }
+}
+
+impl WireValue for EffectStatus {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        if self
+            .result
+            .as_ref()
+            .is_some_and(|result| result.len() > MAX_EFFECT_RESULT_BYTES)
+        {
+            return Err(CodecError::Invalid(
+                "effect status result exceeds wire limit",
+            ));
+        }
+        let state = match self.state {
+            EffectState::Ready => 0,
+            EffectState::Leased => 1,
+            EffectState::Delivered => 2,
+            EffectState::Failed => 3,
+        };
+        encoder.write_u8(state)?;
+        encoder.write_u32(self.attempt)?;
+        encoder.write_bool(self.token_present)?;
+        self.lease_until_ms.encode(encoder)?;
+        encoder.write_i64(self.expires_at_ms)?;
+        self.result.encode(encoder)
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        let state = match decoder.read_u8()? {
+            0 => EffectState::Ready,
+            1 => EffectState::Leased,
+            2 => EffectState::Delivered,
+            3 => EffectState::Failed,
+            _ => return Err(CodecError::Invalid("invalid effect status state")),
+        };
+        let status = Self {
+            state,
+            attempt: decoder.read_u32()?,
+            token_present: decoder.read_bool()?,
+            lease_until_ms: Option::<i64>::decode(decoder)?,
+            expires_at_ms: decoder.read_i64()?,
+            result: Option::<Vec<u8>>::decode(decoder)?,
+        };
+        if status
+            .result
+            .as_ref()
+            .is_some_and(|result| result.len() > MAX_EFFECT_RESULT_BYTES)
+        {
+            return Err(CodecError::Invalid(
+                "effect status result exceeds wire limit",
+            ));
+        }
+        Ok(status)
     }
 }
 

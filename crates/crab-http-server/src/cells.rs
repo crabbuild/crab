@@ -52,6 +52,7 @@ pub(crate) const REPOSITORY_TICK_COMMAND_ID: u32 = 5;
 pub(crate) const REPOSITORY_EFFECT_CLAIM_COMMAND_ID: u32 = 6;
 pub(crate) const REPOSITORY_EFFECT_LEASE_COMMAND_ID: u32 = 7;
 pub(crate) const REPOSITORY_EFFECT_VALIDATE_QUERY_ID: u32 = 5;
+pub(crate) const REPOSITORY_EFFECT_STATUS_QUERY_ID: u32 = 35;
 pub(crate) const REPOSITORY_PROJECTION_COMMAND_ID: u32 = 31;
 pub(crate) const REPOSITORY_PROJECTION_STATE_QUERY_ID: u32 = 27;
 pub(crate) const REPOSITORY_PROJECTION_ATTRIBUTION_QUERY_ID: u32 = 28;
@@ -205,6 +206,7 @@ const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
         4 * 1024,
         128 * 1024,
     ),
+    operation(REPOSITORY_EFFECT_STATUS_QUERY_ID, 36, 1024 * 1024),
 ];
 
 pub(super) fn repository_replica_limits() -> ReplicaLimits {
@@ -243,6 +245,7 @@ impl EffectModule for RepositoryModule {
     const CLAIM_COMMAND_ID: u32 = REPOSITORY_EFFECT_CLAIM_COMMAND_ID;
     const LEASE_COMMAND_ID: u32 = REPOSITORY_EFFECT_LEASE_COMMAND_ID;
     const VALIDATE_QUERY_ID: u32 = REPOSITORY_EFFECT_VALIDATE_QUERY_ID;
+    const STATUS_QUERY_ID: u32 = REPOSITORY_EFFECT_STATUS_QUERY_ID;
 }
 
 pub(crate) fn compiled_registry() -> crab_cell_runtime::Result<Registry> {
