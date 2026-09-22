@@ -4,7 +4,8 @@ use crab_cell_runtime::{
     Digest, QUALIFICATION_PROTECTED_EVIDENCE_MAX_AGE_MS,
     QUALIFICATION_PROTECTED_EVIDENCE_MAX_CLOCK_SKEW_MS, QualificationExecution,
     QualificationOperation, QualificationOperationExecutor, QualificationOwnership,
-    QualificationProfile, QualificationReceipt, QualificationRunner, QualificationWorkload, Result,
+    QualificationProfile, QualificationProviderEvidence, QualificationReceipt, QualificationRunner,
+    QualificationWorkload, Result,
 };
 use ed25519_dalek::SigningKey;
 
@@ -186,8 +187,14 @@ fn protected_evidence_freshness_rejects_stale_and_future_receipts() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn public_protected_matrix_binds_run_artifact_profile_and_signer() {
-    let profile = QualificationProfile::new("protected-contract".into(), 1, 8, 1, 5_000)
-        .expect("protected profile");
+    let mut profile_value = serde_json::to_value(
+        QualificationProfile::new("protected-contract".into(), 1, 8, 1, 5_000)
+            .expect("protected profile"),
+    )
+    .expect("protected profile value");
+    profile_value["provider"] = serde_json::Value::String("protected-provider".into());
+    let profile: QualificationProfile =
+        serde_json::from_value(profile_value).expect("named protected profile");
     let workload = QualificationWorkload::generate_with_size(&profile, 91, 1, 8, 1)
         .expect("protected workload");
     let mut executor = MeasuredExecutor;
@@ -198,6 +205,11 @@ async fn public_protected_matrix_binds_run_artifact_profile_and_signer() {
     let run = summary.artifact(&workload).expect("run artifact");
     let workload_bytes = workload.encode().expect("workload encoding");
     let run_bytes = run.encode().expect("run encoding");
+    let provider_evidence =
+        QualificationProviderEvidence::new(&profile, workload.seed(), true, true, true)
+            .expect("provider evidence")
+            .encode()
+            .expect("provider evidence encoding");
     run.verify_for_profile(&profile)
         .expect("measured run thresholds");
 
@@ -208,7 +220,11 @@ async fn public_protected_matrix_binds_run_artifact_profile_and_signer() {
     let mut artifacts = Vec::with_capacity(MATRIX_ROWS.len());
     for workload_name in MATRIX_ROWS {
         let row_artifacts = if workload_name == "primitives" {
-            vec![workload_bytes.clone(), run_bytes.clone()]
+            vec![
+                workload_bytes.clone(),
+                run_bytes.clone(),
+                provider_evidence.clone(),
+            ]
         } else {
             vec![format!("protected-{workload_name}").into_bytes()]
         };
