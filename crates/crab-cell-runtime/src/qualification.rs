@@ -1059,6 +1059,16 @@ impl QualificationRunArtifact {
         {
             return Err(Error::Control("qualification run lifecycle case coverage"));
         }
+        if profile.requires_lifecycle_case_coverage()
+            && self
+                .primitive_counts
+                .iter()
+                .any(|counts| counts.verified != counts.acknowledged)
+        {
+            return Err(Error::Control(
+                "qualification run acknowledged outcomes are not fully verified",
+            ));
+        }
         let duration_secs = self.elapsed_ms.saturating_add(999) / 1_000;
         for (name, unit, expected) in [
             ("cells", "cells", self.cells),
@@ -4334,6 +4344,19 @@ mod tests {
         };
         artifact.encode().unwrap();
         assert!(artifact.verify_for_profile(&profile).is_err());
+
+        let mut partial_verification = artifact;
+        partial_verification.case_coverage.fill(u8::MAX);
+        partial_verification.primitive_counts[0].verified -= 1;
+        partial_verification.outcome_digest = *qualification_run_outcome_digest(
+            &partial_verification.workload,
+            &partial_verification.primitive_counts,
+            &partial_verification.case_coverage,
+        )
+        .unwrap()
+        .as_bytes();
+        partial_verification.encode().unwrap();
+        assert!(partial_verification.verify_for_profile(&profile).is_err());
     }
 
     #[test]

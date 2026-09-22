@@ -95,6 +95,10 @@ and p50/p95/p99/max latency metrics in non-decreasing order; a signed receipt
 with substituted threshold values is rejected.
 Measured run artifacts use schema 4 and include a bounded primitive/case bitset;
 named provider/topology profiles reject artifacts missing any lifecycle case.
+Those protected profiles also require every acknowledged operation to have an
+independent verification result; a partial verification count cannot be
+promoted by the receipt binder. The local observed smoke remains allowed to
+report partial coverage and is not release evidence.
 The PR profile is a correctness gate.
 `local-provider-v1`, `fault-v1`, `provider-v1`, `compatibility-v1`, and
 `scale-v1` are release-candidate inputs only. The provider-specific
