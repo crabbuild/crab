@@ -5,6 +5,7 @@ use crate::{
 
 const MAX_RETRY_DELAY_MS: u64 = 1_000;
 const COMPACTION_CHECK_INTERVAL: u8 = 8;
+const COMPACTION_DEBT_SEGMENTS: usize = 32;
 const MAX_COMPACTION_CASCADE: usize = 9;
 const RENEW_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 const SELF_FENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -58,7 +59,7 @@ impl CellPublisher {
             observed,
             scratch_directory,
             segment_count: None,
-            appends_since_compaction_check: COMPACTION_CHECK_INTERVAL,
+            appends_since_compaction_check: 0,
             renew_at: std::time::Instant::now() + RENEW_INTERVAL,
             node_lease: None,
             node_durability: None,
@@ -118,6 +119,47 @@ impl CellPublisher {
 
     pub(crate) fn renewal_at(&self) -> std::time::Instant {
         self.renew_at
+    }
+
+    pub(crate) fn compaction_due(&self) -> bool {
+        self.observed.value().ltx_root().is_some()
+            && self.appends_since_compaction_check >= COMPACTION_CHECK_INTERVAL
+    }
+
+    /// Runs at most one promotion while the actor owns the publisher token.
+    /// Retryable preparation failures leave the debt for a later quiet period.
+    pub(crate) async fn compact_one_quiet(&mut self) -> Result<Option<bool>> {
+        self.check_node_lease()?;
+        let Some(base) = self.observed.value().ltx_root() else {
+            self.appends_since_compaction_check = 0;
+            return Ok(Some(false));
+        };
+        let replica = self.replica.clone();
+        let scratch_directory = self.scratch_directory.clone();
+        let attempt = replica.prepare_scheduled_compaction(&base, &scratch_directory);
+        tokio::pin!(attempt);
+        let prepared = loop {
+            tokio::select! {
+                result = &mut attempt => break result,
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(self.renew_at)) => {
+                    self.renew().await?;
+                }
+            }
+        };
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) if retryable_ltx_error(&error) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let Some(prepared) = prepared else {
+            self.appends_since_compaction_check = 0;
+            return Ok(Some(false));
+        };
+        let next_due_ms = self.observed.value().next_due_ms;
+        self.publish_prepared(&prepared, next_due_ms).await?;
+        self.segment_count = Some(prepared.verified().segment_count());
+        self.appends_since_compaction_check = 0;
+        Ok(Some(true))
     }
 
     /// Advances owner progress or fences when the renewal cannot be proven in time.
@@ -271,7 +313,7 @@ impl CellPublisher {
         commit_sequence: u64,
         schema: u32,
     ) -> Result<crab_ltx::PreparedRoot> {
-        let base = self.compact_before_append().await?;
+        let base = self.compact_before_append(cuts.segments.len()).await?;
         let prepared = match self
             .prepare_cuts(base.as_ref(), cuts, commit_sequence, schema)
             .await
@@ -296,9 +338,17 @@ impl CellPublisher {
     fn note_append(&mut self, prepared: &crab_ltx::PreparedRoot) {
         self.segment_count = Some(prepared.verified().segment_count());
         self.appends_since_compaction_check = self.appends_since_compaction_check.saturating_add(1);
+        tracing::debug!(
+            segments = prepared.verified().segment_count(),
+            compaction_debt = self.appends_since_compaction_check,
+            "Cell LTX append prepared"
+        );
     }
 
-    async fn compact_before_append(&mut self) -> Result<Option<crab_ltx::RootRef>> {
+    async fn compact_before_append(
+        &mut self,
+        incoming_segments: usize,
+    ) -> Result<Option<crab_ltx::RootRef>> {
         let Some(mut base) = self.observed.value().ltx_root() else {
             return Ok(None);
         };
@@ -311,19 +361,37 @@ impl CellPublisher {
             }
         };
         let segment_limit = self.replica.limits().max_segments.min(4_096);
-        let under_pressure = segment_count >= segment_limit.saturating_sub(1).max(1);
-        if !under_pressure && self.appends_since_compaction_check < COMPACTION_CHECK_INTERVAL {
+        let projected = segment_count.saturating_add(incoming_segments);
+        let debt_limit = COMPACTION_DEBT_SEGMENTS.min(segment_limit);
+        let under_pressure = projected >= debt_limit;
+        if !under_pressure {
             return Ok(Some(base));
         }
+        tracing::debug!(
+            segments = segment_count,
+            incoming_segments,
+            "Cell LTX compaction pressure"
+        );
 
         for _ in 0..MAX_COMPACTION_CASCADE {
             let Some(prepared) = self.prepare_scheduled_compaction(&base).await? else {
+                if self.segment_count.is_some_and(|count| {
+                    count > 1 && count.saturating_add(incoming_segments) >= debt_limit
+                }) && let Some(compacted) = self.force_full_compaction(&base).await?
+                {
+                    base = compacted;
+                }
                 self.appends_since_compaction_check = 0;
                 return Ok(Some(base));
             };
             let next_due_ms = self.observed.value().next_due_ms;
             base = self.publish_prepared(&prepared, next_due_ms).await?;
-            self.segment_count = Some(prepared.verified().segment_count());
+            let compacted_segments = prepared.verified().segment_count();
+            self.segment_count = Some(compacted_segments);
+            if compacted_segments.saturating_add(incoming_segments) < debt_limit {
+                self.appends_since_compaction_check = 0;
+                return Ok(Some(base));
+            }
         }
         Err(Error::Control(
             "Cell compaction cascade exceeded level limit",
@@ -368,6 +436,7 @@ impl CellPublisher {
         if segment_count <= 1 {
             return Ok(None);
         }
+        tracing::debug!(segments = segment_count, "Cell LTX full compaction forced");
         let mut backoff = PublicationBackoff::default();
         let prepared = loop {
             let replica = self.replica.clone();
@@ -799,5 +868,152 @@ impl PublicationBackoff {
         tokio::time::sleep(delay).await;
         self.delay_ms = self.delay_ms.saturating_mul(2).min(MAX_RETRY_DELAY_MS);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use bytes::Bytes;
+    use crab_ltx::{CaptureBatch, CellReplica, CellStorageLayout, Db, Limits};
+    use crab_storage::Store;
+    use object_store::{memory::InMemory, path::Path};
+
+    use super::CellPublisher;
+    use crate::{CellAuthority, CellId, Control, Digest, IncarnationId, Owner, SessionId};
+
+    #[tokio::test]
+    async fn quiet_compaction_publishes_exact_root_after_eight_appends() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database =
+            Db::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
+        let cell = CellId::from_bytes([41; 32]);
+        let incarnation = IncarnationId::from_bytes([42; 16]);
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            Path::from("quiet-compaction"),
+            [43; 16],
+        );
+        let replica = CellReplica::new(
+            layout.clone(),
+            *cell.as_bytes(),
+            *incarnation.as_bytes(),
+            Limits::default(),
+        )
+        .unwrap();
+        let control = Control::initial(
+            cell,
+            incarnation,
+            Owner {
+                session: SessionId::from_bytes([44; 16]),
+                endpoint: "https://node.internal:8081".into(),
+            },
+            Digest::from_bytes([45; 32]),
+            1,
+        )
+        .unwrap();
+        layout
+            .store()
+            .create_strict(
+                &layout.control_path(cell.as_bytes()),
+                Bytes::from(control.encode().unwrap()),
+            )
+            .await
+            .unwrap();
+        let authority = CellAuthority::new(layout);
+        let observed = authority.load(cell).await.unwrap().unwrap();
+        let mut publisher = CellPublisher::new(
+            replica.clone(),
+            authority,
+            observed,
+            directory.path().to_owned(),
+        );
+        for sequence in 1..=8_u64 {
+            database
+                .transaction(|transaction| {
+                    if sequence == 1 {
+                        transaction
+                            .execute_batch("CREATE TABLE events(sequence INTEGER PRIMARY KEY)")?;
+                    }
+                    transaction.execute("INSERT INTO events VALUES (?1)", [sequence])?;
+                    Ok(())
+                })
+                .unwrap();
+            let cuts = database.capture_deferred().unwrap();
+            let prepared = publisher.prepare_append(&cuts, sequence, 1).await.unwrap();
+            publisher.publish_prepared(&prepared, None).await.unwrap();
+        }
+        assert!(publisher.compaction_due());
+        let before = publisher.control().value().ltx_root().unwrap();
+        assert_eq!(replica.open_root(&before).await.unwrap().segment_count(), 8);
+        assert_eq!(publisher.compact_one_quiet().await.unwrap(), Some(true));
+        let after = publisher.control().value().ltx_root().unwrap();
+        assert_eq!(after.position, before.position);
+        assert_eq!(after.commit_sequence, before.commit_sequence);
+        assert_eq!(replica.open_root(&after).await.unwrap().segment_count(), 1);
+        assert_eq!(publisher.compact_one_quiet().await.unwrap(), Some(false));
+        assert!(!publisher.compaction_due());
+
+        let mut segments = Vec::new();
+        let mut position = after.position;
+        for sequence in 9..=10_u64 {
+            database
+                .transaction(|transaction| {
+                    transaction.execute("INSERT INTO events VALUES (?1)", [sequence])?;
+                    Ok(())
+                })
+                .unwrap();
+            let captured = database.capture_deferred().unwrap();
+            segments.extend(captured.segments);
+            position = captured.position;
+        }
+        let cuts = CaptureBatch {
+            segments,
+            position,
+            timing: Default::default(),
+        };
+        assert_eq!(cuts.segments.len(), 2);
+        let prepared = publisher.prepare_append(&cuts, 9, 1).await.unwrap();
+        publisher.publish_prepared(&prepared, None).await.unwrap();
+        let extended = publisher.control().value().ltx_root().unwrap();
+        assert_eq!(extended.position, position);
+        assert_eq!(
+            replica.open_root(&extended).await.unwrap().segment_count(),
+            3
+        );
+
+        for sequence in 10..=37_u64 {
+            database
+                .transaction(|transaction| {
+                    transaction.execute("INSERT INTO events VALUES (?1)", [sequence + 1])?;
+                    Ok(())
+                })
+                .unwrap();
+            let cuts = database.capture_deferred().unwrap();
+            let prepared = publisher.prepare_append(&cuts, sequence, 1).await.unwrap();
+            publisher.publish_prepared(&prepared, None).await.unwrap();
+        }
+        let at_ceiling = publisher.control().value().ltx_root().unwrap();
+        assert_eq!(
+            replica
+                .open_root(&at_ceiling)
+                .await
+                .unwrap()
+                .segment_count(),
+            31
+        );
+        database
+            .transaction(|transaction| {
+                transaction.execute("INSERT INTO events VALUES (39)", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let cuts = database.capture_deferred().unwrap();
+        let prepared = publisher.prepare_append(&cuts, 38, 1).await.unwrap();
+        publisher.publish_prepared(&prepared, None).await.unwrap();
+        let forced = publisher.control().value().ltx_root().unwrap();
+        assert!(replica.open_root(&forced).await.unwrap().segment_count() < 32);
+        database.close().unwrap();
     }
 }

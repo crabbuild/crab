@@ -125,7 +125,14 @@ The graph obeys these checks:
 - Bundle descriptors identify one exact extent with no fallback location
 - The root's sequence and schema match SQLite `sys_meta`
 
-At 3,072 descriptors, the owner schedules compaction aggressively. At 4,096, it rejects new writes until compaction frees capacity.
+The owner marks routine compaction due after eight appends and starts one
+promotion only after 250 ms without Cell work, with no queued command or
+publication, and with a live lease. The actor retains the exclusive publisher
+token and tracks the maintenance effect through drain. A command arriving
+during maintenance waits under the normal queue and byte limits. If the next
+append would reach 32 descriptors, or a lower configured limit, compaction
+runs on the publication path before that append. The 4,096-descriptor graph
+limit and existing byte-limit/full-compaction fallback remain unchanged.
 
 ## Locate pages with an authenticated radix tree
 
@@ -228,7 +235,12 @@ Compaction is a representation-only publication. It preserves transaction ID, ch
 
 The implementation externally merges authenticated index streams by page number. It reads bounded frame ranges and uploads scratch-backed output without retaining a whole database or LTX body in memory.
 
-Scheduled compaction promotes eight or more contiguous inputs from one level. Admission pressure may force a full level-nine replacement before the next append.
+Scheduled compaction promotes eight or more contiguous inputs from one level.
+A quiet-period attempt publishes at most one prepared root through the same
+authority CAS used by commands. A retryable preparation failure retains the
+debt for a bounded retry; ambiguous CAS is reconciled against the exact root.
+Admission pressure may run the compaction cascade or force a full level-nine
+replacement before the next append.
 
 ## Catalog Cells before creating control
 
