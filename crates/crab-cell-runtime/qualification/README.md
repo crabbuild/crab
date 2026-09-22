@@ -50,6 +50,31 @@ latency histogram, and logical outcome digest. Protected adapters should use
 `run_with_case_coverage` or `run_concurrent_with_case_coverage`, which require
 each result to bind the lifecycle case it exercised.
 
+After a protected adapter has captured a verified run artifact, write the
+non-secret execution identity and fault/ownership observations with the
+`QualificationExecutionEvidence` schema, then bind the receipt with the
+trusted signing key held outside the evidence directory:
+
+```text
+cargo run --locked -p crab-cell-runtime --bin qualification_receipt -- \
+  bind-protected receipt.json <source-sha> <image-digest> profile.json \
+  execution-evidence.json /run/secrets/qualification-signing-key \
+  run-artifact.json workload.json raw/provider-events.json
+```
+
+The command rejects local profiles, non-canonical evidence, mismatched
+workload/run artifacts, missing protected resource measurements, and a signing
+key symlink. It never generates a protected receipt from the synthetic
+`emit` path; the resulting receipt must still pass `verify-matrix` with the
+pinned public key before release packaging.
+
+Named provider profiles also require one canonical
+`QualificationProviderEvidence` raw artifact beside the run and workload
+artifacts. It binds the provider/profile digest and workload seed, and records
+successful conditional, range, and multipart checks. Missing, duplicated,
+partial, or mismatched provider semantics are rejected by both the binder and
+the fresh-process matrix verifier.
+
 The default workload contains a deterministic, seed-bound case schedule for each
 primitive: `happy`, `retry`, `duplicate`, `expiry`, `cancellation`, `owner-loss`,
 and `recovery`. Adapters inspect `QualificationOperation::case()` (or its

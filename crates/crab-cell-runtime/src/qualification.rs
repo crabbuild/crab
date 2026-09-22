@@ -308,6 +308,13 @@ impl QualificationProfile {
         self != &Self::pr_contract()
     }
 
+    /// Returns whether the protected profile names a provider whose
+    /// conditional, range, and multipart semantics require raw evidence.
+    #[must_use]
+    pub fn requires_provider_evidence(&self) -> bool {
+        self.requires_protected_evidence() && !self.provider.is_empty()
+    }
+
     /// Returns whether this profile requires an injected fault schedule and
     /// ownership transition evidence.
     #[must_use]
@@ -987,6 +994,9 @@ impl QualificationRunSummary {
 /// Schema for a measured, typed execution artifact bound to one workload.
 pub const QUALIFICATION_RUN_ARTIFACT_SCHEMA_VERSION: u32 = 4;
 
+/// Schema for canonical provider-semantics evidence.
+pub const QUALIFICATION_PROVIDER_EVIDENCE_SCHEMA_VERSION: u32 = 1;
+
 /// Bounded measured outcome consumed by protected primitive qualification.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1195,6 +1205,157 @@ impl QualificationRunArtifact {
         validate_run_latency_metrics(&self.metrics)?;
         Ok(())
     }
+}
+
+/// Canonical provider-semantics evidence bound to a protected primitives run.
+///
+/// Provider profiles require one such artifact proving conditional mutation,
+/// bounded range reads, and multipart behavior. The artifact is raw signed
+/// evidence; the receipt only stores its digest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QualificationProviderEvidence {
+    schema_version: u32,
+    provider: String,
+    profile: String,
+    profile_digest: [u8; 32],
+    workload_seed: u64,
+    conditional: bool,
+    range: bool,
+    multipart: bool,
+}
+
+impl QualificationProviderEvidence {
+    /// Creates one provider-semantics artifact for a measured workload.
+    pub fn new(
+        profile: &QualificationProfile,
+        workload_seed: u64,
+        conditional: bool,
+        range: bool,
+        multipart: bool,
+    ) -> Result<Self> {
+        profile.validate()?;
+        if profile.required_provider().is_empty() {
+            return Err(Error::Control(
+                "provider evidence requires a named qualification provider",
+            ));
+        }
+        let evidence = Self {
+            schema_version: QUALIFICATION_PROVIDER_EVIDENCE_SCHEMA_VERSION,
+            provider: profile.required_provider().to_owned(),
+            profile: profile.name.clone(),
+            profile_digest: *profile.digest()?.as_bytes(),
+            workload_seed,
+            conditional,
+            range,
+            multipart,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
+    /// Encodes canonical provider-semantics evidence.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self).map_err(Error::from)?;
+        if bytes.len() > MAX_RECEIPT_BYTES {
+            return Err(Error::Control(
+                "qualification provider evidence exceeds limit",
+            ));
+        }
+        Ok(bytes)
+    }
+
+    /// Decodes and validates canonical provider-semantics evidence.
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() > MAX_RECEIPT_BYTES {
+            return Err(Error::Control(
+                "qualification provider evidence exceeds limit",
+            ));
+        }
+        let evidence: Self = serde_json::from_slice(bytes)?;
+        evidence.validate()?;
+        if evidence.encode()? != bytes {
+            return Err(Error::Control(
+                "qualification provider evidence is not canonical",
+            ));
+        }
+        Ok(evidence)
+    }
+
+    fn verify_for(&self, profile: &QualificationProfile, workload_seed: u64) -> Result<()> {
+        if !profile.requires_provider_evidence()
+            || self.provider != profile.required_provider()
+            || self.profile != profile.name
+            || self.profile_digest != *profile.digest()?.as_bytes()
+            || self.workload_seed != workload_seed
+            || !self.conditional
+            || !self.range
+            || !self.multipart
+        {
+            return Err(Error::Control(
+                "qualification provider semantics are incomplete or mismatched",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.schema_version != QUALIFICATION_PROVIDER_EVIDENCE_SCHEMA_VERSION
+            || self.profile_digest.iter().all(|byte| *byte == 0)
+        {
+            return Err(Error::Control("invalid qualification provider evidence"));
+        }
+        validate_label(&self.provider, "qualification provider evidence provider")?;
+        validate_label(&self.profile, "qualification provider evidence profile")?;
+        Ok(())
+    }
+}
+
+fn verify_provider_evidence(
+    profile: &QualificationProfile,
+    run: &QualificationRunArtifact,
+    artifacts: &[&[u8]],
+) -> Result<()> {
+    if !profile.requires_provider_evidence() {
+        return Ok(());
+    }
+    let mut matches = Vec::new();
+    for artifact in artifacts {
+        let Some(candidate) = provider_evidence_candidate(artifact)? else {
+            continue;
+        };
+        matches.push(candidate);
+    }
+    let mut matches = matches.into_iter();
+    let evidence = matches.next().ok_or(Error::Control(
+        "protected provider evidence is missing its semantics artifact",
+    ))?;
+    if matches.next().is_some() {
+        return Err(Error::Control(
+            "protected provider evidence has multiple semantics artifacts",
+        ));
+    }
+    evidence.verify_for(profile, run.workload().seed())
+}
+
+fn provider_evidence_candidate(bytes: &[u8]) -> Result<Option<QualificationProviderEvidence>> {
+    // Raw artifacts may use arbitrary formats, but a JSON object that starts
+    // claiming provider semantics must decode completely or fail the receipt;
+    // otherwise a partial duplicate could hide beside a valid artifact.
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Ok(None);
+    };
+    let Some(object) = value.as_object() else {
+        return Ok(None);
+    };
+    if !["conditional", "range", "multipart"]
+        .iter()
+        .any(|field| object.contains_key(*field))
+    {
+        return Ok(None);
+    }
+    QualificationProviderEvidence::decode(bytes).map(Some)
 }
 
 /// Deterministic logical workload artifact for PR, provider, and scale tiers.
@@ -1836,7 +1997,8 @@ pub struct QualificationOwnership {
 
 /// Non-secret execution identity and fault evidence supplied by a protected
 /// qualification harness when it binds a measured run to a receipt.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QualificationExecutionEvidence {
     /// Provider identity recorded by the harness.
     pub provider: String,
@@ -1860,6 +2022,62 @@ pub struct QualificationExecutionEvidence {
     pub ownership: Vec<QualificationOwnership>,
     /// Whether the harness observed a dirty source or workspace.
     pub dirty: bool,
+}
+
+impl QualificationExecutionEvidence {
+    /// Encodes the non-secret execution evidence in its canonical JSON form.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self).map_err(Error::from)?;
+        if bytes.len() > MAX_RECEIPT_BYTES {
+            return Err(Error::Control(
+                "qualification execution evidence exceeds limit",
+            ));
+        }
+        Ok(bytes)
+    }
+
+    /// Decodes and validates one canonical execution evidence file.
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() > MAX_RECEIPT_BYTES {
+            return Err(Error::Control(
+                "qualification execution evidence exceeds limit",
+            ));
+        }
+        let evidence: Self = serde_json::from_slice(bytes)?;
+        evidence.validate()?;
+        if evidence.encode()? != bytes {
+            return Err(Error::Control(
+                "qualification execution evidence is not canonical",
+            ));
+        }
+        Ok(evidence)
+    }
+
+    fn validate(&self) -> Result<()> {
+        validate_label(&self.provider, "qualification evidence provider")?;
+        validate_label(&self.workload, "qualification evidence workload")?;
+        validate_label(&self.fault, "qualification evidence fault")?;
+        validate_label(&self.toolchain, "qualification evidence toolchain")?;
+        validate_label(
+            &self.execution_profile,
+            "qualification evidence execution profile",
+        )?;
+        validate_label(&self.topology, "qualification evidence topology")?;
+        if self.started_at_ms == 0
+            || self.finished_at_ms < self.started_at_ms
+            || self.fault_schedule.is_empty()
+            || self.fault_schedule.len() > MAX_RECEIPT_BYTES
+            || self.ownership.len() > MAX_METRICS
+            || self
+                .ownership
+                .iter()
+                .any(|proof| proof.root.iter().all(|byte| *byte == 0))
+        {
+            return Err(Error::Control("qualification execution evidence"));
+        }
+        Ok(())
+    }
 }
 
 impl QualificationOwnership {
@@ -2207,6 +2425,9 @@ impl QualificationReceipt {
     ) -> Result<Self> {
         if started_at_ms == 0 || finished_at_ms < started_at_ms {
             return Err(Error::Control("qualification evidence timestamps"));
+        }
+        if fault_schedule.is_empty() || fault_schedule.len() > MAX_RECEIPT_BYTES {
+            return Err(Error::Control("qualification fault schedule"));
         }
         if raw_artifact_digests.is_empty() || raw_artifact_digests.len() > MAX_METRICS {
             return Err(Error::Control("qualification artifact digest count"));
@@ -2807,6 +3028,7 @@ impl QualificationReceipt {
                 "qualification receipt does not bind the measured workload",
             ));
         }
+        verify_provider_evidence(profile, &run, artifacts)?;
         for (name, unit) in [
             ("cells", "cells"),
             ("operations", "operations"),
@@ -2846,6 +3068,13 @@ impl QualificationReceipt {
     fn verify_execution_environment(&self, profile: &QualificationProfile) -> Result<()> {
         if !profile.requires_protected_evidence() {
             return Ok(());
+        }
+        if self.finished_at_ms.saturating_sub(self.started_at_ms)
+            < profile.minimum_duration_secs().saturating_mul(1_000)
+        {
+            return Err(Error::Control(
+                "protected qualification evidence duration is below profile minimum",
+            ));
         }
         if self.topology == "local"
             || self.toolchain == "unknown"
@@ -2908,6 +3137,10 @@ impl QualificationRunner {
         run: &QualificationRunArtifact,
         artifacts: &[&[u8]],
     ) -> Result<QualificationReceipt> {
+        evidence.validate()?;
+        if evidence.dirty {
+            return Err(Error::Control("qualification run source is dirty"));
+        }
         run.verify_for_profile(profile)?;
         if artifacts.is_empty() {
             return Err(Error::Control("qualification run artifacts are empty"));
@@ -2921,6 +3154,39 @@ impl QualificationRunner {
                 && evidence.topology != profile.required_topology())
         {
             return Err(Error::Control("qualification run environment identity"));
+        }
+        if profile.requires_protected_evidence()
+            && (evidence.topology == "local"
+                || evidence.toolchain == "unknown"
+                || evidence.execution_profile != "release"
+                || evidence.ownership.is_empty()
+                || evidence
+                    .finished_at_ms
+                    .saturating_sub(evidence.started_at_ms)
+                    < run.elapsed_ms)
+        {
+            return Err(Error::Control(
+                "qualification run lacks protected execution proof",
+            ));
+        }
+        if profile.requires_fault_injection()
+            && (evidence.fault.eq_ignore_ascii_case("none")
+                || evidence.fault_schedule == b"none"
+                || evidence.ownership.len() < 2
+                || !evidence.ownership.windows(2).any(|observations| {
+                    observations[1].epoch() > observations[0].epoch()
+                        || observations[1].published_sequence()
+                            > observations[0].published_sequence()
+                })
+                || evidence.ownership.windows(2).any(|observations| {
+                    observations[1].epoch() < observations[0].epoch()
+                        || observations[1].published_sequence()
+                            < observations[0].published_sequence()
+                }))
+        {
+            return Err(Error::Control(
+                "qualification run lacks protected fault transition proof",
+            ));
         }
         let encoded_run = run.encode()?;
         if Digest::from_bytes(*blake3::hash(artifacts[0]).as_bytes())
@@ -2940,6 +3206,7 @@ impl QualificationRunner {
         if workload_artifacts.next().is_some() || workload != *run.workload() {
             return Err(Error::Control("qualification run workload identity"));
         }
+        verify_provider_evidence(profile, run, artifacts)?;
         let bucket_calls = run.threshold_metric("bucket_calls", "count")?;
         let peak_rss_bytes = run.threshold_metric("peak_rss_bytes", "bytes")?;
         let artifact_digests = artifacts
@@ -3191,6 +3458,35 @@ fn validate_path(value: &str, field: &'static str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_evidence_round_trip_is_canonical_and_bounded() {
+        let evidence = QualificationExecutionEvidence {
+            provider: "s3".into(),
+            workload: "primitives".into(),
+            fault: "owner-loss".into(),
+            toolchain: "rustc-1.90".into(),
+            execution_profile: "release".into(),
+            topology: "kubernetes".into(),
+            started_at_ms: 10,
+            finished_at_ms: 20,
+            fault_schedule: b"owner-loss-before-commit".to_vec(),
+            ownership: vec![QualificationOwnership::new(
+                4,
+                8,
+                Digest::from_bytes([7; 32]),
+            )],
+            dirty: false,
+        };
+        let encoded = evidence.encode().expect("evidence encoding");
+        assert_eq!(
+            QualificationExecutionEvidence::decode(&encoded).expect("evidence decoding"),
+            evidence
+        );
+        let mut noncanonical = encoded;
+        noncanonical.push(b'\n');
+        assert!(QualificationExecutionEvidence::decode(&noncanonical).is_err());
+    }
 
     #[test]
     fn threshold_profiles_are_canonical_and_distinct() {
@@ -3772,7 +4068,7 @@ mod tests {
                     false,
                 ),
                 1,
-                2,
+                1_001,
                 b"none",
                 vec![Digest::from_bytes(*blake3::hash(&encoded).as_bytes())],
                 vec![QualificationOwnership::new(
@@ -3804,6 +4100,7 @@ mod tests {
         profile.maximum_local_disk_bytes = 2_000;
         profile.maximum_file_descriptors = 3_000;
         profile.maximum_bucket_calls = 4_000;
+        profile.provider = "rustfs".into();
         let workload = QualificationWorkload::generate_with_size(&profile, 29, 1, 8, 1).unwrap();
         let mut executor = ContractExecutor {
             calls: 0,
@@ -3830,6 +4127,11 @@ mod tests {
         run.verify_for_profile(&profile).unwrap();
         let run_bytes = run.encode().unwrap();
         let workload_bytes = workload.encode().unwrap();
+        let provider_evidence =
+            QualificationProviderEvidence::new(&profile, workload.seed(), true, true, true)
+                .unwrap()
+                .encode()
+                .unwrap();
         let key = SigningKey::from_bytes(&[96; 32]);
         let runner = QualificationRunner::new(key.clone());
         let evidence = QualificationExecutionEvidence {
@@ -3840,7 +4142,7 @@ mod tests {
             execution_profile: "release".into(),
             topology: "three-process".into(),
             started_at_ms: 1,
-            finished_at_ms: 2,
+            finished_at_ms: 1_001,
             fault_schedule: b"none".to_vec(),
             ownership: vec![QualificationOwnership::new(
                 1,
@@ -3849,6 +4151,70 @@ mod tests {
             )],
             dirty: false,
         };
+        assert!(
+            runner
+                .emit_protected_run(
+                    &profile,
+                    "binder-source".into(),
+                    Digest::from_bytes([97; 32]),
+                    evidence.clone(),
+                    &run,
+                    &[&run_bytes, &workload_bytes],
+                )
+                .is_err()
+        );
+        let partial_provider_evidence =
+            QualificationProviderEvidence::new(&profile, workload.seed(), true, true, false)
+                .unwrap()
+                .encode()
+                .unwrap();
+        assert!(
+            runner
+                .emit_protected_run(
+                    &profile,
+                    "binder-source".into(),
+                    Digest::from_bytes([97; 32]),
+                    evidence.clone(),
+                    &run,
+                    &[&run_bytes, &workload_bytes, &partial_provider_evidence],
+                )
+                .is_err()
+        );
+        let malformed_provider_evidence = br#"{"schema_version":1,"provider":"rustfs","profile":"protected-binder-contract","conditional":true}"#;
+        assert!(
+            runner
+                .emit_protected_run(
+                    &profile,
+                    "binder-source".into(),
+                    Digest::from_bytes([97; 32]),
+                    evidence.clone(),
+                    &run,
+                    &[
+                        &run_bytes,
+                        &workload_bytes,
+                        &provider_evidence,
+                        malformed_provider_evidence
+                    ],
+                )
+                .is_err()
+        );
+        assert!(
+            runner
+                .emit_protected_run(
+                    &profile,
+                    "binder-source".into(),
+                    Digest::from_bytes([97; 32]),
+                    evidence.clone(),
+                    &run,
+                    &[
+                        &run_bytes,
+                        &workload_bytes,
+                        &provider_evidence,
+                        &provider_evidence,
+                    ],
+                )
+                .is_err()
+        );
         let receipt = runner
             .emit_protected_run(
                 &profile,
@@ -3856,7 +4222,7 @@ mod tests {
                 Digest::from_bytes([97; 32]),
                 evidence.clone(),
                 &run,
-                &[&run_bytes, &workload_bytes],
+                &[&run_bytes, &workload_bytes, &provider_evidence],
             )
             .unwrap();
         receipt
@@ -3864,16 +4230,47 @@ mod tests {
                 "binder-source",
                 Digest::from_bytes([97; 32]),
                 &profile,
-                &[&run_bytes, &workload_bytes],
+                &[&run_bytes, &workload_bytes, &provider_evidence],
                 key.verifying_key().to_bytes(),
             )
             .unwrap();
         receipt
-            .verify_primitive_workload(&profile, &[&run_bytes, &workload_bytes])
+            .verify_primitive_workload(&profile, &[&run_bytes, &workload_bytes, &provider_evidence])
             .unwrap();
         receipt
-            .verify_primitive_run_artifact(&profile, &[&run_bytes, &workload_bytes])
+            .verify_primitive_run_artifact(
+                &profile,
+                &[&run_bytes, &workload_bytes, &provider_evidence],
+            )
             .unwrap();
+        let mut short_evidence = evidence.clone();
+        short_evidence.finished_at_ms = 2;
+        assert!(
+            runner
+                .emit_protected_run(
+                    &profile,
+                    "binder-source".into(),
+                    Digest::from_bytes([97; 32]),
+                    short_evidence,
+                    &run,
+                    &[&run_bytes, &workload_bytes, &provider_evidence],
+                )
+                .is_err()
+        );
+        let mut dirty_evidence = evidence.clone();
+        dirty_evidence.dirty = true;
+        assert!(
+            runner
+                .emit_protected_run(
+                    &profile,
+                    "binder-source".into(),
+                    Digest::from_bytes([97; 32]),
+                    dirty_evidence,
+                    &run,
+                    &[&run_bytes, &workload_bytes, &provider_evidence],
+                )
+                .is_err()
+        );
 
         let mismatched_workload =
             QualificationWorkload::generate_with_size(&profile, 29, 2, 8, 1).unwrap();
@@ -3886,7 +4283,7 @@ mod tests {
                     Digest::from_bytes([97; 32]),
                     evidence,
                     &run,
-                    &[&run_bytes, &mismatched_workload_bytes],
+                    &[&run_bytes, &mismatched_workload_bytes, &provider_evidence],
                 )
                 .is_err()
         );
@@ -4222,7 +4619,7 @@ mod tests {
                     false,
                 ),
                 1,
-                2,
+                3_600_001,
                 b"none",
                 vec![artifact_digest],
                 Vec::new(),
@@ -4261,7 +4658,7 @@ mod tests {
                     false,
                 ),
                 1,
-                2,
+                3_600_001,
                 b"none",
                 vec![artifact_digest],
                 vec![QualificationOwnership::new(
@@ -4363,7 +4760,7 @@ mod tests {
                     false,
                 ),
                 1,
-                2,
+                60_001,
                 b"none",
                 vec![artifact_digest],
                 vec![QualificationOwnership::new(
@@ -4406,7 +4803,7 @@ mod tests {
                     false,
                 ),
                 1,
-                2,
+                60_001,
                 b"fault=owner-kill;phase=after-publication",
                 vec![artifact_digest],
                 vec![
@@ -4456,7 +4853,7 @@ mod tests {
                     false,
                 ),
                 1,
-                2,
+                60_001,
                 b"fault=owner-kill;phase=after-publication",
                 vec![artifact_digest],
                 vec![
@@ -4523,6 +4920,63 @@ mod tests {
             decoded
                 .raw_artifact_digests()
                 .any(|digest| { digest == Digest::from_bytes(*blake3::hash(artifact).as_bytes()) })
+        );
+    }
+
+    #[test]
+    fn evidence_requires_bounded_fault_schedule() {
+        let valid = QualificationExecutionEvidence {
+            provider: "rustfs".into(),
+            workload: "failover".into(),
+            fault: "owner-kill".into(),
+            toolchain: "rustc".into(),
+            execution_profile: "release".into(),
+            topology: "three-process".into(),
+            started_at_ms: 1,
+            finished_at_ms: 2,
+            fault_schedule: b"owner-kill".to_vec(),
+            ownership: Vec::new(),
+            dirty: false,
+        };
+        assert!(valid.encode().is_ok());
+
+        let mut empty = valid.clone();
+        empty.fault_schedule.clear();
+        assert!(empty.encode().is_err());
+
+        let mut oversized = valid;
+        oversized.fault_schedule = vec![0; MAX_RECEIPT_BYTES + 1];
+        assert!(oversized.encode().is_err());
+
+        let artifact = b"raw qualification output";
+        let digest = Digest::from_bytes(*blake3::hash(artifact).as_bytes());
+        let receipt = QualificationReceipt::new(
+            "source".into(),
+            Digest::from_bytes([1; 32]),
+            "rustfs".into(),
+            "failover".into(),
+            "owner-kill".into(),
+            Vec::new(),
+            digest,
+            true,
+        )
+        .expect("receipt identity");
+        assert!(
+            receipt
+                .clone()
+                .with_evidence(1, 2, b"", vec![digest], Vec::new())
+                .is_err()
+        );
+        assert!(
+            receipt
+                .with_evidence(
+                    1,
+                    2,
+                    &vec![0; MAX_RECEIPT_BYTES + 1],
+                    vec![digest],
+                    Vec::new()
+                )
+                .is_err()
         );
     }
 

@@ -6,9 +6,10 @@ use std::{
 };
 
 use crab_cell_runtime::{
-    Digest, QUALIFICATION_MATRIX_ROWS, QualificationMatrixEntry, QualificationMatrixManifest,
-    QualificationMetric, QualificationOwnership, QualificationProfile, QualificationReceipt,
-    QualificationRunArtifact, QualificationRunner, QualificationWorkload, validate_cluster_receipt,
+    Digest, QUALIFICATION_MATRIX_ROWS, QualificationExecutionEvidence, QualificationMatrixEntry,
+    QualificationMatrixManifest, QualificationMetric, QualificationOwnership, QualificationProfile,
+    QualificationReceipt, QualificationRunArtifact, QualificationRunner, QualificationWorkload,
+    validate_cluster_receipt,
 };
 use ed25519_dalek::SigningKey;
 use rand::Rng;
@@ -41,6 +42,12 @@ fn run() -> Result<(), String> {
                 .map_err(|error| error.to_string())?,
                 None => QualificationProfile::pr_contract(),
             };
+            if profile.requires_protected_evidence() {
+                return Err(
+                    "emit cannot create protected evidence; use bind-protected with a measured run artifact"
+                        .into(),
+                );
+            }
             if args.next().is_some() {
                 return Err(usage());
             }
@@ -106,6 +113,7 @@ fn run() -> Result<(), String> {
             fs::write(output, encoded).map_err(|error| format!("write receipt: {error}"))?;
             Ok(())
         }
+        Some("bind-protected") => bind_protected(&mut args),
         Some("profile") => {
             let output = required(&mut args, "output")?;
             let tier = args.next().unwrap_or_else(|| "pr-contract".into());
@@ -263,6 +271,90 @@ fn run() -> Result<(), String> {
         Some("validate-cluster") => validate_cluster(&mut args),
         _ => Err(usage()),
     }
+}
+
+fn bind_protected(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
+    let output = PathBuf::from(required(args, "output")?);
+    let source = required(args, "source revision")?;
+    let image = parse_digest(&required(args, "image digest")?)?;
+    let profile = QualificationProfile::decode(&read_regular_file(
+        Path::new(&required(args, "profile")?),
+        "profile",
+    )?)
+    .map_err(|error| error.to_string())?;
+    if !profile.requires_protected_evidence() {
+        return Err("bind-protected requires a protected qualification profile".into());
+    }
+    let evidence = QualificationExecutionEvidence::decode(&read_regular_file(
+        Path::new(&required(args, "execution evidence")?),
+        "execution evidence",
+    )?)
+    .map_err(|error| error.to_string())?;
+    let signing_key = read_signing_key(Path::new(&required(args, "signing key file")?))?;
+    let run_bytes = read_regular_file(Path::new(&required(args, "run artifact")?), "run artifact")?;
+    let run = QualificationRunArtifact::decode(&run_bytes)
+        .map_err(|error| format!("decode run artifact: {error}"))?;
+    let workload_bytes = read_regular_file(
+        Path::new(&required(args, "workload artifact")?),
+        "workload artifact",
+    )?;
+    let mut artifact_bytes = vec![run_bytes, workload_bytes];
+    for path in args {
+        artifact_bytes.push(read_regular_file(Path::new(&path), "raw artifact")?);
+    }
+    let artifact_refs = artifact_bytes.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let receipt = QualificationRunner::new(signing_key)
+        .emit_protected_run(&profile, source, image, evidence, &run, &artifact_refs)
+        .map_err(|error| error.to_string())?;
+    write_regular_file(
+        &output,
+        &receipt.encode().map_err(|error| error.to_string())?,
+        "protected receipt",
+    )
+}
+
+fn read_regular_file(path: &Path, field: &str) -> Result<Vec<u8>, String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| format!("{field}: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!("{field} must be a regular, non-symlink file"));
+    }
+    fs::read(path).map_err(|error| format!("read {field}: {error}"))
+}
+
+fn write_regular_file(path: &Path, bytes: &[u8], field: &str) -> Result<(), String> {
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && (metadata.file_type().is_symlink() || !metadata.is_file())
+    {
+        return Err(format!("{field} must be a regular, non-symlink file"));
+    }
+    fs::write(path, bytes).map_err(|error| format!("write {field}: {error}"))
+}
+
+fn read_signing_key(path: &Path) -> Result<SigningKey, String> {
+    let bytes = read_regular_file(path, "signing key")?;
+    let key_bytes = if bytes.len() == 32 {
+        bytes
+    } else {
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| "signing key must be 32 raw bytes or 64 lowercase hex characters")?
+            .trim();
+        if text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("signing key must be 32 raw bytes or 64 lowercase hex characters".into());
+        }
+        text.as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| Ok((hex(pair[0])? << 4) | hex(pair[1])?))
+            .collect::<Result<Vec<_>, String>>()?
+    };
+    let key_bytes: [u8; 32] = key_bytes
+        .try_into()
+        .map_err(|_| "signing key must contain exactly 32 bytes".to_owned())?;
+    if key_bytes.iter().all(|byte| *byte == 0) {
+        return Err("signing key must not be zero".into());
+    }
+    Ok(SigningKey::from_bytes(&key_bytes))
 }
 
 fn primitive_workload_seed(artifact: &[u8], profile: &QualificationProfile) -> Result<u64, String> {
@@ -584,17 +676,38 @@ fn unix_millis() -> Result<u64, String> {
 }
 
 fn usage() -> String {
-    "usage: qualification_receipt profile <output> [pr-contract|local-provider|scale|fault|fault-s3|fault-gcs|fault-azure|provider|provider-s3|provider-gcs|provider-azure|compatibility]\n       qualification_receipt workload <output> <profile.json> <seed> [cells operations duration_secs]\n       qualification_receipt verify-workload <workload.json> <profile.json>\n       qualification_receipt manifest <output> <evidence-dir>\n       qualification_receipt emit <output> <source> <image-digest> <artifact> [provider workload fault profile.json]\n       qualification_receipt verify <receipt> <source> <image-digest> <artifact> [profile.json [trusted-signer-hex]]\n       qualification_receipt verify-matrix <manifest> <source> <image-digest> [profile.json [trusted-signer-hex]]\n       qualification_receipt validate-cluster <receipt> <source> <image-digest> [release|source-only]".into()
+    "usage: qualification_receipt profile <output> [pr-contract|local-provider|scale|fault|fault-s3|fault-gcs|fault-azure|provider|provider-s3|provider-gcs|provider-azure|compatibility]\n       qualification_receipt workload <output> <profile.json> <seed> [cells operations duration_secs]\n       qualification_receipt verify-workload <workload.json> <profile.json>\n       qualification_receipt manifest <output> <evidence-dir>\n       qualification_receipt emit <output> <source> <image-digest> <artifact> [provider workload fault profile.json]\n       qualification_receipt bind-protected <output> <source> <image-digest> <profile.json> <execution-evidence.json> <signing-key-file> <run-artifact.json> <workload.json> [raw-artifact ...]\n       qualification_receipt verify <receipt> <source> <image-digest> <artifact> [profile.json [trusted-signer-hex]]\n       qualification_receipt verify-matrix <manifest> <source> <image-digest> [profile.json [trusted-signer-hex]]\n       qualification_receipt validate-cluster <receipt> <source> <image-digest> [release|source-only]".into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_manifest, manifest_base, require_manifest_output, require_trusted_signer,
-        resolve_manifest_path,
+        bind_protected, build_manifest, manifest_base, read_signing_key, require_manifest_output,
+        require_trusted_signer, resolve_manifest_path,
     };
-    use crab_cell_runtime::{QUALIFICATION_MATRIX_ROWS, QualificationProfile};
-    use std::{fs, path::Path};
+    use crab_cell_runtime::{
+        Digest, QUALIFICATION_MATRIX_ROWS, QualificationExecution, QualificationExecutionEvidence,
+        QualificationOperation, QualificationOperationExecutor, QualificationOwnership,
+        QualificationProfile, QualificationProviderEvidence, QualificationReceipt,
+        QualificationWorkload,
+    };
+    use ed25519_dalek::Signer;
+    use std::{fs, future::Future, path::Path, pin::Pin, time::Duration};
+
+    struct BinderExecutor;
+
+    impl QualificationOperationExecutor for BinderExecutor {
+        type Future<'a> = Pin<
+            Box<dyn Future<Output = crab_cell_runtime::Result<QualificationExecution>> + Send + 'a>,
+        >;
+
+        fn execute<'a>(&'a mut self, _operation: QualificationOperation) -> Self::Future<'a> {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(125)).await;
+                Ok(QualificationExecution::acknowledged(true))
+            })
+        }
+    }
 
     #[test]
     fn relative_manifest_uses_the_current_directory() {
@@ -618,6 +731,156 @@ mod tests {
         assert!(require_trusted_signer(Some(&protected), None).is_err());
         assert!(require_trusted_signer(Some(&QualificationProfile::pr_contract()), None).is_ok());
         assert!(require_trusted_signer(None, None).is_ok());
+    }
+
+    #[test]
+    fn signing_key_reader_accepts_hex_and_rejects_symlinks() {
+        let directory = tempfile::tempdir().expect("key directory");
+        let key_path = directory.path().join("key");
+        fs::write(
+            &key_path,
+            "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+        )
+        .expect("key");
+        let key = read_signing_key(&key_path).expect("hex key");
+        assert_eq!(
+            key.to_bytes(),
+            [
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                24, 25, 26, 27, 28, 29, 30, 31, 32,
+            ]
+        );
+        let message = b"qualification";
+        assert!(key.sign(message).to_bytes().iter().any(|byte| *byte != 0));
+
+        #[cfg(unix)]
+        {
+            let linked = directory.path().join("linked-key");
+            std::os::unix::fs::symlink(&key_path, &linked).expect("key symlink");
+            assert!(read_signing_key(&linked).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_protected_cli_binds_and_verifies_a_measured_run() {
+        let directory = tempfile::tempdir().expect("binder directory");
+        let mut profile_value = serde_json::to_value(
+            QualificationProfile::new("cli-binder".into(), 1, 8, 1, 5_000).expect("binder profile"),
+        )
+        .expect("binder profile value");
+        profile_value["provider"] = serde_json::Value::String("rustfs".into());
+        let profile: QualificationProfile =
+            serde_json::from_value(profile_value).expect("named binder profile");
+        let workload = QualificationWorkload::generate_with_size(&profile, 31, 1, 8, 1)
+            .expect("binder workload");
+        let mut executor = BinderExecutor;
+        let summary = workload.run(&mut executor).await.expect("binder run");
+        let elapsed_ms = u64::try_from(summary.elapsed().as_millis())
+            .expect("binder elapsed duration")
+            .max(1);
+        let resources = [
+            crab_cell_runtime::QualificationMetric::new(
+                "peak_rss_bytes".into(),
+                19,
+                "bytes".into(),
+            )
+            .expect("RSS metric"),
+            crab_cell_runtime::QualificationMetric::new(
+                "peak_local_disk_bytes".into(),
+                29,
+                "bytes".into(),
+            )
+            .expect("disk metric"),
+            crab_cell_runtime::QualificationMetric::new(
+                "peak_file_descriptors".into(),
+                39,
+                "count".into(),
+            )
+            .expect("FD metric"),
+            crab_cell_runtime::QualificationMetric::new("bucket_calls".into(), 49, "count".into())
+                .expect("bucket metric"),
+        ];
+        let run = summary
+            .artifact_with_resource_metrics(&workload, &resources)
+            .expect("binder run artifact");
+        let profile_path = directory.path().join("profile.json");
+        let evidence_path = directory.path().join("execution-evidence.json");
+        let key_path = directory.path().join("signing-key");
+        let run_path = directory.path().join("run-artifact.json");
+        let workload_path = directory.path().join("workload.json");
+        let provider_path = directory.path().join("provider-evidence.json");
+        let output_path = directory.path().join("receipt.json");
+        fs::write(&profile_path, profile.encode().expect("profile encoding")).expect("profile");
+        fs::write(
+            &evidence_path,
+            QualificationExecutionEvidence {
+                provider: "rustfs".into(),
+                workload: "primitives".into(),
+                fault: "none".into(),
+                toolchain: "rustc-test".into(),
+                execution_profile: "release".into(),
+                topology: "three-process".into(),
+                started_at_ms: 1,
+                finished_at_ms: 1u64.saturating_add(elapsed_ms),
+                fault_schedule: b"none".to_vec(),
+                ownership: vec![QualificationOwnership::new(
+                    1,
+                    1,
+                    Digest::from_bytes([7; 32]),
+                )],
+                dirty: false,
+            }
+            .encode()
+            .expect("evidence encoding"),
+        )
+        .expect("evidence");
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[91; 32]);
+        fs::write(&key_path, signing_key.to_bytes()).expect("signing key");
+        let run_bytes = run.encode().expect("run encoding");
+        let workload_bytes = workload.encode().expect("workload encoding");
+        let provider_bytes =
+            QualificationProviderEvidence::new(&profile, workload.seed(), true, true, true)
+                .expect("provider evidence")
+                .encode()
+                .expect("provider evidence encoding");
+        fs::write(&run_path, &run_bytes).expect("run artifact");
+        fs::write(&workload_path, &workload_bytes).expect("workload artifact");
+        fs::write(&provider_path, &provider_bytes).expect("provider evidence");
+
+        let mut args = vec![
+            output_path.display().to_string(),
+            "cli-source".into(),
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            profile_path.display().to_string(),
+            evidence_path.display().to_string(),
+            key_path.display().to_string(),
+            run_path.display().to_string(),
+            workload_path.display().to_string(),
+            provider_path.display().to_string(),
+        ]
+        .into_iter();
+        bind_protected(&mut args).expect("bind protected receipt");
+
+        let receipt = QualificationReceipt::decode(&fs::read(&output_path).expect("receipt"))
+            .expect("receipt decoding");
+        receipt
+            .verify_for_profile_with_signer(
+                "cli-source",
+                Digest::from_bytes([171; 32]),
+                &profile,
+                &[&run_bytes, &workload_bytes, &provider_bytes],
+                signing_key.verifying_key().to_bytes(),
+            )
+            .expect_err("wrong image must be rejected");
+        receipt
+            .verify_for_profile_with_signer(
+                "cli-source",
+                Digest::from_bytes([170; 32]),
+                &profile,
+                &[&run_bytes, &workload_bytes, &provider_bytes],
+                signing_key.verifying_key().to_bytes(),
+            )
+            .expect("receipt verification");
     }
 
     #[test]
