@@ -2,3 +2,4 @@ self-hosted-runner:
   labels:
     - crab-large-repo
     - sdk-managed
+    - crab-cell-runtime-protected

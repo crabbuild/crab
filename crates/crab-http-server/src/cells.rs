@@ -2290,7 +2290,7 @@ mod tests {
         assert_eq!(descriptor["modules"][0]["name"], "repository");
         assert_eq!(
             descriptor["modules"][0]["code"],
-            "260b8600f1dcc6ea9ae0695f02de551aeac4609ec1bc8be4e73d3ca11ac339f0"
+            "7ab0bff6f8f388b9fc2c1197816ceaf743c88d546cafafac049475786d57091e"
         );
         assert_eq!(descriptor["modules"][0]["schema_min"], 1);
         assert_eq!(descriptor["modules"][0]["schema_max"], 2);
@@ -2306,7 +2306,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            34
+            35
         );
         assert_eq!(descriptor["namespaces"][0]["role"], "repository");
         assert_eq!(descriptor["namespaces"][0]["shards"], 1);

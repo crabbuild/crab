@@ -16,7 +16,7 @@ pub const MAX_ACTIVITY_PAYLOAD_BYTES: usize = 256 << 10;
 const MAX_ACTIVITY_TYPE_BYTES: usize = 256;
 pub(super) const MAX_ATTEMPTS: u32 = 20;
 const MIN_LEASE_MS: u32 = 5_000;
-const MAX_LEASE_MS: u32 = 300_000;
+pub(crate) const MAX_LEASE_MS: u32 = 300_000;
 const DELIVERY_MARGIN_MS: i64 = 1_000;
 const TERMINAL_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
 

@@ -42,6 +42,22 @@ indexes files; it does not create or sign receipts. Run `verify-matrix` with the
 protected profile and pinned attestation key before treating the resulting
 manifest as release evidence.
 
+The protected release bundle has one canonical fresh-process verifier. It
+requires all nine provider, scale, compatibility, and fault profiles, rejects
+symlinks anywhere below the bundle, checks each profile name and protected
+threshold contract, and verifies every matrix against the same source, image,
+and pinned signer:
+
+```text
+cargo run --locked -p crab-cell-runtime --bin qualification_receipt -- \
+  verify-protected-bundle protected/ <source-sha> <image-digest> \
+  <trusted-signer-hex>
+```
+
+The workflow and release gate call this command directly; they only retain
+their shell-side byte-for-byte comparison between each supplied profile and
+the tracked profile from the exact source checkout.
+
 Typed qualification adapters may use the bounded `QualificationWorkload::run_concurrent`
 entry point when scheduled operations are independent or idempotent. The serial
 `run` entry point remains the safe choice for workloads with application-level
@@ -95,6 +111,10 @@ and p50/p95/p99/max latency metrics in non-decreasing order; a signed receipt
 with substituted threshold values is rejected.
 Measured run artifacts use schema 4 and include a bounded primitive/case bitset;
 named provider/topology profiles reject artifacts missing any lifecycle case.
+Those protected profiles also require every acknowledged operation to have an
+independent verification result; a partial verification count cannot be
+promoted by the receipt binder. The local observed smoke remains allowed to
+report partial coverage and is not release evidence.
 The PR profile is a correctness gate.
 `local-provider-v1`, `fault-v1`, `provider-v1`, `compatibility-v1`, and
 `scale-v1` are release-candidate inputs only. The provider-specific
@@ -113,15 +133,42 @@ receipt.
 ## Release handoff
 
 The HTTP server release workflow consumes protected evidence from a separate
-manual workflow run. The protected workflow must be named `Cell runtime
-protected qualification`, run against the exact release commit, and upload an
-artifact named `cell-runtime-protected-<run-id>-<attempt>` (or the explicit
-artifact name supplied to the release workflow). The artifact must contain one
+manual workflow run. `.github/workflows/cell-runtime-protected-qualification.yml`
+is the canonical handoff: dispatch it from the same exact source commit passed
+as `source_ref` (the workflow rejects a different `GITHUB_SHA`), and use a
+protected self-hosted runner labelled `crab-cell-runtime-protected`, an exact
+source commit and image digest, and the
+operator-installed executable
+`/opt/crab/bin/crab-cell-runtime-protected-qualifier`. That executable is the
+provider/Kubernetes boundary; it must run the real workload and write the
+complete evidence tree, and the workflow fails when it is absent. There is no
+local, emulator, or synthetic fallback.
+
+The protected workflow must be named `Cell runtime protected qualification`,
+run against the exact release commit, and upload an artifact named
+`cell-runtime-protected-<run-id>-<attempt>`. The artifact contains one
 `protected/` directory with the tracked profiles, verified matrix manifests,
-receipts, and raw artifacts. The release job checks the run status, workflow
-name, manual-dispatch event, run ID, attempt, and commit before moving that
-directory beside the exact-source Compose receipt; the existing pinned-signer
-and image/profile-bound matrix verifier remains authoritative.
+receipts, and raw artifacts. The workflow independently verifies every required
+provider, scale, compatibility, and fault matrix with the pinned signer before
+uploading it. The release job checks the run status, workflow name,
+manual-dispatch event, run ID, attempt, and commit before moving that directory
+beside the exact-source Compose receipt; the existing pinned-signer and
+image/profile-bound matrix verifier remains authoritative.
+
+The protected executable receives these arguments and must not print secrets:
+
+```text
+crab-cell-runtime-protected-qualifier \
+  --source-sha <40-hex-commit> \
+  --image-digest sha256:<64-hex> \
+  --signing-key-file /run/secrets/crab-cell-runtime-qualification-signing-key \
+  --output <directory>
+```
+
+It is responsible for isolated provider prefixes/namespaces, fault injection,
+resource sampling, and writing the signed matrices. The workflow verifies the
+result in a fresh Cargo process; it does not turn a command that merely claims
+to have run a workload into release evidence.
 
 For tag-triggered releases, set repository variables
 `CRAB_CELL_RUNTIME_PROTECTED_EVIDENCE_RUN_ID` and, when the default artifact

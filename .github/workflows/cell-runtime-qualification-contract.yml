@@ -16,6 +16,7 @@ on:
       - ".github/workflows/http-server-container.yml"
       - ".github/workflows/http-server-release.yml"
       - ".github/workflows/cell-runtime-qualification-contract.yml"
+      - ".github/workflows/cell-runtime-protected-qualification.yml"
   push:
     branches: [main]
     paths:
@@ -32,6 +33,7 @@ on:
       - ".github/workflows/http-server-container.yml"
       - ".github/workflows/http-server-release.yml"
       - ".github/workflows/cell-runtime-qualification-contract.yml"
+      - ".github/workflows/cell-runtime-protected-qualification.yml"
 
 jobs:
   contract:
@@ -125,6 +127,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test -f .github/workflows/cell-runtime-protected-qualification.yml
+          grep -F 'name: Cell runtime protected qualification' \
+            .github/workflows/cell-runtime-protected-qualification.yml
+          grep -F 'runs-on: [self-hosted, linux, crab-cell-runtime-protected]' \
+            .github/workflows/cell-runtime-protected-qualification.yml
+          grep -F '/opt/crab/bin/crab-cell-runtime-protected-qualifier' \
+            .github/workflows/cell-runtime-protected-qualification.yml
+          grep -F 'test "$GITHUB_SHA" = "$SOURCE_REF"' \
+            .github/workflows/cell-runtime-protected-qualification.yml
+          grep -F 'cell-runtime-protected-${{ github.run_id }}-${{ github.run_attempt }}' \
+            .github/workflows/cell-runtime-protected-qualification.yml
+          grep -F 'verify-protected-bundle "$protected_dir"' \
+            .github/workflows/cell-runtime-protected-qualification.yml
           grep -F 'cell_runtime_evidence_run_id:' .github/workflows/http-server-release.yml
           grep -F 'cell_runtime_evidence_artifact:' .github/workflows/http-server-release.yml
           grep -F 'actions: read' .github/workflows/http-server-release.yml
@@ -132,6 +147,7 @@ jobs:
           grep -F 'if [ "$event" != "workflow_dispatch" ]' .github/workflows/http-server-release.yml
           grep -F 'if [ "$evidence_sha" != "$SOURCE_SHA" ]' .github/workflows/http-server-release.yml
           grep -F 'cell-runtime-protected-${run_id}-${attempt}' .github/workflows/http-server-release.yml
+          grep -F 'verify-protected-bundle "$protected_dir"' .github/workflows/http-server-release.yml
           grep -F 'exactly one protected/' .github/workflows/http-server-release.yml
       - name: Verify receipt, placement, pressure, and resource contracts
         env:
