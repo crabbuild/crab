@@ -151,6 +151,22 @@ completed all 64 operations but failed p99 at 12,960 ms over 202 seconds; a
 subsequent fresh-prefix row passed in 132.27 seconds and drained zero runtime
 reservations. The row is timing-unstable on this local RustFS setup. The
 ten-row real-storage and protected matrices remain unqualified.
+A focused scheduled SQL expiry test now publishes and independently reads an
+acknowledged row, delays a second signed SQL mutation until its identity
+expires at the peer receive boundary, then checks that the peer rejects it
+before dispatch. A separate typed reader confirms the first row remains exact,
+the rejected row is absent, and resolution reports `Expired`. The in-memory
+and isolated RustFS cases passed on 2026-09-22 with zero reservations after
+shutdown. The observer shares the owner process, and this focused test does
+not produce a run artifact or mark the SQL expiry bit in the matrix.
+A subsequent fresh-prefix 64-operation RustFS smoke completed every typed
+operation but failed the unchanged five-second profile gate: p99 was 32,341 ms
+over 236 seconds. Slow cases included Queue happy (7,733 ms), Queue duplicate
+(6,747 ms), Blob recovery-labeled smoke (16,972 ms), and Cron happy (32,340 ms).
+The failure path shut down the node and checked zero reservations before
+reporting the profile failure. Its recovery-labeled operations still do not
+claim recovery coverage. Real-storage performance and scheduled artifacts
+remain open.
 A focused KV expiry test now selects the canonical scheduled KV expiry
 operation, publishes a TTL value, and observes its exact value and version from
 a separate typed client. It delays a signed KV mutation at the peer receive
