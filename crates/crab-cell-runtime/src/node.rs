@@ -7,9 +7,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
-use crate::placement::{
-    PlacementObservation, PlacementPlanner, PlacementRuntimeSnapshot, PlacementScore,
-};
+use crate::placement::{PlacementObservation, PlacementPlanner, PlacementScore};
 use crate::{
     Digest, Error, NodeId, NodeLogPhase, NodeLogRotationBarrier, NodeLogStatus, NodeRecoveryClaim,
     Result, SessionId,
@@ -28,7 +26,7 @@ const MAX_LIVE_NODE_RECORDS: usize = 10_000;
 const SIGNING_DOMAIN: &[u8] = b"crab.node.v1\0";
 const PLACEMENT_SIGNING_DOMAIN: &[u8] = b"crab.node-placement.v1\0";
 const NODE_LOG_SELECTION_DOMAIN: &[u8] = b"crab.node-log.member.v1\0";
-const PLACEMENT_SCHEMA_VERSION: u32 = 1;
+const PLACEMENT_SCHEMA_VERSION: u32 = 2;
 
 /// Current private follower-log wire and persistence protocol.
 pub const NODE_LOG_PROTOCOL_VERSION: u32 = 1;
@@ -58,59 +56,24 @@ pub struct NodePlacementCapacity {
     pub max_active_cells: u32,
     pub running_jobs: u32,
     pub job_capacity: u32,
+    pub publication_backlog: u32,
+    pub hydration_backlog: u32,
+    pub primitive_backlog: u32,
 }
 
 impl NodePlacementCapacity {
-    /// Creates a bounded placement snapshot from measured node totals.
-    pub const fn new(
-        memory_capacity_bytes: u64,
-        disk_capacity_bytes: u64,
-        active_cells: u32,
-        max_active_cells: u32,
-        running_jobs: u32,
-        job_capacity: u32,
-    ) -> Result<Self> {
-        if memory_capacity_bytes == 0
-            || disk_capacity_bytes == 0
-            || max_active_cells == 0
-            || active_cells > max_active_cells
-            || job_capacity == 0
-            || running_jobs > job_capacity
+    /// Validates and returns a placement snapshot with measured node totals.
+    pub const fn validated(self) -> Result<Self> {
+        if self.memory_capacity_bytes == 0
+            || self.disk_capacity_bytes == 0
+            || self.max_active_cells == 0
+            || self.active_cells > self.max_active_cells
+            || self.job_capacity == 0
+            || self.running_jobs > self.job_capacity
         {
             return Err(Error::Node("placement capacity is invalid"));
         }
-        Ok(Self {
-            memory_capacity_bytes,
-            disk_capacity_bytes,
-            active_cells,
-            max_active_cells,
-            running_jobs,
-            job_capacity,
-        })
-    }
-
-    fn validate(self) -> Result<()> {
-        Self::new(
-            self.memory_capacity_bytes,
-            self.disk_capacity_bytes,
-            self.active_cells,
-            self.max_active_cells,
-            self.running_jobs,
-            self.job_capacity,
-        )
-        .map(|_| ())
-    }
-
-    fn from_capacity(capacity: NodeCapacity) -> Option<Self> {
-        Self::new(
-            capacity.free_memory_bytes,
-            capacity.free_disk_bytes,
-            0,
-            1,
-            0,
-            capacity.job_credits,
-        )
-        .ok()
+        Ok(self)
     }
 }
 
@@ -205,7 +168,6 @@ impl NodeAdvertisement {
         failure_domain: NodeFailureDomain,
         capacity: NodeCapacity,
     ) -> Result<Self> {
-        let placement = NodePlacementCapacity::from_capacity(capacity);
         let mut advertisement = Self {
             node,
             session,
@@ -225,17 +187,12 @@ impl NodeAdvertisement {
             capacity,
             log: None,
             signature: [0; 64],
-            placement_version: placement.map_or(0, |_| PLACEMENT_SCHEMA_VERSION),
+            placement_version: 0,
             placement_signature: [0; 64],
-            placement,
+            placement: None,
         };
         advertisement.validate_shape()?;
         advertisement.signature = signing_key.sign(&advertisement.signing_bytes()?).to_bytes();
-        if advertisement.placement.is_some() {
-            advertisement.placement_signature = signing_key
-                .sign(&advertisement.placement_signing_bytes()?)
-                .to_bytes();
-        }
         Ok(advertisement)
     }
 
@@ -331,7 +288,7 @@ impl NodeAdvertisement {
         placement: NodePlacementCapacity,
         signing_key: &SigningKey,
     ) -> Result<Self> {
-        placement.validate()?;
+        placement.validated()?;
         self.placement = Some(placement);
         self.placement_version = PLACEMENT_SCHEMA_VERSION;
         self.placement_signature = signing_key
@@ -424,7 +381,7 @@ impl NodeAdvertisement {
             return Err(Error::Node("advertisement follower capacity is invalid"));
         }
         if let Some(placement) = self.placement {
-            placement.validate()?;
+            placement.validated()?;
         }
         if self.module_digests.is_empty()
             || self.module_digests.len() > MAX_MODULES
@@ -1263,47 +1220,6 @@ impl NodeDirectory {
         Ok(advertisements)
     }
 
-    /// Ranks live, signature-verified nodes using measured runtime snapshots.
-    ///
-    /// The directory contributes only authenticated advertisement capacity and
-    /// lease age. Runtime counters are required explicitly; an absent snapshot
-    /// is omitted instead of being interpreted as idle capacity.
-    pub async fn choose_placement(
-        &self,
-        planner: &PlacementPlanner,
-        cell: crate::CellId,
-        now_ms: i64,
-        snapshots: &[PlacementRuntimeSnapshot],
-        limit: usize,
-    ) -> Result<Option<PlacementScore>> {
-        let live = self.live(now_ms, limit).await?;
-        let observations = live
-            .iter()
-            .filter_map(|advertisement| {
-                snapshots
-                    .iter()
-                    .find(|snapshot| snapshot.node == advertisement.node())
-                    .and_then(|snapshot| {
-                        PlacementObservation::from_advertisement(
-                            advertisement,
-                            now_ms,
-                            snapshot.memory_capacity_bytes,
-                            snapshot.disk_capacity_bytes,
-                            snapshot.active_cells,
-                            snapshot.max_active_cells,
-                            snapshot.running_jobs,
-                            snapshot.pressure,
-                            snapshot.draining,
-                            snapshot.locality_bonus,
-                            snapshot.current_owner,
-                        )
-                        .ok()
-                    })
-            })
-            .collect::<Vec<_>>();
-        planner.choose(cell, now_ms, &observations)
-    }
-
     /// Chooses a destination using only authenticated, measured placement
     /// blocks advertised by the current live fleet.
     ///
@@ -1315,19 +1231,13 @@ impl NodeDirectory {
         planner: &PlacementPlanner,
         cell: crate::CellId,
         now_ms: i64,
-        current_session: SessionId,
         limit: usize,
     ) -> Result<Option<PlacementScore>> {
         let live = self.live(now_ms, limit).await?;
         let observations = live
             .iter()
             .filter_map(|advertisement| {
-                PlacementObservation::from_signed_advertisement(
-                    advertisement,
-                    now_ms,
-                    advertisement.session() == current_session,
-                )
-                .ok()
+                PlacementObservation::from_signed_advertisement(advertisement, now_ms, false).ok()
             })
             .collect::<Vec<_>>();
         planner.choose(cell, now_ms, &observations)
@@ -2511,6 +2421,12 @@ impl From<&NodeAdvertisement> for RawAdvertisement {
                 max_active_cells: placement.max_active_cells,
                 running_jobs: placement.running_jobs,
                 job_capacity: placement.job_capacity,
+                publication_backlog: (value.placement_version >= PLACEMENT_SCHEMA_VERSION)
+                    .then_some(placement.publication_backlog),
+                hydration_backlog: (value.placement_version >= PLACEMENT_SCHEMA_VERSION)
+                    .then_some(placement.hydration_backlog),
+                primitive_backlog: (value.placement_version >= PLACEMENT_SCHEMA_VERSION)
+                    .then_some(placement.primitive_backlog),
             }),
             placement_version: (value.placement_version != 0).then_some(value.placement_version),
             placement_signature: value
@@ -2551,6 +2467,12 @@ struct RawPlacementCapacity {
     max_active_cells: u32,
     running_jobs: u32,
     job_capacity: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    publication_backlog: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hydration_backlog: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    primitive_backlog: Option<u32>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -2626,14 +2548,18 @@ impl TryFrom<RawAdvertisement> for NodeAdvertisement {
             placement: value
                 .placement
                 .map(|placement| {
-                    NodePlacementCapacity::new(
-                        canonical_u64(&placement.memory_capacity_bytes)?,
-                        canonical_u64(&placement.disk_capacity_bytes)?,
-                        placement.active_cells,
-                        placement.max_active_cells,
-                        placement.running_jobs,
-                        placement.job_capacity,
-                    )
+                    NodePlacementCapacity {
+                        memory_capacity_bytes: canonical_u64(&placement.memory_capacity_bytes)?,
+                        disk_capacity_bytes: canonical_u64(&placement.disk_capacity_bytes)?,
+                        active_cells: placement.active_cells,
+                        max_active_cells: placement.max_active_cells,
+                        running_jobs: placement.running_jobs,
+                        job_capacity: placement.job_capacity,
+                        publication_backlog: placement.publication_backlog.unwrap_or(0),
+                        hydration_backlog: placement.hydration_backlog.unwrap_or(0),
+                        primitive_backlog: placement.primitive_backlog.unwrap_or(0),
+                    }
+                    .validated()
                 })
                 .transpose()?,
             log: value.log.map(|log| decode_log(node, log)).transpose()?,

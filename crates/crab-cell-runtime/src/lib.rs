@@ -150,8 +150,8 @@ pub use peer::{
     wire as peer_wire,
 };
 pub use placement::{
-    PlacementEligibility, PlacementObservation, PlacementPlanner, PlacementPressure,
-    PlacementRuntimeSnapshot, PlacementScore,
+    CellTransferDemand, CellTransferIntent, PlacementEligibility, PlacementObservation,
+    PlacementPlanner, PlacementPressure, PlacementScore,
 };
 pub use pressure::{
     MovementBudget, MovementKind, MovementPermit, PressureClassifier, PressureSample, PressureState,

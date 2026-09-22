@@ -10,8 +10,8 @@ use object_store::{memory::InMemory, path::Path};
 use super::*;
 use crate::{
     AppendRequest, ApplicationId, CellTarget, NamespaceId, NodeLogTransport, PeerOperation,
-    PeerPrincipal, PeerSigner, PlacementPlanner, PlacementPressure, PlacementRuntimeSnapshot,
-    RetireRequest, SealRequest, TailRequest, TenantId, peer_wire,
+    PeerPrincipal, PeerSigner, PlacementPlanner, RetireRequest, SealRequest, TailRequest, TenantId,
+    peer_wire,
 };
 
 const NOW_MS: i64 = 1_000_000;
@@ -149,47 +149,93 @@ fn advertisement_for_node_capacity_in_domain(
 }
 
 #[tokio::test]
-async fn placement_uses_signed_capacity_and_requires_runtime_snapshot() {
+async fn placement_uses_signed_capacity_only() {
     let key = SigningKey::from_bytes(&[7; 32]);
     let directory = directory();
     let session = SessionId::from_bytes([1; 16]);
     directory
-        .create(advertisement_for(session, &key, 1, NOW_MS), NOW_MS)
+        .create(
+            advertisement_for(session, &key, 1, NOW_MS)
+                .with_placement_capacity(
+                    NodePlacementCapacity {
+                        memory_capacity_bytes: 2_000,
+                        disk_capacity_bytes: 4_000,
+                        active_cells: 1,
+                        max_active_cells: 8,
+                        running_jobs: 0,
+                        job_capacity: 3,
+                        publication_backlog: 0,
+                        hydration_backlog: 0,
+                        primitive_backlog: 0,
+                    }
+                    .validated()
+                    .unwrap(),
+                    &key,
+                )
+                .unwrap(),
+            NOW_MS,
+        )
         .await
         .unwrap();
     let planner = PlacementPlanner::default();
     let cell = crate::CellId::from_bytes([9; 32]);
-    let snapshot = PlacementRuntimeSnapshot {
-        node: node(session),
-        memory_capacity_bytes: 2_000,
-        disk_capacity_bytes: 4_000,
-        active_cells: 1,
-        max_active_cells: 8,
-        running_jobs: 0,
-        pressure: PlacementPressure::Normal,
-        draining: false,
-        locality_bonus: 10,
-        current_owner: false,
-    };
-    let chosen = directory
-        .choose_placement(&planner, cell, NOW_MS + 1, &[snapshot], 4)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(chosen.node, node(session));
     let advertised = directory
-        .choose_advertised_placement(&planner, cell, NOW_MS + 1, session, 4)
+        .choose_advertised_placement(&planner, cell, NOW_MS + 1, 4)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(advertised.node, node(session));
-    assert!(
-        directory
-            .choose_placement(&planner, cell, NOW_MS + 1, &[], 4)
-            .await
-            .unwrap()
-            .is_none()
-    );
+}
+
+#[tokio::test]
+async fn cold_placement_does_not_reward_the_requesting_node() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let local = SessionId::from_bytes([1; 16]);
+    let remote = SessionId::from_bytes([2; 16]);
+    for (session, free_memory_bytes) in [(local, 100), (remote, 1_000)] {
+        let advertisement = advertisement_for_capacity(
+            session,
+            &key,
+            1,
+            NOW_MS,
+            NodeCapacity {
+                free_memory_bytes,
+                free_disk_bytes: 1_000,
+                job_credits: 4,
+                ..NodeCapacity::default()
+            },
+        )
+        .with_placement_capacity(
+            NodePlacementCapacity {
+                memory_capacity_bytes: 1_000,
+                disk_capacity_bytes: 1_000,
+                active_cells: 0,
+                max_active_cells: 10,
+                running_jobs: 0,
+                job_capacity: 4,
+                publication_backlog: 0,
+                hydration_backlog: 0,
+                primitive_backlog: 0,
+            }
+            .validated()
+            .unwrap(),
+            &key,
+        )
+        .unwrap();
+        directory.create(advertisement, NOW_MS).await.unwrap();
+    }
+    let chosen = directory
+        .choose_advertised_placement(
+            &PlacementPlanner::default(),
+            crate::CellId::from_bytes([9; 32]),
+            NOW_MS + 1,
+            4,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(chosen.session, remote);
 }
 
 #[tokio::test]
@@ -1443,16 +1489,28 @@ fn placement_schema_is_mixed_version_safe_and_fail_closed() {
     let key = SigningKey::from_bytes(&[7; 32]);
     let current = advertisement(&key, 1, NOW_MS)
         .with_placement_capacity(
-            NodePlacementCapacity::new(8_192, 16_384, 3, 16, 2, 8).unwrap(),
+            NodePlacementCapacity {
+                memory_capacity_bytes: 8_192,
+                disk_capacity_bytes: 16_384,
+                active_cells: 3,
+                max_active_cells: 16,
+                running_jobs: 2,
+                job_capacity: 8,
+                publication_backlog: 4,
+                hydration_backlog: 5,
+                primitive_backlog: 6,
+            }
+            .validated()
+            .unwrap(),
             &key,
         )
         .unwrap();
     assert!(current.has_signed_placement());
     let decoded_current = NodeAdvertisement::decode_canonical(&current.encode().unwrap()).unwrap();
-    assert_eq!(decoded_current.placement_version, 1);
+    assert_eq!(decoded_current.placement_version, 2);
     assert_eq!(
         decoded_current.placement_capacity(),
-        Some(NodePlacementCapacity::new(8_192, 16_384, 3, 16, 2, 8).unwrap())
+        current.placement_capacity()
     );
     let observation =
         PlacementObservation::from_signed_advertisement(&decoded_current, NOW_MS + 1, true)
@@ -1460,6 +1518,9 @@ fn placement_schema_is_mixed_version_safe_and_fail_closed() {
     assert_eq!(observation.memory_capacity_bytes, 8_192);
     assert_eq!(observation.active_cells, 3);
     assert_eq!(observation.running_jobs, 2);
+    assert_eq!(observation.publication_backlog, 4);
+    assert_eq!(observation.hydration_backlog, 5);
+    assert_eq!(observation.primitive_backlog, 6);
 
     let mut legacy = current.clone();
     legacy.placement_version = 0;
@@ -1467,26 +1528,27 @@ fn placement_schema_is_mixed_version_safe_and_fail_closed() {
     let decoded_legacy = NodeAdvertisement::decode_canonical(&legacy.encode().unwrap()).unwrap();
     assert!(!decoded_legacy.has_signed_placement());
 
+    let mut previous = current.clone();
+    previous.placement_version = 1;
+    let decoded_previous =
+        NodeAdvertisement::decode_canonical(&previous.encode().unwrap()).unwrap();
+    assert!(!decoded_previous.has_signed_placement());
+    assert_eq!(
+        decoded_previous
+            .placement_capacity()
+            .unwrap()
+            .publication_backlog,
+        0
+    );
+
     let mut future = current;
-    future.placement_version = 2;
+    future.placement_version = 3;
     future.placement_signature = [0; 64];
     let decoded_future = NodeAdvertisement::decode_canonical(&future.encode().unwrap()).unwrap();
     assert!(!decoded_future.has_signed_placement());
     assert!(
-        PlacementObservation::from_advertisement(
-            &decoded_future,
-            NOW_MS + 1,
-            2_000,
-            4_000,
-            1,
-            8,
-            0,
-            PlacementPressure::Normal,
-            false,
-            0,
-            false,
-        )
-        .is_err()
+        PlacementObservation::from_signed_advertisement(&decoded_future, NOW_MS + 1, false)
+            .is_err()
     );
 }
 
@@ -1503,13 +1565,25 @@ fn placement_upgrade_sets_schema_when_legacy_capacity_was_unusable() {
     assert!(!legacy.has_signed_placement());
     let upgraded = legacy
         .with_placement_capacity(
-            NodePlacementCapacity::new(8_192, 16_384, 0, 16, 0, 8).unwrap(),
+            NodePlacementCapacity {
+                memory_capacity_bytes: 8_192,
+                disk_capacity_bytes: 16_384,
+                active_cells: 0,
+                max_active_cells: 16,
+                running_jobs: 0,
+                job_capacity: 8,
+                publication_backlog: 0,
+                hydration_backlog: 0,
+                primitive_backlog: 0,
+            }
+            .validated()
+            .unwrap(),
             &key,
         )
         .unwrap();
     assert!(upgraded.has_signed_placement());
     let decoded = NodeAdvertisement::decode_canonical(&upgraded.encode().unwrap()).unwrap();
-    assert_eq!(decoded.placement_version, 1);
+    assert_eq!(decoded.placement_version, 2);
     assert_eq!(decoded.placement_capacity(), upgraded.placement_capacity());
 }
 

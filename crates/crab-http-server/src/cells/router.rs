@@ -1,21 +1,44 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use crab_cell_runtime::CellStorageLayout;
 use crab_cell_runtime::{
-    ApplicationIdentity, CatalogProof, CatalogRole, CellAuthority, CellCatalog, CellClient,
-    CellDescription, CellHandle, CellReplica, CellRuntime, CellTarget, ControlState,
-    EffectPeerClient, MAX_ACTIVITY_PAYLOAD_BYTES, MigrationPeerClient, NodeByteReservation,
-    NodeDirectory, NodeJobReservation, Owner, PeerOperation, PeerPrincipal, PeerRoundTrip,
-    PeerSigner, PersistedWorkInventory, PlacementPlanner, Registry, ReleaseState, ReleaseStore,
-    VersionedControl, peer_wire,
+    ACTIVE_CELL_NATIVE_BYTES, ACTIVE_CELL_PAGE_CACHE_BYTES, ApplicationIdentity, CatalogProof,
+    CatalogRole, CellAuthority, CellCatalog, CellClient, CellDescription, CellHandle, CellReplica,
+    CellRuntime, CellTarget, CellTransferDemand, ControlState, EffectPeerClient,
+    MAX_ACTIVITY_PAYLOAD_BYTES, MigrationPeerClient, NodeByteReservation, NodeDirectory,
+    NodeJobReservation, Owner, PeerOperation, PeerPrincipal, PeerRoundTrip, PeerSigner,
+    PersistedWorkInventory, PlacementObservation, PlacementPlanner, Registry, ReleaseState,
+    ReleaseStore, VersionedControl, peer_wire,
 };
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{REPOSITORY_NAMESPACE, repository_replica_limits};
 use crate::auth::Identity;
 
 const ACTIVATION_SHARDS: usize = 4096;
+const REBALANCE_INTERVAL: Duration = Duration::from_secs(15);
+const REBALANCE_IDLE_MS: i64 = 60_000;
+
+#[derive(Clone, Copy)]
+struct RebalanceEvidence {
+    generation: u64,
+    first_seen_ms: i64,
+    last_sample_ms: i64,
+    samples: u8,
+}
+
+#[derive(Default)]
+struct RebalanceProgress {
+    released: usize,
+    activated: usize,
+}
 
 #[derive(Clone)]
 pub(crate) struct RepositoryCellRouter {
@@ -31,6 +54,7 @@ pub(crate) struct RepositoryCellRouter {
     recovery_artifacts: Option<Arc<super::RecoveryArtifactRegistry>>,
     activation: Arc<[Mutex<()>]>,
     operation: Arc<[Arc<RwLock<()>>]>,
+    rebalance_evidence: Arc<Mutex<HashMap<crab_cell_runtime::CellId, RebalanceEvidence>>>,
 }
 
 #[derive(Clone)]
@@ -95,7 +119,168 @@ impl RepositoryCellRouter {
                 .map(|_| Arc::new(RwLock::new(())))
                 .collect::<Vec<_>>()
                 .into(),
+            rebalance_evidence: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Runs the private, bounded owner movement loop while server admission is live.
+    pub(crate) async fn run_rebalance(&self, cancellation: CancellationToken) -> crate::Result<()> {
+        let mut tick = tokio::time::interval(REBALANCE_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                () = cancellation.cancelled() => return Ok(()),
+                _ = tick.tick() => {
+                    match self.rebalance_once().await {
+                        Ok(progress) if progress.released > 0 => {
+                            tracing::info!(released = progress.released, activated = progress.activated, "Cell rebalance tick completed");
+                        }
+                        Err(error) => tracing::warn!(error = %error, "Cell rebalance tick failed"),
+                        Ok(_) => {}
+                    }
+                }
+            }
+        }
+    }
+
+    async fn rebalance_once(&self) -> crate::Result<RebalanceProgress> {
+        let now_ms = super::unix_now_ms()?;
+        self.rebalance_once_at(now_ms).await
+    }
+
+    async fn rebalance_once_at(&self, now_ms: i64) -> crate::Result<RebalanceProgress> {
+        let live = self.peer.directory.live(now_ms, 1_024).await?;
+        let observations = live
+            .iter()
+            .filter_map(|node| {
+                PlacementObservation::from_signed_advertisement(node, now_ms, false).ok()
+            })
+            .collect::<Vec<_>>();
+        let Some(source) = observations
+            .iter()
+            .find(|node| node.session == self.peer.owner.session)
+        else {
+            return Ok(RebalanceProgress::default());
+        };
+        let candidates = self.runtime.idle_transfer_candidates().await?;
+        let active = candidates
+            .iter()
+            .map(|(cell, _, _, _)| *cell)
+            .collect::<HashSet<_>>();
+        let mut evidence = self.rebalance_evidence.lock().await;
+        evidence.retain(|cell, _| active.contains(cell));
+        let demands = candidates
+            .into_iter()
+            .filter_map(|(cell, generation, last_used_ms, role)| {
+                if role != CatalogRole::Repository {
+                    return None;
+                }
+                if last_used_ms < 0
+                    || (!source.draining && now_ms.saturating_sub(last_used_ms) < REBALANCE_IDLE_MS)
+                {
+                    return None;
+                }
+                let observed = evidence.entry(cell).or_insert(RebalanceEvidence {
+                    generation,
+                    first_seen_ms: now_ms,
+                    last_sample_ms: source.observed_at_ms,
+                    samples: 1,
+                });
+                if observed.generation != generation {
+                    *observed = RebalanceEvidence {
+                        generation,
+                        first_seen_ms: now_ms,
+                        last_sample_ms: source.observed_at_ms,
+                        samples: 1,
+                    };
+                }
+                if observed.last_sample_ms != source.observed_at_ms {
+                    observed.last_sample_ms = source.observed_at_ms;
+                    observed.samples = observed.samples.saturating_add(1);
+                }
+                Some(CellTransferDemand {
+                    cell,
+                    source: self.peer.owner.session,
+                    generation,
+                    memory_bytes: ACTIVE_CELL_NATIVE_BYTES + ACTIVE_CELL_PAGE_CACHE_BYTES,
+                    disk_bytes: repository_replica_limits().max_plan_bytes,
+                    job_credits: 2,
+                    resident_since_ms: observed.first_seen_ms,
+                    last_moved_at_ms: None,
+                    stable_observations: observed.samples,
+                    settled: true,
+                })
+            })
+            .collect::<Vec<_>>();
+        drop(evidence);
+        let mut progress = RebalanceProgress::default();
+        for intent in self
+            .placement
+            .plan_transfers(now_ms, &observations, &demands)?
+        {
+            let Some(node) = live
+                .iter()
+                .find(|node| node.session() == intent.destination)
+            else {
+                continue;
+            };
+            let Some(proof) = self.catalog.lookup(intent.cell).await? else {
+                continue;
+            };
+            if proof.entry().role() != CatalogRole::Repository
+                || proof.entry().namespace() != REPOSITORY_NAMESPACE
+            {
+                continue;
+            }
+            let target = CellTarget::new(
+                self.identity.tenant(),
+                self.identity.application(),
+                proof.entry().namespace(),
+                proof.entry().partition(),
+            )?;
+            let _operation = Arc::clone(&self.operation[activation_shard(&target)])
+                .write_owned()
+                .await;
+            let still_idle = self
+                .runtime
+                .idle_transfer_candidates()
+                .await?
+                .into_iter()
+                .any(|(cell, generation, last_used_ms, role)| {
+                    cell == intent.cell
+                        && generation == intent.generation
+                        && role == CatalogRole::Repository
+                        && (source.draining
+                            || now_ms.saturating_sub(last_used_ms) >= REBALANCE_IDLE_MS)
+                });
+            if !still_idle {
+                continue;
+            }
+            if self
+                .runtime
+                .release_idle_cell(intent.cell, intent.source, intent.generation)
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            progress.released += 1;
+            if let Err(error) = self
+                .peer
+                .activate_remote(
+                    target,
+                    node.clone(),
+                    &self.runtime_principal(&["cell.activate"]),
+                    now_ms,
+                )
+                .await
+            {
+                tracing::warn!(cell = ?intent.cell, error = %error, "Cell released but receiver activation failed");
+            } else {
+                progress.activated += 1;
+            }
+        }
+        Ok(progress)
     }
 
     pub(crate) async fn route(
@@ -506,13 +691,7 @@ impl RepositoryCellRouter {
             let Some(score) = self
                 .peer
                 .directory
-                .choose_advertised_placement(
-                    &self.placement,
-                    target.cell_id(),
-                    now_ms,
-                    self.peer.owner.session,
-                    1_024,
-                )
+                .choose_advertised_placement(&self.placement, target.cell_id(), now_ms, 1_024)
                 .await?
             else {
                 // A fully legacy fleet has no placement contract yet. Preserve
@@ -969,6 +1148,72 @@ mod tests {
 
     struct UnavailablePeer;
 
+    struct ActivatingPeer {
+        destination: RepositoryCellRouter,
+        source: SessionId,
+        release: crab_cell_runtime::Digest,
+        verifying_key: ed25519_dalek::VerifyingKey,
+        now_ms: i64,
+    }
+
+    impl PeerRoundTrip for ActivatingPeer {
+        fn send(
+            &self,
+            _target: CellTarget,
+            _request: Vec<u8>,
+            _remaining_ms: u32,
+        ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>>
+        {
+            Box::pin(async { Err(crab_cell_runtime::Error::CellNotActive) })
+        }
+
+        fn send_to_node(
+            &self,
+            target: CellTarget,
+            _node: NodeAdvertisement,
+            request: Vec<u8>,
+            _remaining_ms: u32,
+        ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>>
+        {
+            let verified = PeerVerifier::new(self.source, self.release, self.verifying_key)
+                .verify(&request, self.now_ms)
+                .is_ok();
+            let destination = self.destination.clone();
+            Box::pin(async move {
+                if !verified {
+                    return Err(crab_cell_runtime::Error::PeerAuthorization(
+                        "invalid activation",
+                    ));
+                }
+                let scheduled = destination
+                    .activate_local_target(
+                        target.clone(),
+                        destination.runtime_principal(&["cell.activate"]),
+                    )
+                    .await
+                    .map_err(|_| crab_cell_runtime::Error::CellNotActive)?;
+                let handle = scheduled
+                    .cell
+                    .handle
+                    .as_ref()
+                    .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+                crab_cell_runtime::encode_peer_reply(&peer_wire::PeerReply {
+                    outcome: Some(peer_wire::peer_reply::Outcome::Read(peer_wire::ReadReply {
+                        receipt: None,
+                        result: Some(peer_wire::read_reply::Result::Description(
+                            peer_wire::CellDescription {
+                                cell_id: target.cell_id().as_bytes().to_vec(),
+                                incarnation: handle.incarnation().as_bytes().to_vec(),
+                                code: handle.code().as_bytes().to_vec(),
+                                schema: handle.schema(),
+                            },
+                        )),
+                    })),
+                })
+            })
+        }
+    }
+
     struct DelayedActivationPeer {
         session: SessionId,
         release: crab_cell_runtime::Digest,
@@ -1395,6 +1640,234 @@ mod tests {
         let owned = authority.load(target.cell_id()).await.unwrap().unwrap();
         assert_eq!(owned.value().owner.as_ref(), Some(&owner(third_session)));
         third_runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fleet_rebalance_releases_settled_cell_and_restores_its_result() {
+        let identity = ApplicationIdentity::new(
+            TenantId::from_bytes([41; 16]),
+            ApplicationId::from_bytes([42; 16]),
+        );
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("fleet-rebalance"),
+            *identity.application().as_bytes(),
+        );
+        let registry = Arc::new(crate::cells::compiled_registry().unwrap());
+        bootstrap_release_at(
+            &layout,
+            identity,
+            &registry,
+            &format!("sha256:{}", "c".repeat(64)),
+        )
+        .await
+        .unwrap();
+        let source = SessionId::from_bytes([43; 16]);
+        let receiver = SessionId::from_bytes([44; 16]);
+        let source_runtime =
+            CellRuntime::new(SqlWorkerPool::new(1, 4).unwrap(), 16 * 1024 * 1024, source).unwrap();
+        let receiver_runtime = CellRuntime::new(
+            SqlWorkerPool::new(1, 4).unwrap(),
+            16 * 1024 * 1024,
+            receiver,
+        )
+        .unwrap();
+        let source_dir = tempfile::TempDir::new().unwrap();
+        let receiver_dir = tempfile::TempDir::new().unwrap();
+        let target = CellTarget::new(
+            identity.tenant(),
+            identity.application(),
+            REPOSITORY_NAMESPACE,
+            &[45; 16],
+        )
+        .unwrap();
+        let (proof, authority) =
+            crate::cells::provision_repository(&layout, identity, &registry, &target)
+                .await
+                .unwrap();
+        let observed = authority
+            .create_initial(&proof, IncarnationId::from_bytes([46; 16]), owner(source))
+            .await
+            .unwrap();
+        let handle = source_runtime
+            .bootstrap(
+                proof,
+                CellReplica::new(
+                    layout.clone(),
+                    *target.cell_id().as_bytes(),
+                    *observed.value().incarnation.as_bytes(),
+                    repository_replica_limits(),
+                )
+                .unwrap(),
+                authority.clone(),
+                observed,
+                source_dir.path().join("rebalance.sqlite"),
+                |transaction| initialize_repository_schema(transaction).map_err(Into::into),
+            )
+            .await
+            .unwrap();
+        let mutation = mutation(47);
+        let digest = crab_cell_runtime::Digest::from_bytes([48; 32]);
+        let issued_at_ms = mutation.issued_at_ms;
+        handle
+            .execute(mutation, digest, issued_at_ms, 64, 64, |transaction| {
+                transaction.execute_batch("CREATE TABLE transfer_state(value INTEGER NOT NULL); INSERT INTO transfer_state(value) VALUES (7)")?;
+                Ok(crab_cell_runtime::HandlerOutcome::Success(Vec::new()))
+            })
+            .await
+            .unwrap();
+        let destination = router(
+            identity,
+            layout.clone(),
+            Arc::clone(&registry),
+            receiver_runtime.clone(),
+            receiver,
+            receiver_dir.path().to_path_buf(),
+        );
+        let fleet = crab_cell_runtime::Digest::from_bytes([21; 32]);
+        let image = crab_cell_runtime::Digest::from_bytes([22; 32]);
+        let directory = NodeDirectory::new(layout.clone(), fleet, image, registry.release_digest());
+        let now_ms = crate::cells::unix_now_ms().unwrap() + 65_000;
+        for (session, free_memory_bytes, free_disk_bytes, active_cells) in [
+            (source, 1024 * 1024, 7 * 1024 * 1024 * 1024, 1),
+            (receiver, 16 * 1024 * 1024, 10 * 1024 * 1024 * 1024, 0),
+        ] {
+            let key = SigningKey::from_bytes(&[*session.as_bytes().first().unwrap(); 32]);
+            let advertisement = NodeAdvertisement::sign(
+                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+                session,
+                owner(session).endpoint,
+                fleet,
+                crab_cell_runtime::Digest::from_bytes([49; 32]),
+                image,
+                registry.release_digest(),
+                &key,
+                1,
+                now_ms,
+                now_ms + 15_000,
+                registry.module_digests(),
+                vec![1],
+                crab_cell_runtime::NodeFailureDomain::default(),
+                NodeCapacity {
+                    free_memory_bytes,
+                    free_disk_bytes,
+                    job_credits: 10,
+                    ..NodeCapacity::default()
+                },
+            )
+            .unwrap()
+            .with_placement_capacity(
+                crab_cell_runtime::NodePlacementCapacity {
+                    memory_capacity_bytes: 16 * 1024 * 1024,
+                    disk_capacity_bytes: 10 * 1024 * 1024 * 1024,
+                    active_cells,
+                    max_active_cells: 10,
+                    running_jobs: 0,
+                    job_capacity: 10,
+                    publication_backlog: 0,
+                    hydration_backlog: 0,
+                    primitive_backlog: 0,
+                }
+                .validated()
+                .unwrap(),
+                &key,
+            )
+            .unwrap();
+            directory.create(advertisement, now_ms).await.unwrap();
+        }
+        let source_key = SigningKey::from_bytes(&[43; 32]);
+        let source_router = RepositoryCellRouter::new(
+            identity,
+            layout.clone(),
+            Arc::clone(&registry),
+            source_runtime.clone(),
+            RepositoryCellPeer::new(
+                directory,
+                Arc::new(PeerSigner::new(
+                    source,
+                    registry.release_digest(),
+                    source_key.clone(),
+                )),
+                Arc::new(ActivatingPeer {
+                    destination: destination.clone(),
+                    source,
+                    release: registry.release_digest(),
+                    verifying_key: source_key.verifying_key(),
+                    now_ms,
+                }),
+                owner(source),
+            ),
+            source_dir.path().to_path_buf(),
+        )
+        .unwrap();
+        let generation = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some((_, generation, _, _)) = source_runtime
+                    .idle_transfer_candidates()
+                    .await
+                    .unwrap()
+                    .first()
+                {
+                    break *generation;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        source_router.rebalance_evidence.lock().await.insert(
+            target.cell_id(),
+            RebalanceEvidence {
+                generation: generation.saturating_sub(1),
+                first_seen_ms: now_ms - 65_000,
+                last_sample_ms: now_ms - 1,
+                samples: 2,
+            },
+        );
+        let cold = source_router.rebalance_once_at(now_ms).await.unwrap();
+        assert_eq!(cold.released, 0);
+        source_router.rebalance_evidence.lock().await.insert(
+            target.cell_id(),
+            RebalanceEvidence {
+                generation,
+                first_seen_ms: now_ms - 65_000,
+                last_sample_ms: now_ms - 1,
+                samples: 2,
+            },
+        );
+        let progress = source_router.rebalance_once_at(now_ms).await.unwrap();
+        assert_eq!((progress.released, progress.activated), (1, 1));
+        assert_eq!(source_runtime.stats().active_cells(), 0);
+        assert_eq!(receiver_runtime.stats().active_cells(), 1);
+        let owned = authority.load(target.cell_id()).await.unwrap().unwrap();
+        assert_eq!(owned.value().owner.as_ref(), Some(&owner(receiver)));
+        let proof = destination
+            .catalog
+            .lookup(target.cell_id())
+            .await
+            .unwrap()
+            .unwrap();
+        let successor = receiver_runtime
+            .local_handle(proof, &owned)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            successor
+                .query(64, 64, |connection| {
+                    let value =
+                        connection.query_row("SELECT value FROM transfer_state", [], |row| {
+                            row.get::<_, i64>(0)
+                        })?;
+                    Ok(value.to_be_bytes().to_vec())
+                })
+                .await
+                .unwrap(),
+            7_i64.to_be_bytes()
+        );
+        successor.drain().await.unwrap();
+        receiver_runtime.shutdown().await.unwrap();
+        source_runtime.shutdown().await.unwrap();
     }
 
     #[tokio::test]

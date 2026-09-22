@@ -1882,7 +1882,7 @@ async fn churn_evicts_idle_cells_and_restores_exact_roots() {
 }
 
 #[tokio::test]
-async fn persisted_work_blocks_idle_eviction_until_explicit_release() {
+async fn retained_request_outcome_moves_with_exact_root() {
     let fixture = fixture_for(b"eviction-persisted-work");
     let session = SessionId::from_bytes([78; 16]);
     let runtime =
@@ -1909,11 +1909,205 @@ async fn persisted_work_blocks_idle_eviction_until_explicit_release() {
         }
     ));
 
-    assert_eq!(runtime.evict_idle(1).await.unwrap(), 0);
-    assert_eq!(runtime.stats().active_cells(), 1);
-
-    handle.drain().await.unwrap();
+    let generation = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some((_, generation, _, _)) =
+                runtime.idle_transfer_candidates().await.unwrap().first()
+            {
+                break *generation;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    runtime
+        .release_idle_cell(fixture.target.cell_id(), session, generation)
+        .await
+        .unwrap();
     assert_eq!(runtime.stats().active_cells(), 0);
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let idle = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(idle.value().state, ControlState::Idle);
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let successor_session = SessionId::from_bytes([95; 16]);
+    let successor_runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        8 * 1024 * 1024,
+        successor_session,
+    )
+    .unwrap();
+    let successor = successor_runtime
+        .acquire_idle_restored(
+            proof,
+            fixture.replica.clone(),
+            authority,
+            idle,
+            fixture._directory.path().join("outcome-successor.sqlite"),
+            Owner {
+                session: successor_session,
+                endpoint: "https://outcome-successor.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        successor
+            .resolve(identity(79), Digest::from_bytes([79; 32]), 20, 64)
+            .await
+            .unwrap(),
+        Resolution::Committed(StoredOutcome::Success {
+            commit_sequence: 1,
+            ..
+        })
+    ));
+    successor.drain().await.unwrap();
+    successor_runtime.shutdown().await.unwrap();
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn exact_idle_release_checks_generation_and_confirms_authority_release() {
+    let fixture = fixture_for(b"exact-idle-release");
+    let session = SessionId::from_bytes([91; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 * 1024 * 1024, session).unwrap();
+    let _handle = bootstrap_on(&runtime, &fixture, session).await;
+    let candidates = runtime.idle_transfer_candidates().await.unwrap();
+    assert_eq!(candidates.len(), 1);
+    let (cell, generation, _, role) = candidates[0];
+    assert_eq!(role, CatalogRole::Repository);
+    assert!(
+        runtime
+            .release_idle_cell(cell, SessionId::from_bytes([92; 16]), generation)
+            .await
+            .is_err()
+    );
+    assert!(
+        runtime
+            .release_idle_cell(cell, session, generation + 1)
+            .await
+            .is_err()
+    );
+    runtime
+        .release_idle_cell(cell, session, generation)
+        .await
+        .unwrap();
+    assert_eq!(runtime.stats().active_cells(), 0);
+    let idle = CellAuthority::new(fixture.layout.clone())
+        .load(cell)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(idle.value().state, ControlState::Idle);
+    assert!(idle.value().owner.is_none());
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn exact_idle_release_refuses_persisted_work() {
+    let fixture = fixture_for(b"exact-idle-blocked");
+    let session = SessionId::from_bytes([93; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 * 1024 * 1024, session).unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, session).await;
+    let (_, generation, _, _) = runtime.idle_transfer_candidates().await.unwrap()[0];
+    handle
+        .execute(identity(94), Digest::from_bytes([94; 32]), 20, 64, 64, |transaction| {
+            transaction.execute(
+                "INSERT INTO sys_effects(effect_id, destination, operation, state, attempt, due_at_ms, expires_at_ms, token, lease_until_ms, created_sequence, result) VALUES (?1, ?2, ?3, 0, 0, 20, 1000, NULL, NULL, 1, NULL)",
+                crab_ltx::rusqlite::params![&[1_u8; 32], &[2_u8; 32], &[3_u8]],
+            )?;
+            Ok(HandlerOutcome::Success(Vec::new()))
+        })
+        .await
+        .unwrap();
+    assert!(runtime.idle_transfer_candidates().await.unwrap().is_empty());
+    assert!(
+        runtime
+            .release_idle_cell(fixture.target.cell_id(), session, generation)
+            .await
+            .is_err()
+    );
+    assert_eq!(runtime.stats().active_cells(), 1);
+    handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn stop_acquiring_keeps_existing_cell_serving() {
+    let first = fixture_for(b"scale-down-serving");
+    let second = fixture_for(b"scale-down-new");
+    let session = SessionId::from_bytes([96; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 2).unwrap(), 8 * 1024 * 1024, session).unwrap();
+    let handle = bootstrap_on(&runtime, &first, session).await;
+    runtime.stop_acquiring().unwrap();
+    assert!(!runtime.is_acquiring());
+    assert_eq!(
+        handle
+            .query(64, 64, |connection| {
+                let value = connection
+                    .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+                Ok(value.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap(),
+        0_i64.to_be_bytes()
+    );
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(second.layout.clone(), second.target.tenant());
+    let proof = catalog
+        .provision(
+            CatalogEntry::new(
+                &second.target,
+                CatalogRole::Repository,
+                Digest::from_bytes([5; 32]),
+                1,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let authority = CellAuthority::new(second.layout.clone());
+    let observed = authority
+        .create_initial(
+            &proof,
+            IncarnationId::from_bytes([2; 16]),
+            Owner {
+                session,
+                endpoint: "https://node.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let result = runtime
+        .bootstrap(
+            proof,
+            second.replica.clone(),
+            authority,
+            observed,
+            second._directory.path().join("blocked.sqlite"),
+            |_| Ok(()),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(crab_cell_runtime::Error::CellDraining)
+    ));
+    assert_eq!(runtime.unreleased_cell_count().await.unwrap(), 1);
+    handle.drain().await.unwrap();
+    assert_eq!(runtime.unreleased_cell_count().await.unwrap(), 0);
     runtime.shutdown().await.unwrap();
 }
 

@@ -14,13 +14,13 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use crab_cell_app::{ApplicationHandle, CellApplication, CompiledApplication};
 use crab_cell_runtime::{
-    ApplicationId, CellClient, CellRuntime, CellRuntimeStats, DiskBudget, Error, FollowerStore,
-    NodeDurabilityConfig, QualificationOperationExecutor, QualificationRunSummary,
+    ApplicationId, CellClient, CellId, CellRuntime, CellRuntimeStats, DiskBudget, Error,
+    FollowerStore, NodeDurabilityConfig, QualificationOperationExecutor, QualificationRunSummary,
     QualificationWorkload, ReplicaHost, ReplicaLimits, SessionId, SqlWorkerPool, TenantId,
 };
 use tokio::task::JoinHandle;
@@ -390,8 +390,24 @@ impl Drop for TaskBatch {
 pub enum NodeState {
     Starting,
     Ready,
+    ScalingDown,
     Draining,
     Stopped,
+}
+
+/// Progress while a node serves the Cells that cannot yet move.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScaleDownStatus {
+    pub remaining_cells: usize,
+    pub settled_candidates: usize,
+}
+
+impl ScaleDownStatus {
+    /// Reports confirmed local release; receiver service is a separate proof.
+    #[must_use]
+    pub const fn ready_to_stop(self) -> bool {
+        self.remaining_cells == 0
+    }
 }
 
 /// Point-in-time lifecycle and admission status for one [`CellNode`].
@@ -654,7 +670,7 @@ impl CellNode {
     /// Returns whether the node has installed its lease and accepts work.
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        self.state() == NodeState::Ready
+        matches!(self.state(), NodeState::Ready | NodeState::ScalingDown)
             && self
                 .task_group
                 .lock()
@@ -667,6 +683,72 @@ impl CellNode {
     #[must_use]
     pub fn stats(&self) -> CellRuntimeStats {
         self.runtime.stats()
+    }
+
+    /// Lists settled local Cells as advisory candidates for the fleet planner.
+    pub async fn idle_transfer_candidates(
+        &self,
+    ) -> crab_cell_runtime::Result<Vec<(CellId, u64, i64, crab_cell_runtime::CatalogRole)>> {
+        if !self.is_ready() {
+            return Err(Error::CellDraining);
+        }
+        self.runtime.idle_transfer_candidates().await
+    }
+
+    /// Releases one exact settled Cell generation and waits for owner release.
+    pub async fn release_idle_cell(
+        &self,
+        cell: CellId,
+        source: SessionId,
+        generation: u64,
+    ) -> crab_cell_runtime::Result<()> {
+        if !self.is_ready() {
+            return Err(Error::CellDraining);
+        }
+        self.runtime
+            .release_idle_cell(cell, source, generation)
+            .await
+    }
+
+    /// Stops new Cell acquisition while retaining the lease and current owners.
+    pub fn begin_scale_down(&self) -> crab_cell_runtime::Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| Error::Control("CellNode lifecycle lock poisoned"))?;
+        match *state {
+            NodeState::Ready => {
+                self.runtime.stop_acquiring()?;
+                *state = NodeState::ScalingDown;
+                Ok(())
+            }
+            NodeState::ScalingDown => Ok(()),
+            _ => Err(Error::CellDraining),
+        }
+    }
+
+    /// Waits for confirmed releases. An incomplete result leaves the node
+    /// serving and its facilities alive for the next fleet planning window.
+    pub async fn drain_for_scale_down(
+        &self,
+        deadline: Instant,
+    ) -> crab_cell_runtime::Result<ScaleDownStatus> {
+        self.begin_scale_down()?;
+        loop {
+            let remaining_cells = self.runtime.unreleased_cell_count().await?;
+            let settled_candidates = self.runtime.idle_transfer_candidates().await?.len();
+            let status = ScaleDownStatus {
+                remaining_cells,
+                settled_candidates,
+            };
+            if status.ready_to_stop() || Instant::now() >= deadline {
+                return Ok(status);
+            }
+            let wait = deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_secs(1));
+            tokio::time::sleep(wait).await;
+        }
     }
 
     /// Installs the product's metrics adapter before the node is advertised.
@@ -2029,6 +2111,27 @@ mod tests {
         );
         node.shutdown().await.unwrap();
         assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn scale_down_stops_acquisition_without_stopping_the_host() {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([97; 16]))
+            .build()
+            .unwrap();
+        node.install_task_group(CancellationToken::new(), CancellationToken::new())
+            .unwrap();
+        node.install_node_lease_for_startup(NodeLeaseGuard::new(0, 60_000).unwrap())
+            .unwrap();
+        node.start().unwrap();
+        let status = node.drain_for_scale_down(Instant::now()).await.unwrap();
+        assert!(status.ready_to_stop());
+        assert_eq!(node.state(), NodeState::ScalingDown);
+        assert!(node.is_ready());
+        assert!(!node.runtime().is_acquiring());
+        node.drain().await.unwrap();
     }
 
     #[tokio::test]
