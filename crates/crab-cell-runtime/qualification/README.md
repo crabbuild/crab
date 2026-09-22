@@ -118,8 +118,10 @@ receipt.
 
 The HTTP server release workflow consumes protected evidence from a separate
 manual workflow run. `.github/workflows/cell-runtime-protected-qualification.yml`
-is the canonical handoff: it requires a protected self-hosted runner labelled
-`crab-cell-runtime-protected`, an exact source commit and image digest, and the
+is the canonical handoff: dispatch it from the same exact source commit passed
+as `source_ref` (the workflow rejects a different `GITHUB_SHA`), and use a
+protected self-hosted runner labelled `crab-cell-runtime-protected`, an exact
+source commit and image digest, and the
 operator-installed executable
 `/opt/crab/bin/crab-cell-runtime-protected-qualifier`. That executable is the
 provider/Kubernetes boundary; it must run the real workload and write the

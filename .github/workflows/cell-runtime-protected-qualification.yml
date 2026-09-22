@@ -64,6 +64,10 @@ jobs:
             echo "::error::image_digest must be an immutable sha256 digest." >&2
             exit 1
           }
+          test "$GITHUB_SHA" = "$SOURCE_REF" || {
+            echo "::error::The manual workflow dispatch ref must resolve to source_ref." >&2
+            exit 1
+          }
           test "$(git rev-parse HEAD)" = "$SOURCE_REF"
           git fetch --no-tags origin main
           git merge-base --is-ancestor "$SOURCE_REF" origin/main || {
