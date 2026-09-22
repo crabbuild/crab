@@ -134,8 +134,23 @@ reservations after shutdown. The full 24-bit RustFS workload and protected
 matrix remain unqualified.
 The 32-bit single-row and ten-row in-memory smokes passed on 2026-09-22. All
 eight scheduled retry cases passed together on isolated RustFS, including
-exact typed observation and zero reservations after shutdown. The full 32-bit
-RustFS workload and protected matrix remain unqualified.
+exact typed observation and zero reservations after shutdown. A fresh isolated
+RustFS run of the full 64-operation, 32-bit typed workload returned success
+with zero reservations on 2026-09-22 (90.99 seconds). This earlier profile pass
+is not accepted as latency proof: the old power-of-two histogram reported the
+lower edge of each bucket. A focused RustFS `protocol` row later contained a
+6,082 ms Queue duplicate operation yet passed the five-second gate. The
+histogram now measures exact elapsed milliseconds through ten seconds and uses
+the observed maximum beyond that range, so the gate fails conservatively.
+Two ten-row RustFS matrix attempts failed: one at an unspecified row's profile
+threshold after 507.62 seconds, and a second during Cron resume after 241.09
+seconds. A third attempt identified the `protocol` row at 16,778 ms reported
+p99 over 214 seconds. The Cron path now retains its underlying error for
+diagnosis. A corrected-metric `protocol` row with longer non-expiry leases
+completed all 64 operations but failed p99 at 12,960 ms over 202 seconds; a
+subsequent fresh-prefix row passed in 132.27 seconds and drained zero runtime
+reservations. The row is timing-unstable on this local RustFS setup. The
+ten-row real-storage and protected matrices remain unqualified.
 A focused KV expiry test now selects the canonical scheduled KV expiry
 operation, publishes a TTL value, and observes its exact value and version from
 a separate typed client. It delays a signed KV mutation at the peer receive
@@ -280,6 +295,9 @@ cases passed on 2026-09-21. The owner-loss transition uses a test-controlled
 session fence, and the observer uses the public idle-restoration path after
 the successor drains. This is not a scheduled qualification case or protected
 provider run, and it does not set matrix case bits.
+All four three-process owner-kill boundaries passed again together on a fresh
+isolated RustFS bucket on 2026-09-22 (65.91 seconds). The local evidence is
+current, but the same scheduled-artifact and protected-profile gaps remain.
 The third process also checks exact terminal source Effect status and SQL result
 bytes after recovered lease expiry or an owner-acknowledged settlement. Both
 focused three-process RustFS cases passed on 2026-09-21.
