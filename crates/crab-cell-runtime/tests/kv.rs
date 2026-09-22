@@ -50,7 +50,7 @@ impl CellModule for TestKv {
                 codec_version: 1,
                 schema_min: 1,
                 schema_max: 1,
-                input_limit: 1024 * 1024,
+                input_limit: (4 * 1024 * 1024 + 64 * 1024),
                 output_limit: 1024 * 1024,
             }],
             queries: &[
@@ -60,7 +60,7 @@ impl CellModule for TestKv {
                     schema_min: 1,
                     schema_max: 1,
                     input_limit: 4096,
-                    output_limit: 70 * 1024,
+                    output_limit: (4 * 1024 * 1024 + 64 * 1024),
                 },
                 OperationDescriptor {
                     id: 2,
@@ -68,7 +68,7 @@ impl CellModule for TestKv {
                     schema_min: 1,
                     schema_max: 1,
                     input_limit: 4096,
-                    output_limit: 1024 * 1024,
+                    output_limit: (4 * 1024 * 1024 + 64 * 1024),
                 },
             ],
             workflow_definitions: &[],
@@ -298,12 +298,22 @@ fn duplicate_mutation_keys_and_expired_puts_fail_before_writes() {
     let oversized = KvAtomicRequest {
         scope: Vec::new(),
         checks: Vec::new(),
-        mutations: (0_u8..17)
-            .map(|key| put(&[key + 1], &vec![key; 65_536], None))
-            .collect(),
+        mutations: vec![put(b"key", &vec![7; 4 * 1024 * 1024 + 1], None)],
     };
     let transaction = connection.transaction().unwrap();
     assert!(kv_atomic(&transaction, 10, &oversized).is_err());
+    transaction.rollback().unwrap();
+
+    let too_large_batch = KvAtomicRequest {
+        scope: Vec::new(),
+        checks: Vec::new(),
+        mutations: vec![
+            put(b"a", &vec![1; 2 * 1024 * 1024 + 64 * 1024], None),
+            put(b"b", &vec![2; 2 * 1024 * 1024 + 64 * 1024], None),
+        ],
+    };
+    let transaction = connection.transaction().unwrap();
+    assert!(kv_atomic(&transaction, 10, &too_large_batch).is_err());
     transaction.rollback().unwrap();
     assert_eq!(
         connection
@@ -312,6 +322,52 @@ fn duplicate_mutation_keys_and_expired_puts_fail_before_writes() {
             .unwrap(),
         0
     );
+}
+
+#[test]
+fn maximum_value_get_and_list_progress_under_page_budget() {
+    let mut connection = connection();
+    let value = vec![7; 4 * 1024 * 1024];
+    let transaction = connection.transaction().unwrap();
+    kv_atomic(
+        &transaction,
+        10,
+        &KvAtomicRequest {
+            scope: b"scope".to_vec(),
+            checks: Vec::new(),
+            mutations: vec![put(b"a", &value, None)],
+        },
+    )
+    .unwrap();
+    transaction.commit().unwrap();
+
+    let transaction = connection.transaction().unwrap();
+    kv_atomic(
+        &transaction,
+        11,
+        &KvAtomicRequest {
+            scope: b"scope".to_vec(),
+            checks: Vec::new(),
+            mutations: vec![put(b"b", &vec![8; 128 * 1024], None)],
+        },
+    )
+    .unwrap();
+    transaction.commit().unwrap();
+
+    assert_eq!(
+        kv_get(&connection, b"scope", b"a", 12)
+            .unwrap()
+            .unwrap()
+            .value,
+        value
+    );
+    let first = kv_list(&connection, b"scope", b"", None, 10, 12).unwrap();
+    assert_eq!(first.entries.len(), 1);
+    assert_eq!(first.next_after.as_deref(), Some(b"a".as_slice()));
+    let second = kv_list(&connection, b"scope", b"", Some(b"a"), 10, 12).unwrap();
+    assert_eq!(second.entries.len(), 1);
+    assert_eq!(second.entries[0].key, b"b");
+    assert!(second.next_after.is_none());
 }
 
 #[tokio::test]
@@ -386,10 +442,11 @@ async fn typed_kv_namespace_recovers_after_owner_loss() {
         KV_NAMESPACE,
     )
     .unwrap();
+    let large_value = vec![42; 4 * 1024 * 1024];
     let request = KvAtomicRequest {
         scope: b"repository".to_vec(),
         checks: Vec::new(),
-        mutations: vec![put(b"branch", b"main", None)],
+        mutations: vec![put(b"branch", &large_value, None)],
     };
     let committed = namespace
         .atomic(current_identity(7), request)
@@ -406,7 +463,7 @@ async fn typed_kv_namespace_recovers_after_owner_loss() {
         .unwrap()
         .output
         .unwrap();
-    assert_eq!(entry.value, b"main");
+    assert_eq!(entry.value, large_value);
     assert_eq!(
         namespace
             .list(
@@ -493,7 +550,7 @@ async fn typed_kv_namespace_recovers_after_owner_loss() {
             .output
             .unwrap()
             .value,
-        b"main"
+        large_value
     );
     restored.drain().await.unwrap();
     runtime.shutdown().await.unwrap();

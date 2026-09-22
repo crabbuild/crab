@@ -213,11 +213,12 @@ These values are admission contracts, not benchmark results.
 
 | Resource | Initial limit |
 | --- | ---: |
-| Command input, result, or workflow state | 1 MiB each |
+| Command input or result | 1 MiB by default; KV may declare 4 MiB plus 64 KiB framing |
+| Workflow state | 1 MiB |
 | SQL batch | 128 statements |
 | SQL query result | 1,000 rows and 1 MiB |
 | KV atomic batch | 128 mutations |
-| KV value | 64 KiB |
+| KV value | 4 MiB |
 | Blob part / range read | 256 KiB / 512 KiB |
 | Queue payload | 256 KiB |
 | Cron payload / interval | 256 KiB / 1 second to 1 year |

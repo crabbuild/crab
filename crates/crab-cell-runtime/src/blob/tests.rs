@@ -153,6 +153,65 @@ async fn object_store_sweep_keeps_live_parts_and_reclaims_old_orphans() {
     );
 }
 
+#[tokio::test]
+async fn object_store_sweep_reaches_orphans_beyond_live_entries() {
+    use crab_storage::Store;
+    use object_store::memory::InMemory;
+
+    let store = Store::new(std::sync::Arc::new(InMemory::new()));
+    let artifacts = BlobArtifactStore::new(store);
+    let mut live_digests = BTreeSet::new();
+    for index in 0_u32..129 {
+        let payload = index.to_be_bytes();
+        let digest = part_digest(&payload);
+        artifacts.put_part(digest, &payload).await.unwrap();
+        live_digests.insert(digest);
+    }
+    let orphan_payload = b"orphan past the scan budget";
+    artifacts
+        .put_part(part_digest(orphan_payload), orphan_payload)
+        .await
+        .unwrap();
+
+    let report = artifacts
+        .sweep_unreferenced(&live_digests, i64::MAX)
+        .await
+        .unwrap();
+    assert_eq!(report.scanned(), 130);
+    assert_eq!(report.deleted(), 1);
+    assert!(!report.has_more());
+}
+
+#[tokio::test]
+async fn object_store_sweep_bounds_deletions_and_finishes_on_retry() {
+    use crab_storage::Store;
+    use object_store::memory::InMemory;
+
+    let store = Store::new(std::sync::Arc::new(InMemory::new()));
+    let artifacts = BlobArtifactStore::new(store);
+    for index in 0_u32..129 {
+        let payload = index.to_be_bytes();
+        artifacts
+            .put_part(part_digest(&payload), &payload)
+            .await
+            .unwrap();
+    }
+
+    let first = artifacts
+        .sweep_unreferenced(&BTreeSet::new(), i64::MAX)
+        .await
+        .unwrap();
+    assert_eq!(first.deleted(), MAX_BLOB_GC_DELETIONS);
+    assert!(first.has_more());
+
+    let second = artifacts
+        .sweep_unreferenced(&BTreeSet::new(), i64::MAX)
+        .await
+        .unwrap();
+    assert_eq!(second.deleted(), 1);
+    assert!(!second.has_more());
+}
+
 #[test]
 fn checked_in_blob_schema_matches_runtime_schema() {
     assert_eq!(BLOB_SCHEMA, include_str!("../../docs/contracts/blob.sql"));

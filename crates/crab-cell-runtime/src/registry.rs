@@ -28,7 +28,7 @@ const MAX_DESCRIPTOR_BYTES: usize = 256 * 1024;
 const MAX_MODULES: usize = 128;
 const MAX_NAMESPACES: usize = 128;
 const MAX_MIGRATION_BYTES: usize = 1024 * 1024;
-const MAX_OPERATION_BYTES: u32 = 1024 * 1024;
+const MAX_OPERATION_BYTES: u32 = crate::codec::MAX_WIRE_BYTES as u32;
 const CODE_ONLY_MIGRATION_BYTES: usize = 2 * 32;
 
 /// Registry construction error returned before server readiness.

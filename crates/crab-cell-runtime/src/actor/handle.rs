@@ -15,8 +15,8 @@ use crate::{
     MigrationPlan, MutationIdentity, PersistedWorkInventory, Resolution, StoredOutcome,
 };
 
-const MAX_OPERATION_BYTES: usize = 1024 * 1024;
-const MAX_RESULT_BYTES: usize = 1024 * 1024;
+const MAX_OPERATION_BYTES: usize = crate::codec::MAX_WIRE_BYTES;
+const MAX_RESULT_BYTES: usize = crate::codec::MAX_WIRE_BYTES;
 
 /// Cloneable capability for one activated Cell.
 #[derive(Clone)]

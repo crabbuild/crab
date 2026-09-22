@@ -104,11 +104,20 @@ The KV procedure applies all checks before any mutation. A failed check returns 
 | KV contract | Limit or behavior |
 | --- | --- |
 | Atomic items | 128 checks and mutations combined |
-| Value | 64 KiB |
+| Value | 4 MiB |
+| Atomic operation | 4 MiB plus 64 KiB for keys and framing |
+| List page | 1 MiB ordinarily; one larger value occupies its own page |
 | Version | Incarnation plus sequence, 28 bytes |
 | Expiry | Logical timestamp evaluated inside the Cell |
 | List order | Binary key order within one scope and prefix |
 | Cleanup | Bounded scheduler Tick |
+
+KV values remain in the Cell's SQLite database and LTX history. A module that
+uses the 4 MiB maximum must declare an atomic input limit and get/list output
+limits of at least 4 MiB plus 64 KiB for framing. The aggregate atomic and
+list-page budgets prevent a batch of maximum-sized values from bypassing
+admission. For frequently replaced large bodies, use Blob to avoid repeated
+SQLite and LTX writes.
 
 Deleting and recreating a key produces a new version. An old version cannot match the new incarnation and sequence.
 
@@ -205,11 +214,12 @@ Blob bodies do not live in the Cell database. `BlobNamespace` uploads each
 bounded part to the configured object store before committing its digest and
 size in SQLite. The manifest is the durable publication boundary; unreferenced
 content-addressed parts are safe to retry. The configured object-store
-lifecycle policy must reclaim abandoned parts. A bounded
-`BlobArtifactStore::sweep_unreferenced` building block is provided for the
-product-level collector; the collector must pass references from every Cell
-sharing the object-store scope and use a grace cutoff before production
-rollout.
+lifecycle policy must reclaim abandoned parts. The
+`BlobArtifactStore::sweep_unreferenced` building block limits each pass to 128
+deletions but scans the unordered listing until that limit is reached. A
+product-level collector must quiesce writes throughout the scope, pass
+references from every Cell sharing it, and use a grace cutoff. The helper is
+not wired to a product collector yet.
 
 ## Use Cron for failover-safe recurring triggers
 

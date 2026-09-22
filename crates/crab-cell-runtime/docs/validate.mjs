@@ -42,7 +42,7 @@ for (const schema of ['', kv, queue, workflow, blob, cron]) sqlite(schema, 'PRAG
 
 rejects('', `INSERT INTO sys_meta VALUES(1, zeroblob(31), zeroblob(16), 0, 0, 1);`, /CHECK constraint/);
 rejects(kv, `INSERT INTO kv_entries VALUES(X'', X'01', zeroblob(27), X'', NULL);`, /CHECK constraint/);
-rejects(kv, `INSERT INTO kv_entries VALUES(X'', X'01', zeroblob(28), zeroblob(65537), NULL);`, /CHECK constraint/);
+rejects(kv, `INSERT INTO kv_entries VALUES(X'', X'01', zeroblob(28), zeroblob(4194305), NULL);`, /CHECK constraint/);
 
 const leased = `INSERT INTO queue_messages VALUES(zeroblob(16), X'01', 1, 1, 0, 1000, zeroblob(16), 100, NULL, NULL);`;
 rejects(queue, `INSERT INTO queue_messages VALUES(zeroblob(16), X'01', 1, 1, 0, 1000, NULL, 100, NULL, NULL);`, /CHECK constraint/);
