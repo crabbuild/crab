@@ -1480,9 +1480,10 @@ async fn invalid_signature_expiry_and_identity_change_fail_closed() {
         .capacity
         .free_memory_bytes
         .saturating_add(1);
-    // Ordinary capacity hints remain a legacy liveness field. The optional
-    // placement block is the authenticated resource contract.
-    assert!(tampered_capacity.verify_signature().is_ok());
+    // Capacity is part of the signed heartbeat; changing it without a new
+    // signature must fail closed. The optional placement block is authenticated
+    // independently because it drives ownership placement.
+    assert!(tampered_capacity.verify_signature().is_err());
     let signed = original
         .clone()
         .with_placement_capacity(
