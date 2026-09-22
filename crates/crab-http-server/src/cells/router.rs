@@ -829,8 +829,10 @@ impl RepositoryCellPeer {
         _principal: &PeerPrincipal,
         now_ms: i64,
     ) -> crate::Result<()> {
+        // Verification subtracts transit time from the signed lifetime. Leave
+        // room beyond the 30-second request deadline or every remote hint fails.
         let expires_at_ms = now_ms
-            .checked_add(30_000)
+            .checked_add(60_000)
             .ok_or(crab_cell_runtime::Error::Peer(
                 "activation deadline overflow",
             ))?;
@@ -952,8 +954,8 @@ mod tests {
     };
 
     use crab_cell_runtime::{
-        ApplicationId, IncarnationId, MutationIdentity, NodeAdvertisement, NodeCapacity, RequestId,
-        SessionId, SqlWorkerPool, TenantId, Transition,
+        ApplicationId, IncarnationId, MutationIdentity, NodeAdvertisement, NodeCapacity,
+        PeerVerifier, RequestId, SessionId, SqlWorkerPool, TenantId, Transition,
     };
     use crab_storage::{StorageReadKind, Store};
     use ed25519_dalek::SigningKey;
@@ -966,6 +968,129 @@ mod tests {
     };
 
     struct UnavailablePeer;
+
+    struct DelayedActivationPeer {
+        session: SessionId,
+        release: crab_cell_runtime::Digest,
+        key: ed25519_dalek::VerifyingKey,
+        received_at_ms: i64,
+    }
+
+    impl PeerRoundTrip for DelayedActivationPeer {
+        fn send(
+            &self,
+            _target: CellTarget,
+            _request: Vec<u8>,
+            _remaining_ms: u32,
+        ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>>
+        {
+            Box::pin(async { Err(crab_cell_runtime::Error::CellNotActive) })
+        }
+
+        fn send_to_node(
+            &self,
+            _target: CellTarget,
+            _node: NodeAdvertisement,
+            request: Vec<u8>,
+            remaining_ms: u32,
+        ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>>
+        {
+            let verified = remaining_ms == 30_000
+                && PeerVerifier::new(self.session, self.release, self.key)
+                    .verify(&request, self.received_at_ms)
+                    .is_ok();
+            Box::pin(async move {
+                if !verified {
+                    return Err(crab_cell_runtime::Error::Peer(
+                        "activation authorization expired in transit",
+                    ));
+                }
+                Err(crab_cell_runtime::Error::Control(
+                    "activation reached enrolled peer",
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_activation_authorization_survives_transit() {
+        let session = SessionId::from_bytes([1; 16]);
+        let successor = SessionId::from_bytes([2; 16]);
+        let release = crab_cell_runtime::Digest::from_bytes([3; 32]);
+        let fleet = crab_cell_runtime::Digest::from_bytes([4; 32]);
+        let image = crab_cell_runtime::Digest::from_bytes([5; 32]);
+        let key = SigningKey::from_bytes(&[6; 32]);
+        let directory = NodeDirectory::new(
+            CellStorageLayout::new(
+                Store::new(Arc::new(InMemory::new())),
+                ObjectPath::from("activation-transit"),
+                [7; 16],
+            ),
+            fleet,
+            image,
+            release,
+        );
+        let peer = RepositoryCellPeer::new(
+            directory,
+            Arc::new(PeerSigner::new(session, release, key.clone())),
+            Arc::new(DelayedActivationPeer {
+                session,
+                release,
+                key: key.verifying_key(),
+                received_at_ms: 1_001,
+            }),
+            owner(session),
+        );
+        let node = NodeAdvertisement::sign(
+            crab_cell_runtime::NodeId::from_bytes(*successor.as_bytes()),
+            successor,
+            owner(successor).endpoint,
+            fleet,
+            crab_cell_runtime::Digest::from_bytes([8; 32]),
+            image,
+            release,
+            &SigningKey::from_bytes(&[9; 32]),
+            1,
+            1_000,
+            11_000,
+            vec![crab_cell_runtime::Digest::from_bytes([10; 32])],
+            vec![1],
+            crab_cell_runtime::NodeFailureDomain::default(),
+            NodeCapacity {
+                free_memory_bytes: 1,
+                free_disk_bytes: 1,
+                job_credits: 1,
+                ..NodeCapacity::default()
+            },
+        )
+        .unwrap();
+        let target = CellTarget::new(
+            TenantId::from_bytes([11; 16]),
+            ApplicationId::from_bytes([7; 16]),
+            REPOSITORY_NAMESPACE,
+            &[12; 16],
+        )
+        .unwrap();
+        let error = peer
+            .activate_remote(
+                target,
+                node,
+                &PeerPrincipal {
+                    issuer: "urn:crab:local".into(),
+                    subject: "operator".into(),
+                    actions: vec!["repository.issue.create".into()],
+                },
+                1_000,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::Error::Cell(crab_cell_runtime::Error::Control(
+                "activation reached enrolled peer"
+            ))
+        ));
+    }
 
     impl PeerRoundTrip for UnavailablePeer {
         fn send(
