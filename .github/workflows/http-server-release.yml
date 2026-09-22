@@ -3,19 +3,35 @@ name: HTTP server release image
 on:
   push:
     tags: ["crab-http-server-v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Annotated server release tag to qualify (for example crab-http-server-v0.1.0)"
+        required: true
+      cell_runtime_evidence_run_id:
+        description: "Completed protected Cell runtime qualification workflow run ID"
+        required: false
+        default: ""
+      cell_runtime_evidence_artifact:
+        description: "Protected Cell runtime evidence artifact; defaults to cell-runtime-protected-<run-id>-<attempt>"
+        required: false
+        default: ""
 
 permissions:
+  actions: read
   contents: read
   packages: read
 
 concurrency:
-  group: http-server-release-${{ github.ref_name }}
+  group: http-server-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/crab-http-server
   CHART_REGISTRY: ghcr.io/${{ github.repository_owner }}/charts
+  CELL_RUNTIME_EVIDENCE_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.cell_runtime_evidence_run_id || vars.CRAB_CELL_RUNTIME_PROTECTED_EVIDENCE_RUN_ID }}
+  CELL_RUNTIME_EVIDENCE_ARTIFACT: ${{ github.event_name == 'workflow_dispatch' && inputs.cell_runtime_evidence_artifact || vars.CRAB_CELL_RUNTIME_PROTECTED_EVIDENCE_ARTIFACT }}
 
 jobs:
   prepare:
@@ -29,7 +45,7 @@ jobs:
       - name: Check out the release tag
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -37,7 +53,7 @@ jobs:
         id: release
         shell: bash
         env:
-          REQUESTED_TAG: ${{ github.ref_name }}
+          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
 
@@ -176,6 +192,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
+      actions: read
       attestations: write
       contents: write
       id-token: write
@@ -195,6 +212,82 @@ jobs:
         with:
           name: cell-runtime-qualification-${{ github.run_id }}
           path: ${{ runner.temp }}/crab-cell-runtime-qualification
+
+      - name: Download retained protected Cell runtime evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+
+          run_id="${CELL_RUNTIME_EVIDENCE_RUN_ID:-}"
+          artifact="${CELL_RUNTIME_EVIDENCE_ARTIFACT:-}"
+          if [[ ! "$run_id" =~ ^[1-9][0-9]*$ ]]; then
+            {
+              echo "::error::Protected Cell runtime evidence is required for server releases."
+              echo "Run the protected Cell runtime qualification workflow on the exact release commit and pass its run ID, or set CRAB_CELL_RUNTIME_PROTECTED_EVIDENCE_RUN_ID."
+            } >&2
+            exit 1
+          fi
+
+          run_metadata="$(gh run view "$run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json workflowName,status,conclusion,event,databaseId,url,headSha,attempt \
+            --jq '[.workflowName, .status, .conclusion, .event, (.databaseId | tostring), .url, .headSha, (.attempt | tostring)] | @tsv')"
+          old_ifs="$IFS"
+          IFS=$'\t' read -r workflow_name status conclusion event database_id run_url evidence_sha attempt <<< "$run_metadata"
+          IFS="$old_ifs"
+          if [ "$workflow_name" != "Cell runtime protected qualification" ]; then
+            echo "::error::Protected evidence run $run_id came from workflow '$workflow_name', expected 'Cell runtime protected qualification'." >&2
+            exit 1
+          fi
+          if [ "$status" != "completed" ] || [ "$conclusion" != "success" ]; then
+            echo "::error::Protected evidence run $run_id is not a successful completed run: status=$status conclusion=$conclusion url=$run_url" >&2
+            exit 1
+          fi
+          if [ "$event" != "workflow_dispatch" ]; then
+            echo "::error::Protected evidence run $run_id used event '$event'; protected evidence must come from an explicit manual run." >&2
+            exit 1
+          fi
+          if [ "$database_id" != "$run_id" ]; then
+            echo "::error::Protected evidence run metadata mismatch: requested $run_id but GitHub returned $database_id." >&2
+            exit 1
+          fi
+          if [ "$evidence_sha" != "$SOURCE_SHA" ]; then
+            echo "::error::Protected evidence run $run_id was collected from $evidence_sha, but this release is $SOURCE_SHA." >&2
+            exit 1
+          fi
+          if [[ ! "$attempt" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Protected evidence run $run_id did not expose a valid run attempt." >&2
+            exit 1
+          fi
+          if [ -z "$artifact" ]; then
+            artifact="cell-runtime-protected-${run_id}-${attempt}"
+          fi
+          if [[ ! "$artifact" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::Protected evidence artifact name contains unsupported characters." >&2
+            exit 1
+          fi
+
+          download_root="${RUNNER_TEMP}/crab-cell-runtime-protected-download"
+          evidence_dir="${RUNNER_TEMP}/crab-cell-runtime-qualification"
+          mkdir -p "$download_root"
+          gh run download "$run_id" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$artifact" \
+            --dir "$download_root"
+          if find "$download_root" -type l -print -quit | grep --quiet .; then
+            echo "::error::Protected qualification evidence must not contain symlinks." >&2
+            exit 1
+          fi
+          mapfile -t protected_dirs < <(find "$download_root" -type d -name protected -print | sort)
+          if [ "${#protected_dirs[@]}" -ne 1 ]; then
+            echo "::error::Protected evidence artifact must contain exactly one protected/ directory; found ${#protected_dirs[@]}." >&2
+            exit 1
+          fi
+          mkdir -p "$evidence_dir"
+          mv "${protected_dirs[0]}" "$evidence_dir/protected"
 
       - name: Package the Helm chart
         shell: bash

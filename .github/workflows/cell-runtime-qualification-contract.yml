@@ -121,6 +121,18 @@ jobs:
             echo "release workflow must not rebuild after qualification" >&2
             exit 1
           fi
+      - name: Keep protected evidence handoff explicit and exact-source bound
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'cell_runtime_evidence_run_id:' .github/workflows/http-server-release.yml
+          grep -F 'cell_runtime_evidence_artifact:' .github/workflows/http-server-release.yml
+          grep -F 'actions: read' .github/workflows/http-server-release.yml
+          grep -F 'Cell runtime protected qualification' .github/workflows/http-server-release.yml
+          grep -F 'if [ "$event" != "workflow_dispatch" ]' .github/workflows/http-server-release.yml
+          grep -F 'if [ "$evidence_sha" != "$SOURCE_SHA" ]' .github/workflows/http-server-release.yml
+          grep -F 'cell-runtime-protected-${run_id}-${attempt}' .github/workflows/http-server-release.yml
+          grep -F 'exactly one protected/' .github/workflows/http-server-release.yml
       - name: Verify receipt, placement, pressure, and resource contracts
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
