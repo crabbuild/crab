@@ -33,7 +33,10 @@ fn now_ms() -> i64 {
 }
 
 async fn wait_until_expired(deadline_ms: i64) {
-    let remaining_ms = deadline_ms.saturating_sub(now_ms()).saturating_add(100);
+    let remaining_ms = deadline_ms
+        .saturating_sub(now_ms())
+        .max(0)
+        .saturating_add(100);
     let remaining_ms = u64::try_from(remaining_ms).expect("nonnegative expiry wait");
     tokio::time::sleep(Duration::from_millis(remaining_ms)).await;
     assert!(now_ms() > deadline_ms);
