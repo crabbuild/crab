@@ -763,6 +763,9 @@ mod tests {
             .expect("binder workload");
         let mut executor = BinderExecutor;
         let summary = workload.run(&mut executor).await.expect("binder run");
+        let elapsed_ms = u64::try_from(summary.elapsed().as_millis())
+            .expect("binder elapsed duration")
+            .max(1);
         let resources = [
             crab_cell_runtime::QualificationMetric::new(
                 "peak_rss_bytes".into(),
@@ -805,7 +808,7 @@ mod tests {
                 execution_profile: "release".into(),
                 topology: "three-process".into(),
                 started_at_ms: 1,
-                finished_at_ms: 1_001,
+                finished_at_ms: 1u64.saturating_add(elapsed_ms),
                 fault_schedule: b"none".to_vec(),
                 ownership: vec![QualificationOwnership::new(
                     1,
