@@ -59,7 +59,7 @@ fn encoder_and_decoder_enforce_declared_limits_before_allocation() {
         Err(CodecError::Limit)
     ));
     assert!(matches!(
-        BoundedEncoder::new(1024 * 1024 + 1),
+        BoundedEncoder::new(4 * 1024 * 1024 + 64 * 1024 + 1),
         Err(CodecError::Limit)
     ));
 }

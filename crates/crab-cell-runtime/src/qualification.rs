@@ -2435,6 +2435,12 @@ impl QualificationReceipt {
         if ownership.len() > MAX_METRICS {
             return Err(Error::Control("qualification ownership proof count"));
         }
+        if ownership
+            .iter()
+            .any(|proof| proof.root.iter().all(|byte| *byte == 0))
+        {
+            return Err(Error::Control("qualification ownership proof"));
+        }
         self.started_at_ms = started_at_ms;
         self.finished_at_ms = finished_at_ms;
         self.fault_schedule_digest = *blake3::hash(fault_schedule).as_bytes();
@@ -4924,7 +4930,7 @@ mod tests {
     }
 
     #[test]
-    fn evidence_requires_bounded_fault_schedule() {
+    fn evidence_requires_bounded_fault_schedule_and_nonzero_ownership_roots() {
         let valid = QualificationExecutionEvidence {
             provider: "rustfs".into(),
             workload: "failover".into(),
@@ -4943,6 +4949,14 @@ mod tests {
         let mut empty = valid.clone();
         empty.fault_schedule.clear();
         assert!(empty.encode().is_err());
+
+        let mut zero_root = valid.clone();
+        zero_root.ownership = vec![QualificationOwnership::new(
+            1,
+            1,
+            Digest::from_bytes([0; 32]),
+        )];
+        assert!(zero_root.encode().is_err());
 
         let mut oversized = valid;
         oversized.fault_schedule = vec![0; MAX_RECEIPT_BYTES + 1];
@@ -4965,6 +4979,22 @@ mod tests {
             receipt
                 .clone()
                 .with_evidence(1, 2, b"", vec![digest], Vec::new())
+                .is_err()
+        );
+        assert!(
+            receipt
+                .clone()
+                .with_evidence(
+                    1,
+                    2,
+                    b"owner-kill",
+                    vec![digest],
+                    vec![QualificationOwnership::new(
+                        1,
+                        1,
+                        Digest::from_bytes([0; 32]),
+                    )]
+                )
                 .is_err()
         );
         assert!(
