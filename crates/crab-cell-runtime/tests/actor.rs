@@ -2014,6 +2014,81 @@ async fn exact_idle_release_checks_generation_and_confirms_authority_release() {
     runtime.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn exact_idle_release_blocks_new_work_while_inventory_is_pending() {
+    let target_fixture = fixture_for(b"exact-idle-preflight");
+    let blocker_fixture = fixture_for(b"exact-idle-preflight-blocker");
+    let session = SessionId::from_bytes([96; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 2).unwrap(), 8 * 1024 * 1024, session).unwrap();
+    let target = bootstrap_on(&runtime, &target_fixture, session).await;
+    let blocker = bootstrap_on(&runtime, &blocker_fixture, session).await;
+    let candidates = runtime.idle_transfer_candidates().await.unwrap();
+    let (cell, generation, _, _) = candidates
+        .iter()
+        .copied()
+        .find(|(cell, _, _, _)| *cell == target_fixture.target.cell_id())
+        .unwrap();
+
+    let (started, started_signal) = tokio::sync::oneshot::channel();
+    let blocker_task = tokio::spawn(async move {
+        blocker
+            .query(1, 1, move |_| {
+                let _ = started.send(());
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                Ok(Vec::new())
+            })
+            .await
+    });
+    started_signal.await.unwrap();
+
+    let release_runtime = runtime.clone();
+    let release_task = tokio::spawn(async move {
+        release_runtime
+            .release_idle_cell(cell, session, generation)
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let still_candidate = runtime
+                .idle_transfer_candidates()
+                .await
+                .unwrap()
+                .into_iter()
+                .any(|(candidate, _, _, _)| candidate == cell);
+            if !still_candidate {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let result = target
+        .execute(
+            identity(97),
+            Digest::from_bytes([97; 32]),
+            20,
+            64,
+            64,
+            |transaction| {
+                transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                Ok(HandlerOutcome::Success(Vec::new()))
+            },
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(crab_cell_runtime::Error::CellDraining)
+    ));
+
+    assert!(blocker_task.await.unwrap().is_ok());
+    release_task.await.unwrap().unwrap();
+    assert_eq!(runtime.stats().active_cells(), 1);
+    runtime.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn exact_idle_release_refuses_persisted_work() {
     let fixture = fixture_for(b"exact-idle-blocked");

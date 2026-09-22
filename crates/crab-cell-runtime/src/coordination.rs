@@ -117,6 +117,11 @@ pub(crate) enum CoordinationInput {
         refreshing: bool,
         lease_live: bool,
     },
+    BeginTransferPreflight {
+        queue_empty: bool,
+        publication_idle: bool,
+        lease_live: bool,
+    },
     BeginCompaction {
         queue_empty: bool,
         publication_idle: bool,
@@ -564,6 +569,26 @@ impl CoordinationState {
                     CoordinationDecision::Started
                 }
             }
+            CoordinationInput::BeginTransferPreflight {
+                queue_empty,
+                publication_idle,
+                lease_live,
+            } => {
+                if !lease_live {
+                    self.lifecycle = Lifecycle::Fenced;
+                    self.busy = false;
+                    self.renewing = false;
+                    CoordinationDecision::Fence
+                } else if self.is_fenced() {
+                    CoordinationDecision::Reject(RejectReason::Fenced)
+                } else if self.is_draining() {
+                    CoordinationDecision::Reject(RejectReason::Draining)
+                } else if !queue_empty || !publication_idle || !self.can_deactivate() {
+                    CoordinationDecision::Ignored
+                } else {
+                    CoordinationDecision::Started
+                }
+            }
             CoordinationInput::BeginCompaction {
                 queue_empty,
                 publication_idle,
@@ -937,6 +962,46 @@ mod tests {
             CoordinationDecision::Fence
         );
         assert!(fenced.is_fenced());
+    }
+
+    #[test]
+    fn transfer_preflight_requires_a_quiescent_live_owner() {
+        let mut state = CoordinationState::serving(true);
+        assert_eq!(
+            state.step(CoordinationInput::BeginTransferPreflight {
+                queue_empty: false,
+                publication_idle: true,
+                lease_live: true,
+            }),
+            CoordinationDecision::Ignored
+        );
+        assert_eq!(
+            state.step(CoordinationInput::BeginTransferPreflight {
+                queue_empty: true,
+                publication_idle: true,
+                lease_live: true,
+            }),
+            CoordinationDecision::Started
+        );
+        state.begin_effect(CoordinationEffect::Inventory);
+        assert_eq!(
+            state.step(CoordinationInput::BeginTransferPreflight {
+                queue_empty: true,
+                publication_idle: true,
+                lease_live: true,
+            }),
+            CoordinationDecision::Ignored
+        );
+
+        let mut fenced = CoordinationState::serving(true);
+        assert_eq!(
+            fenced.step(CoordinationInput::BeginTransferPreflight {
+                queue_empty: true,
+                publication_idle: true,
+                lease_live: false,
+            }),
+            CoordinationDecision::Fence
+        );
     }
 
     #[test]
