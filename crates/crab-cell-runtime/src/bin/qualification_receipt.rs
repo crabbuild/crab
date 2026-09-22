@@ -530,9 +530,9 @@ fn verify_matrix_files(
         (Some(profile), Some(trusted_signer)) => {
             if profile.requires_protected_evidence() {
                 QualificationReceipt::verify_matrix_for_profile_with_signer_fresh_at(
-                    &source,
+                    source,
                     image,
-                    &profile,
+                    profile,
                     &evidence,
                     *trusted_signer,
                     unix_millis()?,
@@ -540,9 +540,9 @@ fn verify_matrix_files(
                 .map_err(|error| error.to_string())?;
             } else {
                 QualificationReceipt::verify_matrix_for_profile_with_signer(
-                    &source,
+                    source,
                     image,
-                    &profile,
+                    profile,
                     &evidence,
                     *trusted_signer,
                 )
@@ -550,12 +550,12 @@ fn verify_matrix_files(
             }
         }
         (Some(profile), None) => {
-            QualificationReceipt::verify_matrix_for_profile(&source, image, &profile, &evidence)
+            QualificationReceipt::verify_matrix_for_profile(source, image, profile, &evidence)
                 .map_err(|error| error.to_string())?;
         }
         (None, Some(_)) => return Err("a trusted signer requires a profile".into()),
         (None, None) => {
-            QualificationReceipt::verify_matrix(&source, image, &evidence)
+            QualificationReceipt::verify_matrix(source, image, &evidence)
                 .map_err(|error| error.to_string())?;
         }
     }
