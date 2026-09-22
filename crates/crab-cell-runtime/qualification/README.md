@@ -134,12 +134,13 @@ The public host's local process-fault smoke can be run without credentials:
 
 ```text
 cargo test --locked -p crab-http-server --test public_cell_process_fault \
-  filesystem_owner_kill_preserves_three_acknowledged_settlements -- \
-  --exact --nocapture
+  filesystem_owner_kill_ -- \
+  --nocapture
 ```
 
 It starts an owner, successor, and independent observer as separate processes,
-kills the owner after acknowledged leases and settlements, and verifies all
-primitive outcomes through the typed `CellNode` handle. The filesystem CAS
-backend is a deterministic lifecycle regression fixture only; it is not a
-provider, Kubernetes, or large-scale qualification receipt.
+kills the owner before writes, after leases, and after settlements, and
+verifies all primitive outcomes through typed `CellNode` handles. The filter
+selects all three local lifecycle-boundary tests. The
+filesystem CAS backend is a deterministic lifecycle regression fixture only;
+it is not a provider, Kubernetes, or large-scale qualification receipt.

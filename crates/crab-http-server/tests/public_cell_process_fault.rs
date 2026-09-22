@@ -308,6 +308,20 @@ async fn rustfs_owner_kill_preserves_three_acknowledged_settlements() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn filesystem_owner_kill_preserves_three_acknowledged_settlements() {
+    run_filesystem_process_fault(AFTER_SETTLEMENT, "ack", &acknowledged_payload(true)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn filesystem_owner_kill_after_three_leases_reclaims_exact_attempts() {
+    run_filesystem_process_fault(AFTER_LEASE, "ack", &acknowledged_payload(true)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn filesystem_owner_kill_before_eight_primitive_writes_has_no_ghost_state() {
+    run_filesystem_process_fault(BEFORE_WRITE, "ready", b"absent").await;
+}
+
+fn acknowledged_payload(include_settlement_marker: bool) -> Vec<u8> {
     let mut expected = Vec::from(SQL_PAYLOAD);
     expected.extend_from_slice(KV_PAYLOAD);
     expected.extend_from_slice(BLOB_PAYLOAD);
@@ -316,8 +330,10 @@ async fn filesystem_owner_kill_preserves_three_acknowledged_settlements() {
     expected.extend_from_slice(WORKFLOW_RESULT);
     expected.extend_from_slice(b"activity-result");
     expected.extend_from_slice(EFFECT_RESULT);
-    expected.extend_from_slice(CRON_PAYLOAD);
-    run_filesystem_process_fault(AFTER_SETTLEMENT, "ack", &expected).await;
+    if include_settlement_marker {
+        expected.extend_from_slice(CRON_PAYLOAD);
+    }
+    expected
 }
 
 async fn run_process_fault(case: &str, barrier: &str, expected: &[u8]) {
