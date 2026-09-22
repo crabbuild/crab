@@ -112,6 +112,13 @@ jobs:
             --signing-key-file "$QUALIFICATION_KEY_FILE" \
             --output "$evidence_root/protected"
           test -d "$evidence_root/protected"
+          if find "$evidence_root" -type l -print -quit | grep --quiet .; then
+            echo "::error::Protected evidence must not contain symlinks." >&2
+            exit 1
+          fi
+          mapfile -t protected_dirs < <(find "$evidence_root" -type d -name protected -print)
+          test "${#protected_dirs[@]}" -eq 1
+          test "${protected_dirs[0]}" = "$evidence_root/protected"
 
       - name: Verify every protected matrix in a fresh process
         shell: bash
@@ -123,10 +130,13 @@ jobs:
           evidence_root="${RUNNER_TEMP}/crab-cell-runtime-protected"
           protected_dir="$evidence_root/protected"
           test -d "$protected_dir"
-          if find "$protected_dir" -type l -print -quit | grep --quiet .; then
+          if find "$evidence_root" -type l -print -quit | grep --quiet .; then
             echo "::error::Protected evidence must not contain symlinks." >&2
             exit 1
           fi
+          mapfile -t protected_dirs < <(find "$evidence_root" -type d -name protected -print)
+          test "${#protected_dirs[@]}" -eq 1
+          test "${protected_dirs[0]}" = "$protected_dir"
           required_profiles=(
             "local-provider-v1|qualification-matrix-local-provider.json"
             "scale-v1|qualification-matrix.json"
