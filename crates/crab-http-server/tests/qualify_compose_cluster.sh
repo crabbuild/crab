@@ -1034,12 +1034,14 @@ stop_fallback_member() {
 # first publishes an object-covered mutation, then every original member is
 # stopped before the owner is killed. Recovery must therefore use the bounded
 # any-node path and still restore exact data from RustFS.
-resume_service server
-resume_service server-d
 # A stale process fences itself once its lease is renewed after the freeze.
-# Recreate the node to model the orchestrator restart that makes the old
-# owner eligible to rejoin; unfreezing alone cannot restart an exited node.
-"${compose[@]}" up --detach --no-build --force-recreate server proxy server-d >/dev/null
+# Remove the stopped node and its namespace proxy explicitly so the next start
+# models an orchestrator replacement rather than reusing the fenced process.
+for service in proxy server server-d; do
+  kill_service "$service" >/dev/null 2>&1 || true
+  remove_stopped_service "$service" >/dev/null 2>&1 || true
+done
+"${compose[@]}" up --detach --no-build server proxy server-d >/dev/null
 "${compose[@]}" up --detach --no-build server-c >/dev/null
 wait_for_healthy server
 wait_for_healthy server-c
