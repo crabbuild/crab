@@ -64,12 +64,7 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
             CatalogRole::Sql,
             fixture::SQL_MODULE,
             40,
-            |transaction| {
-                transaction.execute_batch(
-                    "CREATE TABLE qualification_rows (id INTEGER PRIMARY KEY, payload BLOB NOT NULL)",
-                )?;
-                Ok(())
-            },
+            fixture::install_reference_sql_schema,
         )
         .await
         .expect("source SQL Cell"),

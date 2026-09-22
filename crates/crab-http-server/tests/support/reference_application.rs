@@ -128,6 +128,16 @@ fn descriptor(
 pub struct ReferenceSql;
 pub struct ReferenceCronDestination;
 
+pub fn install_reference_sql_schema(
+    transaction: &crab_ltx::rusqlite::Transaction<'_>,
+) -> Result<()> {
+    transaction.execute_batch(
+        "CREATE TABLE qualification_rows (id INTEGER PRIMARY KEY, payload BLOB NOT NULL);
+         CREATE TABLE qualification_cron_invocations (schedule_id BLOB NOT NULL, generation INTEGER NOT NULL, occurrence INTEGER NOT NULL, scheduled_at_ms INTEGER NOT NULL, payload BLOB NOT NULL, PRIMARY KEY (schedule_id, generation, occurrence))",
+    )?;
+    Ok(())
+}
+
 impl Command for ReferenceCronDestination {
     const MODULE: &'static str = SQL_MODULE;
     const ID: u32 = 6;
