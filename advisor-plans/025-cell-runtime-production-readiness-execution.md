@@ -38,13 +38,16 @@
 The `public_cell_qualification.rs` test is a typed **smoke**, not a primitive
 fault matrix. It now reports measured acknowledgements without manufacturing
 retry, rejection, or ambiguity from workload hints. Its lifecycle bitset marks
-only observed happy paths and SQL, KV, Blob, Queue, Cron, Workflow, and Effects
-duplicate checks (15 of 56 bits); the other scheduled cases remain unmarked.
+only observed happy paths and SQL, KV, Blob, Queue, Cron, Workflow, Activity,
+and Effects duplicate checks (16 of 56 bits); the other scheduled cases remain
+unmarked.
 SQL, KV, Blob, Cron, Workflow, and Effects replay the same mutation identity
 and compare the first receipt and outcome; Queue resends the same producer
 identity under a distinct request and checks one message and zero remaining
 ready or leased work. Workflow also checks the terminal event sequence and
-Effects checks the settled lease. KV expiry is
+Effects checks the settled lease. Activity repeats its completion token under a
+distinct request and checks one terminal Workflow event, exact result, and no
+live lease. KV expiry is
 checked separately through the same public typed host because waiting for a
 real TTL inside one measured operation can exceed the PR latency threshold.
 The separate check does not
@@ -90,11 +93,18 @@ run with the TTL wait inside one operation failed the unchanged 5-second PR
 latency threshold. Scheduled lifecycle cases and independently checked
 protected evidence remain open for every primitive; expiry still needs a
 separate case artifact tied to the scheduled operation.
-The public Activity capability runs claims and completions inside
-`ActivitySupervisor`. It now resolves an ambiguous completion in the request
-ledger and retries an absent request with the same identity and result. A
-second idle supervisor poll or duplicate Workflow start is not Activity
-duplicate evidence.
+The 16-bit single-row and ten-row in-memory smokes passed on 2026-09-22. A
+focused Activity duplicate run also passed on isolated RustFS, including the
+exact terminal Workflow result read by a separate typed client and zero
+reservations. Its observer shares the node process. The full 16-bit RustFS
+smoke is not qualified: one attempt exceeded the unchanged 5-second p99 limit,
+and a second attempt lost a 5-second Effect lease before validation. Neither
+attempt is promoted to a passing matrix receipt.
+The public Activity capability runs happy-path claims and completions inside
+`ActivitySupervisor`; the local duplicate case uses the typed claim and
+completion commands to observe Activity completion deduplication. The
+supervisor resolves an ambiguous completion in the request ledger and retries
+an absent request with the same identity and result.
 `ApplicationHandle::resolve` now checks the pending target against the compiled
 application and forwards the existing request-ledger lookup. Fault executors
 can use it to distinguish a committed command from an absent or still-unknown
