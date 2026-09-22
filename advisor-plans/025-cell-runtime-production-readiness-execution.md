@@ -49,12 +49,16 @@ checked separately through the same public typed host because waiting for a
 real TTL inside one measured operation can exceed the PR latency threshold.
 The separate check does not
 claim a workload case bit or protected evidence.
-`public_cell_lease_expiry.rs` exercises Queue and source Effect lease expiry
-through the public typed host. It checks rejection of the expired token,
-reclaim with the same identity and a new token/attempt, final settlement,
-independent typed observation, and zero reservations on both in-memory and
-isolated RustFS storage. These are local same-process cases; destination
-Effect delivery expiry and protected scheduled expiry evidence remain open.
+`public_cell_lease_expiry.rs` exercises Blob upload expiry and Queue, Activity,
+and source Effect lease expiry through the public typed host. The lease cases
+check rejection of the expired token, reclaim with the same identity and a new
+token/attempt, final settlement, independent typed observation, and zero
+reservations on both in-memory and isolated RustFS storage. Activity also
+checks an exact terminal Workflow result and duplicate completion without a
+second event. Blob checks that an acknowledged part stays invisible after the
+upload expires and a fresh upload can publish exact bytes under the same key.
+These are local same-process cases; destination Effect delivery expiry and
+protected scheduled expiry evidence remain open.
 The workload's precomputed outcome counts are advisory; the run-artifact
 validator binds scheduled attempts and validates the measured outcomes. The
 local ten-row test still reuses the same primitive workload for every row.
