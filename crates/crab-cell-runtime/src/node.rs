@@ -23,7 +23,7 @@ const MAX_CLOCK_SKEW_MS: i64 = 5 * 60_000;
 const STALE_ADVERTISEMENT_RETENTION_MS: i64 = MAX_CLOCK_SKEW_MS + MAX_ADVERTISEMENT_LIFETIME_MS;
 const MAX_STALE_COLLECTION_ITEMS: usize = 1_024;
 const MAX_LIVE_NODE_RECORDS: usize = 10_000;
-const RECOVERY_CANDIDATE_READ_CONCURRENCY: usize = 32;
+const NODE_DIRECTORY_READ_CONCURRENCY: usize = 32;
 const SIGNING_DOMAIN: &[u8] = b"crab.node.v1\0";
 const PLACEMENT_SIGNING_DOMAIN: &[u8] = b"crab.node-placement.v1\0";
 const NODE_LOG_SELECTION_DOMAIN: &[u8] = b"crab.node-log.member.v1\0";
@@ -1013,7 +1013,7 @@ impl NodeDirectory {
                     Ok(Some((session, eligible, members)))
                 }
             })
-            .buffer_unordered(RECOVERY_CANDIDATE_READ_CONCURRENCY);
+            .buffer_unordered(NODE_DIRECTORY_READ_CONCURRENCY);
         let mut candidates = RecoveryCandidateWindow::new(now_ms, limit)?;
         while let Some(record) = records.next().await {
             let Some((session, eligible, members)) = record? else {
@@ -1369,42 +1369,58 @@ impl NodeDirectory {
             }));
         }
         let prefix = self.layout.node_directory_path();
-        let mut stream = self.layout.store().inner().list(Some(&prefix));
+        let stream = self.layout.store().inner().list(Some(&prefix));
+        let mut records = stream
+            .map(|item| {
+                let prefix = prefix.clone();
+                async move {
+                    let meta =
+                        item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?;
+                    let (body, _) = match self
+                        .layout
+                        .store()
+                        .get_with_etag_bounded(&meta.location, MAX_NODE_BYTES)
+                        .await
+                    {
+                        Ok(value) => value,
+                        Err(StorageError::NotFound { .. }) => return Ok(None),
+                        Err(error) => return Err(error.into()),
+                    };
+                    let NodeRecord::Advertisement(advertisement) =
+                        NodeRecord::decode_canonical(&body)?
+                    else {
+                        return Ok(None);
+                    };
+                    validate_record_path(&self.layout, advertisement.session, &meta.location)?;
+                    match scan {
+                        AdvertisementScan::LiveRelease => {
+                            if advertisement.expires_at_ms <= now_ms {
+                                return Ok(None);
+                            }
+                            self.validate(&advertisement, now_ms)?;
+                        }
+                        AdvertisementScan::AdvertisedFleet => {
+                            advertisement.validate_shape()?;
+                            advertisement.verify_signature()?;
+                            if advertisement.fleet != self.fleet
+                                || advertisement.issued_at_ms
+                                    > now_ms.saturating_add(MAX_CLOCK_SKEW_MS)
+                            {
+                                return Err(Error::Node(
+                                    "advertised node fleet or issue time differs",
+                                ));
+                            }
+                        }
+                    }
+                    Ok(Some(*advertisement))
+                }
+            })
+            .buffer_unordered(NODE_DIRECTORY_READ_CONCURRENCY);
         let mut advertisements = Vec::new();
-        while let Some(item) = stream.next().await {
-            let meta = item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?;
-            let (body, _) = match self
-                .layout
-                .store()
-                .get_with_etag_bounded(&meta.location, MAX_NODE_BYTES)
-                .await
-            {
-                Ok(value) => value,
-                Err(StorageError::NotFound { .. }) => continue,
-                Err(error) => return Err(error.into()),
-            };
-            let NodeRecord::Advertisement(advertisement) = NodeRecord::decode_canonical(&body)?
-            else {
+        while let Some(advertisement) = records.next().await {
+            let Some(advertisement) = advertisement? else {
                 continue;
             };
-            validate_record_path(&self.layout, advertisement.session, &meta.location)?;
-            match scan {
-                AdvertisementScan::LiveRelease => {
-                    if advertisement.expires_at_ms <= now_ms {
-                        continue;
-                    }
-                    self.validate(&advertisement, now_ms)?;
-                }
-                AdvertisementScan::AdvertisedFleet => {
-                    advertisement.validate_shape()?;
-                    advertisement.verify_signature()?;
-                    if advertisement.fleet != self.fleet
-                        || advertisement.issued_at_ms > now_ms.saturating_add(MAX_CLOCK_SKEW_MS)
-                    {
-                        return Err(Error::Node("advertised node fleet or issue time differs"));
-                    }
-                }
-            }
             if advertisements.len() == limit {
                 return Err(Error::Node(match scan {
                     AdvertisementScan::LiveRelease => "live node directory exceeds its limit",
@@ -1413,7 +1429,7 @@ impl NodeDirectory {
                     }
                 }));
             }
-            advertisements.push(*advertisement);
+            advertisements.push(advertisement);
         }
         advertisements
             .sort_unstable_by(|left, right| left.session.as_bytes().cmp(right.session.as_bytes()));
