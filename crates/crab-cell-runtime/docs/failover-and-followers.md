@@ -186,9 +186,8 @@ the old gate only after every issued sequence is object-covered, best-effort
 retires old lanes behind durable append fences, and CASes a fresh inactive
 epoch. Recruitment retries while the node remains healthy and leaves a
 one-node fleet on the object path.
-The preferred
-shard-zero scanner now inventories expired active node
-logs with at most 32 concurrent record reads, selects a bounded rotating
+The node-directory scanners use at most 32 concurrent record reads. The preferred
+shard-zero scanner now inventories expired active node logs, selects a bounded rotating
 window, claims at most two concurrently, scans at most 10,000 affected Cells,
 renews each recovery claim while gathering and pinning, refreshes the claim
 once more before the final seal, and bounds that seal's object-store CAS so a
