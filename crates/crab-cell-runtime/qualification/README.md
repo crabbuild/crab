@@ -139,7 +139,7 @@ cargo test --locked -p crab-http-server --test public_cell_process_fault \
 ```
 
 It starts an owner, successor, and independent observer as separate processes,
-kills the owner after acknowledged leases and settlements, and verifies all
-primitive outcomes through the typed `CellNode` handle. The filesystem CAS
-backend is a deterministic lifecycle regression fixture only; it is not a
-provider, Kubernetes, or large-scale qualification receipt.
+kills the owner before writes, after leases, and after settlements, and
+verifies all primitive outcomes through typed `CellNode` handles. The
+filesystem CAS backend is a deterministic lifecycle regression fixture only;
+it is not a provider, Kubernetes, or large-scale qualification receipt.
