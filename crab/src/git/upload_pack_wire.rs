@@ -764,13 +764,24 @@ where
                         return reject_protocol_request(writer, error, cancellation).await;
                     }
                 };
+                // Protocol-v2 sends haves in one or more negotiation rounds
+                // and omits them from the terminal `done` request. Retain
+                // that complete client have set before deciding whether the
+                // request is a cold clone or changing the visibility proof;
+                // otherwise a complete-view promotion can regenerate the
+                // entire repository for an ordinary incremental fetch.
+                merge_negotiated_haves(
+                    &mut negotiated_haves,
+                    &mut negotiated_have_set,
+                    &fetch.haves,
+                )?;
                 let tip_bound = fetch_snapshot.as_ref().is_some_and(|(_, proof)| {
                     proof.as_ref().is_some_and(|proof| {
                         matches!(proof, UploadPackVisibilityProof::TipBound { .. })
                     })
                 });
                 let cold_clone_needs_complete_view =
-                    fetch.done && fetch.haves.is_empty() && cold_clone_pack.is_none();
+                    fetch.done && negotiated_haves.is_empty() && cold_clone_pack.is_none();
                 if tip_bound
                     && (cold_clone_needs_complete_view
                         || !tip_bound_fetch_eligible(&fetch, fetch_policy, &visible_ref_names))
@@ -822,24 +833,8 @@ where
                     discovery_packs = Vec::new();
                     fetch_snapshot = Some(admitted);
                 }
-                let tip_bound = fetch_snapshot.as_ref().is_some_and(|(_, proof)| {
-                    proof.as_ref().is_some_and(|proof| {
-                        matches!(proof, UploadPackVisibilityProof::TipBound { .. })
-                    })
-                });
-                if tip_bound {
-                    merge_negotiated_haves(
-                        &mut negotiated_haves,
-                        &mut negotiated_have_set,
-                        &fetch.haves,
-                    )?;
-                    if fetch.done {
-                        // Protocol-v2 sends haves in one or more negotiation
-                        // rounds and omits them from the terminal `done`
-                        // request. Keep the transition planner bound to the
-                        // complete client have set.
-                        fetch.haves = negotiated_haves.clone();
-                    }
+                if fetch.done {
+                    fetch.haves = negotiated_haves.clone();
                 }
                 let (repository, proof) = fetch_snapshot.as_ref().ok_or_else(|| {
                     CrabError::Internal("upload-pack did not retain fetch admission".to_owned())

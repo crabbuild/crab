@@ -1548,6 +1548,31 @@ fresh 5,000-commit replay, repeated fetch/repack matrix, hosted-provider
 latency, and v1-retirement gates remain open until they are run on the final
 branch and recorded below.
 
+### 2.5.47 September 21 protocol-v2 negotiation haves retention
+
+The first multi-member requalification exposed a negotiation-state bug after
+the cold-clone promotion fix: Git protocol-v2 can send haves in several fetch
+rounds and omit them from the terminal `done` request. The wire server was
+therefore replacing the authenticated frontier with an empty terminal list,
+which selected the complete repository for an ordinary incremental fetch. The
+server now merges and de-duplicates haves before view promotion and copies the
+complete set into the terminal request. This preserves the fail-closed proof
+while keeping incremental selection bound to `wants - haves`.
+
+A non-shallow full-history Kubernetes source on local RustFS passed incremental
+fetches after pushes 1 and 5, with exact remote tips and no missing-object
+errors. The responses were 49.9 MiB and 55.7 MiB; the earlier faulty path
+returned a 1.09 GiB complete pack for the same class of request. The remaining
+15,296--17,127 range reads and 16.2--19.9 s wall time are current performance
+data, not a release claim; locator-read coalescing and the 5,000-push gate are
+still open.
+
+The replay subsequently reached a source commit carrying a 503,980,520-byte
+Crab/Xet pointer and stopped with `CRAB-E0086` because the replay harness had
+not staged that pointer's local chunks. That is a staging-contract qualification
+failure, not an accepted fetch result: large-file replay must run through the
+normal `crab add` staging path before it can close the xorb/shard gate.
+
 ## 3. Goals
 
 The implementation MUST:
