@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use bytes::Bytes;
 use crab_ltx::CellStorageLayout;
@@ -28,6 +28,7 @@ const MAX_LIVE_NODE_RECORDS: usize = 10_000;
 const SIGNING_DOMAIN: &[u8] = b"crab.node.v1\0";
 const PLACEMENT_SIGNING_DOMAIN: &[u8] = b"crab.node-placement.v1\0";
 const NODE_LOG_SELECTION_DOMAIN: &[u8] = b"crab.node-log.member.v1\0";
+const RECOVERY_CANDIDATE_ROTATION_DOMAIN: &[u8] = b"crab.node-recovery-candidate.v1\0";
 const PLACEMENT_SCHEMA_VERSION: u32 = 1;
 
 /// Current private follower-log wire and persistence protocol.
@@ -999,7 +1000,7 @@ impl NodeDirectory {
         };
         let prefix = self.layout.node_directory_path();
         let mut stream = self.layout.store().inner().list(Some(&prefix));
-        let mut candidates = Vec::new();
+        let mut candidates = RecoveryCandidateWindow::new(now_ms, limit)?;
         while let Some(item) = stream.next().await {
             let meta = item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?;
             let Some((record, _)) = self.load_record_at(&meta.location).await? else {
@@ -1061,12 +1062,8 @@ impl NodeDirectory {
                 continue;
             }
             candidates.push(session);
-            if candidates.len() == limit {
-                break;
-            }
         }
-        candidates.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-        Ok(candidates)
+        Ok(candidates.finish())
     }
 
     /// Extends an exact recovery claim while its claimant remains live.
@@ -1946,6 +1943,71 @@ impl NodeDirectory {
             return Err(Error::Node("advertisement fleet, image or release differs"));
         }
         Ok(())
+    }
+}
+
+/// Bounded rotating window over the expired sessions discovered in one scan.
+///
+/// Object-store listings are not a durable work queue. Keeping only the first
+/// page lets a permanently failing early session starve every later session,
+/// so the window rotates its start key while retaining at most `2 * limit`
+/// session IDs.
+struct RecoveryCandidateWindow {
+    start: [u8; 16],
+    limit: usize,
+    after: BTreeSet<[u8; 16]>,
+    before: BTreeSet<[u8; 16]>,
+}
+
+impl RecoveryCandidateWindow {
+    fn new(now_ms: i64, limit: usize) -> Result<Self> {
+        if now_ms < 0 || limit == 0 {
+            return Err(Error::Node("node recovery candidate window is invalid"));
+        }
+        let bucket = u64::try_from(now_ms / 1_000)
+            .map_err(|_| Error::Node("node recovery candidate rotation overflows"))?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(RECOVERY_CANDIDATE_ROTATION_DOMAIN);
+        hasher.update(&bucket.to_be_bytes());
+        let digest = hasher.finalize();
+        let mut start = [0_u8; 16];
+        start.copy_from_slice(&digest.as_bytes()[..16]);
+        Ok(Self::with_start(start, limit))
+    }
+
+    fn with_start(start: [u8; 16], limit: usize) -> Self {
+        Self {
+            start,
+            limit,
+            after: BTreeSet::new(),
+            before: BTreeSet::new(),
+        }
+    }
+
+    fn push(&mut self, session: SessionId) {
+        let key = *session.as_bytes();
+        let window = if key >= self.start {
+            &mut self.after
+        } else {
+            &mut self.before
+        };
+        if !window.insert(key) {
+            return;
+        }
+        if window.len() > self.limit
+            && let Some(last) = window.iter().next_back().copied()
+        {
+            window.remove(&last);
+        }
+    }
+
+    fn finish(self) -> Vec<SessionId> {
+        self.after
+            .into_iter()
+            .chain(self.before)
+            .take(self.limit)
+            .map(SessionId::from_bytes)
+            .collect()
     }
 }
 

@@ -16,6 +16,39 @@ use crate::{
 
 const NOW_MS: i64 = 1_000_000;
 
+#[test]
+fn recovery_candidate_window_rotates_without_growing_with_directory_size() {
+    let sessions = [
+        SessionId::from_bytes([1; 16]),
+        SessionId::from_bytes([2; 16]),
+        SessionId::from_bytes([3; 16]),
+        SessionId::from_bytes([4; 16]),
+    ];
+    let mut first = RecoveryCandidateWindow::with_start([2; 16], 2);
+    for session in sessions {
+        first.push(session);
+    }
+    assert_eq!(
+        first.finish(),
+        [
+            SessionId::from_bytes([2; 16]),
+            SessionId::from_bytes([3; 16])
+        ]
+    );
+
+    let mut wrapped = RecoveryCandidateWindow::with_start([4; 16], 2);
+    for session in sessions {
+        wrapped.push(session);
+    }
+    assert_eq!(
+        wrapped.finish(),
+        [
+            SessionId::from_bytes([4; 16]),
+            SessionId::from_bytes([1; 16])
+        ]
+    );
+}
+
 fn node(session: SessionId) -> NodeId {
     NodeId::from_bytes(*session.as_bytes())
 }
