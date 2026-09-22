@@ -36,7 +36,7 @@ pub(super) async fn run() {
         .await
         .expect("acknowledged SQL write");
     assert_eq!(committed.output[0].rows_affected, 1);
-    let layout = CellStorageLayout::new(store, root, *application.as_bytes());
+    let layout = CellStorageLayout::new(store.clone(), root, *application.as_bytes());
     let authority = CellAuthority::new(layout);
     let observed = authority
         .load(target.cell_id())
@@ -283,6 +283,20 @@ pub(super) async fn run() {
     } else {
         (None, None, None, None)
     };
+    let expiry_blob = if case == AFTER_BLOB_EXPIRY {
+        let observer_client = CellClient::local_many(Arc::clone(&registry), handles.clone())
+            .expect("source Blob expiry observer client");
+        let observer = node
+            .application_handle::<fixture::ReferenceApplication>(
+                observer_client,
+                tenant,
+                application,
+            )
+            .with_blob_artifact_store(BlobArtifactStore::new(store));
+        Some(process_blob_expiry::owner(&typed, &observer).await)
+    } else {
+        None
+    };
     let leases = if case == AFTER_LEASE {
         let claimed = queue
             .claim(
@@ -525,6 +539,7 @@ pub(super) async fn run() {
         blob_sequence: published.receipt.commit_sequence,
         blob_etag: etag,
         blob_size: size,
+        expiry_blob,
         queue_sequence: queued.receipt.commit_sequence,
         queue_message_id: message_id,
         cron_sequence: scheduled.receipt.commit_sequence,

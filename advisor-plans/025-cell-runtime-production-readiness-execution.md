@@ -356,6 +356,17 @@ absent at or after the acknowledged put sequence, preserve the unrelated
 acknowledged KV value/version, and drain to zero reservations. Filesystem and
 isolated RustFS three-process cases passed on 2026-09-22. The scheduled KV
 expiry artifact and protected provider evidence remain open.
+The Blob upload-expiry boundary now kills the owner after an acknowledged
+multipart Begin and part upload, while a separate typed client confirms the
+object is still unpublished. A fresh successor restores the root, waits for
+expiry, rejects the stale completion, runs a typed Blob maintenance Tick, and
+checks the old upload ID is gone through a rejected Abort. It then publishes a
+new upload under the same key. A third process restores the successor's root,
+reads the exact bytes, ETag, size, and commit sequence, and independently
+confirms the old upload ID is absent. Filesystem and isolated RustFS
+three-process cases passed on 2026-09-22, with zero runtime reservations after
+each drain. Physical orphan-part GC, scheduled case artifacts, and protected
+provider evidence remain open.
 The Cron expiry boundary now commits a schedule, holds a signed pause past its
 identity expiry, and confirms that the pause was rejected before owner kill.
 Fresh successor and third processes restore from durable storage and each
