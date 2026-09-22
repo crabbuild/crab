@@ -909,7 +909,7 @@ async fn public_cell_node_runs_complete_matrix_through_typed_apis() {
                     false,
                 ),
                 1,
-                2,
+                1_001,
                 b"none",
                 artifact_digests,
                 Vec::new(),

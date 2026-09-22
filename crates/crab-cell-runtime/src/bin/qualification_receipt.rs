@@ -42,6 +42,12 @@ fn run() -> Result<(), String> {
                 .map_err(|error| error.to_string())?,
                 None => QualificationProfile::pr_contract(),
             };
+            if profile.requires_protected_evidence() {
+                return Err(
+                    "emit cannot create protected evidence; use bind-protected with a measured run artifact"
+                        .into(),
+                );
+            }
             if args.next().is_some() {
                 return Err(usage());
             }

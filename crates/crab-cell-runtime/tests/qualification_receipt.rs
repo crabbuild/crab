@@ -268,7 +268,7 @@ async fn public_protected_matrix_binds_run_artifact_profile_and_signer() {
                     false,
                 ),
                 1,
-                2,
+                1_001,
                 b"none",
                 raw_digests,
                 vec![QualificationOwnership::new(
@@ -321,7 +321,7 @@ async fn public_protected_matrix_binds_run_artifact_profile_and_signer() {
             &profile,
             &evidence,
             trusted_signer,
-            2 + QUALIFICATION_PROTECTED_EVIDENCE_MAX_AGE_MS + 1,
+            1_001 + QUALIFICATION_PROTECTED_EVIDENCE_MAX_AGE_MS + 1,
         )
         .is_err()
     );

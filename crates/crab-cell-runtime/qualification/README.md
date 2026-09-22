@@ -68,6 +68,13 @@ key symlink. It never generates a protected receipt from the synthetic
 `emit` path; the resulting receipt must still pass `verify-matrix` with the
 pinned public key before release packaging.
 
+Named provider profiles also require one canonical
+`QualificationProviderEvidence` raw artifact beside the run and workload
+artifacts. It binds the provider/profile digest and workload seed, and records
+successful conditional, range, and multipart checks. Missing, duplicated,
+partial, or mismatched provider semantics are rejected by both the binder and
+the fresh-process matrix verifier.
+
 The default workload contains a deterministic, seed-bound case schedule for each
 primitive: `happy`, `retry`, `duplicate`, `expiry`, `cancellation`, `owner-loss`,
 and `recovery`. Adapters inspect `QualificationOperation::case()` (or its
