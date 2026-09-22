@@ -39,8 +39,8 @@ The `public_cell_qualification.rs` test is a typed **smoke**, not a primitive
 fault matrix. It now reports measured acknowledgements without manufacturing
 retry, rejection, or ambiguity from workload hints. Its lifecycle bitset marks
 only observed happy paths, SQL, KV, Blob, Queue, Cron, Workflow, Activity,
-and Effects duplicate checks, and SQL cancellation (17 of 56 bits); the other
-scheduled cases remain unmarked.
+and Effects duplicate checks, and SQL, KV, Cron, and Workflow cancellation
+(20 of 56 bits); the other scheduled cases remain unmarked.
 SQL, KV, Blob, Cron, Workflow, and Effects replay the same mutation identity
 and compare the first receipt and outcome; Queue resends the same producer
 identity under a distinct request and checks one message and zero remaining
@@ -52,11 +52,11 @@ checked separately through the same public typed host because waiting for a
 real TTL inside one measured operation can exceed the PR latency threshold.
 The separate check does not
 claim a workload case bit or protected evidence.
-The scheduled SQL cancellation case pauses a signed peer mutation after
-dispatch, aborts the caller, resolves the acknowledged result from a separate
-typed client, and reads the exact committed row and receipt. Each scheduled
-occurrence gets a fresh one-shot fault; the 64-operation workload can schedule
-the same case more than once.
+The scheduled SQL, KV, Cron, and Workflow cancellation cases pause a signed
+peer mutation after dispatch, abort the caller, resolve the acknowledged
+result from a separate typed client, and read the exact committed row, value,
+schedule, or Workflow run. Each scheduled occurrence gets a fresh one-shot
+fault; the 64-operation workload can schedule the same case more than once.
 `public_cell_lease_expiry.rs` exercises Blob upload expiry and Queue, Activity,
 and source Effect lease expiry through the public typed host. The lease cases
 check rejection of the expired token, reclaim with the same identity and a new
@@ -112,6 +112,10 @@ full 17-bit RustFS workload executed all 64 operations but its artifact failed
 the unchanged 5-second p99 threshold (measured p99 16.778 seconds over 244
 seconds). It did not reach the later KV expiry and shutdown reservation checks,
 and is not a passing qualification receipt.
+The 20-bit single-row and ten-row in-memory smokes passed on 2026-09-22.
+The scheduled KV, Cron, and Workflow cancellation cases passed together on
+isolated RustFS, including zero reservations after shutdown. The full 20-bit
+RustFS workload and protected matrix remain unqualified.
 The public Activity capability runs happy-path claims and completions inside
 `ActivitySupervisor`; the local duplicate case uses the typed claim and
 completion commands to observe Activity completion deduplication. The

@@ -37,8 +37,8 @@ mod qualification_local_fixture;
 #[path = "support/qualification_peer.rs"]
 #[expect(dead_code, reason = "this test uses the paused peer fault helper")]
 mod qualification_peer;
-#[path = "support/qualification_sql_cancellation.rs"]
-mod qualification_sql_cancellation;
+#[path = "support/qualification_scheduled_cancellation.rs"]
+mod qualification_scheduled_cancellation;
 
 use qualification::{assert_zero_reservations, fixed_id, identity, rustfs_public_store};
 use qualification_fixture::{PublicHostFixture, public_host_fixture_with_store};
@@ -121,7 +121,8 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor<'_> {
                 .map_err(|_| Error::Control("public qualification row ID overflow"))?;
             let mutation_index = operation_id.saturating_mul(100);
             let mutation = identity(mutation_index, now_ms);
-            if operation.primitive() == "sql" && operation.case() == QualificationCase::Cancellation
+            if operation.case() == QualificationCase::Cancellation
+                && matches!(operation.primitive(), "sql" | "kv" | "cron" | "workflow")
             {
                 let (client, entered, dispatched) =
                     peer_client_with_paused_mutation(Arc::clone(registry), handles.to_vec(), true);
@@ -130,18 +131,41 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor<'_> {
                     tenant,
                     application,
                 );
-                qualification_sql_cancellation::run(
+                let cancellation = qualification_scheduled_cancellation::CancellationCase::new(
                     &peer,
                     &observer,
                     entered,
                     &dispatched,
                     tenant,
                     application,
-                    sql_row_id,
-                    operation.nonce(),
-                    mutation,
-                )
-                .await?;
+                );
+                match operation.primitive() {
+                    "sql" => {
+                        cancellation
+                            .sql(sql_row_id, operation.nonce(), mutation)
+                            .await?
+                    }
+                    "kv" => {
+                        cancellation
+                            .kv(operation_id, operation.nonce(), mutation)
+                            .await?
+                    }
+                    "cron" => {
+                        cancellation
+                            .cron(operation_id, operation.nonce(), mutation)
+                            .await?
+                    }
+                    "workflow" => {
+                        cancellation
+                            .workflow(operation_id, operation.nonce(), mutation)
+                            .await?
+                    }
+                    _ => {
+                        return Err(Error::Control(
+                            "public qualification cancellation primitive",
+                        ));
+                    }
+                }
                 return Ok(QualificationExecution::acknowledged(true)
                     .with_case(QualificationCase::Cancellation));
             }
@@ -846,7 +870,7 @@ async fn rustfs_public_activity_duplicate_case_preserves_one_completion() {
         &QualificationProfile::pr_contract(),
         41,
         1,
-        QUALIFICATION_CASE_COVERAGE_OPERATIONS as u64,
+        QUALIFICATION_CASE_COVERAGE_OPERATIONS,
         1,
     )
     .expect("qualification case schedule");
@@ -896,7 +920,7 @@ async fn run_scheduled_sql_cancellation_case(
         &QualificationProfile::pr_contract(),
         41,
         1,
-        QUALIFICATION_CASE_COVERAGE_OPERATIONS as u64,
+        QUALIFICATION_CASE_COVERAGE_OPERATIONS,
         1,
     )
     .expect("qualification case schedule");
@@ -921,6 +945,62 @@ async fn run_scheduled_sql_cancellation_case(
         .expect("SQL cancellation case");
     assert!(execution.verified());
     assert_eq!(execution.case(), Some(QualificationCase::Cancellation));
+    drop(executor);
+    drop(typed);
+    node.shutdown().await.expect("qualification shutdown");
+    assert_zero_reservations(&node);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn public_kv_cron_workflow_cancellation_cases_preserve_acknowledged_results() {
+    run_scheduled_data_cancellation_cases(public_host_fixture().await).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_public_kv_cron_workflow_cancellation_cases_preserve_acknowledged_results() {
+    let (store, root) = rustfs_public_store();
+    run_scheduled_data_cancellation_cases(public_host_fixture_with_store(store, root).await).await;
+}
+
+async fn run_scheduled_data_cancellation_cases(
+    (node, typed, tenant, application, _directory, registry, handles, _store): PublicHostFixture,
+) {
+    let workload = QualificationWorkload::generate_with_size(
+        &QualificationProfile::pr_contract(),
+        41,
+        1,
+        QUALIFICATION_CASE_COVERAGE_OPERATIONS,
+        1,
+    )
+    .expect("qualification case schedule");
+    let mut executor = smoke_executor(
+        &node,
+        typed.clone(),
+        &registry,
+        &handles,
+        tenant,
+        application,
+        0,
+    );
+    for primitive in ["kv", "cron", "workflow"] {
+        let operation = workload
+            .iter_operations()
+            .find(|operation| {
+                operation.primitive() == primitive
+                    && operation.case() == QualificationCase::Cancellation
+            })
+            .expect("scheduled cancellation case");
+        let execution = executor
+            .execute(operation)
+            .await
+            .expect("cancellation case");
+        assert!(
+            execution.verified(),
+            "{primitive} cancellation not verified"
+        );
+        assert_eq!(execution.case(), Some(QualificationCase::Cancellation));
+    }
     drop(executor);
     drop(typed);
     node.shutdown().await.expect("qualification shutdown");
@@ -962,7 +1042,7 @@ async fn run_public_typed_primitive_workload(
         .iter()
         .map(|byte| byte.count_ones())
         .sum::<u32>();
-    let observed_smoke_cases = (QUALIFICATION_PRIMITIVES.len() * 2 + 1) as u32;
+    let observed_smoke_cases = (QUALIFICATION_PRIMITIVES.len() * 2 + 4) as u32;
     assert_eq!(covered, observed_smoke_cases);
     assert!(covered < QUALIFICATION_CASE_COVERAGE_OPERATIONS as u32);
     let artifact = summary.artifact(&workload).expect("run artifact");
