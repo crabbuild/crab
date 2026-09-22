@@ -1320,9 +1320,14 @@ fn verify_provider_evidence(
     if !profile.requires_provider_evidence() {
         return Ok(());
     }
-    let mut matches = artifacts
-        .iter()
-        .filter_map(|artifact| QualificationProviderEvidence::decode(artifact).ok());
+    let mut matches = Vec::new();
+    for artifact in artifacts {
+        let Some(candidate) = provider_evidence_candidate(artifact)? else {
+            continue;
+        };
+        matches.push(candidate);
+    }
+    let mut matches = matches.into_iter();
     let evidence = matches.next().ok_or(Error::Control(
         "protected provider evidence is missing its semantics artifact",
     ))?;
@@ -1332,6 +1337,25 @@ fn verify_provider_evidence(
         ));
     }
     evidence.verify_for(profile, run.workload().seed())
+}
+
+fn provider_evidence_candidate(bytes: &[u8]) -> Result<Option<QualificationProviderEvidence>> {
+    // Raw artifacts may use arbitrary formats, but a JSON object that starts
+    // claiming provider semantics must decode completely or fail the receipt;
+    // otherwise a partial duplicate could hide beside a valid artifact.
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Ok(None);
+    };
+    let Some(object) = value.as_object() else {
+        return Ok(None);
+    };
+    if !["conditional", "range", "multipart"]
+        .iter()
+        .any(|field| object.contains_key(*field))
+    {
+        return Ok(None);
+    }
+    QualificationProviderEvidence::decode(bytes).map(Some)
 }
 
 /// Deterministic logical workload artifact for PR, provider, and scale tiers.
@@ -4149,6 +4173,24 @@ mod tests {
                     evidence.clone(),
                     &run,
                     &[&run_bytes, &workload_bytes, &partial_provider_evidence],
+                )
+                .is_err()
+        );
+        let malformed_provider_evidence = br#"{"schema_version":1,"provider":"rustfs","profile":"protected-binder-contract","conditional":true}"#;
+        assert!(
+            runner
+                .emit_protected_run(
+                    &profile,
+                    "binder-source".into(),
+                    Digest::from_bytes([97; 32]),
+                    evidence.clone(),
+                    &run,
+                    &[
+                        &run_bytes,
+                        &workload_bytes,
+                        &provider_evidence,
+                        malformed_provider_evidence
+                    ],
                 )
                 .is_err()
         );
