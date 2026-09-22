@@ -4135,6 +4135,40 @@ mod tests {
                 )
                 .is_err()
         );
+        let partial_provider_evidence =
+            QualificationProviderEvidence::new(&profile, workload.seed(), true, true, false)
+                .unwrap()
+                .encode()
+                .unwrap();
+        assert!(
+            runner
+                .emit_protected_run(
+                    &profile,
+                    "binder-source".into(),
+                    Digest::from_bytes([97; 32]),
+                    evidence.clone(),
+                    &run,
+                    &[&run_bytes, &workload_bytes, &partial_provider_evidence],
+                )
+                .is_err()
+        );
+        assert!(
+            runner
+                .emit_protected_run(
+                    &profile,
+                    "binder-source".into(),
+                    Digest::from_bytes([97; 32]),
+                    evidence.clone(),
+                    &run,
+                    &[
+                        &run_bytes,
+                        &workload_bytes,
+                        &provider_evidence,
+                        &provider_evidence,
+                    ],
+                )
+                .is_err()
+        );
         let receipt = runner
             .emit_protected_run(
                 &profile,
