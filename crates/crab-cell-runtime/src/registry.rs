@@ -423,7 +423,7 @@ pub struct RegistryBuilder {
     maintenance_runners: BTreeMap<&'static str, MaintenanceRunner>,
     effect_runners: BTreeMap<&'static str, EffectRunner>,
     maintenance_operations: BTreeMap<&'static str, (u32, u32)>,
-    effect_operations: BTreeMap<&'static str, (u32, u32, u32, u32)>,
+    effect_operations: BTreeMap<&'static str, (u32, u32, u32, u32, u32)>,
     activity_operations: HashMap<NamespaceId, (u32, u32, u32, u32, u32)>,
 }
 
@@ -587,6 +587,7 @@ impl RegistryBuilder {
                 M::CLAIM_COMMAND_ID,
                 M::LEASE_COMMAND_ID,
                 M::VALIDATE_QUERY_ID,
+                M::STATUS_QUERY_ID,
                 M::CODEC_VERSION,
             ),
         );
@@ -938,7 +939,7 @@ pub struct Registry {
     maintenance_runners: BTreeMap<&'static str, MaintenanceRunner>,
     effect_runners: BTreeMap<&'static str, EffectRunner>,
     maintenance_operations: BTreeMap<&'static str, (u32, u32)>,
-    effect_operations: BTreeMap<&'static str, (u32, u32, u32, u32)>,
+    effect_operations: BTreeMap<&'static str, (u32, u32, u32, u32, u32)>,
     activity_operations: HashMap<NamespaceId, (u32, u32, u32, u32, u32)>,
 }
 
@@ -1297,7 +1298,7 @@ impl Registry {
         if self
             .effect_operations
             .get(module)
-            .is_some_and(|&(claim, lease, _, codec)| {
+            .is_some_and(|&(claim, lease, _, _, codec)| {
                 codec == codec_version && matches!(command_id, id if id == claim || id == lease)
             })
         {
@@ -1326,7 +1327,9 @@ impl Registry {
         if self
             .effect_operations
             .get(module)
-            .is_some_and(|&(_, _, validate, codec)| validate == query_id && codec == codec_version)
+            .is_some_and(|&(_, _, validate, status, codec)| {
+                (validate == query_id || status == query_id) && codec == codec_version
+            })
         {
             return Some("cell.effect.source");
         }

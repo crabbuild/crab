@@ -1,8 +1,9 @@
 use std::{sync::atomic::Ordering, time::Duration};
 
 use crab_cell_runtime::{
-    CellClient, CellTarget, EffectClaimRequest, EffectLeaseOutcome, Error, InvocationError,
-    SqlBatch, SqlStatement, SqlValue, WorkflowOutcome, WorkflowStatus, partition_for_shard,
+    CellClient, CellTarget, EffectClaimRequest, EffectLeaseOutcome, EffectState, EffectStatus,
+    Error, InvocationError, SqlBatch, SqlStatement, SqlValue, WorkflowOutcome, WorkflowStatus,
+    partition_for_shard,
 };
 
 #[path = "support/reference_application.rs"]
@@ -75,18 +76,10 @@ async fn run_expired_delivery(
         .workflow::<fixture::ReferenceWorkflow>()
         .expect("writer Workflow");
     let source = writer
-        .effects::<fixture::ReferenceWorkflow>(workflow_target)
+        .effects::<fixture::ReferenceWorkflow>(workflow_target.clone())
         .expect("writer Effect source");
     let observed_source = observer
-        .effects::<fixture::ReferenceWorkflow>(
-            CellTarget::new(
-                tenant,
-                application,
-                fixture::WORKFLOW_NAMESPACE,
-                &partition_for_shard(0),
-            )
-            .expect("observer Effect target"),
-        )
+        .effects::<fixture::ReferenceWorkflow>(workflow_target.clone())
         .expect("observer Effect source");
     let destination = observer
         .sql::<fixture::ReferenceSql>(sql_target)
@@ -123,6 +116,8 @@ async fn run_expired_delivery(
     };
     assert_eq!(claim.attempt, 1);
     let claim = claim.clone();
+    let effect_id = claim.effect_id;
+    let effect_expires_at_ms = claim.expires_at_ms;
     assert!(
         observed_source
             .validate(vec![claim.clone()], claimed.receipt)
@@ -177,19 +172,31 @@ async fn run_expired_delivery(
             .expect("independent expired Effect observation")
             .output
     );
-    assert!(
-        observed_source
-            .claim(
-                identity(403, now_ms()),
-                EffectClaimRequest {
-                    limit: 1,
-                    lease_ms: 5_000,
-                },
-            )
-            .await
-            .expect("expired source Effect observation")
-            .output
-            .is_empty()
+    let expired = observed_source
+        .claim(
+            identity(403, now_ms()),
+            EffectClaimRequest {
+                limit: 1,
+                lease_ms: 5_000,
+            },
+        )
+        .await
+        .expect("expired source Effect observation");
+    assert!(expired.output.is_empty());
+    let ledger = observed_source
+        .status(effect_id, Some(expired.receipt))
+        .await
+        .expect("independent source Effect ledger observation");
+    assert_eq!(
+        ledger.output,
+        Some(EffectStatus {
+            state: EffectState::Failed,
+            attempt: 1,
+            token_present: false,
+            lease_until_ms: None,
+            expires_at_ms: effect_expires_at_ms,
+            result: None,
+        })
     );
     let after = destination
         .query(None, effect_row_count())

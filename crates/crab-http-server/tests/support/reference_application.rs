@@ -179,6 +179,7 @@ impl EffectModule for ReferenceSql {
     const CLAIM_COMMAND_ID: u32 = 3;
     const LEASE_COMMAND_ID: u32 = 4;
     const VALIDATE_QUERY_ID: u32 = 5;
+    const STATUS_QUERY_ID: u32 = 6;
 }
 impl CellModule for ReferenceSql {
     const NAME: &'static str = SQL_MODULE;
@@ -191,7 +192,7 @@ impl CellModule for ReferenceSql {
             effect_targets: &[],
             dead_letter: None,
         }];
-        descriptor(SQL_MODULE, &[1, 3, 4, 6], &[2, 5], NAMESPACES, &[], &[])
+        descriptor(SQL_MODULE, &[1, 3, 4, 6], &[2, 5, 6], NAMESPACES, &[], &[])
     }
     fn register(self, registry: &mut RegistryBuilder) -> Result<()> {
         register_sql::<Self>(registry)?;
@@ -351,6 +352,7 @@ impl EffectModule for ReferenceCron {
     const CLAIM_COMMAND_ID: u32 = 4;
     const LEASE_COMMAND_ID: u32 = 5;
     const VALIDATE_QUERY_ID: u32 = 6;
+    const STATUS_QUERY_ID: u32 = 7;
 }
 impl CronModule for ReferenceCron {
     const NAMESPACE: NamespaceId = CRON_NAMESPACE;
@@ -368,7 +370,7 @@ impl CellModule for ReferenceCron {
             effect_targets: &[SQL_NAMESPACE],
             dead_letter: None,
         }];
-        descriptor(CRON_MODULE, &[1, 3, 4, 5], &[2, 6], NAMESPACES, &[], &[])
+        descriptor(CRON_MODULE, &[1, 3, 4, 5], &[2, 6, 7], NAMESPACES, &[], &[])
     }
     fn register(self, registry: &mut RegistryBuilder) -> Result<()> {
         register_cron::<Self>(registry)?;
@@ -517,6 +519,7 @@ impl EffectModule for ReferenceWorkflow {
     const CLAIM_COMMAND_ID: u32 = 11;
     const LEASE_COMMAND_ID: u32 = 12;
     const VALIDATE_QUERY_ID: u32 = 13;
+    const STATUS_QUERY_ID: u32 = 14;
 }
 impl CellModule for ReferenceWorkflow {
     const NAME: &'static str = WORKFLOW_MODULE;
@@ -532,7 +535,7 @@ impl CellModule for ReferenceWorkflow {
         descriptor(
             WORKFLOW_MODULE,
             &[1, 2, 3, 4, 6, 7, 8, 9, 11, 12],
-            &[5, 10, 13],
+            &[5, 10, 13, 14],
             NAMESPACES,
             &[WORKFLOW_DIGEST],
             REFERENCE_ACTIVITY_TYPES,

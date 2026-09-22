@@ -10,16 +10,17 @@ use crab_cell_host::CellNodeBuilder;
 use crab_cell_runtime::{
     ActivityCompletion, ActivityCompletionOutcome, ActivityRunOutcome, ActivitySupervisor,
     ApplicationId, BlobArtifactStore, BlobCondition, BlobMutation, BlobMutationOutcome, BlobQuery,
-    BlobQueryResult, CellAuthority, CellCatalog, CellClient, CellReplica, CellStorageLayout,
-    CellTarget, CronMutation, CronMutationOutcome, CronQueryResult, EffectAckRequest,
-    EffectClaimRequest, EffectLease, EffectLeaseCommand, EffectLeaseOutcome, EffectLeaseRequest,
-    IncarnationId, InvocationError, KvAtomicOutcome, KvAtomicRequest, KvMutation,
-    MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest, MutationIdentity,
-    NodeLeaseGuard, Owner, QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome,
-    QueueSendRequest, QueueState, RecoveryManifestStore, ReplicaLimits, Resolution, SessionId,
-    SqlBatch, SqlStatement, SqlValue, SqlWorkerPool, StoredOutcome, TenantId,
-    WorkflowActivityClaimCommand, WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand,
-    WorkflowOutcome, WorkflowStatus, partition_for_shard,
+    BlobQueryResult, BoundedEncoder, CellAuthority, CellCatalog, CellClient, CellReplica,
+    CellStorageLayout, CellTarget, CronMutation, CronMutationOutcome, CronQueryResult,
+    EffectAckRequest, EffectClaimRequest, EffectLease, EffectLeaseCommand, EffectLeaseOutcome,
+    EffectLeaseRequest, EffectState, EffectStatus, IncarnationId, InvocationError, KvAtomicOutcome,
+    KvAtomicRequest, KvMutation, MaintenanceTickCommand, MaintenanceTickOutcome,
+    MaintenanceTickRequest, MutationIdentity, NodeLeaseGuard, Owner, QueueClaimRequest,
+    QueueLeaseOutcome, QueueSendOutcome, QueueSendRequest, QueueState, RecoveryManifestStore,
+    ReplicaLimits, Resolution, SessionId, SqlBatch, SqlResultSet, SqlStatement, SqlValue,
+    SqlWorkerPool, StoredOutcome, TenantId, WireValue, WorkflowActivityClaimCommand,
+    WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand, WorkflowOutcome, WorkflowStatus,
+    partition_for_shard,
 };
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};

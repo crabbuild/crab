@@ -236,6 +236,58 @@ pub(super) async fn run() {
                 .output
                 .is_empty()
         );
+        // Only the lease and settlement fault boundaries retain an Effect ID.
+        // The restored third process must still see the successor's terminal result.
+        let expected_source = acknowledged
+            .settlements
+            .as_ref()
+            .map(|settled| {
+                (
+                    settled.effect_id,
+                    settled.effect_attempt,
+                    settled.effect_expires_at_ms,
+                )
+            })
+            .or_else(|| {
+                acknowledged.leases.as_ref().map(|leased| {
+                    (
+                        leased.effect_id,
+                        leased.effect_attempt + 1,
+                        leased.effect_expires_at_ms,
+                    )
+                })
+            });
+        if let Some((effect_id, attempt, expires_at_ms)) = expected_source {
+            let mut encoded = BoundedEncoder::new(1 << 20).expect("Effect result bound");
+            vec![SqlResultSet {
+                columns: Vec::new(),
+                rows: Vec::new(),
+                rows_affected: 1,
+            }]
+            .encode(&mut encoded)
+            .expect("expected SQL Effect result");
+            let result = encoded.finish();
+            let observed = effects
+                .status(effect_id, None)
+                .await
+                .expect("independent restored Effect source status");
+            assert!(observed.receipt.commit_sequence >= acknowledged.effect_sequence);
+            assert_eq!(
+                observed.output,
+                Some(EffectStatus {
+                    state: EffectState::Delivered,
+                    attempt,
+                    token_present: false,
+                    lease_until_ms: None,
+                    expires_at_ms,
+                    result: Some(result.clone()),
+                })
+            );
+            if let Some(settled) = &acknowledged.settlements {
+                assert_eq!(settled.effect_result, result);
+                assert!(observed.receipt.commit_sequence >= settled.effect_ack_sequence);
+            }
+        }
     } else {
         assert!(rows.output[0].rows.is_empty());
         assert!(rows.output[1].rows.is_empty());

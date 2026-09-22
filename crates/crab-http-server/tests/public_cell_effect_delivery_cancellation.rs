@@ -1,8 +1,9 @@
 use std::{sync::atomic::Ordering, time::Duration};
 
 use crab_cell_runtime::{
-    CellTarget, EffectClaimRequest, EffectLeaseOutcome, Resolution, SqlBatch, SqlResultSet,
-    SqlStatement, SqlValue, WorkflowOutcome, WorkflowStatus, partition_for_shard,
+    CellTarget, EffectClaimRequest, EffectLeaseOutcome, EffectState, EffectStatus, Resolution,
+    SqlBatch, SqlResultSet, SqlStatement, SqlValue, WorkflowOutcome, WorkflowStatus,
+    partition_for_shard,
 };
 
 #[path = "support/reference_application.rs"]
@@ -180,6 +181,21 @@ async fn run_effect_delivery_cancellation(
         .await
         .expect("source Effect acknowledgement");
     assert_eq!(acked.output, EffectLeaseOutcome::Delivered);
+    let status = source
+        .status(claim.effect_id, Some(acked.receipt))
+        .await
+        .expect("independent source Effect outcome observation");
+    assert_eq!(
+        status.output,
+        Some(EffectStatus {
+            state: EffectState::Delivered,
+            attempt: 1,
+            token_present: false,
+            lease_until_ms: None,
+            expires_at_ms: claim.expires_at_ms,
+            result: Some(outcome.result().to_vec()),
+        })
+    );
     let settled = source
         .validate(vec![claim], acked.receipt)
         .await
