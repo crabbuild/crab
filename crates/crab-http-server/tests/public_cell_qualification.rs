@@ -41,6 +41,8 @@ mod qualification_peer;
 mod qualification_scheduled_cancellation;
 #[path = "support/qualification_scheduled_cancellation_leases.rs"]
 mod qualification_scheduled_cancellation_leases;
+#[path = "support/qualification_scheduled_expiry.rs"]
+mod qualification_scheduled_expiry;
 #[path = "support/qualification_scheduled_retry.rs"]
 mod qualification_scheduled_retry;
 #[path = "support/qualification_scheduled_retry_leases.rs"]
@@ -49,7 +51,10 @@ mod qualification_scheduled_retry_leases;
 use qualification::{assert_zero_reservations, fixed_id, identity, rustfs_public_store};
 use qualification_fixture::{PublicHostFixture, public_host_fixture_with_store};
 use qualification_local_fixture::public_host_fixture;
-use qualification_peer::{peer_client_with_one_lost_mutation, peer_client_with_paused_mutation};
+use qualification_peer::{
+    peer_client_with_delayed_mutation_receive, peer_client_with_one_lost_mutation,
+    peer_client_with_paused_mutation,
+};
 
 struct PublicHostSmokeExecutor<'n> {
     node: &'n CellNode,
@@ -1175,6 +1180,60 @@ async fn run_scheduled_retry_cases(
     }
     drop(executor);
     drop(typed);
+    node.shutdown().await.expect("qualification shutdown");
+    assert_zero_reservations(&node);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn public_scheduled_kv_expiry_rejects_delayed_mutation() {
+    run_scheduled_kv_expiry_case(public_host_fixture().await).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_public_scheduled_kv_expiry_rejects_delayed_mutation() {
+    let (store, root) = rustfs_public_store();
+    run_scheduled_kv_expiry_case(public_host_fixture_with_store(store, root).await).await;
+}
+
+async fn run_scheduled_kv_expiry_case(
+    (node, writer, tenant, application, _directory, registry, handles, store): PublicHostFixture,
+) {
+    let workload = QualificationWorkload::generate_with_size(
+        &QualificationProfile::pr_contract(),
+        41,
+        1,
+        QUALIFICATION_CASE_COVERAGE_OPERATIONS,
+        1,
+    )
+    .expect("qualification case schedule");
+    let operation = workload
+        .iter_operations()
+        .find(|operation| {
+            operation.primitive() == "kv" && operation.case() == QualificationCase::Expiry
+        })
+        .expect("scheduled KV expiry case");
+    let observer = independent_observer(&node, &registry, &handles, &store, tenant, application);
+    let (client, entered, release, dispatched) =
+        peer_client_with_delayed_mutation_receive(registry, handles);
+    let peer =
+        node.application_handle::<fixture::ReferenceApplication>(client, tenant, application);
+    qualification_scheduled_expiry::ExpiryCase::new(
+        &writer,
+        &peer,
+        &observer,
+        &entered,
+        &release,
+        &dispatched,
+        tenant,
+        application,
+    )
+    .kv(operation.index(), operation.nonce())
+    .await
+    .expect("scheduled KV expiry");
+    drop(writer);
+    drop(peer);
+    drop(observer);
     node.shutdown().await.expect("qualification shutdown");
     assert_zero_reservations(&node);
 }
