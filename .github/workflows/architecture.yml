@@ -234,16 +234,8 @@ jobs:
           docker logs cell-runtime-rustfs >&2 || true
           exit 1
 
-      - name: Verify canonical LTX and Cell source-loss recovery
+      - name: Verify Crab Cell source-loss recovery
         run: |
-          cargo test -p crab-ltx --locked --features replica --test cell_roots \
-            exact_root_inventory_verifies_every_remote_dependency -- --exact --nocapture
-          cargo test -p crab-cell-runtime --locked --test actor \
-            rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
-            -- --ignored --exact --nocapture
-          cargo test -p crab-cell-runtime --locked --lib \
-            retention::tests::rustfs_maintenance_collection_preserves_live_and_pinned_graphs \
-            -- --ignored --exact --nocapture
           cargo test -p crab-http-server --locked --lib \
             server::peer_e2e_tests::rustfs_public_collaboration_reaches_remote_owner_and_publishes_ltx \
             -- --ignored --exact --nocapture

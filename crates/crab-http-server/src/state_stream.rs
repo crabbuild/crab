@@ -2,7 +2,7 @@ use std::{io, pin::Pin};
 
 use axum::body::Body;
 use bytes::Bytes;
-use crab_cell_runtime::{CellStateStream, Observed, Query};
+use cellule_runtime::{CellStateStream, Observed, Query};
 use futures_util::{Stream, StreamExt as _};
 
 /// Adapts a bounded Cell state stream to one-at-a-time HTTP body chunks.
@@ -58,7 +58,7 @@ where
     stream: CellStateStream<Q>,
     inputs: Pin<Box<Inputs>>,
     encode: Encode,
-    cancellation: crab_cell_runtime::StateStreamCancellation,
+    cancellation: cellule_runtime::StateStreamCancellation,
     done: bool,
 }
 

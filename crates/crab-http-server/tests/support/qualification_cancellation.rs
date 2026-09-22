@@ -6,8 +6,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crab_cell_app::ApplicationHandle;
-use crab_cell_runtime::{
+use cellule_app::ApplicationHandle;
+use cellule_runtime::{
     BoundedDecoder, Command, PreparedCommand, Resolution, StoredOutcome, WireValue,
 };
 use tokio::sync::Notify;

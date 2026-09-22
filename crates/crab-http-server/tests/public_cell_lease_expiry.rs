@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crab_cell_runtime::{
+use cellule_runtime::{
     ActivityCompletion, ActivityCompletionOutcome, BlobArtifactStore, BlobCondition, BlobMutation,
     BlobMutationOutcome, BlobQuery, BlobQueryResult, CellClient, CellTarget, EffectClaimRequest,
     EffectLeaseOutcome, InvocationError, QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome,
@@ -531,7 +531,9 @@ async fn run_blob_expiry(
             tenant,
             application,
         )
-        .with_blob_artifact_store(BlobArtifactStore::new(store));
+        .with_blob_artifact_store(BlobArtifactStore::new(
+            store.for_cellule().expect("Cellule store"),
+        ));
     let blob = writer
         .blob::<fixture::ReferenceBlob>()
         .expect("writer Blob");

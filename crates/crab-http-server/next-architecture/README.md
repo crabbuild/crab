@@ -51,7 +51,7 @@ limits and qualification status are recorded in [crab-ltx](crab-ltx.md).
 Audience: implementers of the HTTP application, storage and publication owners,
 operators, and reviewers of correctness and migration evidence.
 
-The [embedded Rust Cell runtime specification](../../crab-cell-runtime/docs/README.md)
+The [embedded Rust Cell runtime specification](../../../crab/docs/architecture/cells/README.md)
 now owns the low-level shared runtime APIs, Cell formats, primitive contracts and
 compiled-release lifecycle. It narrows delivery to Rust handlers embedded in this
 server; no standalone multi-language platform is planned. For overlapping runtime
@@ -65,7 +65,7 @@ modules independently. Product HTTP/Git routes remain the only public API, while
 Cell and primitive capabilities remain private Rust contracts.
 The exact source-change, registration, route-adapter, compatibility-test and
 whole-image rollout sequence is the
-[native contributor procedure](../../crab-cell-runtime/docs/rust-api.md#add-a-native-feature).
+[native contributor procedure](../../../crab/docs/architecture/cells/rust-api.md#add-a-native-feature).
 
 The Git browse projection is now rebuilt asynchronously from the canonical
 object-store snapshot. Direct `crab`/Git pushes do not require this server:

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crab_cell_runtime::{
+use cellule_runtime::{
     CellClient, CellTarget, Committed, InvocationError, MutationIdentity, RequestId,
 };
 use crab_metadata::manifest_store::{RepositorySnapshot, read_repository_snapshot};
@@ -935,10 +935,10 @@ fn mutation_identity() -> crate::Result<MutationIdentity> {
 fn invocation_error<T>(error: InvocationError<T>) -> crate::Error {
     match error {
         InvocationError::NotStarted(error) => crate::Error::Cell(error),
-        InvocationError::Rejected(_) => crate::Error::Cell(crab_cell_runtime::Error::Command(
+        InvocationError::Rejected(_) => crate::Error::Cell(cellule_runtime::Error::Command(
             "projection command rejected",
         )),
-        InvocationError::Pending(_) => crate::Error::Cell(crab_cell_runtime::Error::Command(
+        InvocationError::Pending(_) => crate::Error::Cell(cellule_runtime::Error::Command(
             "projection command pending",
         )),
         InvocationError::InvalidPublishedResult { source, .. } => crate::Error::Cell(*source),

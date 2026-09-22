@@ -13,7 +13,11 @@ pub(super) async fn run() {
     let application = Arc::new(fixture::compiled());
     let tenant = TenantId::from_bytes([71; 16]);
     let application_id = ApplicationId::from_bytes([72; 16]);
-    let layout = CellStorageLayout::new(store.clone(), root, *application_id.as_bytes());
+    let layout = CellStorageLayout::new(
+        store.for_cellule().expect("Cellule store"),
+        root,
+        *application_id.as_bytes(),
+    );
     let observer_session = SessionId::from_bytes([73; 16]);
     let observer = CellNodeBuilder::new(Arc::clone(&application))
         .with_runtime(
@@ -47,7 +51,9 @@ pub(super) async fn run() {
         CellClient::local_many(application.registry(), restored).expect("observer direct client");
     let typed = observer
         .application_handle::<fixture::ReferenceApplication>(client, tenant, application_id)
-        .with_blob_artifact_store(BlobArtifactStore::new(store));
+        .with_blob_artifact_store(BlobArtifactStore::new(
+            store.for_cellule().expect("Cellule store"),
+        ));
     let sql = typed
         .sql::<fixture::ReferenceSql>(
             CellTarget::new(

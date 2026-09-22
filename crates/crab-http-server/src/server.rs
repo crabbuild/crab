@@ -16,11 +16,11 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
-use crab_cell_host::{
+use cellule_host::{
     CellNode, CellNodeBuilder, CellNodeFacility, FOLLOWER_STORE_COMPONENT,
     NODE_DURABILITY_PROVIDER_COMPONENT, NodeDurabilitySupervisorConfig,
 };
-use crab_cell_runtime::{
+use cellule_runtime::{
     ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_NATIVE_BYTES, ACTIVE_CELL_PAGE_CACHE_BYTES,
     ApplicationIdentityStore, CellRuntime, Digest, NodeDirectory, Owner, PeerRoundTrip, PeerSigner,
     ReleaseState, ReleaseStore, ReplicaHost, ScratchMonitor, SessionId, SqlWorkerPool,
@@ -217,13 +217,13 @@ impl CellRuntimeBudget {
         })
     }
 
-    pub(crate) fn local_disk(self) -> crab_cell_runtime::DiskBudget {
-        crab_cell_runtime::DiskBudget::new(self.local_disk_mebibytes as u64 * MIB)
+    pub(crate) fn local_disk(self) -> cellule_runtime::DiskBudget {
+        cellule_runtime::DiskBudget::new(self.local_disk_mebibytes as u64 * MIB)
     }
 
     pub(crate) fn replica_host(
         self,
-        local_disk: crab_cell_runtime::DiskBudget,
+        local_disk: cellule_runtime::DiskBudget,
         scratch_root: PathBuf,
     ) -> ReplicaHost {
         let scratch_monitor = Arc::new(ActualScratchMonitor {
@@ -307,7 +307,7 @@ pub(crate) fn test_cell_capacity_report() -> CellCapacityReport {
 
 struct ActualScratchMonitor {
     root: PathBuf,
-    local_disk: crab_cell_runtime::DiskBudget,
+    local_disk: cellule_runtime::DiskBudget,
     reserve_bytes: u64,
 }
 
@@ -723,9 +723,9 @@ pub(crate) struct Server {
     #[cfg(test)]
     pub(crate) peer_receiver: Option<crate::peer::PeerReceiver>,
     #[cfg(test)]
-    pub(crate) follower_store: Option<crab_cell_runtime::FollowerStore>,
+    pub(crate) follower_store: Option<cellule_runtime::FollowerStore>,
     #[cfg(test)]
-    pub(crate) node_log_transport: Option<Arc<dyn crab_cell_runtime::NodeLogTransport>>,
+    pub(crate) node_log_transport: Option<Arc<dyn cellule_runtime::NodeLogTransport>>,
     pub options: RepositoryOptions,
     pub cursor_key: [u8; 32],
     pub admission: Semaphore,
@@ -803,7 +803,7 @@ impl Server {
             })
     }
 
-    pub(crate) fn follower_store(&self) -> Option<Arc<crab_cell_runtime::FollowerStore>> {
+    pub(crate) fn follower_store(&self) -> Option<Arc<cellule_runtime::FollowerStore>> {
         self.node_component(FOLLOWER_STORE_COMPONENT).or_else(|| {
             #[cfg(test)]
             {
@@ -816,10 +816,8 @@ impl Server {
         })
     }
 
-    pub(crate) fn node_log_transport(
-        &self,
-    ) -> Option<Arc<dyn crab_cell_runtime::NodeLogTransport>> {
-        self.node_component::<Arc<dyn crab_cell_runtime::NodeLogTransport>>(
+    pub(crate) fn node_log_transport(&self) -> Option<Arc<dyn cellule_runtime::NodeLogTransport>> {
+        self.node_component::<Arc<dyn cellule_runtime::NodeLogTransport>>(
             CELL_COMPONENT_NODE_LOG_TRANSPORT,
         )
         .map(|transport| transport.as_ref().clone())
@@ -995,7 +993,7 @@ pub async fn serve(config: Config) -> Result<()> {
     // the ten-second advertisement expires and fences the whole process.
     let control_root = crate::storage_root::StorageRoot::build(&config.storage)?;
     let control_layout = ApplicationIdentityStore::new(
-        control_root.store.clone(),
+        control_root.store.for_cellule()?,
         ObjectPath::from(control_root.prefix.clone()),
     )
     .layout(startup.identity)
@@ -1012,7 +1010,7 @@ pub async fn serve(config: Config) -> Result<()> {
         peer_tls.signing_key().clone(),
         session,
         config.cells.peer_advertise.to_string(),
-        crab_cell_runtime::NodeFailureDomain::new(
+        cellule_runtime::NodeFailureDomain::new(
             config.cells.failure_zone.clone(),
             config.cells.failure_host.clone(),
         )?,
@@ -1077,7 +1075,7 @@ pub async fn serve(config: Config) -> Result<()> {
     cell_node.install_telemetry(Arc::new(metrics.clone()))?;
     let cell_runtime = cell_node.runtime();
     let follower_store = cell_node
-        .owned_component::<crab_cell_runtime::FollowerStore>(FOLLOWER_STORE_COMPONENT)
+        .owned_component::<cellule_runtime::FollowerStore>(FOLLOWER_STORE_COMPONENT)
         .ok_or(crate::Error::Config("follower store is unavailable"))?;
     if follower_store.quarantined_entries() != 0 {
         tracing::warn!(
@@ -1099,12 +1097,12 @@ pub async fn serve(config: Config) -> Result<()> {
     );
     let peer_round_trip: Arc<dyn PeerRoundTrip> = Arc::new(crate::peer::PeerHttpRoundTrip::new(
         startup.identity,
-        crab_cell_runtime::CellAuthority::new(startup.layout.clone()),
+        cellule_runtime::CellAuthority::new(startup.layout.clone()),
         directory.clone(),
         peer_tls.client_identity(),
         session,
     ));
-    let node_log_transport: Arc<dyn crab_cell_runtime::NodeLogTransport> = Arc::new(
+    let node_log_transport: Arc<dyn cellule_runtime::NodeLogTransport> = Arc::new(
         crate::peer::NodeLogHttpTransport::new(
             directory.clone(),
             peer_tls.client_identity(),
@@ -1452,7 +1450,7 @@ fn listener_task_result(
 }
 
 async fn collect_retired_follower_lanes(
-    store: crab_cell_runtime::FollowerStore,
+    store: cellule_runtime::FollowerStore,
     directory: NodeDirectory,
     cancellation: CancellationToken,
 ) -> Result<()> {
@@ -1841,7 +1839,7 @@ fn management_router(server: Arc<Server>) -> Router {
         .route(
             "/internal/cells/v1/forward",
             post(crate::peer::forward).layer(axum::extract::DefaultBodyLimit::max(
-                crab_cell_runtime::MAX_PEER_REQUEST_BYTES,
+                cellule_runtime::MAX_PEER_REQUEST_BYTES,
             )),
         )
         .route(
@@ -2280,7 +2278,7 @@ mod peer_e2e_tests;
 mod tests {
     use super::*;
     use axum::body::Body;
-    use crab_cell_host::CellNodeTaskGroup;
+    use cellule_host::CellNodeTaskGroup;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -2372,7 +2370,7 @@ mod tests {
         let available = fs4::available_space(directory.path()).unwrap();
         let monitor = ActualScratchMonitor {
             root: directory.path().to_owned(),
-            local_disk: crab_cell_runtime::DiskBudget::new(MIB),
+            local_disk: cellule_runtime::DiskBudget::new(MIB),
             reserve_bytes: available,
         };
 

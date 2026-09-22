@@ -1,4 +1,4 @@
-use crab_cell_runtime::{Committed, InvocationError, MutationIdentity, Observed, RequestId};
+use cellule_runtime::{Committed, InvocationError, MutationIdentity, Observed, RequestId};
 use uuid::Uuid;
 
 use super::{Release, ReleaseAsset};

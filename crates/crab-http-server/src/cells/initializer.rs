@@ -1,9 +1,9 @@
 use std::{path::Path, sync::Arc};
 
-use crab_cell_app::CompiledApplication;
-use crab_cell_host::CellNodeBuilder;
-use crab_cell_runtime::CellStorageLayout;
-use crab_cell_runtime::{
+use cellule_app::CompiledApplication;
+use cellule_host::CellNodeBuilder;
+use cellule_runtime::CellStorageLayout;
+use cellule_runtime::{
     ApplicationIdentity, CatalogEntry, CatalogProof, CatalogRole, CellAuthority, CellCatalog,
     CellHandle, CellReplica, CellTarget, ControlState, IncarnationId, Owner, Registry,
     ReleaseState, ReleaseStore, SessionId, SqlWorkerPool,
@@ -101,7 +101,7 @@ pub(crate) async fn initialize_repository_at(
         *observed.value().incarnation.as_bytes(),
         repository_replica_limits(),
     )
-    .map_err(crab_cell_runtime::Error::from)?;
+    .map_err(cellule_runtime::Error::from)?;
     let destination = directory.path().join(format!("{}.sqlite", Uuid::now_v7()));
     let result: Result<()> = async {
         let handle = match (observed.value().state, observed.value().root.is_some()) {
@@ -189,7 +189,7 @@ async fn verify_repository_identity(handle: &CellHandle, repository: Uuid) -> Re
                     [],
                     |row| row.get::<_, Vec<u8>>(0),
                 )
-                .map_err(crab_cell_runtime::Error::from)
+                .map_err(cellule_runtime::Error::from)
         })
         .await?;
     if observed.as_slice() != repository.as_bytes() {
@@ -265,15 +265,15 @@ pub(crate) async fn provision_repository(
 ) -> Result<(CatalogProof, CellAuthority)> {
     let catalog = CellCatalog::new(layout.clone(), identity.tenant());
     let (code, schema) = registry
-        .current_cell_version(REPOSITORY_NAMESPACE, CatalogRole::Repository)
-        .ok_or(crab_cell_runtime::Error::Registry(
+        .current_cell_version(REPOSITORY_NAMESPACE, CatalogRole::Application)
+        .ok_or(cellule_runtime::Error::Registry(
             "repository module is not registered",
         ))?;
     let proof = ReleaseStore::new(layout.clone(), identity)?
         .provision(
             &catalog,
             registry,
-            CatalogEntry::new(target, CatalogRole::Repository, code, schema)?,
+            CatalogEntry::new(target, CatalogRole::Application, code, schema)?,
         )
         .await?;
     Ok((proof, CellAuthority::new(layout.clone())))
@@ -283,7 +283,7 @@ pub(crate) async fn provision_repository(
 mod tests {
     use std::sync::Arc;
 
-    use crab_cell_runtime::{ApplicationId, CellAuthority, CellTarget, ControlState, TenantId};
+    use cellule_runtime::{ApplicationId, CellAuthority, CellTarget, ControlState, TenantId};
     use crab_storage::Store;
     use object_store::{memory::InMemory, path::Path as ObjectPath};
 
@@ -296,7 +296,7 @@ mod tests {
             ApplicationId::from_bytes([32; 16]),
         );
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            Store::new(Arc::new(InMemory::new())).for_cellule().unwrap(),
             ObjectPath::from("repository-initializer"),
             *identity.application().as_bytes(),
         );

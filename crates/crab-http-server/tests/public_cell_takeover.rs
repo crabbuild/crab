@@ -3,8 +3,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crab_cell_host::CellNodeBuilder;
-use crab_cell_runtime::{
+use cellule_host::CellNodeBuilder;
+use cellule_runtime::{
     ActivityRunOutcome, ActivitySupervisor, ApplicationId, BlobArtifactStore, BlobCondition,
     BlobMutation, BlobQuery, BlobQueryResult, CatalogRole, CellAuthority, CellCatalog, CellClient,
     CellReplica, CellStorageLayout, CellTarget, CronMutation, CronQueryResult, EffectClaimRequest,
@@ -33,7 +33,11 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
     let application = Arc::new(fixture::compiled());
     let tenant = TenantId::from_bytes([71; 16]);
     let application_id = ApplicationId::from_bytes([72; 16]);
-    let layout = CellStorageLayout::new(store.clone(), root, *application_id.as_bytes());
+    let layout = CellStorageLayout::new(
+        store.for_cellule().expect("Cellule store"),
+        root,
+        *application_id.as_bytes(),
+    );
     let source_session = SessionId::from_bytes([24; 16]);
     let successor_session = SessionId::from_bytes([70; 16]);
     let source = CellNodeBuilder::new(Arc::clone(&application))
@@ -151,7 +155,9 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
             tenant,
             application_id,
         )
-        .with_blob_artifact_store(BlobArtifactStore::new(store.clone()));
+        .with_blob_artifact_store(BlobArtifactStore::new(
+            store.for_cellule().expect("Cellule store"),
+        ));
     let source_kv = source_handle
         .kv::<fixture::ReferenceKv>(fixture::KV_NAMESPACE)
         .expect("source typed KV");
@@ -246,7 +252,7 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
         )
         .await
         .expect("acknowledged Blob commit");
-    let crab_cell_runtime::BlobMutationOutcome::Committed { etag, size } = committed.output else {
+    let cellule_runtime::BlobMutationOutcome::Committed { etag, size } = committed.output else {
         panic!("source Blob was not committed");
     };
     let source_queue = source_handle
@@ -287,7 +293,7 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
         .expect("acknowledged Cron schedule");
     assert!(matches!(
         scheduled.output,
-        crab_cell_runtime::CronMutationOutcome::Applied { .. }
+        cellule_runtime::CronMutationOutcome::Applied { .. }
     ));
     let source_workflow = source_handle
         .workflow::<fixture::ReferenceWorkflow>()
@@ -435,7 +441,9 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
             tenant,
             application_id,
         )
-        .with_blob_artifact_store(BlobArtifactStore::new(store));
+        .with_blob_artifact_store(BlobArtifactStore::new(
+            store.for_cellule().expect("Cellule store"),
+        ));
     let successor_sql = successor_handle
         .sql::<fixture::ReferenceSql>(sql_target)
         .expect("successor typed SQL");

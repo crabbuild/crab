@@ -1,4 +1,4 @@
-use crab_cell_runtime::{
+use cellule_runtime::{
     CellStorageLayout, Digest, FencedNodeSession, NodeAdvertisement, NodeCapacity, NodeDirectory,
     NodeFailureDomain, NodeId, SessionId,
 };

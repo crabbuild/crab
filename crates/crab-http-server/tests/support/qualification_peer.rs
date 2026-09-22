@@ -9,7 +9,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crab_cell_runtime::{
+use cellule_runtime::{
     CellClient, CellHandle, CellId, CellTarget, Digest, EffectPeerClient, Error, PeerAuthorizer,
     PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerRoundTrip, PeerSigner, PeerVerifier,
     Registry, Result, SessionId, VerifiedPeerRequest,

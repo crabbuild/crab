@@ -19,7 +19,7 @@ Browser                    Native Git / Git LFS
               ▼                    ▼
      repository Cell router   remote-git/read/write
               │                    │
-        SQLite + crab-ltx           │
+        SQLite + Cellule LTX        │
               └─────────┬──────────┘
                         ▼
                    object storage
@@ -194,7 +194,7 @@ Read these sources in order:
 | [app.rs](src/app.rs) | Admission timeout, repository access, input validation, and HTTP error mapping |
 | [cells/router.rs](src/cells/router.rs) | Published-root validation plus local-owner restore or authenticated peer dispatch |
 | [cells/repository.rs](src/cells/repository.rs) | SQLite transaction, submission reservation, number allocation, and typed outcome |
-| [crab-ltx](../crab-ltx/README.md) | Verified immutable publication and exact source-loss restore |
+| [Cellule LTX](../../crab/docs/architecture/cells/storage.md) | Verified immutable publication and exact source-loss restore |
 
 Example JSON body, subject to the server's authentication and mutation checks:
 

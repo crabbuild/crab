@@ -2,7 +2,7 @@
 
 [Design index](README.md) · Local/remote library and issue/comment/label/status/check/settings HTTP integration implemented.
 
-[crab-ltx](../../crab-ltx/README.md) now implements the embedded local SQLite
+[crab-ltx](../../../crab/docs/architecture/cells/storage.md) now implements the embedded local SQLite
 WAL-to-LTX mechanics and optional canonical Cell-root transport. The Cargo member contains a pinned, modified source
 integration of `celld-ltx`, not a Git dependency or separate daemon.
 The HTTP server consumes it through `crab-cell-runtime`: repository issue,
@@ -27,9 +27,9 @@ performance and process/network fault qualification remain delivery work.
 | Host facilities | Injectable filesystem/base VFS/clock/executor; shared page-fault worker/cache and I/O/job/recovery/dirty concurrency budgets; one-MiB full-job scratch permits; temporary reservations follow cancelled jobs but are removed from returned long-lived handles |
 | Server wiring | All repository collaboration metadata, owner/control publication, scheduled owner-bound compaction, exact local-cut pruning, local/remote/idle/stale-owner routing, public HTTP response gating and source-loss restore are wired; immutable Release asset bodies remain object data by design |
 
-Source and usage: [crate README](../../crab-ltx/README.md),
-[public API](../../crab-ltx/src/lib.rs),
-[import inventory/notices](../../crab-ltx/UPSTREAM.md).
+Source and usage: [crate README](../../../crab/docs/architecture/cells/storage.md),
+public API (`cellule-ltx/src/lib.rs`),
+import inventory/notices (`cellule-ltx/UPSTREAM.md`).
 Local proof includes real SQLite, process kill followed by source-directory loss,
 independent CRC/format vectors and exact snapshot/compaction comparison. It does
 not qualify the multi-node server. A separate real RustFS Cell round trip
@@ -60,9 +60,9 @@ Foreground faults and owner-driven hydration share write/truncate bookkeeping;
 capture/snapshot reads also use the VFS. Each frame is BLAKE3/CRC verified.
 The existing full-restore server activation protocol remains a valid initial
 policy; selecting sparse activation still requires HTTP admission/output-gate wiring.
-See the [Cell API and limits](../../crab-ltx/README.md#core-api).
-The [Litestream comparison](../../crab-ltx/README.md#litestream-comparison) and
-[upstream record](../../crab-ltx/UPSTREAM.md) describe the capabilities and
+See the [Cell API and limits](../../../crab/docs/architecture/cells/storage.md).
+The [Litestream comparison](../../../crab/docs/architecture/cells/storage.md) and
+upstream record (`cellule-ltx/UPSTREAM.md`) describe the capabilities and
 intentional deviations from Litestream and the pinned Celld implementation.
 
 The server can now supply one `Host` throughout local resume, Cell recovery,
@@ -78,8 +78,8 @@ timers, distributed fencing or a deterministic cluster simulator.
 
 The requested capacity is 1K–10K active databases per node, 100–5,000 MB each,
 with 1,000 TPS aggregate per node. This is a target, not current qualification.
-The [resource limits](../../crab-ltx/README.md#resource-limits) and
-[verification](../../crab-ltx/README.md#verification) sections record current
+The [resource limits](../../../crab/docs/architecture/cells/storage.md) and
+[verification](../../../crab/docs/architecture/cells/storage.md) sections record current
 bounds and remaining qualification work. Raising `Limits` alone is insufficient.
 
 The [Celld comparison](celld-and-rust.md) explains the system-level differences.
@@ -334,7 +334,7 @@ adaptation passes. Source reuse does not justify publishing an unknown checksum.
 ### Implemented library API
 
 The following signatures summarize callable crate APIs. Full types and a
-compilable example live in the [crate README](../../crab-ltx/README.md).
+compilable example live in the [crate README](../../../crab/docs/architecture/cells/storage.md).
 
 ```rust
 impl Db {
@@ -546,7 +546,7 @@ owner replacement with empty local disks through an HTTP mutation and reload. Th
 [delivery gates](validation-and-delivery.md), not outcomes of the local crate tests.
 
 Run `cargo test -p crab-ltx --locked` with the worktree\'s external
-`CARGO_TARGET_DIR`. See the [crate verification scope](../../crab-ltx/README.md#verification)
+`CARGO_TARGET_DIR`. See the [crate verification scope](../../../crab/docs/architecture/cells/storage.md)
 for the remaining interoperability, fuzz, fault, memory and platform gates.
 
 Freeze the encoding capability, capture result shape and local retention rules

@@ -1,6 +1,6 @@
 use std::{sync::atomic::Ordering, time::Duration};
 
-use crab_cell_runtime::{
+use cellule_runtime::{
     CellClient, CellTarget, EffectClaimRequest, EffectLeaseOutcome, EffectState, EffectStatus,
     Error, InvocationError, SqlBatch, SqlStatement, SqlValue, WorkflowOutcome, WorkflowStatus,
     partition_for_shard,

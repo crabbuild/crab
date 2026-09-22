@@ -107,7 +107,7 @@ pub async fn enter_cell_maintenance(
             let grace_ms = u64::try_from(grace.as_millis())
                 .map_err(|_| Error::Config("Cell retention grace is too large"))?;
             let max_deletes = max_deletes.unwrap_or(10_000);
-            crab_cell_runtime::GarbageCollectionPolicy::new(0, grace_ms, max_deletes)?;
+            cellule_runtime::GarbageCollectionPolicy::new(0, grace_ms, max_deletes)?;
             Some(cells::RetentionRequest { grace, max_deletes })
         }
         (None, None) => None,
@@ -181,7 +181,7 @@ pub enum Error {
     #[error("object storage coordination failed")]
     Coordination(#[from] crab_coordination::CoordinationError),
     #[error("embedded Cell runtime initialization failed")]
-    Cell(#[from] crab_cell_runtime::Error),
+    Cell(#[from] cellule_runtime::Error),
     #[error("private Cell TLS setup failed: {context}")]
     PeerTls {
         context: &'static str,

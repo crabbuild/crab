@@ -4,8 +4,9 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use crab_cell_app::{ApplicationBuilder, CellApplication, CellType};
-use crab_cell_runtime::{
+use cellule_app::{ApplicationBuilder, CellApplication, CellType};
+use cellule_ltx::{CellReplica, DiskBudget, Host, Limits};
+use cellule_runtime::{
     ActivityContext, ActivityExecution, ActivityHandler, ApplicationId, BlobModule, BoundedEncoder,
     BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellHandle, CellModule, CellRuntime,
     CellStorageLayout, CellTarget, Command, CommandContext, CommandResult, CronInvocation,
@@ -18,7 +19,6 @@ use crab_cell_runtime::{
     register_effect_delivery, register_kv, register_maintenance, register_queue, register_sql,
     register_workflow, register_workflow_activities,
 };
-use crab_ltx::{CellReplica, DiskBudget, Host, Limits};
 
 pub const SQL_NAMESPACE: NamespaceId = NamespaceId::from_bytes([1; 16]);
 pub const KV_NAMESPACE: NamespaceId = NamespaceId::from_bytes([2; 16]);
@@ -48,10 +48,10 @@ fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-fn migration() -> &'static [crab_cell_runtime::MigrationDescriptor] {
-    static MIGRATION: OnceLock<&'static [crab_cell_runtime::MigrationDescriptor]> = OnceLock::new();
+fn migration() -> &'static [cellule_runtime::MigrationDescriptor] {
+    static MIGRATION: OnceLock<&'static [cellule_runtime::MigrationDescriptor]> = OnceLock::new();
     MIGRATION.get_or_init(|| {
-        Box::leak(Box::new([crab_cell_runtime::MigrationDescriptor {
+        Box::leak(Box::new([cellule_runtime::MigrationDescriptor {
             version: 1,
             sql: "-- reference application migration v1",
             digest: Digest::from_bytes(
@@ -129,7 +129,7 @@ pub struct ReferenceSql;
 pub struct ReferenceCronDestination;
 
 pub fn install_reference_sql_schema(
-    transaction: &crab_ltx::rusqlite::Transaction<'_>,
+    transaction: &cellule_ltx::rusqlite::Transaction<'_>,
 ) -> Result<()> {
     transaction.execute_batch(
         "CREATE TABLE qualification_rows (id INTEGER PRIMARY KEY, payload BLOB NOT NULL);
@@ -150,9 +150,9 @@ impl Command for ReferenceCronDestination {
         invocation: Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
         let generation = i64::try_from(invocation.generation)
-            .map_err(|_| crab_cell_runtime::Error::Command("cron generation overflow"))?;
+            .map_err(|_| cellule_runtime::Error::Command("cron generation overflow"))?;
         let occurrence = i64::try_from(invocation.occurrence)
-            .map_err(|_| crab_cell_runtime::Error::Command("cron occurrence overflow"))?;
+            .map_err(|_| cellule_runtime::Error::Command("cron occurrence overflow"))?;
         let rows = context.sql(&SqlBatch {
             statements: vec![SqlStatement {
                 sql: "INSERT INTO qualification_cron_invocations (schedule_id, generation, occurrence, scheduled_at_ms, payload) VALUES (?1, ?2, ?3, ?4, ?5)".into(),
@@ -425,7 +425,7 @@ impl WorkflowDefinition for ReferenceDefinition {
                 state: b"effect-valid-published".to_vec(),
                 result: Some(b"effect-valid-scheduled".to_vec()),
                 actions: vec![WorkflowAction::Effect {
-                    intent: crab_cell_runtime::EffectCommandIntent {
+                    intent: cellule_runtime::EffectCommandIntent {
                         target: CellTarget::new(
                             context.source().tenant(),
                             context.source().application(),
@@ -446,7 +446,7 @@ impl WorkflowDefinition for ReferenceDefinition {
                 state: b"effect-published".to_vec(),
                 result: Some(b"effect-scheduled".to_vec()),
                 actions: vec![WorkflowAction::Effect {
-                    intent: crab_cell_runtime::EffectCommandIntent {
+                    intent: cellule_runtime::EffectCommandIntent {
                         target: CellTarget::new(
                             context.source().tenant(),
                             context.source().application(),
@@ -587,7 +587,7 @@ impl CellApplication for ReferenceApplication {
     }
 }
 
-pub fn compiled() -> crab_cell_app::CompiledApplication {
+pub fn compiled() -> cellule_app::CompiledApplication {
     ReferenceApplication::compile(BuildDescriptor {
         source_revision: "reference-source".into(),
         cargo_lock_digest: Digest::from_bytes([42; 32]),
@@ -610,29 +610,29 @@ pub async fn bootstrap_reference_cell<F>(
     module: &'static str,
     incarnation_byte: u8,
     initialize: F,
-) -> crab_cell_runtime::Result<CellHandle>
+) -> cellule_runtime::Result<CellHandle>
 where
     F: for<'connection> FnOnce(
-            &crab_ltx::rusqlite::Transaction<'connection>,
-        ) -> crab_cell_runtime::Result<()>
+            &cellule_ltx::rusqlite::Transaction<'connection>,
+        ) -> cellule_runtime::Result<()>
         + Send
         + 'static,
 {
     let target = CellTarget::new(tenant, application, namespace, &partition_for_shard(0))?;
-    let catalog = crab_cell_runtime::CellCatalog::new(layout.clone(), tenant);
+    let catalog = cellule_runtime::CellCatalog::new(layout.clone(), tenant);
     let proof = catalog
         .provision(CatalogEntry::new(
             &target,
             role,
             registry
                 .module_code(module)
-                .ok_or(crab_cell_runtime::Error::Registry("module code is missing"))?,
+                .ok_or(cellule_runtime::Error::Registry("module code is missing"))?,
             1,
         )?)
         .await?;
     let authority = CellAuthority::new(layout.clone());
     let incarnation = IncarnationId::from_bytes([incarnation_byte; 16]);
-    let session = crab_cell_runtime::SessionId::from_bytes([24; 16]);
+    let session = cellule_runtime::SessionId::from_bytes([24; 16]);
     let observed = authority
         .create_initial(
             &proof,

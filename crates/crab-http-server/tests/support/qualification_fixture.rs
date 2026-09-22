@@ -1,8 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
-use crab_cell_app::ApplicationHandle;
-use crab_cell_host::{CellNode, CellNodeBuilder};
-use crab_cell_runtime::{
+use cellule_app::ApplicationHandle;
+use cellule_host::{CellNode, CellNodeBuilder};
+use cellule_runtime::{
     ApplicationId, BlobArtifactStore, CatalogRole, CellClient, CellHandle, CellStorageLayout,
     Error, NodeLeaseGuard, Registry, SqlWorkerPool, TenantId, install_blob_schema,
     install_cron_schema, install_kv_schema, install_queue_schema, install_workflow_schema,
@@ -28,9 +28,13 @@ pub async fn public_host_fixture_with_store(store: Store, root: Path) -> PublicH
     let application = Arc::new(fixture::compiled());
     let tenant = TenantId::from_bytes([71; 16]);
     let application_id = ApplicationId::from_bytes([72; 16]);
-    let layout = CellStorageLayout::new(store.clone(), root, *application_id.as_bytes());
+    let layout = CellStorageLayout::new(
+        store.for_cellule().expect("Cellule store"),
+        root,
+        *application_id.as_bytes(),
+    );
     let directory = tempfile::tempdir().expect("qualification directory");
-    let session = crab_cell_runtime::SessionId::from_bytes([24; 16]);
+    let session = cellule_runtime::SessionId::from_bytes([24; 16]);
     let node = CellNodeBuilder::new(Arc::clone(&application))
         .with_runtime(
             SqlWorkerPool::new(4, 32).expect("qualification pool"),
@@ -174,7 +178,9 @@ pub async fn public_host_fixture_with_store(store: Store, root: Path) -> PublicH
         .expect("qualification client");
     let typed = node
         .application_handle::<fixture::ReferenceApplication>(client, tenant, application_id)
-        .with_blob_artifact_store(BlobArtifactStore::new(store.clone()));
+        .with_blob_artifact_store(BlobArtifactStore::new(
+            store.for_cellule().expect("Cellule store"),
+        ));
     (
         node,
         typed,

@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use crab_cell_runtime::{
+use cellule_runtime::{
     CellTarget, CronCommand, CronMutation, CronMutationOutcome, CronQueryResult, KvAtomicCommand,
     KvAtomicOutcome, KvAtomicRequest, KvMutation, Resolution, SqlBatch, SqlBatchCommand,
     SqlResultSet, SqlStatement, SqlValue, WorkflowOutcome, WorkflowStart, WorkflowStartCommand,

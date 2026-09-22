@@ -5,8 +5,8 @@ use std::{
     time::Duration,
 };
 
-use crab_cell_runtime::CellStorageLayout;
-use crab_cell_runtime::{
+use cellule_runtime::CellStorageLayout;
+use cellule_runtime::{
     ACTIVE_CELL_NATIVE_BYTES, ACTIVE_CELL_PAGE_CACHE_BYTES, ApplicationIdentity, CatalogProof,
     CatalogRole, CellAuthority, CellCatalog, CellClient, CellDescription, CellHandle, CellReplica,
     CellRuntime, CellTarget, CellTransferDemand, ControlState, EffectPeerClient,
@@ -54,7 +54,7 @@ pub(crate) struct RepositoryCellRouter {
     recovery_artifacts: Option<Arc<super::RecoveryArtifactRegistry>>,
     activation: Arc<[Mutex<()>]>,
     operation: Arc<[Arc<RwLock<()>>]>,
-    rebalance_evidence: Arc<Mutex<HashMap<crab_cell_runtime::CellId, RebalanceEvidence>>>,
+    rebalance_evidence: Arc<Mutex<HashMap<cellule_runtime::CellId, RebalanceEvidence>>>,
 }
 
 #[derive(Clone)]
@@ -172,7 +172,7 @@ impl RepositoryCellRouter {
         let demands = candidates
             .into_iter()
             .filter_map(|(cell, generation, last_used_ms, role)| {
-                if role != CatalogRole::Repository {
+                if role != CatalogRole::Application {
                     return None;
                 }
                 if last_used_ms < 0
@@ -227,7 +227,7 @@ impl RepositoryCellRouter {
             let Some(proof) = self.catalog.lookup(intent.cell).await? else {
                 continue;
             };
-            if proof.entry().role() != CatalogRole::Repository
+            if proof.entry().role() != CatalogRole::Application
                 || proof.entry().namespace() != REPOSITORY_NAMESPACE
             {
                 continue;
@@ -249,7 +249,7 @@ impl RepositoryCellRouter {
                 .any(|(cell, generation, last_used_ms, role)| {
                     cell == intent.cell
                         && generation == intent.generation
-                        && role == CatalogRole::Repository
+                        && role == CatalogRole::Application
                         && (source.draining
                             || now_ms.saturating_sub(last_used_ms) >= REBALANCE_IDLE_MS)
                 });
@@ -345,7 +345,7 @@ impl RepositoryCellRouter {
         if target.tenant() != self.identity.tenant()
             || target.application() != self.identity.application()
         {
-            return Err(crab_cell_runtime::Error::PeerAuthorization(
+            return Err(cellule_runtime::Error::PeerAuthorization(
                 "runtime target belongs to another application",
             )
             .into());
@@ -365,14 +365,14 @@ impl RepositoryCellRouter {
         principal: PeerPrincipal,
     ) -> crate::Result<ScheduledRepositoryCell> {
         if target.namespace() != REPOSITORY_NAMESPACE {
-            return Err(crab_cell_runtime::Error::PeerAuthorization(
+            return Err(cellule_runtime::Error::PeerAuthorization(
                 "peer activation targets an unsupported namespace",
             )
             .into());
         }
         let scheduled = self.route_target_inner(target, principal, false).await?;
         if scheduled.cell.handle.is_none() {
-            return Err(crab_cell_runtime::Error::CellNotActive.into());
+            return Err(cellule_runtime::Error::CellNotActive.into());
         }
         Ok(scheduled)
     }
@@ -397,15 +397,12 @@ impl RepositoryCellRouter {
         self.recovery_artifacts.clone()
     }
 
-    pub(crate) fn recovery_disk_budget(&self) -> crab_cell_runtime::DiskBudget {
+    pub(crate) fn recovery_disk_budget(&self) -> cellule_runtime::DiskBudget {
         self.runtime.local_disk_budget()
     }
 
-    fn recovery_manifest_store(
-        &self,
-        scratch: PathBuf,
-    ) -> crab_cell_runtime::RecoveryManifestStore {
-        let store = crab_cell_runtime::RecoveryManifestStore::new(
+    fn recovery_manifest_store(&self, scratch: PathBuf) -> cellule_runtime::RecoveryManifestStore {
+        let store = cellule_runtime::RecoveryManifestStore::new(
             self.layout.clone(),
             repository_replica_limits(),
         )
@@ -430,7 +427,7 @@ impl RepositoryCellRouter {
         if target.tenant() != self.identity.tenant()
             || target.application() != self.identity.application()
         {
-            return Err(crab_cell_runtime::Error::PeerAuthorization(
+            return Err(cellule_runtime::Error::PeerAuthorization(
                 "migration target belongs to another application",
             )
             .into());
@@ -441,12 +438,12 @@ impl RepositoryCellRouter {
                 .catalog
                 .lookup(target.cell_id())
                 .await?
-                .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+                .ok_or(cellule_runtime::Error::CellNotActive)?;
             let control = self
                 .authority
                 .load(target.cell_id())
                 .await?
-                .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+                .ok_or(cellule_runtime::Error::CellNotActive)?;
             if control.value().state == ControlState::Tombstoned {
                 return Ok(());
             }
@@ -465,7 +462,7 @@ impl RepositoryCellRouter {
                     control.value().code,
                     control.value().schema,
                 )?
-                .ok_or(crab_cell_runtime::Error::Registry(
+                .ok_or(cellule_runtime::Error::Registry(
                     "cataloged Cell has no migration to the current release",
                 ))?;
             let expected = CellDescription {
@@ -490,7 +487,7 @@ impl RepositoryCellRouter {
                 }
                 Some(handle)
                     if handle.code() == plan.to_code() && handle.schema() >= plan.to_schema() => {}
-                Some(_) => return Err(crab_cell_runtime::Error::Fenced.into()),
+                Some(_) => return Err(cellule_runtime::Error::Fenced.into()),
                 None => {
                     self.migration_peer_client()
                         .migrate(target.clone(), expected, plan, super::unix_now_ms()?)
@@ -511,7 +508,7 @@ impl RepositoryCellRouter {
         if target.tenant() != self.identity.tenant()
             || target.application() != self.identity.application()
         {
-            return Err(crab_cell_runtime::Error::PeerAuthorization(
+            return Err(cellule_runtime::Error::PeerAuthorization(
                 "persisted-work target belongs to another application",
             )
             .into());
@@ -520,7 +517,7 @@ impl RepositoryCellRouter {
             .catalog
             .lookup(target.cell_id())
             .await?
-            .ok_or(crab_cell_runtime::Error::CellNotActive)?
+            .ok_or(cellule_runtime::Error::CellNotActive)?
             .entry()
             .role();
         let scheduled = self
@@ -536,7 +533,7 @@ impl RepositoryCellRouter {
                 .persisted_work_inventory(role)
                 .await
                 .map_err(Into::into),
-            None => Err(crab_cell_runtime::Error::CellNotActive.into()),
+            None => Err(cellule_runtime::Error::CellNotActive.into()),
         };
         drop(scheduled.cell);
         let drained = if release_after {
@@ -563,7 +560,7 @@ impl RepositoryCellRouter {
         let release = ReleaseStore::new(self.layout.clone(), self.identity)?
             .load()
             .await?
-            .ok_or(crab_cell_runtime::Error::Release(
+            .ok_or(cellule_runtime::Error::Release(
                 "release is unavailable during Cell migration",
             ))?;
         if !matches!(
@@ -571,7 +568,7 @@ impl RepositoryCellRouter {
             ReleaseState::Activating | ReleaseState::Maintenance
         ) || release.record().desired() != Some(self.registry.release_digest())
         {
-            return Err(crab_cell_runtime::Error::Release(
+            return Err(cellule_runtime::Error::Release(
                 "Cell migration requires the compiled release to be activating or in maintenance",
             )
             .into());
@@ -632,14 +629,14 @@ impl RepositoryCellRouter {
             .catalog
             .lookup(target.cell_id())
             .await?
-            .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+            .ok_or(cellule_runtime::Error::CellNotActive)?;
         let observed = self
             .authority
             .load(target.cell_id())
             .await?
-            .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+            .ok_or(cellule_runtime::Error::CellNotActive)?;
         if observed.value().root.is_none() {
-            return Err(crab_cell_runtime::Error::CellNotActive.into());
+            return Err(cellule_runtime::Error::CellNotActive.into());
         }
         if use_placement
             && self
@@ -655,7 +652,7 @@ impl RepositoryCellRouter {
                     release_after: false,
                 });
             }
-            return Err(crab_cell_runtime::Error::CellNotActive.into());
+            return Err(cellule_runtime::Error::CellNotActive.into());
         }
         let mut routed = self
             .activate_or_route(target, proof, observed, &principal)
@@ -703,7 +700,7 @@ impl RepositoryCellRouter {
                 .directory
                 .load(score.session, now_ms)
                 .await?
-                .ok_or(crab_cell_runtime::Error::CellNotActive)?
+                .ok_or(cellule_runtime::Error::CellNotActive)?
                 .advertisement()
                 .clone()
         };
@@ -717,10 +714,10 @@ impl RepositoryCellRouter {
         {
             Ok(()) => Ok(true),
             Err(crate::Error::Cell(
-                error @ (crab_cell_runtime::Error::CellNotActive
-                | crab_cell_runtime::Error::Deadline
-                | crab_cell_runtime::Error::PeerTransport { .. }
-                | crab_cell_runtime::Error::PeerTransportUnknown { .. }),
+                error @ (cellule_runtime::Error::CellNotActive
+                | cellule_runtime::Error::Deadline
+                | cellule_runtime::Error::PeerTransport { .. }
+                | cellule_runtime::Error::PeerTransportUnknown { .. }),
             )) => {
                 // Placement is advisory. A stale or unreachable destination must
                 // not turn a cold request into an outage; local authority CAS
@@ -746,7 +743,7 @@ impl RepositoryCellRouter {
     ) -> crate::Result<Option<RepositoryCell>> {
         if let Some(handle) = self
             .runtime
-            .resident_handle(target, CatalogRole::Repository)
+            .resident_handle(target, CatalogRole::Application)
             .await?
         {
             return Ok(Some(RepositoryCell {
@@ -763,10 +760,10 @@ impl RepositoryCellRouter {
             return Ok(None);
         };
         if control.value().root.is_none() {
-            return Err(crab_cell_runtime::Error::CellNotActive.into());
+            return Err(cellule_runtime::Error::CellNotActive.into());
         }
         if control.value().state == ControlState::Tombstoned {
-            return Err(crab_cell_runtime::Error::CellNotActive.into());
+            return Err(cellule_runtime::Error::CellNotActive.into());
         }
         let Some(owner) = control.value().owner.as_ref() else {
             return Ok(None);
@@ -781,7 +778,7 @@ impl RepositoryCellRouter {
             };
         }
         if owner != &self.peer.owner {
-            return Err(crab_cell_runtime::Error::Fenced.into());
+            return Err(cellule_runtime::Error::Fenced.into());
         }
         Ok(self
             .runtime
@@ -803,7 +800,7 @@ impl RepositoryCellRouter {
         principal: &PeerPrincipal,
     ) -> crate::Result<ScheduledRepositoryCell> {
         if observed.value().state == ControlState::Tombstoned {
-            return Err(crab_cell_runtime::Error::CellNotActive.into());
+            return Err(cellule_runtime::Error::CellNotActive.into());
         }
         let remote_owner = observed
             .value()
@@ -838,7 +835,7 @@ impl RepositoryCellRouter {
         if observed.value().owner.as_ref().is_some_and(|owner| {
             owner.session == self.peer.owner.session && owner != &self.peer.owner
         }) {
-            return Err(crab_cell_runtime::Error::Fenced.into());
+            return Err(cellule_runtime::Error::Fenced.into());
         }
 
         let replica = CellReplica::new(
@@ -847,7 +844,7 @@ impl RepositoryCellRouter {
             *observed.value().incarnation.as_bytes(),
             repository_replica_limits(),
         )
-        .map_err(crab_cell_runtime::Error::from)?;
+        .map_err(cellule_runtime::Error::from)?;
         let destination = self.activation_path(&target).await?;
         let recovery_scratch = destination
             .parent()
@@ -896,7 +893,7 @@ impl RepositoryCellRouter {
                 }
             }
             ControlState::Tombstoned => {
-                return Err(crab_cell_runtime::Error::CellNotActive.into());
+                return Err(cellule_runtime::Error::CellNotActive.into());
             }
         };
         Ok(ScheduledRepositoryCell {
@@ -971,17 +968,17 @@ impl RepositoryCellRouter {
             .catalog
             .lookup(target.cell_id())
             .await?
-            .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+            .ok_or(cellule_runtime::Error::CellNotActive)?;
         let control = self
             .authority
             .load(target.cell_id())
             .await?
-            .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+            .ok_or(cellule_runtime::Error::CellNotActive)?;
         let handle = self
             .runtime
             .local_handle(proof, &control)
             .await?
-            .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+            .ok_or(cellule_runtime::Error::CellNotActive)?;
         handle.drain().await.map_err(Into::into)
     }
 }
@@ -1004,7 +1001,7 @@ impl RepositoryCellPeer {
     async fn activate_remote(
         &self,
         target: CellTarget,
-        node: crab_cell_runtime::NodeAdvertisement,
+        node: cellule_runtime::NodeAdvertisement,
         _principal: &PeerPrincipal,
         now_ms: i64,
     ) -> crate::Result<()> {
@@ -1012,9 +1009,7 @@ impl RepositoryCellPeer {
         // room beyond the 30-second request deadline or every remote hint fails.
         let expires_at_ms = now_ms
             .checked_add(60_000)
-            .ok_or(crab_cell_runtime::Error::Peer(
-                "activation deadline overflow",
-            ))?;
+            .ok_or(cellule_runtime::Error::Peer("activation deadline overflow"))?;
         let principal = PeerPrincipal {
             issuer: format!(
                 "crab-runtime:{}",
@@ -1039,7 +1034,7 @@ impl RepositoryCellPeer {
             .round_trip
             .send_to_node(target.clone(), node, request, 30_000)
             .await?;
-        let reply = crab_cell_runtime::decode_peer_reply(&reply)?;
+        let reply = cellule_runtime::decode_peer_reply(&reply)?;
         match reply.outcome {
             Some(peer_wire::peer_reply::Outcome::Read(read)) => match read.result {
                 Some(peer_wire::read_reply::Result::Description(description))
@@ -1047,16 +1042,16 @@ impl RepositoryCellPeer {
                 {
                     Ok(())
                 }
-                _ => Err(crab_cell_runtime::Error::Peer(
+                _ => Err(cellule_runtime::Error::Peer(
                     "preferred node did not activate the requested Cell",
                 )
                 .into()),
             },
             Some(peer_wire::peer_reply::Outcome::Error(error)) => {
                 let _ = error;
-                Err(crab_cell_runtime::Error::Peer("preferred node rejected activation").into())
+                Err(cellule_runtime::Error::Peer("preferred node rejected activation").into())
             }
-            _ => Err(crab_cell_runtime::Error::Peer(
+            _ => Err(cellule_runtime::Error::Peer(
                 "preferred node returned an unexpected activation reply",
             )
             .into()),
@@ -1105,7 +1100,7 @@ fn validate_action(action: &str) -> crate::Result<()> {
             | "repository.release.update"
             | "repository.release.asset"
     ) {
-        return Err(crab_cell_runtime::Error::PeerAuthorization(
+        return Err(cellule_runtime::Error::PeerAuthorization(
             "repository route requested an unknown action",
         )
         .into());
@@ -1132,7 +1127,7 @@ mod tests {
         time::UNIX_EPOCH,
     };
 
-    use crab_cell_runtime::{
+    use cellule_runtime::{
         ApplicationId, IncarnationId, MutationIdentity, NodeAdvertisement, NodeCapacity,
         PeerVerifier, RequestId, SessionId, SqlWorkerPool, TenantId, Transition,
     };
@@ -1151,7 +1146,7 @@ mod tests {
     struct ActivatingPeer {
         destination: RepositoryCellRouter,
         source: SessionId,
-        release: crab_cell_runtime::Digest,
+        release: cellule_runtime::Digest,
         verifying_key: ed25519_dalek::VerifyingKey,
         now_ms: i64,
     }
@@ -1162,9 +1157,9 @@ mod tests {
             _target: CellTarget,
             _request: Vec<u8>,
             _remaining_ms: u32,
-        ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>>
+        ) -> Pin<Box<dyn Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>>
         {
-            Box::pin(async { Err(crab_cell_runtime::Error::CellNotActive) })
+            Box::pin(async { Err(cellule_runtime::Error::CellNotActive) })
         }
 
         fn send_to_node(
@@ -1173,7 +1168,7 @@ mod tests {
             _node: NodeAdvertisement,
             request: Vec<u8>,
             _remaining_ms: u32,
-        ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>>
+        ) -> Pin<Box<dyn Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>>
         {
             let verified = PeerVerifier::new(self.source, self.release, self.verifying_key)
                 .verify(&request, self.now_ms)
@@ -1181,7 +1176,7 @@ mod tests {
             let destination = self.destination.clone();
             Box::pin(async move {
                 if !verified {
-                    return Err(crab_cell_runtime::Error::PeerAuthorization(
+                    return Err(cellule_runtime::Error::PeerAuthorization(
                         "invalid activation",
                     ));
                 }
@@ -1191,13 +1186,13 @@ mod tests {
                         destination.runtime_principal(&["cell.activate"]),
                     )
                     .await
-                    .map_err(|_| crab_cell_runtime::Error::CellNotActive)?;
+                    .map_err(|_| cellule_runtime::Error::CellNotActive)?;
                 let handle = scheduled
                     .cell
                     .handle
                     .as_ref()
-                    .ok_or(crab_cell_runtime::Error::CellNotActive)?;
-                crab_cell_runtime::encode_peer_reply(&peer_wire::PeerReply {
+                    .ok_or(cellule_runtime::Error::CellNotActive)?;
+                cellule_runtime::encode_peer_reply(&peer_wire::PeerReply {
                     outcome: Some(peer_wire::peer_reply::Outcome::Read(peer_wire::ReadReply {
                         receipt: None,
                         result: Some(peer_wire::read_reply::Result::Description(
@@ -1216,7 +1211,7 @@ mod tests {
 
     struct DelayedActivationPeer {
         session: SessionId,
-        release: crab_cell_runtime::Digest,
+        release: cellule_runtime::Digest,
         key: ed25519_dalek::VerifyingKey,
         received_at_ms: i64,
     }
@@ -1227,9 +1222,9 @@ mod tests {
             _target: CellTarget,
             _request: Vec<u8>,
             _remaining_ms: u32,
-        ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>>
+        ) -> Pin<Box<dyn Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>>
         {
-            Box::pin(async { Err(crab_cell_runtime::Error::CellNotActive) })
+            Box::pin(async { Err(cellule_runtime::Error::CellNotActive) })
         }
 
         fn send_to_node(
@@ -1238,7 +1233,7 @@ mod tests {
             _node: NodeAdvertisement,
             request: Vec<u8>,
             remaining_ms: u32,
-        ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>>
+        ) -> Pin<Box<dyn Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>>
         {
             let verified = remaining_ms == 30_000
                 && PeerVerifier::new(self.session, self.release, self.key)
@@ -1246,11 +1241,11 @@ mod tests {
                     .is_ok();
             Box::pin(async move {
                 if !verified {
-                    return Err(crab_cell_runtime::Error::Peer(
+                    return Err(cellule_runtime::Error::Peer(
                         "activation authorization expired in transit",
                     ));
                 }
-                Err(crab_cell_runtime::Error::Control(
+                Err(cellule_runtime::Error::Control(
                     "activation reached enrolled peer",
                 ))
             })
@@ -1261,13 +1256,13 @@ mod tests {
     async fn remote_activation_authorization_survives_transit() {
         let session = SessionId::from_bytes([1; 16]);
         let successor = SessionId::from_bytes([2; 16]);
-        let release = crab_cell_runtime::Digest::from_bytes([3; 32]);
-        let fleet = crab_cell_runtime::Digest::from_bytes([4; 32]);
-        let image = crab_cell_runtime::Digest::from_bytes([5; 32]);
+        let release = cellule_runtime::Digest::from_bytes([3; 32]);
+        let fleet = cellule_runtime::Digest::from_bytes([4; 32]);
+        let image = cellule_runtime::Digest::from_bytes([5; 32]);
         let key = SigningKey::from_bytes(&[6; 32]);
         let directory = NodeDirectory::new(
             CellStorageLayout::new(
-                Store::new(Arc::new(InMemory::new())),
+                Store::new(Arc::new(InMemory::new())).for_cellule().unwrap(),
                 ObjectPath::from("activation-transit"),
                 [7; 16],
             ),
@@ -1287,20 +1282,20 @@ mod tests {
             owner(session),
         );
         let node = NodeAdvertisement::sign(
-            crab_cell_runtime::NodeId::from_bytes(*successor.as_bytes()),
+            cellule_runtime::NodeId::from_bytes(*successor.as_bytes()),
             successor,
             owner(successor).endpoint,
             fleet,
-            crab_cell_runtime::Digest::from_bytes([8; 32]),
+            cellule_runtime::Digest::from_bytes([8; 32]),
             image,
             release,
             &SigningKey::from_bytes(&[9; 32]),
             1,
             1_000,
             11_000,
-            vec![crab_cell_runtime::Digest::from_bytes([10; 32])],
+            vec![cellule_runtime::Digest::from_bytes([10; 32])],
             vec![1],
-            crab_cell_runtime::NodeFailureDomain::default(),
+            cellule_runtime::NodeFailureDomain::default(),
             NodeCapacity {
                 free_memory_bytes: 1,
                 free_disk_bytes: 1,
@@ -1331,7 +1326,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             error,
-            crate::Error::Cell(crab_cell_runtime::Error::Control(
+            crate::Error::Cell(cellule_runtime::Error::Control(
                 "activation reached enrolled peer"
             ))
         ));
@@ -1343,9 +1338,9 @@ mod tests {
             _target: CellTarget,
             _request: Vec<u8>,
             _remaining_ms: u32,
-        ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>>
+        ) -> Pin<Box<dyn Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>>
         {
-            Box::pin(async { Err(crab_cell_runtime::Error::CellNotActive) })
+            Box::pin(async { Err(cellule_runtime::Error::CellNotActive) })
         }
     }
 
@@ -1358,14 +1353,15 @@ mod tests {
         let reads = Arc::new(Mutex::new(Vec::<StorageReadKind>::new()));
         let observed_reads = Arc::clone(&reads);
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())).with_read_request_observer(Arc::new(
-                move |kind| {
+            Store::new(Arc::new(InMemory::new()))
+                .with_read_request_observer(Arc::new(move |kind| {
                     observed_reads
                         .lock()
                         .expect("read observer lock")
                         .push(kind)
-                },
-            )),
+                }))
+                .for_cellule()
+                .unwrap(),
             ObjectPath::from("repository-router"),
             *identity.application().as_bytes(),
         );
@@ -1419,7 +1415,7 @@ mod tests {
                     layout.clone(),
                     *target.cell_id().as_bytes(),
                     *observed.value().incarnation.as_bytes(),
-                    crab_cell_runtime::ReplicaLimits::default(),
+                    cellule_runtime::ReplicaLimits::default(),
                 )
                 .unwrap(),
                 authority,
@@ -1536,19 +1532,19 @@ mod tests {
         let stale_issued_at_ms = now_ms - 20_000;
         let directory = NodeDirectory::new(
             layout.clone(),
-            crab_cell_runtime::Digest::from_bytes([21; 32]),
-            crab_cell_runtime::Digest::from_bytes([22; 32]),
+            cellule_runtime::Digest::from_bytes([21; 32]),
+            cellule_runtime::Digest::from_bytes([22; 32]),
             registry.release_digest(),
         );
         directory
             .create(
                 NodeAdvertisement::sign(
-                    crab_cell_runtime::NodeId::from_bytes(*stale_session.as_bytes()),
+                    cellule_runtime::NodeId::from_bytes(*stale_session.as_bytes()),
                     stale_session,
                     owner(stale_session).endpoint,
-                    crab_cell_runtime::Digest::from_bytes([21; 32]),
-                    crab_cell_runtime::Digest::from_bytes([23; 32]),
-                    crab_cell_runtime::Digest::from_bytes([22; 32]),
+                    cellule_runtime::Digest::from_bytes([21; 32]),
+                    cellule_runtime::Digest::from_bytes([23; 32]),
+                    cellule_runtime::Digest::from_bytes([22; 32]),
                     registry.release_digest(),
                     &SigningKey::from_bytes(&[10; 32]),
                     1,
@@ -1556,7 +1552,7 @@ mod tests {
                     stale_issued_at_ms + 15_000,
                     registry.module_digests(),
                     vec![1],
-                    crab_cell_runtime::NodeFailureDomain::default(),
+                    cellule_runtime::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
@@ -1578,12 +1574,12 @@ mod tests {
         directory
             .create(
                 NodeAdvertisement::sign(
-                    crab_cell_runtime::NodeId::from_bytes(*third_session.as_bytes()),
+                    cellule_runtime::NodeId::from_bytes(*third_session.as_bytes()),
                     third_session,
                     owner(third_session).endpoint,
-                    crab_cell_runtime::Digest::from_bytes([21; 32]),
-                    crab_cell_runtime::Digest::from_bytes([24; 32]),
-                    crab_cell_runtime::Digest::from_bytes([22; 32]),
+                    cellule_runtime::Digest::from_bytes([21; 32]),
+                    cellule_runtime::Digest::from_bytes([24; 32]),
+                    cellule_runtime::Digest::from_bytes([22; 32]),
                     registry.release_digest(),
                     &SigningKey::from_bytes(&[11; 32]),
                     1,
@@ -1591,7 +1587,7 @@ mod tests {
                     now_ms + 15_000,
                     registry.module_digests(),
                     vec![1],
-                    crab_cell_runtime::NodeFailureDomain::default(),
+                    cellule_runtime::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
@@ -1649,7 +1645,7 @@ mod tests {
             ApplicationId::from_bytes([42; 16]),
         );
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            Store::new(Arc::new(InMemory::new())).for_cellule().unwrap(),
             ObjectPath::from("fleet-rebalance"),
             *identity.application().as_bytes(),
         );
@@ -1707,12 +1703,12 @@ mod tests {
             .await
             .unwrap();
         let mutation = mutation(47);
-        let digest = crab_cell_runtime::Digest::from_bytes([48; 32]);
+        let digest = cellule_runtime::Digest::from_bytes([48; 32]);
         let issued_at_ms = mutation.issued_at_ms;
         handle
             .execute(mutation, digest, issued_at_ms, 64, 64, |transaction| {
                 transaction.execute_batch("CREATE TABLE transfer_state(value INTEGER NOT NULL); INSERT INTO transfer_state(value) VALUES (7)")?;
-                Ok(crab_cell_runtime::HandlerOutcome::Success(Vec::new()))
+                Ok(cellule_runtime::HandlerOutcome::Success(Vec::new()))
             })
             .await
             .unwrap();
@@ -1724,8 +1720,8 @@ mod tests {
             receiver,
             receiver_dir.path().to_path_buf(),
         );
-        let fleet = crab_cell_runtime::Digest::from_bytes([21; 32]);
-        let image = crab_cell_runtime::Digest::from_bytes([22; 32]);
+        let fleet = cellule_runtime::Digest::from_bytes([21; 32]);
+        let image = cellule_runtime::Digest::from_bytes([22; 32]);
         let directory = NodeDirectory::new(layout.clone(), fleet, image, registry.release_digest());
         let now_ms = crate::cells::unix_now_ms().unwrap() + 65_000;
         for (session, free_memory_bytes, free_disk_bytes, active_cells) in [
@@ -1734,11 +1730,11 @@ mod tests {
         ] {
             let key = SigningKey::from_bytes(&[*session.as_bytes().first().unwrap(); 32]);
             let advertisement = NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+                cellule_runtime::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 owner(session).endpoint,
                 fleet,
-                crab_cell_runtime::Digest::from_bytes([49; 32]),
+                cellule_runtime::Digest::from_bytes([49; 32]),
                 image,
                 registry.release_digest(),
                 &key,
@@ -1747,7 +1743,7 @@ mod tests {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
+                cellule_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes,
                     free_disk_bytes,
@@ -1757,7 +1753,7 @@ mod tests {
             )
             .unwrap()
             .with_placement_capacity(
-                crab_cell_runtime::NodePlacementCapacity {
+                cellule_runtime::NodePlacementCapacity {
                     memory_capacity_bytes: 16 * 1024 * 1024,
                     disk_capacity_bytes: 10 * 1024 * 1024 * 1024,
                     active_cells,
@@ -1877,7 +1873,7 @@ mod tests {
             ApplicationId::from_bytes([12; 16]),
         );
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            Store::new(Arc::new(InMemory::new())).for_cellule().unwrap(),
             ObjectPath::from("repository-router-missing"),
             *identity.application().as_bytes(),
         );
@@ -1918,7 +1914,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(crate::Error::Cell(crab_cell_runtime::Error::CellNotActive))
+            Err(crate::Error::Cell(cellule_runtime::Error::CellNotActive))
         ));
         runtime.shutdown().await.unwrap();
     }
@@ -1930,7 +1926,7 @@ mod tests {
             ApplicationId::from_bytes([32; 16]),
         );
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            Store::new(Arc::new(InMemory::new())).for_cellule().unwrap(),
             ObjectPath::from("repository-router-activity-admission"),
             *identity.application().as_bytes(),
         );
@@ -1955,7 +1951,7 @@ mod tests {
 
         assert!(matches!(
             router.reserve_activity_payloads(),
-            Err(crate::Error::Cell(crab_cell_runtime::Error::Capacity(
+            Err(crate::Error::Cell(cellule_runtime::Error::Capacity(
                 "node retained bytes"
             )))
         ));
@@ -1982,8 +1978,8 @@ mod tests {
             RepositoryCellPeer::new(
                 NodeDirectory::new(
                     layout,
-                    crab_cell_runtime::Digest::from_bytes([21; 32]),
-                    crab_cell_runtime::Digest::from_bytes([22; 32]),
+                    cellule_runtime::Digest::from_bytes([21; 32]),
+                    cellule_runtime::Digest::from_bytes([22; 32]),
                     registry.release_digest(),
                 ),
                 Arc::new(PeerSigner::new(

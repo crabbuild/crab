@@ -214,7 +214,7 @@ impl Command for CreateRelease {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_create(&input)?;
         let digest = release_digest(&input);
         let existing = context.sql(&SqlBatch { statements: vec![statement(
@@ -228,7 +228,7 @@ impl Command for CreateRelease {
                 ));
             }
             let release = load_release(context, result_u64_from_row(row, 1)?)?.ok_or(
-                crab_cell_runtime::Error::Command("repository release submission has no release"),
+                cellule_runtime::Error::Command("repository release submission has no release"),
             )?;
             if release.deleted {
                 return Ok(CommandResult::Rejected(
@@ -253,7 +253,7 @@ impl Command for CreateRelease {
             statement("SELECT last FROM repository_sequences WHERE kind = 'release'", vec![]),
         ] })?;
         if sequence[0].rows_affected != 1 {
-            return Err(crab_cell_runtime::Error::Command(
+            return Err(cellule_runtime::Error::Command(
                 "repository release numbering is exhausted",
             ));
         }
@@ -319,7 +319,7 @@ impl Command for UpdateRelease {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_number(input.number)?;
         validate_number(input.version)?;
         validate_title(&input.title)?;
@@ -393,7 +393,7 @@ impl Command for CompleteReleasePublication {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_number(input.number)?;
         if input.expected_version > 0 {
             validate_number(input.expected_version)?;
@@ -458,7 +458,7 @@ impl Command for DeleteRelease {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_number(input.number)?;
         validate_number(input.version)?;
         let Some(mut release) = load_release(context, input.number)? else {
@@ -504,7 +504,7 @@ impl Command for ReserveReleaseAsset {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         let reservation = input.reservation;
         validate_reservation(&reservation)?;
         let Some(release) = load_release(context, reservation.release)? else {
@@ -573,7 +573,7 @@ impl Command for AttachReleaseAsset {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_reservation(&input.reservation)?;
         validate_asset_result(input.size, &input.digest)?;
         let Some(mut release) = load_release(context, input.reservation.release)? else {
@@ -672,7 +672,7 @@ impl Command for DeleteReleaseAsset {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_number(input.release)?;
         validate_number(input.version)?;
         let Some(mut release) = load_release(context, input.release)? else {
@@ -719,7 +719,7 @@ impl Query for GetRelease {
     fn execute(
         context: &mut QueryContext<'_>,
         number: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         validate_number(number)?;
         load_release_query(context, number)
     }
@@ -737,7 +737,7 @@ impl Query for GetReleaseSubmission {
     fn execute(
         context: &mut QueryContext<'_>,
         key: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         let result = context.sql(&SqlBatch {
             statements: vec![statement(
                 "SELECT release_number FROM repository_release_submissions WHERE request_id = ?",
@@ -767,7 +767,7 @@ impl Query for ListReleases {
     fn execute(
         context: &mut QueryContext<'_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         validate_list(input.before, input.limit)?;
         validate_query(input.query.as_deref())?;
         let query = input.query.as_ref().map(|query| query.to_lowercase());
@@ -779,7 +779,7 @@ impl Query for ListReleases {
             let number = result_u64_from_row(row, 0)?;
             last_examined = Some(number);
             let release = load_release_query(context, number)?.ok_or(
-                crab_cell_runtime::Error::Command("repository release list row disappeared"),
+                cellule_runtime::Error::Command("repository release list row disappeared"),
             )?;
             let visible = !release.deleted
                 && (input.include_drafts
@@ -815,7 +815,7 @@ impl Query for ListReleases {
     }
 }
 
-fn validate_create(input: &CreateReleaseInput) -> crab_cell_runtime::Result<()> {
+fn validate_create(input: &CreateReleaseInput) -> cellule_runtime::Result<()> {
     validate_author(&input.author)?;
     validate_tag_name(&input.tag_name)?;
     validate_oid(&input.target_oid)?;
@@ -823,7 +823,7 @@ fn validate_create(input: &CreateReleaseInput) -> crab_cell_runtime::Result<()> 
     validate_body(&input.body, false)
 }
 
-fn validate_tag_name(value: &str) -> crab_cell_runtime::Result<()> {
+fn validate_tag_name(value: &str) -> cellule_runtime::Result<()> {
     if value.is_empty()
         || value.len() > 255
         || value.trim() != value
@@ -831,28 +831,28 @@ fn validate_tag_name(value: &str) -> crab_cell_runtime::Result<()> {
         || value.chars().any(char::is_control)
         || crab_git::validate_push_refname(&format!("refs/tags/{value}")).is_err()
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository release tag is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_oid(value: &str) -> crab_cell_runtime::Result<()> {
+fn validate_oid(value: &str) -> cellule_runtime::Result<()> {
     if value.len() != 40
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         || value.bytes().all(|byte| byte == b'0')
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository release object ID is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_reservation(value: &ReleaseAssetReservation) -> crab_cell_runtime::Result<()> {
+fn validate_reservation(value: &ReleaseAssetReservation) -> cellule_runtime::Result<()> {
     validate_number(value.release)?;
     validate_number(value.expected_version)?;
     validate_author(&value.uploader)?;
@@ -869,21 +869,21 @@ fn validate_reservation(value: &ReleaseAssetReservation) -> crab_cell_runtime::R
         || value.content_type.len() > 255
         || value.content_type.chars().any(char::is_control)
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository release asset reservation is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_asset_result(size: u64, digest: &str) -> crab_cell_runtime::Result<()> {
+fn validate_asset_result(size: u64, digest: &str) -> cellule_runtime::Result<()> {
     if size > crate::server::MAX_DEPENDENCY_FILE_BYTES
         || digest.len() != 64
         || !digest
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository release asset result is invalid",
         ));
     }
@@ -919,16 +919,16 @@ fn asset_reservation_digest(value: &ReleaseAssetReservation) -> blake3::Hash {
     hasher.finalize()
 }
 
-fn next_version(value: u64) -> crab_cell_runtime::Result<u64> {
+fn next_version(value: u64) -> cellule_runtime::Result<u64> {
     value
         .checked_add(1)
         .filter(|value| *value < MAX_NUMBER)
-        .ok_or(crab_cell_runtime::Error::Command(
+        .ok_or(cellule_runtime::Error::Command(
             "repository release version is exhausted",
         ))
 }
 
-fn publication_result_version(expected_version: u64) -> crab_cell_runtime::Result<u64> {
+fn publication_result_version(expected_version: u64) -> cellule_runtime::Result<u64> {
     if expected_version == 0 {
         Ok(1)
     } else {
@@ -936,14 +936,14 @@ fn publication_result_version(expected_version: u64) -> crab_cell_runtime::Resul
     }
 }
 
-fn optional_wire<T: WireValue>(value: &Option<T>) -> crab_cell_runtime::Result<SqlValue> {
+fn optional_wire<T: WireValue>(value: &Option<T>) -> cellule_runtime::Result<SqlValue> {
     match value {
         Some(value) => {
             let mut encoder = BoundedEncoder::new(512 * 1024).map_err(|_| {
-                crab_cell_runtime::Error::Command("repository release publication is too large")
+                cellule_runtime::Error::Command("repository release publication is too large")
             })?;
             value.encode(&mut encoder).map_err(|_| {
-                crab_cell_runtime::Error::Command("repository release publication is too large")
+                cellule_runtime::Error::Command("repository release publication is too large")
             })?;
             Ok(SqlValue::Blob(encoder.finish()))
         }
@@ -951,35 +951,35 @@ fn optional_wire<T: WireValue>(value: &Option<T>) -> crab_cell_runtime::Result<S
     }
 }
 
-fn decode_optional_wire<T: WireValue>(value: &SqlValue) -> crab_cell_runtime::Result<Option<T>> {
+fn decode_optional_wire<T: WireValue>(value: &SqlValue) -> cellule_runtime::Result<Option<T>> {
     match value {
         SqlValue::Null => Ok(None),
         SqlValue::Blob(bytes) => {
             let mut decoder = BoundedDecoder::new(bytes, 512 * 1024).map_err(|_| {
-                crab_cell_runtime::Error::Command("repository release publication is invalid")
+                cellule_runtime::Error::Command("repository release publication is invalid")
             })?;
             let value = T::decode(&mut decoder).map_err(|_| {
-                crab_cell_runtime::Error::Command("repository release publication is invalid")
+                cellule_runtime::Error::Command("repository release publication is invalid")
             })?;
             decoder.finish().map_err(|_| {
-                crab_cell_runtime::Error::Command("repository release publication is invalid")
+                cellule_runtime::Error::Command("repository release publication is invalid")
             })?;
             Ok(Some(value))
         }
-        _ => Err(crab_cell_runtime::Error::Command(
+        _ => Err(cellule_runtime::Error::Command(
             "repository release publication is invalid",
         )),
     }
 }
 
-fn insert_release(release: &ReleaseRecord) -> crab_cell_runtime::Result<SqlStatement> {
+fn insert_release(release: &ReleaseRecord) -> cellule_runtime::Result<SqlStatement> {
     Ok(statement(
         "INSERT INTO repository_releases(number, create_request_id, author_issuer, author_subject, author_name, tag_name, tag_oid, target_oid, title, body, prerelease, draft, publication_pending, version, created_at_ms, published_at_ms, updated_at_ms, deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         release_values(release)?,
     ))
 }
 
-fn release_values(release: &ReleaseRecord) -> crab_cell_runtime::Result<Vec<SqlValue>> {
+fn release_values(release: &ReleaseRecord) -> cellule_runtime::Result<Vec<SqlValue>> {
     Ok(vec![
         integer(release.number)?,
         SqlValue::Blob(release.create_submission_id.to_vec()),
@@ -1012,7 +1012,7 @@ fn release_values(release: &ReleaseRecord) -> crab_cell_runtime::Result<Vec<SqlV
 fn update_release_statement(
     release: &ReleaseRecord,
     expected_version: u64,
-) -> crab_cell_runtime::Result<SqlStatement> {
+) -> cellule_runtime::Result<SqlStatement> {
     Ok(statement(
         "UPDATE repository_releases SET tag_oid = ?, title = ?, body = ?, prerelease = ?, draft = ?, publication_pending = ?, version = ?, published_at_ms = ?, updated_at_ms = ?, deleted = ? WHERE number = ? AND version = ?",
         vec![
@@ -1043,12 +1043,12 @@ fn update_release_row(
     context: &CommandContext<'_, '_>,
     release: &ReleaseRecord,
     expected_version: u64,
-) -> crab_cell_runtime::Result<()> {
+) -> cellule_runtime::Result<()> {
     let result = context.sql(&SqlBatch {
         statements: vec![update_release_statement(release, expected_version)?],
     })?;
     if result[0].rows_affected != 1 {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository release update lost its transaction",
         ));
     }
@@ -1062,7 +1062,7 @@ fn release_select() -> &'static str {
 fn load_release(
     context: &CommandContext<'_, '_>,
     number: u64,
-) -> crab_cell_runtime::Result<Option<ReleaseRecord>> {
+) -> cellule_runtime::Result<Option<ReleaseRecord>> {
     let result = context.sql(&SqlBatch { statements: vec![
         statement(release_select(), vec![integer(number)?]),
         statement("SELECT request_id, name, content_type, size, digest, uploader_issuer, uploader_subject, uploader_name, created_at_ms FROM repository_release_assets WHERE release_number = ? ORDER BY name", vec![integer(number)?]),
@@ -1077,7 +1077,7 @@ fn load_release(
 fn load_release_query(
     context: &QueryContext<'_>,
     number: u64,
-) -> crab_cell_runtime::Result<Option<ReleaseRecord>> {
+) -> cellule_runtime::Result<Option<ReleaseRecord>> {
     let result = context.sql(&SqlBatch { statements: vec![
         statement(release_select(), vec![integer(number)?]),
         statement("SELECT request_id, name, content_type, size, digest, uploader_issuer, uploader_subject, uploader_name, created_at_ms FROM repository_release_assets WHERE release_number = ? ORDER BY name", vec![integer(number)?]),
@@ -1092,14 +1092,14 @@ fn load_release_query(
 fn release_from_rows(
     row: &[SqlValue],
     asset_rows: &[Vec<SqlValue>],
-) -> crab_cell_runtime::Result<ReleaseRecord> {
+) -> cellule_runtime::Result<ReleaseRecord> {
     let submission = <[u8; 16]>::try_from(result_blob(row, 1)?).map_err(|_| {
-        crab_cell_runtime::Error::Command("repository release submission ID is invalid")
+        cellule_runtime::Error::Command("repository release submission ID is invalid")
     })?;
     let assets = asset_rows
         .iter()
         .map(|row| asset_from_row(row))
-        .collect::<crab_cell_runtime::Result<Vec<_>>>()?;
+        .collect::<cellule_runtime::Result<Vec<_>>>()?;
     Ok(ReleaseRecord {
         number: result_u64_from_row(row, 0)?,
         create_submission_id: submission,
@@ -1121,10 +1121,10 @@ fn release_from_rows(
     })
 }
 
-fn asset_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<ReleaseAssetRecord> {
+fn asset_from_row(row: &[SqlValue]) -> cellule_runtime::Result<ReleaseAssetRecord> {
     Ok(ReleaseAssetRecord {
         request_id: <[u8; 16]>::try_from(result_blob(row, 0)?).map_err(|_| {
-            crab_cell_runtime::Error::Command("repository release asset ID is invalid")
+            cellule_runtime::Error::Command("repository release asset ID is invalid")
         })?,
         name: result_text(row, 1)?,
         content_type: result_text(row, 2)?,
@@ -1135,7 +1135,7 @@ fn asset_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<ReleaseAssetRec
     })
 }
 
-fn author_from_row(row: &[SqlValue], start: usize) -> crab_cell_runtime::Result<RepositoryAuthor> {
+fn author_from_row(row: &[SqlValue], start: usize) -> cellule_runtime::Result<RepositoryAuthor> {
     Ok(RepositoryAuthor {
         issuer: result_text(row, start)?,
         subject: result_text(row, start + 1)?,
@@ -1143,33 +1143,33 @@ fn author_from_row(row: &[SqlValue], start: usize) -> crab_cell_runtime::Result<
     })
 }
 
-fn optional_text(row: &[SqlValue], index: usize) -> crab_cell_runtime::Result<Option<String>> {
+fn optional_text(row: &[SqlValue], index: usize) -> cellule_runtime::Result<Option<String>> {
     match row.get(index) {
         Some(SqlValue::Null) => Ok(None),
         Some(SqlValue::Text(value)) => Ok(Some(value.clone())),
-        _ => Err(crab_cell_runtime::Error::Command(
+        _ => Err(cellule_runtime::Error::Command(
             "repository release row is invalid",
         )),
     }
 }
 
-fn optional_u64(row: &[SqlValue], index: usize) -> crab_cell_runtime::Result<Option<u64>> {
+fn optional_u64(row: &[SqlValue], index: usize) -> cellule_runtime::Result<Option<u64>> {
     match row.get(index) {
         Some(SqlValue::Null) => Ok(None),
         Some(SqlValue::Integer(value)) => u64::try_from(*value)
             .map(Some)
-            .map_err(|_| crab_cell_runtime::Error::Command("repository release row is invalid")),
-        _ => Err(crab_cell_runtime::Error::Command(
+            .map_err(|_| cellule_runtime::Error::Command("repository release row is invalid")),
+        _ => Err(cellule_runtime::Error::Command(
             "repository release row is invalid",
         )),
     }
 }
 
-fn result_bool(row: &[SqlValue], index: usize) -> crab_cell_runtime::Result<bool> {
+fn result_bool(row: &[SqlValue], index: usize) -> cellule_runtime::Result<bool> {
     match result_u64_from_row(row, index)? {
         0 => Ok(false),
         1 => Ok(true),
-        _ => Err(crab_cell_runtime::Error::Command(
+        _ => Err(cellule_runtime::Error::Command(
             "repository release row is invalid",
         )),
     }
@@ -1177,14 +1177,14 @@ fn result_bool(row: &[SqlValue], index: usize) -> crab_cell_runtime::Result<bool
 
 fn bounded_release_page(
     items: Vec<ReleaseRecord>,
-) -> crab_cell_runtime::Result<(Vec<ReleaseRecord>, bool)> {
+) -> cellule_runtime::Result<(Vec<ReleaseRecord>, bool)> {
     let total = items.len();
     let mut used =
         4 + br#"{"items":["#.len() + br#"],"next":"#.len() + MAX_NUMBER.to_string().len() + 1;
     let mut kept = Vec::with_capacity(total);
     for item in items {
         let encoded = serde_json::to_vec(&item)
-            .map_err(|_| crab_cell_runtime::Error::Command("repository release row is invalid"))?;
+            .map_err(|_| cellule_runtime::Error::Command("repository release row is invalid"))?;
         let separator = usize::from(!kept.is_empty());
         if used
             .checked_add(separator + encoded.len())
@@ -1196,7 +1196,7 @@ fn bounded_release_page(
         kept.push(item);
     }
     if kept.is_empty() && total != 0 {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository release exceeds the page limit",
         ));
     }

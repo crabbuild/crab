@@ -73,6 +73,12 @@ This digest is separate from the established `BucketIdentity` used for logical
 cross-scheme comparison and cache keys. Raw `Store::new` wrappers have no target
 identity; integrity callers must not infer one from their display text.
 
+`Store::for_cellule` passes the same object-store handle, retry policy,
+identity, provider handles, and read observers to the independent Cellule
+runtime. It rejects scoped, routed, or staged stores because translating those
+policies through a second facade would change where Cell data is read or
+written. The HTTP server calls it only on its unscoped application roots.
+
 Non-resumable multipart uploads use one bounded part queue with or without a
 progress callback. Part and completion failures attempt abort before returning;
 an abort failure does not replace the original error used for retry decisions.

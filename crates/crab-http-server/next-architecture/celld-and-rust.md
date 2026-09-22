@@ -63,7 +63,7 @@ must hold independently. Follower selection is outside Crab's first release.
 The detailed target extension uses a node-session recovery interlock plus a
 control-pinned recovery overlay so follower durability remains compatible with
 Crab's exact roots; see
-[follower durability and warm failover](../../crab-cell-runtime/docs/failover-and-followers.md).
+[follower durability and warm failover](../../../crab/docs/architecture/cells/failover-and-followers.md).
 
 Celld's pinned peer transport uses fleet HMAC authentication over private HTTP;
 network encryption is supplied externally. Crab proposes mutual TLS on its
@@ -89,7 +89,7 @@ that a partial port inherits Celld's guarantees.
 
 The inspected Celld revision is
 `10cb1303dac710dcb3b557e318e08c855261f68b`. The implemented
-[import inventory](../../crab-ltx/UPSTREAM.md) records this revision, original
+import inventory (`cellule-ltx/UPSTREAM.md`) records this revision, original
 hashes, licenses, omitted modules and intentional local changes.
 Do not depend on a floating `main` branch.
 

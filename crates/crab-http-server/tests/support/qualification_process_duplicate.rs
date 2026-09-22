@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) async fn verify(
-    typed: &crab_cell_app::ApplicationHandle<fixture::ReferenceApplication>,
+    typed: &cellule_app::ApplicationHandle<fixture::ReferenceApplication>,
     tenant: TenantId,
     application: ApplicationId,
     acknowledged: &Acknowledgement,

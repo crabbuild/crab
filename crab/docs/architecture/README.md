@@ -9,7 +9,7 @@ each subsystem, and how the components fit together.
 | Document | Scope |
 |----------|-------|
 | [System Overview](system-overview.md) | High-level architecture, component diagram, data flow |
-| [Embedded Rust Cell Runtime](../../../crates/crab-cell-runtime/docs/README.md) | Rust-native Crab integration, typed handlers, LTX/control formats, SQL/private-peer contracts, release procedures and acceptance tests |
+| [Embedded Rust Cell Runtime](cells/README.md) | Rust-native Crab integration with Cellule, typed handlers, LTX/control formats, SQL/private-peer contracts, release procedures and acceptance tests |
 | [Multi-Crate Transition Plan](multi-crate-transition.md) | Phased crate split plan, target workspace DAG, hardening gates |
 | [Rust SDK Design and Delivery Plan](crab-sdk.md) | Public remote/local API, publication recovery, Git compatibility, executable phases and acceptance criteria |
 | [Crab SDK API](crab-sdk-api.md) | Unified repository facade, remote/local interfaces, task namespaces, feature boundaries, and qualification gates |

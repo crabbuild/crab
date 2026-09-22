@@ -6,8 +6,8 @@ use axum::{
     routing::post,
 };
 use bytes::Bytes;
-use crab_cell_runtime::CellStorageLayout;
-use crab_cell_runtime::{
+use cellule_runtime::CellStorageLayout;
+use cellule_runtime::{
     ApplicationId, ApplicationIdentity, CellAuthority, CellTarget, Control, Digest, IncarnationId,
     NamespaceId, NodeAdvertisement, NodeCapacity, NodeDirectory, Owner, PeerRoundTrip, SessionId,
     TenantId, peer_wire,
@@ -37,7 +37,11 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
     let loaded =
         LoadedPeerTls::load(&files.config(url::Url::parse(&first_endpoint).unwrap())).unwrap();
     let store = Store::new(Arc::new(InMemory::new()));
-    let layout = CellStorageLayout::new(store, ObjectPath::from("root"), [21; 16]);
+    let layout = CellStorageLayout::new(
+        store.for_cellule().unwrap(),
+        ObjectPath::from("root"),
+        [21; 16],
+    );
     let image = Digest::from_bytes([22; 32]);
     let release = Digest::from_bytes([23; 32]);
     let directory = NodeDirectory::new(layout.clone(), loaded.fleet(), image, release);
@@ -51,7 +55,7 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
         directory
             .create(
                 NodeAdvertisement::sign(
-                    crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+                    cellule_runtime::NodeId::from_bytes(*session.as_bytes()),
                     session,
                     endpoint,
                     loaded.fleet(),
@@ -64,7 +68,7 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
                     now_ms + 15_000,
                     vec![Digest::from_bytes([26; 32])],
                     vec![1],
-                    crab_cell_runtime::NodeFailureDomain::default(),
+                    cellule_runtime::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1_000,
                         free_disk_bytes: 2_000,
@@ -135,7 +139,7 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
             }
         }),
     );
-    let expected = crab_cell_runtime::encode_peer_reply(&peer_wire::PeerReply {
+    let expected = cellule_runtime::encode_peer_reply(&peer_wire::PeerReply {
         outcome: Some(peer_wire::peer_reply::Outcome::Error(peer_wire::Error {
             code: peer_wire::error::Code::NotFound as i32,
             outcome: peer_wire::error::Outcome::NotStarted as i32,

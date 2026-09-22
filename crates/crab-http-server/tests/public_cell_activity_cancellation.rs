@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use crab_cell_runtime::{
+use cellule_runtime::{
     ActivityClaim, ActivityCompletion, ActivityCompletionOutcome, CellTarget, Resolution,
     WorkflowActivityClaimCommand, WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand,
     WorkflowActivityValidateQuery, WorkflowActivityValidateRequest, WorkflowOutcome,

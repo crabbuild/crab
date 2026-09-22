@@ -9,8 +9,8 @@ use std::{
 };
 
 use bytes::Bytes;
-use crab_cell_runtime::CellStorageLayout;
-use crab_cell_runtime::{
+use cellule_runtime::CellStorageLayout;
+use cellule_runtime::{
     ActivityContext, ActivityExecution, ApplicationId, BlockingActivityHandler, BuildDescriptor,
     CellAuthority, CellCatalog, CellModule, CellReplica, CellRuntime, CellTarget, Digest,
     IncarnationId, MaintenanceModule, MigrationDescriptor, ModuleDescriptor,
@@ -36,8 +36,7 @@ use crate::cells::{
 
 const WORKFLOW_MODULE: &str = "scheduler-workflow-test";
 const WORKFLOW_NAMESPACE: NamespaceId = NamespaceId::from_bytes([31; 16]);
-const WORKFLOW_MIGRATION: &str =
-    include_str!("../../../../crab-cell-runtime/src/migrations/workflow.sql");
+const WORKFLOW_MIGRATION: &str = cellule_runtime::WORKFLOW_SCHEMA_SQL;
 const WORKFLOW_COMMANDS: &[OperationDescriptor] = &[
     operation(1, 1 << 20, 64),
     operation(2, 1 << 20, 64),
@@ -59,7 +58,7 @@ static WORKFLOW_DEFINITIONS: [&dyn WorkflowDefinition; 1] = [&WORKFLOW_DEFINITIO
 static WORKFLOW_NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     id: WORKFLOW_NAMESPACE,
     name: WORKFLOW_MODULE,
-    role: crab_cell_runtime::CatalogRole::Workflow,
+    role: cellule_runtime::CatalogRole::Workflow,
     shards: 1,
     effect_targets: &[],
     dead_letter: None,
@@ -197,7 +196,7 @@ async fn committed_claim_with_a_lost_response_is_resumed_after_timeout() {
     let object_store: Arc<dyn ObjectStore> = hanging.clone();
     let application = ApplicationId::from_bytes([51; 16]);
     let layout = CellStorageLayout::new(
-        Store::new(object_store),
+        Store::new(object_store).for_cellule().unwrap(),
         Path::from("scheduler-claim-timeout"),
         *application.as_bytes(),
     );
@@ -206,8 +205,8 @@ async fn committed_claim_with_a_lost_response_is_resumed_after_timeout() {
     let release = Digest::from_bytes([54; 32]);
     let certificate = Digest::from_bytes([55; 32]);
     let key = SigningKey::from_bytes(&[56; 32]);
-    let expired = crab_cell_runtime::SessionId::from_bytes([57; 16]);
-    let claimant = crab_cell_runtime::SessionId::from_bytes([58; 16]);
+    let expired = cellule_runtime::SessionId::from_bytes([57; 16]);
+    let claimant = cellule_runtime::SessionId::from_bytes([58; 16]);
     let capacity = NodeCapacity {
         free_memory_bytes: 1,
         free_disk_bytes: 1,
@@ -216,9 +215,9 @@ async fn committed_claim_with_a_lost_response_is_resumed_after_timeout() {
         ..NodeCapacity::default()
     };
     let advertisement =
-        |session: crab_cell_runtime::SessionId, issued_at_ms: i64, expires_at_ms: i64| {
+        |session: cellule_runtime::SessionId, issued_at_ms: i64, expires_at_ms: i64| {
             NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+                cellule_runtime::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 "https://claim-timeout.internal:8081".into(),
                 fleet,
@@ -231,7 +230,7 @@ async fn committed_claim_with_a_lost_response_is_resumed_after_timeout() {
                 expires_at_ms,
                 vec![Digest::from_bytes([59; 32])],
                 vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
+                cellule_runtime::NodeFailureDomain::default(),
                 capacity,
             )
             .unwrap()
@@ -257,7 +256,7 @@ async fn committed_claim_with_a_lost_response_is_resumed_after_timeout() {
     .await;
     assert!(matches!(
         timed_out,
-        Err(crate::Error::Cell(crab_cell_runtime::Error::Deadline))
+        Err(crate::Error::Cell(cellule_runtime::Error::Deadline))
     ));
 
     let resumed = claim_expired_with_timeout(
@@ -276,13 +275,13 @@ async fn committed_claim_with_a_lost_response_is_resumed_after_timeout() {
 #[tokio::test]
 async fn recovery_finish_is_bounded_when_storage_stalls() {
     let result = finish_recovery_with_timeout(Duration::ZERO, async {
-        std::future::pending::<crab_cell_runtime::Result<()>>().await
+        std::future::pending::<cellule_runtime::Result<()>>().await
     })
     .await;
 
     assert!(matches!(
         result,
-        Err(crate::Error::Cell(crab_cell_runtime::Error::Deadline))
+        Err(crate::Error::Cell(cellule_runtime::Error::Deadline))
     ));
 }
 
@@ -291,7 +290,7 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
     let application = ApplicationId::from_bytes([61; 16]);
     let tenant = TenantId::from_bytes([62; 16]);
     let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
+        Store::new(Arc::new(InMemory::new())).for_cellule().unwrap(),
         Path::from("scheduler-recovery"),
         *application.as_bytes(),
     );
@@ -300,9 +299,9 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
     let release = Digest::from_bytes([65; 32]);
     let certificate = Digest::from_bytes([66; 32]);
     let key = SigningKey::from_bytes(&[67; 32]);
-    let leader = crab_cell_runtime::SessionId::from_bytes([68; 16]);
-    let member = crab_cell_runtime::SessionId::from_bytes([69; 16]);
-    let claimant = crab_cell_runtime::SessionId::from_bytes([70; 16]);
+    let leader = cellule_runtime::SessionId::from_bytes([68; 16]);
+    let member = cellule_runtime::SessionId::from_bytes([69; 16]);
+    let claimant = cellule_runtime::SessionId::from_bytes([70; 16]);
     let now_ms = super::super::unix_now_ms().unwrap();
     let initial_ms = now_ms - 20_000;
     let capacity = NodeCapacity {
@@ -311,15 +310,15 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
         follower_free_bytes: 1 << 30,
         follower_retained_bytes: 0,
         job_credits: 1,
-        log_protocol: crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION,
+        log_protocol: cellule_runtime::NODE_LOG_PROTOCOL_VERSION,
     };
-    let advertisement = |session: crab_cell_runtime::SessionId,
+    let advertisement = |session: cellule_runtime::SessionId,
                          endpoint: &str,
                          progress,
                          issued_at_ms,
                          expires_at_ms| {
         NodeAdvertisement::sign(
-            crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+            cellule_runtime::NodeId::from_bytes(*session.as_bytes()),
             session,
             endpoint.into(),
             fleet,
@@ -332,7 +331,7 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
             expires_at_ms,
             vec![Digest::from_bytes([71; 32])],
             vec![1],
-            crab_cell_runtime::NodeFailureDomain::default(),
+            cellule_runtime::NodeFailureDomain::default(),
             capacity,
         )
         .unwrap()
@@ -405,14 +404,14 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
         .unwrap();
 
     let follower_directory = tempfile::TempDir::new().unwrap();
-    let follower = crab_cell_runtime::FollowerStore::open(
+    let follower = cellule_runtime::FollowerStore::open(
         follower_directory.path().to_owned(),
         super::super::repository_replica_limits(),
-        crab_cell_runtime::DiskBudget::new(1 << 30),
+        cellule_runtime::DiskBudget::new(1 << 30),
     )
     .unwrap();
     let source = tempfile::TempDir::new().unwrap();
-    let mut database = crab_ltx::Db::open(
+    let mut database = cellule_ltx::Db::open(
         &source.path().join("follower.sqlite"),
         super::super::repository_replica_limits(),
     )
@@ -422,8 +421,8 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
         .unwrap();
     let capture = database.capture().unwrap();
     let segment = capture.segments.first().unwrap();
-    let frame = crab_ltx::encode_node_frame(
-        crab_ltx::NodeFrameScope {
+    let frame = cellule_ltx::encode_node_frame(
+        cellule_ltx::NodeFrameScope {
             leader_session: *leader.as_bytes(),
             log_epoch: 1,
             node_sequence: 1,
@@ -442,9 +441,9 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
     .clone();
     follower.append(leader, 1, vec![frame], 0).await.unwrap();
     database.close().unwrap();
-    let transport: Arc<dyn crab_cell_runtime::NodeLogTransport> =
-        Arc::new(crab_cell_runtime::LocalFollowerTransport::new(
-            crab_cell_runtime::NodeId::from_bytes(*member.as_bytes()),
+    let transport: Arc<dyn cellule_runtime::NodeLogTransport> =
+        Arc::new(cellule_runtime::LocalFollowerTransport::new(
+            cellule_runtime::NodeId::from_bytes(*member.as_bytes()),
             follower,
         ));
     recover_node_session(
@@ -457,7 +456,7 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
                 super::super::repository_replica_limits(),
             ),
             transport,
-            recovery_disk: crab_ltx::DiskBudget::new(512 << 20),
+            recovery_disk: cellule_ltx::DiskBudget::new(512 << 20),
             recovery_scratch: std::env::temp_dir(),
             metrics: None,
         },
@@ -495,7 +494,7 @@ impl WorkflowDefinition for SchedulerWorkflowDefinition {
         _state: &[u8],
         event: &[u8],
         context: WorkflowContext,
-    ) -> crab_cell_runtime::Result<WorkflowDecision> {
+    ) -> cellule_runtime::Result<WorkflowDecision> {
         if event.starts_with(b"activity\0") {
             return Ok(WorkflowDecision {
                 status: WorkflowStatus::Completed,
@@ -588,7 +587,7 @@ impl CellModule for SchedulerWorkflow {
         })
     }
 
-    fn register(self, registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
+    fn register(self, registry: &mut RegistryBuilder) -> cellule_runtime::Result<()> {
         register_workflow::<Self>(registry)?;
         register_workflow_activities::<Self>(registry)?;
         register_blocking_activity::<Self, SchedulerEcho>(registry)?;
@@ -604,8 +603,8 @@ impl PeerRoundTrip for UnavailablePeer {
         _target: CellTarget,
         _request: Vec<u8>,
         _remaining_ms: u32,
-    ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>> {
-        Box::pin(async { Err(crab_cell_runtime::Error::CellNotActive) })
+    ) -> Pin<Box<dyn Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>> {
+        Box::pin(async { Err(cellule_runtime::Error::CellNotActive) })
     }
 }
 
@@ -617,9 +616,9 @@ impl PeerRoundTrip for CountingUnavailablePeer {
         _target: CellTarget,
         _request: Vec<u8>,
         _remaining_ms: u32,
-    ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>> {
+    ) -> Pin<Box<dyn Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>> {
         self.0.fetch_add(1, Ordering::AcqRel);
-        Box::pin(async { Err(crab_cell_runtime::Error::CellNotActive) })
+        Box::pin(async { Err(cellule_runtime::Error::CellNotActive) })
     }
 }
 
@@ -699,7 +698,7 @@ async fn scan_executes_registered_workflow_activity_without_blocking_the_scanner
     builder.register(SchedulerWorkflow).unwrap();
     let registry = Arc::new(builder.finish().unwrap());
     let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
+        Store::new(Arc::new(InMemory::new())).for_cellule().unwrap(),
         Path::from("workflow-scheduler"),
         *identity.application().as_bytes(),
     );
@@ -718,12 +717,12 @@ async fn scan_executes_registered_workflow_activity_without_blocking_the_scanner
         &0_u32.to_be_bytes(),
     )
     .unwrap();
-    let catalog = crab_cell_runtime::CellCatalog::new(layout.clone(), identity.tenant());
+    let catalog = cellule_runtime::CellCatalog::new(layout.clone(), identity.tenant());
     let proof = catalog
         .provision(
-            crab_cell_runtime::CatalogEntry::new(
+            cellule_runtime::CatalogEntry::new(
                 &target,
-                crab_cell_runtime::CatalogRole::Workflow,
+                cellule_runtime::CatalogRole::Workflow,
                 registry.module_code(WORKFLOW_MODULE).unwrap(),
                 1,
             )
@@ -762,7 +761,7 @@ async fn scan_executes_registered_workflow_activity_without_blocking_the_scanner
         )
         .await
         .unwrap();
-    let client = crab_cell_runtime::CellClient::local(registry.clone(), handle.clone());
+    let client = cellule_runtime::CellClient::local(registry.clone(), handle.clone());
     let workflows = WorkflowNamespace::<SchedulerWorkflow>::new(
         client,
         identity.tenant(),
@@ -796,7 +795,7 @@ async fn scan_executes_registered_workflow_activity_without_blocking_the_scanner
     node_directory
         .create(
             NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+                cellule_runtime::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 endpoint,
                 fleet,
@@ -809,7 +808,7 @@ async fn scan_executes_registered_workflow_activity_without_blocking_the_scanner
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
+                cellule_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
@@ -892,7 +891,7 @@ async fn scan_cursor_advances_when_the_cycle_budget_is_exhausted() {
         ApplicationId::from_bytes([52; 16]),
     );
     let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
+        Store::new(Arc::new(InMemory::new())).for_cellule().unwrap(),
         Path::from("repository-scheduler-fairness"),
         *identity.application().as_bytes(),
     );
@@ -969,7 +968,7 @@ async fn scan_cursor_advances_when_the_cycle_budget_is_exhausted() {
     node_directory
         .create(
             NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+                cellule_runtime::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 endpoint,
                 fleet,
@@ -982,7 +981,7 @@ async fn scan_cursor_advances_when_the_cycle_budget_is_exhausted() {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
+                cellule_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
@@ -1067,7 +1066,7 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
         ApplicationId::from_bytes([92; 16]),
     );
     let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
+        Store::new(Arc::new(InMemory::new())).for_cellule().unwrap(),
         Path::from("repository-scheduler-retry"),
         *identity.application().as_bytes(),
     );
@@ -1106,7 +1105,7 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
         95,
     )
     .await;
-    let catalog = crab_cell_runtime::CellCatalog::new(layout.clone(), identity.tenant());
+    let catalog = cellule_runtime::CellCatalog::new(layout.clone(), identity.tenant());
     let proof = catalog.lookup(target.cell_id()).await.unwrap().unwrap();
     let idle = authority.load(target.cell_id()).await.unwrap().unwrap();
     let replica = CellReplica::new(
@@ -1143,7 +1142,7 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
     node_directory
         .create(
             NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*remote_session.as_bytes()),
+                cellule_runtime::NodeId::from_bytes(*remote_session.as_bytes()),
                 remote_session,
                 remote_endpoint,
                 fleet,
@@ -1156,7 +1155,7 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
+                cellule_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 0,
                     free_disk_bytes: 0,
@@ -1173,7 +1172,7 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
     node_directory
         .create(
             NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*local_session.as_bytes()),
+                cellule_runtime::NodeId::from_bytes(*local_session.as_bytes()),
                 local_session,
                 local_endpoint.clone(),
                 fleet,
@@ -1186,7 +1185,7 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
+                cellule_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
@@ -1259,7 +1258,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
         ApplicationId::from_bytes([2; 16]),
     );
     let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
+        Store::new(Arc::new(InMemory::new())).for_cellule().unwrap(),
         Path::from("repository-scheduler"),
         *identity.application().as_bytes(),
     );
@@ -1309,7 +1308,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
     node_directory
         .create(
             NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*stale_session.as_bytes()),
+                cellule_runtime::NodeId::from_bytes(*stale_session.as_bytes()),
                 stale_session,
                 "https://stale.internal:8789".into(),
                 fleet,
@@ -1322,7 +1321,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
                 stale_issued_at_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
+                cellule_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1,
                     free_disk_bytes: 1,
@@ -1338,7 +1337,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
     node_directory
         .create(
             NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+                cellule_runtime::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 endpoint,
                 fleet,
@@ -1351,7 +1350,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
+                cellule_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
@@ -1394,7 +1393,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
     let after = authority.load(target.cell_id()).await.unwrap().unwrap();
     assert_eq!(after.value().root.as_ref().unwrap().commit_sequence, 1);
     assert!(after.value().next_due_ms.is_some_and(|due| due > now_ms));
-    assert_eq!(after.value().state, crab_cell_runtime::ControlState::Idle);
+    assert_eq!(after.value().state, cellule_runtime::ControlState::Idle);
     assert_eq!(status.progress(), 2);
     assert!(status.is_healthy(super::super::unix_now_ms().unwrap()));
     assert!(
@@ -1433,7 +1432,7 @@ async fn activating_release_migrates_idle_cell_before_ready_gate() {
     builder.register(SchedulerWorkflow).unwrap();
     let registry = Arc::new(builder.finish().unwrap());
     let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
+        Store::new(Arc::new(InMemory::new())).for_cellule().unwrap(),
         Path::from("scheduler-release-migration"),
         *identity.application().as_bytes(),
     );
@@ -1449,12 +1448,12 @@ async fn activating_release_migrates_idle_cell_before_ready_gate() {
         b"retained-workflow",
     )
     .unwrap();
-    let catalog = crab_cell_runtime::CellCatalog::new(layout.clone(), identity.tenant());
+    let catalog = cellule_runtime::CellCatalog::new(layout.clone(), identity.tenant());
     let proof = catalog
         .provision(
-            crab_cell_runtime::CatalogEntry::new(
+            cellule_runtime::CatalogEntry::new(
                 &target,
-                crab_cell_runtime::CatalogRole::Workflow,
+                cellule_runtime::CatalogRole::Workflow,
                 WORKFLOW_PREDECESSOR,
                 1,
             )
@@ -1497,7 +1496,7 @@ async fn activating_release_migrates_idle_cell_before_ready_gate() {
         .await
         .unwrap();
 
-    let releases = crab_cell_runtime::ReleaseStore::new(layout.clone(), identity).unwrap();
+    let releases = cellule_runtime::ReleaseStore::new(layout.clone(), identity).unwrap();
     let ready = releases.load().await.unwrap().unwrap();
     let operation = RequestId::from_bytes([76; 16]);
     let second_image = format!("sha256:{}", "4b".repeat(32));
@@ -1526,7 +1525,7 @@ async fn activating_release_migrates_idle_cell_before_ready_gate() {
     node_directory
         .create(
             NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+                cellule_runtime::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 endpoint,
                 fleet,
@@ -1539,7 +1538,7 @@ async fn activating_release_migrates_idle_cell_before_ready_gate() {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
+                cellule_runtime::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
@@ -1598,7 +1597,7 @@ async fn activating_release_migrates_idle_cell_before_ready_gate() {
     assert_eq!(migrated.value().schema, 1);
     assert_eq!(migrated.value().root.as_ref().unwrap().commit_sequence, 1);
     assert_eq!(migrated.value().state, ControlState::Idle);
-    let progress = crab_cell_runtime::MigrationProgressStore::new(layout.clone(), identity)
+    let progress = cellule_runtime::MigrationProgressStore::new(layout.clone(), identity)
         .unwrap()
         .load(target.cell_id(), operation)
         .await
@@ -1606,7 +1605,7 @@ async fn activating_release_migrates_idle_cell_before_ready_gate() {
         .unwrap();
     assert_eq!(
         progress.state(),
-        crab_cell_runtime::MigrationProgressState::Completed
+        cellule_runtime::MigrationProgressState::Completed
     );
     assert_eq!(progress.attempts(), 1);
     super::super::verify_current_cells(&layout, identity, &registry)

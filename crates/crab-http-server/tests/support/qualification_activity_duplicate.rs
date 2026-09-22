@@ -1,5 +1,5 @@
-use crab_cell_app::ApplicationHandle;
-use crab_cell_runtime::{
+use cellule_app::ApplicationHandle;
+use cellule_runtime::{
     ActivityCompletion, ActivityCompletionOutcome, ApplicationId, CellTarget, Error, Result,
     TenantId, WorkflowActivityClaimCommand, WorkflowActivityClaimRequest,
     WorkflowActivityCompleteCommand, WorkflowActivityValidateQuery,

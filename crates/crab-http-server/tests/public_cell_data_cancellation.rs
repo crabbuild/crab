@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use crab_cell_runtime::{
+use cellule_runtime::{
     BlobCommand, BlobCondition, BlobMutation, BlobMutationOutcome, BlobQuery, BlobQueryResult,
     CellTarget, EffectAckRequest, EffectClaimRequest, EffectLease, EffectLeaseCommand,
     EffectLeaseOutcome, EffectLeaseRequest, QueueClaimRequest, QueueLeaseOutcome, QueueSendCommand,

@@ -3,7 +3,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crab_cell_runtime::{
+use cellule_runtime::{
     ActivityRunOutcome, ActivitySupervisor, ActivitySupervisorError, Resolution, StoredOutcome,
     WorkflowOutcome, WorkflowStatus,
 };

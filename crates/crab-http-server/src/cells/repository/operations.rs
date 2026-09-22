@@ -12,7 +12,7 @@ impl Command for UpdateIssue {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_number(input.number)?;
         validate_number(input.version)?;
         validate_author(&input.actor)?;
@@ -22,7 +22,7 @@ impl Command for UpdateIssue {
             && input.label_ids.is_none()
             && input.assignee_subjects.is_none()
         {
-            return Err(crab_cell_runtime::Error::Command(
+            return Err(cellule_runtime::Error::Command(
                 "repository issue update has no changes",
             ));
         }
@@ -33,7 +33,7 @@ impl Command for UpdateIssue {
             validate_body(body, false)?;
         }
         if input.state.is_some_and(|state| state > 1) {
-            return Err(crab_cell_runtime::Error::Command(
+            return Err(cellule_runtime::Error::Command(
                 "repository issue state is invalid",
             ));
         }
@@ -48,7 +48,7 @@ impl Command for UpdateIssue {
                             vec![integer(*label)?],
                         ))
                     })
-                    .collect::<crab_cell_runtime::Result<Vec<_>>>()?;
+                    .collect::<cellule_runtime::Result<Vec<_>>>()?;
                 let existing = context.sql(&SqlBatch { statements })?;
                 if existing.iter().any(|result| result.rows.is_empty()) {
                     return Ok(CommandResult::Rejected(UpdateIssueOutcome::LabelInvalid));
@@ -104,7 +104,7 @@ impl Command for UpdateIssue {
             .version
             .checked_add(1)
             .filter(|version| *version <= MAX_NUMBER)
-            .ok_or(crab_cell_runtime::Error::Command(
+            .ok_or(cellule_runtime::Error::Command(
                 "repository issue version is exhausted",
             ))?;
         issue.updated_at_ms = timestamp(context.now_ms())?;
@@ -146,7 +146,7 @@ impl Command for UpdateComment {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_number(input.key.issue)?;
         validate_number(input.key.number)?;
         validate_number(input.version)?;
@@ -173,7 +173,7 @@ impl Command for UpdateComment {
             .version
             .checked_add(1)
             .filter(|version| *version <= MAX_NUMBER)
-            .ok_or(crab_cell_runtime::Error::Command(
+            .ok_or(cellule_runtime::Error::Command(
                 "repository comment version is exhausted",
             ))?;
         comment.updated_at_ms = timestamp(context.now_ms())?;
@@ -212,10 +212,10 @@ impl Query for ListIssues {
     fn execute(
         context: &mut QueryContext<'_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         validate_list(input.before, input.limit)?;
         if input.state > 2 {
-            return Err(crab_cell_runtime::Error::Command(
+            return Err(cellule_runtime::Error::Command(
                 "repository issue filter is invalid",
             ));
         }
@@ -281,7 +281,7 @@ impl Query for ListComments {
     fn execute(
         context: &mut QueryContext<'_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         validate_number(input.issue)?;
         validate_list(input.before, input.limit)?;
         let exists = context.sql(&SqlBatch {
@@ -389,7 +389,7 @@ impl Command for CreateLabel {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_author(&input.author)?;
         validate_label_fields(&input.name, &input.color, input.description.as_deref())?;
         let payload_digest = label_submission_digest(&input);
@@ -413,7 +413,7 @@ impl Command for CreateLabel {
             let label = current[0]
                 .rows
                 .first()
-                .ok_or(crab_cell_runtime::Error::Command(
+                .ok_or(cellule_runtime::Error::Command(
                     "repository label submission has no label row",
                 ))?;
             if !matches!(label.get(7), Some(SqlValue::Null)) {
@@ -504,9 +504,9 @@ impl Command for UpdateLabel {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         if input.number == 0 || input.number > MAX_REPOSITORY_LABELS {
-            return Err(crab_cell_runtime::Error::Command(
+            return Err(cellule_runtime::Error::Command(
                 "repository label number is invalid",
             ));
         }
@@ -542,7 +542,7 @@ impl Command for UpdateLabel {
             .version
             .checked_add(1)
             .filter(|version| *version <= MAX_NUMBER)
-            .ok_or(crab_cell_runtime::Error::Command(
+            .ok_or(cellule_runtime::Error::Command(
                 "repository label version is exhausted",
             ))?;
         label.updated_at_ms = timestamp(context.now_ms())?;
@@ -584,9 +584,9 @@ impl Command for DeleteLabel {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         if input.number == 0 || input.number > MAX_REPOSITORY_LABELS {
-            return Err(crab_cell_runtime::Error::Command(
+            return Err(cellule_runtime::Error::Command(
                 "repository label number is invalid",
             ));
         }
@@ -640,7 +640,7 @@ impl Query for ListLabels {
     fn execute(
         context: &mut QueryContext<'_>,
         (): Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         let result = context.sql(&SqlBatch {
             statements: vec![statement(
                 "SELECT number, name, color, description, version, created_at_ms, updated_at_ms FROM repository_labels WHERE deleted_version IS NULL ORDER BY name_key, number",
@@ -648,7 +648,7 @@ impl Query for ListLabels {
             )],
         })?;
         if result[0].rows.len() > MAX_REPOSITORY_LABELS as usize {
-            return Err(crab_cell_runtime::Error::Command(
+            return Err(cellule_runtime::Error::Command(
                 "repository label catalog exceeds its bound",
             ));
         }
@@ -656,7 +656,7 @@ impl Query for ListLabels {
             .rows
             .iter()
             .map(|row| label_from_row(row))
-            .collect::<crab_cell_runtime::Result<Vec<_>>>()?;
+            .collect::<cellule_runtime::Result<Vec<_>>>()?;
         Ok(LabelCatalog { labels })
     }
 }
@@ -673,7 +673,7 @@ impl Command for CreateCommitStatus {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_author(&input.author)?;
         validate_status_fields(
             &input.oid,
@@ -783,7 +783,7 @@ impl Query for ListCommitStatuses {
     fn execute(
         context: &mut QueryContext<'_>,
         oid: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         validate_status_fields(&oid, "status", 0, None, None)?;
         let result = context.sql(&SqlBatch {
             statements: vec![statement(
@@ -792,7 +792,7 @@ impl Query for ListCommitStatuses {
             )],
         })?;
         if result[0].rows.len() > MAX_STATUS_SUBMISSIONS as usize {
-            return Err(crab_cell_runtime::Error::Command(
+            return Err(cellule_runtime::Error::Command(
                 "repository commit status catalog exceeds its bound",
             ));
         }
@@ -807,7 +807,7 @@ impl Query for ListCommitStatuses {
             previous = Some(key);
         }
         if statuses.len() > MAX_STATUS_CONTEXTS as usize {
-            return Err(crab_cell_runtime::Error::Command(
+            return Err(cellule_runtime::Error::Command(
                 "repository commit status contexts exceed their bound",
             ));
         }
@@ -827,7 +827,7 @@ impl Query for GetCommitStatusSubmission {
     fn execute(
         context: &mut QueryContext<'_>,
         key: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         validate_status_fields(&key.oid, "status", 0, None, None)?;
         let result = context.sql(&SqlBatch {
             statements: vec![statement(
@@ -850,7 +850,7 @@ fn status_context_available(
     context: &CommandContext<'_, '_>,
     oid: &str,
     status_context: &str,
-) -> crab_cell_runtime::Result<bool> {
+) -> cellule_runtime::Result<bool> {
     let context_key = status_context.to_lowercase();
     let result = context.sql(&SqlBatch {
         statements: vec![
