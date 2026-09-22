@@ -2189,11 +2189,14 @@ dependencies = [
 name = "crab-cell-app"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "blake3",
  "crab-cell-runtime",
  "crab-ltx",
  "crab-storage",
  "ed25519-dalek",
+ "fs4",
+ "futures-util",
  "object_store",
  "tempfile",
  "tokio",
