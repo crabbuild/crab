@@ -1836,7 +1836,8 @@ pub struct QualificationOwnership {
 
 /// Non-secret execution identity and fault evidence supplied by a protected
 /// qualification harness when it binds a measured run to a receipt.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QualificationExecutionEvidence {
     /// Provider identity recorded by the harness.
     pub provider: String,
@@ -1860,6 +1861,61 @@ pub struct QualificationExecutionEvidence {
     pub ownership: Vec<QualificationOwnership>,
     /// Whether the harness observed a dirty source or workspace.
     pub dirty: bool,
+}
+
+impl QualificationExecutionEvidence {
+    /// Encodes the non-secret execution evidence in its canonical JSON form.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self).map_err(Error::from)?;
+        if bytes.len() > MAX_RECEIPT_BYTES {
+            return Err(Error::Control(
+                "qualification execution evidence exceeds limit",
+            ));
+        }
+        Ok(bytes)
+    }
+
+    /// Decodes and validates one canonical execution evidence file.
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() > MAX_RECEIPT_BYTES {
+            return Err(Error::Control(
+                "qualification execution evidence exceeds limit",
+            ));
+        }
+        let evidence: Self = serde_json::from_slice(bytes)?;
+        evidence.validate()?;
+        if evidence.encode()? != bytes {
+            return Err(Error::Control(
+                "qualification execution evidence is not canonical",
+            ));
+        }
+        Ok(evidence)
+    }
+
+    fn validate(&self) -> Result<()> {
+        validate_label(&self.provider, "qualification evidence provider")?;
+        validate_label(&self.workload, "qualification evidence workload")?;
+        validate_label(&self.fault, "qualification evidence fault")?;
+        validate_label(&self.toolchain, "qualification evidence toolchain")?;
+        validate_label(
+            &self.execution_profile,
+            "qualification evidence execution profile",
+        )?;
+        validate_label(&self.topology, "qualification evidence topology")?;
+        if self.started_at_ms == 0
+            || self.finished_at_ms < self.started_at_ms
+            || self.fault_schedule.is_empty()
+            || self.ownership.len() > MAX_METRICS
+            || self
+                .ownership
+                .iter()
+                .any(|proof| proof.root.iter().all(|byte| *byte == 0))
+        {
+            return Err(Error::Control("qualification execution evidence"));
+        }
+        Ok(())
+    }
 }
 
 impl QualificationOwnership {
@@ -2908,6 +2964,10 @@ impl QualificationRunner {
         run: &QualificationRunArtifact,
         artifacts: &[&[u8]],
     ) -> Result<QualificationReceipt> {
+        evidence.validate()?;
+        if evidence.dirty {
+            return Err(Error::Control("qualification run source is dirty"));
+        }
         run.verify_for_profile(profile)?;
         if artifacts.is_empty() {
             return Err(Error::Control("qualification run artifacts are empty"));
@@ -3191,6 +3251,35 @@ fn validate_path(value: &str, field: &'static str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_evidence_round_trip_is_canonical_and_bounded() {
+        let evidence = QualificationExecutionEvidence {
+            provider: "s3".into(),
+            workload: "primitives".into(),
+            fault: "owner-loss".into(),
+            toolchain: "rustc-1.90".into(),
+            execution_profile: "release".into(),
+            topology: "kubernetes".into(),
+            started_at_ms: 10,
+            finished_at_ms: 20,
+            fault_schedule: b"owner-loss-before-commit".to_vec(),
+            ownership: vec![QualificationOwnership::new(
+                4,
+                8,
+                Digest::from_bytes([7; 32]),
+            )],
+            dirty: false,
+        };
+        let encoded = evidence.encode().expect("evidence encoding");
+        assert_eq!(
+            QualificationExecutionEvidence::decode(&encoded).expect("evidence decoding"),
+            evidence
+        );
+        let mut noncanonical = encoded;
+        noncanonical.push(b'\n');
+        assert!(QualificationExecutionEvidence::decode(&noncanonical).is_err());
+    }
 
     #[test]
     fn threshold_profiles_are_canonical_and_distinct() {
@@ -3874,6 +3963,20 @@ mod tests {
         receipt
             .verify_primitive_run_artifact(&profile, &[&run_bytes, &workload_bytes])
             .unwrap();
+        let mut dirty_evidence = evidence.clone();
+        dirty_evidence.dirty = true;
+        assert!(
+            runner
+                .emit_protected_run(
+                    &profile,
+                    "binder-source".into(),
+                    Digest::from_bytes([97; 32]),
+                    dirty_evidence,
+                    &run,
+                    &[&run_bytes, &workload_bytes],
+                )
+                .is_err()
+        );
 
         let mismatched_workload =
             QualificationWorkload::generate_with_size(&profile, 29, 2, 8, 1).unwrap();
