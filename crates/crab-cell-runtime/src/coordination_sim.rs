@@ -5,7 +5,7 @@ use crate::coordination::{
 use std::env;
 
 const COMMANDS: usize = 2;
-const EVENT_COUNT: usize = 39;
+const EVENT_COUNT: usize = 41;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Event {
@@ -22,6 +22,8 @@ enum Event {
     FinishMigration,
     BeginHydration,
     FinishHydration { complete: bool, stale: bool },
+    BeginCompaction,
+    FinishCompaction { fenced: bool },
     Fence,
     AdvanceClock { milliseconds: u64 },
     CallerCancel,
@@ -88,6 +90,7 @@ struct Simulation {
     work_effect: Option<u64>,
     renewal_effect: Option<u64>,
     hydration_effect: Option<u64>,
+    compaction_effect: Option<u64>,
     publication_effects: Vec<u64>,
     delayed_effects: usize,
     primitive_obligations: usize,
@@ -118,6 +121,7 @@ impl Simulation {
             work_effect: None,
             renewal_effect: None,
             hydration_effect: None,
+            compaction_effect: None,
             publication_effects: Vec::new(),
             delayed_effects: 0,
             primitive_obligations: 0,
@@ -135,6 +139,7 @@ impl Simulation {
     fn restore_after_takeover(&mut self) {
         let retained = self.retained;
         self.state = CoordinationState::serving(true);
+        self.compaction_effect = None;
         self.publication_effects.clear();
         for _ in 0..retained {
             if matches!(
@@ -190,10 +195,14 @@ impl Simulation {
                 decision
             }
             Event::BeginWork => {
-                let decision = self.state.step(CoordinationInput::BeginWork {
-                    kind: AdmissionKind::Command,
-                    publisher_ready: true,
-                });
+                let decision = if self.owner_live {
+                    self.state.step(CoordinationInput::BeginWork {
+                        kind: AdmissionKind::Command,
+                        publisher_ready: true,
+                    })
+                } else {
+                    CoordinationDecision::Ignored
+                };
                 if matches!(decision, CoordinationDecision::Started) {
                     self.work_effect = Some(
                         self.state
@@ -203,7 +212,11 @@ impl Simulation {
                 decision
             }
             Event::BeginPublication => {
-                let decision = self.state.step(CoordinationInput::BeginPublication);
+                let decision = if self.owner_live {
+                    self.state.step(CoordinationInput::BeginPublication)
+                } else {
+                    CoordinationDecision::Ignored
+                };
                 if matches!(decision, CoordinationDecision::Started) {
                     self.retained = self.retained.saturating_add(1);
                     self.publication_effects
@@ -281,6 +294,32 @@ impl Simulation {
                 self.complete_effect(effect_id, CoordinationEffect::Hydration);
                 self.state
                     .step(CoordinationInput::FinishHydration { complete, stale })
+            }
+            Event::BeginCompaction => {
+                let decision = self.state.step(CoordinationInput::BeginCompaction {
+                    queue_empty: true,
+                    publication_idle: self.state.publication_count() == 0,
+                    publisher_ready: self.compaction_effect.is_none(),
+                    due: true,
+                    lease_live: self.owner_live,
+                });
+                if matches!(decision, CoordinationDecision::Started) {
+                    self.compaction_effect =
+                        Some(self.state.begin_effect(CoordinationEffect::Compaction));
+                }
+                decision
+            }
+            Event::FinishCompaction { fenced } => {
+                if let Some(effect_id) = self.compaction_effect.take() {
+                    self.complete_effect(Some(effect_id), CoordinationEffect::Compaction);
+                    if fenced {
+                        self.owner = None;
+                    }
+                    self.state
+                        .step(CoordinationInput::FinishCompaction { fenced })
+                } else {
+                    CoordinationDecision::Ignored
+                }
             }
             Event::Fence => {
                 self.owner = None;
@@ -575,7 +614,11 @@ impl Simulation {
             "publication obligation was not retained: {:?}",
             self.trace
         );
-        assert!(self.owner.is_some() || self.retained == 0 || self.state.is_fenced());
+        assert!(
+            self.owner.is_some() || self.retained == 0 || self.state.is_fenced(),
+            "owner lost with retained publication: {:?}",
+            self.trace
+        );
         if matches!(
             self.movement,
             MovementPhase::Quiescing
@@ -662,7 +705,11 @@ fn event(seed: u64) -> Event {
         35 => Event::LostReleaseResponse,
         36 => Event::MovementAcquire,
         37 => Event::ReceiverCrash,
-        _ => Event::MembershipLoss,
+        38 => Event::MembershipLoss,
+        39 => Event::BeginCompaction,
+        _ => Event::FinishCompaction {
+            fenced: seed & 1 == 0,
+        },
     }
 }
 

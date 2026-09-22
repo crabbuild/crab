@@ -18,6 +18,7 @@ pub(crate) enum CoordinationEffect {
     Work(AdmissionKind),
     Hydration,
     Inventory,
+    Compaction,
     Publication,
     Proof,
     Renewal,
@@ -115,6 +116,16 @@ pub(crate) enum CoordinationInput {
         inventory_unknown: bool,
         refreshing: bool,
         lease_live: bool,
+    },
+    BeginCompaction {
+        queue_empty: bool,
+        publication_idle: bool,
+        publisher_ready: bool,
+        due: bool,
+        lease_live: bool,
+    },
+    FinishCompaction {
+        fenced: bool,
     },
     FinishHydration {
         complete: bool,
@@ -551,6 +562,45 @@ impl CoordinationState {
                     CoordinationDecision::Ignored
                 } else {
                     CoordinationDecision::Started
+                }
+            }
+            CoordinationInput::BeginCompaction {
+                queue_empty,
+                publication_idle,
+                publisher_ready,
+                due,
+                lease_live,
+            } => {
+                if !lease_live {
+                    self.lifecycle = Lifecycle::Fenced;
+                    CoordinationDecision::Fence
+                } else if self.is_fenced()
+                    || self.is_draining()
+                    || self.busy
+                    || self.renewing
+                    || !queue_empty
+                    || !publication_idle
+                    || !publisher_ready
+                    || !due
+                    || !self.pending_effects.is_empty()
+                {
+                    CoordinationDecision::Ignored
+                } else {
+                    // The publisher token is exclusive, and busy keeps new SQL
+                    // from building unpublished cuts behind a long promotion.
+                    self.busy = true;
+                    CoordinationDecision::Started
+                }
+            }
+            CoordinationInput::FinishCompaction { fenced } => {
+                self.busy = false;
+                if fenced || self.is_fenced() {
+                    self.lifecycle = Lifecycle::Fenced;
+                    CoordinationDecision::Fence
+                } else if self.can_deactivate() && self.is_draining() {
+                    CoordinationDecision::ReadyToDeactivate
+                } else {
+                    CoordinationDecision::Ignored
                 }
             }
             CoordinationInput::FinishHydration { complete, stale } => {
@@ -1225,6 +1275,75 @@ mod tests {
         let state = CoordinationState::serving(true);
         assert!(!state.ready_to_deactivate(false, true));
         assert!(!state.ready_to_deactivate(true, false));
+        assert!(state.ready_to_deactivate(true, true));
+    }
+
+    #[test]
+    fn compaction_waits_for_quiet_publication_and_blocks_drain_until_completion() {
+        let mut state = CoordinationState::serving(true);
+        let begin = |state: &mut CoordinationState, queue_empty, publication_idle| {
+            state.step(CoordinationInput::BeginCompaction {
+                queue_empty,
+                publication_idle,
+                publisher_ready: true,
+                due: true,
+                lease_live: true,
+            })
+        };
+        assert_eq!(
+            begin(&mut state, false, true),
+            CoordinationDecision::Ignored
+        );
+        assert_eq!(
+            begin(&mut state, true, false),
+            CoordinationDecision::Ignored
+        );
+        assert_eq!(begin(&mut state, true, true), CoordinationDecision::Started);
+        let effect = state.begin_effect(CoordinationEffect::Compaction);
+        assert_eq!(
+            state.step(CoordinationInput::BeginDrain),
+            CoordinationDecision::Started
+        );
+        assert!(!state.ready_to_deactivate(true, false));
+        assert_eq!(
+            state.step(CoordinationInput::CompleteEffect {
+                effect_id: effect,
+                effect: CoordinationEffect::Compaction,
+            }),
+            CoordinationDecision::EffectCompleted
+        );
+        assert_eq!(
+            state.step(CoordinationInput::FinishCompaction { fenced: false }),
+            CoordinationDecision::ReadyToDeactivate
+        );
+    }
+
+    #[test]
+    fn lease_loss_during_compaction_fences_without_releasing_the_effect() {
+        let mut state = CoordinationState::serving(true);
+        assert_eq!(
+            state.step(CoordinationInput::BeginCompaction {
+                queue_empty: true,
+                publication_idle: true,
+                publisher_ready: true,
+                due: true,
+                lease_live: true,
+            }),
+            CoordinationDecision::Started
+        );
+        let effect = state.begin_effect(CoordinationEffect::Compaction);
+        assert_eq!(
+            state.step(CoordinationInput::FinishCompaction { fenced: true }),
+            CoordinationDecision::Fence
+        );
+        assert!(!state.ready_to_deactivate(true, true));
+        assert_eq!(
+            state.step(CoordinationInput::CompleteEffect {
+                effect_id: effect,
+                effect: CoordinationEffect::Compaction,
+            }),
+            CoordinationDecision::EffectCompleted
+        );
         assert!(state.ready_to_deactivate(true, true));
     }
 }

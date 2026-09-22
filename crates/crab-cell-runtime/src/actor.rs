@@ -49,6 +49,8 @@ const RENEWAL_SCAN: std::time::Duration = std::time::Duration::from_millis(100);
 const MAX_RENEWALS_IN_FLIGHT: usize = 32;
 const SQL_WALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 const HYDRATION_TICK: std::time::Duration = std::time::Duration::from_millis(100);
+const COMPACTION_QUIET: std::time::Duration = std::time::Duration::from_millis(250);
+const COMPACTION_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 const HYDRATION_PAGES_PER_STEP: u32 = 64;
 const FLEET_PUBLICATION_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -1589,6 +1591,8 @@ struct ActiveCell {
     inventory_refreshing: bool,
     drain: Option<oneshot::Sender<crate::Result<()>>>,
     last_used_ms: i64,
+    last_work_at: std::time::Instant,
+    compaction_retry_at: std::time::Instant,
 }
 
 struct QueuedPublication {
@@ -1689,6 +1693,13 @@ enum TaskResult {
         node_logged: bool,
         result: crate::Result<()>,
         fenced: bool,
+    },
+    Compacted {
+        cell: CellId,
+        generation: u64,
+        effect_id: u64,
+        publisher: Box<CellPublisher>,
+        result: crate::Result<Option<bool>>,
     },
     Queried {
         cell: CellId,
@@ -1829,6 +1840,7 @@ async fn run(
                         &node_lease,
                     );
                     start_background_inventory(&pool, &mut cells, &mut tasks, &node_lease);
+                    start_background_compaction(&pool, &mut cells, &mut tasks, &node_lease);
                 }
             }
             continue;
@@ -1872,6 +1884,7 @@ async fn run(
                     &node_lease,
                 );
                 start_background_inventory(&pool, &mut cells, &mut tasks, &node_lease);
+                start_background_compaction(&pool, &mut cells, &mut tasks, &node_lease);
             }
         }
     }
@@ -2557,6 +2570,74 @@ fn start_background_inventory(
     }
 }
 
+fn start_background_compaction(
+    pool: &SqlWorkerPool,
+    cells: &mut HashMap<CellId, ActiveCell>,
+    tasks: &mut JoinSet<TaskResult>,
+    node_lease: &RuntimeNodeLease,
+) {
+    let now = std::time::Instant::now();
+    for (cell, active) in cells {
+        if now.duration_since(active.last_work_at) < COMPACTION_QUIET
+            || now < active.compaction_retry_at
+        {
+            continue;
+        }
+        let due = active
+            .publisher
+            .as_ref()
+            .is_some_and(CellPublisher::compaction_due);
+        let decision = active
+            .coordination
+            .step(CoordinationInput::BeginCompaction {
+                queue_empty: active.queue.is_empty(),
+                publication_idle: active.coordination.publication_count() == 0,
+                publisher_ready: active.publisher.is_some(),
+                due,
+                lease_live: node_lease.check().is_ok(),
+            });
+        if matches!(decision, CoordinationDecision::Fence) {
+            fence_active(active);
+            continue;
+        }
+        if !matches!(decision, CoordinationDecision::Started) {
+            continue;
+        }
+        let Some(mut publisher) = active.publisher.take() else {
+            active
+                .coordination
+                .step(CoordinationInput::FinishCompaction { fenced: true });
+            fence_active(active);
+            continue;
+        };
+        let cell = *cell;
+        let generation = active.generation;
+        let effect_id = active.begin_task(CoordinationEffect::Compaction);
+        let pool = pool.clone();
+        tasks.spawn(async move {
+            let started = std::time::Instant::now();
+            let result = publisher.compact_one_quiet().await;
+            tracing::debug!(
+                elapsed_ms = started.elapsed().as_millis(),
+                promoted = matches!(result, Ok(Some(true))),
+                retry = matches!(result, Ok(None)),
+                succeeded = result.is_ok(),
+                "Cell LTX quiet compaction completed"
+            );
+            if result.is_err() {
+                let _ = pool.fence(cell).await;
+            }
+            TaskResult::Compacted {
+                cell,
+                generation,
+                effect_id,
+                publisher: Box::new(publisher),
+                result,
+            }
+        });
+    }
+}
+
 fn schedule(active: &mut ActiveCell, lease_live: bool) -> CoordinationDecision {
     let publication_blocked = active.queue.front().is_some_and(|work| {
         matches!(work, QueuedWork::Command(_))
@@ -2595,6 +2676,7 @@ fn start_next(
     }
     let generation = active.generation;
     active.last_used_ms = unix_millis();
+    active.last_work_at = std::time::Instant::now();
     let kind = match &work {
         QueuedWork::Command(_) => AdmissionKind::Command,
         QueuedWork::Query(_) => AdmissionKind::Query,
@@ -2972,6 +3054,12 @@ fn start_publication(
         return;
     };
     let node_logged = publication.durability.is_some();
+    tracing::debug!(
+        queue_wait_ms = publication.submitted_at.elapsed().as_millis(),
+        pending_publications = active.coordination.publication_count(),
+        publication_bytes = active.publication_bytes,
+        "Cell LTX publication started"
+    );
     let generation = active.generation;
     let effect_id = active.begin_task(CoordinationEffect::Publication);
     // Moving the publisher out of ActiveCell is the serialization token for
@@ -3046,6 +3134,11 @@ fn start_publication(
             Ok(())
         }
         .await;
+        tracing::debug!(
+            publication_lag_ms = publication.submitted_at.elapsed().as_millis(),
+            succeeded = result.is_ok(),
+            "Cell LTX publication completed"
+        );
         let fenced = result.is_err();
         if let Some(proof) = publication_proof {
             let _ = proof.send(if fenced { Err(Error::Fenced) } else { Ok(()) });
@@ -3321,6 +3414,8 @@ fn handle_task(
                         inventory_refreshing: false,
                         drain: None,
                         last_used_ms: unix_millis(),
+                        last_work_at: std::time::Instant::now(),
+                        compaction_retry_at: std::time::Instant::now(),
                     },
                 );
             }
@@ -3567,6 +3662,7 @@ fn handle_task(
                 return;
             }
             active.finish_task(effect_id, CoordinationEffect::Publication);
+            active.last_work_at = std::time::Instant::now();
             let object_published = result.is_ok();
             if node_lease.check().is_err() {
                 result = Err(Error::Fenced);
@@ -3588,6 +3684,37 @@ fn handle_task(
                 fence_active(active);
             } else {
                 start_publication(cell, active, pool, tasks);
+            }
+            continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
+        }
+        TaskResult::Compacted {
+            cell,
+            generation,
+            effect_id,
+            publisher,
+            result,
+        } => {
+            let Some(active) = cells.get_mut(&cell) else {
+                return;
+            };
+            if active.generation != generation
+                || !active
+                    .coordination
+                    .effect_matches(effect_id, CoordinationEffect::Compaction)
+            {
+                return;
+            }
+            active.finish_task(effect_id, CoordinationEffect::Compaction);
+            let fenced = result.is_err() || node_lease.check().is_err();
+            active.publisher = Some(*publisher);
+            if matches!(result, Ok(None)) {
+                active.compaction_retry_at = std::time::Instant::now() + COMPACTION_RETRY;
+            }
+            let decision = active
+                .coordination
+                .step(CoordinationInput::FinishCompaction { fenced });
+            if matches!(decision, CoordinationDecision::Fence) {
+                fence_active(active);
             }
             continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
         }
@@ -3804,6 +3931,7 @@ fn rejection_error(reason: RejectReason) -> Error {
 }
 
 fn finish_work(active: &mut ActiveCell, fenced: bool) -> CoordinationDecision {
+    active.last_work_at = std::time::Instant::now();
     let decision = active
         .coordination
         .step(CoordinationInput::FinishWork { fenced });
@@ -3814,6 +3942,7 @@ fn finish_work(active: &mut ActiveCell, fenced: bool) -> CoordinationDecision {
 }
 
 fn finish_migration(active: &mut ActiveCell, fenced: bool) -> CoordinationDecision {
+    active.last_work_at = std::time::Instant::now();
     let decision = active
         .coordination
         .step(CoordinationInput::FinishMigration { fenced });

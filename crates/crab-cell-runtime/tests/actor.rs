@@ -2,7 +2,7 @@ use std::{
     fmt,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
 };
@@ -23,7 +23,7 @@ use crab_cell_runtime::{
 };
 use crab_ltx::{CellObjectKind, CellStorageLayout};
 use crab_ltx::{CellReplica, Limits};
-use crab_storage::{ObjectStoreCredentials, Store, build_explicit_store};
+use crab_storage::{ObjectStoreCredentials, RetryPolicy, Store, build_explicit_store};
 use futures_util::stream::BoxStream;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
@@ -36,6 +36,7 @@ struct PausingStore {
     inner: Arc<InMemory>,
     armed: AtomicBool,
     failing: AtomicBool,
+    transient_put_failures: AtomicUsize,
     failed: AtomicBool,
     blocked: AtomicBool,
     released: AtomicBool,
@@ -56,6 +57,7 @@ impl PausingStore {
             inner,
             armed: AtomicBool::new(false),
             failing: AtomicBool::new(false),
+            transient_put_failures: AtomicUsize::new(0),
             failed: AtomicBool::new(false),
             blocked: AtomicBool::new(false),
             released: AtomicBool::new(false),
@@ -81,6 +83,10 @@ impl PausingStore {
 
     fn fail_puts(&self) {
         self.failing.store(true, Ordering::Release);
+    }
+
+    fn fail_next_put_transiently(&self) {
+        self.transient_put_failures.store(1, Ordering::Release);
     }
 
     fn allow_puts(&self) {
@@ -134,6 +140,23 @@ impl ObjectStore for PausingStore {
         payload: PutPayload,
         options: PutOptions,
     ) -> object_store::Result<PutResult> {
+        if self
+            .transient_put_failures
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            self.failed.store(true, Ordering::Release);
+            self.entered.notify_waiters();
+            return Err(object_store::Error::Generic {
+                store: "pausing-store",
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "injected transient put failure",
+                )),
+            });
+        }
         if self.failing.load(Ordering::Acquire) {
             self.failed.store(true, Ordering::Release);
             self.entered.notify_waiters();
@@ -2710,6 +2733,202 @@ async fn dispatcher_compacts_before_segment_admission_is_exhausted() {
             .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))
             .unwrap(),
         10
+    );
+}
+
+#[tokio::test]
+async fn dispatcher_promotes_after_burst_becomes_quiet() {
+    let pausing = Arc::new(PausingStore::new(Arc::new(InMemory::new())));
+    let store: Arc<dyn ObjectStore> = pausing.clone();
+    let fixture = fixture_with_limits_and_store(
+        b"quiet-compaction-runtime",
+        Limits::default(),
+        Store::with_retry(
+            store,
+            RetryPolicy {
+                max_attempts: 1,
+                base: std::time::Duration::from_millis(1),
+                cap: std::time::Duration::from_millis(1),
+            },
+        ),
+    );
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    for sequence in 1_u8..=8 {
+        handle
+            .execute(
+                identity(sequence),
+                Digest::from_bytes([sequence.saturating_add(30); 32]),
+                20,
+                1_024,
+                1_024,
+                |transaction| {
+                    transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                    Ok(HandlerOutcome::Success(Vec::new()))
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let before = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap()
+        .value()
+        .ltx_root()
+        .unwrap();
+    let initial_segments = fixture
+        .replica
+        .open_root(&before)
+        .await
+        .unwrap()
+        .segment_count();
+    assert!(initial_segments >= 8);
+    pausing.fail_next_put_transiently();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        pausing.wait_until_failed(),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        authority
+            .load(fixture.target.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .ltx_root(),
+        Some(before)
+    );
+
+    let promoted = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let root = authority
+                .load(fixture.target.cell_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .value()
+                .ltx_root()
+                .unwrap();
+            if fixture
+                .replica
+                .open_root(&root)
+                .await
+                .unwrap()
+                .segment_count()
+                < initial_segments
+            {
+                break root;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(promoted.position, before.position);
+    assert_eq!(promoted.commit_sequence, before.commit_sequence);
+    handle.drain().await.unwrap();
+    let restored_directory = tempfile::TempDir::new().unwrap();
+    let restored = restored_directory.path().join("restored.sqlite");
+    fixture
+        .replica
+        .open_root(&promoted)
+        .await
+        .unwrap()
+        .restore(&restored)
+        .await
+        .unwrap();
+    let connection = crab_ltx::rusqlite::Connection::open(restored).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        8
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn command_arriving_during_quiet_compaction_waits_for_publisher() {
+    let pausing = Arc::new(PausingStore::new(Arc::new(InMemory::new())));
+    let store: Arc<dyn ObjectStore> = pausing.clone();
+    let fixture = fixture_with_limits_and_store(
+        b"quiet-compaction-queued-command",
+        Limits::default(),
+        Store::new(store),
+    );
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    for sequence in 1_u8..=8 {
+        handle
+            .execute(
+                identity(sequence),
+                Digest::from_bytes([sequence.saturating_add(70); 32]),
+                20,
+                1_024,
+                1_024,
+                |transaction| {
+                    transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                    Ok(HandlerOutcome::Success(Vec::new()))
+                },
+            )
+            .await
+            .unwrap();
+    }
+    pausing.arm();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        pausing.wait_until_blocked(),
+    )
+    .await
+    .unwrap();
+    let ninth = handle.execute(
+        identity(9),
+        Digest::from_bytes([79; 32]),
+        20,
+        1_024,
+        1_024,
+        |transaction| {
+            transaction.execute("UPDATE counter SET value = value + 1", [])?;
+            Ok(HandlerOutcome::Success(Vec::new()))
+        },
+    );
+    tokio::pin!(ninth);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut ninth)
+            .await
+            .is_err()
+    );
+    pausing.release();
+    assert_eq!(ninth.await.unwrap().commit_sequence(), 9);
+    handle.drain().await.unwrap();
+    let root = CellAuthority::new(fixture.layout.clone())
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap()
+        .value()
+        .ltx_root()
+        .unwrap();
+    let restored_directory = tempfile::TempDir::new().unwrap();
+    let restored = restored_directory.path().join("restored.sqlite");
+    fixture
+        .replica
+        .open_root(&root)
+        .await
+        .unwrap()
+        .restore(&restored)
+        .await
+        .unwrap();
+    let connection = crab_ltx::rusqlite::Connection::open(restored).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        9
     );
 }
 
