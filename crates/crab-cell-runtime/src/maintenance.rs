@@ -38,6 +38,13 @@ impl PersistedWorkInventory {
         !self.unknown && self.bits == 0
     }
 
+    /// Reports whether durable rows need no source-side execution after an
+    /// exact-root handoff. Retained outcomes, Blob metadata, and producer
+    /// identities are restored with the root; live primitive rows still block.
+    pub(crate) const fn is_transfer_settled(self) -> bool {
+        !self.unknown && self.bits & (EFFECTS | QUEUE_MESSAGES | WORKFLOWS | CRON_SCHEDULES) == 0
+    }
+
     pub(crate) const fn is_unknown(self) -> bool {
         self.unknown
     }

@@ -28,7 +28,7 @@ pub(crate) struct EvictionObservation {
 }
 
 impl EvictionObservation {
-    fn eligible(self) -> bool {
+    pub(crate) fn eligible(self) -> bool {
         self.accounting_known
             && !self.busy
             && !self.retained_obligation

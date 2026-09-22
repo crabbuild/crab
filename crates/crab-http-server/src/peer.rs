@@ -320,6 +320,10 @@ impl NodePublisher {
             }
             loop {
                 let now_ms = now_ms()?;
+                draining |= self
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|runtime| !runtime.is_acquiring());
                 let next = self.advertisement(self.scheduler.progress(), now_ms, draining)?;
                 let mut current = observed.lock().await;
                 match self.directory.refresh(&current, next, now_ms).await {
@@ -410,7 +414,7 @@ impl NodePublisher {
         draining: bool,
     ) -> crate::Result<NodeAdvertisement> {
         let local_resources = if draining {
-            None
+            self.local_resources().ok()
         } else {
             Some(self.local_resources()?)
         };
@@ -437,7 +441,7 @@ impl NodePublisher {
             )?
         };
         let runtime_stats = self.runtime.as_ref().map(CellRuntime::stats);
-        if let (Some(resources), Some(stats)) = (local_resources, runtime_stats) {
+        if !draining && let (Some(resources), Some(stats)) = (local_resources, runtime_stats) {
             constrain_capacity_to_runtime(&mut capacity, resources, stats);
         }
         let advertisement = NodeAdvertisement::sign(
@@ -457,32 +461,34 @@ impl NodePublisher {
             self.failure_domain.clone(),
             capacity,
         )?;
-        if draining {
+        let Some(resources) = local_resources else {
             return Ok(advertisement);
+        };
+        let Some(stats) = runtime_stats else {
+            return Ok(advertisement);
+        };
+        let placement_disk_capacity = resources
+            .disk_capacity_bytes
+            .min(stats.local_disk_capacity_bytes());
+        // Retained native work and unrooted node-log bytes conservatively count
+        // as publication backlog until their owning reservations are released.
+        let publication_bytes = u64::try_from(stats.retained_bytes())
+            .unwrap_or(u64::MAX)
+            .saturating_add(stats.unpublished_node_log_bytes());
+        let publication_backlog =
+            u32::try_from(publication_bytes.div_ceil(1024 * 1024)).unwrap_or(u32::MAX);
+        let placement = NodePlacementCapacity {
+            memory_capacity_bytes: resources.memory_bytes,
+            disk_capacity_bytes: placement_disk_capacity,
+            active_cells: stats.placement_active_cells(),
+            max_active_cells: stats.placement_active_cell_capacity(),
+            running_jobs: stats.placement_running_jobs(),
+            job_capacity: stats.placement_job_capacity(),
+            publication_backlog,
+            hydration_backlog: u32::try_from(stats.hydration_jobs()).unwrap_or(u32::MAX),
+            primitive_backlog: u32::try_from(stats.primitive_jobs()).unwrap_or(u32::MAX),
         }
-        let resources = local_resources.ok_or(crate::Error::Config(
-            "local resources are missing for a serving advertisement",
-        ))?;
-        let placement_disk_capacity =
-            runtime_stats.map_or(resources.disk_capacity_bytes, |stats| {
-                resources
-                    .disk_capacity_bytes
-                    .min(stats.local_disk_capacity_bytes())
-            });
-        let placement = NodePlacementCapacity::new(
-            resources.memory_bytes,
-            placement_disk_capacity,
-            runtime_stats.map_or(
-                0,
-                crab_cell_runtime::CellRuntimeStats::placement_active_cells,
-            ),
-            runtime_stats.map_or(1, |stats| stats.placement_active_cell_capacity()),
-            runtime_stats.map_or(0, |stats| stats.placement_running_jobs()),
-            runtime_stats.map_or_else(
-                || resources.job_credits.min(u32::MAX as usize) as u32,
-                |stats| stats.placement_job_capacity(),
-            ),
-        )?;
+        .validated()?;
         Ok(advertisement.with_placement_capacity(placement, &self.signing_key)?)
     }
 }
@@ -2356,16 +2362,27 @@ mod tests {
         assert_eq!(placement.max_active_cells, 4);
         assert_eq!(placement.running_jobs, 1);
         assert_eq!(placement.job_capacity, 6);
+        assert_eq!(placement.publication_backlog, 1);
+        assert_eq!(placement.hydration_backlog, 0);
+        assert_eq!(placement.primitive_backlog, stats.primitive_jobs() as u32);
         assert!(
             published.advertisement().capacity().free_memory_bytes
                 <= resources.memory_bytes.saturating_sub(512)
         );
         assert!(published.advertisement().capacity().job_credits <= 5);
+        let draining = publisher.advertisement(2, now_ms().unwrap(), true).unwrap();
+        assert!(draining.has_signed_placement());
+        assert!(
+            crab_cell_runtime::PlacementObservation::from_signed_advertisement(
+                &draining,
+                now_ms().unwrap(),
+                false,
+            )
+            .unwrap()
+            .draining
+        );
         assert_eq!(
-            publisher
-                .advertisement(2, now_ms().unwrap(), true)
-                .unwrap()
-                .capacity(),
+            draining.capacity(),
             NodeCapacity {
                 free_memory_bytes: 0,
                 free_disk_bytes: 0,

@@ -131,7 +131,7 @@ the path should be replaced.
 | --- | --- | --- | --- |
 | Protocol assurance | `Control` retains pure persistent transitions. The runtime now has a private coordination state machine, deterministic simulator, and pinned TLA+ model; async adapters carry activation generations and typed per-effect intents/IDs while parity coverage is still expanding. | One private sans-I/O coordination kernel used by production and simulation, a replayable adversarial scheduler, and a TLA+ model of the same durable state machine. | Pinned seeds find deliberately broken variants; model configurations check single-writer and acknowledged-durability invariants; remaining work is full decision extraction/parity, not a second policy path. |
 | Warm request latency | `RepositoryCellRouter::route_existing` first asks the actor-owned resident lookup; sparse activation receives bounded background `Db::hydrate_step` work on the existing SQL worker. The zero-origin post-promotion qualification is still outstanding. | Actor-owned resident lookup before remote metadata, plus bounded background hydration. A fully hydrated local read performs zero object-store operations from route through SQL result. | An instrumented store observes zero calls for qualified resident reads; cold, sparse, hydrating, resident, local-write, fleet-proof, and object-proof latency are reported separately. |
-| Fleet balancing | Signed versioned placement observations carry measured memory/disk totals and runtime Cell/job counts; deterministic weighted planning, idle-victim selection, hysteretic pressure classification, and a held movement budget are local seams. Cold activation now sends one authenticated activation hint to the preferred live node; feature-gated OS-process probes prove one idle-control winner, exact-root preservation, stale-owner fencing/recovery, committed-release response-loss reconciliation, and local failed idle/takeover receiver rollback to unowned `Idle`, while protected multi-process movement proof remains. | Deterministic weighted placement over signed live capacity, actor-approved quiescent release, idle eviction, cgroup-aware pressure tiers, hysteresis, and paced drains. Placement remains advisory; existing control CAS remains authoritative. | Skew, membership change, stale samples, pressure, receiver death, rolling drain, and oscillation tests preserve authority and converge within declared movement and latency bounds. |
+| Fleet balancing | Signed versioned placement observations carry measured node headroom, Cell/job counts, and three backlog counters. The private server loop plans bounded transfers, the actor confirms exact settled releases, and the receiver restores through ordinary authority acquisition. Cold activation also sends one authenticated hint to a preferred live node. Local and process race tests cover exact-root preservation, stale-owner fencing/recovery, and failed receiver rollback; protected multi-process movement proof remains. | Deterministic weighted placement over signed live capacity, actor-approved quiescent release, idle eviction, cgroup-aware pressure tiers, hysteresis, and paced drains. Placement remains advisory; existing control CAS remains authoritative. | Skew, membership change, stale samples, pressure, receiver death, rolling drain, and oscillation tests preserve authority and converge within declared movement and latency bounds. |
 
 The Celld comparison is pinned to upstream commit `10cb1303dac710dcb3b557e318e08c855261f68b`.
 Its documentation reports about 1.1 ms p50 and 7 ms p99 for one fixed-host
@@ -157,7 +157,7 @@ shared authenticated mechanics remain private to Cell roots.
 | Metadata lookup | [`CellCatalog::lookup`](../src/catalog.rs) loads the shard head and every referenced immutable catalog page; [`CellAuthority::load`](../src/authority.rs) separately reads exact control. |
 | Local residency | [`CellRuntime::resident_handle`](../src/actor.rs) asks the actor for a fully resident owner before remote metadata; [`local_handle`](../src/actor.rs) remains the verified slow-path lookup for sparse or activation callers. Fenced, draining, and non-resident actors miss safely. |
 | Sparse hydration | [`Db::hydration` and `hydrate_step`](../../crab-ltx/src/db.rs) are driven by the actor's bounded hydration tick through the existing SQL worker; cancellation/restart and post-promotion zero-I/O qualification remain. |
-| Fleet observation | [`NodePublisher`](../../crab-http-server/src/peer.rs) signs short-lived live capacity observations; `NodeAdvertisement` carries a versioned placement signature, advertised memory/disk/job headroom and the signed disk total are clamped by the runtime ledger, server memory capacity resolves nested cgroup-v1/v2 membership with fail-closed root fallbacks, and cold activation sends a bounded direct-node hint before normal authority acquisition. The test-only process race covers one shared-control winner; unified process-wide probe parity and protected multi-process movement proof remain. |
+| Fleet observation | [`NodePublisher`](../../crab-http-server/src/peer.rs) signs short-lived measured capacity and backlog observations; `NodeAdvertisement` carries a versioned placement signature. [`RepositoryCellRouter`](../../crab-http-server/src/cells/router.rs) plans movement from live signed samples and actor-settled candidates, then records confirmed release and receiver activation separately. Advertised disk headroom is clamped by the runtime ledger, server memory resolves nested cgroup-v1/v2 membership, and cold activation sends a bounded direct-node hint before normal authority acquisition. The test-only process race covers one shared-control winner; unified process-wide probe parity and protected multi-process movement proof remain. |
 | Existing rendezvous | [`preferred_scanner`](../src/scheduler.rs) elects a catalog scheduler scanner. It does not rank or move Cell owners. |
 | Transition safety | [`Control`](../src/control.rs) validates named single-record transitions; [`coordination.rs`](../src/coordination.rs) allocates and retires typed per-effect intents/IDs, while the actor fences completions by activation generation and effect family, drains the kernel-owned pending-effect set before fenced deactivation, and keeps effect timing coupled to the production publisher. Background hydration, renewal, persisted-work inventory refresh, drain, and shutdown pass queue/publisher/lease observations through the same kernel schedule transition before an adapter starts work. |
 
@@ -595,6 +595,31 @@ Advertisements remain short-lived and signed. A mixed fleet that does not
 publish the required placement version may route existing ownership normally
 but performs no proactive movement. This is a rollout gate, not a compatibility
 fallback.
+
+The current signed placement schema is version 2. It carries three bounded
+backlog counters: publication pressure in 1 MiB units of retained native work
+and unrooted node-log bytes, plus admitted hydration and primitive job counts.
+An advertisement without a runtime measurement has no signed placement block.
+Draining nodes retain a signed block with zero free capacity so donors remain
+visible but cannot receive new Cells. The pure transfer planner caps one
+tick at two Cells and 8 GiB of projected disk restore, with absolute receiver
+memory, disk, Cell-slot, and job-credit checks. It requires two stable samples
+and a 60-second residence/cooldown for ordinary movement; explicit drain and
+sustained shedding bypass the score-gain gate only. These are advisory limits;
+the actor still rechecks the exact Cell generation and persisted work inventory
+before release. Retained request/inbox outcomes, Blob metadata, and Queue
+producer identities may follow the exact root. Any source effect, Queue
+message, Workflow run, Cron schedule, or unknown inventory blocks movement.
+The private server controller runs every 15 seconds, samples signed live nodes
+and actor-approved local candidates, then releases exact generations through
+the actor before sending an authenticated receiver activation hint. If receiver
+activation fails, the exact unowned root remains available for normal routing.
+Each tick reports confirmed source releases and successful receiver activations
+separately; a started drain is not counted as a completed move.
+The scale-down host state stops new acquisition and reports confirmed remaining
+Cell ownership without terminating service. Operator wiring, measured per-Cell
+disk demand, a narrower state-aware SQL settlement check, and shared fleet-wide
+movement accounting remain qualification work before production rollout.
 
 ### Weight Cells by measured cost
 

@@ -1380,6 +1380,9 @@ pub async fn serve(config: Config) -> Result<()> {
     cell_tasks.spawn(release_watch)?;
     let scheduler_cancellation = cancellation.clone();
     cell_tasks.spawn(async move { cell_scheduler.run(scheduler_cancellation).await })?;
+    let rebalance_cancellation = cancellation.clone();
+    cell_tasks
+        .spawn(async move { repository_cells.run_rebalance(rebalance_cancellation).await })?;
     cell_node.start()?;
     server.node_healthy.store(true, Ordering::Release);
     let app = router(Arc::clone(&server));

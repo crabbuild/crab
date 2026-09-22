@@ -1,7 +1,13 @@
+use std::collections::HashSet;
+
 use crate::{CellId, Error, NodeAdvertisement, NodeId, NodePlacementCapacity, Result, SessionId};
 
 const MAX_OBSERVATION_AGE_MS: i64 = 30_000;
 const SCORE_SCALE: u128 = 1_000;
+const MIN_TRANSFER_GAIN: u128 = 50_000;
+const MIN_RESIDENCE_MS: i64 = 60_000;
+const MAX_TRANSFERS_PER_TICK: usize = 2;
+const MAX_TRANSFER_BYTES_PER_TICK: u64 = 8 * 1024 * 1024 * 1024;
 
 /// Pressure class supplied by the signed node observation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -10,22 +16,6 @@ pub enum PlacementPressure {
     Constrained,
     Shedding,
     Critical,
-}
-
-/// Runtime-measured values joined to one signed node advertisement before
-/// planning. Missing snapshots are not converted to optimistic zero load.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PlacementRuntimeSnapshot {
-    pub node: NodeId,
-    pub memory_capacity_bytes: u64,
-    pub disk_capacity_bytes: u64,
-    pub active_cells: u32,
-    pub max_active_cells: u32,
-    pub running_jobs: u32,
-    pub pressure: PlacementPressure,
-    pub draining: bool,
-    pub locality_bonus: u16,
-    pub current_owner: bool,
 }
 
 /// Authenticated, bounded node values consumed by the pure placement planner.
@@ -57,56 +47,6 @@ pub struct PlacementObservation {
 }
 
 impl PlacementObservation {
-    /// Converts an already signature-verified live advertisement into planner
-    /// input. Runtime ledger values remain explicit so stale startup hints are
-    /// never guessed from the wire capacity alone.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the conversion binds signed identity to measured runtime values"
-    )]
-    pub fn from_advertisement(
-        advertisement: &NodeAdvertisement,
-        now_ms: i64,
-        memory_capacity_bytes: u64,
-        disk_capacity_bytes: u64,
-        active_cells: u32,
-        max_active_cells: u32,
-        running_jobs: u32,
-        pressure: PlacementPressure,
-        draining: bool,
-        locality_bonus: u16,
-        current_owner: bool,
-    ) -> Result<Self> {
-        if now_ms < 0
-            || advertisement.expires_at_ms() <= now_ms
-            || !advertisement.has_signed_placement()
-        {
-            return Err(Error::Node("placement advertisement is stale"));
-        }
-        let capacity = advertisement.capacity();
-        Ok(Self {
-            node: advertisement.node(),
-            session: advertisement.session(),
-            observed_at_ms: advertisement.issued_at_ms(),
-            memory_capacity_bytes,
-            free_memory_bytes: capacity.free_memory_bytes,
-            disk_capacity_bytes,
-            free_disk_bytes: capacity.free_disk_bytes,
-            active_cells,
-            max_active_cells,
-            running_jobs,
-            job_capacity: capacity.job_credits,
-            publication_backlog: 0,
-            hydration_backlog: 0,
-            primitive_backlog: 0,
-            pressure,
-            draining,
-            authenticated: true,
-            locality_bonus,
-            current_owner,
-        })
-    }
-
     /// Converts the signed runtime block carried by a live advertisement into
     /// planner input without substituting host-wide or zero-valued guesses.
     pub fn from_signed_advertisement(
@@ -152,9 +92,9 @@ impl PlacementObservation {
             max_active_cells: placement.max_active_cells,
             running_jobs: placement.running_jobs,
             job_capacity: placement.job_capacity,
-            publication_backlog: 0,
-            hydration_backlog: 0,
-            primitive_backlog: 0,
+            publication_backlog: placement.publication_backlog,
+            hydration_backlog: placement.hydration_backlog,
+            primitive_backlog: placement.primitive_backlog,
             pressure: if capacity.free_memory_bytes == 0 || capacity.free_disk_bytes == 0 {
                 PlacementPressure::Critical
             } else {
@@ -189,6 +129,35 @@ pub struct PlacementScore {
     pub session: SessionId,
     pub score: u128,
     pub eligibility: PlacementEligibility,
+}
+
+/// Actor-sampled demand for one locally owned Cell. A missing or unsettled
+/// sample cannot be used as a transfer hint; the actor must recheck on release.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellTransferDemand {
+    pub cell: CellId,
+    pub source: SessionId,
+    pub generation: u64,
+    pub memory_bytes: u64,
+    pub disk_bytes: u64,
+    pub job_credits: u32,
+    pub resident_since_ms: i64,
+    pub last_moved_at_ms: Option<i64>,
+    pub stable_observations: u8,
+    pub settled: bool,
+}
+
+/// Advisory transfer proposal. It conveys neither release nor receiver admission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellTransferIntent {
+    pub cell: CellId,
+    pub source: SessionId,
+    pub generation: u64,
+    pub destination: SessionId,
+    pub observed_at_ms: i64,
+    pub memory_bytes: u64,
+    pub disk_bytes: u64,
+    pub job_credits: u32,
 }
 
 /// Deterministic weighted placement policy. It never mutates authority.
@@ -254,6 +223,142 @@ impl PlacementPlanner {
             .find(|score| score.eligibility == PlacementEligibility::Eligible))
     }
 
+    /// Plans at most two settled transfers and 8 GiB of projected restore
+    /// bytes from one authenticated fleet snapshot. Receiver capacity is
+    /// projected across selected intents, then rechecked during activation.
+    pub fn plan_transfers(
+        &self,
+        now_ms: i64,
+        observations: &[PlacementObservation],
+        demands: &[CellTransferDemand],
+    ) -> Result<Vec<CellTransferIntent>> {
+        if now_ms < 0 || observations.len() > 10_000 || demands.len() > 10_000 {
+            return Err(Error::Control("transfer snapshot is invalid"));
+        }
+        let mut nodes = HashSet::new();
+        let mut sessions = HashSet::new();
+        for observation in observations {
+            if !nodes.insert(observation.node) || !sessions.insert(observation.session) {
+                return Err(Error::Control("transfer snapshot duplicates a node"));
+            }
+        }
+        let mut cells = HashSet::new();
+        for demand in demands {
+            if !cells.insert(demand.cell) {
+                return Err(Error::Control("transfer snapshot duplicates a Cell"));
+            }
+        }
+        let mut projected = observations.to_vec();
+        for observation in &mut projected {
+            observation.current_owner = false;
+        }
+        let mut candidates = demands.to_vec();
+        candidates.sort_by(|left, right| {
+            let priority = |demand: &CellTransferDemand| {
+                observations
+                    .iter()
+                    .find(|node| node.session == demand.source)
+                    .map_or(0, |node| {
+                        u8::from(node.draining) * 2
+                            + u8::from(node.pressure >= PlacementPressure::Shedding)
+                    })
+            };
+            priority(right)
+                .cmp(&priority(left))
+                .then_with(|| left.cell.as_bytes().cmp(right.cell.as_bytes()))
+        });
+        let mut intents = Vec::new();
+        let mut bytes = 0u64;
+        for demand in candidates {
+            if intents.len() == MAX_TRANSFERS_PER_TICK {
+                break;
+            }
+            let Some(source) = observations
+                .iter()
+                .find(|node| node.session == demand.source)
+            else {
+                continue;
+            };
+            if !demand.settled
+                || demand.generation == 0
+                || demand.memory_bytes == 0
+                || demand.disk_bytes == 0
+                || demand.job_credits == 0
+                || demand.resident_since_ms < 0
+                || demand.resident_since_ms > now_ms
+                || demand
+                    .last_moved_at_ms
+                    .is_some_and(|at| at < 0 || at > now_ms)
+                || !source.authenticated
+                || self.eligibility(now_ms, *source) == PlacementEligibility::Stale
+            {
+                continue;
+            }
+            let urgent = source.draining || source.pressure >= PlacementPressure::Shedding;
+            if !urgent
+                && (demand.stable_observations < 2
+                    || now_ms - demand.resident_since_ms < MIN_RESIDENCE_MS
+                    || demand
+                        .last_moved_at_ms
+                        .is_some_and(|at| now_ms - at < MIN_RESIDENCE_MS))
+            {
+                continue;
+            }
+            let Some(next_bytes) = bytes.checked_add(demand.disk_bytes) else {
+                continue;
+            };
+            if next_bytes > MAX_TRANSFER_BYTES_PER_TICK {
+                continue;
+            }
+            let mut owned_source = *source;
+            owned_source.current_owner = true;
+            let source_score = self.score(demand.cell, now_ms, owned_source).score;
+            let destination = self
+                .rank(demand.cell, now_ms, &projected)?
+                .into_iter()
+                .find(|score| {
+                    score.session != demand.source
+                        && score.eligibility == PlacementEligibility::Eligible
+                        && projected
+                            .iter()
+                            .find(|node| node.session == score.session)
+                            .is_some_and(|node| {
+                                node.free_memory_bytes >= demand.memory_bytes
+                                    && node.free_disk_bytes >= demand.disk_bytes
+                                    && node.max_active_cells.saturating_sub(node.active_cells) >= 1
+                                    && node.job_capacity.saturating_sub(node.running_jobs)
+                                        >= demand.job_credits
+                            })
+                        && (urgent || score.score >= source_score.saturating_add(MIN_TRANSFER_GAIN))
+                });
+            let Some(destination) = destination else {
+                continue;
+            };
+            let Some(receiver) = projected
+                .iter_mut()
+                .find(|node| node.session == destination.session)
+            else {
+                continue;
+            };
+            receiver.free_memory_bytes -= demand.memory_bytes;
+            receiver.free_disk_bytes -= demand.disk_bytes;
+            receiver.active_cells += 1;
+            receiver.running_jobs += demand.job_credits;
+            bytes = next_bytes;
+            intents.push(CellTransferIntent {
+                cell: demand.cell,
+                source: demand.source,
+                generation: demand.generation,
+                destination: destination.session,
+                observed_at_ms: source.observed_at_ms,
+                memory_bytes: demand.memory_bytes,
+                disk_bytes: demand.disk_bytes,
+                job_credits: demand.job_credits,
+            });
+        }
+        Ok(intents)
+    }
+
     fn score(
         &self,
         cell: CellId,
@@ -306,7 +411,7 @@ impl PlacementPlanner {
             + locality * 10
             + sticky * SCORE_SCALE
             + hash_bonus)
-            .saturating_sub(backlog.min(100) * 5);
+            .saturating_sub(backlog.min(100) * SCORE_SCALE);
         PlacementScore {
             node: observation.node,
             session: observation.session,
@@ -459,5 +564,177 @@ mod tests {
             .unwrap()
             .score;
         assert!(worse_score < healthy_score);
+    }
+
+    #[test]
+    fn measured_backlog_reduces_placement_score() {
+        let planner = PlacementPlanner::default();
+        let healthy = observation(1);
+        let mut busy = healthy;
+        busy.publication_backlog = 3;
+        busy.hydration_backlog = 2;
+        busy.primitive_backlog = 1;
+        let healthy_score = planner
+            .choose(CellId::from_bytes([9; 32]), 100, &[healthy])
+            .unwrap()
+            .unwrap()
+            .score;
+        let busy_score = planner
+            .choose(CellId::from_bytes([9; 32]), 100, &[busy])
+            .unwrap()
+            .unwrap()
+            .score;
+        assert!(busy_score < healthy_score);
+    }
+
+    fn demand(cell: u8, source: SessionId) -> CellTransferDemand {
+        CellTransferDemand {
+            cell: CellId::from_bytes([cell; 32]),
+            source,
+            generation: 1,
+            memory_bytes: 400,
+            disk_bytes: 400,
+            job_credits: 1,
+            resident_since_ms: 0,
+            last_moved_at_ms: None,
+            stable_observations: 2,
+            settled: true,
+        }
+    }
+
+    #[test]
+    fn transfer_projection_prevents_receiver_overcommit() {
+        let planner = PlacementPlanner::default();
+        let mut donor = observation(1);
+        donor.draining = true;
+        let receiver = observation(2);
+        let first = demand(1, donor.session);
+        let second = demand(2, donor.session);
+        let left = planner
+            .plan_transfers(100, &[donor, receiver], &[first, second])
+            .unwrap();
+        let right = planner
+            .plan_transfers(100, &[receiver, donor], &[second, first])
+            .unwrap();
+        assert_eq!(left, right);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].cell, first.cell);
+    }
+
+    #[test]
+    fn transfer_requires_settlement_residence_and_fresh_destination() {
+        let planner = PlacementPlanner::default();
+        let donor = observation(1);
+        let mut receiver = observation(2);
+        receiver.free_memory_bytes = 1_000;
+        receiver.free_disk_bytes = 1_000;
+        let mut candidate = demand(1, donor.session);
+        assert!(
+            planner
+                .plan_transfers(100, &[donor, receiver], &[candidate])
+                .unwrap()
+                .is_empty()
+        );
+        candidate.settled = false;
+        assert!(
+            planner
+                .plan_transfers(100_000, &[donor, receiver], &[candidate])
+                .unwrap()
+                .is_empty()
+        );
+        candidate.settled = true;
+        receiver.observed_at_ms = 100_000;
+        assert_eq!(
+            planner
+                .plan_transfers(100_000, &[donor, receiver], &[candidate])
+                .unwrap()
+                .len(),
+            0
+        );
+        let mut donor = donor;
+        donor.draining = true;
+        receiver.observed_at_ms = 100;
+        assert!(
+            planner
+                .plan_transfers(100_000, &[donor, receiver], &[candidate])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn duplicate_nodes_and_cells_fail_closed() {
+        let planner = PlacementPlanner::default();
+        let node = observation(1);
+        let candidate = demand(1, node.session);
+        assert!(
+            planner
+                .plan_transfers(100, &[node, node], &[candidate])
+                .is_err()
+        );
+        assert!(
+            planner
+                .plan_transfers(100, &[node], &[candidate, candidate])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn normal_transfer_requires_stable_gain_and_cooldown() {
+        let planner = PlacementPlanner::default();
+        let mut donor = observation(1);
+        donor.observed_at_ms = 100_000;
+        donor.free_memory_bytes = 100;
+        donor.free_disk_bytes = 100;
+        let mut receiver = observation(2);
+        receiver.observed_at_ms = 100_000;
+        receiver.free_memory_bytes = 1_000;
+        receiver.free_disk_bytes = 1_000;
+        let mut candidate = demand(1, donor.session);
+        candidate.memory_bytes = 100;
+        candidate.disk_bytes = 100;
+        assert_eq!(
+            planner
+                .plan_transfers(100_000, &[donor, receiver], &[candidate])
+                .unwrap()
+                .len(),
+            1
+        );
+        candidate.last_moved_at_ms = Some(99_999);
+        assert!(
+            planner
+                .plan_transfers(100_000, &[donor, receiver], &[candidate])
+                .unwrap()
+                .is_empty()
+        );
+        candidate.last_moved_at_ms = None;
+        candidate.stable_observations = 1;
+        assert!(
+            planner
+                .plan_transfers(100_000, &[donor, receiver], &[candidate])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn transfer_budget_counts_projected_restore_bytes() {
+        let planner = PlacementPlanner::default();
+        let mut donor = observation(1);
+        donor.draining = true;
+        let mut receiver = observation(2);
+        receiver.disk_capacity_bytes = 12 * 1024 * 1024 * 1024;
+        receiver.free_disk_bytes = receiver.disk_capacity_bytes;
+        let mut first = demand(1, donor.session);
+        first.disk_bytes = 5 * 1024 * 1024 * 1024;
+        let mut second = demand(2, donor.session);
+        second.disk_bytes = first.disk_bytes;
+        assert_eq!(
+            planner
+                .plan_transfers(100, &[donor, receiver], &[first, second])
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }
