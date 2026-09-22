@@ -13,7 +13,11 @@ pub(super) async fn run() {
     let application = Arc::new(fixture::compiled());
     let tenant = TenantId::from_bytes([71; 16]);
     let application_id = ApplicationId::from_bytes([72; 16]);
-    let layout = CellStorageLayout::new(store.clone(), root, *application_id.as_bytes());
+    let layout = CellStorageLayout::new(
+        store.for_cellule().expect("Cellule store"),
+        root,
+        *application_id.as_bytes(),
+    );
     let source_session = SessionId::from_bytes([24; 16]);
     let successor_session = SessionId::from_bytes([70; 16]);
     let fenced = fence_public_session(&layout, source_session, successor_session).await;
@@ -51,7 +55,9 @@ pub(super) async fn run() {
         .expect("successor direct client");
     let typed = successor
         .application_handle::<fixture::ReferenceApplication>(direct.clone(), tenant, application_id)
-        .with_blob_artifact_store(BlobArtifactStore::new(store));
+        .with_blob_artifact_store(BlobArtifactStore::new(
+            store.for_cellule().expect("Cellule store"),
+        ));
     if let Some(acknowledged) = &acknowledgement {
         process_duplicate::verify(&typed, tenant, application_id, acknowledged).await;
     }

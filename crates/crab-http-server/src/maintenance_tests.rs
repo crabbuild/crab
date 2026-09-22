@@ -13,16 +13,16 @@ const TTL: Duration = Duration::from_secs(60);
 
 struct UnavailableRoundTrip;
 
-impl crab_cell_runtime::PeerRoundTrip for UnavailableRoundTrip {
+impl cellule_runtime::PeerRoundTrip for UnavailableRoundTrip {
     fn send(
         &self,
-        _target: crab_cell_runtime::CellTarget,
+        _target: cellule_runtime::CellTarget,
         _request: Vec<u8>,
         _remaining_ms: u32,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>,
+        Box<dyn std::future::Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>,
     > {
-        Box::pin(async { Err(crab_cell_runtime::Error::CellNotActive) })
+        Box::pin(async { Err(cellule_runtime::Error::CellNotActive) })
     }
 }
 
@@ -98,12 +98,12 @@ pub(super) async fn fixture() -> Arc<Server> {
         .repositories
         .get(&("team".into(), "repo".into()))
         .unwrap();
-    let identity = crab_cell_runtime::ApplicationIdentity::new(
-        crab_cell_runtime::TenantId::from_bytes([31; 16]),
-        crab_cell_runtime::ApplicationId::from_bytes([32; 16]),
+    let identity = cellule_runtime::ApplicationIdentity::new(
+        cellule_runtime::TenantId::from_bytes([31; 16]),
+        cellule_runtime::ApplicationId::from_bytes([32; 16]),
     );
-    let layout = crab_cell_runtime::CellStorageLayout::new(
-        repository.store.clone(),
+    let layout = cellule_runtime::CellStorageLayout::new(
+        repository.store.clone().for_cellule().unwrap(),
         object_store::path::Path::from("maintenance-test-cells"),
         *identity.application().as_bytes(),
     );
@@ -130,9 +130,9 @@ pub(super) async fn fixture() -> Arc<Server> {
     )
     .await
     .unwrap();
-    let cell_session = crab_cell_runtime::SessionId::from_bytes([33; 16]);
-    let cell_runtime = crab_cell_runtime::CellRuntime::new(
-        crab_cell_runtime::SqlWorkerPool::new(1, 16).unwrap(),
+    let cell_session = cellule_runtime::SessionId::from_bytes([33; 16]);
+    let cell_runtime = cellule_runtime::CellRuntime::new(
+        cellule_runtime::SqlWorkerPool::new(1, 16).unwrap(),
         16 * 1024 * 1024,
         cell_session,
     )
@@ -143,19 +143,19 @@ pub(super) async fn fixture() -> Arc<Server> {
         Arc::clone(&registry),
         cell_runtime.clone(),
         crate::cells::RepositoryCellPeer::new(
-            crab_cell_runtime::NodeDirectory::new(
+            cellule_runtime::NodeDirectory::new(
                 layout,
-                crab_cell_runtime::Digest::from_bytes([34; 32]),
-                crab_cell_runtime::Digest::from_bytes([35; 32]),
+                cellule_runtime::Digest::from_bytes([34; 32]),
+                cellule_runtime::Digest::from_bytes([35; 32]),
                 registry.release_digest(),
             ),
-            Arc::new(crab_cell_runtime::PeerSigner::new(
+            Arc::new(cellule_runtime::PeerSigner::new(
                 cell_session,
                 registry.release_digest(),
                 ed25519_dalek::SigningKey::from_bytes(&[36; 32]),
             )),
             Arc::new(UnavailableRoundTrip),
-            crab_cell_runtime::Owner {
+            cellule_runtime::Owner {
                 session: cell_session,
                 endpoint: "https://server.test:8081".into(),
             },
@@ -246,26 +246,26 @@ fn enable_catalog_readiness(server: &mut Arc<Server>) {
         store.clone(),
         "catalog",
     )));
-    let identity = crab_cell_runtime::ApplicationIdentity::new(
-        crab_cell_runtime::TenantId::from_bytes([1; 16]),
-        crab_cell_runtime::ApplicationId::from_bytes([2; 16]),
+    let identity = cellule_runtime::ApplicationIdentity::new(
+        cellule_runtime::TenantId::from_bytes([1; 16]),
+        cellule_runtime::ApplicationId::from_bytes([2; 16]),
     );
-    let layout = crab_cell_runtime::CellStorageLayout::new(
-        store,
+    let layout = cellule_runtime::CellStorageLayout::new(
+        store.for_cellule().unwrap(),
         object_store::path::Path::from("catalog"),
         *identity.application().as_bytes(),
     );
     let registry = Arc::new(crate::cells::compiled_registry().unwrap());
     let resolver =
         crate::peer::LocalCellResolver::new(layout.clone(), identity, server.cell_runtime.clone());
-    let releases = crab_cell_runtime::ReleaseStore::new(layout.clone(), identity).unwrap();
+    let releases = cellule_runtime::ReleaseStore::new(layout.clone(), identity).unwrap();
     server.peer_receiver = Some(crate::peer::PeerReceiver::new(
-        crab_cell_runtime::NodeId::from_bytes([9; 16]),
-        crab_cell_runtime::SessionId::from_bytes([9; 16]),
-        crab_cell_runtime::NodeDirectory::new(
+        cellule_runtime::NodeId::from_bytes([9; 16]),
+        cellule_runtime::SessionId::from_bytes([9; 16]),
+        cellule_runtime::NodeDirectory::new(
             layout,
-            crab_cell_runtime::Digest::from_bytes([3; 32]),
-            crab_cell_runtime::Digest::from_bytes([4; 32]),
+            cellule_runtime::Digest::from_bytes([3; 32]),
+            cellule_runtime::Digest::from_bytes([4; 32]),
             registry.release_digest(),
         ),
         registry,

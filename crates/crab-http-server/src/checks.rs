@@ -8,7 +8,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use crab_cell_runtime::{Committed, InvocationError, MutationIdentity, Observed, RequestId};
+use cellule_runtime::{Committed, InvocationError, MutationIdentity, Observed, RequestId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;

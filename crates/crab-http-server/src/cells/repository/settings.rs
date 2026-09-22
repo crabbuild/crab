@@ -58,7 +58,7 @@ impl Command for ReplaceBranchProtections {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_settings_version(input.expected_version, true)?;
         validate_protections(&input.rules)?;
         let current = context.sql(&SqlBatch {
@@ -106,7 +106,7 @@ impl Command for ReplaceRepositoryLifecycle {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_settings_version(input.expected_version, true)?;
         let current = context.sql(&SqlBatch {
             statements: vec![statement(
@@ -159,7 +159,7 @@ impl Query for GetBranchProtections {
     fn execute(
         context: &mut QueryContext<'_>,
         (): Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         let result = context.sql(&SqlBatch {
             statements: vec![statement(
                 "SELECT protections_version, protections FROM repository_settings WHERE singleton = 1",
@@ -189,7 +189,7 @@ impl Query for GetRepositoryLifecycle {
     fn execute(
         context: &mut QueryContext<'_>,
         (): Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         let result = context.sql(&SqlBatch {
             statements: vec![statement(
                 "SELECT lifecycle_version, archived FROM repository_settings WHERE singleton = 1",
@@ -205,21 +205,21 @@ impl Query for GetRepositoryLifecycle {
     }
 }
 
-fn validate_settings(settings: &BranchProtectionSettings) -> crab_cell_runtime::Result<()> {
+fn validate_settings(settings: &BranchProtectionSettings) -> cellule_runtime::Result<()> {
     validate_settings_version(settings.version, false)?;
     validate_protections(&settings.rules)
 }
 
-fn validate_settings_version(version: u64, allow_zero: bool) -> crab_cell_runtime::Result<()> {
+fn validate_settings_version(version: u64, allow_zero: bool) -> cellule_runtime::Result<()> {
     if version >= MAX_NUMBER || (!allow_zero && version == 0) {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository settings version is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_protections(rules: &[BranchProtectionRecord]) -> crab_cell_runtime::Result<()> {
+fn validate_protections(rules: &[BranchProtectionRecord]) -> cellule_runtime::Result<()> {
     let rules = rules
         .iter()
         .map(|rule| crate::BranchProtection {
@@ -229,47 +229,48 @@ fn validate_protections(rules: &[BranchProtectionRecord]) -> crab_cell_runtime::
         })
         .collect::<Vec<_>>();
     if !crate::config::valid_branch_protections(&rules) {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository branch protections are invalid",
         ));
     }
     Ok(())
 }
 
-fn encode_protections(rules: &[BranchProtectionRecord]) -> crab_cell_runtime::Result<Vec<u8>> {
+fn encode_protections(rules: &[BranchProtectionRecord]) -> cellule_runtime::Result<Vec<u8>> {
     let mut encoder = BoundedEncoder::new(MAX_PROTECTION_BYTES)
-        .map_err(|_| crab_cell_runtime::Error::Command("repository protections are too large"))?;
+        .map_err(|_| cellule_runtime::Error::Command("repository protections are too large"))?;
     encoder
         .write_count(rules.len())
-        .map_err(|_| crab_cell_runtime::Error::Command("repository protections are too large"))?;
+        .map_err(|_| cellule_runtime::Error::Command("repository protections are too large"))?;
     for rule in rules {
-        rule.encode(&mut encoder).map_err(|_| {
-            crab_cell_runtime::Error::Command("repository protections are too large")
-        })?;
+        rule.encode(&mut encoder)
+            .map_err(|_| cellule_runtime::Error::Command("repository protections are too large"))?;
     }
     Ok(encoder.finish())
 }
 
-fn decode_protections(bytes: &[u8]) -> crab_cell_runtime::Result<Vec<BranchProtectionRecord>> {
+fn decode_protections(bytes: &[u8]) -> cellule_runtime::Result<Vec<BranchProtectionRecord>> {
     let mut decoder = BoundedDecoder::new(bytes, MAX_PROTECTION_BYTES)
-        .map_err(|_| crab_cell_runtime::Error::Command("repository protections are invalid"))?;
+        .map_err(|_| cellule_runtime::Error::Command("repository protections are invalid"))?;
     let count = decoder
         .read_count()
-        .map_err(|_| crab_cell_runtime::Error::Command("repository protections are invalid"))?;
+        .map_err(|_| cellule_runtime::Error::Command("repository protections are invalid"))?;
     if count > 100 {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository protections are invalid",
         ));
     }
     let mut rules = Vec::with_capacity(count);
     for _ in 0..count {
-        rules.push(BranchProtectionRecord::decode(&mut decoder).map_err(|_| {
-            crab_cell_runtime::Error::Command("repository protections are invalid")
-        })?);
+        rules.push(
+            BranchProtectionRecord::decode(&mut decoder).map_err(|_| {
+                cellule_runtime::Error::Command("repository protections are invalid")
+            })?,
+        );
     }
     decoder
         .finish()
-        .map_err(|_| crab_cell_runtime::Error::Command("repository protections are invalid"))?;
+        .map_err(|_| cellule_runtime::Error::Command("repository protections are invalid"))?;
     validate_protections(&rules)?;
     Ok(rules)
 }

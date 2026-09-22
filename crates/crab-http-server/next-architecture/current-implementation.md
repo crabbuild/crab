@@ -96,7 +96,7 @@ and in-progress epochs while deleting immutable rows in bounded batches.
 
 ### Replication crate now available
 
-[crab-ltx](../../crab-ltx/README.md) is a workspace member based on pinned,
+[crab-ltx](../../../crab/docs/architecture/cells/storage.md) is a workspace member based on pinned,
 modified Celld source. It supplies owned SQLite writer/capture lifecycle,
 checksum-bearing LTX, full snapshots, exact verified local restore and complete
 chain compaction. Empty default features keep the local library provider/runtime
@@ -120,7 +120,7 @@ application sequence, schema, scheduler deadline and exact endpoint. Published
 bootstrap, command and migration batches are reverified and pruned from the
 local managed session before success escapes.
 It does not introduce a second SQLite library. See the
-[crab-ltx safety model](../../crab-ltx/README.md#safety-model) for API and
+[crab-ltx safety model](../../../crab/docs/architecture/cells/storage.md) for API and
 qualification boundaries.
 
 Local tests cover commit/rollback, checkpoint/shrink/regrowth, source-directory

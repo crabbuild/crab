@@ -5,9 +5,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crab_cell_app::ApplicationHandle;
-use crab_cell_host::CellNode;
-use crab_cell_runtime::{
+use cellule_app::ApplicationHandle;
+use cellule_host::CellNode;
+use cellule_runtime::{
     ActivityRunOutcome, ActivitySupervisor, ApplicationId, BlobCondition, BlobMutation, BlobQuery,
     BlobQueryResult, CellClient, CellHandle, CellTarget, CronMutation, CronQueryResult, Digest,
     EffectClaimRequest, EffectLeaseOutcome, Error, KvAtomicOutcome, KvAtomicRequest, KvMutation,
@@ -235,7 +235,7 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor {
                             return Err(Error::Control("public qualification Blob replay differs"));
                         }
                     }
-                    let crab_cell_runtime::BlobMutationOutcome::Committed { etag, size } =
+                    let cellule_runtime::BlobMutationOutcome::Committed { etag, size } =
                         committed.output
                     else {
                         return Err(Error::Control("public qualification Blob not committed"));
@@ -784,7 +784,7 @@ async fn rustfs_public_activity_duplicate_case_preserves_one_completion() {
         &QualificationProfile::pr_contract(),
         41,
         1,
-        QUALIFICATION_CASE_COVERAGE_OPERATIONS as u64,
+        QUALIFICATION_CASE_COVERAGE_OPERATIONS,
         1,
     )
     .expect("qualification case schedule");

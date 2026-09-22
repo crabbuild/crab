@@ -1,4 +1,4 @@
-use crab_cell_runtime::{
+use cellule_runtime::{
     BoundedDecoder, BoundedEncoder, CellModule, Command, CommandContext, CommandResult, Query,
     QueryContext, RegistryBuilder, SqlBatch, SqlResultSet, SqlStatement, SqlValue, WireValue,
 };
@@ -339,7 +339,7 @@ impl Command for CreateIssue {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_author(&input.author)?;
         validate_title(&input.title)?;
         validate_body(&input.body, false)?;
@@ -364,7 +364,7 @@ impl Command for CreateIssue {
             let issue = current[0]
                 .rows
                 .first()
-                .ok_or(crab_cell_runtime::Error::Command(
+                .ok_or(cellule_runtime::Error::Command(
                     "repository issue submission has no issue row",
                 ))?;
             return Ok(CommandResult::Success(CreateIssueOutcome::Created(
@@ -385,7 +385,7 @@ impl Command for CreateIssue {
             ],
         })?;
         if sequence[0].rows_affected != 1 {
-            return Err(crab_cell_runtime::Error::Command(
+            return Err(cellule_runtime::Error::Command(
                 "repository issue numbering is exhausted",
             ));
         }
@@ -432,7 +432,7 @@ impl Command for CreateComment {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_number(input.issue)?;
         validate_author(&input.author)?;
         validate_body(&input.body, true)?;
@@ -468,7 +468,7 @@ impl Command for CreateComment {
             let comment = current[0]
                 .rows
                 .first()
-                .ok_or(crab_cell_runtime::Error::Command(
+                .ok_or(cellule_runtime::Error::Command(
                     "repository comment submission has no comment row",
                 ))?;
             return Ok(CommandResult::Success(CreateCommentOutcome::Created(
@@ -489,7 +489,7 @@ impl Command for CreateComment {
             ],
         })?;
         if sequence[0].rows_affected != 1 {
-            return Err(crab_cell_runtime::Error::Command(
+            return Err(cellule_runtime::Error::Command(
                 "repository comment numbering is exhausted",
             ));
         }
@@ -534,7 +534,7 @@ impl Query for GetIssue {
     fn execute(
         context: &mut QueryContext<'_>,
         number: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         validate_number(number)?;
         let result = context.sql(&SqlBatch {
             statements: vec![statement(
@@ -562,7 +562,7 @@ impl Query for GetComment {
     fn execute(
         context: &mut QueryContext<'_>,
         key: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         validate_number(key.issue)?;
         validate_number(key.number)?;
         let result = context.sql(&SqlBatch {
@@ -592,7 +592,7 @@ mod releases_codec;
 mod settings;
 mod settings_codec;
 
-pub(crate) fn register(registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
+pub(crate) fn register(registry: &mut RegistryBuilder) -> cellule_runtime::Result<()> {
     registry.bind_command::<CreateIssue>()?;
     registry.bind_command::<CreateComment>()?;
     registry.bind_command::<UpdateIssue>()?;
@@ -668,7 +668,7 @@ fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {
 fn insert_issue(
     context: &CommandContext<'_, '_>,
     record: &IssueRecord,
-) -> crab_cell_runtime::Result<()> {
+) -> cellule_runtime::Result<()> {
     context.sql(&SqlBatch {
         statements: vec![statement(
             "INSERT INTO repository_issues(number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -694,7 +694,7 @@ fn insert_issue(
 fn insert_comment(
     context: &CommandContext<'_, '_>,
     record: &CommentRecord,
-) -> crab_cell_runtime::Result<()> {
+) -> cellule_runtime::Result<()> {
     context.sql(&SqlBatch {
         statements: vec![statement(
             "INSERT INTO repository_issue_comments(issue_number, number, author_issuer, author_subject, author_name, body, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -786,13 +786,13 @@ fn hash_text(hasher: &mut blake3::Hasher, value: &str) {
     hasher.update(value.as_bytes());
 }
 
-fn integer(value: u64) -> crab_cell_runtime::Result<SqlValue> {
+fn integer(value: u64) -> cellule_runtime::Result<SqlValue> {
     Ok(SqlValue::Integer(i64::try_from(value).map_err(|_| {
-        crab_cell_runtime::Error::Command("repository integer exceeds SQLite range")
+        cellule_runtime::Error::Command("repository integer exceeds SQLite range")
     })?))
 }
 
-fn advance_revision(context: &CommandContext<'_, '_>) -> crab_cell_runtime::Result<()> {
+fn advance_revision(context: &CommandContext<'_, '_>) -> cellule_runtime::Result<()> {
     let result = context.sql(&SqlBatch {
         statements: vec![statement(
             "UPDATE repository_identity SET app_revision = app_revision + 1 WHERE singleton = 1 AND app_revision < 9007199254740991",
@@ -800,40 +800,40 @@ fn advance_revision(context: &CommandContext<'_, '_>) -> crab_cell_runtime::Resu
         )],
     })?;
     if result[0].rows_affected != 1 {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository identity is missing or its revision is exhausted",
         ));
     }
     Ok(())
 }
 
-fn result_u64(sets: &[SqlResultSet], set: usize, column: usize) -> crab_cell_runtime::Result<u64> {
+fn result_u64(sets: &[SqlResultSet], set: usize, column: usize) -> cellule_runtime::Result<u64> {
     match sets
         .get(set)
         .and_then(|set| set.rows.first())
         .and_then(|row| row.get(column))
     {
         Some(SqlValue::Integer(value)) => u64::try_from(*value)
-            .map_err(|_| crab_cell_runtime::Error::Command("repository result is negative")),
-        _ => Err(crab_cell_runtime::Error::Command(
+            .map_err(|_| cellule_runtime::Error::Command("repository result is negative")),
+        _ => Err(cellule_runtime::Error::Command(
             "repository query returned an invalid integer",
         )),
     }
 }
 
-fn result_text(row: &[SqlValue], column: usize) -> crab_cell_runtime::Result<String> {
+fn result_text(row: &[SqlValue], column: usize) -> cellule_runtime::Result<String> {
     match row.get(column) {
         Some(SqlValue::Text(value)) => Ok(value.clone()),
-        _ => Err(crab_cell_runtime::Error::Command(
+        _ => Err(cellule_runtime::Error::Command(
             "repository query returned invalid text",
         )),
     }
 }
 
-fn result_blob(row: &[SqlValue], column: usize) -> crab_cell_runtime::Result<&[u8]> {
+fn result_blob(row: &[SqlValue], column: usize) -> cellule_runtime::Result<&[u8]> {
     match row.get(column) {
         Some(SqlValue::Blob(value)) => Ok(value),
-        _ => Err(crab_cell_runtime::Error::Command(
+        _ => Err(cellule_runtime::Error::Command(
             "repository query returned invalid bytes",
         )),
     }
@@ -842,17 +842,17 @@ fn result_blob(row: &[SqlValue], column: usize) -> crab_cell_runtime::Result<&[u
 fn result_optional_text(
     row: &[SqlValue],
     column: usize,
-) -> crab_cell_runtime::Result<Option<String>> {
+) -> cellule_runtime::Result<Option<String>> {
     match row.get(column) {
         Some(SqlValue::Null) => Ok(None),
         Some(SqlValue::Text(value)) => Ok(Some(value.clone())),
-        _ => Err(crab_cell_runtime::Error::Command(
+        _ => Err(cellule_runtime::Error::Command(
             "repository query returned invalid optional text",
         )),
     }
 }
 
-fn label_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<LabelRecord> {
+fn label_from_row(row: &[SqlValue]) -> cellule_runtime::Result<LabelRecord> {
     let record = LabelRecord {
         number: result_u64_from_row(row, 0)?,
         name: result_text(row, 1)?,
@@ -866,13 +866,13 @@ fn label_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<LabelRecord> {
     Ok(record)
 }
 
-fn status_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<CommitStatusRecord> {
+fn status_from_row(row: &[SqlValue]) -> cellule_runtime::Result<CommitStatusRecord> {
     let submission = result_blob(row, 1)?;
     let submission_id = <[u8; 16]>::try_from(submission).map_err(|_| {
-        crab_cell_runtime::Error::Command("repository status submission ID is invalid")
+        cellule_runtime::Error::Command("repository status submission ID is invalid")
     })?;
     let state = u8::try_from(result_u64_from_row(row, 7)?)
-        .map_err(|_| crab_cell_runtime::Error::Command("repository status state is invalid"))?;
+        .map_err(|_| cellule_runtime::Error::Command("repository status state is invalid"))?;
     let record = CommitStatusRecord {
         number: result_u64_from_row(row, 0)?,
         submission_id,
@@ -892,11 +892,11 @@ fn status_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<CommitStatusRe
     Ok(record)
 }
 
-fn issue_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<IssueRecord> {
+fn issue_from_row(row: &[SqlValue]) -> cellule_runtime::Result<IssueRecord> {
     let state = u8::try_from(result_u64_from_row(row, 6)?)
-        .map_err(|_| crab_cell_runtime::Error::Command("invalid issue state"))?;
+        .map_err(|_| cellule_runtime::Error::Command("invalid issue state"))?;
     if state > 1 {
-        return Err(crab_cell_runtime::Error::Command("invalid issue state"));
+        return Err(cellule_runtime::Error::Command("invalid issue state"));
     }
     let record = IssueRecord {
         number: result_u64_from_row(row, 0)?,
@@ -918,7 +918,7 @@ fn issue_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<IssueRecord> {
     Ok(record)
 }
 
-fn comment_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<CommentRecord> {
+fn comment_from_row(row: &[SqlValue]) -> cellule_runtime::Result<CommentRecord> {
     let record = CommentRecord {
         issue: result_u64_from_row(row, 0)?,
         number: result_u64_from_row(row, 1)?,
@@ -936,31 +936,31 @@ fn comment_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<CommentRecord
     Ok(record)
 }
 
-fn result_u64_from_row(row: &[SqlValue], column: usize) -> crab_cell_runtime::Result<u64> {
+fn result_u64_from_row(row: &[SqlValue], column: usize) -> cellule_runtime::Result<u64> {
     match row.get(column) {
         Some(SqlValue::Integer(value)) => u64::try_from(*value)
-            .map_err(|_| crab_cell_runtime::Error::Command("repository result is negative")),
-        _ => Err(crab_cell_runtime::Error::Command(
+            .map_err(|_| cellule_runtime::Error::Command("repository result is negative")),
+        _ => Err(cellule_runtime::Error::Command(
             "repository query returned an invalid integer",
         )),
     }
 }
 
-fn timestamp(now_ms: i64) -> crab_cell_runtime::Result<u64> {
+fn timestamp(now_ms: i64) -> cellule_runtime::Result<u64> {
     u64::try_from(now_ms)
-        .map_err(|_| crab_cell_runtime::Error::Command("repository timestamp is negative"))
+        .map_err(|_| cellule_runtime::Error::Command("repository timestamp is negative"))
 }
 
-fn validate_number(number: u64) -> crab_cell_runtime::Result<()> {
+fn validate_number(number: u64) -> cellule_runtime::Result<()> {
     if number == 0 || number > MAX_NUMBER {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository number is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_author(author: &RepositoryAuthor) -> crab_cell_runtime::Result<()> {
+fn validate_author(author: &RepositoryAuthor) -> cellule_runtime::Result<()> {
     for (value, maximum) in [
         (&author.issuer, 512),
         (&author.subject, 512),
@@ -970,7 +970,7 @@ fn validate_author(author: &RepositoryAuthor) -> crab_cell_runtime::Result<()> {
             || value.chars().count() > maximum
             || value.chars().any(char::is_control)
         {
-            return Err(crab_cell_runtime::Error::Command(
+            return Err(cellule_runtime::Error::Command(
                 "repository author identity is invalid",
             ));
         }
@@ -978,22 +978,22 @@ fn validate_author(author: &RepositoryAuthor) -> crab_cell_runtime::Result<()> {
     Ok(())
 }
 
-fn validate_title(title: &str) -> crab_cell_runtime::Result<()> {
+fn validate_title(title: &str) -> cellule_runtime::Result<()> {
     if title.trim() != title
         || title.is_empty()
         || title.chars().count() > 256
         || title.chars().any(char::is_control)
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository issue title is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_body(body: &str, required: bool) -> crab_cell_runtime::Result<()> {
+fn validate_body(body: &str, required: bool) -> cellule_runtime::Result<()> {
     if (required && body.trim().is_empty()) || body.len() > 64 * 1024 || body.contains('\0') {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository discussion body is invalid",
         ));
     }
@@ -1004,7 +1004,7 @@ fn validate_label_fields(
     name: &str,
     color: &str,
     description: Option<&str>,
-) -> crab_cell_runtime::Result<()> {
+) -> cellule_runtime::Result<()> {
     if name.is_empty()
         || name.trim() != name
         || name.chars().count() > 50
@@ -1019,7 +1019,7 @@ fn validate_label_fields(
                 || value.chars().any(char::is_control)
         })
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository label fields are invalid",
         ));
     }
@@ -1032,7 +1032,7 @@ fn validate_status_fields(
     state: u8,
     description: Option<&str>,
     target_url: Option<&str>,
-) -> crab_cell_runtime::Result<()> {
+) -> cellule_runtime::Result<()> {
     if oid.len() != 40
         || !oid
             .bytes()
@@ -1048,24 +1048,24 @@ fn validate_status_fields(
         || target_url
             .is_some_and(|value| value.len() > 2_048 || value.chars().any(char::is_control))
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository commit status is invalid",
         ));
     }
     if let Some(value) = target_url {
         let url = url::Url::parse(value).map_err(|_| {
-            crab_cell_runtime::Error::Command("repository commit status target is invalid")
+            cellule_runtime::Error::Command("repository commit status target is invalid")
         })?;
         crate::config::validate_identity_url(&url, true).map_err(|_| {
-            crab_cell_runtime::Error::Command("repository commit status target is invalid")
+            cellule_runtime::Error::Command("repository commit status target is invalid")
         })?;
     }
     Ok(())
 }
 
-fn validate_status_record(record: &CommitStatusRecord) -> crab_cell_runtime::Result<()> {
+fn validate_status_record(record: &CommitStatusRecord) -> cellule_runtime::Result<()> {
     if record.number == 0 || record.number > MAX_STATUS_SUBMISSIONS {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository commit status number is invalid",
         ));
     }
@@ -1079,23 +1079,23 @@ fn validate_status_record(record: &CommitStatusRecord) -> crab_cell_runtime::Res
     )
 }
 
-fn validate_label(record: &LabelRecord) -> crab_cell_runtime::Result<()> {
+fn validate_label(record: &LabelRecord) -> cellule_runtime::Result<()> {
     if record.number == 0 || record.number > MAX_REPOSITORY_LABELS {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository label number is invalid",
         ));
     }
     validate_label_fields(&record.name, &record.color, record.description.as_deref())?;
     validate_number(record.version)?;
     if record.updated_at_ms < record.created_at_ms {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository label row is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_issue(record: &IssueRecord) -> crab_cell_runtime::Result<()> {
+fn validate_issue(record: &IssueRecord) -> cellule_runtime::Result<()> {
     validate_number(record.number)?;
     validate_author(&record.author)?;
     validate_title(&record.title)?;
@@ -1104,26 +1104,26 @@ fn validate_issue(record: &IssueRecord) -> crab_cell_runtime::Result<()> {
     validate_assignees(&record.assignee_subjects)?;
     validate_number(record.version)?;
     if record.state > 1 || record.updated_at_ms < record.created_at_ms {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository issue row is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_label_ids(labels: &[u64]) -> crab_cell_runtime::Result<()> {
+fn validate_label_ids(labels: &[u64]) -> cellule_runtime::Result<()> {
     if labels.len() > MAX_LABELS
         || labels.contains(&0)
         || labels.windows(2).any(|pair| pair[0] >= pair[1])
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository issue labels are invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_assignees(assignees: &[String]) -> crab_cell_runtime::Result<()> {
+fn validate_assignees(assignees: &[String]) -> cellule_runtime::Result<()> {
     if assignees.len() > MAX_ASSIGNEES
         || assignees.iter().any(|subject| {
             subject.is_empty()
@@ -1132,26 +1132,26 @@ fn validate_assignees(assignees: &[String]) -> crab_cell_runtime::Result<()> {
         })
         || assignees.windows(2).any(|pair| pair[0] >= pair[1])
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository issue assignees are invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_list(before: Option<u64>, limit: u8) -> crab_cell_runtime::Result<()> {
+fn validate_list(before: Option<u64>, limit: u8) -> cellule_runtime::Result<()> {
     if limit == 0
         || usize::from(limit) > MAX_LIST_ITEMS
         || before.is_some_and(|value| value == 0 || value > MAX_NUMBER)
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository list bounds are invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_query(query: Option<&str>) -> crab_cell_runtime::Result<()> {
+fn validate_query(query: Option<&str>) -> cellule_runtime::Result<()> {
     if query.is_some_and(|query| {
         query.is_empty()
             || query.trim() != query
@@ -1159,7 +1159,7 @@ fn validate_query(query: Option<&str>) -> crab_cell_runtime::Result<()> {
             || query.chars().any(char::is_control)
             || query.to_lowercase() != query
     }) {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository search query is invalid",
         ));
     }
@@ -1178,67 +1178,66 @@ fn same_author(left: &RepositoryAuthor, right: &RepositoryAuthor) -> bool {
     left.issuer == right.issuer && left.subject == right.subject
 }
 
-fn encode_label_ids(labels: &[u64]) -> crab_cell_runtime::Result<Vec<u8>> {
+fn encode_label_ids(labels: &[u64]) -> cellule_runtime::Result<Vec<u8>> {
     let mut encoder = BoundedEncoder::new(16 * 1024)
-        .map_err(|_| crab_cell_runtime::Error::Command("repository label encoding failed"))?;
+        .map_err(|_| cellule_runtime::Error::Command("repository label encoding failed"))?;
     encoder
         .write_count(labels.len())
-        .map_err(|_| crab_cell_runtime::Error::Command("repository label encoding failed"))?;
+        .map_err(|_| cellule_runtime::Error::Command("repository label encoding failed"))?;
     for label in labels {
         encoder
             .write_u64(*label)
-            .map_err(|_| crab_cell_runtime::Error::Command("repository label encoding failed"))?;
+            .map_err(|_| cellule_runtime::Error::Command("repository label encoding failed"))?;
     }
     Ok(encoder.finish())
 }
 
-fn decode_label_ids(bytes: &[u8]) -> crab_cell_runtime::Result<Vec<u64>> {
+fn decode_label_ids(bytes: &[u8]) -> cellule_runtime::Result<Vec<u64>> {
     let mut decoder = BoundedDecoder::new(bytes, 16 * 1024)
-        .map_err(|_| crab_cell_runtime::Error::Command("repository label encoding is invalid"))?;
+        .map_err(|_| cellule_runtime::Error::Command("repository label encoding is invalid"))?;
     let count = decoder
         .read_count()
-        .map_err(|_| crab_cell_runtime::Error::Command("repository label encoding is invalid"))?;
+        .map_err(|_| cellule_runtime::Error::Command("repository label encoding is invalid"))?;
     if count > MAX_LABELS {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository label encoding is invalid",
         ));
     }
     let mut labels = Vec::with_capacity(count);
     for _ in 0..count {
         labels.push(decoder.read_u64().map_err(|_| {
-            crab_cell_runtime::Error::Command("repository label encoding is invalid")
+            cellule_runtime::Error::Command("repository label encoding is invalid")
         })?);
     }
     decoder
         .finish()
-        .map_err(|_| crab_cell_runtime::Error::Command("repository label encoding is invalid"))?;
+        .map_err(|_| cellule_runtime::Error::Command("repository label encoding is invalid"))?;
     validate_label_ids(&labels)?;
     Ok(labels)
 }
 
-fn encode_assignees(assignees: &[String]) -> crab_cell_runtime::Result<Vec<u8>> {
+fn encode_assignees(assignees: &[String]) -> cellule_runtime::Result<Vec<u8>> {
     let mut encoder = BoundedEncoder::new(16 * 1024)
-        .map_err(|_| crab_cell_runtime::Error::Command("repository assignee encoding failed"))?;
+        .map_err(|_| cellule_runtime::Error::Command("repository assignee encoding failed"))?;
     encoder
         .write_count(assignees.len())
-        .map_err(|_| crab_cell_runtime::Error::Command("repository assignee encoding failed"))?;
+        .map_err(|_| cellule_runtime::Error::Command("repository assignee encoding failed"))?;
     for assignee in assignees {
-        encoder.write_text(assignee).map_err(|_| {
-            crab_cell_runtime::Error::Command("repository assignee encoding failed")
-        })?;
+        encoder
+            .write_text(assignee)
+            .map_err(|_| cellule_runtime::Error::Command("repository assignee encoding failed"))?;
     }
     Ok(encoder.finish())
 }
 
-fn decode_assignees(bytes: &[u8]) -> crab_cell_runtime::Result<Vec<String>> {
-    let mut decoder = BoundedDecoder::new(bytes, 16 * 1024).map_err(|_| {
-        crab_cell_runtime::Error::Command("repository assignee encoding is invalid")
-    })?;
-    let count = decoder.read_count().map_err(|_| {
-        crab_cell_runtime::Error::Command("repository assignee encoding is invalid")
-    })?;
+fn decode_assignees(bytes: &[u8]) -> cellule_runtime::Result<Vec<String>> {
+    let mut decoder = BoundedDecoder::new(bytes, 16 * 1024)
+        .map_err(|_| cellule_runtime::Error::Command("repository assignee encoding is invalid"))?;
+    let count = decoder
+        .read_count()
+        .map_err(|_| cellule_runtime::Error::Command("repository assignee encoding is invalid"))?;
     if count > MAX_ASSIGNEES {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository assignee encoding is invalid",
         ));
     }
@@ -1248,35 +1247,35 @@ fn decode_assignees(bytes: &[u8]) -> crab_cell_runtime::Result<Vec<String>> {
             decoder
                 .read_text()
                 .map_err(|_| {
-                    crab_cell_runtime::Error::Command("repository assignee encoding is invalid")
+                    cellule_runtime::Error::Command("repository assignee encoding is invalid")
                 })?
                 .to_owned(),
         );
     }
-    decoder.finish().map_err(|_| {
-        crab_cell_runtime::Error::Command("repository assignee encoding is invalid")
-    })?;
+    decoder
+        .finish()
+        .map_err(|_| cellule_runtime::Error::Command("repository assignee encoding is invalid"))?;
     validate_assignees(&assignees)?;
     Ok(assignees)
 }
 
-fn encoded_size<T: WireValue>(value: &T) -> crab_cell_runtime::Result<usize> {
+fn encoded_size<T: WireValue>(value: &T) -> cellule_runtime::Result<usize> {
     let mut encoder = BoundedEncoder::new(MAX_LIST_OUTPUT_BYTES as u32)
-        .map_err(|_| crab_cell_runtime::Error::Command("repository result encoding failed"))?;
+        .map_err(|_| cellule_runtime::Error::Command("repository result encoding failed"))?;
     value
         .encode(&mut encoder)
-        .map_err(|_| crab_cell_runtime::Error::Command("repository result encoding failed"))?;
+        .map_err(|_| cellule_runtime::Error::Command("repository result encoding failed"))?;
     Ok(encoder.finish().len())
 }
 
-fn validate_comment(record: &CommentRecord) -> crab_cell_runtime::Result<()> {
+fn validate_comment(record: &CommentRecord) -> cellule_runtime::Result<()> {
     validate_number(record.issue)?;
     validate_number(record.number)?;
     validate_author(&record.author)?;
     validate_body(&record.body, true)?;
     validate_number(record.version)?;
     if record.updated_at_ms < record.created_at_ms {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository comment row is invalid",
         ));
     }

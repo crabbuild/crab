@@ -6,8 +6,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crab_cell_host::CellNodeBuilder;
-use crab_cell_runtime::{
+use cellule_host::CellNodeBuilder;
+use cellule_runtime::{
     ActivityCompletion, ActivityCompletionOutcome, ActivityRunOutcome, ActivitySupervisor,
     ApplicationId, BlobArtifactStore, BlobCondition, BlobMutation, BlobMutationOutcome, BlobQuery,
     BlobQueryResult, BoundedEncoder, CellAuthority, CellCatalog, CellClient, CellReplica,
@@ -26,9 +26,6 @@ use crab_storage::Store;
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
-
-#[path = "../../crab-cell-runtime/src/process_store.rs"]
-mod process_store;
 
 #[path = "support/reference_application.rs"]
 mod fixture;
@@ -184,7 +181,7 @@ fn process_case() -> String {
 fn process_store() -> (Store, Path) {
     if env::var(STORE_BACKEND_ENV).ok().as_deref() == Some(FILESYSTEM_STORE_BACKEND) {
         let path = env::var(STORE_PATH_ENV).expect("filesystem fault store path");
-        let store = process_store::FilesystemCasStore::new(FilePath::new(&path))
+        let store = cellule_store::test_support::FilesystemCasStore::new(FilePath::new(&path))
             .expect("filesystem fault store");
         return (
             Store::new(Arc::new(store)),

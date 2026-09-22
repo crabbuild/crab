@@ -6,6 +6,7 @@ Root `AGENTS.md` and `crates/AGENTS.md` apply. Read
 ## Purpose and ownership
 
 Owns provider construction, object paths, conditional writes, transport retries, and storage errors. Auth resolves credentials; callers supply mutation and publication policy.
+`Store::for_cellule` adapts an unscoped provider store to the independent Cellule runtime without changing its transport identity or observers.
 
 ## Read first
 

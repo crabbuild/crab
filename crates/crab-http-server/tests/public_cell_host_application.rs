@@ -1,8 +1,8 @@
 use std::{sync::Arc, time::UNIX_EPOCH};
 
-use crab_cell_app::{ApplicationBuilder, CellApplication, CellType, CompiledApplication};
-use crab_cell_host::CellNodeBuilder;
-use crab_cell_runtime::{
+use cellule_app::{ApplicationBuilder, CellApplication, CellType, CompiledApplication};
+use cellule_host::CellNodeBuilder;
+use cellule_runtime::{
     BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog, CellClient, CellModule,
     CellReplica, CellStorageLayout, CellTarget, Digest, IncarnationId, MigrationDescriptor,
     ModuleDescriptor, MutationIdentity, NamespaceDescriptor, NamespaceId, NodeLeaseGuard,
@@ -78,7 +78,7 @@ impl CellModule for PublicSql {
         &DESCRIPTOR
     }
 
-    fn register(self, registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
+    fn register(self, registry: &mut RegistryBuilder) -> cellule_runtime::Result<()> {
         register_sql::<Self>(registry)
     }
 }
@@ -88,7 +88,7 @@ struct PublicApplication;
 impl CellApplication for PublicApplication {
     const NAME: &'static str = "public-host-application";
 
-    fn register(builder: &mut ApplicationBuilder) -> crab_cell_runtime::Result<()> {
+    fn register(builder: &mut ApplicationBuilder) -> cellule_runtime::Result<()> {
         builder.register(PublicSql)?;
         builder.cell_type(CellType::new(
             MODULE,
@@ -115,11 +115,11 @@ fn compiled_application() -> Arc<CompiledApplication> {
 async fn node_public_application_handle_executes_typed_sql() {
     let application = compiled_application();
     let tenant = TenantId::from_bytes([64; 16]);
-    let application_id = crab_cell_runtime::ApplicationId::from_bytes([65; 16]);
+    let application_id = cellule_runtime::ApplicationId::from_bytes([65; 16]);
     let target =
         CellTarget::new(tenant, application_id, NAMESPACE, &partition_for_shard(0)).unwrap();
     let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
+        Store::new(Arc::new(InMemory::new())).for_cellule().unwrap(),
         Path::from("public-host-application"),
         *application_id.as_bytes(),
     );

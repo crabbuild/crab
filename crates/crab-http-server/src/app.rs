@@ -101,7 +101,7 @@ pub(crate) enum Error {
     #[error("Collaboration Cell contract failed: {0}")]
     CellContract(&'static str),
     #[error("Collaboration Cell operation failed")]
-    Cell(#[source] crab_cell_runtime::Error),
+    Cell(#[source] cellule_runtime::Error),
     #[error("Collaboration storage failed")]
     Storage(#[from] StorageError),
     #[error("Collaboration data encoding failed")]
@@ -273,7 +273,7 @@ impl IntoResponse for Error {
                 "submission_conflict",
                 "This submission ID was already used for different content; check the existing discussion before submitting again",
             ),
-            Self::Cell(crab_cell_runtime::Error::Capacity(_)) => (
+            Self::Cell(cellule_runtime::Error::Capacity(_)) => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "busy",
                 "Collaboration requests are busy; retry the same submission shortly",
@@ -285,18 +285,18 @@ impl IntoResponse for Error {
             ),
             Self::CellUnavailable
             | Self::Cell(
-                crab_cell_runtime::Error::CellNotActive
-                | crab_cell_runtime::Error::CellDraining
-                | crab_cell_runtime::Error::RuntimeClosed
-                | crab_cell_runtime::Error::Fenced
-                | crab_cell_runtime::Error::PendingPublication
-                | crab_cell_runtime::Error::Deadline,
+                cellule_runtime::Error::CellNotActive
+                | cellule_runtime::Error::CellDraining
+                | cellule_runtime::Error::RuntimeClosed
+                | cellule_runtime::Error::Fenced
+                | cellule_runtime::Error::PendingPublication
+                | cellule_runtime::Error::Deadline,
             ) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "cell_unavailable",
                 "Repository collaboration is temporarily unavailable; retry the same submission shortly",
             ),
-            Self::Cell(crab_cell_runtime::Error::PeerAuthorization(_)) => (
+            Self::Cell(cellule_runtime::Error::PeerAuthorization(_)) => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 "Repository collaboration authorization was denied",

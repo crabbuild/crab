@@ -1518,12 +1518,14 @@ jq --null-input \
     }
   }' > "$receipt_path"
 if [ "${CRAB_HTTP_CLUSTER_VALIDATE:-false}" = true ]; then
+  : "${CRAB_HTTP_CLUSTER_CARGO_TARGET_DIR:?set a per-checkout target directory on the Workspace volume}"
   receipt_mode=source-only
   if [ "$qualified_image_ref" != source-only ]; then
     receipt_mode=release
   fi
-  CARGO_TARGET_DIR="${CRAB_HTTP_CLUSTER_CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/crab-http-cluster-target}" \
-    cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
+  cellule_manifest="$(cargo metadata --format-version 1 --locked | jq -er '[.packages[] | select(.name == "cellule-runtime") | .manifest_path] | unique | .[0]')"
+  CARGO_TARGET_DIR="$CRAB_HTTP_CLUSTER_CARGO_TARGET_DIR" \
+    cargo run --quiet --locked --manifest-path "$cellule_manifest" -p cellule-runtime --bin qualification_receipt -- \
       validate-cluster "$receipt_path" "$source_revision" "$qualified_image_digest" "$receipt_mode"
 fi
 cat "$receipt_path"

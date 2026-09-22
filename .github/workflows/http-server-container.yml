@@ -881,8 +881,9 @@ jobs:
           if [ -n '${{ inputs.image_ref }}' ]; then
             receipt_mode=release
           fi
+          cellule_manifest="$(cargo metadata --format-version 1 --locked | jq -er '[.packages[] | select(.name == "cellule-runtime") | .manifest_path] | unique | .[0]')"
           CARGO_TARGET_DIR="${RUNNER_TEMP}/crab-http-server-receipt-target" \
-            cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
+            cargo run --quiet --locked --manifest-path "$cellule_manifest" -p cellule-runtime --bin qualification_receipt -- \
               validate-cluster "${RUNNER_TEMP}/crab-http-server-cluster-receipt.json" \
               "$source_revision" "${{ steps.image.outputs.digest }}" "$receipt_mode"
       - name: Prepare exact-source qualification evidence

@@ -445,14 +445,15 @@ jobs:
           release_dir="${RUNNER_TEMP}/crab-http-server-release"
           mkdir -p "$release_dir"
           export CARGO_TARGET_DIR="${RUNNER_TEMP}/crab-cell-runtime-target"
-          cargo run --locked --quiet -p crab-cell-runtime --bin qualification_receipt \
+          cellule_manifest="$(cargo metadata --format-version 1 --locked | jq -er '[.packages[] | select(.name == "cellule-runtime") | .manifest_path] | unique | .[0]')"
+          cargo run --locked --quiet --manifest-path "$cellule_manifest" -p cellule-runtime --bin qualification_receipt \
             -- validate-cluster "$evidence_dir/cluster-receipt.json" \
             "$SOURCE_SHA" "$IMAGE_DIGEST" release
-          cargo run --locked --quiet -p crab-cell-runtime --bin qualification_receipt \
+          cargo run --locked --quiet --manifest-path "$cellule_manifest" -p cellule-runtime --bin qualification_receipt \
             -- emit "$release_dir/cell-runtime-qualification.json" \
             "$SOURCE_SHA" "$IMAGE_DIGEST" "$evidence_dir/cluster-receipt.json" \
             github-actions http-server-release none
-          cargo run --locked --quiet -p crab-cell-runtime --bin qualification_receipt \
+          cargo run --locked --quiet --manifest-path "$cellule_manifest" -p cellule-runtime --bin qualification_receipt \
             -- verify "$release_dir/cell-runtime-qualification.json" \
             "$SOURCE_SHA" "$IMAGE_DIGEST" "$evidence_dir/cluster-receipt.json"
 
@@ -472,6 +473,7 @@ jobs:
             exit 1
           fi
           export CARGO_TARGET_DIR="${RUNNER_TEMP}/crab-cell-runtime-target"
+          cellule_manifest="$(cargo metadata --format-version 1 --locked | jq -er '[.packages[] | select(.name == "cellule-runtime") | .manifest_path] | unique | .[0]')"
           required_profiles=(
             "local-provider-v1|qualification-matrix-local-provider.json"
             "scale-v1|qualification-matrix.json"
@@ -487,7 +489,7 @@ jobs:
             IFS='|' read -r profile_name matrix_name <<< "$requirement"
             matrix="$protected_dir/$matrix_name"
             profile="$protected_dir/$profile_name.json"
-            tracked_profile="crates/crab-cell-runtime/qualification/profiles/$profile_name.json"
+            tracked_profile="$(dirname "$cellule_manifest")/qualification/profiles/$profile_name.json"
             test -s "$matrix" || {
               echo "::error::Protected Cell runtime matrix is required at $matrix; fixture receipts cannot qualify a release."
               exit 1
@@ -508,7 +510,7 @@ jobs:
               echo "::error::Protected $profile_name profile does not match the exact tagged source."
               exit 1
             }
-            cargo run --locked --quiet -p crab-cell-runtime --bin qualification_receipt \
+            cargo run --locked --quiet --manifest-path "$cellule_manifest" -p cellule-runtime --bin qualification_receipt \
               -- verify-matrix "$matrix" \
               "$SOURCE_SHA" "$IMAGE_DIGEST" "$profile" "$QUALIFICATION_SIGNER"
           done

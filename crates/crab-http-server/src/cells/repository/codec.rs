@@ -1,4 +1,4 @@
-use crab_cell_runtime::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use cellule_runtime::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 
 use super::{
     CommentKey, CommentPage, CommentRecord, CommitStatusCatalog, CommitStatusRecord,

@@ -1,6 +1,6 @@
 use serde::{Serialize, de::DeserializeOwned};
 
-use crab_cell_runtime::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use cellule_runtime::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 
 use super::{
     AttachReleaseAssetInput, AttachReleaseAssetOutcome, CompleteReleasePublicationInput,

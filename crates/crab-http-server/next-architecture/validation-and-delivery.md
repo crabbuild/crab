@@ -157,7 +157,7 @@ losing accounting. Named base VFS and independent worker lifecycle are exercised
 three epochs additionally cover these storage boundaries.
 This does not simulate RustFS disk/power loss.
 
-Run the [crate's scoped commands](../../crab-ltx/README.md#verification) for tests,
+Run the [crate's scoped commands](../../../crab/docs/architecture/cells/storage.md) for tests,
 Clippy and format checks. Existing dependency versions remain unchanged and the
 workspace resolves a single SQLite linkage. The existing workspace CI will run
 the new member; broad CI and cross-platform results must be recorded separately.

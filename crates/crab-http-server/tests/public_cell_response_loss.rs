@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crab_cell_runtime::{
+use cellule_runtime::{
     BlobArtifactStore, BlobCondition, BlobMutation, BlobQuery, BlobQueryResult, CellTarget,
     CronMutation, CronQueryResult, EffectClaimRequest, InvocationError, KvAtomicRequest,
     KvMutation, QueueClaimRequest, QueueLeaseOutcome, QueueSendRequest, QueueState, Resolution,
@@ -549,7 +549,9 @@ async fn run_public_blob_lost_response(
     let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false, 1);
     let peer = node
         .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
-        .with_blob_artifact_store(BlobArtifactStore::new(store));
+        .with_blob_artifact_store(BlobArtifactStore::new(
+            store.for_cellule().expect("Cellule store"),
+        ));
     let peer_blob = peer.blob::<fixture::ReferenceBlob>().expect("peer Blob");
     let observer_blob = local
         .blob::<fixture::ReferenceBlob>()

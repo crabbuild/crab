@@ -36,7 +36,11 @@ pub(super) async fn run() {
         .await
         .expect("acknowledged SQL write");
     assert_eq!(committed.output[0].rows_affected, 1);
-    let layout = CellStorageLayout::new(store, root, *application.as_bytes());
+    let layout = CellStorageLayout::new(
+        store.for_cellule().expect("Cellule store"),
+        root,
+        *application.as_bytes(),
+    );
     let authority = CellAuthority::new(layout);
     let observed = authority
         .load(target.cell_id())

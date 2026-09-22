@@ -12,9 +12,9 @@ bytes = { workspace = true }
 blake3 = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 crab-read = { workspace = true }
-crab-cell-runtime = { workspace = true }
-crab-cell-app = { workspace = true }
-crab-cell-host = { workspace = true }
+cellule-runtime = { workspace = true }
+cellule-app = { workspace = true }
+cellule-host = { workspace = true }
 crab-lfs = { workspace = true }
 crab-git = { workspace = true }
 gix-hash = { workspace = true }
@@ -63,6 +63,7 @@ zip = { version = "6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 async-trait = { workspace = true }
-crab-ltx = { workspace = true, features = ["replica"] }
+cellule-store = { workspace = true, features = ["test-support"] }
+cellule-ltx = { workspace = true, features = ["replica"] }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }

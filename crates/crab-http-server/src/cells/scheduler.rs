@@ -8,8 +8,8 @@ use std::{
     time::Duration,
 };
 
-use crab_cell_runtime::CellStorageLayout;
-use crab_cell_runtime::{
+use cellule_runtime::CellStorageLayout;
+use cellule_runtime::{
     ActivityRunOutcome, ApplicationIdentity, BlockingActivityPool, BlockingActivityReservation,
     CatalogProof, CatalogShardScan, CellAuthority, CellCatalog, CellId, CellTarget, ControlState,
     DueCellScan, EffectRunOutcome, FencedNodeSession, InvocationError, MaintenanceTickOutcome,
@@ -57,7 +57,7 @@ pub(crate) struct SchedulerStatus {
 impl SchedulerStatus {
     pub(crate) fn new(now_ms: i64) -> crate::Result<Self> {
         if now_ms < 0 {
-            return Err(crab_cell_runtime::Error::Control("negative scheduler status time").into());
+            return Err(cellule_runtime::Error::Control("negative scheduler status time").into());
         }
         Ok(Self {
             progress: Arc::new(AtomicU64::new(1)),
@@ -118,7 +118,7 @@ pub(crate) struct RepositoryCellScheduler {
     recovery_affinity_seen: HashMap<SessionId, i64>,
     recovery_jobs: tokio::task::JoinSet<RecoveryJobResult>,
     recovery_manifests: RecoveryManifestStore,
-    recovery_disk: crab_cell_runtime::DiskBudget,
+    recovery_disk: cellule_runtime::DiskBudget,
     recovery_retries: HashMap<SessionId, RecoveryRetryState>,
     next_migration_shard: u8,
     next_shard: u8,
@@ -203,7 +203,7 @@ impl RepositoryCellScheduler {
 
     pub(crate) fn with_node_recovery_disk(
         mut self,
-        recovery_disk: crab_cell_runtime::DiskBudget,
+        recovery_disk: cellule_runtime::DiskBudget,
     ) -> Self {
         self.recovery_manifests = self
             .recovery_manifests
@@ -254,9 +254,7 @@ impl RepositoryCellScheduler {
 
     async fn scan_once_bounded(&mut self, cycle_limit: usize) -> crate::Result<()> {
         if cycle_limit == 0 || cycle_limit > MAX_DUE_PER_CYCLE {
-            return Err(
-                crab_cell_runtime::Error::Control("scheduler cycle limit is invalid").into(),
-            );
+            return Err(cellule_runtime::Error::Control("scheduler cycle limit is invalid").into());
         }
         let now_ms = super::unix_now_ms()?;
         self.reap_migration_jobs();
@@ -388,7 +386,7 @@ impl RepositoryCellScheduler {
                 let target_version = self
                     .registry
                     .current_cell_version(proof.entry().namespace(), proof.entry().role())
-                    .ok_or(crab_cell_runtime::Error::Registry(
+                    .ok_or(cellule_runtime::Error::Registry(
                         "cataloged Cell namespace has no current release version",
                     ))?;
                 let attempt = MigrationProgressAttempt::new(
@@ -435,7 +433,7 @@ impl RepositoryCellScheduler {
         }
         self.migration_scans
             .get_mut(&shard)
-            .ok_or(crab_cell_runtime::Error::Control(
+            .ok_or(cellule_runtime::Error::Control(
                 "release migration shard cursor disappeared",
             ))?
             .next()
@@ -459,7 +457,7 @@ impl RepositoryCellScheduler {
                 let scan = self
                     .scans
                     .get_mut(&shard)
-                    .ok_or(crab_cell_runtime::Error::Control(
+                    .ok_or(cellule_runtime::Error::Control(
                         "scheduler shard cursor disappeared",
                     ))?;
                 scan.next_batch_bounded(now_ms, limit - attempted).await
@@ -485,7 +483,7 @@ impl RepositoryCellScheduler {
         Ok((attempted, false))
     }
 
-    async fn process(&mut self, due: crab_cell_runtime::DueCell) -> crate::Result<()> {
+    async fn process(&mut self, due: cellule_runtime::DueCell) -> crate::Result<()> {
         let entry = due.catalog().entry();
         let control = due.control().value();
         if !self.registry.supports_cell(
@@ -494,7 +492,7 @@ impl RepositoryCellScheduler {
             control.code,
             control.schema,
         ) {
-            return Err(crab_cell_runtime::Error::Registry(
+            return Err(cellule_runtime::Error::Registry(
                 "due Cell is unsupported by the running release",
             )
             .into());
@@ -508,7 +506,7 @@ impl RepositoryCellScheduler {
         let expected_commit_sequence = control
             .root
             .as_ref()
-            .ok_or(crab_cell_runtime::Error::CellNotActive)?
+            .ok_or(cellule_runtime::Error::CellNotActive)?
             .commit_sequence;
         let scheduled = self.router.route_scheduler_target(target.clone()).await?;
         let release_after = scheduled.should_release();
@@ -791,10 +789,10 @@ impl RepositoryCellScheduler {
                             crate::Error::Storage(_) => {
                                 crate::metrics::RecoveryFailureReason::Storage
                             }
-                            crate::Error::Cell(crab_cell_runtime::Error::Capacity(_)) => {
+                            crate::Error::Cell(cellule_runtime::Error::Capacity(_)) => {
                                 crate::metrics::RecoveryFailureReason::Capacity
                             }
-                            crate::Error::Cell(crab_cell_runtime::Error::Fenced) => {
+                            crate::Error::Cell(cellule_runtime::Error::Fenced) => {
                                 crate::metrics::RecoveryFailureReason::Fenced
                             }
                             _ => crate::metrics::RecoveryFailureReason::Other,
@@ -867,7 +865,7 @@ impl RepositoryCellScheduler {
 
     fn reserve_blocking_activity(
         &self,
-        namespace: crab_cell_runtime::NamespaceId,
+        namespace: cellule_runtime::NamespaceId,
     ) -> crate::Result<Option<Option<BlockingActivityReservation>>> {
         if !self.registry.requires_blocking_activity(namespace) {
             return Ok(Some(None));
@@ -875,7 +873,7 @@ impl RepositoryCellScheduler {
         let pool = self
             .blocking_activities
             .as_ref()
-            .ok_or(crab_cell_runtime::Error::Registry(
+            .ok_or(cellule_runtime::Error::Registry(
                 "blocking activity pool is unavailable",
             ))?;
         Ok(pool.try_reserve()?.map(Some))
@@ -913,7 +911,7 @@ impl MigrationShardScan {
         }
     }
 
-    async fn next(&mut self) -> crab_cell_runtime::Result<Option<CatalogProof>> {
+    async fn next(&mut self) -> cellule_runtime::Result<Option<CatalogProof>> {
         loop {
             if let Some(entry) = self.entries.pop_front() {
                 return Ok(Some(entry));
@@ -934,13 +932,13 @@ struct ActivityCellReservation {
 struct MigrationCellReservation {
     cell: CellId,
     cells: Arc<Mutex<HashSet<CellId>>>,
-    _job: crab_cell_runtime::NodeJobReservation,
+    _job: cellule_runtime::NodeJobReservation,
 }
 
 struct RecoverySessionReservation {
     session: SessionId,
     sessions: Arc<Mutex<HashSet<SessionId>>>,
-    _job: crab_cell_runtime::NodeJobReservation,
+    _job: cellule_runtime::NodeJobReservation,
 }
 
 struct RecoveryJobResult {
@@ -1010,11 +1008,11 @@ impl Drop for RecoverySessionReservation {
 
 struct RecoveryContext {
     directory: NodeDirectory,
-    catalog: crab_cell_runtime::CellCatalog,
+    catalog: cellule_runtime::CellCatalog,
     authority: CellAuthority,
     manifests: RecoveryManifestStore,
     transport: Arc<dyn NodeLogTransport>,
-    recovery_disk: crab_cell_runtime::DiskBudget,
+    recovery_disk: cellule_runtime::DiskBudget,
     recovery_scratch: std::path::PathBuf,
     metrics: Option<crate::metrics::Metrics>,
 }
@@ -1155,25 +1153,25 @@ async fn recover_node_session(
     work.affected_cells = work
         .affected_cells
         .checked_add(inventory.summary.affected_cells)
-        .ok_or(crab_cell_runtime::Error::Capacity(
+        .ok_or(cellule_runtime::Error::Capacity(
             "recovery affected Cell count",
         ))?;
     work.catalog_shards = work
         .catalog_shards
         .checked_add(inventory.summary.catalog_shards)
-        .ok_or(crab_cell_runtime::Error::Capacity(
+        .ok_or(cellule_runtime::Error::Capacity(
             "recovery catalog shard count",
         ))?;
     work.catalog_pages = work
         .catalog_pages
         .checked_add(inventory.summary.catalog_pages)
-        .ok_or(crab_cell_runtime::Error::Capacity(
+        .ok_or(cellule_runtime::Error::Capacity(
             "recovery catalog page count",
         ))?;
     work.control_reads = work
         .control_reads
         .checked_add(inventory.summary.control_reads)
-        .ok_or(crab_cell_runtime::Error::Capacity(
+        .ok_or(cellule_runtime::Error::Capacity(
             "recovery control read count",
         ))?;
     let cells = inventory.cells;
@@ -1213,19 +1211,19 @@ async fn recover_node_session(
     work.bundle_bytes = work
         .bundle_bytes
         .checked_add(result.publication.bundle_bytes)
-        .ok_or(crab_cell_runtime::Error::Capacity(
+        .ok_or(cellule_runtime::Error::Capacity(
             "recovery bundle byte count",
         ))?;
     work.object_reads = work
         .object_reads
         .checked_add(result.publication.object_reads)
-        .ok_or(crab_cell_runtime::Error::Capacity(
+        .ok_or(cellule_runtime::Error::Capacity(
             "recovery object read count",
         ))?;
     work.object_writes = work
         .object_writes
         .checked_add(result.publication.object_writes)
-        .ok_or(crab_cell_runtime::Error::Capacity(
+        .ok_or(cellule_runtime::Error::Capacity(
             "recovery object write count",
         ))?;
     let controls = result.controls;
@@ -1249,7 +1247,7 @@ async fn recover_node_session(
     .await
     {
         Ok(result) => result,
-        Err(_) => Err(crab_cell_runtime::Error::Deadline),
+        Err(_) => Err(cellule_runtime::Error::Deadline),
     };
     let refreshed = match refreshed {
         Ok(refreshed) => refreshed,
@@ -1291,11 +1289,11 @@ async fn recover_node_session(
 
 async fn finish_recovery_with_timeout<T, F>(timeout: Duration, future: F) -> crate::Result<T>
 where
-    F: Future<Output = crab_cell_runtime::Result<T>>,
+    F: Future<Output = cellule_runtime::Result<T>>,
 {
     tokio::time::timeout(timeout, future)
         .await
-        .map_err(|_| crab_cell_runtime::Error::Deadline)?
+        .map_err(|_| cellule_runtime::Error::Deadline)?
         .map_err(Into::into)
 }
 
@@ -1305,13 +1303,13 @@ async fn claim_expired_with_timeout(
     claimant: SessionId,
     now_ms: i64,
     timeout: Duration,
-) -> crate::Result<crab_cell_runtime::FencedNodeSession> {
+) -> crate::Result<cellule_runtime::FencedNodeSession> {
     tokio::time::timeout(
         timeout,
         directory.claim_expired_for_recovery(session, claimant, now_ms),
     )
     .await
-    .map_err(|_| crab_cell_runtime::Error::Deadline)?
+    .map_err(|_| cellule_runtime::Error::Deadline)?
     .map_err(Into::into)
 }
 
@@ -1321,7 +1319,7 @@ async fn await_with_claim_heartbeat<T, F>(
     future: F,
 ) -> crate::Result<T>
 where
-    F: Future<Output = crab_cell_runtime::Result<T>>,
+    F: Future<Output = cellule_runtime::Result<T>>,
 {
     tokio::pin!(future);
     loop {
@@ -1333,7 +1331,7 @@ where
                     directory.refresh_recovery_claim(fenced, super::unix_now_ms()?),
                 )
                 .await
-                .map_err(|_| crab_cell_runtime::Error::Fenced)??;
+                .map_err(|_| cellule_runtime::Error::Fenced)??;
                 *fenced = refreshed;
             }
         }
@@ -1374,7 +1372,7 @@ fn mutation_identity() -> crate::Result<MutationIdentity> {
         issued_at_ms: now_ms,
         expires_at_ms: now_ms
             .checked_add(60_000)
-            .ok_or(crab_cell_runtime::Error::Command(
+            .ok_or(cellule_runtime::Error::Command(
                 "scheduler request expiry overflow",
             ))?,
     })
@@ -1382,22 +1380,22 @@ fn mutation_identity() -> crate::Result<MutationIdentity> {
 
 fn migration_failure(error: &crate::Error) -> MigrationFailure {
     match error {
-        crate::Error::Cell(crab_cell_runtime::Error::Capacity(_)) => MigrationFailure::Capacity,
-        crate::Error::Cell(crab_cell_runtime::Error::Deadline) => MigrationFailure::Deadline,
+        crate::Error::Cell(cellule_runtime::Error::Capacity(_)) => MigrationFailure::Capacity,
+        crate::Error::Cell(cellule_runtime::Error::Deadline) => MigrationFailure::Deadline,
         crate::Error::Cell(
-            crab_cell_runtime::Error::Registry(_)
-            | crab_cell_runtime::Error::Control(_)
-            | crab_cell_runtime::Error::Release(_),
+            cellule_runtime::Error::Registry(_)
+            | cellule_runtime::Error::Control(_)
+            | cellule_runtime::Error::Release(_),
         )
         | crate::Error::Config(_) => MigrationFailure::Incompatible,
         crate::Error::Cell(
-            crab_cell_runtime::Error::CellNotActive
-            | crab_cell_runtime::Error::CellDraining
-            | crab_cell_runtime::Error::Fenced
-            | crab_cell_runtime::Error::RuntimeClosed
-            | crab_cell_runtime::Error::PeerTransport { .. }
-            | crab_cell_runtime::Error::PeerTransportUnknown { .. }
-            | crab_cell_runtime::Error::Storage(_),
+            cellule_runtime::Error::CellNotActive
+            | cellule_runtime::Error::CellDraining
+            | cellule_runtime::Error::Fenced
+            | cellule_runtime::Error::RuntimeClosed
+            | cellule_runtime::Error::PeerTransport { .. }
+            | cellule_runtime::Error::PeerTransportUnknown { .. }
+            | cellule_runtime::Error::Storage(_),
         )
         | crate::Error::Storage(_) => MigrationFailure::Unavailable,
         _ => MigrationFailure::Internal,

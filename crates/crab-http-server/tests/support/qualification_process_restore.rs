@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn install_process_lease(node: &crab_cell_host::CellNode) {
+pub(super) fn install_process_lease(node: &cellule_host::CellNode) {
     let cancellation = CancellationToken::new();
     let tasks = node
         .install_task_group(cancellation.clone(), CancellationToken::new())
@@ -14,7 +14,7 @@ pub(super) fn install_process_lease(node: &crab_cell_host::CellNode) {
         .spawn(async move {
             loop {
                 tokio::select! {
-                    () = cancellation.cancelled() => return Ok::<(), crab_cell_runtime::Error>(()),
+                    () = cancellation.cancelled() => return Ok::<(), cellule_runtime::Error>(()),
                     () = tokio::time::sleep(Duration::from_secs(20)) => lease.renew(0, 60_000)?,
                 }
             }
@@ -23,15 +23,15 @@ pub(super) fn install_process_lease(node: &crab_cell_host::CellNode) {
 }
 
 pub(super) async fn restore_cells(
-    node: &crab_cell_host::CellNode,
+    node: &cellule_host::CellNode,
     layout: &CellStorageLayout,
     tenant: TenantId,
     application: ApplicationId,
     session: SessionId,
-    fenced: Option<&crab_cell_runtime::FencedNodeSession>,
+    fenced: Option<&cellule_runtime::FencedNodeSession>,
     directory: &FilePath,
     role: &str,
-) -> Vec<crab_cell_runtime::CellHandle> {
+) -> Vec<cellule_runtime::CellHandle> {
     let authority = CellAuthority::new(layout.clone());
     let mut restored_cells = Vec::new();
     for (namespace, module, incarnation_byte) in [
@@ -83,10 +83,7 @@ pub(super) async fn restore_cells(
                 .await
                 .expect("exact-root takeover")
         } else {
-            assert_eq!(
-                observed.value().state,
-                crab_cell_runtime::ControlState::Idle
-            );
+            assert_eq!(observed.value().state, cellule_runtime::ControlState::Idle);
             assert!(observed.value().owner.is_none());
             node.runtime()
                 .acquire_idle_restored(

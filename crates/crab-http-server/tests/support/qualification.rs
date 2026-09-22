@@ -3,8 +3,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crab_cell_host::CellNode;
-use crab_cell_runtime::{MutationIdentity, RequestId};
+use cellule_host::CellNode;
+use cellule_runtime::{MutationIdentity, RequestId};
 use crab_storage::{ObjectStoreCredentials, Store, build_explicit_store};
 use object_store::path::Path;
 

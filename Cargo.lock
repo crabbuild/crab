@@ -1525,6 +1525,107 @@ dependencies = [
 ]
 
 [[package]]
+name = "cellule-app"
+version = "0.1.0"
+source = "git+https://github.com/crabbuild/cellule.git?rev=6ba6e2ba260ee2c571667e0cf2d1120666b756f5#6ba6e2ba260ee2c571667e0cf2d1120666b756f5"
+dependencies = [
+ "blake3",
+ "cellule-runtime",
+]
+
+[[package]]
+name = "cellule-host"
+version = "0.1.0"
+source = "git+https://github.com/crabbuild/cellule.git?rev=6ba6e2ba260ee2c571667e0cf2d1120666b756f5#6ba6e2ba260ee2c571667e0cf2d1120666b756f5"
+dependencies = [
+ "cellule-app",
+ "cellule-runtime",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "cellule-ltx"
+version = "0.1.0"
+source = "git+https://github.com/crabbuild/cellule.git?rev=6ba6e2ba260ee2c571667e0cf2d1120666b756f5#6ba6e2ba260ee2c571667e0cf2d1120666b756f5"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "bytes",
+ "cellule-store",
+ "crc-fast",
+ "futures-util",
+ "lz4_flex 0.11.6",
+ "object_store",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "cellule-runtime"
+version = "0.1.0"
+source = "git+https://github.com/crabbuild/cellule.git?rev=6ba6e2ba260ee2c571667e0cf2d1120666b756f5#6ba6e2ba260ee2c571667e0cf2d1120666b756f5"
+dependencies = [
+ "blake3",
+ "bytes",
+ "cellule-ltx",
+ "cellule-store",
+ "ed25519-dalek",
+ "futures-util",
+ "object_store",
+ "prost",
+ "prost-build",
+ "protoc-bin-vendored",
+ "rand 0.9.4",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "cellule-store"
+version = "0.1.0"
+source = "git+https://github.com/crabbuild/cellule.git?rev=6ba6e2ba260ee2c571667e0cf2d1120666b756f5#6ba6e2ba260ee2c571667e0cf2d1120666b756f5"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "bytes",
+ "cellule-types",
+ "fs4",
+ "futures-util",
+ "hyper 1.11.1",
+ "object_store",
+ "rand 0.9.4",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "cellule-types"
+version = "0.1.0"
+source = "git+https://github.com/crabbuild/cellule.git?rev=6ba6e2ba260ee2c571667e0cf2d1120666b756f5#6ba6e2ba260ee2c571667e0cf2d1120666b756f5"
+dependencies = [
+ "schemars 0.8.22",
+ "serde",
+]
+
+[[package]]
 name = "cfg-if"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2186,61 +2287,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crab-cell-app"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "blake3",
- "crab-cell-runtime",
- "crab-ltx",
- "crab-storage",
- "ed25519-dalek",
- "fs4",
- "futures-util",
- "object_store",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "crab-cell-host"
-version = "0.1.0"
-dependencies = [
- "crab-cell-app",
- "crab-cell-runtime",
- "tempfile",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "crab-cell-runtime"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "blake3",
- "bytes",
- "crab-ltx",
- "crab-storage",
- "ed25519-dalek",
- "fs4",
- "futures-util",
- "object_store",
- "prost",
- "prost-build",
- "protoc-bin-vendored",
- "rand 0.9.4",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
 name = "crab-coordination"
 version = "0.1.0"
 dependencies = [
@@ -2321,14 +2367,15 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "bytes",
+ "cellule-app",
+ "cellule-host",
+ "cellule-ltx",
+ "cellule-runtime",
+ "cellule-store",
  "clap",
- "crab-cell-app",
- "crab-cell-host",
- "crab-cell-runtime",
  "crab-coordination",
  "crab-git",
  "crab-lfs",
- "crab-ltx",
  "crab-metadata",
  "crab-read",
  "crab-remote",
@@ -2394,27 +2441,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
-]
-
-[[package]]
-name = "crab-ltx"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "blake3",
- "bytes",
- "crab-storage",
- "crc-fast",
- "futures-util",
- "lz4_flex 0.11.6",
- "object_store",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -2669,6 +2695,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "bytes",
+ "cellule-store",
  "crab-types",
  "futures-util",
  "hyper 1.11.1",

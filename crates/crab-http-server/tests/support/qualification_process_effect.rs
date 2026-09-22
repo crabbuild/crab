@@ -1,11 +1,11 @@
 use super::*;
 
 pub(super) async fn verify(
-    typed: &crab_cell_app::ApplicationHandle<fixture::ReferenceApplication>,
+    typed: &cellule_app::ApplicationHandle<fixture::ReferenceApplication>,
     direct: &CellClient,
-    peer_effect: &crab_cell_runtime::EffectPeerClient,
-    sql: &crab_cell_runtime::SqlCell<fixture::ReferenceSql>,
-    workflow: &crab_cell_runtime::WorkflowNamespace<fixture::ReferenceWorkflow>,
+    peer_effect: &cellule_runtime::EffectPeerClient,
+    sql: &cellule_runtime::SqlCell<fixture::ReferenceSql>,
+    workflow: &cellule_runtime::WorkflowNamespace<fixture::ReferenceWorkflow>,
     tenant: TenantId,
     application_id: ApplicationId,
     acknowledgement: Option<&Acknowledgement>,

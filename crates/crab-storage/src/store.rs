@@ -90,6 +90,18 @@ fn next_cache_identity() -> u64 {
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
+fn cellule_identity(identity: &BucketIdentity) -> cellule_store::BucketIdentity {
+    use cellule_store::StorageProviderKind;
+
+    let provider = match identity.cloud {
+        crate::StorageProviderKind::S3 => StorageProviderKind::S3,
+        crate::StorageProviderKind::Gcs => StorageProviderKind::Gcs,
+        crate::StorageProviderKind::Azure => StorageProviderKind::Azure,
+        crate::StorageProviderKind::Local => StorageProviderKind::Local,
+    };
+    cellule_store::BucketIdentity::new(provider, identity.host.clone(), identity.container.clone())
+}
+
 /// CAS-aware facade over an `object_store::ObjectStore`.
 ///
 /// Cheap to clone: the inner store is held behind `Arc`, the retry
@@ -531,6 +543,55 @@ impl Store {
     #[must_use]
     pub fn inner(&self) -> &Arc<dyn ObjectStore> {
         &self.inner
+    }
+
+    /// Adapts an unscoped store for the extracted Cell runtime.
+    ///
+    /// Provider handles and transport wrappers must stay bound to the same
+    /// destination; dropping them would weaken Cell upload and read behavior.
+    pub fn for_cellule(&self) -> Result<cellule_store::Store> {
+        if self.storage_scope.is_some()
+            || self.read_routes.is_some()
+            || self.staging_writes.is_some()
+        {
+            return Err(StorageError::Internal(
+                "Cellule requires an unscoped store without routed or staged writes".to_owned(),
+            ));
+        }
+
+        let retry = cellule_store::RetryPolicy {
+            max_attempts: self.retry.max_attempts,
+            base: self.retry.base,
+            cap: self.retry.cap,
+        };
+        let mut store = cellule_store::Store::with_retry(Arc::clone(&self.inner), retry)
+            .with_bucket_identity(cellule_identity(&self.identity));
+        if let Some(identity) = self.target_identity {
+            store = store.with_target_identity(identity);
+        }
+        if let Some(signer) = &self.signer {
+            store = store.with_signer(Arc::clone(signer));
+        }
+        if let (Some(multipart), Some(identity)) = (&self.multipart, &self.multipart_identity) {
+            store = store.with_multipart(Arc::clone(multipart), cellule_identity(identity));
+        }
+        if let Some(observer) = &self.read_byte_observer {
+            store = store.with_read_byte_observer(Arc::clone(observer));
+        }
+        if let Some(observer) = &self.read_request_observer {
+            let observer = Arc::clone(observer);
+            store = store.with_read_request_observer(Arc::new(move |kind| {
+                let kind = match kind {
+                    cellule_store::StorageReadKind::Get => StorageReadKind::Get,
+                    cellule_store::StorageReadKind::GetVersion => StorageReadKind::GetVersion,
+                    cellule_store::StorageReadKind::Stream => StorageReadKind::Stream,
+                    cellule_store::StorageReadKind::Head => StorageReadKind::Head,
+                    cellule_store::StorageReadKind::Range => StorageReadKind::Range,
+                };
+                observer(kind);
+            }));
+        }
+        Ok(store)
     }
 
     /// Returns the process-local identity used to isolate immutable read caches.
@@ -5013,6 +5074,27 @@ mod tests {
         let identity = BucketIdentity::new(StorageProviderKind::S3, "my-bucket", "my-bucket");
         let store = memory_store().with_bucket_identity(identity.clone());
         assert_eq!(store.bucket_identity(), identity);
+    }
+
+    #[test]
+    fn cellule_adapter_preserves_transport_identity() {
+        let identity = BucketIdentity::new(StorageProviderKind::S3, "bucket", "bucket");
+        let store = memory_store()
+            .with_bucket_identity(identity)
+            .with_target_identity([7; 32]);
+        let adapted = store.for_cellule().unwrap();
+
+        assert!(Arc::ptr_eq(store.inner(), adapted.inner()));
+        assert_eq!(adapted.target_identity(), Some(&[7; 32]));
+        assert_eq!(adapted.bucket_identity().host, "bucket");
+    }
+
+    #[test]
+    fn cellule_adapter_rejects_routed_store() {
+        let store = memory_store()
+            .with_read_routes(vec![("repository".to_owned(), Arc::new(InMemory::new()))]);
+
+        assert!(store.for_cellule().is_err());
     }
 
     #[tokio::test]

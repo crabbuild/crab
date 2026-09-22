@@ -18,11 +18,7 @@ OBJECT_STORE_IMPLEMENTATION_FEATURES = {
     "crab-storage": {"aws", "gcp", "azure", "fs"},
     "crab-workflow": {"aws", "gcp", "azure", "fs", "http"},
 }
-OBJECT_STORE_DEV_IMPLEMENTATION_FEATURES = {
-    # This exercises the filesystem backend's unsupported conditional update.
-    # Runtime provider construction remains owned by crab-storage.
-    "crab-ltx": {"fs"},
-}
+OBJECT_STORE_DEV_IMPLEMENTATION_FEATURES = {}
 XET_OWNER_PACKAGE = "crab-xet"
 XET_FORBIDDEN_PATTERNS = ("xet_core_structures", "xet-core-structures")
 XET_MODULE_REQUIRED_NORMAL_PACKAGES = {
@@ -1748,11 +1744,7 @@ DELETED_WORKFLOW_REEXPORT_ADAPTER_FORBIDDEN_PATTERNS = {
     "pub use yaml::",
 }
 PRIVATE_INTERNAL_PACKAGES = {
-    "crab-cell-app",
-    "crab-cell-host",
-    "crab-cell-runtime",
     "crab-http-server",
-    "crab-ltx",
     "crab-s3-gateway",
     "crab-vfs",
     "crab-workflow",
@@ -1795,7 +1787,7 @@ ALLOWED_SERVER_DEV_FIXTURES = {
     "crab-s3-gateway": set(),
 }
 CELL_RUNTIME_SERVER_SOURCE_PATHS = ("crates/crab-http-server/src",)
-CELL_RUNTIME_SERVER_IMPORT_PATTERN = "crab_ltx::"
+CELL_RUNTIME_SERVER_IMPORT_PATTERN = "cellule_ltx::"
 CELL_RUNTIME_SERVER_CONSTRUCTOR_PATTERNS = (
     "CellRuntime::new(",
     "CellRuntime::new_with_replica_host(",
@@ -1816,67 +1808,7 @@ CELL_RUNTIME_SERVER_COMPONENT_FIELDS = frozenset(
         "node_log_transport",
     }
 )
-RETIRED_STANDALONE_LTX_SOURCE_PATHS = (
-    "crates/crab-ltx/src",
-    "crates/crab-ltx/examples",
-)
-RETIRED_STANDALONE_LTX_FILENAMES = frozenset(
-    {
-        "schedule.rs",
-        "paged_vfs.rs",
-        "replica_roundtrip.rs",
-        "paged_read.rs",
-        "sparse_writer.rs",
-        "compact_history.rs",
-        "repository_replication_lifecycle.rs",
-        "rustfs_replication_scale_load.rs",
-        "rustfs_paged_read_scale_performance.rs",
-    }
-)
-RETIRED_STANDALONE_LTX_PATHS = (
-    "crates/crab-ltx/src/paged/map.rs",
-)
-RETIRED_STANDALONE_LTX_SYMBOLS = re.compile(
-    r"\b(?:ReplicaHead|Replica|PagedDatabase|PagedConnection|CompactionSchedule)\b"
-)
-RETIRED_STANDALONE_LTX_MARKERS = re.compile(
-    r"(?:ltx/<epoch>|head\.json|manifest\.json)"
-)
-CELL_RUNTIME_COORDINATION_KERNEL_PATH = "crates/crab-cell-runtime/src/coordination.rs"
-CELL_RUNTIME_COORDINATION_ACTOR_PATH = "crates/crab-cell-runtime/src/actor.rs"
-CELL_RUNTIME_COORDINATION_REQUIRED_KERNEL_PATTERNS = (
-    "pub(crate) enum CoordinationInput",
-    "pub(crate) enum CoordinationDecision",
-    "pub(crate) struct CoordinationState",
-    "pub(crate) fn step(&mut self, input: CoordinationInput)",
-)
-CELL_RUNTIME_COORDINATION_REQUIRED_ACTOR_PATTERNS = (
-    "CoordinationState",
-    "coordination.step(CoordinationInput::",
-)
-CELL_RUNTIME_COORDINATION_FORBIDDEN_KERNEL_PATTERNS = (
-    "async fn",
-    ".await",
-    "tokio::",
-    "object_store",
-    "rusqlite",
-    "reqwest::",
-    "std::fs",
-    "std::net",
-    "std::time",
-    "rand::",
-    "getrandom",
-    "spawn_blocking",
-    "Command::new(",
-)
 WORKSPACE_DEPENDENCY_POLICY = {
-    "crab-cell-app": {
-        "normal": {"crab-cell-runtime"},
-        "dev": {"crab-ltx", "crab-storage"},
-    },
-    "crab-cell-host": {"normal": {"crab-cell-app", "crab-cell-runtime"}},
-    "crab-cell-runtime": {"normal": {"crab-ltx", "crab-storage"}},
-    "crab-ltx": {"normal": {"crab-storage"}},
     "crab-remote": {
         "normal": {"crab-auth", "crab-coordination", "crab-git", "crab-metadata", "crab-read", "crab-remote-git", "crab-storage", "crab-write", "crab-xet"},
     },
@@ -1889,11 +1821,8 @@ WORKSPACE_DEPENDENCY_POLICY = {
     # metadata, write, coordination, LFS, and remote-read behavior.
     "crab-http-server": {
         "normal": {
-            "crab-cell-app",
-            "crab-cell-host",
-            "crab-coordination",
-            "crab-cell-runtime",
-            "crab-git",
+                            "crab-coordination",
+                    "crab-git",
             "crab-lfs",
             "crab-metadata",
             "crab-read",
@@ -1902,7 +1831,6 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-write",
             "crab-remote",
         },
-        "dev": {"crab-ltx"},
     },
     "crab": {
         "normal": {
@@ -2021,10 +1949,6 @@ WORKSPACE_DEPENDENCY_POLICY = {
     "crab-xet": {},
 }
 WORKSPACE_DEPENDENCY_PATHS = {
-    "crab-cell-app": "crates/crab-cell-app",
-    "crab-cell-host": "crates/crab-cell-host",
-    "crab-cell-runtime": "crates/crab-cell-runtime",
-    "crab-ltx": "crates/crab-ltx",
     "crab-write": "crates/crab-write",
     "crab-http-server": "crates/crab-http-server",
     "crab-auth": "crates/crab-auth",
@@ -2489,16 +2413,16 @@ def production_struct_fields(text: str, name: str) -> set[str]:
 
 
 def check_cell_runtime_server_boundary(root: Path, metadata: dict) -> bool:
-    """Keep crab-http-server's production Cell ownership behind crab-cell-runtime."""
+    """Keep crab-http-server's production Cell ownership behind cellule-runtime."""
     violations: list[str] = []
     package = package_by_name(metadata, "crab-http-server")
     for dependency in package["dependencies"]:
-        if dependency["name"] != "crab-ltx":
+        if dependency["name"] != "cellule-ltx":
             continue
         kind = dependency_kind(dependency)
         if kind != "dev":
             violations.append(
-                f"crab-http-server: {kind}-depends on crab-ltx; production Cell ownership belongs to crab-cell-runtime"
+                f"crab-http-server: {kind}-depends on cellule-ltx; production Cell ownership belongs to cellule-runtime"
             )
 
     for relative_path in CELL_RUNTIME_SERVER_SOURCE_PATHS:
@@ -2535,87 +2459,10 @@ def check_cell_runtime_server_boundary(root: Path, metadata: dict) -> bool:
                     )
 
     if not violations:
-        print("ok: crab-http-server production Cell ownership stays behind crab-cell-runtime")
+        print("ok: crab-http-server production Cell ownership stays behind cellule-runtime")
         return True
 
     print("error: crab-http-server escaped the canonical Cell runtime boundary:", file=sys.stderr)
-    for violation in violations:
-        print(f"  {violation}", file=sys.stderr)
-    return False
-
-
-def check_standalone_ltx_hard_cut(root: Path) -> bool:
-    """Keep the retired epoch-head API out of callable LTX source and examples."""
-    violations: list[str] = []
-    for relative_path in RETIRED_STANDALONE_LTX_PATHS:
-        if (root / relative_path).exists():
-            violations.append(f"{relative_path}: retired standalone LTX path")
-    for relative_path in RETIRED_STANDALONE_LTX_SOURCE_PATHS:
-        path = root / relative_path
-        if not path.exists():
-            continue
-        candidates = [path] if path.is_file() else sorted(path.rglob("*.rs"))
-        for candidate in candidates:
-            if candidate.name in RETIRED_STANDALONE_LTX_FILENAMES:
-                violations.append(f"{rel(root, candidate)}: retired standalone LTX module")
-            text = candidate.read_text(encoding="utf-8")
-            for number, line in enumerate(text.splitlines(), start=1):
-                if candidate.name == "cell_layout.rs" and "catalog/{shard:02x}/head.json" in line:
-                    continue
-                if RETIRED_STANDALONE_LTX_SYMBOLS.search(line) or RETIRED_STANDALONE_LTX_MARKERS.search(
-                    line
-                ):
-                    violations.append(f"{rel(root, candidate)}:{number}: {line.strip()}")
-
-    if not violations:
-        print("ok: standalone LTX epoch-head surfaces stay hard-removed")
-        return True
-
-    print("error: retired standalone LTX surface regressed:", file=sys.stderr)
-    for violation in violations:
-        print(f"  {violation}", file=sys.stderr)
-    return False
-
-
-def check_cell_runtime_coordination_kernel(root: Path) -> bool:
-    """Keep volatile coordination decisions pure and actor-owned in production."""
-    violations: list[str] = []
-    kernel = root / CELL_RUNTIME_COORDINATION_KERNEL_PATH
-    actor = root / CELL_RUNTIME_COORDINATION_ACTOR_PATH
-
-    if not kernel.exists():
-        violations.append(f"{CELL_RUNTIME_COORDINATION_KERNEL_PATH}: missing coordination kernel")
-    else:
-        kernel_text = kernel.read_text(encoding="utf-8")
-        for pattern in CELL_RUNTIME_COORDINATION_REQUIRED_KERNEL_PATTERNS:
-            if pattern not in kernel_text:
-                violations.append(
-                    f"{CELL_RUNTIME_COORDINATION_KERNEL_PATH}: missing {pattern!r}"
-                )
-        allowed_lines = rust_test_only_lines(kernel_text)
-        for number, line in enumerate(kernel_text.splitlines(), start=1):
-            if number in allowed_lines:
-                continue
-            for pattern in CELL_RUNTIME_COORDINATION_FORBIDDEN_KERNEL_PATTERNS:
-                if pattern in line:
-                    violations.append(
-                        f"{CELL_RUNTIME_COORDINATION_KERNEL_PATH}:{number}: "
-                        f"forbidden adapter dependency {pattern!r}"
-                    )
-
-    if not actor.exists():
-        violations.append(f"{CELL_RUNTIME_COORDINATION_ACTOR_PATH}: missing actor adapter")
-    else:
-        actor_text = actor.read_text(encoding="utf-8")
-        for pattern in CELL_RUNTIME_COORDINATION_REQUIRED_ACTOR_PATTERNS:
-            if pattern not in actor_text:
-                violations.append(f"{CELL_RUNTIME_COORDINATION_ACTOR_PATH}: missing {pattern!r}")
-
-    if not violations:
-        print("ok: Cell coordination decisions stay in the pure kernel")
-        return True
-
-    print("error: Cell coordination escaped the pure kernel boundary:", file=sys.stderr)
     for violation in violations:
         print(f"  {violation}", file=sys.stderr)
     return False
@@ -5064,8 +4911,6 @@ def main() -> int:
         check_package_release_policy(metadata),
         check_server_fixture_dependencies(metadata),
         check_cell_runtime_server_boundary(root, metadata),
-        check_standalone_ltx_hard_cut(root),
-        check_cell_runtime_coordination_kernel(root),
         check_workspace_dependency_policy(metadata),
         check_workspace_dependency_sources(root, metadata),
         check_workspace_xet_dependency_sources(root, metadata),

@@ -20,6 +20,7 @@ test-support = []
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
+cellule-store = { workspace = true }
 crab-types = { workspace = true }
 futures-util = { workspace = true }
 hyper = "1"

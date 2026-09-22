@@ -2,8 +2,8 @@
 
 use super::*;
 
-use crab_cell_runtime::CellStorageLayout;
-use crab_cell_runtime::{
+use cellule_runtime::CellStorageLayout;
+use cellule_runtime::{
     ApplicationId, ApplicationIdentity, CellAuthority, Digest, NodeDirectory, SessionId, TenantId,
 };
 use crab_storage::{ObjectStoreCredentials, build_explicit_store};
@@ -50,13 +50,13 @@ async fn json_get(client: &reqwest::Client, url: impl reqwest::IntoUrl) -> (Stat
 impl PeerRoundTrip for UnavailablePeer {
     fn send(
         &self,
-        _target: crab_cell_runtime::CellTarget,
+        _target: cellule_runtime::CellTarget,
         _request: Vec<u8>,
         _remaining_ms: u32,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>,
+        Box<dyn std::future::Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>,
     > {
-        Box::pin(async { Err(crab_cell_runtime::Error::CellNotActive) })
+        Box::pin(async { Err(cellule_runtime::Error::CellNotActive) })
     }
 }
 
@@ -100,7 +100,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         ApplicationId::from_bytes([3; 16]),
     );
     let cell_layout = CellStorageLayout::new(
-        store.clone(),
+        store.clone().for_cellule().unwrap(),
         ObjectPath::from(format!("{root}/cells")),
         *identity.application().as_bytes(),
     );
@@ -155,7 +155,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             peer_tls.signing_key().clone(),
             ingress_session,
             "https://localhost:2".into(),
-            crab_cell_runtime::NodeFailureDomain::default(),
+            cellule_runtime::NodeFailureDomain::default(),
             peer_tls.fleet(),
             peer_tls.certificate(),
             image,
@@ -173,7 +173,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             peer_tls.signing_key().clone(),
             owner_session,
             management_endpoint.clone(),
-            crab_cell_runtime::NodeFailureDomain::default(),
+            cellule_runtime::NodeFailureDomain::default(),
             peer_tls.fleet(),
             peer_tls.certificate(),
             image,
@@ -199,13 +199,13 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         owner_runtime.clone(),
         crate::cells::RepositoryCellPeer::new(
             directory.clone(),
-            Arc::new(crab_cell_runtime::PeerSigner::new(
+            Arc::new(cellule_runtime::PeerSigner::new(
                 owner_session,
                 registry.release_digest(),
                 peer_tls.signing_key().clone(),
             )),
             Arc::new(UnavailablePeer),
-            crab_cell_runtime::Owner {
+            cellule_runtime::Owner {
                 session: owner_session,
                 endpoint: management_endpoint,
             },
@@ -224,7 +224,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .unwrap();
 
     let authority = CellAuthority::new(cell_layout.clone());
-    let target = crab_cell_runtime::CellTarget::new(
+    let target = cellule_runtime::CellTarget::new(
         identity.tenant(),
         identity.application(),
         crate::cells::REPOSITORY_NAMESPACE,
@@ -250,7 +250,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             owner_session,
             directory.clone(),
             Arc::clone(&registry),
-            Arc::new(crab_cell_runtime::ReleaseStore::new(cell_layout.clone(), identity).unwrap()),
+            Arc::new(cellule_runtime::ReleaseStore::new(cell_layout.clone(), identity).unwrap()),
             LocalCellResolver::new(cell_layout.clone(), identity, owner_runtime.clone()),
             Arc::new(UnavailablePeer),
         )),
@@ -290,13 +290,13 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         ingress_runtime.clone(),
         crate::cells::RepositoryCellPeer::new(
             directory.clone(),
-            Arc::new(crab_cell_runtime::PeerSigner::new(
+            Arc::new(cellule_runtime::PeerSigner::new(
                 ingress_session,
                 registry.release_digest(),
                 peer_tls.signing_key().clone(),
             )),
             round_trip,
-            crab_cell_runtime::Owner {
+            cellule_runtime::Owner {
                 session: ingress_session,
                 endpoint: "https://localhost:2".into(),
             },
@@ -596,7 +596,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     let stale_owner = authority.load(target.cell_id()).await.unwrap().unwrap();
     let takeover = stale_owner
         .value()
-        .takeover(crab_cell_runtime::Owner {
+        .takeover(cellule_runtime::Owner {
             session: ingress_session,
             endpoint: "https://localhost:2".into(),
         })
@@ -605,7 +605,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .transition(
             &stale_owner,
             takeover,
-            crab_cell_runtime::Transition::Takeover,
+            cellule_runtime::Transition::Takeover,
         )
         .await
         .unwrap();
@@ -779,14 +779,11 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     ingress_server.receives.wait().await;
     ingress_server.shutdown_runtimes().await.unwrap();
     match owner_server.shutdown_runtimes().await {
-        Ok(()) | Err(crate::Error::Cell(crab_cell_runtime::Error::Fenced)) => {}
+        Ok(()) | Err(crate::Error::Cell(cellule_runtime::Error::Fenced)) => {}
         Err(error) => panic!("unexpected stale-owner shutdown result: {error}"),
     }
     let released = authority.load(target.cell_id()).await.unwrap().unwrap();
-    assert_eq!(
-        released.value().state,
-        crab_cell_runtime::ControlState::Idle
-    );
+    assert_eq!(released.value().state, cellule_runtime::ControlState::Idle);
     assert!(released.value().owner.is_none());
     assert!(
         released.value().root.as_ref().unwrap().commit_sequence

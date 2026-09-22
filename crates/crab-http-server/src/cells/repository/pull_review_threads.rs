@@ -20,11 +20,11 @@ impl PullReviewThreadSide {
         }
     }
 
-    fn from_code(value: u64) -> crab_cell_runtime::Result<Self> {
+    fn from_code(value: u64) -> cellule_runtime::Result<Self> {
         match value {
             0 => Ok(Self::Old),
             1 => Ok(Self::New),
-            _ => Err(crab_cell_runtime::Error::Command(
+            _ => Err(cellule_runtime::Error::Command(
                 "repository pull review thread side is invalid",
             )),
         }
@@ -226,7 +226,7 @@ impl Command for CreatePullReviewThread {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_create_thread(&input)?;
         let digest = thread_digest(&input);
         let existing = context.sql(&SqlBatch {
@@ -251,7 +251,7 @@ impl Command for CreatePullReviewThread {
                     number: result_u64_from_row(row, 1)?,
                 },
             )?
-            .ok_or(crab_cell_runtime::Error::Command(
+            .ok_or(cellule_runtime::Error::Command(
                 "repository pull review thread submission has no thread",
             ))?;
             return Ok(CommandResult::Success(
@@ -329,13 +329,13 @@ impl Command for UpdatePullReviewThread {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_number(input.key.pull)?;
         validate_number(input.key.number)?;
         validate_number(input.version)?;
         validate_author(&input.actor)?;
         if input.body.is_none() && input.suggested_text.is_none() && input.resolved.is_none() {
-            return Err(crab_cell_runtime::Error::Command(
+            return Err(cellule_runtime::Error::Command(
                 "repository pull review thread update is empty",
             ));
         }
@@ -356,7 +356,7 @@ impl Command for UpdatePullReviewThread {
             if let Some(suggested_text) = &input.suggested_text {
                 validate_suggested_text(suggested_text.as_deref())?;
                 if record.side == PullReviewThreadSide::Old && suggested_text.is_some() {
-                    return Err(crab_cell_runtime::Error::Command(
+                    return Err(cellule_runtime::Error::Command(
                         "old pull review thread anchors cannot have suggestions",
                     ));
                 }
@@ -414,7 +414,7 @@ impl Command for CreatePullReviewReply {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_number(input.pull)?;
         validate_number(input.thread)?;
         validate_author(&input.author)?;
@@ -457,7 +457,7 @@ impl Command for CreatePullReviewReply {
                     number: result_u64_from_row(row, 1)?,
                 },
             )?
-            .ok_or(crab_cell_runtime::Error::Command(
+            .ok_or(cellule_runtime::Error::Command(
                 "repository pull review reply submission has no reply",
             ))?;
             return Ok(CommandResult::Success(
@@ -510,7 +510,7 @@ impl Command for UpdatePullReviewReply {
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+    ) -> cellule_runtime::Result<CommandResult<Self::Output>> {
         validate_number(input.key.pull)?;
         validate_number(input.key.thread)?;
         validate_number(input.key.number)?;
@@ -568,7 +568,7 @@ impl Query for GetPullReviewThread {
     fn execute(
         context: &mut QueryContext<'_>,
         key: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         validate_thread_key(&key)?;
         load_thread_query(context, key)
     }
@@ -586,7 +586,7 @@ impl Query for ListPullReviewThreads {
     fn execute(
         context: &mut QueryContext<'_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         validate_thread_list(&input)?;
         if !pull_exists_query(context, input.pull)? {
             return Ok(None);
@@ -595,7 +595,7 @@ impl Query for ListPullReviewThreads {
         let items = rows
             .iter()
             .map(|row| thread_from_row(row))
-            .collect::<crab_cell_runtime::Result<Vec<_>>>()?;
+            .collect::<cellule_runtime::Result<Vec<_>>>()?;
         let (items, next) = bounded_page(items, input.limit, |item| item.number)?;
         Ok(Some(PullReviewThreadPage { items, next }))
     }
@@ -613,8 +613,8 @@ impl Query for GetPullReviewThreadSubmission {
     fn execute(
         context: &mut QueryContext<'_>,
         key: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
-        let pull = key.pull.ok_or(crab_cell_runtime::Error::Command(
+    ) -> cellule_runtime::Result<Self::Output> {
+        let pull = key.pull.ok_or(cellule_runtime::Error::Command(
             "repository pull review thread submission scope is invalid",
         ))?;
         validate_number(pull)?;
@@ -647,7 +647,7 @@ impl Query for GetPullReviewReply {
     fn execute(
         context: &mut QueryContext<'_>,
         key: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         validate_reply_key(&key)?;
         load_reply_query(context, key)
     }
@@ -665,7 +665,7 @@ impl Query for ListPullReviewReplies {
     fn execute(
         context: &mut QueryContext<'_>,
         input: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
+    ) -> cellule_runtime::Result<Self::Output> {
         validate_reply_list(&input)?;
         if !thread_exists_query(context, input.pull, input.thread)? {
             return Ok(None);
@@ -674,7 +674,7 @@ impl Query for ListPullReviewReplies {
         let items = rows
             .iter()
             .map(|row| reply_from_row(row))
-            .collect::<crab_cell_runtime::Result<Vec<_>>>()?;
+            .collect::<cellule_runtime::Result<Vec<_>>>()?;
         let (items, next) = bounded_page(items, input.limit, |item| item.number)?;
         Ok(Some(PullReviewReplyPage { items, next }))
     }
@@ -692,11 +692,11 @@ impl Query for GetPullReviewReplySubmission {
     fn execute(
         context: &mut QueryContext<'_>,
         key: Self::Input,
-    ) -> crab_cell_runtime::Result<Self::Output> {
-        let pull = key.pull.ok_or(crab_cell_runtime::Error::Command(
+    ) -> cellule_runtime::Result<Self::Output> {
+        let pull = key.pull.ok_or(cellule_runtime::Error::Command(
             "repository pull review reply submission scope is invalid",
         ))?;
-        let thread = key.thread.ok_or(crab_cell_runtime::Error::Command(
+        let thread = key.thread.ok_or(cellule_runtime::Error::Command(
             "repository pull review reply submission scope is invalid",
         ))?;
         validate_number(pull)?;
@@ -735,7 +735,7 @@ fn same_author(left: &RepositoryAuthor, right: &RepositoryAuthor) -> bool {
     left.issuer == right.issuer && left.subject == right.subject
 }
 
-fn validate_create_thread(input: &CreatePullReviewThreadInput) -> crab_cell_runtime::Result<()> {
+fn validate_create_thread(input: &CreatePullReviewThreadInput) -> cellule_runtime::Result<()> {
     validate_number(input.pull)?;
     validate_author(&input.author)?;
     validate_body(&input.body, true)?;
@@ -749,14 +749,14 @@ fn validate_create_thread(input: &CreatePullReviewThreadInput) -> crab_cell_runt
     match input.side {
         PullReviewThreadSide::Old => {
             if input.old_blob_oid.is_none() || input.suggested_text.is_some() {
-                return Err(crab_cell_runtime::Error::Command(
+                return Err(cellule_runtime::Error::Command(
                     "old pull review thread anchor is invalid",
                 ));
             }
         }
         PullReviewThreadSide::New => {
             if input.new_blob_oid.is_none() {
-                return Err(crab_cell_runtime::Error::Command(
+                return Err(cellule_runtime::Error::Command(
                     "new pull review thread anchor is invalid",
                 ));
             }
@@ -765,18 +765,18 @@ fn validate_create_thread(input: &CreatePullReviewThreadInput) -> crab_cell_runt
     Ok(())
 }
 
-fn validate_thread_key(key: &PullReviewThreadKey) -> crab_cell_runtime::Result<()> {
+fn validate_thread_key(key: &PullReviewThreadKey) -> cellule_runtime::Result<()> {
     validate_number(key.pull)?;
     validate_number(key.number)
 }
 
-fn validate_reply_key(key: &PullReviewReplyKey) -> crab_cell_runtime::Result<()> {
+fn validate_reply_key(key: &PullReviewReplyKey) -> cellule_runtime::Result<()> {
     validate_number(key.pull)?;
     validate_number(key.thread)?;
     validate_number(key.number)
 }
 
-fn validate_thread_list(input: &PullReviewThreadListInput) -> crab_cell_runtime::Result<()> {
+fn validate_thread_list(input: &PullReviewThreadListInput) -> cellule_runtime::Result<()> {
     validate_number(input.pull)?;
     validate_list(input.before, input.limit)?;
     if input
@@ -784,7 +784,7 @@ fn validate_thread_list(input: &PullReviewThreadListInput) -> crab_cell_runtime:
         .as_ref()
         .is_some_and(|path| validate_path(path).is_err())
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository pull review thread path is invalid",
         ));
     }
@@ -792,7 +792,7 @@ fn validate_thread_list(input: &PullReviewThreadListInput) -> crab_cell_runtime:
         || (input.outdated.is_some()
             && (input.comparison_base_oid.is_none() || input.comparison_head_oid.is_none()))
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository pull review thread comparison is incomplete",
         ));
     }
@@ -805,66 +805,63 @@ fn validate_thread_list(input: &PullReviewThreadListInput) -> crab_cell_runtime:
     Ok(())
 }
 
-fn validate_reply_list(input: &PullReviewReplyListInput) -> crab_cell_runtime::Result<()> {
+fn validate_reply_list(input: &PullReviewReplyListInput) -> cellule_runtime::Result<()> {
     validate_number(input.pull)?;
     validate_number(input.thread)?;
     validate_list(input.before, input.limit)
 }
 
-fn validate_path(path: &[u8]) -> crab_cell_runtime::Result<()> {
+fn validate_path(path: &[u8]) -> cellule_runtime::Result<()> {
     if path.is_empty() || path.len() > 1024 || path.contains(&0) {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository pull review thread path is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_oid(value: &str) -> crab_cell_runtime::Result<()> {
+fn validate_oid(value: &str) -> cellule_runtime::Result<()> {
     if value.len() != 40
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         || value.bytes().all(|byte| byte == b'0')
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository pull review thread object ID is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_oid_option(value: &Option<String>) -> crab_cell_runtime::Result<()> {
+fn validate_oid_option(value: &Option<String>) -> cellule_runtime::Result<()> {
     if let Some(value) = value {
         validate_oid(value)?;
     }
     Ok(())
 }
 
-fn validate_lines(start_line: u64, end_line: u64) -> crab_cell_runtime::Result<()> {
+fn validate_lines(start_line: u64, end_line: u64) -> cellule_runtime::Result<()> {
     validate_number(start_line)?;
     validate_number(end_line)?;
     if end_line < start_line || end_line - start_line >= 200 {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository pull review thread line range is invalid",
         ));
     }
     Ok(())
 }
 
-fn validate_suggested_text(value: Option<&str>) -> crab_cell_runtime::Result<()> {
+fn validate_suggested_text(value: Option<&str>) -> cellule_runtime::Result<()> {
     if value.is_some_and(|value| value.len() > MAX_SUGGESTED_TEXT_BYTES || value.contains('\0')) {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository pull review suggestion is invalid",
         ));
     }
     Ok(())
 }
 
-fn pull_state(
-    context: &CommandContext<'_, '_>,
-    pull: u64,
-) -> crab_cell_runtime::Result<Option<u64>> {
+fn pull_state(context: &CommandContext<'_, '_>, pull: u64) -> cellule_runtime::Result<Option<u64>> {
     let result = context.sql(&SqlBatch {
         statements: vec![statement(
             "SELECT state FROM repository_pulls WHERE number = ?",
@@ -882,7 +879,7 @@ fn next_number(
     context: &CommandContext<'_, '_>,
     table: &str,
     pull: u64,
-) -> crab_cell_runtime::Result<u64> {
+) -> cellule_runtime::Result<u64> {
     let insert = format!(
         "INSERT INTO {table}(pull_number, last) VALUES (?, 1) ON CONFLICT(pull_number) DO UPDATE SET last = last + 1 WHERE last < 9007199254740991"
     );
@@ -896,7 +893,7 @@ fn next_number(
         ],
     })?;
     if result[0].rows_affected != 1 {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository pull review numbering is exhausted",
         ));
     }
@@ -907,7 +904,7 @@ fn next_reply_number(
     context: &CommandContext<'_, '_>,
     pull: u64,
     thread: u64,
-) -> crab_cell_runtime::Result<u64> {
+) -> cellule_runtime::Result<u64> {
     let result = context.sql(&SqlBatch {
         statements: vec![
             statement(
@@ -921,7 +918,7 @@ fn next_reply_number(
         ],
     })?;
     if result[0].rows_affected != 1 {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository pull review reply numbering is exhausted",
         ));
     }
@@ -978,7 +975,7 @@ fn reply_digest(input: &CreatePullReviewReplyInput) -> blake3::Hash {
 
 fn insert_thread_statement(
     record: &PullReviewThreadRecord,
-) -> crab_cell_runtime::Result<SqlStatement> {
+) -> cellule_runtime::Result<SqlStatement> {
     Ok(statement(
         "INSERT INTO repository_pull_review_threads(pull_number, number, author_issuer, author_subject, author_name, body, suggested_text, base_oid, head_oid, path, old_blob_oid, new_blob_oid, side, start_line, end_line, resolved, resolved_by_issuer, resolved_by_subject, resolved_by_name, resolved_at_ms, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         vec![
@@ -1012,7 +1009,7 @@ fn insert_thread_statement(
 fn update_thread_statement(
     record: &PullReviewThreadRecord,
     old_version: u64,
-) -> crab_cell_runtime::Result<SqlStatement> {
+) -> cellule_runtime::Result<SqlStatement> {
     let mut statement = insert_thread_statement(record)?;
     statement.sql = "UPDATE repository_pull_review_threads SET body = ?, suggested_text = ?, resolved = ?, resolved_by_issuer = ?, resolved_by_subject = ?, resolved_by_name = ?, resolved_at_ms = ?, version = ?, updated_at_ms = ? WHERE pull_number = ? AND number = ? AND version = ?".into();
     statement.parameters = vec![
@@ -1032,9 +1029,7 @@ fn update_thread_statement(
     Ok(statement)
 }
 
-fn insert_reply_statement(
-    record: &PullReviewReplyRecord,
-) -> crab_cell_runtime::Result<SqlStatement> {
+fn insert_reply_statement(record: &PullReviewReplyRecord) -> cellule_runtime::Result<SqlStatement> {
     Ok(statement(
         "INSERT INTO repository_pull_review_replies(pull_number, thread_number, number, author_issuer, author_subject, author_name, body, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         vec![
@@ -1058,7 +1053,7 @@ fn optional_text(value: &Option<String>) -> SqlValue {
         .map_or(SqlValue::Null, |value| SqlValue::Text(value.clone()))
 }
 
-fn optional_integer(value: Option<u64>) -> crab_cell_runtime::Result<SqlValue> {
+fn optional_integer(value: Option<u64>) -> cellule_runtime::Result<SqlValue> {
     value.map_or(Ok(SqlValue::Null), integer)
 }
 
@@ -1074,7 +1069,7 @@ fn optional_author_field(
 fn load_thread(
     context: &CommandContext<'_, '_>,
     key: PullReviewThreadKey,
-) -> crab_cell_runtime::Result<Option<PullReviewThreadRecord>> {
+) -> cellule_runtime::Result<Option<PullReviewThreadRecord>> {
     validate_thread_key(&key)?;
     let result = context.sql(&SqlBatch {
         statements: vec![thread_select_statement(key.pull, key.number)?],
@@ -1089,7 +1084,7 @@ fn load_thread(
 fn load_thread_query(
     context: &QueryContext<'_>,
     key: PullReviewThreadKey,
-) -> crab_cell_runtime::Result<Option<PullReviewThreadRecord>> {
+) -> cellule_runtime::Result<Option<PullReviewThreadRecord>> {
     validate_thread_key(&key)?;
     let result = context.sql(&SqlBatch {
         statements: vec![thread_select_statement(key.pull, key.number)?],
@@ -1101,19 +1096,19 @@ fn load_thread_query(
         .transpose()
 }
 
-fn thread_select_statement(pull: u64, number: u64) -> crab_cell_runtime::Result<SqlStatement> {
+fn thread_select_statement(pull: u64, number: u64) -> cellule_runtime::Result<SqlStatement> {
     Ok(statement(
         "SELECT pull_number, number, author_issuer, author_subject, author_name, body, suggested_text, base_oid, head_oid, path, old_blob_oid, new_blob_oid, side, start_line, end_line, resolved, resolved_by_issuer, resolved_by_subject, resolved_by_name, resolved_at_ms, version, created_at_ms, updated_at_ms FROM repository_pull_review_threads WHERE pull_number = ? AND number = ?",
         vec![integer(pull)?, integer(number)?],
     ))
 }
 
-fn thread_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<PullReviewThreadRecord> {
+fn thread_from_row(row: &[SqlValue]) -> cellule_runtime::Result<PullReviewThreadRecord> {
     let resolved = result_u64_from_row(row, 15)?;
     let resolved_by = optional_author(row, 16)?;
     let resolved_at_ms = result_optional_u64(row, 19)?;
     if (resolved == 0) != resolved_by.is_none() || (resolved == 0) != resolved_at_ms.is_none() {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository pull review thread resolution is invalid",
         ));
     }
@@ -1142,7 +1137,7 @@ fn thread_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<PullReviewThre
     Ok(record)
 }
 
-fn validate_thread_record(record: &PullReviewThreadRecord) -> crab_cell_runtime::Result<()> {
+fn validate_thread_record(record: &PullReviewThreadRecord) -> cellule_runtime::Result<()> {
     validate_number(record.pull)?;
     validate_number(record.number)?;
     validate_author(&record.author)?;
@@ -1157,18 +1152,18 @@ fn validate_thread_record(record: &PullReviewThreadRecord) -> crab_cell_runtime:
     if record.side == PullReviewThreadSide::Old
         && (record.old_blob_oid.is_none() || record.suggested_text.is_some())
     {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "old pull review thread record is invalid",
         ));
     }
     if record.side == PullReviewThreadSide::New && record.new_blob_oid.is_none() {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "new pull review thread record is invalid",
         ));
     }
     validate_number(record.version)?;
     if record.updated_at_ms < record.created_at_ms {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository pull review thread timestamp is invalid",
         ));
     }
@@ -1181,7 +1176,7 @@ fn validate_thread_record(record: &PullReviewThreadRecord) -> crab_cell_runtime:
 fn load_reply(
     context: &CommandContext<'_, '_>,
     key: PullReviewReplyKey,
-) -> crab_cell_runtime::Result<Option<PullReviewReplyRecord>> {
+) -> cellule_runtime::Result<Option<PullReviewReplyRecord>> {
     validate_reply_key(&key)?;
     let result = context.sql(&SqlBatch {
         statements: vec![reply_select_statement(&key)?],
@@ -1196,7 +1191,7 @@ fn load_reply(
 fn load_reply_query(
     context: &QueryContext<'_>,
     key: PullReviewReplyKey,
-) -> crab_cell_runtime::Result<Option<PullReviewReplyRecord>> {
+) -> cellule_runtime::Result<Option<PullReviewReplyRecord>> {
     validate_reply_key(&key)?;
     let result = context.sql(&SqlBatch {
         statements: vec![reply_select_statement(&key)?],
@@ -1208,7 +1203,7 @@ fn load_reply_query(
         .transpose()
 }
 
-fn reply_select_statement(key: &PullReviewReplyKey) -> crab_cell_runtime::Result<SqlStatement> {
+fn reply_select_statement(key: &PullReviewReplyKey) -> cellule_runtime::Result<SqlStatement> {
     Ok(statement(
         "SELECT pull_number, thread_number, number, author_issuer, author_subject, author_name, body, version, created_at_ms, updated_at_ms FROM repository_pull_review_replies WHERE pull_number = ? AND thread_number = ? AND number = ?",
         vec![
@@ -1219,7 +1214,7 @@ fn reply_select_statement(key: &PullReviewReplyKey) -> crab_cell_runtime::Result
     ))
 }
 
-fn reply_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<PullReviewReplyRecord> {
+fn reply_from_row(row: &[SqlValue]) -> cellule_runtime::Result<PullReviewReplyRecord> {
     let record = PullReviewReplyRecord {
         pull: result_u64_from_row(row, 0)?,
         thread: result_u64_from_row(row, 1)?,
@@ -1237,14 +1232,14 @@ fn reply_from_row(row: &[SqlValue]) -> crab_cell_runtime::Result<PullReviewReply
     validate_body(&record.body, true)?;
     validate_number(record.version)?;
     if record.updated_at_ms < record.created_at_ms {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository pull review reply timestamp is invalid",
         ));
     }
     Ok(record)
 }
 
-fn author_from_row(row: &[SqlValue], start: usize) -> crab_cell_runtime::Result<RepositoryAuthor> {
+fn author_from_row(row: &[SqlValue], start: usize) -> cellule_runtime::Result<RepositoryAuthor> {
     Ok(RepositoryAuthor {
         issuer: result_text(row, start)?,
         subject: result_text(row, start + 1)?,
@@ -1255,7 +1250,7 @@ fn author_from_row(row: &[SqlValue], start: usize) -> crab_cell_runtime::Result<
 fn optional_author(
     row: &[SqlValue],
     start: usize,
-) -> crab_cell_runtime::Result<Option<RepositoryAuthor>> {
+) -> cellule_runtime::Result<Option<RepositoryAuthor>> {
     let issuer = result_optional_text(row, start)?;
     let subject = result_optional_text(row, start + 1)?;
     let name = result_optional_text(row, start + 2)?;
@@ -1266,19 +1261,19 @@ fn optional_author(
             subject,
             name,
         })),
-        _ => Err(crab_cell_runtime::Error::Command(
+        _ => Err(cellule_runtime::Error::Command(
             "repository pull review thread resolver is invalid",
         )),
     }
 }
 
-fn result_optional_u64(row: &[SqlValue], column: usize) -> crab_cell_runtime::Result<Option<u64>> {
+fn result_optional_u64(row: &[SqlValue], column: usize) -> cellule_runtime::Result<Option<u64>> {
     match row.get(column) {
         Some(SqlValue::Null) => Ok(None),
         Some(SqlValue::Integer(value)) => u64::try_from(*value)
             .map(Some)
-            .map_err(|_| crab_cell_runtime::Error::Command("repository result is negative")),
-        _ => Err(crab_cell_runtime::Error::Command(
+            .map_err(|_| cellule_runtime::Error::Command("repository result is negative")),
+        _ => Err(cellule_runtime::Error::Command(
             "repository query returned invalid optional integer",
         )),
     }
@@ -1287,7 +1282,7 @@ fn result_optional_u64(row: &[SqlValue], column: usize) -> crab_cell_runtime::Re
 fn list_threads(
     context: &QueryContext<'_>,
     input: &PullReviewThreadListInput,
-) -> crab_cell_runtime::Result<Vec<Vec<SqlValue>>> {
+) -> cellule_runtime::Result<Vec<Vec<SqlValue>>> {
     let upper = input.before.map_or(MAX_NUMBER, |value| value - 1);
     let mut sql = String::from(
         "SELECT pull_number, number, author_issuer, author_subject, author_name, body, suggested_text, base_oid, head_oid, path, old_blob_oid, new_blob_oid, side, start_line, end_line, resolved, resolved_by_issuer, resolved_by_subject, resolved_by_name, resolved_at_ms, version, created_at_ms, updated_at_ms FROM repository_pull_review_threads WHERE pull_number = ? AND number <= ?",
@@ -1305,19 +1300,19 @@ fn list_threads(
         Some(false) => {
             sql.push_str(" AND base_oid = ? AND head_oid = ?");
             parameters.push(SqlValue::Text(input.comparison_base_oid.clone().ok_or(
-                crab_cell_runtime::Error::Command("thread comparison is incomplete"),
+                cellule_runtime::Error::Command("thread comparison is incomplete"),
             )?));
             parameters.push(SqlValue::Text(input.comparison_head_oid.clone().ok_or(
-                crab_cell_runtime::Error::Command("thread comparison is incomplete"),
+                cellule_runtime::Error::Command("thread comparison is incomplete"),
             )?));
         }
         Some(true) => {
             sql.push_str(" AND NOT (base_oid = ? AND head_oid = ?)");
             parameters.push(SqlValue::Text(input.comparison_base_oid.clone().ok_or(
-                crab_cell_runtime::Error::Command("thread comparison is incomplete"),
+                cellule_runtime::Error::Command("thread comparison is incomplete"),
             )?));
             parameters.push(SqlValue::Text(input.comparison_head_oid.clone().ok_or(
-                crab_cell_runtime::Error::Command("thread comparison is incomplete"),
+                cellule_runtime::Error::Command("thread comparison is incomplete"),
             )?));
         }
         None => {}
@@ -1334,7 +1329,7 @@ fn list_threads(
 fn list_replies(
     context: &QueryContext<'_>,
     input: &PullReviewReplyListInput,
-) -> crab_cell_runtime::Result<Vec<Vec<SqlValue>>> {
+) -> cellule_runtime::Result<Vec<Vec<SqlValue>>> {
     let upper = input.before.map_or(MAX_NUMBER, |value| value - 1);
     Ok(context.sql(&SqlBatch {
         statements: vec![statement(
@@ -1351,7 +1346,7 @@ fn list_replies(
         .clone())
 }
 
-fn pull_exists_query(context: &QueryContext<'_>, pull: u64) -> crab_cell_runtime::Result<bool> {
+fn pull_exists_query(context: &QueryContext<'_>, pull: u64) -> cellule_runtime::Result<bool> {
     let result = context.sql(&SqlBatch {
         statements: vec![statement(
             "SELECT 1 FROM repository_pulls WHERE number = ?",
@@ -1365,7 +1360,7 @@ fn thread_exists_query(
     context: &QueryContext<'_>,
     pull: u64,
     thread: u64,
-) -> crab_cell_runtime::Result<bool> {
+) -> cellule_runtime::Result<bool> {
     let result = context.sql(&SqlBatch {
         statements: vec![statement(
             "SELECT 1 FROM repository_pull_review_threads WHERE pull_number = ? AND number = ?",
@@ -1379,14 +1374,14 @@ fn bounded_page<T: Serialize>(
     items: Vec<T>,
     requested: u8,
     number: impl Fn(&T) -> u64,
-) -> crab_cell_runtime::Result<(Vec<T>, Option<u64>)> {
+) -> cellule_runtime::Result<(Vec<T>, Option<u64>)> {
     let total = items.len();
     let mut used =
         4 + br#"{"items":["#.len() + br#"],"next":"#.len() + MAX_NUMBER.to_string().len() + 1;
     let mut kept = Vec::with_capacity(total);
     for item in items {
         let encoded = serde_json::to_vec(&item).map_err(|_| {
-            crab_cell_runtime::Error::Command("repository pull review page is invalid")
+            cellule_runtime::Error::Command("repository pull review page is invalid")
         })?;
         let separator = usize::from(!kept.is_empty());
         if used
@@ -1399,7 +1394,7 @@ fn bounded_page<T: Serialize>(
         kept.push(item);
     }
     if kept.is_empty() && total != 0 {
-        return Err(crab_cell_runtime::Error::Command(
+        return Err(cellule_runtime::Error::Command(
             "repository pull review page exceeds the limit",
         ));
     }
@@ -1409,18 +1404,18 @@ fn bounded_page<T: Serialize>(
     Ok((kept, next))
 }
 
-fn next_version(value: u64) -> crab_cell_runtime::Result<u64> {
+fn next_version(value: u64) -> cellule_runtime::Result<u64> {
     value
         .checked_add(1)
         .filter(|value| *value < MAX_NUMBER)
-        .ok_or(crab_cell_runtime::Error::Command(
+        .ok_or(cellule_runtime::Error::Command(
             "repository pull review version is exhausted",
         ))
 }
 
 #[cfg(test)]
 mod tests {
-    use crab_cell_runtime::{BoundedDecoder, BoundedEncoder, WireValue};
+    use cellule_runtime::{BoundedDecoder, BoundedEncoder, WireValue};
 
     use super::*;
 

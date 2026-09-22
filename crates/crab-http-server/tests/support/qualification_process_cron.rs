@@ -1,10 +1,10 @@
 use super::*;
 
 pub(super) async fn verify(
-    typed: &crab_cell_app::ApplicationHandle<fixture::ReferenceApplication>,
-    peer_effect: &crab_cell_runtime::EffectPeerClient,
-    sql: &crab_cell_runtime::SqlCell<fixture::ReferenceSql>,
-    cron: &crab_cell_runtime::CronNamespace<fixture::ReferenceCron>,
+    typed: &cellule_app::ApplicationHandle<fixture::ReferenceApplication>,
+    peer_effect: &cellule_runtime::EffectPeerClient,
+    sql: &cellule_runtime::SqlCell<fixture::ReferenceSql>,
+    cron: &cellule_runtime::CronNamespace<fixture::ReferenceCron>,
     tenant: TenantId,
     application_id: ApplicationId,
     acknowledgement: Option<&Acknowledgement>,

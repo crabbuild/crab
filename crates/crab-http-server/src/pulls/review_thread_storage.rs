@@ -15,7 +15,7 @@ use crate::{
     },
     server::{Repository, Server},
 };
-use crab_cell_runtime::{Committed, InvocationError, Observed};
+use cellule_runtime::{Committed, InvocationError, Observed};
 
 #[derive(Clone, Debug)]
 pub(super) struct PullReviewThread {
