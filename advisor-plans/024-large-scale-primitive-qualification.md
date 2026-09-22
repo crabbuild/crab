@@ -28,9 +28,11 @@ profile in a fresh process, and uploads the required artifact layout. It fails
 closed when the real harness is absent; it never manufactures a receipt.
 Workflow provenance, run attempt, exact source commit, artifact layout, and
 symlink absence remain checked before the existing pinned-signer and
-image/profile-bound matrix verification. Protected provider, Kubernetes, and
-scale receipts remain open until real runs produce the required signed
-evidence.
+image/profile-bound matrix verification. The workflow and release gate now
+share the Rust `verify-protected-bundle` command for the complete nine-profile
+bundle, while retaining the exact-source byte comparison for each tracked
+profile. Protected provider, Kubernetes, and scale receipts remain open until
+real runs produce the required signed evidence.
 
 The public host fault fixture also has local three-process modes backed by the
 test-only filesystem CAS store. They kill the owner before writes, after leases,
