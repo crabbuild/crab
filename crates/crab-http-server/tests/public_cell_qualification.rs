@@ -8,17 +8,18 @@ use std::{
 use crab_cell_app::ApplicationHandle;
 use crab_cell_host::CellNode;
 use crab_cell_runtime::{
-    ActivityRunOutcome, ActivitySupervisor, ApplicationId, BlobCondition, BlobMutation, BlobQuery,
-    BlobQueryResult, CellClient, CellHandle, CellTarget, CronMutation, CronQueryResult, Digest,
-    EffectClaimRequest, EffectLeaseOutcome, Error, KvAtomicOutcome, KvAtomicRequest, KvMutation,
-    QUALIFICATION_CASE_COVERAGE_OPERATIONS, QUALIFICATION_MATRIX_ROWS, QUALIFICATION_PRIMITIVES,
-    QualificationCase, QualificationExecution, QualificationMatrixEntry,
+    ActivityRunOutcome, ActivitySupervisor, ApplicationId, BlobArtifactStore, BlobCondition,
+    BlobMutation, BlobQuery, BlobQueryResult, CellClient, CellHandle, CellTarget, CronMutation,
+    CronQueryResult, Digest, EffectClaimRequest, EffectLeaseOutcome, Error, KvAtomicOutcome,
+    KvAtomicRequest, KvMutation, QUALIFICATION_CASE_COVERAGE_OPERATIONS, QUALIFICATION_MATRIX_ROWS,
+    QUALIFICATION_PRIMITIVES, QualificationCase, QualificationExecution, QualificationMatrixEntry,
     QualificationMatrixManifest, QualificationOperation, QualificationOperationExecutor,
     QualificationProfile, QualificationReceipt, QualificationRunner, QualificationWorkload,
     QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome, QueueSendRequest, QueueState, Registry,
     Result, SqlBatch, SqlStatement, SqlValue, TenantId, WorkflowOutcome, WorkflowSignal,
     WorkflowStatus, partition_for_shard,
 };
+use crab_storage::Store;
 use ed25519_dalek::SigningKey;
 
 #[path = "support/reference_application.rs"]
@@ -28,7 +29,6 @@ mod qualification;
 #[path = "support/qualification_activity_duplicate.rs"]
 mod qualification_activity_duplicate;
 #[path = "support/qualification_cancellation.rs"]
-#[expect(dead_code, reason = "this test uses the cancellation boundary helper")]
 mod qualification_cancellation;
 #[path = "support/qualification_fixture.rs"]
 mod qualification_fixture;
@@ -39,6 +39,8 @@ mod qualification_local_fixture;
 mod qualification_peer;
 #[path = "support/qualification_scheduled_cancellation.rs"]
 mod qualification_scheduled_cancellation;
+#[path = "support/qualification_scheduled_cancellation_leases.rs"]
+mod qualification_scheduled_cancellation_leases;
 
 use qualification::{assert_zero_reservations, fixed_id, identity, rustfs_public_store};
 use qualification_fixture::{PublicHostFixture, public_host_fixture_with_store};
@@ -64,12 +66,14 @@ fn independent_observer(
     node: &CellNode,
     registry: &Arc<Registry>,
     handles: &[CellHandle],
+    store: &Store,
     tenant: TenantId,
     application: ApplicationId,
 ) -> ApplicationHandle<fixture::ReferenceApplication> {
     let client = CellClient::local_many(Arc::clone(registry), handles.to_vec())
         .expect("independent qualification client");
     node.application_handle::<fixture::ReferenceApplication>(client, tenant, application)
+        .with_blob_artifact_store(BlobArtifactStore::new(store.clone()))
 }
 
 fn smoke_executor<'n>(
@@ -77,6 +81,7 @@ fn smoke_executor<'n>(
     handle: ApplicationHandle<fixture::ReferenceApplication>,
     registry: &Arc<Registry>,
     handles: &[CellHandle],
+    store: &Store,
     tenant: TenantId,
     application: ApplicationId,
     run_tag: u64,
@@ -84,7 +89,7 @@ fn smoke_executor<'n>(
     PublicHostSmokeExecutor {
         node,
         handle,
-        observer: independent_observer(node, registry, handles, tenant, application),
+        observer: independent_observer(node, registry, handles, store, tenant, application),
         registry: Arc::clone(registry),
         handles: handles.to_vec(),
         tenant,
@@ -122,7 +127,10 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor<'_> {
             let mutation_index = operation_id.saturating_mul(100);
             let mutation = identity(mutation_index, now_ms);
             if operation.case() == QualificationCase::Cancellation
-                && matches!(operation.primitive(), "sql" | "kv" | "cron" | "workflow")
+                && matches!(
+                    operation.primitive(),
+                    "sql" | "kv" | "blob" | "queue" | "cron" | "workflow" | "activity" | "effects"
+                )
             {
                 let (client, entered, dispatched) =
                     peer_client_with_paused_mutation(Arc::clone(registry), handles.to_vec(), true);
@@ -150,6 +158,16 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor<'_> {
                             .kv(operation_id, operation.nonce(), mutation)
                             .await?
                     }
+                    "blob" => {
+                        cancellation
+                            .blob(operation_id, operation.nonce(), mutation)
+                            .await?
+                    }
+                    "queue" => {
+                        cancellation
+                            .queue(operation_id, operation.nonce(), mutation)
+                            .await?
+                    }
                     "cron" => {
                         cancellation
                             .cron(operation_id, operation.nonce(), mutation)
@@ -158,6 +176,16 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor<'_> {
                     "workflow" => {
                         cancellation
                             .workflow(operation_id, operation.nonce(), mutation)
+                            .await?
+                    }
+                    "activity" => {
+                        cancellation
+                            .activity(operation_id, operation.nonce(), mutation)
+                            .await?
+                    }
+                    "effects" => {
+                        cancellation
+                            .effects(operation_id, operation.nonce(), mutation)
                             .await?
                     }
                     _ => {
@@ -864,7 +892,7 @@ async fn rustfs_public_cell_node_runs_typed_primitive_workload() {
 #[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
 async fn rustfs_public_activity_duplicate_case_preserves_one_completion() {
     let (store, root) = rustfs_public_store();
-    let (node, typed, tenant, application, _directory, registry, handles, _store) =
+    let (node, typed, tenant, application, _directory, registry, handles, store) =
         public_host_fixture_with_store(store, root).await;
     let workload = QualificationWorkload::generate_with_size(
         &QualificationProfile::pr_contract(),
@@ -885,6 +913,7 @@ async fn rustfs_public_activity_duplicate_case_preserves_one_completion() {
         typed.clone(),
         &registry,
         &handles,
+        &store,
         tenant,
         application,
         0,
@@ -914,7 +943,7 @@ async fn rustfs_public_sql_cancellation_case_preserves_acknowledged_row() {
 }
 
 async fn run_scheduled_sql_cancellation_case(
-    (node, typed, tenant, application, _directory, registry, handles, _store): PublicHostFixture,
+    (node, typed, tenant, application, _directory, registry, handles, store): PublicHostFixture,
 ) {
     let workload = QualificationWorkload::generate_with_size(
         &QualificationProfile::pr_contract(),
@@ -935,6 +964,7 @@ async fn run_scheduled_sql_cancellation_case(
         typed.clone(),
         &registry,
         &handles,
+        &store,
         tenant,
         application,
         0,
@@ -953,18 +983,45 @@ async fn run_scheduled_sql_cancellation_case(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn public_kv_cron_workflow_cancellation_cases_preserve_acknowledged_results() {
-    run_scheduled_data_cancellation_cases(public_host_fixture().await).await;
+    run_scheduled_cancellation_cases(public_host_fixture().await, &["kv", "cron", "workflow"])
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
 async fn rustfs_public_kv_cron_workflow_cancellation_cases_preserve_acknowledged_results() {
     let (store, root) = rustfs_public_store();
-    run_scheduled_data_cancellation_cases(public_host_fixture_with_store(store, root).await).await;
+    run_scheduled_cancellation_cases(
+        public_host_fixture_with_store(store, root).await,
+        &["kv", "cron", "workflow"],
+    )
+    .await;
 }
 
-async fn run_scheduled_data_cancellation_cases(
-    (node, typed, tenant, application, _directory, registry, handles, _store): PublicHostFixture,
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn public_blob_queue_activity_effect_cancellation_cases_preserve_acknowledged_results() {
+    run_scheduled_cancellation_cases(
+        public_host_fixture().await,
+        &["blob", "queue", "activity", "effects"],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_public_blob_queue_activity_effect_cancellation_cases_preserve_acknowledged_results()
+{
+    let (store, root) = rustfs_public_store();
+    run_scheduled_cancellation_cases(
+        public_host_fixture_with_store(store, root).await,
+        &["blob", "queue", "activity", "effects"],
+    )
+    .await;
+}
+
+async fn run_scheduled_cancellation_cases(
+    (node, typed, tenant, application, _directory, registry, handles, store): PublicHostFixture,
+    primitives: &[&str],
 ) {
     let workload = QualificationWorkload::generate_with_size(
         &QualificationProfile::pr_contract(),
@@ -979,11 +1036,12 @@ async fn run_scheduled_data_cancellation_cases(
         typed.clone(),
         &registry,
         &handles,
+        &store,
         tenant,
         application,
         0,
     );
-    for primitive in ["kv", "cron", "workflow"] {
+    for &primitive in primitives {
         let operation = workload
             .iter_operations()
             .find(|operation| {
@@ -1008,7 +1066,7 @@ async fn run_scheduled_data_cancellation_cases(
 }
 
 async fn run_public_typed_primitive_workload(
-    (node, typed, tenant, application_id, _directory, registry, handles, _store): PublicHostFixture,
+    (node, typed, tenant, application_id, _directory, registry, handles, store): PublicHostFixture,
 ) {
     let profile = QualificationProfile::pr_contract();
     let workload = QualificationWorkload::generate_with_size(&profile, 41, 1, 64, 1)
@@ -1018,6 +1076,7 @@ async fn run_public_typed_primitive_workload(
         typed.clone(),
         &registry,
         &handles,
+        &store,
         tenant,
         application_id,
         0,
@@ -1042,7 +1101,7 @@ async fn run_public_typed_primitive_workload(
         .iter()
         .map(|byte| byte.count_ones())
         .sum::<u32>();
-    let observed_smoke_cases = (QUALIFICATION_PRIMITIVES.len() * 2 + 4) as u32;
+    let observed_smoke_cases = (QUALIFICATION_PRIMITIVES.len() * 3) as u32;
     assert_eq!(covered, observed_smoke_cases);
     assert!(covered < QUALIFICATION_CASE_COVERAGE_OPERATIONS as u32);
     let artifact = summary.artifact(&workload).expect("run artifact");
@@ -1113,7 +1172,7 @@ struct MatrixRowEvidence {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn public_cell_node_runs_complete_matrix_through_typed_apis() {
-    let (node, typed, tenant, application_id, _directory, registry, handles, _store) =
+    let (node, typed, tenant, application_id, _directory, registry, handles, store) =
         public_host_fixture().await;
     let profile = QualificationProfile::pr_contract();
     let image = Digest::from_bytes([74; 32]);
@@ -1138,6 +1197,7 @@ async fn public_cell_node_runs_complete_matrix_through_typed_apis() {
             typed.clone(),
             &registry,
             &handles,
+            &store,
             tenant,
             application_id,
             row_index as u64 + 1,

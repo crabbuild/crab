@@ -19,12 +19,12 @@ use crate::{
 };
 
 pub struct CancellationCase<'a> {
-    peer: &'a ApplicationHandle<fixture::ReferenceApplication>,
-    observer: &'a ApplicationHandle<fixture::ReferenceApplication>,
-    entered: Arc<Notify>,
-    dispatched: &'a Arc<AtomicUsize>,
-    tenant: TenantId,
-    application: ApplicationId,
+    pub(crate) peer: &'a ApplicationHandle<fixture::ReferenceApplication>,
+    pub(crate) observer: &'a ApplicationHandle<fixture::ReferenceApplication>,
+    pub(crate) entered: Arc<Notify>,
+    pub(crate) dispatched: &'a Arc<AtomicUsize>,
+    pub(crate) tenant: TenantId,
+    pub(crate) application: ApplicationId,
 }
 
 impl<'a> CancellationCase<'a> {
