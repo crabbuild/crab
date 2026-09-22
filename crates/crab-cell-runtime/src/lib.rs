@@ -163,11 +163,12 @@ pub use qualification::{
     QUALIFICATION_PROFILE_SCHEMA_VERSION, QUALIFICATION_PROTECTED_EVIDENCE_MAX_AGE_MS,
     QUALIFICATION_PROTECTED_EVIDENCE_MAX_CLOCK_SKEW_MS, QUALIFICATION_RESOURCE_METRICS,
     QUALIFICATION_RUN_ARTIFACT_SCHEMA_VERSION, QUALIFICATION_SCHEMA_VERSION, QualificationCase,
-    QualificationExecution, QualificationMatrixEntry, QualificationMatrixManifest,
-    QualificationMetric, QualificationOperation, QualificationOperationExecutor,
-    QualificationOperationIter, QualificationOutcome, QualificationOwnership,
-    QualificationPrimitiveCounts, QualificationProfile, QualificationReceipt,
-    QualificationRunArtifact, QualificationRunSummary, QualificationRunner, QualificationWorkload,
+    QualificationExecution, QualificationExecutionEvidence, QualificationMatrixEntry,
+    QualificationMatrixManifest, QualificationMetric, QualificationOperation,
+    QualificationOperationExecutor, QualificationOperationIter, QualificationOutcome,
+    QualificationOwnership, QualificationPrimitiveCounts, QualificationProfile,
+    QualificationReceipt, QualificationRunArtifact, QualificationRunSummary, QualificationRunner,
+    QualificationWorkload,
 };
 pub use queue::{
     QueueClaimCommand, QueueClaimRequest, QueueControlAction, QueueControlCommand,
