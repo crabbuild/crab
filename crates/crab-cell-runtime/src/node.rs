@@ -717,7 +717,7 @@ impl NodeDirectory {
         claimant: SessionId,
         now_ms: i64,
     ) -> Result<FencedNodeSession> {
-        self.claim_expired_inner(session, claimant, now_ms, false)
+        self.claim_expired_inner(session, claimant, now_ms, false, false)
             .await
     }
 
@@ -736,14 +736,7 @@ impl NodeDirectory {
         claimant: SessionId,
         now_ms: i64,
     ) -> Result<FencedNodeSession> {
-        let advertisement = self
-            .load(claimant, now_ms)
-            .await?
-            .ok_or(Error::Node("node recovery claimant is not live"))?;
-        if !recovery_executor_eligible(advertisement.advertisement()) {
-            return Err(Error::Capacity("node recovery claimant is not eligible"));
-        }
-        self.claim_expired_inner(session, claimant, now_ms, false)
+        self.claim_expired_inner(session, claimant, now_ms, false, true)
             .await
     }
 
@@ -756,7 +749,7 @@ impl NodeDirectory {
         claimant: SessionId,
         now_ms: i64,
     ) -> Result<NodeTakeoverProof> {
-        self.claim_expired_inner(session, claimant, now_ms, true)
+        self.claim_expired_inner(session, claimant, now_ms, true, false)
             .await?
             .direct_takeover()
     }
@@ -767,13 +760,20 @@ impl NodeDirectory {
         claimant: SessionId,
         now_ms: i64,
         reject_active_log: bool,
+        require_recovery_eligibility: bool,
     ) -> Result<FencedNodeSession> {
         if now_ms < 0 || claimant.as_bytes().iter().all(|byte| *byte == 0) || claimant == session {
             return Err(Error::Node("node recovery time is invalid"));
         }
-        self.load(claimant, now_ms)
+        let claimant_advertisement = self
+            .load(claimant, now_ms)
             .await?
             .ok_or(Error::Node("node recovery claimant is not live"))?;
+        if require_recovery_eligibility
+            && !recovery_executor_eligible(claimant_advertisement.advertisement())
+        {
+            return Err(Error::Capacity("node recovery claimant is not eligible"));
+        }
         let path = self.layout.node_path(session.as_bytes());
         let Some((record, token)) = self.load_record_at(&path).await? else {
             return Err(Error::Node("expired node session record is missing"));
