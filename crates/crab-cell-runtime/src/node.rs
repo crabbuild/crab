@@ -23,6 +23,7 @@ const MAX_CLOCK_SKEW_MS: i64 = 5 * 60_000;
 const STALE_ADVERTISEMENT_RETENTION_MS: i64 = MAX_CLOCK_SKEW_MS + MAX_ADVERTISEMENT_LIFETIME_MS;
 const MAX_STALE_COLLECTION_ITEMS: usize = 1_024;
 const MAX_LIVE_NODE_RECORDS: usize = 10_000;
+const RECOVERY_CANDIDATE_READ_CONCURRENCY: usize = 32;
 const SIGNING_DOMAIN: &[u8] = b"crab.node.v1\0";
 const PLACEMENT_SIGNING_DOMAIN: &[u8] = b"crab.node-placement.v1\0";
 const NODE_LOG_SELECTION_DOMAIN: &[u8] = b"crab.node-log.member.v1\0";
@@ -956,51 +957,67 @@ impl NodeDirectory {
             HashSet::new()
         };
         let prefix = self.layout.node_directory_path();
-        let mut stream = self.layout.store().inner().list(Some(&prefix));
+        let stream = self.layout.store().inner().list(Some(&prefix));
+        let mut records = stream
+            .map(|item| {
+                let prefix = prefix.clone();
+                async move {
+                    let meta =
+                        item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?;
+                    let Some((record, _)) = self.load_record_at(&meta.location).await? else {
+                        return Ok(None);
+                    };
+                    let session = record.session();
+                    validate_record_path(&self.layout, session, &meta.location)?;
+                    let (eligible, members) = match record {
+                        NodeRecord::Advertisement(advertisement) => {
+                            self.validate_scope(&advertisement)?;
+                            advertisement.validate_shape()?;
+                            advertisement.verify_signature()?;
+                            if advertisement.issued_at_ms > now_ms.saturating_add(MAX_CLOCK_SKEW_MS)
+                            {
+                                return Err(Error::Node("advertised node issue time differs"));
+                            }
+                            let log = advertisement.log.as_ref();
+                            (
+                                advertisement.expires_at_ms <= now_ms
+                                    && log.is_some_and(NodeLogStatus::active)
+                                    && log.is_some_and(|log| {
+                                        matches!(
+                                            log.phase(),
+                                            NodeLogPhase::Open | NodeLogPhase::Recovering
+                                        )
+                                    }),
+                                log.map_or_else(Vec::new, |log| log.members().to_vec()),
+                            )
+                        }
+                        NodeRecord::Tombstone(tombstone) => {
+                            let claim_available = tombstone.claimant == Some(claimant)
+                                || tombstone
+                                    .claim_expires_at_ms
+                                    .is_none_or(|expires_at_ms| expires_at_ms <= now_ms);
+                            let log = tombstone.log.as_ref();
+                            (
+                                claim_available
+                                    && log.is_some_and(|log| {
+                                        log.active()
+                                            && matches!(
+                                                log.phase(),
+                                                NodeLogPhase::Open | NodeLogPhase::Recovering
+                                            )
+                                    }),
+                                log.map_or_else(Vec::new, |log| log.members().to_vec()),
+                            )
+                        }
+                    };
+                    Ok(Some((session, eligible, members)))
+                }
+            })
+            .buffer_unordered(RECOVERY_CANDIDATE_READ_CONCURRENCY);
         let mut candidates = RecoveryCandidateWindow::new(now_ms, limit)?;
-        while let Some(item) = stream.next().await {
-            let meta = item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?;
-            let Some((record, _)) = self.load_record_at(&meta.location).await? else {
+        while let Some(record) = records.next().await {
+            let Some((session, eligible, members)) = record? else {
                 continue;
-            };
-            let session = record.session();
-            validate_record_path(&self.layout, session, &meta.location)?;
-            let (eligible, members) = match record {
-                NodeRecord::Advertisement(advertisement) => {
-                    self.validate_scope(&advertisement)?;
-                    advertisement.validate_shape()?;
-                    advertisement.verify_signature()?;
-                    if advertisement.issued_at_ms > now_ms.saturating_add(MAX_CLOCK_SKEW_MS) {
-                        return Err(Error::Node("advertised node issue time differs"));
-                    }
-                    let log = advertisement.log.as_ref();
-                    (
-                        advertisement.expires_at_ms <= now_ms
-                            && log.is_some_and(NodeLogStatus::active)
-                            && log.is_some_and(|log| {
-                                matches!(log.phase(), NodeLogPhase::Open | NodeLogPhase::Recovering)
-                            }),
-                        log.map_or_else(Vec::new, |log| log.members().to_vec()),
-                    )
-                }
-                NodeRecord::Tombstone(tombstone) => {
-                    let claim_available = tombstone.claimant == Some(claimant)
-                        || tombstone
-                            .claim_expires_at_ms
-                            .is_none_or(|expires_at_ms| expires_at_ms <= now_ms);
-                    let log = tombstone.log.as_ref();
-                    (
-                        claim_available
-                            && log.is_some_and(|log| {
-                                log.active()
-                                    && matches!(
-                                        log.phase(),
-                                        NodeLogPhase::Open | NodeLogPhase::Recovering
-                                    )
-                            }),
-                        log.map_or_else(Vec::new, |log| log.members().to_vec()),
-                    )
-                }
             };
             if !eligible || session == claimant {
                 continue;
