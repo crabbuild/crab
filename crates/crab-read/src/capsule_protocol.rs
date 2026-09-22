@@ -1777,6 +1777,40 @@ fn append_tip_bound_transitions(
     Ok(())
 }
 
+fn append_checkpoint_tip_bound_transitions(
+    output: &mut CapsuleTipBoundTransitions,
+    history: &BTreeMap<
+        String,
+        Vec<crab_metadata::git_visibility::GitVisibilityCheckpointTransition>,
+    >,
+) -> Result<()> {
+    for (ref_name, transitions) in history {
+        let output_transitions = output.entry(ref_name.clone()).or_default();
+        for transition in transitions {
+            let parse_oid = |value: &str| {
+                ObjectId::from_hex(value.as_bytes()).map_err(|_| {
+                    corrupt_path(
+                        "capsule Git visibility",
+                        "checkpoint visibility transition contains an invalid object ID",
+                    )
+                })
+            };
+            let added = transition
+                .objects
+                .iter()
+                .map(|oid| parse_oid(oid))
+                .collect::<Result<Vec<_>>>()?;
+            output_transitions.push(CapsuleVisibilityTransition {
+                old_oid: Some(parse_oid(&transition.from_oid)?),
+                new_oid: parse_oid(&transition.to_oid)?,
+                added,
+                removed: Vec::new(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn build_tip_bound_transitions(
     capsules: &[Capsule],
     controls: &[CapsuleControl],
@@ -4123,7 +4157,19 @@ async fn assemble_layered_control_view(
         .values()
         .flat_map(|(_, capsules)| capsules.iter().cloned())
         .collect::<Vec<_>>();
-    let tip_bound_transitions = build_tip_bound_transitions(&[], &all_capsule_controls)?;
+    let mut tip_bound_transitions = BTreeMap::new();
+    if let Some(CheckpointData::Layered(checkpoint)) = checkpoint.as_ref() {
+        append_checkpoint_tip_bound_transitions(
+            &mut tip_bound_transitions,
+            checkpoint.visibility_transitions(),
+        )?;
+    }
+    for (ref_name, transitions) in build_tip_bound_transitions(&[], &all_capsule_controls)? {
+        tip_bound_transitions
+            .entry(ref_name)
+            .or_default()
+            .extend(transitions);
+    }
     let mut capsule_run_sources = Vec::new();
     let mut capsule_run_member_oids = BTreeMap::new();
     let mut frontier_object_admission = BTreeMap::new();

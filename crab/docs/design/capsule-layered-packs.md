@@ -1766,6 +1766,13 @@ descriptor. The root's checkpoint pointer authenticates the checkpoint hash,
 size, covered generation, covered root digest, physical-source count,
 pack-member count, and object count.
 
+The checkpoint footer also carries a bounded recent suffix of the authenticated
+per-ref visibility transition history. Ordinary control-only fetches can use
+that suffix to plan a have-to-tip delta without downloading the large ordinal
+visibility body. The complete history remains in the body; an older or
+incomplete have chain deliberately falls back to the existing authenticated
+catalog/traversal planner, so this acceleration hint cannot weaken correctness.
+
 Pack-set order is oldest/largest to newest/smallest. Member directories and
 locators remain with their immutable source rather than being recopied into
 every checkpoint. A reader opens only the source controls selected by

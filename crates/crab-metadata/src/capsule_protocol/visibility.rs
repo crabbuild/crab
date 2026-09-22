@@ -131,6 +131,19 @@ impl CapsuleVisibilitySnapshot {
         &self.refs
     }
 
+    /// Return the bounded recent transition suffix for control-only fetches.
+    ///
+    /// The complete history remains in the snapshot body. This suffix is a
+    /// performance hint authenticated by the enclosing checkpoint; readers
+    /// fall back to the complete visibility proof when a requested have is
+    /// older than the retained links.
+    pub fn recent_transitions(
+        &self,
+    ) -> Result<BTreeMap<String, Vec<GitVisibilityCheckpointTransition>>> {
+        self.to_index(0, &"0".repeat(64), &"0".repeat(64))
+            .map(|index| index.recent_checkpoint_history())
+    }
+
     /// Restore the checkpoint proof under its current pack identity.
     pub fn to_index(
         &self,

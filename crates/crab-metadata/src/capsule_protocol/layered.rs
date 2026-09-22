@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::capsule_protocol::{CapsuleGitPack, CapsuleRun, CapsuleSectionKind, PointerCatalog};
 use crate::error::{MetadataError, Result};
-use crate::git_visibility::{GitVisibilityIndex, GitVisibilityOid, GitVisibilityOrdinalTransition};
+use crate::git_visibility::{
+    GitVisibilityCheckpointTransition, GitVisibilityIndex, GitVisibilityOid,
+    GitVisibilityOrdinalTransition,
+};
 use crate::validation::{validate_content_hash, validate_sha1};
 
 const CHECKPOINT_MAGIC: &[u8; 8] = b"CRBCKP05";
@@ -161,6 +164,18 @@ impl LayeredVisibilitySnapshot {
     #[must_use]
     pub fn object_set_digest(&self) -> String {
         visibility_object_set_digest(&self.objects)
+    }
+
+    /// Return the bounded recent transition suffix for control-only fetches.
+    ///
+    /// The complete history remains in this compact proof. Only the recent
+    /// suffix is copied into the checkpoint footer; an older have falls back
+    /// to the complete visibility path rather than weakening correctness.
+    pub fn recent_transitions(
+        &self,
+    ) -> Result<BTreeMap<String, Vec<GitVisibilityCheckpointTransition>>> {
+        self.to_index(0, &"0".repeat(64), &"0".repeat(64), &self.catalog_digest)
+            .map(|index| index.recent_checkpoint_history())
     }
 
     /// Encode the proof in its canonical bounded binary representation.
@@ -1277,6 +1292,8 @@ struct CheckpointFooter {
     cold_clone_object_set_digest: Option<String>,
     #[serde(default)]
     cold_clone_object_count: Option<u64>,
+    #[serde(default)]
+    visibility_transitions: BTreeMap<String, Vec<GitVisibilityCheckpointTransition>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1309,6 +1326,11 @@ impl LayeredCheckpoint {
         pointer_catalog: PointerCatalog,
         visibility: Option<crate::capsule_protocol::CapsuleVisibilitySnapshot>,
     ) -> Result<Self> {
+        let visibility_transitions = visibility
+            .as_ref()
+            .map(crate::capsule_protocol::CapsuleVisibilitySnapshot::recent_transitions)
+            .transpose()?
+            .unwrap_or_default();
         let visibility = match visibility {
             Some(value) => Some((CapsuleSectionKind::VisibilitySnapshot, value.encode()?)),
             None => None,
@@ -1321,6 +1343,7 @@ impl LayeredCheckpoint {
             visibility,
             None,
             None,
+            visibility_transitions,
         )
     }
 
@@ -1332,6 +1355,11 @@ impl LayeredCheckpoint {
         pointer_catalog: PointerCatalog,
         visibility: Option<LayeredVisibilitySnapshot>,
     ) -> Result<Self> {
+        let visibility_transitions = visibility
+            .as_ref()
+            .map(LayeredVisibilitySnapshot::recent_transitions)
+            .transpose()?
+            .unwrap_or_default();
         let cold_clone_object_set_digest = visibility
             .as_ref()
             .map(LayeredVisibilitySnapshot::object_set_digest);
@@ -1357,6 +1385,7 @@ impl LayeredCheckpoint {
             visibility,
             cold_clone_object_set_digest,
             cold_clone_object_count,
+            visibility_transitions,
         )
     }
 
@@ -1368,6 +1397,7 @@ impl LayeredCheckpoint {
         visibility: Option<(CapsuleSectionKind, Bytes)>,
         cold_clone_object_set_digest: Option<String>,
         cold_clone_object_count: Option<u64>,
+        visibility_transitions: BTreeMap<String, Vec<GitVisibilityCheckpointTransition>>,
     ) -> Result<Self> {
         validate_content_hash(
             covered_root_digest,
@@ -1402,6 +1432,7 @@ impl LayeredCheckpoint {
             sources,
             cold_clone_object_set_digest,
             cold_clone_object_count,
+            visibility_transitions,
         };
         validate_source_inventory(&footer.sources)?;
         for source in &footer.sources {
@@ -1595,6 +1626,15 @@ impl LayeredCheckpoint {
     #[must_use]
     pub const fn cold_clone_object_count(&self) -> Option<u64> {
         self.footer.cold_clone_object_count
+    }
+
+    /// Return the bounded authenticated transition suffix available to a
+    /// control-only incremental fetch.
+    #[must_use]
+    pub fn visibility_transitions(
+        &self,
+    ) -> &BTreeMap<String, Vec<GitVisibilityCheckpointTransition>> {
+        &self.footer.visibility_transitions
     }
 
     /// Decode the complete pointer catalog compacted by this checkpoint.
@@ -1827,6 +1867,13 @@ fn validate_checkpoint_footer(
     if object_size <= footer_start {
         return Err(corrupt("layered checkpoint object is truncated"));
     }
+    GitVisibilityIndex::validate_checkpoint_history(&footer.visibility_transitions).map_err(
+        |error| {
+            corrupt(format!(
+                "layered checkpoint visibility transitions: {error}"
+            ))
+        },
+    )?;
     Ok(())
 }
 
@@ -2094,6 +2141,63 @@ mod tests {
             Some(expected_digest.as_str())
         );
         assert_eq!(control.cold_clone_object_count(), Some(1));
+    }
+
+    #[test]
+    fn control_footer_preserves_recent_visibility_transitions() {
+        let object_a = "a".repeat(40);
+        let object_b = "b".repeat(40);
+        let object_c = "c".repeat(40);
+        let mut index = GitVisibilityIndex::new(
+            1,
+            "1".repeat(64),
+            "2".repeat(64),
+            BTreeMap::from([("refs/heads/main".to_owned(), vec![object_b.clone()])]),
+        )
+        .unwrap();
+        index
+            .apply_ref_edit(
+                "refs/heads/main".to_owned(),
+                &crate::git_visibility::GitVisibilityEdit::from_delta_objects(
+                    Some(object_b),
+                    object_c.clone(),
+                    vec![object_a, object_c],
+                    Vec::new(),
+                ),
+            )
+            .unwrap();
+        let layer = PackLayer::build(&pack()).unwrap();
+        let source = layer.source_descriptor().unwrap();
+        let catalog_digest = source_catalog_digest(std::slice::from_ref(&source)).unwrap();
+        let snapshot = LayeredVisibilitySnapshot::from_index(&index, &catalog_digest).unwrap();
+        let checkpoint = LayeredCheckpoint::build_with_ordinal_visibility(
+            1,
+            &"3".repeat(64),
+            vec![source],
+            PointerCatalog::new(),
+            Some(snapshot),
+        )
+        .unwrap();
+        assert_eq!(
+            checkpoint
+                .visibility_transitions()
+                .get("refs/heads/main")
+                .map(Vec::len),
+            Some(1)
+        );
+        let control_start = usize::try_from(checkpoint.control_offset()).unwrap();
+        let control = LayeredCheckpoint::decode_control(
+            checkpoint.bytes().slice(control_start..),
+            checkpoint.bytes().len() as u64,
+            checkpoint.control_offset(),
+            checkpoint.hash(),
+            checkpoint.footer_hash(),
+        )
+        .unwrap();
+        assert_eq!(
+            control.visibility_transitions(),
+            checkpoint.visibility_transitions()
+        );
     }
 
     #[test]

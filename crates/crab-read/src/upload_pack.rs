@@ -754,6 +754,10 @@ fn plan_from_tip_bound_transitions(
     maximum_objects: u64,
 ) -> crab_remote_git::Result<Option<PackPlan>> {
     if request.haves.is_empty() {
+        tracing::debug!(
+            transition_refs = transitions.len(),
+            "tip-bound transition planning skipped without client haves"
+        );
         return Ok(None);
     }
     let selected_refs = request
@@ -766,6 +770,11 @@ fn plan_from_tip_bound_transitions(
         })
         .collect::<Option<Vec<_>>>();
     let Some(selected_refs) = selected_refs else {
+        tracing::debug!(
+            wants = request.wants.len(),
+            visible_refs = visible.len(),
+            "tip-bound transition planning skipped because a want is not an advertised tip"
+        );
         return Ok(None);
     };
 
@@ -773,11 +782,33 @@ fn plan_from_tip_bound_transitions(
     let mut object_ids = Vec::new();
     for (ref_name, want) in selected_refs.iter().zip(&request.wants) {
         let Some(ref_transitions) = transitions.get(*ref_name) else {
+            tracing::debug!(
+                ref_name = *ref_name,
+                transition_refs = transitions.len(),
+                "tip-bound transition planning skipped because the advertised ref has no transitions"
+            );
             return Ok(None);
         };
         let Some((have, delta)) =
             transition_delta_for_haves(ref_transitions, *want, &request.haves)
         else {
+            let direct_haves = request
+                .haves
+                .iter()
+                .filter(|have| {
+                    ref_transitions
+                        .iter()
+                        .any(|transition| transition.old_oid == Some(**have))
+                })
+                .count();
+            tracing::debug!(
+                ref_name = *ref_name,
+                transitions = ref_transitions.len(),
+                haves = request.haves.len(),
+                direct_haves,
+                want = %want,
+                "tip-bound transition planning skipped because no authenticated have-to-want chain matched"
+            );
             return Ok(None);
         };
         common_haves.insert(have);

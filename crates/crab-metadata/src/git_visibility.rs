@@ -228,10 +228,13 @@ struct GitVisibilityTransition {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct GitVisibilityCheckpointTransition {
-    pub(crate) from_oid: String,
-    pub(crate) to_oid: String,
-    pub(crate) objects: Vec<String>,
+pub struct GitVisibilityCheckpointTransition {
+    /// Ref tip before this authenticated fast-forward transition.
+    pub from_oid: String,
+    /// Ref tip after this authenticated fast-forward transition.
+    pub to_oid: String,
+    /// Objects newly admitted by this transition.
+    pub objects: Vec<String>,
 }
 
 impl GitVisibilityClosure {
@@ -1291,9 +1294,7 @@ impl GitVisibilityIndex {
         self.refs.values().map(GitVisibilityClosure::len).sum()
     }
 
-    pub(crate) fn checkpoint_history(
-        &self,
-    ) -> BTreeMap<String, Vec<GitVisibilityCheckpointTransition>> {
+    pub fn checkpoint_history(&self) -> BTreeMap<String, Vec<GitVisibilityCheckpointTransition>> {
         self.incremental_history
             .iter()
             .map(|(name, transitions)| {
@@ -1319,6 +1320,43 @@ impl GitVisibilityIndex {
                 (name.clone(), transitions)
             })
             .collect()
+    }
+
+    /// Return the bounded recent transition history used by warm fetches.
+    ///
+    /// Checkpoints retain the complete history in their body, but control-only
+    /// readers need only a recent suffix to avoid a visibility walk. Missing
+    /// older links deliberately make the reader fall back to the authenticated
+    /// catalog/traversal path.
+    pub fn recent_checkpoint_history(
+        &self,
+    ) -> BTreeMap<String, Vec<GitVisibilityCheckpointTransition>> {
+        self.checkpoint_history()
+            .into_iter()
+            .map(|(name, transitions)| {
+                let start = transitions
+                    .len()
+                    .saturating_sub(MAX_VISIBILITY_TRANSITIONS_PER_REF);
+                (name, transitions[start..].to_vec())
+            })
+            .collect()
+    }
+
+    /// Validate transition records before they are used as a control-only hint.
+    pub fn validate_checkpoint_history(
+        history: &BTreeMap<String, Vec<GitVisibilityCheckpointTransition>>,
+    ) -> Result<()> {
+        for (name, transitions) in history {
+            if !name.starts_with("refs/") {
+                return Err(corrupt("checkpoint history contains an invalid ref name"));
+            }
+            for transition in transitions {
+                validate_oid(&transition.from_oid)?;
+                validate_oid(&transition.to_oid)?;
+                validate_sorted_oids(&transition.objects, "checkpoint history")?;
+            }
+        }
+        Ok(())
     }
 
     /// Return the dense dictionary and ordinal closures used by a compact
