@@ -1,4 +1,4 @@
-use super::fleet::{peer_round_trip, start_peer_servers};
+use super::fleet::{balancer_round_trip, peer_round_trip, start_peer_servers};
 use super::*;
 use std::{collections::HashMap, net::SocketAddr, time::SystemTime};
 
@@ -98,6 +98,22 @@ pub(super) fn perf_cells() -> [(NamespaceId, CatalogRole, &'static str, u8, Sche
             install_workflow_schema,
         ),
     ]
+}
+
+pub(super) fn owner_routes(
+    tenant: TenantId,
+    application: ApplicationId,
+    owners: [SocketAddr; 3],
+) -> HashMap<crab_cell_runtime::CellId, SocketAddr> {
+    perf_cells()
+        .into_iter()
+        .enumerate()
+        .map(|(index, (namespace, _, _, _, _))| {
+            let target =
+                CellTarget::new(tenant, application, namespace, &partition_for_shard(0)).unwrap();
+            (target.cell_id(), owners[index % owners.len()])
+        })
+        .collect()
 }
 
 pub(super) struct PerfFixture {
@@ -256,19 +272,17 @@ impl PerfFixture {
         directory: tempfile::TempDir,
         store: Store,
         owners: [SocketAddr; 3],
+        balancer: Option<SocketAddr>,
     ) -> Self {
         let application = Arc::new(compiled());
         let registry = application.registry();
         let tenant = TenantId::from_bytes([81; 16]);
         let application_id = ApplicationId::from_bytes([82; 16]);
-        let mut endpoints = HashMap::new();
-        for (index, (namespace, _, _, _, _)) in perf_cells().into_iter().enumerate() {
-            let target =
-                CellTarget::new(tenant, application_id, namespace, &partition_for_shard(0))
-                    .unwrap();
-            endpoints.insert(target.cell_id(), owners[index % owners.len()]);
-        }
-        let round_trip = peer_round_trip(endpoints);
+        let round_trip = if let Some(address) = balancer {
+            balancer_round_trip(address)
+        } else {
+            peer_round_trip(owner_routes(tenant, application_id, owners))
+        };
         let signer = Arc::new(PeerSigner::new(
             crab_cell_runtime::SessionId::from_bytes([77; 16]),
             registry.release_digest(),

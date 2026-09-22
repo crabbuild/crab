@@ -1,6 +1,11 @@
 use super::performance_fixture::now_ms;
 use super::*;
-use std::{collections::HashMap, net::SocketAddr, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    sync::atomic::{AtomicUsize, Ordering},
+    time::{Duration, Instant},
+};
 
 use crab_cell_runtime::{
     CellId, MAX_PEER_REQUEST_BYTES, PeerAuthorizer, PeerCellResolver, PeerDispatcher,
@@ -46,8 +51,37 @@ impl PeerAuthorizer for FleetAuthorizer {
 
 struct TcpRoundTrip(Arc<HashMap<CellId, SocketAddr>>);
 
+struct BalancerRoundTrip(SocketAddr);
+
+pub(super) struct BalancerStats([AtomicUsize; 3]);
+
+impl BalancerStats {
+    pub(super) fn counts(&self) -> [usize; 3] {
+        std::array::from_fn(|node| self.0[node].load(Ordering::Relaxed))
+    }
+}
+
+#[derive(Default)]
+pub(super) struct GatewayStats {
+    local: AtomicUsize,
+    forwarded: AtomicUsize,
+}
+
+impl GatewayStats {
+    pub(super) fn counts(&self) -> (usize, usize) {
+        (
+            self.local.load(Ordering::Relaxed),
+            self.forwarded.load(Ordering::Relaxed),
+        )
+    }
+}
+
 pub(super) fn peer_round_trip(endpoints: HashMap<CellId, SocketAddr>) -> Arc<dyn PeerRoundTrip> {
     Arc::new(TcpRoundTrip(Arc::new(endpoints)))
+}
+
+pub(super) fn balancer_round_trip(address: SocketAddr) -> Arc<dyn PeerRoundTrip> {
+    Arc::new(BalancerRoundTrip(address))
 }
 
 impl PeerRoundTrip for TcpRoundTrip {
@@ -60,37 +94,91 @@ impl PeerRoundTrip for TcpRoundTrip {
         let address = self.0.get(&target.cell_id()).copied();
         Box::pin(async move {
             let address = address.ok_or(Error::CellNotActive)?;
-            let reply =
-                tokio::time::timeout(Duration::from_millis(u64::from(remaining_ms)), async {
-                    let mut socket = TcpStream::connect(address).await.map_err(|source| {
-                        Error::PeerTransport {
-                            context: "fleet peer connect",
-                            source: Box::new(source),
-                        }
-                    })?;
-                    socket
-                        .write_all(&(request.len() as u32).to_be_bytes())
-                        .await
-                        .map_err(peer_io)?;
-                    socket.write_all(&request).await.map_err(peer_io)?;
-                    let mut length = [0; 4];
-                    socket.read_exact(&mut length).await.map_err(peer_io)?;
-                    let length = u32::from_be_bytes(length) as usize;
-                    if length > MAX_PEER_REQUEST_BYTES {
-                        return Err(Error::Peer("fleet reply exceeds peer byte limit"));
-                    }
-                    let mut reply = vec![0; length];
-                    socket.read_exact(&mut reply).await.map_err(peer_io)?;
-                    Ok(reply)
-                })
-                .await
-                .map_err(|source| Error::PeerTransportUnknown {
-                    context: "fleet peer deadline",
-                    source: Box::new(source),
-                })??;
-            Ok(reply)
+            send_tcp(address, request, remaining_ms).await
         })
     }
+}
+
+impl PeerRoundTrip for BalancerRoundTrip {
+    fn send(
+        &self,
+        _target: CellTarget,
+        request: Vec<u8>,
+        remaining_ms: u32,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'static>> {
+        Box::pin(send_tcp(self.0, request, remaining_ms))
+    }
+}
+
+pub(super) async fn start_balancer(
+    nodes: [SocketAddr; 3],
+) -> (SocketAddr, tokio::task::JoinHandle<()>, Arc<BalancerStats>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let stats = Arc::new(BalancerStats(std::array::from_fn(|_| AtomicUsize::new(0))));
+    let counts = Arc::clone(&stats);
+    let next = Arc::new(AtomicUsize::new(0));
+    let server = tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            let node = next.fetch_add(1, Ordering::Relaxed) % nodes.len();
+            counts.0[node].fetch_add(1, Ordering::Relaxed);
+            tokio::spawn(async move {
+                let _ = serve_balancer(socket, nodes[node]).await;
+            });
+        }
+    });
+    (address, server, stats)
+}
+
+async fn serve_balancer(mut socket: TcpStream, entry: SocketAddr) -> Result<()> {
+    let mut length = [0; 4];
+    socket.read_exact(&mut length).await.map_err(peer_io)?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length > MAX_PEER_REQUEST_BYTES {
+        return Err(Error::Peer("fleet request exceeds peer byte limit"));
+    }
+    let mut request = vec![0; length];
+    socket.read_exact(&mut request).await.map_err(peer_io)?;
+    // The balancer is a transport hop: the entry node authenticates the
+    // unchanged request and may use the protocol's one forwarding hop.
+    let reply = send_tcp(entry, request, 60_000).await?;
+    socket
+        .write_all(&(reply.len() as u32).to_be_bytes())
+        .await
+        .map_err(peer_io)?;
+    socket.write_all(&reply).await.map_err(peer_io)?;
+    Ok(())
+}
+
+async fn send_tcp(address: SocketAddr, request: Vec<u8>, remaining_ms: u32) -> Result<Vec<u8>> {
+    tokio::time::timeout(Duration::from_millis(u64::from(remaining_ms)), async {
+        let mut socket =
+            TcpStream::connect(address)
+                .await
+                .map_err(|source| Error::PeerTransport {
+                    context: "fleet peer connect",
+                    source: Box::new(source),
+                })?;
+        socket
+            .write_all(&(request.len() as u32).to_be_bytes())
+            .await
+            .map_err(peer_io)?;
+        socket.write_all(&request).await.map_err(peer_io)?;
+        let mut length = [0; 4];
+        socket.read_exact(&mut length).await.map_err(peer_io)?;
+        let length = u32::from_be_bytes(length) as usize;
+        if length > MAX_PEER_REQUEST_BYTES {
+            return Err(Error::Peer("fleet reply exceeds peer byte limit"));
+        }
+        let mut reply = vec![0; length];
+        socket.read_exact(&mut reply).await.map_err(peer_io)?;
+        Ok(reply)
+    })
+    .await
+    .map_err(|source| Error::PeerTransportUnknown {
+        context: "fleet peer deadline",
+        source: Box::new(source),
+    })?
 }
 
 fn peer_io(source: std::io::Error) -> Error {
@@ -125,7 +213,15 @@ pub(super) async fn start_peer_server(
     verifier: Arc<PeerVerifier>,
     handles: Vec<CellHandle>,
 ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
-    let dispatcher = Arc::new(PeerDispatcher::new(
+    let dispatcher = dispatcher(registry, handles);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = serve_listener(listener, verifier, dispatcher, None);
+    (address, server)
+}
+
+fn dispatcher(registry: &Arc<Registry>, handles: Vec<CellHandle>) -> Arc<PeerDispatcher> {
+    Arc::new(PeerDispatcher::new(
         Arc::clone(registry),
         Arc::new(FleetResolver(Arc::new(
             handles
@@ -134,26 +230,61 @@ pub(super) async fn start_peer_server(
                 .collect(),
         ))),
         Arc::new(FleetAuthorizer),
-    ));
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
+    ))
+}
+
+struct Gateway {
+    local: HashSet<CellId>,
+    owners: HashMap<CellId, SocketAddr>,
+    stats: Arc<GatewayStats>,
+}
+
+pub(super) fn start_gateway_peer_server(
+    listener: TcpListener,
+    registry: &Arc<Registry>,
+    verifier: Arc<PeerVerifier>,
+    handles: Vec<CellHandle>,
+    owners: HashMap<CellId, SocketAddr>,
+    stats: Arc<GatewayStats>,
+) -> tokio::task::JoinHandle<()> {
+    let gateway = Arc::new(Gateway {
+        local: handles.iter().map(CellHandle::cell_id).collect(),
+        owners,
+        stats,
+    });
+    serve_listener(
+        listener,
+        verifier,
+        dispatcher(registry, handles),
+        Some(gateway),
+    )
+}
+
+fn serve_listener(
+    listener: TcpListener,
+    verifier: Arc<PeerVerifier>,
+    dispatcher: Arc<PeerDispatcher>,
+    gateway: Option<Arc<Gateway>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
         while let Ok((socket, _)) = listener.accept().await {
             let verifier = Arc::clone(&verifier);
             let dispatcher = Arc::clone(&dispatcher);
+            let gateway = gateway.clone();
             tokio::spawn(async move {
-                let _ = serve_peer(socket, verifier, dispatcher).await;
+                let _ = serve_peer(socket, verifier, dispatcher, gateway).await;
             });
         }
-    });
-    (address, server)
+    })
 }
 
 async fn serve_peer(
     mut socket: TcpStream,
     verifier: Arc<PeerVerifier>,
     dispatcher: Arc<PeerDispatcher>,
+    gateway: Option<Arc<Gateway>>,
 ) -> Result<()> {
+    let started = Instant::now();
     let mut length = [0; 4];
     socket.read_exact(&mut length).await.map_err(peer_io)?;
     let length = u32::from_be_bytes(length) as usize;
@@ -164,7 +295,27 @@ async fn serve_peer(
     socket.read_exact(&mut request).await.map_err(peer_io)?;
     let now = now_ms();
     let verified = verifier.verify(&request, now)?;
-    let reply = dispatcher.dispatch_bytes(&verified, now).await?;
+    let reply = match gateway {
+        Some(gateway) if !gateway.local.contains(&verified.target().cell_id()) => {
+            let address = gateway
+                .owners
+                .get(&verified.target().cell_id())
+                .copied()
+                .ok_or(Error::CellNotActive)?;
+            let elapsed = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+            let remaining = verified.remaining_ms().saturating_sub(elapsed.max(1));
+            let forwarded = verified.forward(remaining)?;
+            let reply = send_tcp(address, forwarded, remaining).await?;
+            gateway.stats.forwarded.fetch_add(1, Ordering::Relaxed);
+            reply
+        }
+        Some(gateway) => {
+            let reply = dispatcher.dispatch_bytes(&verified, now).await?;
+            gateway.stats.local.fetch_add(1, Ordering::Relaxed);
+            reply
+        }
+        None => dispatcher.dispatch_bytes(&verified, now).await?,
+    };
     socket
         .write_all(&(reply.len() as u32).to_be_bytes())
         .await

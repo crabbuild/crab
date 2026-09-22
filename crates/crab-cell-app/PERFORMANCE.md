@@ -85,3 +85,28 @@ The test prints action-level and combined fleet latency and throughput. It
 starts and stops the three owner processes outside the timed workload. The
 topology and two measured runs are recorded in
 [`performance/2026-09-21-three-process-local.md`](performance/2026-09-21-three-process-local.md).
+
+## Balanced three-process fleet workload
+
+The balanced variant sends every request through a loopback TCP listener that
+selects one of the three owner processes in round-robin order. Any process can
+receive a request. It verifies the peer signature, serves a locally owned Cell,
+or forwards the unchanged signed operation to the owning process using the
+protocol's one allowed forwarding hop. The test asserts that every process
+served local requests and forwarded remote requests. It also reports how many
+requests the balancer sent to each entry process.
+
+```bash
+CRAB_CELL_PERF_ITERATIONS=100 \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-my-worktree \
+  cargo test -p crab-cell-app --test reference_application \
+  process_performance::reference_balanced_three_process_fleet_end_to_end_performance \
+  --release --locked -- --ignored --nocapture
+```
+
+The timer includes the balancer TCP hop and any entry-to-owner forwarding. The
+balancer runs as a task in the load-generator process, while three owners run
+as separate OS processes. Cell placement is a static seven-Cell test map; this
+does not qualify a distributed ownership directory, dynamic placement, or a
+million-Cell fleet. Results are recorded in
+[`performance/2026-09-21-balanced-three-process-local.md`](performance/2026-09-21-balanced-three-process-local.md).
