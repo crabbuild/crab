@@ -102,6 +102,12 @@ the checked-in profile from the tagged source before invoking the validator.
 GitHub's workflow attestation remains the trust anchor for the release job and
 source identity.
 
+The protected bundle gate is centralized in the fresh-process
+`verify-protected-bundle` command. It checks the complete nine-profile bundle,
+rejects symlinks below the evidence root, and applies the same source, image,
+profile, signer, and freshness checks to every matrix; the workflows retain
+only the exact-source profile byte comparison.
+
 Typed application qualification runs through `CellNode`: protected serial
 workloads use `run_qualification`, while independent or idempotent operations
 may use the readiness-gated `run_qualification_concurrent` entry point with an

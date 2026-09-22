@@ -152,14 +152,13 @@ jobs:
           for requirement in "${required_profiles[@]}"; do
             IFS='|' read -r profile_name matrix_name <<< "$requirement"
             profile="$protected_dir/$profile_name.json"
-            matrix="$protected_dir/$matrix_name"
             tracked="crates/crab-cell-runtime/qualification/profiles/$profile_name.json"
             test -f "$profile" && test ! -L "$profile"
-            test -f "$matrix" && test ! -L "$matrix"
             cmp -- "$profile" "$tracked"
-            cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
-              verify-matrix "$matrix" "$SOURCE_SHA" "$IMAGE_DIGEST" "$profile" "$QUALIFICATION_SIGNER"
           done
+          cargo run --quiet --locked -p crab-cell-runtime --bin qualification_receipt -- \
+            verify-protected-bundle "$protected_dir" "$SOURCE_SHA" "$IMAGE_DIGEST" \
+            "$QUALIFICATION_SIGNER"
           printf '%s\n' "$SOURCE_SHA" > "$evidence_root/source-revision"
           printf '%s\n' "$IMAGE_DIGEST" > "$evidence_root/image-digest"
 

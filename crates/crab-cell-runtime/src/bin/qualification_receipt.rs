@@ -14,6 +14,27 @@ use crab_cell_runtime::{
 use ed25519_dalek::SigningKey;
 use rand::Rng;
 
+const PROTECTED_BUNDLE_PROFILES: &[(&str, &str)] = &[
+    (
+        "local-provider-v1",
+        "qualification-matrix-local-provider.json",
+    ),
+    ("scale-v1", "qualification-matrix.json"),
+    (
+        "compatibility-v1",
+        "qualification-matrix-compatibility.json",
+    ),
+    ("provider-s3-v1", "qualification-matrix-provider-s3.json"),
+    ("provider-gcs-v1", "qualification-matrix-provider-gcs.json"),
+    (
+        "provider-azure-v1",
+        "qualification-matrix-provider-azure.json",
+    ),
+    ("fault-s3-v1", "qualification-matrix-fault-s3.json"),
+    ("fault-gcs-v1", "qualification-matrix-fault-gcs.json"),
+    ("fault-azure-v1", "qualification-matrix-fault-azure.json"),
+];
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -268,6 +289,7 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         Some("verify-matrix") => verify_matrix(&mut args),
+        Some("verify-protected-bundle") => verify_protected_bundle(&mut args),
         Some("validate-cluster") => validate_cluster(&mut args),
         _ => Err(usage()),
     }
@@ -402,12 +424,72 @@ fn verify_matrix(args: &mut impl Iterator<Item = String>) -> Result<(), String> 
     if args.next().is_some() {
         return Err(usage());
     }
-    require_trusted_signer(profile.as_ref(), trusted_signer.as_ref())?;
-    let manifest = QualificationMatrixManifest::decode(
-        &fs::read(&manifest_path).map_err(|error| format!("read matrix manifest: {error}"))?,
-    )
-    .map_err(|error| error.to_string())?;
-    let base = manifest_base(&manifest_path);
+    verify_matrix_files(
+        &manifest_path,
+        &source,
+        image,
+        profile.as_ref(),
+        trusted_signer.as_ref(),
+    )?;
+    println!("qualification matrix verified");
+    Ok(())
+}
+
+fn verify_protected_bundle(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
+    let protected_dir = PathBuf::from(required(args, "protected evidence directory")?);
+    let source = required(args, "source revision")?;
+    let image = parse_digest(&required(args, "image digest")?)?;
+    let trusted_signer = parse_signer(&required(args, "trusted signer")?)?;
+    if args.next().is_some() {
+        return Err(usage());
+    }
+    require_directory(&protected_dir, "protected evidence directory")?;
+    reject_symlinks(&protected_dir, "protected evidence")?;
+
+    for (profile_name, matrix_name) in PROTECTED_BUNDLE_PROFILES {
+        let profile_path = protected_dir.join(format!("{profile_name}.json"));
+        let matrix_path = protected_dir.join(matrix_name);
+        let profile = QualificationProfile::decode(&read_regular_file(
+            &profile_path,
+            "protected qualification profile",
+        )?)
+        .map_err(|error| error.to_string())?;
+        if profile.name() != *profile_name {
+            return Err(format!(
+                "protected profile name mismatch: expected {profile_name}, got {}",
+                profile.name()
+            ));
+        }
+        if !profile.requires_protected_evidence() {
+            return Err(format!(
+                "protected profile {profile_name} does not require protected evidence"
+            ));
+        }
+        require_file(&matrix_path, "protected qualification matrix")?;
+        verify_matrix_files(
+            &matrix_path,
+            &source,
+            image,
+            Some(&profile),
+            Some(&trusted_signer),
+        )?;
+    }
+    println!("qualification protected bundle verified");
+    Ok(())
+}
+
+fn verify_matrix_files(
+    manifest_path: &Path,
+    source: &str,
+    image: Digest,
+    profile: Option<&QualificationProfile>,
+    trusted_signer: Option<&[u8; 32]>,
+) -> Result<(), String> {
+    require_trusted_signer(profile, trusted_signer)?;
+    let manifest =
+        QualificationMatrixManifest::decode(&read_regular_file(manifest_path, "matrix manifest")?)
+            .map_err(|error| error.to_string())?;
+    let base = manifest_base(manifest_path);
     let mut receipts = Vec::with_capacity(manifest.entries().len());
     let mut artifacts = Vec::with_capacity(manifest.entries().len());
     for entry in manifest.entries() {
@@ -452,7 +534,7 @@ fn verify_matrix(args: &mut impl Iterator<Item = String>) -> Result<(), String> 
                     image,
                     &profile,
                     &evidence,
-                    trusted_signer,
+                    *trusted_signer,
                     unix_millis()?,
                 )
                 .map_err(|error| error.to_string())?;
@@ -462,7 +544,7 @@ fn verify_matrix(args: &mut impl Iterator<Item = String>) -> Result<(), String> 
                     image,
                     &profile,
                     &evidence,
-                    trusted_signer,
+                    *trusted_signer,
                 )
                 .map_err(|error| error.to_string())?;
             }
@@ -477,7 +559,21 @@ fn verify_matrix(args: &mut impl Iterator<Item = String>) -> Result<(), String> 
                 .map_err(|error| error.to_string())?;
         }
     }
-    println!("qualification matrix verified");
+    Ok(())
+}
+
+fn reject_symlinks(path: &Path, field: &str) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| format!("{field}: {error}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!("{field} must not contain symlinks"));
+    }
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(path).map_err(|error| format!("read {field}: {error}"))? {
+        let entry = entry.map_err(|error| format!("read {field} entry: {error}"))?;
+        reject_symlinks(&entry.path(), field)?;
+    }
     Ok(())
 }
 
@@ -676,14 +772,14 @@ fn unix_millis() -> Result<u64, String> {
 }
 
 fn usage() -> String {
-    "usage: qualification_receipt profile <output> [pr-contract|local-provider|scale|fault|fault-s3|fault-gcs|fault-azure|provider|provider-s3|provider-gcs|provider-azure|compatibility]\n       qualification_receipt workload <output> <profile.json> <seed> [cells operations duration_secs]\n       qualification_receipt verify-workload <workload.json> <profile.json>\n       qualification_receipt manifest <output> <evidence-dir>\n       qualification_receipt emit <output> <source> <image-digest> <artifact> [provider workload fault profile.json]\n       qualification_receipt bind-protected <output> <source> <image-digest> <profile.json> <execution-evidence.json> <signing-key-file> <run-artifact.json> <workload.json> [raw-artifact ...]\n       qualification_receipt verify <receipt> <source> <image-digest> <artifact> [profile.json [trusted-signer-hex]]\n       qualification_receipt verify-matrix <manifest> <source> <image-digest> [profile.json [trusted-signer-hex]]\n       qualification_receipt validate-cluster <receipt> <source> <image-digest> [release|source-only]".into()
+    "usage: qualification_receipt profile <output> [pr-contract|local-provider|scale|fault|fault-s3|fault-gcs|fault-azure|provider|provider-s3|provider-gcs|provider-azure|compatibility]\n       qualification_receipt workload <output> <profile.json> <seed> [cells operations duration_secs]\n       qualification_receipt verify-workload <workload.json> <profile.json>\n       qualification_receipt manifest <output> <evidence-dir>\n       qualification_receipt emit <output> <source> <image-digest> <artifact> [provider workload fault profile.json]\n       qualification_receipt bind-protected <output> <source> <image-digest> <profile.json> <execution-evidence.json> <signing-key-file> <run-artifact.json> <workload.json> [raw-artifact ...]\n       qualification_receipt verify <receipt> <source> <image-digest> <artifact> [profile.json [trusted-signer-hex]]\n       qualification_receipt verify-matrix <manifest> <source> <image-digest> [profile.json [trusted-signer-hex]]\n       qualification_receipt verify-protected-bundle <protected-dir> <source> <image-digest> <trusted-signer-hex>\n       qualification_receipt validate-cluster <receipt> <source> <image-digest> [release|source-only]".into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_protected, build_manifest, manifest_base, read_signing_key, require_manifest_output,
-        require_trusted_signer, resolve_manifest_path,
+        PROTECTED_BUNDLE_PROFILES, bind_protected, build_manifest, manifest_base, read_signing_key,
+        reject_symlinks, require_manifest_output, require_trusted_signer, resolve_manifest_path,
     };
     use crab_cell_runtime::{
         Digest, QUALIFICATION_MATRIX_ROWS, QualificationExecution, QualificationExecutionEvidence,
@@ -731,6 +827,27 @@ mod tests {
         assert!(require_trusted_signer(Some(&protected), None).is_err());
         assert!(require_trusted_signer(Some(&QualificationProfile::pr_contract()), None).is_ok());
         assert!(require_trusted_signer(None, None).is_ok());
+    }
+
+    #[test]
+    fn protected_bundle_profile_contract_covers_every_release_profile() {
+        assert_eq!(PROTECTED_BUNDLE_PROFILES.len(), 9);
+        for (name, _) in PROTECTED_BUNDLE_PROFILES {
+            let profile = match *name {
+                "local-provider-v1" => QualificationProfile::local_provider(),
+                "scale-v1" => QualificationProfile::scale(),
+                "compatibility-v1" => QualificationProfile::compatibility(),
+                "provider-s3-v1" => QualificationProfile::provider_s3(),
+                "provider-gcs-v1" => QualificationProfile::provider_gcs(),
+                "provider-azure-v1" => QualificationProfile::provider_azure(),
+                "fault-s3-v1" => QualificationProfile::fault_s3(),
+                "fault-gcs-v1" => QualificationProfile::fault_gcs(),
+                "fault-azure-v1" => QualificationProfile::fault_azure(),
+                _ => panic!("unexpected protected profile"),
+            };
+            assert_eq!(profile.name(), *name);
+            assert!(profile.requires_protected_evidence());
+        }
     }
 
     #[test]
@@ -963,5 +1080,17 @@ mod tests {
         assert!(resolve_manifest_path(directory.path(), "linked.json").is_err());
         assert!(resolve_manifest_path(directory.path(), "linked-directory/artifact.json").is_err());
         assert!(resolve_manifest_path(directory.path(), "artifact.json").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_bundle_rejects_nested_symlinks() {
+        let directory = tempfile::tempdir().expect("bundle directory");
+        let nested = directory.path().join("nested");
+        fs::create_dir(&nested).expect("nested directory");
+        fs::write(nested.join("artifact"), b"artifact").expect("artifact");
+        std::os::unix::fs::symlink(nested.join("artifact"), nested.join("linked"))
+            .expect("nested symlink");
+        assert!(reject_symlinks(directory.path(), "protected evidence").is_err());
     }
 }

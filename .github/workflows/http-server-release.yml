@@ -508,10 +508,10 @@ jobs:
               echo "::error::Protected $profile_name profile does not match the exact tagged source."
               exit 1
             }
-            cargo run --locked --quiet -p crab-cell-runtime --bin qualification_receipt \
-              -- verify-matrix "$matrix" \
-              "$SOURCE_SHA" "$IMAGE_DIGEST" "$profile" "$QUALIFICATION_SIGNER"
           done
+          cargo run --locked --quiet -p crab-cell-runtime --bin qualification_receipt \
+            -- verify-protected-bundle "$protected_dir" \
+            "$SOURCE_SHA" "$IMAGE_DIGEST" "$QUALIFICATION_SIGNER"
 
       - name: Package verified Cell runtime qualification evidence
         shell: bash

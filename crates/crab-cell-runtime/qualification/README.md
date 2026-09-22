@@ -42,6 +42,22 @@ indexes files; it does not create or sign receipts. Run `verify-matrix` with the
 protected profile and pinned attestation key before treating the resulting
 manifest as release evidence.
 
+The protected release bundle has one canonical fresh-process verifier. It
+requires all nine provider, scale, compatibility, and fault profiles, rejects
+symlinks anywhere below the bundle, checks each profile name and protected
+threshold contract, and verifies every matrix against the same source, image,
+and pinned signer:
+
+```text
+cargo run --locked -p crab-cell-runtime --bin qualification_receipt -- \
+  verify-protected-bundle protected/ <source-sha> <image-digest> \
+  <trusted-signer-hex>
+```
+
+The workflow and release gate call this command directly; they only retain
+their shell-side byte-for-byte comparison between each supplied profile and
+the tracked profile from the exact source checkout.
+
 Typed qualification adapters may use the bounded `QualificationWorkload::run_concurrent`
 entry point when scheduled operations are independent or idempotent. The serial
 `run` entry point remains the safe choice for workloads with application-level
