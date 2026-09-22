@@ -40,4 +40,48 @@ is serial and includes all method calls, verification, and the 6 ms intentional
 Cron due-time wait. It excludes Cell bootstrap and shutdown. Capture the source
 revision, Rust profile, CPU, storage, iteration count, and raw output with every
 report. These local numbers are development evidence, not a cloud capacity or
-release qualification result.
+release qualification result. Two measured runs are recorded in
+[`performance/2026-09-21-local.md`](performance/2026-09-21-local.md).
+
+## Three-runtime fleet workload
+
+The second ignored test places the seven reference Cells across three
+independent runtimes. Six primitive lanes run concurrently through signed peer
+requests over loopback TCP, with 100 verified actions per lane when the
+iteration count is 100. It reports each lane and the fleet's combined action
+latency and throughput:
+
+```bash
+CRAB_CELL_PERF_ITERATIONS=100 \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-my-worktree \
+  cargo test -p crab-cell-app --test reference_application \
+  performance::reference_three_node_fleet_end_to_end_performance \
+  --release --locked -- --ignored --nocapture
+```
+
+The runtimes share one process and an in-memory object store. Static Cell-ID
+routing uses the local TCP stack; this run does not include product ingress,
+dynamic placement, mTLS, or provider network latency. The measured topology,
+workload, and two runs are in
+[`performance/2026-09-21-three-node-local.md`](performance/2026-09-21-three-node-local.md).
+
+## Three-process fleet workload
+
+The process benchmark runs the same six concurrent lanes through three
+separate owner processes and a parent load generator. Owners share the
+test-only filesystem CAS store and receive signed Cell peer requests over
+loopback TCP. Each process has its own node session, SQLite workers, and local
+database directory:
+
+```bash
+CRAB_CELL_PERF_ITERATIONS=100 \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-my-worktree \
+  cargo test -p crab-cell-app --test reference_application \
+  process_performance::reference_three_process_fleet_end_to_end_performance \
+  --release --locked -- --ignored --nocapture
+```
+
+The test prints action-level and combined fleet latency and throughput. It
+starts and stops the three owner processes outside the timed workload. The
+topology and two measured runs are recorded in
+[`performance/2026-09-21-three-process-local.md`](performance/2026-09-21-three-process-local.md).
