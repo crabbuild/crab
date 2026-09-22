@@ -13,7 +13,7 @@
 - Priority: P0; effort: XL; risk: HIGH; category: correctness/feature.
 - Depends on: plan 027's measured actor snapshot; may be developed alongside
   plan 028. Planned at `cebc909940f137e4bd8445e524e77a154bf51a29`,
-  2026-09-21. Status: IN PROGRESS; implementation in this branch, acceptance gates pending.
+  2026-09-21. Status: IMPLEMENTED; local runtime gates pass. Protected end-to-end qualification remains plan 032.
 
 ## Why and current state
 

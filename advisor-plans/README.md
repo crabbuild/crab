@@ -12,12 +12,12 @@ complete from local tests or synthetic qualification receipts.
 
 | Order | Plan | Outcome | Depends on | Status |
 | --- | --- | --- | --- | --- |
-| 1 | [027](027-sign-live-rebalance-inputs.md) | Sign measured Cell, memory, disk, job, and backlog inputs | None | IN PROGRESS |
-| 2 | [028](028-project-bounded-cell-transfers.md) | Produce deterministic, projected, paced transfer intents | 027 | IN PROGRESS |
-| 3 | [029](029-actor-verified-cell-release.md) | Recheck unsettled work and await exact-Cell release | 027; may proceed alongside 028 | IN PROGRESS |
-| 4 | [030](030-host-scale-down-lifecycle.md) | Keep blocked Cells and node lease alive during scale-down | 029 | IN PROGRESS |
-| 5 | [031](031-run-fleet-rebalance-controller.md) | Wire signed planning, host movement, and receiver activation | 027–030 | IN PROGRESS |
-| 6 | [032](032-prove-cell-rebalance-end-to-end.md) | Prove user-visible scale-up/down and fault safety | 027–031 | TODO |
+| 1 | [027](027-sign-live-rebalance-inputs.md) | Sign measured Cell, memory, disk, job, and backlog inputs | None | IMPLEMENTED; protected E2E remains 032 |
+| 2 | [028](028-project-bounded-cell-transfers.md) | Produce deterministic, projected, paced transfer intents | 027 | IMPLEMENTED; protected E2E remains 032 |
+| 3 | [029](029-actor-verified-cell-release.md) | Recheck unsettled work and await exact-Cell release | 027; may proceed alongside 028 | IMPLEMENTED; protected E2E remains 032 |
+| 4 | [030](030-host-scale-down-lifecycle.md) | Keep blocked Cells and node lease alive during scale-down | 029 | IMPLEMENTED; protected E2E remains 032 |
+| 5 | [031](031-run-fleet-rebalance-controller.md) | Wire signed planning, host movement, and receiver activation | 027–030 | IMPLEMENTED; protected E2E remains 032 |
+| 6 | [032](032-prove-cell-rebalance-end-to-end.md) | Prove user-visible scale-up/down and fault safety | 027–031 | IN PROGRESS; protected provider/Kubernetes + multi-process evidence open |
 
 The implementation critical path is 027 → 029 → 030 → 031 → 032; 028 starts
 after 027 and joins before 031. Use a different external Cargo target

@@ -70,6 +70,21 @@ async fn cloned_directories_share_only_a_fresh_recovery_scan_snapshot() {
     assert!(!Arc::ptr_eq(&first, &refreshed));
 }
 
+#[tokio::test]
+async fn empty_live_node_snapshot_is_reused_within_its_ttl() {
+    let directory = directory();
+    let first = directory
+        .recovery_scan_snapshot(NOW_MS, true)
+        .await
+        .unwrap();
+    assert!(first.live_nodes.is_empty());
+    let reused = directory
+        .recovery_scan_snapshot(NOW_MS + 1, true)
+        .await
+        .unwrap();
+    assert!(Arc::ptr_eq(&first, &reused));
+}
+
 #[test]
 fn recovery_candidate_snapshot_rechecks_claim_and_expiry() {
     let record = RecoveryCandidateRecord {

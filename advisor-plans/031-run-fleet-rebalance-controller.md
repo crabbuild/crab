@@ -12,7 +12,7 @@
 - Priority: P0; effort: XL; risk: HIGH; category: feature/integration.
 - Depends on: plans 027–030. Planned at
   `cebc909940f137e4bd8445e524e77a154bf51a29`, 2026-09-21.
-- Status: IN PROGRESS; implementation in this branch, acceptance gates pending.
+- Status: IMPLEMENTED; local controller/host/server gates pass. Protected end-to-end qualification remains plan 032.
 
 ## Why and current state
 

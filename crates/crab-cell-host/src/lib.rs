@@ -400,6 +400,8 @@ pub enum NodeState {
 pub struct ScaleDownStatus {
     pub remaining_cells: usize,
     pub settled_candidates: usize,
+    pub released_cells: usize,
+    pub blocked_cells: usize,
 }
 
 impl ScaleDownStatus {
@@ -537,6 +539,7 @@ impl CellNodeBuilder {
         let node = CellNode {
             application,
             runtime,
+            session,
             state: Arc::new(Mutex::new(NodeState::Starting)),
             lease_installed: AtomicBool::new(false),
             shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -567,6 +570,7 @@ impl CellNodeBuilder {
         let node = CellNode {
             application,
             runtime,
+            session,
             state: Arc::new(Mutex::new(NodeState::Starting)),
             lease_installed: AtomicBool::new(false),
             shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -637,6 +641,7 @@ fn append_required_components(
 pub struct CellNode {
     application: Arc<CompiledApplication>,
     runtime: CellRuntime,
+    session: SessionId,
     state: Arc<Mutex<NodeState>>,
     lease_installed: AtomicBool,
     shutdown_lock: Arc<tokio::sync::Mutex<()>>,
@@ -733,15 +738,65 @@ impl CellNode {
         &self,
         deadline: Instant,
     ) -> crab_cell_runtime::Result<ScaleDownStatus> {
+        let _shutdown = self.shutdown_lock.lock().await;
+        if self.state() == NodeState::Stopped {
+            return Ok(ScaleDownStatus {
+                remaining_cells: 0,
+                settled_candidates: 0,
+                released_cells: 0,
+                blocked_cells: 0,
+            });
+        }
         self.begin_scale_down()?;
+        let mut released_cells = 0_usize;
+        let mut blocked = HashSet::new();
         loop {
+            let candidates = self.runtime.idle_transfer_candidates().await?;
+            for (cell, generation, _, _) in candidates.iter().copied() {
+                if Instant::now() >= deadline {
+                    break;
+                }
+                let result = tokio::time::timeout_at(
+                    deadline.into(),
+                    self.runtime
+                        .release_idle_cell(cell, self.session, generation),
+                )
+                .await;
+                match result {
+                    Ok(Ok(())) => {
+                        released_cells = released_cells.saturating_add(1);
+                        blocked.remove(&cell);
+                    }
+                    Ok(Err(_)) => {
+                        blocked.insert(cell);
+                    }
+                    Err(_) => break,
+                }
+            }
             let remaining_cells = self.runtime.unreleased_cell_count().await?;
-            let settled_candidates = self.runtime.idle_transfer_candidates().await?.len();
+            let current_candidates = self.runtime.idle_transfer_candidates().await?;
+            let settled_candidates = current_candidates.len();
+            let candidate_ids = current_candidates
+                .iter()
+                .map(|(cell, _, _, _)| *cell)
+                .collect::<HashSet<_>>();
+            blocked.retain(|cell| candidate_ids.contains(cell));
             let status = ScaleDownStatus {
                 remaining_cells,
                 settled_candidates,
+                released_cells,
+                blocked_cells: blocked
+                    .len()
+                    .saturating_add(remaining_cells.saturating_sub(settled_candidates)),
             };
-            if status.ready_to_stop() || Instant::now() >= deadline {
+            if status.ready_to_stop() {
+                if Instant::now() >= deadline {
+                    return Ok(status);
+                }
+                self.drain_until_locked(Some(deadline)).await?;
+                return Ok(status);
+            }
+            if Instant::now() >= deadline {
                 return Ok(status);
             }
             let wait = deadline
@@ -1158,6 +1213,10 @@ impl CellNode {
     /// Stops admission and completes every owned drain phase by `deadline`.
     pub async fn drain_until(&self, deadline: Option<Instant>) -> crab_cell_runtime::Result<()> {
         let _shutdown = self.shutdown_lock.lock().await;
+        self.drain_until_locked(deadline).await
+    }
+
+    async fn drain_until_locked(&self, deadline: Option<Instant>) -> crab_cell_runtime::Result<()> {
         {
             let mut state = self
                 .state
@@ -2126,11 +2185,19 @@ mod tests {
         node.install_node_lease_for_startup(NodeLeaseGuard::new(0, 60_000).unwrap())
             .unwrap();
         node.start().unwrap();
-        let status = node.drain_for_scale_down(Instant::now()).await.unwrap();
+        let status = node
+            .drain_for_scale_down(Instant::now() + Duration::from_secs(1))
+            .await
+            .unwrap();
         assert!(status.ready_to_stop());
-        assert_eq!(node.state(), NodeState::ScalingDown);
-        assert!(node.is_ready());
+        assert_eq!(node.state(), NodeState::Stopped);
+        assert!(!node.is_ready());
         assert!(!node.runtime().is_acquiring());
+        let retry = node
+            .drain_for_scale_down(Instant::now() + Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(retry.ready_to_stop());
         node.drain().await.unwrap();
     }
 

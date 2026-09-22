@@ -647,8 +647,8 @@ impl CellRuntime {
         response.await.map_err(|_| Error::RuntimeClosed)?
     }
 
-    /// Releases one exact local generation only after the actor's settled-work
-    /// gate, worker close, and authoritative release have completed.
+    /// Releases one exact local generation only after a fresh settled-work
+    /// preflight, actor gate, worker close, and authoritative release complete.
     pub async fn release_idle_cell(
         &self,
         cell: CellId,
@@ -1679,9 +1679,16 @@ struct ActiveCell {
     persisted_work: crate::PersistedWorkInventory,
     inventory_refreshing: bool,
     drain: Option<oneshot::Sender<crate::Result<()>>>,
+    // Transfer closes the old capability and installs a fresh one; failed fresh
+    // inventory must leave the current owner serving through that capability.
+    transfer: Option<TransferPreflight>,
     last_used_ms: i64,
     last_work_at: std::time::Instant,
     compaction_retry_at: std::time::Instant,
+}
+
+struct TransferPreflight {
+    reply: oneshot::Sender<crate::Result<()>>,
 }
 
 struct QueuedPublication {
@@ -1694,7 +1701,10 @@ struct QueuedPublication {
 
 impl ActiveCell {
     fn draining(&self) -> bool {
-        self.drain.is_some() || self.coordination.is_draining()
+        self.drain.is_some()
+            || self.transfer.is_some()
+            || self.coordination.is_draining()
+            || self.coordination.is_transfer_preparing()
     }
 
     fn busy(&self) -> bool {
@@ -1756,6 +1766,12 @@ enum TaskResult {
         generation: u64,
         effect_id: u64,
         result: crate::Result<crate::PersistedWorkInventory>,
+    },
+    TransferPreflight {
+        cell: CellId,
+        generation: u64,
+        effect_id: u64,
+        result: crate::Result<crate::maintenance::TransferWorkInventory>,
     },
     Executed {
         cell: CellId,
@@ -1996,6 +2012,11 @@ fn start_shutdown_drain(
     state.draining = true;
     let mut ready = Vec::new();
     for (cell, active) in cells.iter_mut() {
+        if let Some(transfer) = active.transfer.take() {
+            active.coordination.step(CoordinationInput::AbortTransfer);
+            let _ = transfer.reply.send(Err(Error::CellDraining));
+        }
+        active.inventory_refreshing = false;
         active.coordination.step(CoordinationInput::BeginShutdown);
         active.admission.draining.store(true, Ordering::Release);
         active.admission.requests.close();
@@ -2138,6 +2159,10 @@ fn handle_message(
                 send_command_reply(&mut command, Err(Error::CellNotActive));
                 return;
             };
+            if active.transfer.is_some() {
+                send_command_reply(&mut command, Err(Error::CellDraining));
+                return;
+            }
             match active.coordination.step(CoordinationInput::Admit {
                 kind: AdmissionKind::Command,
                 admission_matches: Arc::ptr_eq(&active.admission, &command.admission),
@@ -2157,6 +2182,10 @@ fn handle_message(
                 send_query_reply(&mut query, Err(Error::CellNotActive));
                 return;
             };
+            if active.transfer.is_some() {
+                send_query_reply(&mut query, Err(Error::CellDraining));
+                return;
+            }
             match active.coordination.step(CoordinationInput::Admit {
                 kind: AdmissionKind::Query,
                 admission_matches: Arc::ptr_eq(&active.admission, &query.admission),
@@ -2176,6 +2205,10 @@ fn handle_message(
                 send_resolve_reply(&mut resolve, Err(Error::CellNotActive));
                 return;
             };
+            if active.transfer.is_some() {
+                send_resolve_reply(&mut resolve, Ok(Resolution::Unknown));
+                return;
+            }
             match active.coordination.step(CoordinationInput::Admit {
                 kind: AdmissionKind::Resolve,
                 admission_matches: Arc::ptr_eq(&active.admission, &resolve.admission),
@@ -2246,7 +2279,9 @@ fn handle_message(
                 )
                 .then_some(active)
                 .filter(|active| {
-                    !require_resident || active.coordination.residency() == Residency::Resident
+                    active.transfer.is_none()
+                        && (!require_resident
+                            || active.coordination.residency() == Residency::Resident)
                 })
                 .map(|active| LocalCell {
                     admission: active.admission.clone(),
@@ -2267,7 +2302,30 @@ fn handle_message(
                 return;
             };
             if !Arc::ptr_eq(&active.admission, &admission) {
-                let _ = reply.send(Err(Error::CellNotActive));
+                let _ = reply.send(Err(if active.transfer.is_some() {
+                    Error::CellDraining
+                } else {
+                    Error::CellNotActive
+                }));
+                return;
+            }
+            if active.transfer.is_some() {
+                if let Some(transfer) = active.transfer.take() {
+                    active.coordination.step(CoordinationInput::AbortTransfer);
+                    let _ = transfer.reply.send(Err(Error::CellDraining));
+                }
+                let decision = active.coordination.step(CoordinationInput::BeginDrain);
+                if let CoordinationDecision::Reject(reason) = decision {
+                    let _ = reply.send(Err(rejection_error(reason)));
+                    return;
+                }
+                active.drain = Some(reply);
+                if matches!(
+                    schedule(active, node_lease.check().is_ok()),
+                    CoordinationDecision::ReadyToDeactivate
+                ) {
+                    start_deactivate(cell, pool, cells, transitioning, tasks);
+                }
                 return;
             }
             let decision = active.coordination.step(CoordinationInput::BeginDrain);
@@ -2305,7 +2363,7 @@ fn handle_message(
             let candidates = cells
                 .iter()
                 .filter_map(|(cell, active)| {
-                    eviction_observation(*cell, active)
+                    transfer_candidate_observation(*cell, active)
                         .eligible()
                         .then_some(active)
                         .filter(|active| !active.draining())
@@ -2332,7 +2390,8 @@ fn handle_message(
             };
             if active.generation != generation
                 || active.draining()
-                || !eviction_observation(cell, active).eligible()
+                || active.transfer.is_some()
+                || active.inventory_refreshing
             {
                 let _ = reply.send(Err(Error::CellDraining));
                 return;
@@ -2341,11 +2400,60 @@ fn handle_message(
                 let _ = reply.send(Err(Error::Capacity("movement budget")));
                 return;
             };
-            if begin_idle_cell_eviction(cell, pool, cells, transitioning, tasks, Some(reply)) {
-                movement_permits.insert(cell, permit);
-            } else {
-                movement.complete(&mut permit);
-            }
+            {
+                let Some(active) = cells.get_mut(&cell) else {
+                    movement.complete(&mut permit);
+                    let _ = reply.send(Err(Error::CellNotActive));
+                    return;
+                };
+                if active.transfer.is_some()
+                    || active.drain.is_some()
+                    || active.inventory_refreshing
+                {
+                    movement.complete(&mut permit);
+                    let _ = reply.send(Err(Error::CellDraining));
+                    return;
+                }
+                let decision =
+                    active
+                        .coordination
+                        .step(CoordinationInput::BeginTransferPreflight {
+                            queue_empty: active.queue.is_empty(),
+                            publication_idle: active.coordination.publication_count() == 0,
+                            lease_live: node_lease.check().is_ok(),
+                        });
+                match decision {
+                    CoordinationDecision::Started => {}
+                    CoordinationDecision::Fence => {
+                        fence_active(active);
+                        movement.complete(&mut permit);
+                        let _ = reply.send(Err(Error::Fenced));
+                        return;
+                    }
+                    CoordinationDecision::Reject(reason) => {
+                        movement.complete(&mut permit);
+                        let _ = reply.send(Err(rejection_error(reason)));
+                        return;
+                    }
+                    CoordinationDecision::Ignored => {
+                        movement.complete(&mut permit);
+                        let _ = reply.send(Err(Error::CellDraining));
+                        return;
+                    }
+                    _ => {
+                        movement.complete(&mut permit);
+                        let _ = reply.send(Err(Error::CellDraining));
+                        return;
+                    }
+                }
+                active.admission.draining.store(true, Ordering::Release);
+                active.admission.requests.close();
+                active.admission.bytes.close();
+                active.admission = new_cell_admission();
+                active.transfer = Some(TransferPreflight { reply });
+            };
+            movement_permits.insert(cell, permit);
+            continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
         }
         Message::ObservePressure { sample, reply } => {
             let result = pressure.observe(sample);
@@ -2484,7 +2592,7 @@ fn eviction_observation(cell: CellId, active: &ActiveCell) -> EvictionObservatio
         last_used_ms: active.last_used_ms,
         cost: ResourceCost::active_cell()
             .with_retained_bytes(usize::try_from(active.publication_bytes).unwrap_or(usize::MAX)),
-        busy: active.busy() || active.renewing(),
+        busy: active.busy() || active.renewing() || active.transfer.is_some(),
         retained_obligation: active.coordination.publication_count() != 0,
         migrating: active.publisher.is_none(),
         backup_pinned: active.unpublished_node_logs != 0,
@@ -2492,6 +2600,25 @@ fn eviction_observation(cell: CellId, active: &ActiveCell) -> EvictionObservatio
         primitive_obligation: !active.persisted_work.is_transfer_settled(),
         accounting_known: !active.persisted_work.is_unknown(),
     }
+}
+
+fn transfer_candidate_observation(cell: CellId, active: &ActiveCell) -> EvictionObservation {
+    let mut observation = eviction_observation(cell, active);
+    if !active.persisted_work.is_unknown() {
+        observation.primitive_obligation = false;
+    }
+    observation
+}
+
+fn transfer_observation(
+    cell: CellId,
+    active: &ActiveCell,
+    inventory: crate::maintenance::TransferWorkInventory,
+) -> EvictionObservation {
+    let mut observation = eviction_observation(cell, active);
+    observation.primitive_obligation = !inventory.is_settled();
+    observation.accounting_known = true;
+    observation
 }
 
 fn begin_idle_cell_eviction(
@@ -3583,6 +3710,7 @@ fn handle_task(
                         persisted_work,
                         inventory_refreshing: false,
                         drain: None,
+                        transfer: None,
                         last_used_ms: unix_millis(),
                         last_work_at: std::time::Instant::now(),
                         compaction_retry_at: std::time::Instant::now(),
@@ -3669,6 +3797,102 @@ fn handle_task(
                 active.persisted_work = inventory;
             }
             continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
+        }
+        TaskResult::TransferPreflight {
+            cell,
+            generation,
+            effect_id,
+            result,
+        } => {
+            let preflight = {
+                let Some(active) = cells.get_mut(&cell) else {
+                    return;
+                };
+                if active.generation != generation
+                    || !active
+                        .coordination
+                        .effect_matches(effect_id, CoordinationEffect::Inventory)
+                {
+                    return;
+                }
+                active.finish_task(effect_id, CoordinationEffect::Inventory);
+                active.inventory_refreshing = false;
+                match active.transfer.take() {
+                    Some(transfer) => {
+                        let mut ready_to_deactivate = false;
+                        let mut fenced = false;
+                        let transfer_result = if node_lease.check().is_err() {
+                            fenced = true;
+                            active.coordination.step(CoordinationInput::Fence);
+                            fence_active(active);
+                            Err(Error::Fenced)
+                        } else {
+                            match result {
+                                Ok(inventory) => {
+                                    if inventory.is_settled()
+                                        && active.queue.is_empty()
+                                        && active.coordination.can_deactivate()
+                                        && transfer_observation(cell, active, inventory).eligible()
+                                    {
+                                        match active
+                                            .coordination
+                                            .step(CoordinationInput::ConfirmTransfer)
+                                        {
+                                            CoordinationDecision::ReadyToDeactivate => {
+                                                ready_to_deactivate = true;
+                                                Ok(())
+                                            }
+                                            CoordinationDecision::Started => Ok(()),
+                                            CoordinationDecision::Reject(RejectReason::Fenced) => {
+                                                fenced = true;
+                                                fence_active(active);
+                                                Err(Error::Fenced)
+                                            }
+                                            CoordinationDecision::Reject(reason) => {
+                                                Err(rejection_error(reason))
+                                            }
+                                            _ => Err(Error::CellDraining),
+                                        }
+                                    } else {
+                                        Err(Error::CellDraining)
+                                    }
+                                }
+                                Err(error) => Err(error),
+                            }
+                        };
+                        if transfer_result.is_err() && !fenced {
+                            active.coordination.step(CoordinationInput::AbortTransfer);
+                        }
+                        Some((transfer, ready_to_deactivate, fenced, transfer_result))
+                    }
+                    None => None,
+                }
+            };
+            let Some((transfer, ready_to_deactivate, _fenced, transfer_result)) = preflight else {
+                continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
+                return;
+            };
+            if transfer_result.is_ok() {
+                if ready_to_deactivate {
+                    if let Some(active) = cells.get_mut(&cell) {
+                        active.drain = Some(transfer.reply);
+                    }
+                    start_deactivate(cell, pool, cells, transitioning, tasks);
+                } else if let Some(active) = cells.get_mut(&cell) {
+                    active.drain = Some(transfer.reply);
+                    continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
+                } else {
+                    if let Some(mut permit) = movement_permits.remove(&cell) {
+                        movement.complete(&mut permit);
+                    }
+                }
+            } else {
+                let _ = transfer.reply.send(transfer_result);
+                if let Some(mut permit) = movement_permits.remove(&cell) {
+                    movement.complete(&mut permit);
+                }
+                continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
+            }
         }
         TaskResult::Executed {
             cell,
@@ -4125,6 +4349,10 @@ fn finish_migration(active: &mut ActiveCell, fenced: bool) -> CoordinationDecisi
 fn fence_active(active: &mut ActiveCell) {
     active.coordination.step(CoordinationInput::Fence);
     fence_admission(&active.admission);
+    if let Some(transfer) = active.transfer.take() {
+        let _ = transfer.reply.send(Err(Error::Fenced));
+    }
+    active.inventory_refreshing = false;
     while let Some(publication) = active.publications.pop_front() {
         active
             .coordination
@@ -4163,6 +4391,27 @@ fn continue_cell(
     tasks: &mut JoinSet<TaskResult>,
     node_lease: &RuntimeNodeLease,
 ) {
+    if cells
+        .get(&cell)
+        .is_some_and(|active| active.transfer.is_some())
+    {
+        let ready = cells.get(&cell).is_some_and(|active| {
+            !active.inventory_refreshing
+                && active.queue.is_empty()
+                && active.coordination.can_deactivate()
+        });
+        if ready {
+            start_transfer_inspection(cell, pool, cells, tasks, node_lease);
+            return;
+        }
+        if let Some(active) = cells.get_mut(&cell)
+            && !active.inventory_refreshing
+            && !active.queue.is_empty()
+        {
+            start_next(active, pool, tasks, node_lease);
+        }
+        return;
+    }
     let Some(active) = cells.get_mut(&cell) else {
         return;
     };
@@ -4190,6 +4439,50 @@ fn continue_cell(
             fence_active(active);
         }
     }
+}
+
+fn start_transfer_inspection(
+    cell: CellId,
+    pool: &SqlWorkerPool,
+    cells: &mut HashMap<CellId, ActiveCell>,
+    tasks: &mut JoinSet<TaskResult>,
+    node_lease: &RuntimeNodeLease,
+) {
+    let Some(active) = cells.get_mut(&cell) else {
+        return;
+    };
+    if active.transfer.is_none()
+        || active.inventory_refreshing
+        || !active.queue.is_empty()
+        || !active.coordination.can_deactivate()
+    {
+        return;
+    }
+    if node_lease.check().is_err() {
+        fence_active(active);
+        return;
+    }
+    let generation = active.generation;
+    let role = active.role;
+    let effect_id = active.begin_task(CoordinationEffect::Inventory);
+    active.inventory_refreshing = true;
+    let pool = pool.clone();
+    tasks.spawn(async move {
+        let deadline = std::time::Instant::now() + SQL_WALL_DEADLINE;
+        let result = tokio::time::timeout_at(
+            deadline.into(),
+            pool.transfer_work_inventory(cell, role, unix_millis()),
+        )
+        .await
+        .map_err(|_| Error::Deadline)
+        .and_then(|result| result);
+        TaskResult::TransferPreflight {
+            cell,
+            generation,
+            effect_id,
+            result,
+        }
+    });
 }
 
 fn fence_admission(admission: &CellAdmission) {
