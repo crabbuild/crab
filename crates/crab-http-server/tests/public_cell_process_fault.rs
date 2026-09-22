@@ -14,12 +14,12 @@ use crab_cell_runtime::{
     CellTarget, CronMutation, CronMutationOutcome, CronQueryResult, EffectAckRequest,
     EffectClaimRequest, EffectLease, EffectLeaseCommand, EffectLeaseOutcome, EffectLeaseRequest,
     IncarnationId, InvocationError, KvAtomicOutcome, KvAtomicRequest, KvMutation,
-    MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest, NodeLeaseGuard, Owner,
-    QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome, QueueSendRequest, QueueState,
-    RecoveryManifestStore, ReplicaLimits, Resolution, SessionId, SqlBatch, SqlStatement, SqlValue,
-    SqlWorkerPool, StoredOutcome, TenantId, WorkflowActivityClaimCommand,
-    WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand, WorkflowOutcome, WorkflowStatus,
-    partition_for_shard,
+    MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest, MutationIdentity,
+    NodeLeaseGuard, Owner, QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome,
+    QueueSendRequest, QueueState, RecoveryManifestStore, ReplicaLimits, Resolution, SessionId,
+    SqlBatch, SqlStatement, SqlValue, SqlWorkerPool, StoredOutcome, TenantId,
+    WorkflowActivityClaimCommand, WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand,
+    WorkflowOutcome, WorkflowStatus, partition_for_shard,
 };
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,8 @@ use tokio_util::sync::CancellationToken;
 
 #[path = "support/reference_application.rs"]
 mod fixture;
+#[path = "support/qualification_process_duplicate.rs"]
+mod process_duplicate;
 #[path = "support/qualification_process_owner.rs"]
 mod process_owner;
 #[path = "support/qualification_process_successor.rs"]
@@ -71,6 +73,8 @@ const EFFECT_RESULT: &[u8] = b"delivered-effect";
 
 #[derive(Deserialize, Serialize)]
 struct Acknowledgement {
+    replay_issued_at_ms: i64,
+    queue_available_at_ms: i64,
     sql_sequence: u64,
     kv_sequence: u64,
     kv_version: Vec<u8>,
@@ -149,6 +153,12 @@ fn now_ms() -> i64 {
             .as_millis(),
     )
     .expect("fault clock bounds")
+}
+
+fn replay_identity(index: u64, issued_at_ms: i64) -> MutationIdentity {
+    let mut identity = identity(index, issued_at_ms);
+    identity.expires_at_ms = issued_at_ms + 300_000;
+    identity
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

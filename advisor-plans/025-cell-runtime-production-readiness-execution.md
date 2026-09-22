@@ -179,7 +179,14 @@ plus acknowledged Workflow starts that schedule Activity and Effect work.
 The successor starts with an empty local directory and checks exact SQL bytes,
 KV bytes/version, Blob bytes/ETag/size, Queue message ID/payload, Cron
 generation/due time, completed Workflow result/event sequence, each source
-commit sequence, exact restored roots, and higher owner epochs. It claims and
+commit sequence, exact restored roots, and higher owner epochs. Before settling
+pending work, it replays the original SQL insert, KV put, Blob completion,
+Queue send, Cron upsert, and Workflow start with their exact mutation identities
+through typed capabilities. Each returns the original commit sequence and
+outcome; the independent reads still show one SQL row, the first KV version,
+one Blob, one Queue message, the first Cron generation, and one Workflow event.
+These are real-storage cross-process duplicate checks, but they do not set
+protected matrix case bits. The successor claims and
 acknowledges the Queue message, completes the pending Activity, delivers the
 Effect to its SQL destination through the signed peer inbox, then settles the
 source lease. After the recovered Cron schedule becomes due, the successor

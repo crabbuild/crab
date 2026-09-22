@@ -22,9 +22,10 @@ pub(super) async fn run() {
     let sql = typed
         .sql::<fixture::ReferenceSql>(target.clone())
         .expect("source SQL");
+    let replay_issued_at_ms = now_ms();
     let committed = sql
         .batch(
-            identity(900_100, now_ms()),
+            replay_identity(900_100, replay_issued_at_ms),
             SqlBatch {
                 statements: vec![SqlStatement {
                     sql: "INSERT INTO qualification_rows (id, payload) VALUES (1, ?1)".into(),
@@ -48,7 +49,7 @@ pub(super) async fn run() {
         .expect("source KV");
     let written = kv
         .atomic(
-            identity(900_101, now_ms()),
+            replay_identity(900_101, replay_issued_at_ms),
             KvAtomicRequest {
                 scope: KV_SCOPE.to_vec(),
                 checks: Vec::new(),
@@ -94,7 +95,7 @@ pub(super) async fn run() {
     .expect("source Blob part");
     let published = blob
         .mutate(
-            identity(900_104, issued_at_ms),
+            replay_identity(900_104, replay_issued_at_ms),
             BlobMutation::Complete {
                 key: BLOB_KEY.to_vec(),
                 upload_id,
@@ -109,13 +110,14 @@ pub(super) async fn run() {
     let queue = typed
         .queue::<fixture::ReferenceQueue>()
         .expect("source Queue");
+    let queue_available_at_ms = now_ms();
     let queued = queue
         .send(
-            identity(900_105, now_ms()),
+            replay_identity(900_105, replay_issued_at_ms),
             QueueSendRequest {
                 producer_id: fixed_id(900_105),
                 payload: QUEUE_PAYLOAD.to_vec(),
-                available_at_ms: now_ms(),
+                available_at_ms: queue_available_at_ms,
             },
         )
         .await
@@ -128,7 +130,7 @@ pub(super) async fn run() {
     let next_due_ms = now_ms() + 20_000;
     let scheduled = cron
         .mutate(
-            identity(900_108, now_ms()),
+            replay_identity(900_108, replay_issued_at_ms),
             CronMutation::Upsert {
                 schedule_id,
                 target_index: 0,
@@ -148,7 +150,7 @@ pub(super) async fn run() {
         .expect("source Workflow");
     let started = workflow
         .start(
-            identity(900_109, now_ms()),
+            replay_identity(900_109, replay_issued_at_ms),
             WORKFLOW_ID.to_vec(),
             WORKFLOW_RESULT.to_vec(),
         )
@@ -274,6 +276,8 @@ pub(super) async fn run() {
         None
     };
     let acknowledgement = Acknowledgement {
+        replay_issued_at_ms,
+        queue_available_at_ms,
         sql_sequence: committed.receipt.commit_sequence,
         kv_sequence: written.receipt.commit_sequence,
         kv_version: version.to_vec(),

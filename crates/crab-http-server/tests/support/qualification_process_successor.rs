@@ -106,6 +106,9 @@ pub(super) async fn run() {
     let typed = successor
         .application_handle::<fixture::ReferenceApplication>(direct.clone(), tenant, application_id)
         .with_blob_artifact_store(BlobArtifactStore::new(store));
+    if let Some(acknowledged) = &acknowledgement {
+        process_duplicate::verify(&typed, tenant, application_id, acknowledged).await;
+    }
     if let Some(leases) = acknowledgement.as_ref().and_then(|ack| ack.leases.as_ref()) {
         let deadline = leases
             .queue_until_ms
