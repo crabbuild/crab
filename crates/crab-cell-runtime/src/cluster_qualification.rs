@@ -167,7 +167,7 @@ pub fn validate_cluster_receipt(
         &receipt.follower_replacement,
         &receipt.placement,
     )?;
-    validate_work(&receipt.work)
+    validate_work(&receipt.work, &receipt.fallback_owner_loss)
 }
 
 fn validate_selection(
@@ -353,10 +353,24 @@ fn member_nodes(object: &Map<String, Value>) -> Result<Vec<&str>> {
         .collect()
 }
 
-fn validate_work(work: &ClusterWorkEvidence) -> Result<()> {
+fn validate_work(work: &ClusterWorkEvidence, fallback_owner_loss: &Value) -> Result<()> {
     validate_work_cycle(&work.owner_loss, false)?;
     validate_work_cycle(&work.second_owner_loss, false)?;
-    validate_work_cycle(&work.fallback, true)
+    validate_fallback_work(&work.fallback, fallback_owner_loss)
+}
+
+fn validate_fallback_work(work: &WorkCycle, fallback_owner_loss: &Value) -> Result<()> {
+    let fallback = as_object(fallback_owner_loss, "fallback owner loss")?;
+    let fallback_log = as_object(
+        object_value(fallback, "node_log_before")?,
+        "fallback node log",
+    )?;
+    if !boolean(fallback_log, "active")? && work.is_empty() {
+        // An inactive log never enabled fleet proof, so request-path takeover
+        // may finish without scheduling a node-log recovery job.
+        return Ok(());
+    }
+    validate_work_cycle(work, true)
 }
 
 fn validate_work_cycle(work: &WorkCycle, allow_object_only: bool) -> Result<()> {
@@ -402,6 +416,37 @@ fn validate_work_cycle(work: &WorkCycle, allow_object_only: bool) -> Result<()> 
         }
     }
     Ok(())
+}
+
+impl WorkCycle {
+    fn is_empty(&self) -> bool {
+        [
+            self.candidate_count,
+            self.affected_cells,
+            self.catalog_shards,
+            self.catalog_pages,
+            self.control_reads,
+            self.follower_pages,
+            self.follower_frames,
+            self.follower_bytes,
+            self.peer_requests,
+            self.bundle_bytes,
+            self.object_reads,
+            self.object_writes,
+            self.phases.claim.count,
+            self.phases.claim.duration_ms,
+            self.phases.witness.count,
+            self.phases.witness.duration_ms,
+            self.phases.scope_validation.count,
+            self.phases.scope_validation.duration_ms,
+            self.phases.pin_attach.count,
+            self.phases.pin_attach.duration_ms,
+            self.phases.seal.count,
+            self.phases.seal.duration_ms,
+        ]
+        .into_iter()
+        .all(|value| value == 0)
+    }
 }
 
 fn validate_owner_loss(value: &Value) -> Result<()> {
@@ -826,8 +871,8 @@ mod tests {
 
     use super::{
         ClusterWorkEvidence, RecoveryPhaseEvidence, RecoveryPhaseTiming, WorkCycle,
-        validate_follower_affinity, validate_metrics, validate_revision, validate_timing,
-        validate_work_cycle,
+        validate_fallback_work, validate_follower_affinity, validate_metrics, validate_revision,
+        validate_timing, validate_work_cycle,
     };
 
     #[test]
@@ -957,6 +1002,51 @@ mod tests {
             ..valid
         };
         assert!(validate_work_cycle(&invalid, false).is_err());
+    }
+
+    #[test]
+    fn fallback_work_allows_direct_takeover_only_for_inactive_logs() {
+        let zero = WorkCycle {
+            candidate_count: 0,
+            affected_cells: 0,
+            catalog_shards: 0,
+            catalog_pages: 0,
+            control_reads: 0,
+            follower_pages: 0,
+            follower_frames: 0,
+            follower_bytes: 0,
+            peer_requests: 0,
+            bundle_bytes: 0,
+            object_reads: 0,
+            object_writes: 0,
+            phases: RecoveryPhaseEvidence {
+                claim: RecoveryPhaseTiming {
+                    count: 0,
+                    duration_ms: 0,
+                },
+                witness: RecoveryPhaseTiming {
+                    count: 0,
+                    duration_ms: 0,
+                },
+                scope_validation: RecoveryPhaseTiming {
+                    count: 0,
+                    duration_ms: 0,
+                },
+                pin_attach: RecoveryPhaseTiming {
+                    count: 0,
+                    duration_ms: 0,
+                },
+                seal: RecoveryPhaseTiming {
+                    count: 0,
+                    duration_ms: 0,
+                },
+            },
+        };
+        let inactive = json!({"node_log_before": {"active": false}});
+        assert!(validate_fallback_work(&zero, &inactive).is_ok());
+
+        let active = json!({"node_log_before": {"active": true}});
+        assert!(validate_fallback_work(&zero, &active).is_err());
     }
 
     #[test]

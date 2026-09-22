@@ -1089,9 +1089,11 @@ node_c_fallback="$(fallback_node_json server-c "$session_c_fallback")"
 node_d_fallback="$(fallback_node_json server-d "$session_d_fallback")"
 node_b_before_fallback="$(fallback_node_json server-b "$session_after_second_loss")"
 fallback_members="$(jq -c '.advertisement.log.member_nodes' <<<"$node_b_before_fallback")"
+# A replacement owner may have an enrolled but inactive log: no fleet proof
+# has escaped that epoch yet, so the first fallback mutation must use object
+# coverage and remain recoverable without a follower witness.
 if ! jq --exit-status \
   '.live == true and .advertisement.log.state == "open" and
-   .advertisement.log.active == true and
    (.advertisement.log.member_nodes | length > 0)' \
   <<<"$node_b_before_fallback" >/dev/null; then
   echo "Fallback owner B did not expose an open live durability log." >&2
@@ -1099,14 +1101,16 @@ if ! jq --exit-status \
   exit 1
 fi
 
+# Capture the pre-mutation root so recovery proves that this object-covered
+# write advanced the successor's root after the owner disappears.
+control_before_fallback="$(service_cli server-b cells status --owner demo --name hello)"
+root_before_fallback="$(jq --compact-output '.root' <<<"$control_before_fallback")"
 fallback_response="$(post_json_eventually \
   "$node_b_origin" \
   "${repository_path}/labels" \
   '{"request_id":"00000000-0000-4000-8000-000000000106","name":"fallback-covered","color":"7c3aed","description":"Object-covered fallback recovery"}' \
   '.id == 3 and .name == "fallback-covered"' \
   'Node B did not accept the fallback-covered label.')"
-control_before_fallback="$(service_cli server-b cells status --owner demo --name hello)"
-root_before_fallback="$(jq --compact-output '.root' <<<"$control_before_fallback")"
 fallback_object_covered=false
 for _ in $(seq 1 60); do
   fallback_owner_metrics="$(service_cli server-b cells metrics)"
