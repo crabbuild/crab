@@ -8,10 +8,11 @@ use crab_cell_app::{ApplicationBuilder, CellApplication, CellType};
 use crab_cell_runtime::{
     ActivityContext, ActivityExecution, ActivityHandler, ApplicationId, BlobModule, BoundedEncoder,
     BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellHandle, CellModule, CellRuntime,
-    CellStorageLayout, CellTarget, CronModule, CronTarget, Digest, EffectModule, IncarnationId,
-    KvModule, MaintenanceModule, ModuleDescriptor, NamespaceDescriptor, NamespaceId,
-    OperationDescriptor, Owner, QueueDeadLetterTarget, QueueModule, Registry, RegistryBuilder,
-    Result, SqlBatch, SqlModule, SqlStatement, SqlValue, TenantId, WireValue, WorkflowAction,
+    CellStorageLayout, CellTarget, Command, CommandContext, CommandResult, CronInvocation,
+    CronModule, CronTarget, Digest, EffectModule, IncarnationId, KvModule, MaintenanceModule,
+    ModuleDescriptor, NamespaceDescriptor, NamespaceId, OperationDescriptor, Owner,
+    QueueDeadLetterTarget, QueueModule, Registry, RegistryBuilder, Result, SqlBatch, SqlModule,
+    SqlResultSet, SqlStatement, SqlValue, TenantId, WireValue, WorkflowAction,
     WorkflowActivityModule, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowModule,
     WorkflowStatus, partition_for_shard, register_activity, register_blob, register_cron,
     register_effect_delivery, register_kv, register_maintenance, register_queue, register_sql,
@@ -125,6 +126,39 @@ fn descriptor(
 }
 
 pub struct ReferenceSql;
+pub struct ReferenceCronDestination;
+
+impl Command for ReferenceCronDestination {
+    const MODULE: &'static str = SQL_MODULE;
+    const ID: u32 = 6;
+    const CODEC_VERSION: u32 = 1;
+    type Input = CronInvocation;
+    type Output = Vec<SqlResultSet>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        invocation: Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        let generation = i64::try_from(invocation.generation)
+            .map_err(|_| crab_cell_runtime::Error::Command("cron generation overflow"))?;
+        let occurrence = i64::try_from(invocation.occurrence)
+            .map_err(|_| crab_cell_runtime::Error::Command("cron occurrence overflow"))?;
+        let rows = context.sql(&SqlBatch {
+            statements: vec![SqlStatement {
+                sql: "INSERT INTO qualification_cron_invocations (schedule_id, generation, occurrence, scheduled_at_ms, payload) VALUES (?1, ?2, ?3, ?4, ?5)".into(),
+                parameters: vec![
+                    SqlValue::Blob(invocation.schedule_id.to_vec()),
+                    SqlValue::Integer(generation),
+                    SqlValue::Integer(occurrence),
+                    SqlValue::Integer(invocation.scheduled_at_ms),
+                    SqlValue::Blob(invocation.payload),
+                ],
+            }],
+        })?;
+        Ok(CommandResult::Success(rows))
+    }
+}
+
 impl SqlModule for ReferenceSql {
     const MODULE: &'static str = SQL_MODULE;
     const BATCH_COMMAND_ID: u32 = 1;
@@ -147,11 +181,12 @@ impl CellModule for ReferenceSql {
             effect_targets: &[],
             dead_letter: None,
         }];
-        descriptor(SQL_MODULE, &[1, 3, 4], &[2, 5], NAMESPACES, &[], &[])
+        descriptor(SQL_MODULE, &[1, 3, 4, 6], &[2, 5], NAMESPACES, &[], &[])
     }
     fn register(self, registry: &mut RegistryBuilder) -> Result<()> {
         register_sql::<Self>(registry)?;
-        register_effect_delivery::<Self>(registry)
+        register_effect_delivery::<Self>(registry)?;
+        registry.bind_command::<ReferenceCronDestination>()
     }
 }
 
@@ -299,7 +334,13 @@ impl MaintenanceModule for ReferenceCron {
     const MODULE: &'static str = CRON_MODULE;
     const TICK_COMMAND_ID: u32 = 3;
     const CRON_TARGETS: &'static [CronTarget] =
-        &[CronTarget::new(SQL_MODULE, SQL_NAMESPACE, 1, 1, 1 << 20)];
+        &[CronTarget::new(SQL_MODULE, SQL_NAMESPACE, 6, 1, 1 << 20)];
+}
+impl EffectModule for ReferenceCron {
+    const MODULE: &'static str = CRON_MODULE;
+    const CLAIM_COMMAND_ID: u32 = 4;
+    const LEASE_COMMAND_ID: u32 = 5;
+    const VALIDATE_QUERY_ID: u32 = 6;
 }
 impl CronModule for ReferenceCron {
     const NAMESPACE: NamespaceId = CRON_NAMESPACE;
@@ -317,10 +358,11 @@ impl CellModule for ReferenceCron {
             effect_targets: &[SQL_NAMESPACE],
             dead_letter: None,
         }];
-        descriptor(CRON_MODULE, &[1, 3], &[2], NAMESPACES, &[], &[])
+        descriptor(CRON_MODULE, &[1, 3, 4, 5], &[2, 6], NAMESPACES, &[], &[])
     }
     fn register(self, registry: &mut RegistryBuilder) -> Result<()> {
-        register_cron::<Self>(registry)
+        register_cron::<Self>(registry)?;
+        register_effect_delivery::<Self>(registry)
     }
 }
 

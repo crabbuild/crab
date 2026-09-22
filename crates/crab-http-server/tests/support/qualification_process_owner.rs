@@ -125,7 +125,7 @@ pub(super) async fn run() {
     };
     let cron = typed.cron::<fixture::ReferenceCron>().expect("source Cron");
     let schedule_id = fixed_id(900_108);
-    let next_due_ms = now_ms() + 60_000;
+    let next_due_ms = now_ms() + 20_000;
     let scheduled = cron
         .mutate(
             identity(900_108, now_ms()),
@@ -134,7 +134,7 @@ pub(super) async fn run() {
                 target_index: 0,
                 target_partition: partition_for_shard(0).to_vec(),
                 payload: CRON_PAYLOAD.to_vec(),
-                interval_ms: 60_000,
+                interval_ms: 300_000,
                 next_due_ms,
             },
         )

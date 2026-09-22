@@ -182,9 +182,13 @@ generation/due time, completed Workflow result/event sequence, each source
 commit sequence, exact restored roots, and higher owner epochs. It claims and
 acknowledges the Queue message, completes the pending Activity, delivers the
 Effect to its SQL destination through the signed peer inbox, then settles the
-source lease. It checks one exact SQL row, identical replay and inbox resolution,
-no remaining claims, and zero runtime
-reservations to zero. A second boundary kills the owner before those writes;
+source lease. After the recovered Cron schedule becomes due, the successor
+executes its typed maintenance Tick, observes occurrence one and the next due
+time, delivers the resulting Effect through the signed peer inbox, and checks
+one exact SQL occurrence row, identical replay and inbox resolution, and a
+settled source lease. A repeated Tick produces no second occurrence. The
+successor checks no remaining claims and zero runtime reservations. A second
+boundary kills the owner before those writes;
 the successor checks all six values/schedules and both pending work items are
 absent. A third boundary kills the owner after Queue, Activity, and source
 Effect claims acknowledge. The independent successor rejects all three stale

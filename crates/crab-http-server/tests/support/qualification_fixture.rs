@@ -77,7 +77,8 @@ pub async fn public_host_fixture_with_store(store: Store, root: Path) -> PublicH
             40,
             |transaction| {
                 transaction.execute_batch(
-                    "CREATE TABLE qualification_rows (id INTEGER PRIMARY KEY, payload BLOB NOT NULL)",
+                    "CREATE TABLE qualification_rows (id INTEGER PRIMARY KEY, payload BLOB NOT NULL);
+                     CREATE TABLE qualification_cron_invocations (schedule_id BLOB NOT NULL, generation INTEGER NOT NULL, occurrence INTEGER NOT NULL, scheduled_at_ms INTEGER NOT NULL, payload BLOB NOT NULL, PRIMARY KEY (schedule_id, generation, occurrence))",
                 )?;
                 Ok(())
             },

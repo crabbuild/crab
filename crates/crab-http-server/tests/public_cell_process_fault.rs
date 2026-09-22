@@ -13,8 +13,9 @@ use crab_cell_runtime::{
     BlobQueryResult, CellAuthority, CellCatalog, CellClient, CellReplica, CellStorageLayout,
     CellTarget, CronMutation, CronMutationOutcome, CronQueryResult, EffectAckRequest,
     EffectClaimRequest, EffectLease, EffectLeaseCommand, EffectLeaseOutcome, EffectLeaseRequest,
-    IncarnationId, InvocationError, KvAtomicOutcome, KvAtomicRequest, KvMutation, NodeLeaseGuard,
-    Owner, QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome, QueueSendRequest, QueueState,
+    IncarnationId, InvocationError, KvAtomicOutcome, KvAtomicRequest, KvMutation,
+    MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest, NodeLeaseGuard, Owner,
+    QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome, QueueSendRequest, QueueState,
     RecoveryManifestStore, ReplicaLimits, Resolution, SessionId, SqlBatch, SqlStatement, SqlValue,
     SqlWorkerPool, StoredOutcome, TenantId, WorkflowActivityClaimCommand,
     WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand, WorkflowOutcome, WorkflowStatus,
@@ -191,6 +192,7 @@ async fn rustfs_owner_kill_recovers_eight_acknowledged_primitives_in_successor_p
     expected.extend_from_slice(WORKFLOW_RESULT);
     expected.extend_from_slice(b"activity-result");
     expected.extend_from_slice(EFFECT_RESULT);
+    expected.extend_from_slice(CRON_PAYLOAD);
     run_process_fault(AFTER_ACK, "ack", &expected).await;
 }
 
@@ -211,6 +213,7 @@ async fn rustfs_owner_kill_after_three_leases_reclaims_exact_attempts() {
     expected.extend_from_slice(WORKFLOW_RESULT);
     expected.extend_from_slice(b"activity-result");
     expected.extend_from_slice(EFFECT_RESULT);
+    expected.extend_from_slice(CRON_PAYLOAD);
     run_process_fault(AFTER_LEASE, "ack", &expected).await;
 }
 
