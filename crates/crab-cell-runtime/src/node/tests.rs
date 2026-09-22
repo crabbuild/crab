@@ -49,6 +49,44 @@ fn recovery_candidate_window_rotates_without_growing_with_directory_size() {
     );
 }
 
+#[tokio::test]
+async fn cloned_directories_share_only_a_fresh_recovery_scan_snapshot() {
+    let directory = directory();
+    let clone = directory.clone();
+    let first = directory
+        .recovery_scan_snapshot(NOW_MS, false)
+        .await
+        .unwrap();
+    let reused = clone
+        .recovery_scan_snapshot(NOW_MS + 1, false)
+        .await
+        .unwrap();
+    assert!(Arc::ptr_eq(&first, &reused));
+
+    let refreshed = clone
+        .recovery_scan_snapshot(NOW_MS + RECOVERY_SCAN_CACHE_TTL_MS, false)
+        .await
+        .unwrap();
+    assert!(!Arc::ptr_eq(&first, &refreshed));
+}
+
+#[test]
+fn recovery_candidate_snapshot_rechecks_claim_and_expiry() {
+    let record = RecoveryCandidateRecord {
+        session: SessionId::from_bytes([1; 16]),
+        expires_at_ms: NOW_MS + 10,
+        claimant: Some(SessionId::from_bytes([2; 16])),
+        claim_expires_at_ms: Some(NOW_MS + 20),
+        active: true,
+        phase: NodeLogPhase::Recovering,
+        members: Vec::new(),
+    };
+    let other = SessionId::from_bytes([3; 16]);
+    assert!(!record.eligible_for(other, NOW_MS + 15));
+    assert!(record.eligible_for(other, NOW_MS + 20));
+    assert!(record.eligible_for(record.claimant.unwrap(), NOW_MS + 15));
+}
+
 fn node(session: SessionId) -> NodeId {
     NodeId::from_bytes(*session.as_bytes())
 }
