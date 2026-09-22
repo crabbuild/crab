@@ -124,17 +124,30 @@ replay path; durable handoff for that result remains open. These tests share a
 process with their observer and are not scheduled matrix cases or protected
 provider evidence, so they do not set retry or expiry case bits.
 
-`PreparedCommand` now retains exact encoded typed input, identity, digest, and owner
+`PreparedCommand` retains exact encoded typed input, identity, digest, and owner
 incarnation before dispatch, so a cancelled caller can resolve the attempt
-through `ApplicationHandle::resolve`. Two SQL cancellation cases pause the signed
-peer request immediately before and after dispatch, cancel the task at that
-await boundary, resolve from a separate typed application handle, check the
-exact row after an absent-only retry or a committed outcome, and drain all
-reservations. Both cases passed in memory and on fresh isolated RustFS on
-2026-09-21. They establish the public cancellation mechanism but do not cover
-KV, Blob, Queue, Cron, Workflow, Activity, or Effects cancellation, independent
-process observation, or protected scheduled matrix evidence; no cancellation
-case bit is set yet.
+through `ApplicationHandle::resolve`. The public host now cancels signed peer
+mutations immediately before and after dispatch for SQL, KV, Blob completion,
+Queue send, Cron upsert, Workflow start, and Effect acknowledgement. A separate
+typed application handle resolves the retained evidence, checks absence before
+an exact-identity retry or observes the committed result, then checks the exact
+row, value/version, Blob bytes/size/ETag, message and final Queue lease,
+schedule generation, terminal Workflow result, or settled Effect lease. All
+fourteen cases passed in memory and on isolated RustFS on 2026-09-21; each node
+drained runtime reservations. Four more cases cancel the public typed Activity
+claim and completion commands before and after signed-peer dispatch. A separate
+typed application handle resolves the exact request, validates the claim lease,
+checks a terminal Workflow result and event sequence, and verifies duplicate
+completion leaves one transition. All four passed in memory and on isolated
+RustFS on 2026-09-21 with zero reservations. Two destination Effect cases cancel
+the signed delivery before and after inbox dispatch. The retained source claim
+resolves the destination inbox, retries only an absent delivery, and checks an
+exactly-once typed SQL row, identical inbox replay result, source settlement,
+and zero reservations. Both passed in memory and on isolated RustFS on
+2026-09-21. Cancellation while the native Activity handler or Effect supervisor
+executes, independent-process observation, and protected scheduled matrix
+evidence remain open. These tests share a process with their observer, so no
+cancellation case bit is set yet.
 
 A separate `public_cell_takeover.rs` test now uses a fresh successor `CellNode` and
 empty local directory against the same object store. It checks the exact

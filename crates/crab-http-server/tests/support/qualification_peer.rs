@@ -10,9 +10,9 @@ use std::{
 };
 
 use crab_cell_runtime::{
-    CellClient, CellHandle, CellId, CellTarget, Digest, Error, PeerAuthorizer, PeerCellResolver,
-    PeerDispatcher, PeerPrincipal, PeerRoundTrip, PeerSigner, PeerVerifier, Registry, Result,
-    SessionId, VerifiedPeerRequest,
+    CellClient, CellHandle, CellId, CellTarget, Digest, EffectPeerClient, Error, PeerAuthorizer,
+    PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerRoundTrip, PeerSigner, PeerVerifier,
+    Registry, Result, SessionId, VerifiedPeerRequest,
 };
 use ed25519_dalek::SigningKey;
 use tokio::sync::Notify;
@@ -73,6 +73,7 @@ struct FaultyMutationRoundTrip {
     dispatched: Arc<AtomicUsize>,
     attempted: Arc<AtomicUsize>,
     fault: MutationFault,
+    operation_tag: u32,
 }
 
 impl PeerRoundTrip for FaultyMutationRoundTrip {
@@ -87,6 +88,7 @@ impl PeerRoundTrip for FaultyMutationRoundTrip {
         let dispatched = Arc::clone(&self.dispatched);
         let attempted = Arc::clone(&self.attempted);
         let fault = self.fault.clone();
+        let operation_tag = self.operation_tag;
         Box::pin(async move {
             let now_ms = i64::try_from(
                 SystemTime::now()
@@ -99,9 +101,9 @@ impl PeerRoundTrip for FaultyMutationRoundTrip {
             if verified.target() != &target {
                 return Err(Error::Peer("qualification peer target differs"));
             }
-            let mutation = verified.operation_tag() == 10;
-            let selected =
-                mutation && attempted.fetch_add(1, Ordering::AcqRel) + 1 == fault.ordinal();
+            let selected_operation = verified.operation_tag() == operation_tag;
+            let selected = selected_operation
+                && attempted.fetch_add(1, Ordering::AcqRel) + 1 == fault.ordinal();
             if selected {
                 match &fault {
                     MutationFault::Drop {
@@ -126,7 +128,7 @@ impl PeerRoundTrip for FaultyMutationRoundTrip {
                 }
             }
             let reply = dispatcher.dispatch_bytes(&verified, now_ms).await?;
-            if mutation {
+            if selected_operation {
                 dispatched.fetch_add(1, Ordering::AcqRel);
             }
             if selected {
@@ -163,6 +165,18 @@ fn peer_client_with_fault(
     fault: MutationFault,
     dispatched: Arc<AtomicUsize>,
 ) -> CellClient {
+    let (signer, round_trip) =
+        peer_transport_with_fault(registry.clone(), handles, fault, dispatched, 10);
+    CellClient::peer(registry, signer, qualification_principal(), round_trip)
+}
+
+fn peer_transport_with_fault(
+    registry: Arc<Registry>,
+    handles: Vec<CellHandle>,
+    fault: MutationFault,
+    dispatched: Arc<AtomicUsize>,
+    operation_tag: u32,
+) -> (Arc<PeerSigner>, Arc<dyn PeerRoundTrip>) {
     let session = SessionId::from_bytes([96; 16]);
     let release = Digest::from_bytes([97; 32]);
     let signer = Arc::new(PeerSigner::new(
@@ -187,17 +201,17 @@ fn peer_client_with_fault(
         dispatched,
         attempted: Arc::new(AtomicUsize::new(0)),
         fault,
+        operation_tag,
     };
-    CellClient::peer(
-        registry,
-        signer,
-        PeerPrincipal {
-            issuer: "urn:crab:qualification".into(),
-            subject: "qualification".into(),
-            actions: vec!["cell.read".into(), "cell.write".into()],
-        },
-        Arc::new(round_trip),
-    )
+    (signer, Arc::new(round_trip))
+}
+
+fn qualification_principal() -> PeerPrincipal {
+    PeerPrincipal {
+        issuer: "urn:crab:qualification".into(),
+        subject: "qualification".into(),
+        actions: vec!["cell.read".into(), "cell.write".into()],
+    }
 }
 
 pub fn peer_client_with_one_lost_mutation(
@@ -239,4 +253,28 @@ pub fn peer_client_with_paused_mutation(
         Arc::clone(&dispatched),
     );
     (client, entered, dispatched)
+}
+
+pub fn peer_effect_client_with_paused_delivery(
+    registry: Arc<Registry>,
+    handles: Vec<CellHandle>,
+    pause_after_dispatch: bool,
+) -> (EffectPeerClient, Arc<Notify>, Arc<AtomicUsize>) {
+    let entered = Arc::new(Notify::new());
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    let (signer, round_trip) = peer_transport_with_fault(
+        registry,
+        handles,
+        MutationFault::Pause {
+            after_dispatch: pause_after_dispatch,
+            entered: Arc::clone(&entered),
+        },
+        Arc::clone(&dispatched),
+        13,
+    );
+    (
+        EffectPeerClient::new(signer, qualification_principal(), round_trip),
+        entered,
+        dispatched,
+    )
 }

@@ -6,16 +6,16 @@ use std::{
 
 use crab_cell_app::{ApplicationBuilder, CellApplication, CellType};
 use crab_cell_runtime::{
-    ActivityContext, ActivityExecution, ActivityHandler, ApplicationId, BlobModule,
+    ActivityContext, ActivityExecution, ActivityHandler, ApplicationId, BlobModule, BoundedEncoder,
     BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellHandle, CellModule, CellRuntime,
     CellStorageLayout, CellTarget, CronModule, CronTarget, Digest, EffectModule, IncarnationId,
     KvModule, MaintenanceModule, ModuleDescriptor, NamespaceDescriptor, NamespaceId,
     OperationDescriptor, Owner, QueueDeadLetterTarget, QueueModule, Registry, RegistryBuilder,
-    Result, SqlModule, TenantId, WorkflowAction, WorkflowActivityModule, WorkflowContext,
-    WorkflowDecision, WorkflowDefinition, WorkflowModule, WorkflowStatus, partition_for_shard,
-    register_activity, register_blob, register_cron, register_effect_delivery, register_kv,
-    register_maintenance, register_queue, register_sql, register_workflow,
-    register_workflow_activities,
+    Result, SqlBatch, SqlModule, SqlStatement, SqlValue, TenantId, WireValue, WorkflowAction,
+    WorkflowActivityModule, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowModule,
+    WorkflowStatus, partition_for_shard, register_activity, register_blob, register_cron,
+    register_effect_delivery, register_kv, register_maintenance, register_queue, register_sql,
+    register_workflow, register_workflow_activities,
 };
 use crab_ltx::{CellReplica, DiskBudget, Host, Limits};
 
@@ -337,6 +337,35 @@ impl WorkflowDefinition for ReferenceDefinition {
                     input: b"activity-result".to_vec(),
                     due_at_ms: context.now_ms(),
                     expires_at_ms: context.now_ms() + 60_000,
+                }],
+            });
+        }
+        if event == b"effect-valid" {
+            let mut encoded = BoundedEncoder::new(1 << 20)?;
+            SqlBatch {
+                statements: vec![SqlStatement {
+                    sql: "INSERT INTO qualification_rows (id, payload) VALUES (90, ?1)".into(),
+                    parameters: vec![SqlValue::Blob(b"delivered-effect".to_vec())],
+                }],
+            }
+            .encode(&mut encoded)?;
+            return Ok(WorkflowDecision {
+                status: WorkflowStatus::Completed,
+                state: b"effect-valid-published".to_vec(),
+                result: Some(b"effect-valid-scheduled".to_vec()),
+                actions: vec![WorkflowAction::Effect {
+                    intent: crab_cell_runtime::EffectCommandIntent {
+                        target: CellTarget::new(
+                            context.source().tenant(),
+                            context.source().application(),
+                            SQL_NAMESPACE,
+                            &partition_for_shard(0),
+                        )?,
+                        command_id: ReferenceSql::BATCH_COMMAND_ID,
+                        codec_version: <ReferenceSql as SqlModule>::CODEC_VERSION,
+                        input: encoded.finish(),
+                        expires_at_ms: context.now_ms() + 60_000,
+                    },
                 }],
             });
         }
