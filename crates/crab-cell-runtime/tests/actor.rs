@@ -2089,6 +2089,41 @@ async fn exact_idle_release_blocks_new_work_while_inventory_is_pending() {
     runtime.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn exact_idle_release_drains_work_admitted_before_transfer() {
+    let fixture = fixture_for(b"exact-idle-admitted-before-transfer");
+    let session = SessionId::from_bytes([99; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 * 1024 * 1024, session).unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, session).await;
+    let (_, generation, _, _) = runtime.idle_transfer_candidates().await.unwrap()[0];
+
+    let (started, started_signal) = tokio::sync::oneshot::channel();
+    let query_handle = handle.clone();
+    let query_task = tokio::spawn(async move {
+        query_handle
+            .query(1, 1, move |_| {
+                let _ = started.send(());
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                Ok(Vec::new())
+            })
+            .await
+    });
+    started_signal.await.unwrap();
+
+    let release_runtime = runtime.clone();
+    let release_task = tokio::spawn(async move {
+        release_runtime
+            .release_idle_cell(fixture.target.cell_id(), session, generation)
+            .await
+    });
+
+    assert!(query_task.await.unwrap().is_ok());
+    release_task.await.unwrap().unwrap();
+    assert_eq!(runtime.stats().active_cells(), 0);
+    runtime.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn exact_idle_release_refuses_persisted_work() {
     let fixture = fixture_for(b"exact-idle-blocked");

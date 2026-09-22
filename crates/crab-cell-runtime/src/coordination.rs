@@ -122,6 +122,8 @@ pub(crate) enum CoordinationInput {
         publication_idle: bool,
         lease_live: bool,
     },
+    ConfirmTransfer,
+    AbortTransfer,
     BeginCompaction {
         queue_empty: bool,
         publication_idle: bool,
@@ -185,6 +187,7 @@ pub(crate) struct CoordinationState {
     follower_proof: bool,
     residency: Residency,
     shutdown_requested: bool,
+    transfer_preparing: bool,
     next_effect_id: u64,
     pending_effects: BTreeMap<u64, CoordinationEffect>,
 }
@@ -206,6 +209,7 @@ impl CoordinationState {
             follower_proof: false,
             residency: Residency::Resident,
             shutdown_requested: false,
+            transfer_preparing: false,
             next_effect_id: 0,
             pending_effects: BTreeMap::new(),
         }
@@ -223,6 +227,7 @@ impl CoordinationState {
             follower_proof: false,
             residency,
             shutdown_requested: false,
+            transfer_preparing: false,
             next_effect_id: 0,
             pending_effects: BTreeMap::new(),
         }
@@ -242,6 +247,10 @@ impl CoordinationState {
 
     pub(crate) fn is_shutdown(&self) -> bool {
         self.shutdown_requested || matches!(self.lifecycle, Lifecycle::Shutdown)
+    }
+
+    pub(crate) fn is_transfer_preparing(&self) -> bool {
+        self.transfer_preparing
     }
 
     pub(crate) fn is_busy(&self) -> bool {
@@ -293,7 +302,7 @@ impl CoordinationState {
     pub(crate) fn lookup(&self) -> CoordinationDecision {
         if self.is_fenced() {
             CoordinationDecision::Reject(RejectReason::Fenced)
-        } else if self.is_draining() {
+        } else if self.is_draining() || self.transfer_preparing {
             CoordinationDecision::Reject(RejectReason::Draining)
         } else {
             CoordinationDecision::LocalHandle
@@ -408,6 +417,7 @@ impl CoordinationState {
                 }
             }
             CoordinationInput::BeginShutdown => {
+                self.transfer_preparing = false;
                 if self.is_shutdown() {
                     CoordinationDecision::Ignored
                 } else if self.is_fenced() {
@@ -468,7 +478,11 @@ impl CoordinationState {
                     self.busy = false;
                     self.renewing = false;
                     CoordinationDecision::Fence
-                } else if self.is_fenced() || self.is_draining() || self.renewing {
+                } else if self.is_fenced()
+                    || self.is_draining()
+                    || self.transfer_preparing
+                    || self.renewing
+                {
                     CoordinationDecision::Reject(if self.is_fenced() {
                         RejectReason::Fenced
                     } else {
@@ -533,7 +547,7 @@ impl CoordinationState {
                     CoordinationDecision::Fence
                 } else if self.is_fenced() {
                     CoordinationDecision::Reject(RejectReason::Fenced)
-                } else if self.is_draining() {
+                } else if self.is_draining() || self.transfer_preparing {
                     CoordinationDecision::Reject(RejectReason::Draining)
                 } else if self.busy {
                     CoordinationDecision::Reject(RejectReason::Busy)
@@ -559,7 +573,7 @@ impl CoordinationState {
                     CoordinationDecision::Fence
                 } else if self.is_fenced() {
                     CoordinationDecision::Reject(RejectReason::Fenced)
-                } else if self.is_draining() {
+                } else if self.is_draining() || self.transfer_preparing {
                     CoordinationDecision::Reject(RejectReason::Draining)
                 } else if self.busy {
                     CoordinationDecision::Reject(RejectReason::Busy)
@@ -570,8 +584,8 @@ impl CoordinationState {
                 }
             }
             CoordinationInput::BeginTransferPreflight {
-                queue_empty,
-                publication_idle,
+                queue_empty: _,
+                publication_idle: _,
                 lease_live,
             } => {
                 if !lease_live {
@@ -581,12 +595,54 @@ impl CoordinationState {
                     CoordinationDecision::Fence
                 } else if self.is_fenced() {
                     CoordinationDecision::Reject(RejectReason::Fenced)
-                } else if self.is_draining() {
+                } else if self.is_draining() || self.transfer_preparing {
                     CoordinationDecision::Reject(RejectReason::Draining)
-                } else if !queue_empty || !publication_idle || !self.can_deactivate() {
+                } else if self.renewing
+                    || self.pending_effects.values().any(|effect| {
+                        matches!(
+                            effect,
+                            CoordinationEffect::Hydration
+                                | CoordinationEffect::Inventory
+                                | CoordinationEffect::Compaction
+                                | CoordinationEffect::Renewal
+                        )
+                    })
+                {
                     CoordinationDecision::Ignored
                 } else {
+                    // Admission closes before these observations become quiescent so
+                    // work already accepted by the actor can finish without loss.
+                    self.transfer_preparing = true;
                     CoordinationDecision::Started
+                }
+            }
+            CoordinationInput::ConfirmTransfer => {
+                if self.is_fenced() {
+                    CoordinationDecision::Reject(RejectReason::Fenced)
+                } else if self.is_shutdown() || self.is_draining() {
+                    CoordinationDecision::Reject(RejectReason::Draining)
+                } else if !self.transfer_preparing || !self.can_deactivate() {
+                    CoordinationDecision::Ignored
+                } else {
+                    self.transfer_preparing = false;
+                    self.lifecycle = Lifecycle::Draining;
+                    if self.can_deactivate() {
+                        CoordinationDecision::ReadyToDeactivate
+                    } else {
+                        CoordinationDecision::Started
+                    }
+                }
+            }
+            CoordinationInput::AbortTransfer => {
+                if self.is_fenced() {
+                    CoordinationDecision::Reject(RejectReason::Fenced)
+                } else if self.is_shutdown() || self.is_draining() {
+                    CoordinationDecision::Reject(RejectReason::Draining)
+                } else if self.transfer_preparing {
+                    self.transfer_preparing = false;
+                    CoordinationDecision::Ignored
+                } else {
+                    CoordinationDecision::Ignored
                 }
             }
             CoordinationInput::BeginCompaction {
@@ -601,6 +657,7 @@ impl CoordinationState {
                     CoordinationDecision::Fence
                 } else if self.is_fenced()
                     || self.is_draining()
+                    || self.transfer_preparing
                     || self.busy
                     || self.renewing
                     || !queue_empty
@@ -646,6 +703,7 @@ impl CoordinationState {
                 self.lifecycle = Lifecycle::Fenced;
                 self.busy = false;
                 self.renewing = false;
+                self.transfer_preparing = false;
                 CoordinationDecision::Ignored
             }
         }
@@ -661,6 +719,9 @@ impl CoordinationState {
             } else {
                 CoordinationDecision::Reject(RejectReason::Fenced)
             };
+        }
+        if self.transfer_preparing {
+            return CoordinationDecision::Reject(RejectReason::Draining);
         }
         // Migration swaps the admission capability before its durable cut is
         // published. The successor capability may queue work, but `busy` keeps
@@ -973,19 +1034,43 @@ mod tests {
                 publication_idle: true,
                 lease_live: true,
             }),
+            CoordinationDecision::Started
+        );
+        assert!(state.is_transfer_preparing());
+        assert_eq!(
+            state.step(CoordinationInput::BeginCompaction {
+                queue_empty: true,
+                publication_idle: true,
+                publisher_ready: true,
+                due: true,
+                lease_live: true,
+            }),
             CoordinationDecision::Ignored
         );
         assert_eq!(
-            state.step(CoordinationInput::BeginTransferPreflight {
-                queue_empty: true,
-                publication_idle: true,
-                lease_live: true,
+            state.step(CoordinationInput::Admit {
+                kind: AdmissionKind::Command,
+                admission_matches: true,
             }),
-            CoordinationDecision::Started
+            CoordinationDecision::Reject(RejectReason::Draining)
         );
-        state.begin_effect(CoordinationEffect::Inventory);
         assert_eq!(
-            state.step(CoordinationInput::BeginTransferPreflight {
+            state.step(CoordinationInput::AbortTransfer),
+            CoordinationDecision::Ignored
+        );
+        assert!(!state.is_transfer_preparing());
+        assert_eq!(
+            state.step(CoordinationInput::Admit {
+                kind: AdmissionKind::Command,
+                admission_matches: true,
+            }),
+            CoordinationDecision::Admit
+        );
+
+        let mut refreshing = CoordinationState::serving(true);
+        refreshing.begin_effect(CoordinationEffect::Inventory);
+        assert_eq!(
+            refreshing.step(CoordinationInput::BeginTransferPreflight {
                 queue_empty: true,
                 publication_idle: true,
                 lease_live: true,
@@ -1002,6 +1087,45 @@ mod tests {
             }),
             CoordinationDecision::Fence
         );
+    }
+
+    #[test]
+    fn transfer_confirmation_enters_terminal_drain_and_fence_wins() {
+        let mut state = CoordinationState::serving(true);
+        assert_eq!(
+            state.step(CoordinationInput::BeginTransferPreflight {
+                queue_empty: true,
+                publication_idle: true,
+                lease_live: true,
+            }),
+            CoordinationDecision::Started
+        );
+        assert_eq!(
+            state.step(CoordinationInput::ConfirmTransfer),
+            CoordinationDecision::ReadyToDeactivate
+        );
+        assert!(state.is_draining());
+        assert!(!state.is_transfer_preparing());
+        assert_eq!(
+            state.step(CoordinationInput::Admit {
+                kind: AdmissionKind::Query,
+                admission_matches: true,
+            }),
+            CoordinationDecision::Reject(RejectReason::Draining)
+        );
+
+        let mut fenced = CoordinationState::serving(true);
+        fenced.step(CoordinationInput::BeginTransferPreflight {
+            queue_empty: true,
+            publication_idle: true,
+            lease_live: true,
+        });
+        fenced.step(CoordinationInput::Fence);
+        assert_eq!(
+            fenced.step(CoordinationInput::ConfirmTransfer),
+            CoordinationDecision::Reject(RejectReason::Fenced)
+        );
+        assert!(!fenced.is_transfer_preparing());
     }
 
     #[test]

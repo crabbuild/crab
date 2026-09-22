@@ -626,6 +626,10 @@ the existing terminal shutdown only after ownership reaches zero. Measured
 per-Cell disk demand, shared fleet-wide movement accounting, and protected
 provider/Kubernetes evidence remain qualification work before production
 rollout.
+The mTLS management listener exposes `POST /internal/cells/v1/scale-down` for
+an operator or orchestrator to request this same drain: `200` means the node
+reached `Stopped`, while `202` reports a bounded incomplete drain that is safe
+to retry without releasing blocked ownership.
 
 ### Weight Cells by measured cost
 

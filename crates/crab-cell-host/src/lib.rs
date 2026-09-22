@@ -739,6 +739,14 @@ impl CellNode {
         deadline: Instant,
     ) -> crab_cell_runtime::Result<ScaleDownStatus> {
         let _shutdown = self.shutdown_lock.lock().await;
+        if self.state() == NodeState::Stopped {
+            return Ok(ScaleDownStatus {
+                remaining_cells: 0,
+                settled_candidates: 0,
+                released_cells: 0,
+                blocked_cells: 0,
+            });
+        }
         self.begin_scale_down()?;
         let mut released_cells = 0_usize;
         let mut blocked_cells = 0_usize;
@@ -2172,6 +2180,11 @@ mod tests {
         assert_eq!(node.state(), NodeState::Stopped);
         assert!(!node.is_ready());
         assert!(!node.runtime().is_acquiring());
+        let retry = node
+            .drain_for_scale_down(Instant::now() + Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(retry.ready_to_stop());
         node.drain().await.unwrap();
     }
 
