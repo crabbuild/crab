@@ -224,6 +224,9 @@ cases passed on 2026-09-21. The owner-loss transition uses a test-controlled
 session fence, and the observer uses the public idle-restoration path after
 the successor drains. This is not a scheduled qualification case or protected
 provider run, and it does not set matrix case bits.
+The third process also checks exact terminal source Effect status and SQL result
+bytes after recovered lease expiry or an owner-acknowledged settlement. Both
+focused three-process RustFS cases passed on 2026-09-21.
 
 Implement one fault-capable executor through `CellNode` and typed
 `ApplicationHandle` capabilities. Each operation writes a unique, bounded
