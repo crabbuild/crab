@@ -676,12 +676,31 @@ fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_manifest, manifest_base, read_signing_key, require_manifest_output,
+        bind_protected, build_manifest, manifest_base, read_signing_key, require_manifest_output,
         require_trusted_signer, resolve_manifest_path,
     };
-    use crab_cell_runtime::{QUALIFICATION_MATRIX_ROWS, QualificationProfile};
+    use crab_cell_runtime::{
+        Digest, QUALIFICATION_MATRIX_ROWS, QualificationExecution, QualificationExecutionEvidence,
+        QualificationOperation, QualificationOperationExecutor, QualificationOwnership,
+        QualificationProfile, QualificationReceipt, QualificationWorkload,
+    };
     use ed25519_dalek::Signer;
-    use std::{fs, path::Path};
+    use std::{fs, future::Future, path::Path, pin::Pin, time::Duration};
+
+    struct BinderExecutor;
+
+    impl QualificationOperationExecutor for BinderExecutor {
+        type Future<'a> = Pin<
+            Box<dyn Future<Output = crab_cell_runtime::Result<QualificationExecution>> + Send + 'a>,
+        >;
+
+        fn execute<'a>(&'a mut self, _operation: QualificationOperation) -> Self::Future<'a> {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(125)).await;
+                Ok(QualificationExecution::acknowledged(true))
+            })
+        }
+    }
 
     #[test]
     fn relative_manifest_uses_the_current_directory() {
@@ -733,6 +752,112 @@ mod tests {
             std::os::unix::fs::symlink(&key_path, &linked).expect("key symlink");
             assert!(read_signing_key(&linked).is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn bind_protected_cli_binds_and_verifies_a_measured_run() {
+        let directory = tempfile::tempdir().expect("binder directory");
+        let profile =
+            QualificationProfile::new("cli-binder".into(), 1, 8, 1, 5_000).expect("binder profile");
+        let workload = QualificationWorkload::generate_with_size(&profile, 31, 1, 8, 1)
+            .expect("binder workload");
+        let mut executor = BinderExecutor;
+        let summary = workload.run(&mut executor).await.expect("binder run");
+        let resources = [
+            crab_cell_runtime::QualificationMetric::new(
+                "peak_rss_bytes".into(),
+                19,
+                "bytes".into(),
+            )
+            .expect("RSS metric"),
+            crab_cell_runtime::QualificationMetric::new(
+                "peak_local_disk_bytes".into(),
+                29,
+                "bytes".into(),
+            )
+            .expect("disk metric"),
+            crab_cell_runtime::QualificationMetric::new(
+                "peak_file_descriptors".into(),
+                39,
+                "count".into(),
+            )
+            .expect("FD metric"),
+            crab_cell_runtime::QualificationMetric::new("bucket_calls".into(), 49, "count".into())
+                .expect("bucket metric"),
+        ];
+        let run = summary
+            .artifact_with_resource_metrics(&workload, &resources)
+            .expect("binder run artifact");
+        let profile_path = directory.path().join("profile.json");
+        let evidence_path = directory.path().join("execution-evidence.json");
+        let key_path = directory.path().join("signing-key");
+        let run_path = directory.path().join("run-artifact.json");
+        let workload_path = directory.path().join("workload.json");
+        let output_path = directory.path().join("receipt.json");
+        fs::write(&profile_path, profile.encode().expect("profile encoding")).expect("profile");
+        fs::write(
+            &evidence_path,
+            QualificationExecutionEvidence {
+                provider: "rustfs".into(),
+                workload: "primitives".into(),
+                fault: "none".into(),
+                toolchain: "rustc-test".into(),
+                execution_profile: "release".into(),
+                topology: "three-process".into(),
+                started_at_ms: 1,
+                finished_at_ms: 1_001,
+                fault_schedule: b"none".to_vec(),
+                ownership: vec![QualificationOwnership::new(
+                    1,
+                    1,
+                    Digest::from_bytes([7; 32]),
+                )],
+                dirty: false,
+            }
+            .encode()
+            .expect("evidence encoding"),
+        )
+        .expect("evidence");
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[91; 32]);
+        fs::write(&key_path, signing_key.to_bytes()).expect("signing key");
+        let run_bytes = run.encode().expect("run encoding");
+        let workload_bytes = workload.encode().expect("workload encoding");
+        fs::write(&run_path, &run_bytes).expect("run artifact");
+        fs::write(&workload_path, &workload_bytes).expect("workload artifact");
+
+        let mut args = vec![
+            output_path.display().to_string(),
+            "cli-source".into(),
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            profile_path.display().to_string(),
+            evidence_path.display().to_string(),
+            key_path.display().to_string(),
+            run_path.display().to_string(),
+            workload_path.display().to_string(),
+        ]
+        .into_iter();
+        bind_protected(&mut args).expect("bind protected receipt");
+
+        let receipt = QualificationReceipt::decode(&fs::read(&output_path).expect("receipt"))
+            .expect("receipt decoding");
+        receipt
+            .verify_for_profile_with_signer(
+                "cli-source",
+                Digest::from_bytes([171; 32]),
+                &profile,
+                &[&run_bytes, &workload_bytes],
+                signing_key.verifying_key().to_bytes(),
+            )
+            .expect_err("wrong image must be rejected");
+        receipt
+            .verify_for_profile_with_signer(
+                "cli-source",
+                Digest::from_bytes([170; 32]),
+                &profile,
+                &[&run_bytes, &workload_bytes],
+                signing_key.verifying_key().to_bytes(),
+            )
+            .expect("receipt verification");
     }
 
     #[test]
