@@ -38,9 +38,9 @@
 The `public_cell_qualification.rs` test is a typed **smoke**, not a primitive
 fault matrix. It now reports measured acknowledgements without manufacturing
 retry, rejection, or ambiguity from workload hints. Its lifecycle bitset marks
-only observed happy paths, duplicate checks, and cancellation checks for SQL,
-KV, Blob, Queue, Cron, Workflow, Activity, and Effects (24 of 56 bits); the
-other scheduled cases remain unmarked.
+only observed happy paths, retries, duplicate checks, and cancellation checks
+for SQL, KV, Blob, Queue, Cron, Workflow, Activity, and Effects (32 of 56 bits);
+the other scheduled cases remain unmarked.
 SQL, KV, Blob, Cron, Workflow, and Effects replay the same mutation identity
 and compare the first receipt and outcome; Queue resends the same producer
 identity under a distinct request and checks one message and zero remaining
@@ -61,6 +61,13 @@ and no live lease. The Effects scheduled case covers source acknowledgement;
 the separate delivery cancellation test covers the destination inbox boundary.
 Each scheduled occurrence gets a fresh one-shot fault; the 64-operation
 workload can schedule the same case more than once.
+The scheduled retry cases lose one signed request before dispatch, resolve its
+exact pending identity as absent through the separate typed observer, then
+execute the retained prepared request once. They verify the resulting typed
+state and report one measured retry. Blob checks published bytes and ETag;
+Queue checks one message and final settlement; Activity checks one terminal
+Workflow event and no live lease; Effects checks the delivered source status
+and no live lease. Each retry operation has a fresh one-shot loss boundary.
 `public_cell_lease_expiry.rs` exercises Blob upload expiry and Queue, Activity,
 and source Effect lease expiry through the public typed host. The lease cases
 check rejection of the expired token, reclaim with the same identity and a new
@@ -125,6 +132,10 @@ The scheduled Blob, Queue, Activity, and Effect source-ack cancellation cases
 passed together on isolated RustFS, including exact typed observation and zero
 reservations after shutdown. The full 24-bit RustFS workload and protected
 matrix remain unqualified.
+The 32-bit single-row and ten-row in-memory smokes passed on 2026-09-22. All
+eight scheduled retry cases passed together on isolated RustFS, including
+exact typed observation and zero reservations after shutdown. The full 32-bit
+RustFS workload and protected matrix remain unqualified.
 The public Activity capability runs happy-path claims and completions inside
 `ActivitySupervisor`; the local duplicate case uses the typed claim and
 completion commands to observe Activity completion deduplication. The
