@@ -196,75 +196,93 @@ pub(super) async fn run() {
     else {
         panic!("source Effect workflow did not complete");
     };
-    let (expiry_sql_sequence, expiry_kv_sequence, expiry_cron) =
-        if case == AFTER_SQL_EXPIRY || case == AFTER_KV_EXPIRY || case == AFTER_CRON_EXPIRY {
-            let observer_client = CellClient::local_many(Arc::clone(&registry), handles.clone())
-                .expect("source expiry observer client");
-            let observer = node.application_handle::<fixture::ReferenceApplication>(
-                observer_client,
-                tenant,
-                application,
+    let (expiry_sql_sequence, expiry_kv_sequence, expiry_cron, expiry_workflow) = if case
+        == AFTER_SQL_EXPIRY
+        || case == AFTER_KV_EXPIRY
+        || case == AFTER_CRON_EXPIRY
+        || case == AFTER_WORKFLOW_EXPIRY
+    {
+        let observer_client = CellClient::local_many(Arc::clone(&registry), handles.clone())
+            .expect("source expiry observer client");
+        let observer = node.application_handle::<fixture::ReferenceApplication>(
+            observer_client,
+            tenant,
+            application,
+        );
+        let (peer_client, entered, release, dispatched) =
+            qualification_peer::peer_client_with_delayed_mutation_receive(
+                Arc::clone(&registry),
+                handles.clone(),
             );
-            let (peer_client, entered, release, dispatched) =
-                qualification_peer::peer_client_with_delayed_mutation_receive(
-                    Arc::clone(&registry),
-                    handles.clone(),
-                );
-            let peer = node.application_handle::<fixture::ReferenceApplication>(
-                peer_client,
-                tenant,
-                application,
-            );
-            let expiry = process_expiry::ExpiryCase::new(
-                &typed,
-                &peer,
-                &observer,
-                &entered,
-                &release,
-                &dispatched,
-                tenant,
-                application,
-            );
-            if case == AFTER_SQL_EXPIRY {
-                (
-                    Some(
-                        expiry
-                            .sql(SQL_EXPIRY_OPERATION_ID, SQL_EXPIRY_NONCE)
-                            .await
-                            .expect("source scheduled SQL expiry"),
-                    ),
-                    None,
-                    None,
-                )
-            } else if case == AFTER_KV_EXPIRY {
-                (
-                    None,
-                    Some(
-                        expiry
-                            .kv(KV_EXPIRY_OPERATION_ID, KV_EXPIRY_NONCE)
-                            .await
-                            .expect("source scheduled KV expiry"),
-                    ),
-                    None,
-                )
-            } else {
-                let (sequence, generation, next_due_ms) = expiry
-                    .cron(CRON_EXPIRY_OPERATION_ID, CRON_EXPIRY_NONCE)
-                    .await
-                    .expect("source scheduled Cron expiry");
-                (
-                    None,
-                    None,
-                    Some(CronExpiryEvidence {
-                        sequence,
-                        generation,
-                        next_due_ms,
-                    }),
-                )
-            }
+        let peer = node.application_handle::<fixture::ReferenceApplication>(
+            peer_client,
+            tenant,
+            application,
+        );
+        let expiry = process_expiry::ExpiryCase::new(
+            &typed,
+            &peer,
+            &observer,
+            &entered,
+            &release,
+            &dispatched,
+            tenant,
+            application,
+        );
+        if case == AFTER_SQL_EXPIRY {
+            (
+                Some(
+                    expiry
+                        .sql(SQL_EXPIRY_OPERATION_ID, SQL_EXPIRY_NONCE)
+                        .await
+                        .expect("source scheduled SQL expiry"),
+                ),
+                None,
+                None,
+                None,
+            )
+        } else if case == AFTER_KV_EXPIRY {
+            (
+                None,
+                Some(
+                    expiry
+                        .kv(KV_EXPIRY_OPERATION_ID, KV_EXPIRY_NONCE)
+                        .await
+                        .expect("source scheduled KV expiry"),
+                ),
+                None,
+                None,
+            )
+        } else if case == AFTER_CRON_EXPIRY {
+            let (sequence, generation, next_due_ms) = expiry
+                .cron(CRON_EXPIRY_OPERATION_ID, CRON_EXPIRY_NONCE)
+                .await
+                .expect("source scheduled Cron expiry");
+            (
+                None,
+                None,
+                Some(CronExpiryEvidence {
+                    sequence,
+                    generation,
+                    next_due_ms,
+                }),
+                None,
+            )
         } else {
-            (None, None, None)
-        };
+            let (sequence, run_id) = expiry
+                .workflow(WORKFLOW_EXPIRY_OPERATION_ID, WORKFLOW_EXPIRY_NONCE)
+                .await
+                .expect("source scheduled Workflow expiry");
+            (
+                None,
+                None,
+                None,
+                Some(WorkflowExpiryEvidence { sequence, run_id }),
+            )
+        }
+    } else {
+        (None, None, None, None)
+    };
     let leases = if case == AFTER_LEASE {
         let claimed = queue
             .claim(
@@ -501,6 +519,7 @@ pub(super) async fn run() {
         expiry_sql_sequence,
         expiry_kv_sequence,
         expiry_cron,
+        expiry_workflow,
         kv_sequence: written.receipt.commit_sequence,
         kv_version: version.to_vec(),
         blob_sequence: published.receipt.commit_sequence,
