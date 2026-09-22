@@ -1012,18 +1012,11 @@ impl NodeDirectory {
             return Ok(Arc::clone(snapshot));
         }
 
-        let live_nodes = if include_live_nodes {
-            self.live(now_ms, MAX_LIVE_NODE_RECORDS)
-                .await?
-                .into_iter()
-                .filter(recovery_executor_eligible)
-                .map(|advertisement| advertisement.node())
-                .collect::<HashSet<_>>()
-        } else {
-            HashSet::new()
-        };
         let prefix = self.layout.node_directory_path();
         let stream = self.layout.store().inner().list(Some(&prefix));
+        let mut live_nodes = HashSet::new();
+        let mut live_sessions = HashSet::new();
+        let mut live_count = 0_usize;
         let mut records = stream
             .map(|item| {
                 let prefix = prefix.clone();
@@ -1035,7 +1028,7 @@ impl NodeDirectory {
                     };
                     let session = record.session();
                     validate_record_path(&self.layout, session, &meta.location)?;
-                    let candidate = match record {
+                    match record {
                         NodeRecord::Advertisement(advertisement) => {
                             self.validate_scope(&advertisement)?;
                             advertisement.validate_shape()?;
@@ -1044,38 +1037,66 @@ impl NodeDirectory {
                             {
                                 return Err(Error::Node("advertised node issue time differs"));
                             }
-                            advertisement
-                                .log
-                                .as_ref()
-                                .map(|log| RecoveryCandidateRecord {
+                            let live = if include_live_nodes && advertisement.expires_at_ms > now_ms
+                            {
+                                self.validate(&advertisement, now_ms)?;
+                                Some((
+                                    advertisement.node(),
+                                    recovery_executor_eligible(&advertisement),
+                                ))
+                            } else {
+                                None
+                            };
+                            let candidate =
+                                advertisement
+                                    .log
+                                    .as_ref()
+                                    .map(|log| RecoveryCandidateRecord {
+                                        session,
+                                        expires_at_ms: advertisement.expires_at_ms,
+                                        claimant: None,
+                                        claim_expires_at_ms: None,
+                                        active: log.active(),
+                                        phase: log.phase(),
+                                        members: log.members().to_vec(),
+                                    });
+                            Ok(Some((candidate, live)))
+                        }
+                        NodeRecord::Tombstone(tombstone) => {
+                            let candidate =
+                                tombstone.log.as_ref().map(|log| RecoveryCandidateRecord {
                                     session,
-                                    expires_at_ms: advertisement.expires_at_ms,
-                                    claimant: None,
-                                    claim_expires_at_ms: None,
+                                    expires_at_ms: tombstone.expires_at_ms,
+                                    claimant: tombstone.claimant,
+                                    claim_expires_at_ms: tombstone.claim_expires_at_ms,
                                     active: log.active(),
                                     phase: log.phase(),
                                     members: log.members().to_vec(),
-                                })
+                                });
+                            Ok(Some((candidate, None)))
                         }
-                        NodeRecord::Tombstone(tombstone) => {
-                            tombstone.log.as_ref().map(|log| RecoveryCandidateRecord {
-                                session,
-                                expires_at_ms: tombstone.expires_at_ms,
-                                claimant: tombstone.claimant,
-                                claim_expires_at_ms: tombstone.claim_expires_at_ms,
-                                active: log.active(),
-                                phase: log.phase(),
-                                members: log.members().to_vec(),
-                            })
-                        }
-                    };
-                    Ok(candidate)
+                    }
                 }
             })
             .buffer_unordered(NODE_DIRECTORY_READ_CONCURRENCY);
         let mut candidates = Vec::new();
         while let Some(record) = records.next().await {
-            if let Some(record) = record? {
+            if let Some((record, live)) = record? {
+                if let Some((node, eligible)) = live {
+                    live_count = live_count.saturating_add(1);
+                    if live_count > MAX_LIVE_NODE_RECORDS {
+                        return Err(Error::Node("live node directory exceeds its limit"));
+                    }
+                    if !live_sessions.insert(node) {
+                        return Err(Error::Node("multiple live sessions advertise one node"));
+                    }
+                    if eligible {
+                        live_nodes.insert(node);
+                    }
+                }
+                let Some(record) = record else {
+                    continue;
+                };
                 if candidates.len() == MAX_LIVE_NODE_RECORDS {
                     return Err(Error::Node("node recovery directory exceeds its limit"));
                 }
