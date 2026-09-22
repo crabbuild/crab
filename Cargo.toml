@@ -40,16 +40,16 @@ crab-auth-store = { version = "=0.1.0", path = "crates/crab-auth-store", default
 crab-cache = { version = "=0.1.0", path = "crates/crab-cache", default-features = false }
 crab-cache-server = { version = "=1.2.4", path = "crates/crab-cache-server", default-features = false }
 crab-cache-store = { version = "=0.1.0", path = "crates/crab-cache-store", default-features = false }
-cellule-runtime = { git = "https://github.com/crabbuild/cellule.git", rev = "e8095eafcd14e1a4bffa9b3b193a693bc2c87c20", default-features = false }
-cellule-app = { git = "https://github.com/crabbuild/cellule.git", rev = "e8095eafcd14e1a4bffa9b3b193a693bc2c87c20", default-features = false }
-cellule-host = { git = "https://github.com/crabbuild/cellule.git", rev = "e8095eafcd14e1a4bffa9b3b193a693bc2c87c20", default-features = false }
-cellule-store = { version = "=0.1.0", git = "https://github.com/crabbuild/cellule.git", rev = "e8095eafcd14e1a4bffa9b3b193a693bc2c87c20", default-features = false }
+cellule-runtime = { git = "https://github.com/crabbuild/cellule.git", rev = "89c927398de0073755a4ddd8759d87ac691cfe9a", default-features = false }
+cellule-app = { git = "https://github.com/crabbuild/cellule.git", rev = "89c927398de0073755a4ddd8759d87ac691cfe9a", default-features = false }
+cellule-host = { git = "https://github.com/crabbuild/cellule.git", rev = "89c927398de0073755a4ddd8759d87ac691cfe9a", default-features = false }
+cellule-store = { version = "=0.1.0", git = "https://github.com/crabbuild/cellule.git", rev = "89c927398de0073755a4ddd8759d87ac691cfe9a", default-features = false }
 crab-coordination = { version = "=0.1.0", path = "crates/crab-coordination", default-features = false }
 crab-diff = { version = "=0.1.0", path = "crates/crab-diff", default-features = false }
 crab-git = { version = "=0.1.0", path = "crates/crab-git", default-features = false }
 crab-http-server = { version = "=0.1.0", path = "crates/crab-http-server", default-features = false }
 crab-lfs = { version = "=0.1.0", path = "crates/crab-lfs", default-features = false }
-cellule-ltx = { git = "https://github.com/crabbuild/cellule.git", rev = "e8095eafcd14e1a4bffa9b3b193a693bc2c87c20", default-features = false }
+cellule-ltx = { git = "https://github.com/crabbuild/cellule.git", rev = "89c927398de0073755a4ddd8759d87ac691cfe9a", default-features = false }
 crab-metadata = { version = "=0.1.0", path = "crates/crab-metadata", default-features = false }
 crab-read = { version = "=0.1.0", path = "crates/crab-read", default-features = false }
 crab-remote = { version = "=0.1.0", path = "crates/crab-remote", default-features = false }
