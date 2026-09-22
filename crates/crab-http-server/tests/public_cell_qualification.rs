@@ -855,7 +855,8 @@ async fn public_cell_node_runs_complete_matrix_through_typed_apis() {
             &profile,
             41_u64.saturating_add(row_index as u64),
             1,
-            16,
+            // Keep each row above the PR profile's measured one-second floor without sleeps.
+            64,
             1,
         )
         .expect("qualification workload");
