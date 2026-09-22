@@ -98,12 +98,26 @@ pub(super) async fn run() {
         )
         .await
         .expect("observer SQL rows");
-    let kv = typed
+    let kv_capability = typed
         .kv::<fixture::ReferenceKv>(fixture::KV_NAMESPACE)
-        .expect("observer KV")
+        .expect("observer KV");
+    let kv = kv_capability
         .get(KV_SCOPE.to_vec(), KV_KEY.to_vec(), None)
         .await
         .expect("observer KV value");
+    for key_id in [KV_EXPIRY_OPERATION_ID, KV_EXPIRY_OPERATION_ID + 1] {
+        let expired = kv_capability
+            .get(KV_EXPIRY_SCOPE.to_vec(), fixed_id(key_id).to_vec(), None)
+            .await
+            .expect("observer KV expiry read");
+        assert!(expired.output.is_none(), "expired KV key appeared");
+        if let Some(sequence) = acknowledgement
+            .as_ref()
+            .and_then(|ack| ack.expiry_kv_sequence)
+        {
+            assert!(expired.receipt.commit_sequence >= sequence);
+        }
+    }
     let blob = typed
         .blob::<fixture::ReferenceBlob>()
         .expect("observer Blob")
@@ -369,6 +383,13 @@ pub(super) async fn run() {
             .is_some()
         {
             values.extend_from_slice(&SQL_EXPIRY_NONCE.to_be_bytes());
+        }
+        if acknowledgement
+            .as_ref()
+            .and_then(|acknowledged| acknowledged.expiry_kv_sequence)
+            .is_some()
+        {
+            values.extend_from_slice(&KV_EXPIRY_NONCE.to_be_bytes());
         }
         values
     } else {

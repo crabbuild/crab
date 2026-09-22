@@ -511,7 +511,7 @@ impl<'a> ExpiryCase<'a> {
         Ok(())
     }
 
-    pub async fn kv(self, operation_id: u64, nonce: u64) -> Result<()> {
+    pub async fn kv(self, operation_id: u64, nonce: u64) -> Result<u64> {
         let Self {
             writer,
             peer,
@@ -638,6 +638,6 @@ impl<'a> ExpiryCase<'a> {
         if expired.output.is_some() || delayed_absent.output.is_some() {
             return Err(Error::Control("public scheduled KV expiry state differs"));
         }
-        Ok(())
+        Ok(inserted.receipt.commit_sequence)
     }
 }
