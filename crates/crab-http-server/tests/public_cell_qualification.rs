@@ -9,7 +9,8 @@ use crab_cell_runtime::{
     ActivityRunOutcome, ActivitySupervisor, ApplicationId, BlobCondition, BlobMutation, BlobQuery,
     BlobQueryResult, CellTarget, CronMutation, CronQueryResult, Digest, EffectClaimRequest,
     EffectLeaseOutcome, Error, KvAtomicOutcome, KvAtomicRequest, KvMutation,
-    QUALIFICATION_MATRIX_ROWS, QualificationCase, QualificationExecution, QualificationMatrixEntry,
+    QUALIFICATION_CASE_COVERAGE_OPERATIONS, QUALIFICATION_MATRIX_ROWS, QUALIFICATION_PRIMITIVES,
+    QualificationCase, QualificationExecution, QualificationMatrixEntry,
     QualificationMatrixManifest, QualificationOperation, QualificationOperationExecutor,
     QualificationProfile, QualificationReceipt, QualificationRunner, QualificationWorkload,
     QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome, QueueSendRequest, QueueState, Result,
@@ -752,7 +753,10 @@ async fn run_public_typed_primitive_workload(
         run_tag: 0,
     };
     assert!(node.is_ready());
-    let summary = workload.run(&mut executor).await.expect("typed workload");
+    let summary = node
+        .run_qualification_observed(&workload, &mut executor)
+        .await
+        .expect("typed workload");
     assert!(node.is_ready());
     assert_eq!(summary.operations(), 64);
     assert!(summary.primitive_counts().iter().all(|counts| {
@@ -768,7 +772,9 @@ async fn run_public_typed_primitive_workload(
         .iter()
         .map(|byte| byte.count_ones())
         .sum::<u32>();
-    assert_eq!(covered, 15);
+    let observed_smoke_cases = (QUALIFICATION_PRIMITIVES.len() * 2 - 1) as u32;
+    assert_eq!(covered, observed_smoke_cases);
+    assert!(covered < QUALIFICATION_CASE_COVERAGE_OPERATIONS as u32);
     let artifact = summary.artifact(&workload).expect("run artifact");
     artifact
         .verify_for_profile(&profile)
@@ -860,7 +866,10 @@ async fn public_cell_node_runs_complete_matrix_through_typed_apis() {
             run_tag: row_index as u64 + 1,
         };
         assert!(node.is_ready());
-        let summary = workload.run(&mut executor).await.expect("typed workload");
+        let summary = node
+            .run_qualification_observed(&workload, &mut executor)
+            .await
+            .expect("typed workload");
         assert!(node.is_ready());
         let run_artifact = summary.artifact(&workload).expect("run artifact");
         run_artifact

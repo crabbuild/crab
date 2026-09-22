@@ -102,6 +102,15 @@ the checked-in profile from the tagged source before invoking the validator.
 GitHub's workflow attestation remains the trust anchor for the release job and
 source identity.
 
+Typed application qualification runs through `CellNode`: protected serial
+workloads use `run_qualification`, while independent or idempotent operations
+may use the readiness-gated `run_qualification_concurrent` entry point with an
+explicit bounded concurrency. Local wiring/smoke checks that intentionally
+observe only a subset of lifecycle cases use `run_qualification_observed`; that
+result cannot satisfy a protected profile unless its artifact independently
+proves the required case coverage. All paths reject results if the node begins
+draining or a supervised task fails before the run completes.
+
 The raw four-process receipt is validated first with the fail-closed v6 command:
 
 ```bash

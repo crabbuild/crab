@@ -1085,6 +1085,12 @@ impl QualificationRunArtifact {
         &self.workload
     }
 
+    /// Returns the bounded metrics captured with this measured run.
+    #[must_use]
+    pub fn metrics(&self) -> &[QualificationMetric] {
+        &self.metrics
+    }
+
     #[must_use]
     pub const fn outcome_digest(&self) -> Digest {
         Digest::from_bytes(self.outcome_digest)
@@ -1826,6 +1832,34 @@ pub struct QualificationOwnership {
     epoch: u64,
     published_sequence: u64,
     root: [u8; 32],
+}
+
+/// Non-secret execution identity and fault evidence supplied by a protected
+/// qualification harness when it binds a measured run to a receipt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QualificationExecutionEvidence {
+    /// Provider identity recorded by the harness.
+    pub provider: String,
+    /// Logical workload row in the ten-row qualification matrix.
+    pub workload: String,
+    /// Named fault schedule, or `none` for a non-fault run.
+    pub fault: String,
+    /// Toolchain identity used by the harness.
+    pub toolchain: String,
+    /// Immutable execution image/profile identity.
+    pub execution_profile: String,
+    /// Topology identity required by the selected profile.
+    pub topology: String,
+    /// Wall-clock start timestamp in Unix milliseconds.
+    pub started_at_ms: u64,
+    /// Wall-clock finish timestamp in Unix milliseconds.
+    pub finished_at_ms: u64,
+    /// Canonical fault schedule bytes retained in the raw evidence bundle.
+    pub fault_schedule: Vec<u8>,
+    /// Ownership watermarks captured before/after any injected fault.
+    pub ownership: Vec<QualificationOwnership>,
+    /// Whether the harness observed a dirty source or workspace.
+    pub dirty: bool,
 }
 
 impl QualificationOwnership {
@@ -2761,6 +2795,18 @@ impl QualificationReceipt {
                 "qualification receipt does not bind the measured workload seed",
             ));
         }
+        let mut workloads = artifacts.iter().filter_map(|artifact| {
+            QualificationWorkload::decode(artifact)
+                .ok()
+                .filter(|workload| workload.verify_for_profile(profile).is_ok())
+        });
+        if let Some(workload) = workloads.next()
+            && (workloads.next().is_some() || workload != *run.workload())
+        {
+            return Err(Error::Control(
+                "qualification receipt does not bind the measured workload",
+            ));
+        }
         for (name, unit) in [
             ("cells", "cells"),
             ("operations", "operations"),
@@ -2845,6 +2891,90 @@ impl QualificationRunner {
     #[must_use]
     pub fn new(signing_key: SigningKey) -> Self {
         Self { signing_key }
+    }
+
+    /// Binds a verified typed run artifact to one signed receipt.
+    ///
+    /// The run artifact must be the first raw artifact and a canonical
+    /// workload artifact must be present in the remaining list. This keeps the
+    /// protected `primitives` row reproducible while allowing the harness to
+    /// retain additional raw provider/fault evidence in the same receipt.
+    pub fn emit_protected_run(
+        &self,
+        profile: &QualificationProfile,
+        source_revision: String,
+        image: Digest,
+        evidence: QualificationExecutionEvidence,
+        run: &QualificationRunArtifact,
+        artifacts: &[&[u8]],
+    ) -> Result<QualificationReceipt> {
+        run.verify_for_profile(profile)?;
+        if artifacts.is_empty() {
+            return Err(Error::Control("qualification run artifacts are empty"));
+        }
+        if evidence.workload != "primitives" {
+            return Err(Error::Control("qualification run workload row"));
+        }
+        if (!profile.required_provider().is_empty()
+            && evidence.provider != profile.required_provider())
+            || (!profile.required_topology().is_empty()
+                && evidence.topology != profile.required_topology())
+        {
+            return Err(Error::Control("qualification run environment identity"));
+        }
+        let encoded_run = run.encode()?;
+        if Digest::from_bytes(*blake3::hash(artifacts[0]).as_bytes())
+            != Digest::from_bytes(*blake3::hash(&encoded_run).as_bytes())
+            || QualificationRunArtifact::decode(artifacts[0])? != *run
+        {
+            return Err(Error::Control("qualification run primary artifact differs"));
+        }
+        let mut workload_artifacts = artifacts.iter().filter_map(|artifact| {
+            QualificationWorkload::decode(artifact)
+                .ok()
+                .filter(|workload| workload.verify_for_profile(profile).is_ok())
+        });
+        let Some(workload) = workload_artifacts.next() else {
+            return Err(Error::Control("qualification run workload artifact count"));
+        };
+        if workload_artifacts.next().is_some() || workload != *run.workload() {
+            return Err(Error::Control("qualification run workload identity"));
+        }
+        let bucket_calls = run.threshold_metric("bucket_calls", "count")?;
+        let peak_rss_bytes = run.threshold_metric("peak_rss_bytes", "bytes")?;
+        let artifact_digests = artifacts
+            .iter()
+            .map(|artifact| Digest::from_bytes(*blake3::hash(artifact).as_bytes()))
+            .collect::<Vec<_>>();
+        let receipt = QualificationReceipt::new(
+            source_revision,
+            image,
+            evidence.provider,
+            evidence.workload,
+            evidence.fault,
+            run.metrics().to_vec(),
+            artifact_digests[0],
+            true,
+        )?
+        .with_execution(
+            evidence.toolchain,
+            evidence.execution_profile,
+            evidence.topology,
+            run.workload().seed(),
+            bucket_calls,
+            peak_rss_bytes,
+            evidence.dirty,
+        )?
+        .with_profile(profile)?
+        .with_evidence(
+            evidence.started_at_ms,
+            evidence.finished_at_ms,
+            &evidence.fault_schedule,
+            artifact_digests,
+            evidence.ownership,
+        )?
+        .attest(&self.signing_key)?;
+        Ok(receipt)
     }
 
     #[expect(
@@ -3662,6 +3792,102 @@ mod tests {
         assert!(
             forged
                 .verify_primitive_run_artifact(&profile, &[&encoded])
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_run_binder_requires_one_canonical_run_and_workload() {
+        let mut profile =
+            QualificationProfile::new("protected-binder-contract".into(), 1, 8, 1, 5_000).unwrap();
+        profile.maximum_peak_rss_bytes = 1_000;
+        profile.maximum_local_disk_bytes = 2_000;
+        profile.maximum_file_descriptors = 3_000;
+        profile.maximum_bucket_calls = 4_000;
+        let workload = QualificationWorkload::generate_with_size(&profile, 29, 1, 8, 1).unwrap();
+        let mut executor = ContractExecutor {
+            calls: 0,
+            case_coverage: false,
+        };
+        let summary = workload.run(&mut executor).await.unwrap();
+        let resources = [
+            QualificationMetric::new("peak_rss_bytes".into(), 19, "bytes".into()).unwrap(),
+            QualificationMetric::new("peak_local_disk_bytes".into(), 29, "bytes".into()).unwrap(),
+            QualificationMetric::new("peak_file_descriptors".into(), 39, "count".into()).unwrap(),
+            QualificationMetric::new("bucket_calls".into(), 49, "count".into()).unwrap(),
+        ];
+        let mut run = summary
+            .artifact_with_resource_metrics(&workload, &resources)
+            .unwrap();
+        run.elapsed_ms = 1_000;
+        for (name, value) in [("duration_secs", 1), ("throughput_ops_per_sec", 8)] {
+            run.metrics
+                .iter_mut()
+                .find(|metric| metric.name() == name)
+                .unwrap()
+                .value = value;
+        }
+        run.verify_for_profile(&profile).unwrap();
+        let run_bytes = run.encode().unwrap();
+        let workload_bytes = workload.encode().unwrap();
+        let key = SigningKey::from_bytes(&[96; 32]);
+        let runner = QualificationRunner::new(key.clone());
+        let evidence = QualificationExecutionEvidence {
+            provider: "rustfs".into(),
+            workload: "primitives".into(),
+            fault: "none".into(),
+            toolchain: "rustc".into(),
+            execution_profile: "release".into(),
+            topology: "three-process".into(),
+            started_at_ms: 1,
+            finished_at_ms: 2,
+            fault_schedule: b"none".to_vec(),
+            ownership: vec![QualificationOwnership::new(
+                1,
+                1,
+                Digest::from_bytes([98; 32]),
+            )],
+            dirty: false,
+        };
+        let receipt = runner
+            .emit_protected_run(
+                &profile,
+                "binder-source".into(),
+                Digest::from_bytes([97; 32]),
+                evidence.clone(),
+                &run,
+                &[&run_bytes, &workload_bytes],
+            )
+            .unwrap();
+        receipt
+            .verify_for_profile_with_signer(
+                "binder-source",
+                Digest::from_bytes([97; 32]),
+                &profile,
+                &[&run_bytes, &workload_bytes],
+                key.verifying_key().to_bytes(),
+            )
+            .unwrap();
+        receipt
+            .verify_primitive_workload(&profile, &[&run_bytes, &workload_bytes])
+            .unwrap();
+        receipt
+            .verify_primitive_run_artifact(&profile, &[&run_bytes, &workload_bytes])
+            .unwrap();
+
+        let mismatched_workload =
+            QualificationWorkload::generate_with_size(&profile, 29, 2, 8, 1).unwrap();
+        let mismatched_workload_bytes = mismatched_workload.encode().unwrap();
+        assert!(
+            runner
+                .emit_protected_run(
+                    &profile,
+                    "binder-source".into(),
+                    Digest::from_bytes([97; 32]),
+                    evidence,
+                    &run,
+                    &[&run_bytes, &mismatched_workload_bytes],
+                )
                 .is_err()
         );
     }
