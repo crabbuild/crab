@@ -65,6 +65,25 @@ static WORKFLOW_NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     dead_letter: None,
 }];
 
+#[test]
+fn recovery_retry_backoff_is_bounded_and_monotonic() {
+    let mut retry = RecoveryRetryState::new(100);
+    assert!(retry.ready(100));
+
+    retry.record_failure(100);
+    assert_eq!(retry.next_attempt_ms, 1_100);
+    assert!(!retry.ready(1_099));
+    assert!(retry.ready(1_100));
+
+    retry.record_failure(1_100);
+    assert_eq!(retry.next_attempt_ms, 3_100);
+    for now_ms in [3_100, 7_100, 15_100, 30_100, 45_100, 60_100] {
+        retry.record_failure(now_ms);
+        assert!(retry.next_attempt_ms - now_ms <= RECOVERY_RETRY_MAX_MS);
+    }
+    assert_eq!(retry.next_attempt_ms - 60_100, RECOVERY_RETRY_MAX_MS);
+}
+
 #[derive(Debug)]
 struct HangingUpdateStore {
     inner: Arc<InMemory>,

@@ -192,7 +192,11 @@ logs, claims at most two concurrently, scans at most 10,000 affected Cells,
 renews each recovery claim while gathering and pinning, refreshes the claim
 once more before the final seal, and bounds that seal's object-store CAS so a
 stalled store returns a retryable deadline instead of holding an unbounded
-recovery task. It leaves a takeover proof that another request can reload. For
+recovery task. Failed sessions use bounded in-memory exponential retry, capped
+below the 30-second claim lifetime, so an unavailable object store cannot keep
+all recovery workers hot or starve later sessions; the authoritative claim is
+still the only ownership record. It leaves a takeover proof that another
+request can reload. For
 commands, the
 actor keeps complete local cuts readable without making their directory entries
 durable, then submits those exact bytes before immutable-root preparation.
@@ -1509,9 +1513,9 @@ structured logs or bounded administrative queries, never metric labels.
 The current server wiring emits durability-proof and follower-append events
 through `CellTelemetry`; it samples the signed node-log phase and session-lease
 remaining time, and records recovery duration and bounded failure class from the
-scheduler. Recovery `waiting` is intentionally reported as zero until admission
-owns a durable queued-candidate count; it must not be inferred from a saturated
-worker count.
+scheduler. Recovery `waiting` counts candidates in the bounded retry delay; it
+does not include sessions that have not yet been observed by this scheduler and
+must not be inferred from a saturated worker count.
 
 `cells status --owner OWNER --name REPOSITORY --json` reports from persistent
 control and signed node-session state:
