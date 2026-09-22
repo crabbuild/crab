@@ -591,6 +591,8 @@ async fn conflicting_duplicate_and_sequence_gap_fail_closed() {
         )
         .await
         .unwrap();
+    let retained_before_rejected_append = store.retained_bytes();
+    let available_before_rejected_append = store.available_bytes();
     assert!(
         store
             .append(
@@ -601,6 +603,16 @@ async fn conflicting_duplicate_and_sequence_gap_fail_closed() {
             )
             .await
             .is_err()
+    );
+    assert_eq!(
+        store.retained_bytes(),
+        retained_before_rejected_append,
+        "a rejected append must not leak disk admission"
+    );
+    assert_eq!(
+        store.available_bytes(),
+        available_before_rejected_append,
+        "a rejected append must restore shared capacity"
     );
     assert!(
         store
@@ -613,6 +625,8 @@ async fn conflicting_duplicate_and_sequence_gap_fail_closed() {
             .await
             .is_err()
     );
+    assert_eq!(store.retained_bytes(), retained_before_rejected_append);
+    assert_eq!(store.available_bytes(), available_before_rejected_append);
     database.close().unwrap();
 }
 

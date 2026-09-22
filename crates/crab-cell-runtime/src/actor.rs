@@ -50,6 +50,7 @@ const MAX_RENEWALS_IN_FLIGHT: usize = 32;
 const SQL_WALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 const HYDRATION_TICK: std::time::Duration = std::time::Duration::from_millis(100);
 const HYDRATION_PAGES_PER_STEP: u32 = 64;
+const FLEET_PUBLICATION_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 const fn bounded_u32(value: usize) -> u32 {
     if value > u32::MAX as usize {
@@ -2980,13 +2981,57 @@ fn start_publication(
     tasks.spawn(async move {
         let _retained_reservation = retained_reservation;
         let retained_bytes = publication.pending.retained_bytes();
+        let mut publication_proof = Some(publication.proof);
+        let fleet_deadline = std::time::Instant::now() + FLEET_PUBLICATION_GRACE;
+        let mut retry_delay = std::time::Duration::from_millis(100);
         let result = async {
             let expected = publication.pending.outcome().clone();
-            let prepared = publisher.prepare(&publication.pending).await?;
+            let prepared = loop {
+                match publisher.prepare(&publication.pending).await {
+                    Ok(prepared) => break prepared,
+                    Err(error) if node_logged && is_storage_publication_error(&error) => {
+                        if let Some(durability) = publication.durability.as_ref() {
+                            wait_for_fleet_proof(durability, fleet_deadline).await?;
+                        }
+                        if let Some(proof) = publication_proof.take() {
+                            let _ = proof.send(Err(error));
+                        }
+                        if std::time::Instant::now() >= fleet_deadline {
+                            return Err(Error::Fenced);
+                        }
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = retry_delay
+                            .saturating_mul(2)
+                            .min(std::time::Duration::from_secs(2));
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
             pool.bind_prepared(cell, prepared.clone()).await?;
-            let root = publisher
-                .publish_prepared(&prepared, publication.pending.next_due_ms())
-                .await?;
+            let root = loop {
+                match publisher
+                    .publish_prepared(&prepared, publication.pending.next_due_ms())
+                    .await
+                {
+                    Ok(root) => break root,
+                    Err(error) if node_logged && is_storage_publication_error(&error) => {
+                        if let Some(durability) = publication.durability.as_ref() {
+                            wait_for_fleet_proof(durability, fleet_deadline).await?;
+                        }
+                        if let Some(proof) = publication_proof.take() {
+                            let _ = proof.send(Err(error));
+                        }
+                        if std::time::Instant::now() >= fleet_deadline {
+                            return Err(Error::Fenced);
+                        }
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = retry_delay
+                            .saturating_mul(2)
+                            .min(std::time::Duration::from_secs(2));
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
             if let Some(durability) = publication.durability.as_ref() {
                 durability.prove_object().await?;
             } else {
@@ -3002,8 +3047,9 @@ fn start_publication(
         }
         .await;
         let fenced = result.is_err();
-        let proof = if fenced { Err(Error::Fenced) } else { Ok(()) };
-        let _ = publication.proof.send(proof);
+        if let Some(proof) = publication_proof {
+            let _ = proof.send(if fenced { Err(Error::Fenced) } else { Ok(()) });
+        }
         if fenced {
             let _ = pool.fence(cell).await;
         }
@@ -3018,6 +3064,25 @@ fn start_publication(
             fenced,
         }
     });
+}
+
+fn is_storage_publication_error(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Storage(_) | Error::Ltx(crab_ltx::CrabError::Storage(_))
+    )
+}
+
+async fn wait_for_fleet_proof(
+    durability: &PendingDurability,
+    deadline: std::time::Instant,
+) -> crate::Result<()> {
+    tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        durability.prove_fleet(),
+    )
+    .await
+    .map_err(|_| Error::Fenced)?
 }
 
 async fn execute_query(

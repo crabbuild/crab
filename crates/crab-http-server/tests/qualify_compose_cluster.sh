@@ -101,24 +101,35 @@ resume_service() {
   "${compose[@]}" kill --signal SIGCONT "$service" >/dev/null
 }
 
+compose_container_id() {
+  local service="$1"
+  local containers
+  # Service namespace dependencies can make `compose ps SERVICE` resolve the
+  # namespace provider; labels keep kill and remove scoped to the requested node.
+  containers="$(docker container ls --all \
+    --filter "label=com.docker.compose.project=${project}" \
+    --filter "label=com.docker.compose.service=${service}" \
+    --format '{{.ID}}')"
+  if [ -z "$containers" ] || [[ "$containers" == *$'\n'* ]]; then
+    return 1
+  fi
+  printf '%s\n' "$containers"
+}
+
 remove_stopped_service() {
   local service="$1"
   local container
-  container="$("${compose[@]}" ps --all --quiet "$service")"
-  if [ -z "$container" ]; then
+  if ! container="$(compose_container_id "$service")"; then
     echo "${service} did not have a removable container." >&2
     return 1
   fi
-  # Node services use `service:server`; targeting the exact container avoids
-  # Compose treating the shared namespace provider as part of node removal.
   docker rm --force "$container" >/dev/null
 }
 
 kill_service() {
   local service="$1"
   local container
-  container="$("${compose[@]}" ps --all --quiet "$service")"
-  if [ -z "$container" ]; then
+  if ! container="$(compose_container_id "$service")"; then
     echo "${service} did not have a container to kill." >&2
     return 1
   fi
@@ -130,7 +141,7 @@ wait_for_healthy() {
   local service="$1"
   local container
   for _ in $(seq 1 90); do
-    container="$("${compose[@]}" ps --quiet "$service")"
+    container="$(compose_container_id "$service" || true)"
     if [ -n "$container" ] &&
       [ "$(docker inspect --format '{{.State.Health.Status}}' "$container")" = healthy ]; then
       return 0
@@ -269,9 +280,9 @@ fi
 "${compose[@]}" config --quiet
 "${compose[@]}" up --detach "${up_mode[@]}" --wait --wait-timeout 180
 
-# The cluster overlay starts B only after C is healthy. Together with B's
-# implicit network-namespace dependency on A, its first immutable epoch can
-# recruit both followers without replacing its boot session.
+# The cluster overlay starts B only after C is healthy. The dedicated namespace
+# sidecar lets every node be restarted independently without replacing the
+# boot session of a surviving peer.
 
 capacity_a="$("${compose[@]}" exec -T server crab-http-server \
   --config /etc/crab/server.toml cells capacity --json --live)"
@@ -539,7 +550,7 @@ awk '$1 == "crab_cell_follower_retained_bytes" && $2 + 0 > 0 { found = 1 }
 
 # Keep node C as the deterministic surviving follower: node A remains in the
 # log, but its signed advertisement must expire before the owner is killed.
-# Freezing preserves the shared Compose network namespace for the proxy.
+# The dedicated Compose namespace sidecar remains alive while A is frozen.
 freeze_service server
 a_advertisement_expired=false
 for _ in $(seq 1 45); do
@@ -703,9 +714,8 @@ jq --exit-status \
   <<<"$control_continued" >/dev/null
 
 resume_service server
-# The shared namespace provider is resumed in place. Including it in `up` lets
-# Compose recreate the provider while B is being attached, which races B's
-# network namespace and can make an otherwise healthy rejoin fail closed.
+# The namespace sidecar stays up while A self-fences; B can therefore rejoin
+# without recreating another node or racing a failed namespace provider.
 "${compose[@]}" up --detach --no-build server-b >/dev/null
 wait_for_healthy server-b
 rejoin_ready=false
@@ -823,8 +833,8 @@ jq --exit-status \
    any(.advertisement.log.member_nodes[]; . != $node_b)' \
   <<<"$node_before_follower_loss" >/dev/null
 
-# Freezing nodes A and D keeps the shared Compose network namespace alive while
-# the old followers, heartbeats, and follower endpoints are unavailable.
+# Freezing nodes A and D removes their leases and follower endpoints while the
+# dedicated Compose namespace sidecar remains available for node C.
 freeze_service server
 freeze_service server-d
 sleep 12
@@ -1005,8 +1015,8 @@ service_session() {
 stop_fallback_member() {
   case "$1" in
     server)
-      # Freezing A preserves the shared network namespace while removing its
-      # heartbeat and follower endpoint from the live fleet.
+      # Freezing A removes its heartbeat and follower endpoint without stopping
+      # the dedicated Compose namespace used by the remaining nodes.
       freeze_service server
       ;;
     server-c|server-d)
@@ -1024,8 +1034,14 @@ stop_fallback_member() {
 # first publishes an object-covered mutation, then every original member is
 # stopped before the owner is killed. Recovery must therefore use the bounded
 # any-node path and still restore exact data from RustFS.
-resume_service server
-resume_service server-d
+# A stale process fences itself once its lease is renewed after the freeze.
+# Remove the stopped node and its namespace proxy explicitly so the next start
+# models an orchestrator replacement rather than reusing the fenced process.
+for service in proxy server server-d; do
+  kill_service "$service" >/dev/null 2>&1 || true
+  remove_stopped_service "$service" >/dev/null 2>&1 || true
+done
+"${compose[@]}" up --detach --no-build server proxy server-d >/dev/null
 "${compose[@]}" up --detach --no-build server-c >/dev/null
 wait_for_healthy server
 wait_for_healthy server-c

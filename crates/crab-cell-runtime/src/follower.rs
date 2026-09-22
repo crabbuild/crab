@@ -752,9 +752,11 @@ fn settle_disk_reservation(
     result: Result<FollowerReceipt>,
     resize: Result<()>,
 ) -> Result<FollowerReceipt> {
-    let receipt = result?;
+    // Reconcile the shared admission even when the filesystem operation
+    // failed.  Returning early on `result` would retain the preflight growth
+    // forever and eventually make unrelated Cells fail closed for capacity.
     resize?;
-    Ok(receipt)
+    result
 }
 
 fn append_sync(

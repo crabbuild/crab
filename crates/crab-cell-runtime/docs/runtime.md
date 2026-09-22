@@ -95,6 +95,14 @@ Handler errors roll back the application savepoint. Runtime ledger updates still
 | CAS winner differs | Fence, discard local handle, reload authority | Outcome unknown |
 | Deadline expires after SQL started | Interrupt SQLite, fence admission, wait for callback exit | Outcome unknown |
 
+When a follower proof wins but immutable-object publication returns a storage
+error, the actor keeps the ordered publication obligation and retries it with
+bounded backoff for a short grace period. The fleet-proven result and logical
+head remain readable while the exact object root catches up; if the root still
+cannot be published when the grace period expires, the Cell fences and leaves
+the node-log tail for takeover recovery. A control conflict, lease loss, or
+non-storage publication error fences immediately.
+
 The actor never reruns a handler after SQLite may have started it. `Resolve` reads the durable ledger at an authoritative root.
 
 Runtime capture leaves each complete local LTX file readable but defers its

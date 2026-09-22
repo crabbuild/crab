@@ -208,6 +208,13 @@ object publication; its admission is already installed, so requests queue
 behind the publication barrier. Migrations, drain, and shutdown do not cross a
 command backlog; object-only migrations continue to wait for exact root
 publication.
+
+If immutable-object publication returns a storage error after the fleet proof,
+the ordered publisher retains the cut and retries with bounded backoff for a
+short grace period. The logical head may serve the fleet-proven result while
+the published head catches up. Lease loss, a control conflict, or exhaustion
+of that grace period fences the Cell; the unpublished node-log interval stays
+owner-pinned so takeover can seal and replay it.
 An active predecessor log cannot be converted directly from a session fence
 into Cell takeover authority: only the coordinator's successful post-seal
 result carries `NodeTakeoverProof`.
