@@ -1,4 +1,7 @@
-use std::collections::{BTreeSet, HashSet};
+use std::{
+    collections::{BTreeSet, HashSet},
+    sync::Arc,
+};
 
 use bytes::Bytes;
 use crab_ltx::CellStorageLayout;
@@ -6,6 +9,7 @@ use crab_storage::{ETag, StorageError, map_object_store_error};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 
 use crate::placement::{PlacementObservation, PlacementPlanner, PlacementScore};
 use crate::{
@@ -24,6 +28,7 @@ const STALE_ADVERTISEMENT_RETENTION_MS: i64 = MAX_CLOCK_SKEW_MS + MAX_ADVERTISEM
 const MAX_STALE_COLLECTION_ITEMS: usize = 1_024;
 const MAX_LIVE_NODE_RECORDS: usize = 10_000;
 const NODE_DIRECTORY_READ_CONCURRENCY: usize = 32;
+const RECOVERY_SCAN_CACHE_TTL_MS: i64 = 1_000;
 const SIGNING_DOMAIN: &[u8] = b"crab.node.v1\0";
 const PLACEMENT_SIGNING_DOMAIN: &[u8] = b"crab.node-placement.v1\0";
 const NODE_LOG_SELECTION_DOMAIN: &[u8] = b"crab.node-log.member.v1\0";
@@ -595,6 +600,10 @@ pub struct NodeDirectory {
     fleet: Digest,
     image: Digest,
     release: Digest,
+    // Candidate discovery is advisory; claims always reload the authoritative
+    // record. Sharing this short-lived snapshot keeps cloned schedulers from
+    // multiplying a full directory scan without changing failover authority.
+    recovery_scan: Arc<RwLock<Option<Arc<RecoveryScanSnapshot>>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -611,6 +620,7 @@ impl NodeDirectory {
             fleet,
             image,
             release,
+            recovery_scan: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -949,7 +959,60 @@ impl NodeDirectory {
         if claimant_node.is_some_and(|node| claimant_advertisement.advertisement.node() != node) {
             return Err(Error::Node("node recovery claimant identity differs"));
         }
-        let live_nodes = if claimant_node.is_some() || require_no_live_followers {
+        let snapshot = self
+            .recovery_scan_snapshot(now_ms, claimant_node.is_some() || require_no_live_followers)
+            .await?;
+        let live_nodes = &snapshot.live_nodes;
+        let mut candidates = RecoveryCandidateWindow::new(now_ms, limit)?;
+        for record in &snapshot.records {
+            if !record.eligible_for(claimant, now_ms) || record.session == claimant {
+                continue;
+            }
+            if let Some(claimant_node) = claimant_node {
+                let preferred = record
+                    .members
+                    .iter()
+                    .filter(|member| live_nodes.contains(member))
+                    .min_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+                if preferred != Some(&claimant_node) {
+                    continue;
+                }
+            } else if require_no_live_followers
+                && record
+                    .members
+                    .iter()
+                    .any(|member| live_nodes.contains(member))
+            {
+                continue;
+            }
+            candidates.push(record.session);
+        }
+        Ok(candidates.finish())
+    }
+
+    async fn recovery_scan_snapshot(
+        &self,
+        now_ms: i64,
+        include_live_nodes: bool,
+    ) -> Result<Arc<RecoveryScanSnapshot>> {
+        if let Some(snapshot) = self.recovery_scan.read().await.as_ref()
+            && now_ms >= snapshot.observed_at_ms
+            && now_ms.saturating_sub(snapshot.observed_at_ms) < RECOVERY_SCAN_CACHE_TTL_MS
+            && (!include_live_nodes || !snapshot.live_nodes.is_empty())
+        {
+            return Ok(Arc::clone(snapshot));
+        }
+
+        let mut cached = self.recovery_scan.write().await;
+        if let Some(snapshot) = cached.as_ref()
+            && now_ms >= snapshot.observed_at_ms
+            && now_ms.saturating_sub(snapshot.observed_at_ms) < RECOVERY_SCAN_CACHE_TTL_MS
+            && (!include_live_nodes || !snapshot.live_nodes.is_empty())
+        {
+            return Ok(Arc::clone(snapshot));
+        }
+
+        let live_nodes = if include_live_nodes {
             self.live(now_ms, MAX_LIVE_NODE_RECORDS)
                 .await?
                 .into_iter()
@@ -972,7 +1035,7 @@ impl NodeDirectory {
                     };
                     let session = record.session();
                     validate_record_path(&self.layout, session, &meta.location)?;
-                    let (eligible, members) = match record {
+                    let candidate = match record {
                         NodeRecord::Advertisement(advertisement) => {
                             self.validate_scope(&advertisement)?;
                             advertisement.validate_shape()?;
@@ -981,66 +1044,51 @@ impl NodeDirectory {
                             {
                                 return Err(Error::Node("advertised node issue time differs"));
                             }
-                            let log = advertisement.log.as_ref();
-                            (
-                                advertisement.expires_at_ms <= now_ms
-                                    && log.is_some_and(NodeLogStatus::active)
-                                    && log.is_some_and(|log| {
-                                        matches!(
-                                            log.phase(),
-                                            NodeLogPhase::Open | NodeLogPhase::Recovering
-                                        )
-                                    }),
-                                log.map_or_else(Vec::new, |log| log.members().to_vec()),
-                            )
+                            advertisement
+                                .log
+                                .as_ref()
+                                .map(|log| RecoveryCandidateRecord {
+                                    session,
+                                    expires_at_ms: advertisement.expires_at_ms,
+                                    claimant: None,
+                                    claim_expires_at_ms: None,
+                                    active: log.active(),
+                                    phase: log.phase(),
+                                    members: log.members().to_vec(),
+                                })
                         }
                         NodeRecord::Tombstone(tombstone) => {
-                            let claim_available = tombstone.claimant == Some(claimant)
-                                || tombstone
-                                    .claim_expires_at_ms
-                                    .is_none_or(|expires_at_ms| expires_at_ms <= now_ms);
-                            let log = tombstone.log.as_ref();
-                            (
-                                claim_available
-                                    && log.is_some_and(|log| {
-                                        log.active()
-                                            && matches!(
-                                                log.phase(),
-                                                NodeLogPhase::Open | NodeLogPhase::Recovering
-                                            )
-                                    }),
-                                log.map_or_else(Vec::new, |log| log.members().to_vec()),
-                            )
+                            tombstone.log.as_ref().map(|log| RecoveryCandidateRecord {
+                                session,
+                                expires_at_ms: tombstone.expires_at_ms,
+                                claimant: tombstone.claimant,
+                                claim_expires_at_ms: tombstone.claim_expires_at_ms,
+                                active: log.active(),
+                                phase: log.phase(),
+                                members: log.members().to_vec(),
+                            })
                         }
                     };
-                    Ok(Some((session, eligible, members)))
+                    Ok(candidate)
                 }
             })
             .buffer_unordered(NODE_DIRECTORY_READ_CONCURRENCY);
-        let mut candidates = RecoveryCandidateWindow::new(now_ms, limit)?;
+        let mut candidates = Vec::new();
         while let Some(record) = records.next().await {
-            let Some((session, eligible, members)) = record? else {
-                continue;
-            };
-            if !eligible || session == claimant {
-                continue;
-            }
-            if let Some(claimant_node) = claimant_node {
-                let preferred = members
-                    .iter()
-                    .filter(|member| live_nodes.contains(member))
-                    .min_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-                if preferred != Some(&claimant_node) {
-                    continue;
+            if let Some(record) = record? {
+                if candidates.len() == MAX_LIVE_NODE_RECORDS {
+                    return Err(Error::Node("node recovery directory exceeds its limit"));
                 }
-            } else if require_no_live_followers
-                && members.iter().any(|member| live_nodes.contains(member))
-            {
-                continue;
+                candidates.push(record);
             }
-            candidates.push(session);
         }
-        Ok(candidates.finish())
+        let snapshot = Arc::new(RecoveryScanSnapshot {
+            observed_at_ms: now_ms,
+            live_nodes,
+            records: candidates,
+        });
+        *cached = Some(Arc::clone(&snapshot));
+        Ok(snapshot)
     }
 
     /// Extends an exact recovery claim while its claimant remains live.
@@ -1889,6 +1937,34 @@ impl NodeDirectory {
             return Err(Error::Node("advertisement fleet, image or release differs"));
         }
         Ok(())
+    }
+}
+
+struct RecoveryScanSnapshot {
+    observed_at_ms: i64,
+    live_nodes: HashSet<NodeId>,
+    records: Vec<RecoveryCandidateRecord>,
+}
+
+struct RecoveryCandidateRecord {
+    session: SessionId,
+    expires_at_ms: i64,
+    claimant: Option<SessionId>,
+    claim_expires_at_ms: Option<i64>,
+    active: bool,
+    phase: NodeLogPhase,
+    members: Vec<NodeId>,
+}
+
+impl RecoveryCandidateRecord {
+    fn eligible_for(&self, claimant: SessionId, now_ms: i64) -> bool {
+        self.expires_at_ms <= now_ms
+            && self.active
+            && matches!(self.phase, NodeLogPhase::Open | NodeLogPhase::Recovering)
+            && (self.claimant == Some(claimant)
+                || self
+                    .claim_expires_at_ms
+                    .is_none_or(|expires_at_ms| expires_at_ms <= now_ms))
     }
 }
 
