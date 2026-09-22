@@ -41,11 +41,15 @@ mod qualification_peer;
 mod qualification_scheduled_cancellation;
 #[path = "support/qualification_scheduled_cancellation_leases.rs"]
 mod qualification_scheduled_cancellation_leases;
+#[path = "support/qualification_scheduled_retry.rs"]
+mod qualification_scheduled_retry;
+#[path = "support/qualification_scheduled_retry_leases.rs"]
+mod qualification_scheduled_retry_leases;
 
 use qualification::{assert_zero_reservations, fixed_id, identity, rustfs_public_store};
 use qualification_fixture::{PublicHostFixture, public_host_fixture_with_store};
 use qualification_local_fixture::public_host_fixture;
-use qualification_peer::peer_client_with_paused_mutation;
+use qualification_peer::{peer_client_with_one_lost_mutation, peer_client_with_paused_mutation};
 
 struct PublicHostSmokeExecutor<'n> {
     node: &'n CellNode,
@@ -126,6 +130,65 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor<'_> {
                 .map_err(|_| Error::Control("public qualification row ID overflow"))?;
             let mutation_index = operation_id.saturating_mul(100);
             let mutation = identity(mutation_index, now_ms);
+            if operation.case() == QualificationCase::Retry {
+                let (client, dropped, dispatched) = peer_client_with_one_lost_mutation(
+                    Arc::clone(registry),
+                    handles.to_vec(),
+                    true,
+                    1,
+                );
+                let peer = node.application_handle::<fixture::ReferenceApplication>(
+                    client,
+                    tenant,
+                    application,
+                );
+                let retry = qualification_scheduled_retry::RetryCase::new(
+                    &peer,
+                    &observer,
+                    &dropped,
+                    &dispatched,
+                    tenant,
+                    application,
+                );
+                match operation.primitive() {
+                    "sql" => retry.sql(sql_row_id, operation.nonce(), mutation).await?,
+                    "kv" => retry.kv(operation_id, operation.nonce(), mutation).await?,
+                    "blob" => {
+                        retry
+                            .blob(operation_id, operation.nonce(), mutation)
+                            .await?
+                    }
+                    "queue" => {
+                        retry
+                            .queue(operation_id, operation.nonce(), mutation)
+                            .await?
+                    }
+                    "cron" => {
+                        retry
+                            .cron(operation_id, operation.nonce(), mutation)
+                            .await?
+                    }
+                    "workflow" => {
+                        retry
+                            .workflow(operation_id, operation.nonce(), mutation)
+                            .await?
+                    }
+                    "activity" => {
+                        retry
+                            .activity(operation_id, operation.nonce(), mutation)
+                            .await?
+                    }
+                    "effects" => {
+                        retry
+                            .effects(operation_id, operation.nonce(), mutation)
+                            .await?
+                    }
+                    _ => return Err(Error::Control("public qualification retry primitive")),
+                }
+                return Ok(QualificationExecution::acknowledged(true)
+                    .with_retries(1)
+                    .with_case(QualificationCase::Retry));
+            }
             if operation.case() == QualificationCase::Cancellation
                 && matches!(
                     operation.primitive(),
@@ -1065,6 +1128,57 @@ async fn run_scheduled_cancellation_cases(
     assert_zero_reservations(&node);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn public_scheduled_retry_cases_preserve_exact_results() {
+    run_scheduled_retry_cases(public_host_fixture().await).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_public_scheduled_retry_cases_preserve_exact_results() {
+    let (store, root) = rustfs_public_store();
+    run_scheduled_retry_cases(public_host_fixture_with_store(store, root).await).await;
+}
+
+async fn run_scheduled_retry_cases(
+    (node, typed, tenant, application, _directory, registry, handles, store): PublicHostFixture,
+) {
+    let workload = QualificationWorkload::generate_with_size(
+        &QualificationProfile::pr_contract(),
+        41,
+        1,
+        QUALIFICATION_CASE_COVERAGE_OPERATIONS,
+        1,
+    )
+    .expect("qualification case schedule");
+    let mut executor = smoke_executor(
+        &node,
+        typed.clone(),
+        &registry,
+        &handles,
+        &store,
+        tenant,
+        application,
+        0,
+    );
+    for &primitive in QUALIFICATION_PRIMITIVES {
+        let operation = workload
+            .iter_operations()
+            .find(|operation| {
+                operation.primitive() == primitive && operation.case() == QualificationCase::Retry
+            })
+            .expect("scheduled retry case");
+        let execution = executor.execute(operation).await.expect("retry case");
+        assert!(execution.verified(), "{primitive} retry not verified");
+        assert_eq!(execution.retries(), 1);
+        assert_eq!(execution.case(), Some(QualificationCase::Retry));
+    }
+    drop(executor);
+    drop(typed);
+    node.shutdown().await.expect("qualification shutdown");
+    assert_zero_reservations(&node);
+}
+
 async fn run_public_typed_primitive_workload(
     (node, typed, tenant, application_id, _directory, registry, handles, store): PublicHostFixture,
 ) {
@@ -1094,14 +1208,14 @@ async fn run_public_typed_primitive_workload(
             && counts.verified() == counts.attempted()
             && counts.rejected() == 0
             && counts.ambiguous() == 0
-            && counts.retried() == 0
+            && counts.retried() > 0
     }));
     let covered = summary
         .case_coverage()
         .iter()
         .map(|byte| byte.count_ones())
         .sum::<u32>();
-    let observed_smoke_cases = (QUALIFICATION_PRIMITIVES.len() * 3) as u32;
+    let observed_smoke_cases = (QUALIFICATION_PRIMITIVES.len() * 4) as u32;
     assert_eq!(covered, observed_smoke_cases);
     assert!(covered < QUALIFICATION_CASE_COVERAGE_OPERATIONS as u32);
     let artifact = summary.artifact(&workload).expect("run artifact");
