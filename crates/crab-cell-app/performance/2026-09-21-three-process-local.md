@@ -1,6 +1,6 @@
 # Cell three-process fleet performance — 2026-09-21
 
-Measured code: `da3479be91b`.
+Measured code: `a87ac6c2b20`.
 
 The load generator and three Cell owners ran as four OS processes on one Apple
 M2 Max host (macOS Darwin 25.5.0 arm64, Rust 1.97.0). Each owner had a distinct
@@ -42,24 +42,23 @@ CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-89be5c6d \
 
 | Verified action | Run | actions/s | p50 ms | p95 ms | p99 ms | max ms |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| SQL order insert and read | 1 | 51.08 | 10.774 | 28.765 | 62.685 | 630.527 |
-| SQL order insert and read | 2 | 67.78 | 11.224 | 29.322 | 76.396 | 84.300 |
-| KV cart put and get | 1 | 58.18 | 9.700 | 20.331 | 51.165 | 603.337 |
-| KV cart put and get | 2 | 81.48 | 9.575 | 24.364 | 69.026 | 73.429 |
-| Blob attachment upload and read, 32 KiB | 1 | 27.26 | 27.933 | 64.754 | 109.453 | 573.580 |
-| Blob attachment upload and read, 32 KiB | 2 | 29.85 | 27.161 | 77.298 | 104.404 | 105.117 |
-| Queue notification send, claim, acknowledge | 1 | 28.90 | 24.998 | 60.744 | 71.109 | 581.684 |
-| Queue notification send, claim, acknowledge | 2 | 32.01 | 25.620 | 73.569 | 84.210 | 97.581 |
-| Workflow start, native activity, terminal read | 1 | 27.05 | 28.676 | 62.576 | 79.038 | 603.593 |
-| Workflow start, native activity, terminal read | 2 | 29.42 | 28.088 | 74.752 | 82.610 | 86.022 |
-| Cron schedule, tick, effect delivery, SQL read | 1 | 19.30 | 43.739 | 93.350 | 122.960 | 675.891 |
-| Cron schedule, tick, effect delivery, SQL read | 2 | 19.97 | 48.664 | 101.352 | 138.467 | 139.929 |
-| **Fleet, all six actions** | **1** | **115.81** | **22.808** | **68.027** | **122.960** | **675.891** |
-| **Fleet, all six actions** | **2** | **119.78** | **23.727** | **75.122** | **103.650** | **139.929** |
+| SQL order insert and read | 1 | 66.27 | 11.825 | 30.225 | 53.176 | 78.881 |
+| SQL order insert and read | 2 | 69.41 | 12.003 | 24.490 | 60.409 | 61.126 |
+| KV cart put and get | 1 | 88.17 | 9.450 | 18.191 | 55.173 | 59.934 |
+| KV cart put and get | 2 | 89.56 | 9.250 | 17.136 | 52.264 | 53.874 |
+| Blob attachment upload and read, 32 KiB | 1 | 29.50 | 29.277 | 65.929 | 78.255 | 79.361 |
+| Blob attachment upload and read, 32 KiB | 2 | 31.37 | 27.980 | 61.950 | 76.333 | 78.234 |
+| Queue notification send, claim, acknowledge | 1 | 31.52 | 26.549 | 72.309 | 89.642 | 100.055 |
+| Queue notification send, claim, acknowledge | 2 | 33.16 | 26.395 | 62.790 | 75.801 | 80.204 |
+| Workflow start, native activity, terminal read | 1 | 28.88 | 30.384 | 64.314 | 96.724 | 97.024 |
+| Workflow start, native activity, terminal read | 2 | 30.64 | 30.138 | 61.203 | 73.995 | 78.475 |
+| Cron schedule, tick, effect delivery, SQL read | 1 | 19.65 | 48.196 | 102.352 | 115.194 | 130.834 |
+| Cron schedule, tick, effect delivery, SQL read | 2 | 20.69 | 45.695 | 92.352 | 100.961 | 101.188 |
+| **Fleet, all six actions** | **1** | **117.86** | **24.769** | **73.771** | **102.293** | **130.834** |
+| **Fleet, all six actions** | **2** | **124.16** | **24.549** | **65.847** | **89.620** | **101.188** |
 
-One run had several 0.6–0.7 s maximum latencies. These are observed outliers;
-this uncontrolled desktop run does not establish their cause. The process test
-proves separate owner processes, signed peer dispatch, shared authority, and
+The two runs vary under uncontrolled desktop load. The process test proves
+separate owner processes, signed peer dispatch, shared authority, and
 fleet-level result verification. It does not measure separate machines,
 inter-host network latency, mTLS, product ingress or dynamic placement, a cloud
 object provider, follower durability, node loss, or a representative sustained

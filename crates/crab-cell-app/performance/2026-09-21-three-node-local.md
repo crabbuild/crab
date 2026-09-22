@@ -1,6 +1,6 @@
 # Cell three-runtime fleet performance — 2026-09-21
 
-Measured code: `b6906e0a2b2`.
+Measured code: `a87ac6c2b20`.
 
 This is a local three-runtime topology on one Apple M2 Max host (macOS Darwin
 25.5.0 arm64, Rust 1.97.0). Each runtime has a distinct node session, SQLite
@@ -41,20 +41,20 @@ CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-89be5c6d \
 
 | Verified action | Run | actions/s | p50 ms | p95 ms | p99 ms | max ms |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| SQL order insert and read | 1 | 171.70 | 4.595 | 13.565 | 19.282 | 21.344 |
-| SQL order insert and read | 2 | 159.33 | 4.824 | 14.368 | 23.943 | 24.995 |
-| KV cart put and get | 1 | 250.95 | 3.097 | 7.599 | 20.286 | 22.433 |
-| KV cart put and get | 2 | 198.40 | 3.496 | 9.379 | 38.341 | 45.279 |
-| Blob attachment upload and read, 32 KiB | 1 | 78.91 | 9.727 | 30.759 | 50.553 | 53.233 |
-| Blob attachment upload and read, 32 KiB | 2 | 68.71 | 11.131 | 34.768 | 40.280 | 46.452 |
-| Queue notification send, claim, acknowledge | 1 | 84.73 | 8.781 | 30.029 | 35.392 | 37.575 |
-| Queue notification send, claim, acknowledge | 2 | 72.71 | 10.355 | 34.490 | 43.590 | 44.552 |
-| Workflow start, native activity, terminal read | 1 | 71.82 | 11.969 | 27.440 | 37.836 | 41.092 |
-| Workflow start, native activity, terminal read | 2 | 61.83 | 13.395 | 36.812 | 44.896 | 47.363 |
-| Cron schedule, tick, effect delivery, SQL read | 1 | 37.65 | 22.602 | 45.645 | 60.671 | 66.631 |
-| Cron schedule, tick, effect delivery, SQL read | 2 | 30.67 | 28.694 | 60.528 | 78.548 | 87.508 |
-| **Fleet, all six actions** | **1** | **225.88** | **8.859** | **33.713** | **48.450** | **66.631** |
-| **Fleet, all six actions** | **2** | **183.99** | **10.293** | **40.280** | **56.911** | **87.508** |
+| SQL order insert and read | 1 | 172.15 | 4.314 | 13.881 | 22.203 | 30.736 |
+| SQL order insert and read | 2 | 158.07 | 4.886 | 14.215 | 27.095 | 31.987 |
+| KV cart put and get | 1 | 231.45 | 3.024 | 7.788 | 28.672 | 35.787 |
+| KV cart put and get | 2 | 207.66 | 3.325 | 10.209 | 22.365 | 33.185 |
+| Blob attachment upload and read, 32 KiB | 1 | 77.31 | 9.293 | 33.081 | 46.598 | 46.978 |
+| Blob attachment upload and read, 32 KiB | 2 | 71.87 | 9.984 | 32.401 | 44.580 | 46.666 |
+| Queue notification send, claim, acknowledge | 1 | 82.20 | 8.671 | 30.963 | 35.811 | 38.561 |
+| Queue notification send, claim, acknowledge | 2 | 75.22 | 9.510 | 28.723 | 39.637 | 43.682 |
+| Workflow start, native activity, terminal read | 1 | 68.71 | 10.871 | 35.750 | 48.053 | 49.629 |
+| Workflow start, native activity, terminal read | 2 | 63.53 | 11.962 | 32.491 | 50.760 | 52.046 |
+| Cron schedule, tick, effect delivery, SQL read | 1 | 37.41 | 23.270 | 45.311 | 59.227 | 67.312 |
+| Cron schedule, tick, effect delivery, SQL read | 2 | 35.02 | 25.811 | 49.500 | 64.387 | 66.511 |
+| **Fleet, all six actions** | **1** | **224.41** | **8.763** | **35.718** | **46.978** | **67.312** |
+| **Fleet, all six actions** | **2** | **210.10** | **9.394** | **36.952** | **50.760** | **66.511** |
 
 These measurements verify three independent runtime owners and the signed peer
 protocol over the local TCP stack. They do not measure three processes or
