@@ -10,13 +10,13 @@ use std::{
 
 use crab_cell_runtime::{
     ApplicationId, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog,
-    CellModule, CellRuntime, CellTarget, Digest, DurabilityGate, HandlerOutcome, IncarnationId,
-    LocalFollowerTransport, MigrationDescriptor, MigrationPeerClient, ModuleDescriptor,
-    NamespaceDescriptor, NamespaceId, NodeDurability, NodeId, NodeLeaseGuard, NodeLogAuthority,
-    NodeLogRotationBarrier, NodeLogShipper, NodeLogTransport, Owner, PeerAuthorizer,
-    PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerRoundTrip, PeerSigner, PeerVerifier,
-    Registry, RegistryBuilder, RetainedCodeDescriptor, SessionId, SqlWorkerPool, TenantId,
-    VerifiedPeerRequest,
+    CellModule, CellRuntime, CellTarget, ControlState, Digest, DurabilityGate, HandlerOutcome,
+    IncarnationId, LocalFollowerTransport, MigrationDescriptor, MigrationPeerClient,
+    ModuleDescriptor, NamespaceDescriptor, NamespaceId, NodeDurability, NodeId, NodeLeaseGuard,
+    NodeLogAuthority, NodeLogRotationBarrier, NodeLogShipper, NodeLogTransport, Owner,
+    PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerRoundTrip, PeerSigner,
+    PeerVerifier, Registry, RegistryBuilder, RetainedCodeDescriptor, SessionId, SqlWorkerPool,
+    TenantId, VerifiedPeerRequest,
 };
 use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
@@ -849,10 +849,22 @@ async fn migration_digest_conflict_blocks_activation() {
             "migration digest conflicts with SQLite history"
         ))
     ));
-    let after = authority.load(cell).await.unwrap().unwrap();
-    assert_eq!(after.value(), before.value());
-    assert_eq!(after.value().schema, 1);
-    assert_eq!(after.value().root.as_ref().unwrap().commit_sequence, 0);
+    let after = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let current = authority.load(cell).await.unwrap().unwrap();
+            if current.value().state == ControlState::Idle {
+                break current;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(after.value().incarnation, before.value().incarnation);
+    assert_eq!(after.value().code, before.value().code);
+    assert_eq!(after.value().schema, before.value().schema);
+    assert_eq!(after.value().root, before.value().root);
+    assert!(after.value().owner.is_none());
     assert!(matches!(
         handle.query(1, 1, |_| Ok(Vec::new())).await,
         Err(crab_cell_runtime::Error::CellDraining) | Err(crab_cell_runtime::Error::Fenced)

@@ -1592,6 +1592,10 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
     drop(kv);
     drop(sql);
     drop(typed);
+    // The workload executor owns the last cloned local transport. Release it
+    // before deleting the source files so the crashed owner cannot continue a
+    // background compaction against the torn-down SQLite paths.
+    drop(executor);
     drop(runtime);
     drop(directory);
 
