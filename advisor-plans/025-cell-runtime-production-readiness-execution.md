@@ -207,10 +207,16 @@ completion, destination Effect delivery, and source Effect Ack before killing
 the owner. The successor replays the three exact terminal mutation identities
 and checks their original commit sequences and outcomes, the exact terminal
 Workflow result/event, one restored SQL destination row, no claimable Queue or
-Effect work, and zero reservations after drain. All four concurrent RustFS
-cases passed on 2026-09-21. The test uses a test-controlled session fence. It
-is not a scheduled qualification case or protected three-process provider run,
-and it does not set matrix case bits.
+Effect work, and zero reservations after drain. A third process now
+independently acquires the successor's published idle roots into an empty local
+directory. It checks the final SQL rows, KV version, Blob bytes/ETag, Queue
+settlement, fired Cron occurrence, terminal Workflow and Activity results,
+Effect destination row, empty Queue/Activity/Effect claims, and zero runtime
+reservations after its own drain. All four concurrent three-process RustFS
+cases passed on 2026-09-21. The owner-loss transition uses a test-controlled
+session fence, and the observer uses the public idle-restoration path after
+the successor drains. This is not a scheduled qualification case or protected
+provider run, and it does not set matrix case bits.
 
 Implement one fault-capable executor through `CellNode` and typed
 `ApplicationHandle` capabilities. Each operation writes a unique, bounded

@@ -33,8 +33,12 @@ mod process_cron;
 mod process_duplicate;
 #[path = "support/qualification_process_effect.rs"]
 mod process_effect;
+#[path = "support/qualification_process_observer.rs"]
+mod process_observer;
 #[path = "support/qualification_process_owner.rs"]
 mod process_owner;
+#[path = "support/qualification_process_restore.rs"]
+mod process_restore;
 #[path = "support/qualification_process_successor.rs"]
 mod process_successor;
 #[path = "support/qualification.rs"]
@@ -196,6 +200,7 @@ async fn process_role() {
     match env::var(ROLE_ENV).ok().as_deref() {
         Some("owner") => process_owner::run().await,
         Some("successor") => process_successor::run().await,
+        Some("observer") => process_observer::run().await,
         None => {}
         Some(role) => panic!("unknown fault process role: {role}"),
     }
@@ -309,6 +314,24 @@ async fn run_process_fault(case: &str, barrier: &str, expected: &[u8]) {
     }
     assert_eq!(
         std::fs::read(sync.path().join("observation")).expect("successor observation marker"),
+        expected
+    );
+    let mut observer = spawn_role(&binary, "observer", case, &root, sync.path());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        if let Some(status) = observer.0.try_wait().expect("observer status") {
+            assert!(status.success(), "independent observer failed: {status}");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "independent observation timed out"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        std::fs::read(sync.path().join("independent-observation"))
+            .expect("independent observation marker"),
         expected
     );
 }

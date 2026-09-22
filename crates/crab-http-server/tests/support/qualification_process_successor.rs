@@ -26,12 +26,7 @@ pub(super) async fn run() {
         .with_session(successor_session)
         .build()
         .expect("successor node");
-    successor
-        .install_task_group(CancellationToken::new(), CancellationToken::new())
-        .expect("successor tasks");
-    successor
-        .install_node_lease(NodeLeaseGuard::new(0, 60_000).expect("successor lease"))
-        .expect("successor readiness");
+    process_restore::install_process_lease(&successor);
     let directory = tempfile::tempdir().expect("empty successor directory");
     assert_eq!(
         std::fs::read_dir(directory.path())
@@ -39,66 +34,17 @@ pub(super) async fn run() {
             .count(),
         0
     );
-    let authority = CellAuthority::new(layout.clone());
-    let mut restored_cells = Vec::new();
-    for (namespace, module, incarnation_byte) in [
-        (fixture::SQL_NAMESPACE, fixture::SQL_MODULE, 40_u8),
-        (fixture::KV_NAMESPACE, fixture::KV_MODULE, 41_u8),
-        (fixture::BLOB_NAMESPACE, fixture::BLOB_MODULE, 42_u8),
-        (fixture::QUEUE_NAMESPACE, fixture::QUEUE_MODULE, 43_u8),
-        (fixture::CRON_NAMESPACE, fixture::CRON_MODULE, 45_u8),
-        (fixture::WORKFLOW_NAMESPACE, fixture::WORKFLOW_MODULE, 46_u8),
-    ] {
-        let target = CellTarget::new(tenant, application_id, namespace, &partition_for_shard(0))
-            .expect("successor target");
-        let observed = authority
-            .load(target.cell_id())
-            .await
-            .expect("source authority")
-            .expect("source owner");
-        let source_root = observed.value().root.clone().expect("acknowledged root");
-        let source_epoch = observed.value().epoch;
-        let proof = CellCatalog::new(layout.clone(), tenant)
-            .lookup(target.cell_id())
-            .await
-            .expect("source catalog")
-            .expect("source provisioned");
-        let restored = successor
-            .runtime()
-            .takeover_restored(
-                proof,
-                CellReplica::new(
-                    layout.clone(),
-                    *target.cell_id().as_bytes(),
-                    *IncarnationId::from_bytes([incarnation_byte; 16]).as_bytes(),
-                    ReplicaLimits::default(),
-                )
-                .expect("successor replica"),
-                authority.clone(),
-                observed,
-                fenced.direct_takeover().expect("direct takeover proof"),
-                RecoveryManifestStore::new(layout.clone(), ReplicaLimits::default()),
-                directory.path().join(format!("{module}-successor.sqlite")),
-                Owner {
-                    session: successor_session,
-                    endpoint: "https://public-successor.internal:8081".into(),
-                },
-            )
-            .await
-            .expect("exact-root takeover");
-        let current = authority
-            .load(target.cell_id())
-            .await
-            .expect("successor authority")
-            .expect("successor owner");
-        assert!(current.value().epoch > source_epoch);
-        assert_eq!(current.value().root.as_ref(), Some(&source_root));
-        assert_eq!(
-            current.value().owner.as_ref().map(|owner| owner.session),
-            Some(successor_session)
-        );
-        restored_cells.push(restored);
-    }
+    let restored_cells = process_restore::restore_cells(
+        &successor,
+        &layout,
+        tenant,
+        application_id,
+        successor_session,
+        Some(&fenced),
+        directory.path(),
+        "successor",
+    )
+    .await;
     let peer_effect =
         qualification_peer::peer_effect_client(application.registry(), restored_cells.clone());
     let direct = CellClient::local_many(application.registry(), restored_cells)
