@@ -129,6 +129,7 @@ jobs:
           for filter in qualification placement pressure resource; do
             cargo test -p crab-cell-runtime "${filter}" --locked
           done
+          cargo test -p crab-cell-runtime --bin qualification_receipt --locked
       - name: Verify canonical LTX contracts
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target

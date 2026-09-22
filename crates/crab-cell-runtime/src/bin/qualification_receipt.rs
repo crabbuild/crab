@@ -688,7 +688,8 @@ mod tests {
     use crab_cell_runtime::{
         Digest, QUALIFICATION_MATRIX_ROWS, QualificationExecution, QualificationExecutionEvidence,
         QualificationOperation, QualificationOperationExecutor, QualificationOwnership,
-        QualificationProfile, QualificationReceipt, QualificationWorkload,
+        QualificationProfile, QualificationProviderEvidence, QualificationReceipt,
+        QualificationWorkload,
     };
     use ed25519_dalek::Signer;
     use std::{fs, future::Future, path::Path, pin::Pin, time::Duration};
@@ -763,8 +764,13 @@ mod tests {
     #[tokio::test]
     async fn bind_protected_cli_binds_and_verifies_a_measured_run() {
         let directory = tempfile::tempdir().expect("binder directory");
-        let profile =
-            QualificationProfile::new("cli-binder".into(), 1, 8, 1, 5_000).expect("binder profile");
+        let mut profile_value = serde_json::to_value(
+            QualificationProfile::new("cli-binder".into(), 1, 8, 1, 5_000).expect("binder profile"),
+        )
+        .expect("binder profile value");
+        profile_value["provider"] = serde_json::Value::String("rustfs".into());
+        let profile: QualificationProfile =
+            serde_json::from_value(profile_value).expect("named binder profile");
         let workload = QualificationWorkload::generate_with_size(&profile, 31, 1, 8, 1)
             .expect("binder workload");
         let mut executor = BinderExecutor;
@@ -802,6 +808,7 @@ mod tests {
         let key_path = directory.path().join("signing-key");
         let run_path = directory.path().join("run-artifact.json");
         let workload_path = directory.path().join("workload.json");
+        let provider_path = directory.path().join("provider-evidence.json");
         let output_path = directory.path().join("receipt.json");
         fs::write(&profile_path, profile.encode().expect("profile encoding")).expect("profile");
         fs::write(
@@ -831,8 +838,14 @@ mod tests {
         fs::write(&key_path, signing_key.to_bytes()).expect("signing key");
         let run_bytes = run.encode().expect("run encoding");
         let workload_bytes = workload.encode().expect("workload encoding");
+        let provider_bytes =
+            QualificationProviderEvidence::new(&profile, workload.seed(), true, true, true)
+                .expect("provider evidence")
+                .encode()
+                .expect("provider evidence encoding");
         fs::write(&run_path, &run_bytes).expect("run artifact");
         fs::write(&workload_path, &workload_bytes).expect("workload artifact");
+        fs::write(&provider_path, &provider_bytes).expect("provider evidence");
 
         let mut args = vec![
             output_path.display().to_string(),
@@ -843,6 +856,7 @@ mod tests {
             key_path.display().to_string(),
             run_path.display().to_string(),
             workload_path.display().to_string(),
+            provider_path.display().to_string(),
         ]
         .into_iter();
         bind_protected(&mut args).expect("bind protected receipt");
@@ -854,7 +868,7 @@ mod tests {
                 "cli-source",
                 Digest::from_bytes([171; 32]),
                 &profile,
-                &[&run_bytes, &workload_bytes],
+                &[&run_bytes, &workload_bytes, &provider_bytes],
                 signing_key.verifying_key().to_bytes(),
             )
             .expect_err("wrong image must be rejected");
@@ -863,7 +877,7 @@ mod tests {
                 "cli-source",
                 Digest::from_bytes([170; 32]),
                 &profile,
-                &[&run_bytes, &workload_bytes],
+                &[&run_bytes, &workload_bytes, &provider_bytes],
                 signing_key.verifying_key().to_bytes(),
             )
             .expect("receipt verification");
