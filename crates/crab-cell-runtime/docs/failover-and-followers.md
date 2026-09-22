@@ -389,12 +389,14 @@ CAS-protected mutable authority:
 ```
 
 `node` identifies the durable local data directory; `session` identifies only
-one boot generation. The identity signature covers only the canonical
-`identity` fields. The whole
-object is still protected by its object-store ETag. The owner may renew only a
-`live` record with the exact session and generation. A recoverer may change
-only recovery-owned fields after expiry. Every transition validates all
-unchanged fields before conditional overwrite.
+one boot generation. The identity signature covers the canonical `identity`
+fields and the top-level capacity snapshot. Heartbeats re-sign changed
+capacity without changing the boot identity; lease and log state remain
+CAS-protected mutable authority. The whole object is still protected by its
+object-store ETag. The owner may renew only a `live` record with the exact
+session and generation. A recoverer may change only recovery-owned fields after
+expiry. Every transition validates all unchanged fields before conditional
+overwrite.
 
 | Session state | May route application work? | May append to its follower log? | May a peer recover it? |
 | --- | --- | --- | --- |
