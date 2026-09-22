@@ -784,7 +784,7 @@ async fn rustfs_public_activity_duplicate_case_preserves_one_completion() {
         &QualificationProfile::pr_contract(),
         41,
         1,
-        QUALIFICATION_CASE_COVERAGE_OPERATIONS as u64,
+        QUALIFICATION_CASE_COVERAGE_OPERATIONS,
         1,
     )
     .expect("qualification case schedule");
