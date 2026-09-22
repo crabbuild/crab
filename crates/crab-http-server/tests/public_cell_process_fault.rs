@@ -13,12 +13,13 @@ use crab_cell_runtime::{
     BlobQueryResult, CellAuthority, CellCatalog, CellClient, CellReplica, CellStorageLayout,
     CellTarget, CronMutation, CronMutationOutcome, CronQueryResult, EffectAckRequest,
     EffectClaimRequest, EffectLease, EffectLeaseCommand, EffectLeaseOutcome, EffectLeaseRequest,
-    IncarnationId, InvocationError, KvAtomicOutcome, KvAtomicRequest, KvMutation, NodeLeaseGuard,
-    Owner, QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome, QueueSendRequest, QueueState,
-    RecoveryManifestStore, ReplicaLimits, Resolution, SessionId, SqlBatch, SqlStatement, SqlValue,
-    SqlWorkerPool, StoredOutcome, TenantId, WorkflowActivityClaimCommand,
-    WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand, WorkflowOutcome, WorkflowStatus,
-    partition_for_shard,
+    IncarnationId, InvocationError, KvAtomicOutcome, KvAtomicRequest, KvMutation,
+    MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest, MutationIdentity,
+    NodeLeaseGuard, Owner, QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome,
+    QueueSendRequest, QueueState, RecoveryManifestStore, ReplicaLimits, Resolution, SessionId,
+    SqlBatch, SqlStatement, SqlValue, SqlWorkerPool, StoredOutcome, TenantId,
+    WorkflowActivityClaimCommand, WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand,
+    WorkflowOutcome, WorkflowStatus, partition_for_shard,
 };
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};
@@ -26,8 +27,18 @@ use tokio_util::sync::CancellationToken;
 
 #[path = "support/reference_application.rs"]
 mod fixture;
+#[path = "support/qualification_process_cron.rs"]
+mod process_cron;
+#[path = "support/qualification_process_duplicate.rs"]
+mod process_duplicate;
+#[path = "support/qualification_process_effect.rs"]
+mod process_effect;
+#[path = "support/qualification_process_observer.rs"]
+mod process_observer;
 #[path = "support/qualification_process_owner.rs"]
 mod process_owner;
+#[path = "support/qualification_process_restore.rs"]
+mod process_restore;
 #[path = "support/qualification_process_successor.rs"]
 mod process_successor;
 #[path = "support/qualification.rs"]
@@ -54,6 +65,7 @@ const SYNC_ENV: &str = "CRAB_CELL_PROCESS_FAULT_SYNC";
 const BEFORE_WRITE: &str = "before-write";
 const AFTER_ACK: &str = "after-ack";
 const AFTER_LEASE: &str = "after-lease";
+const AFTER_SETTLEMENT: &str = "after-settlement";
 const SQL_PAYLOAD: &[u8] = b"acknowledged-before-owner-kill";
 const KV_SCOPE: &[u8] = b"process-fault";
 const KV_KEY: &[u8] = b"acknowledged";
@@ -70,6 +82,8 @@ const EFFECT_RESULT: &[u8] = b"delivered-effect";
 
 #[derive(Deserialize, Serialize)]
 struct Acknowledgement {
+    replay_issued_at_ms: i64,
+    queue_available_at_ms: i64,
     sql_sequence: u64,
     kv_sequence: u64,
     kv_version: Vec<u8>,
@@ -89,6 +103,7 @@ struct Acknowledgement {
     effect_sequence: u64,
     effect_run_id: [u8; 16],
     leases: Option<LeaseEvidence>,
+    settlements: Option<SettlementEvidence>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -110,6 +125,27 @@ struct LeaseEvidence {
     effect_sequence: u64,
 }
 
+#[derive(Deserialize, Serialize)]
+struct SettlementEvidence {
+    queue_token: [u8; 16],
+    queue_ack_sequence: u64,
+    activity_id: [u8; 16],
+    activity_attempt: u32,
+    activity_token: [u8; 16],
+    activity_completion_token: [u8; 16],
+    activity_input: Vec<u8>,
+    activity_complete_sequence: u64,
+    activity_event_sequence: u64,
+    activity_result: Vec<u8>,
+    effect_id: [u8; 32],
+    effect_attempt: u32,
+    effect_token: [u8; 16],
+    effect_expires_at_ms: i64,
+    effect_result: Vec<u8>,
+    effect_destination_sequence: u64,
+    effect_ack_sequence: u64,
+}
+
 struct ChildGuard(Child);
 
 impl Drop for ChildGuard {
@@ -128,7 +164,10 @@ fn process_input() -> (Path, std::path::PathBuf) {
 fn process_case() -> String {
     let case = env::var(CASE_ENV).expect("fault case");
     assert!(
-        case == BEFORE_WRITE || case == AFTER_ACK || case == AFTER_LEASE,
+        case == BEFORE_WRITE
+            || case == AFTER_ACK
+            || case == AFTER_LEASE
+            || case == AFTER_SETTLEMENT,
         "unknown fault case"
     );
     case
@@ -150,11 +189,18 @@ fn now_ms() -> i64 {
     .expect("fault clock bounds")
 }
 
+fn replay_identity(index: u64, issued_at_ms: i64) -> MutationIdentity {
+    let mut identity = identity(index, issued_at_ms);
+    identity.expires_at_ms = issued_at_ms + 300_000;
+    identity
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn process_role() {
     match env::var(ROLE_ENV).ok().as_deref() {
         Some("owner") => process_owner::run().await,
         Some("successor") => process_successor::run().await,
+        Some("observer") => process_observer::run().await,
         None => {}
         Some(role) => panic!("unknown fault process role: {role}"),
     }
@@ -191,6 +237,7 @@ async fn rustfs_owner_kill_recovers_eight_acknowledged_primitives_in_successor_p
     expected.extend_from_slice(WORKFLOW_RESULT);
     expected.extend_from_slice(b"activity-result");
     expected.extend_from_slice(EFFECT_RESULT);
+    expected.extend_from_slice(CRON_PAYLOAD);
     run_process_fault(AFTER_ACK, "ack", &expected).await;
 }
 
@@ -211,7 +258,23 @@ async fn rustfs_owner_kill_after_three_leases_reclaims_exact_attempts() {
     expected.extend_from_slice(WORKFLOW_RESULT);
     expected.extend_from_slice(b"activity-result");
     expected.extend_from_slice(EFFECT_RESULT);
+    expected.extend_from_slice(CRON_PAYLOAD);
     run_process_fault(AFTER_LEASE, "ack", &expected).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_owner_kill_preserves_three_acknowledged_settlements() {
+    let mut expected = Vec::from(SQL_PAYLOAD);
+    expected.extend_from_slice(KV_PAYLOAD);
+    expected.extend_from_slice(BLOB_PAYLOAD);
+    expected.extend_from_slice(QUEUE_PAYLOAD);
+    expected.extend_from_slice(CRON_PAYLOAD);
+    expected.extend_from_slice(WORKFLOW_RESULT);
+    expected.extend_from_slice(b"activity-result");
+    expected.extend_from_slice(EFFECT_RESULT);
+    expected.extend_from_slice(CRON_PAYLOAD);
+    run_process_fault(AFTER_SETTLEMENT, "ack", &expected).await;
 }
 
 async fn run_process_fault(case: &str, barrier: &str, expected: &[u8]) {
@@ -251,6 +314,24 @@ async fn run_process_fault(case: &str, barrier: &str, expected: &[u8]) {
     }
     assert_eq!(
         std::fs::read(sync.path().join("observation")).expect("successor observation marker"),
+        expected
+    );
+    let mut observer = spawn_role(&binary, "observer", case, &root, sync.path());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        if let Some(status) = observer.0.try_wait().expect("observer status") {
+            assert!(status.success(), "independent observer failed: {status}");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "independent observation timed out"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        std::fs::read(sync.path().join("independent-observation"))
+            .expect("independent observation marker"),
         expected
     );
 }

@@ -57,8 +57,14 @@ reservations on both in-memory and isolated RustFS storage. Activity also
 checks an exact terminal Workflow result and duplicate completion without a
 second event. Blob checks that an acknowledged part stays invisible after the
 upload expires and a fresh upload can publish exact bytes under the same key.
-These are local same-process cases; destination Effect delivery expiry and
-protected scheduled expiry evidence remain open.
+`public_cell_effect_delivery_expiry.rs` delays one signed delivery at the peer
+receive boundary until the source intent expires. The receiving verifier rejects
+the expired identity before dispatch; a separate typed observer checks that the
+destination SQL row is absent, the source lease is no longer valid or claimable,
+the stale Ack is rejected, and runtime reservations drain. The in-memory and
+isolated RustFS cases passed on 2026-09-21. These are local same-process cases;
+the source Effect's terminal failed row is not exposed by a public query, and
+protected scheduled expiry evidence remains open.
 The workload's precomputed outcome counts are advisory; the run-artifact
 validator binds scheduled attempts and validates the measured outcomes. The
 local ten-row test still reuses the same primitive workload for every row.
@@ -179,24 +185,44 @@ plus acknowledged Workflow starts that schedule Activity and Effect work.
 The successor starts with an empty local directory and checks exact SQL bytes,
 KV bytes/version, Blob bytes/ETag/size, Queue message ID/payload, Cron
 generation/due time, completed Workflow result/event sequence, each source
-commit sequence, exact restored roots, and higher owner epochs. It claims and
+commit sequence, exact restored roots, and higher owner epochs. Before settling
+pending work, it replays the original SQL insert, KV put, Blob completion,
+Queue send, Cron upsert, and Workflow start with their exact mutation identities
+through typed capabilities. Each returns the original commit sequence and
+outcome; the independent reads still show one SQL row, the first KV version,
+one Blob, one Queue message, the first Cron generation, and one Workflow event.
+These are real-storage cross-process duplicate checks, but they do not set
+protected matrix case bits. The successor claims and
 acknowledges the Queue message, completes the pending Activity, delivers the
 Effect to its SQL destination through the signed peer inbox, then settles the
-source lease. It checks one exact SQL row, identical replay and inbox resolution,
-no remaining claims, and zero runtime
-reservations to zero. A second boundary kills the owner before those writes;
+source lease. After the recovered Cron schedule becomes due, the successor
+executes its typed maintenance Tick, observes occurrence one and the next due
+time, delivers the resulting Effect through the signed peer inbox, and checks
+one exact SQL occurrence row, identical replay and inbox resolution, and a
+settled source lease. A repeated Tick produces no second occurrence. The
+successor checks no remaining claims and zero runtime reservations. A second
+boundary kills the owner before those writes;
 the successor checks all six values/schedules and both pending work items are
 absent. A third boundary kills the owner after Queue, Activity, and source
 Effect claims acknowledge. The independent successor rejects all three stale
 tokens after expiry, reclaims the same work on attempt two with new tokens,
 checks exact Activity result bytes and one terminal Workflow event, delivers
 the reclaimed Effect exactly once to SQL, settles Queue and Effect leases,
-and drains reservations. All three concurrent RustFS
-cases passed on 2026-09-21. The test uses a test-controlled
-session fence. It is not a scheduled qualification case or protected
-three-process provider run, and it does not set matrix case bits. Activity
-completion and Effect destination delivery happen after takeover; their
-pre-kill acknowledgements cover scheduling, not settlement.
+and drains reservations. A fourth boundary acknowledges Queue Ack, Activity
+completion, destination Effect delivery, and source Effect Ack before killing
+the owner. The successor replays the three exact terminal mutation identities
+and checks their original commit sequences and outcomes, the exact terminal
+Workflow result/event, one restored SQL destination row, no claimable Queue or
+Effect work, and zero reservations after drain. A third process now
+independently acquires the successor's published idle roots into an empty local
+directory. It checks the final SQL rows, KV version, Blob bytes/ETag, Queue
+settlement, fired Cron occurrence, terminal Workflow and Activity results,
+Effect destination row, empty Queue/Activity/Effect claims, and zero runtime
+reservations after its own drain. All four concurrent three-process RustFS
+cases passed on 2026-09-21. The owner-loss transition uses a test-controlled
+session fence, and the observer uses the public idle-restoration path after
+the successor drains. This is not a scheduled qualification case or protected
+provider run, and it does not set matrix case bits.
 
 Implement one fault-capable executor through `CellNode` and typed
 `ApplicationHandle` capabilities. Each operation writes a unique, bounded

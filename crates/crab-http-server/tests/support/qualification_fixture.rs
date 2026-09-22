@@ -75,12 +75,7 @@ pub async fn public_host_fixture_with_store(store: Store, root: Path) -> PublicH
             CatalogRole::Sql,
             fixture::SQL_MODULE,
             40,
-            |transaction| {
-                transaction.execute_batch(
-                    "CREATE TABLE qualification_rows (id INTEGER PRIMARY KEY, payload BLOB NOT NULL)",
-                )?;
-                Ok(())
-            },
+            fixture::install_reference_sql_schema,
         )
         .await
         .expect("SQL Cell"),
