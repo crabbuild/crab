@@ -110,3 +110,14 @@ as separate OS processes. Cell placement is a static seven-Cell test map; this
 does not qualify a distributed ownership directory, dynamic placement, or a
 million-Cell fleet. Results are recorded in
 [`performance/2026-09-21-balanced-three-process-local.md`](performance/2026-09-21-balanced-three-process-local.md).
+
+## Native RustFS sanity check
+
+On 2026-09-22, the ignored typed primitive smoke was also run against a fresh
+native RustFS instance and an isolated bucket/prefix. The run reached the
+object-store-backed workload but failed the PR profile's measured latency
+envelope after 377.94 seconds; RustFS reported roughly five-second commits for
+small control objects on the mounted workspace volume. No receipt was emitted
+and this is not provider qualification evidence. It is retained here as a
+failed environment check so a slow local backend cannot be mistaken for a
+passing production profile.
