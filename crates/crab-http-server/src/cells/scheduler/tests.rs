@@ -84,6 +84,19 @@ fn recovery_retry_backoff_is_bounded_and_monotonic() {
     assert_eq!(retry.next_attempt_ms - 60_100, RECOVERY_RETRY_MAX_MS);
 }
 
+#[tokio::test]
+async fn recovery_task_panics_become_retryable_failures() {
+    let result = super::catch_recovery_panic(async {
+        panic!("recovery worker panic");
+    })
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(crate::Error::Config("Cell node-log recovery task panicked"))
+    ));
+}
+
 #[derive(Debug)]
 struct HangingUpdateStore {
     inner: Arc<InMemory>,

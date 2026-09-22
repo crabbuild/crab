@@ -19,6 +19,7 @@ use crab_cell_runtime::{
     ReleaseStore, RequestId, SchedulerFleet, SessionId, preferred_scanner,
     recoverable_cells_from_scopes_with_summary,
 };
+use futures_util::FutureExt;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -779,7 +780,7 @@ impl RepositoryCellScheduler {
                 let _reservation = reservation;
                 let started = std::time::Instant::now();
                 let metrics = context.metrics.clone();
-                let result = recover_node_session(context, session, claimant).await;
+                let result = recover_node_session_guarded(context, session, claimant).await;
                 if let Some(metrics) = metrics {
                     if let Ok(work) = &result {
                         metrics.record_recovery_work(*work);
@@ -879,6 +880,24 @@ impl RepositoryCellScheduler {
             ))?;
         Ok(pool.try_reserve()?.map(Some))
     }
+}
+
+async fn recover_node_session_guarded(
+    context: RecoveryContext,
+    session: SessionId,
+    claimant: SessionId,
+) -> crate::Result<RecoveryWorkSummary> {
+    catch_recovery_panic(recover_node_session(context, session, claimant)).await
+}
+
+async fn catch_recovery_panic<F>(future: F) -> crate::Result<RecoveryWorkSummary>
+where
+    F: Future<Output = crate::Result<RecoveryWorkSummary>> + Send,
+{
+    std::panic::AssertUnwindSafe(future)
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| Err(crate::Error::Config("Cell node-log recovery task panicked")))
 }
 
 struct MigrationShardScan {
