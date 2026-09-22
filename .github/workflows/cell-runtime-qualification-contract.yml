@@ -16,6 +16,7 @@ on:
       - ".github/workflows/http-server-container.yml"
       - ".github/workflows/http-server-release.yml"
       - ".github/workflows/cell-runtime-qualification-contract.yml"
+      - ".github/workflows/cell-runtime-protected-qualification.yml"
   push:
     branches: [main]
     paths:
@@ -32,6 +33,7 @@ on:
       - ".github/workflows/http-server-container.yml"
       - ".github/workflows/http-server-release.yml"
       - ".github/workflows/cell-runtime-qualification-contract.yml"
+      - ".github/workflows/cell-runtime-protected-qualification.yml"
 
 jobs:
   contract:
