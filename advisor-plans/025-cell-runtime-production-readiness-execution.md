@@ -167,6 +167,20 @@ is unchanged through a separate typed reader. The in-memory and isolated
 RustFS cases passed on 2026-09-22 with zero reservations after shutdown. Its
 observer shares the owner process; the focused test does not produce a run
 artifact or mark Cron expiry in the matrix.
+A focused scheduled Workflow expiry test now starts and reads an acknowledged
+completed run with its exact run ID, definition digest, event sequence, and
+result. It holds a second signed Start at peer receive until the mutation
+identity expires, checks that no second run appears before or after rejection,
+and confirms `Expired` resolution. The original run remains byte-for-byte
+unchanged. The in-memory and isolated RustFS cases passed on 2026-09-22 and
+drained zero reservations after shutdown. The typed observer remains in the
+owner process; this test does not produce a case artifact or protected evidence.
+The SQL, KV, Cron, and Workflow focused expiry cases passed together against
+one isolated RustFS bucket with distinct prefixes on 2026-09-22 (34.83
+seconds). Their shared boundary aborts a stalled signed request if the
+pre-release observation fails, and the fixture shuts down and checks runtime
+reservations before reporting a returned case error. This remains local
+same-process observation, not a protected scheduled matrix result.
 A subsequent fresh-prefix 64-operation RustFS smoke completed every typed
 operation but failed the unchanged five-second profile gate: p99 was 32,341 ms
 over 236 seconds. Slow cases included Queue happy (7,733 ms), Queue duplicate
