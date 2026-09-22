@@ -47,6 +47,7 @@ impl PeerAuthorizer for QualificationAuthorizer {
 
 #[derive(Clone)]
 enum MutationFault {
+    None,
     Drop {
         before_dispatch: bool,
         ordinal: usize,
@@ -61,6 +62,7 @@ enum MutationFault {
 impl MutationFault {
     fn ordinal(&self) -> usize {
         match self {
+            Self::None => usize::MAX,
             Self::Drop { ordinal, .. } => *ordinal,
             Self::Pause { .. } => 1,
         }
@@ -277,4 +279,15 @@ pub fn peer_effect_client_with_paused_delivery(
         entered,
         dispatched,
     )
+}
+
+pub fn peer_effect_client(registry: Arc<Registry>, handles: Vec<CellHandle>) -> EffectPeerClient {
+    let (signer, round_trip) = peer_transport_with_fault(
+        registry,
+        handles,
+        MutationFault::None,
+        Arc::new(AtomicUsize::new(0)),
+        13,
+    );
+    EffectPeerClient::new(signer, qualification_principal(), round_trip)
 }

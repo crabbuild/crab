@@ -3,7 +3,7 @@ use super::*;
 pub(super) async fn run() {
     let (root, sync) = process_input();
     let case = process_case();
-    let acknowledgement = if case == AFTER_ACK {
+    let acknowledgement = if case != BEFORE_WRITE {
         let bytes = std::fs::read(sync.join("ack")).expect("owner acknowledgement");
         Some(serde_json::from_slice::<Acknowledgement>(&bytes).expect("decode acknowledgement"))
     } else {
@@ -99,14 +99,25 @@ pub(super) async fn run() {
         );
         restored_cells.push(restored);
     }
+    let peer_effect =
+        qualification_peer::peer_effect_client(application.registry(), restored_cells.clone());
+    let direct = CellClient::local_many(application.registry(), restored_cells)
+        .expect("successor direct client");
     let typed = successor
-        .application_handle::<fixture::ReferenceApplication>(
-            CellClient::local_many(application.registry(), restored_cells)
-                .expect("successor typed client"),
-            tenant,
-            application_id,
-        )
+        .application_handle::<fixture::ReferenceApplication>(direct.clone(), tenant, application_id)
         .with_blob_artifact_store(BlobArtifactStore::new(store));
+    if let Some(leases) = acknowledgement.as_ref().and_then(|ack| ack.leases.as_ref()) {
+        let deadline = leases
+            .queue_until_ms
+            .max(leases.activity_until_ms)
+            .max(leases.effect_until_ms);
+        let remaining_ms = deadline.saturating_sub(now_ms()).max(0).saturating_add(100);
+        tokio::time::sleep(Duration::from_millis(
+            u64::try_from(remaining_ms).expect("nonnegative lease expiry wait"),
+        ))
+        .await;
+        assert!(now_ms() > deadline);
+    }
     let target = CellTarget::new(
         tenant,
         application_id,
@@ -192,8 +203,26 @@ pub(super) async fn run() {
         .expect("successor Queue");
     let info = queue.info(0, None).await.expect("successor Queue info");
     if let Some(acknowledged) = &acknowledgement {
-        assert_eq!(info.output.ready, 1);
-        assert_eq!(info.output.leased, 0);
+        if let Some(leases) = &acknowledged.leases {
+            assert_eq!(info.output.ready + info.output.leased, 1);
+            assert!(info.receipt.commit_sequence >= leases.queue_sequence);
+            let old_ack = queue
+                .ack(
+                    identity(900_118, now_ms()),
+                    0,
+                    acknowledged.queue_message_id,
+                    leases.queue_token,
+                )
+                .await;
+            assert!(matches!(
+                old_ack,
+                Err(InvocationError::Rejected(outcome))
+                    if outcome.output == QueueLeaseOutcome::LeaseLost
+            ));
+        } else {
+            assert_eq!(info.output.ready, 1);
+            assert_eq!(info.output.leased, 0);
+        }
         assert!(info.receipt.commit_sequence >= acknowledged.queue_sequence);
         let claimed = queue
             .claim(
@@ -210,7 +239,12 @@ pub(super) async fn run() {
         let message = &claimed.output[0];
         assert_eq!(message.message_id, acknowledged.queue_message_id);
         assert_eq!(message.payload, QUEUE_PAYLOAD);
-        assert_eq!(message.attempt, 1);
+        if let Some(leases) = &acknowledged.leases {
+            assert_eq!(message.attempt, leases.queue_attempt + 1);
+            assert_ne!(message.token, leases.queue_token);
+        } else {
+            assert_eq!(message.attempt, 1);
+        }
         let acked = queue
             .ack(
                 identity(900_107, now_ms()),
@@ -309,15 +343,96 @@ pub(super) async fn run() {
         5_000,
     )
     .expect("successor Activity supervisor");
-    let activity_outcome = activity
-        .run_once(0, None)
-        .await
-        .expect("successor Activity run");
+    let reclaimed_activity =
+        if let Some(leases) = acknowledgement.as_ref().and_then(|ack| ack.leases.as_ref()) {
+            assert!(activity_state.receipt.commit_sequence >= leases.activity_sequence);
+            let target = CellTarget::new(
+                tenant,
+                application_id,
+                fixture::WORKFLOW_NAMESPACE,
+                &partition_for_shard(0),
+            )
+            .expect("successor Activity target");
+            let stale = direct
+                .command::<WorkflowActivityCompleteCommand<fixture::ReferenceWorkflow>>(
+                    &target,
+                    identity(900_121, now_ms()),
+                    ActivityCompletion {
+                        run_id: acknowledgement
+                            .as_ref()
+                            .expect("Activity acknowledgement")
+                            .activity_run_id,
+                        activity_id: leases.activity_id,
+                        attempt: leases.activity_attempt,
+                        lease_token: leases.activity_token,
+                        completion_token: fixed_id(900_119),
+                        result: b"activity-result".to_vec(),
+                        failed: false,
+                        retryable: false,
+                    },
+                )
+                .await;
+            assert!(matches!(
+                stale,
+                Err(InvocationError::Rejected(outcome))
+                    if outcome.output == ActivityCompletionOutcome::LeaseLost
+            ));
+            let claimed = direct
+                .command::<WorkflowActivityClaimCommand<fixture::ReferenceWorkflow>>(
+                    &target,
+                    identity(900_122, now_ms()),
+                    WorkflowActivityClaimRequest {
+                        limit: 1,
+                        lease_ms: 10_000,
+                    },
+                )
+                .await
+                .expect("successor Activity reclaim");
+            let [claim] = claimed.output.as_slice() else {
+                panic!("successor did not reclaim one Activity");
+            };
+            assert_eq!(claim.activity_id, leases.activity_id);
+            assert_eq!(claim.attempt, leases.activity_attempt + 1);
+            assert_ne!(claim.token, leases.activity_token);
+            let completed = direct
+                .command::<WorkflowActivityCompleteCommand<fixture::ReferenceWorkflow>>(
+                    &target,
+                    identity(900_123, now_ms()),
+                    ActivityCompletion {
+                        run_id: claim.run_id,
+                        activity_id: claim.activity_id,
+                        attempt: claim.attempt,
+                        lease_token: claim.token,
+                        completion_token: fixed_id(900_120),
+                        result: claim.input.clone(),
+                        failed: false,
+                        retryable: false,
+                    },
+                )
+                .await
+                .expect("successor Activity completion");
+            assert!(matches!(
+                completed.output,
+                ActivityCompletionOutcome::Applied(WorkflowOutcome::Applied {
+                    status: WorkflowStatus::Completed,
+                    event_sequence: 2,
+                    ..
+                })
+            ));
+            Some(claim.clone())
+        } else {
+            let outcome = activity
+                .run_once(0, None)
+                .await
+                .expect("successor Activity run");
+            if acknowledgement.is_some() {
+                assert!(matches!(outcome, ActivityRunOutcome::Completed { .. }));
+            } else {
+                assert!(matches!(outcome, ActivityRunOutcome::Idle { .. }));
+            }
+            None
+        };
     if let Some(acknowledged) = &acknowledgement {
-        assert!(matches!(
-            activity_outcome,
-            ActivityRunOutcome::Completed { .. }
-        ));
         let settled = workflow
             .state(ACTIVITY_WORKFLOW_ID.to_vec(), None)
             .await
@@ -328,6 +443,15 @@ pub(super) async fn run() {
         assert!(run.result.as_deref().is_some_and(
             |result| result.starts_with(b"activity\0") && result.ends_with(b"activity-result")
         ));
+        if let Some(claim) = reclaimed_activity {
+            let mut expected = b"activity\0".to_vec();
+            expected.push(0);
+            expected.extend_from_slice(&claim.activity_id);
+            expected.extend_from_slice(&(claim.input.len() as u32).to_be_bytes());
+            expected.extend_from_slice(&claim.input);
+            assert_eq!(run.event_sequence, 2);
+            assert_eq!(run.result, Some(expected));
+        }
         assert!(matches!(
             activity
                 .run_once(0, None)
@@ -335,8 +459,6 @@ pub(super) async fn run() {
                 .expect("successor Activity settled check"),
             ActivityRunOutcome::Idle { .. }
         ));
-    } else {
-        assert!(matches!(activity_outcome, ActivityRunOutcome::Idle { .. }));
     }
     let effect_state = workflow
         .state(EFFECT_WORKFLOW_ID.to_vec(), None)
@@ -346,7 +468,10 @@ pub(super) async fn run() {
         let run = effect_state.output.expect("acknowledged Effect workflow");
         assert_eq!(run.run_id, acknowledged.effect_run_id);
         assert_eq!(run.status, WorkflowStatus::Completed);
-        assert_eq!(run.result.as_deref(), Some(b"effect-scheduled".as_slice()));
+        assert_eq!(
+            run.result.as_deref(),
+            Some(b"effect-valid-scheduled".as_slice())
+        );
         assert!(effect_state.receipt.commit_sequence >= acknowledged.effect_sequence);
     } else {
         assert!(
@@ -362,21 +487,73 @@ pub(super) async fn run() {
     )
     .expect("successor Effect target");
     let effects = typed
-        .effects::<fixture::ReferenceWorkflow>(effect_target)
+        .effects::<fixture::ReferenceWorkflow>(effect_target.clone())
         .expect("successor Effects");
-    let claimed = effects
-        .claim(
-            identity(900_112, now_ms()),
-            EffectClaimRequest {
-                limit: 1,
-                lease_ms: 5_000,
-            },
-        )
-        .await
-        .expect("successor Effect claim");
+    let claimed = if let Some(leases) = acknowledgement.as_ref().and_then(|ack| ack.leases.as_ref())
+    {
+        let stale = direct
+            .command::<EffectLeaseCommand<fixture::ReferenceWorkflow>>(
+                &effect_target,
+                identity(900_124, now_ms()),
+                EffectLeaseRequest::Ack(EffectAckRequest {
+                    lease: EffectLease {
+                        effect_id: leases.effect_id,
+                        attempt: leases.effect_attempt,
+                        token: leases.effect_token,
+                        expires_at_ms: leases.effect_expires_at_ms,
+                    },
+                    result: EFFECT_RESULT.to_vec(),
+                }),
+            )
+            .await;
+        assert!(matches!(
+            stale,
+            Err(InvocationError::Rejected(outcome))
+                if outcome.output == EffectLeaseOutcome::LeaseLost
+        ));
+        let mut reclaimed = None;
+        for attempt in 0..4 {
+            let next = effects
+                .claim(
+                    identity(900_125 + attempt, now_ms()),
+                    EffectClaimRequest {
+                        limit: 1,
+                        lease_ms: 30_000,
+                    },
+                )
+                .await
+                .expect("successor Effect reclaim");
+            if !next.output.is_empty() {
+                reclaimed = Some(next);
+                break;
+            }
+            // Expired source leases become ready after their bounded retry delay.
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        reclaimed.expect("successor Effect became claimable")
+    } else {
+        effects
+            .claim(
+                identity(900_112, now_ms()),
+                EffectClaimRequest {
+                    limit: 1,
+                    lease_ms: 30_000,
+                },
+            )
+            .await
+            .expect("successor Effect claim")
+    };
     if acknowledgement.is_some() {
         assert_eq!(claimed.output.len(), 1);
         let effect = claimed.output[0].clone();
+        if let Some(leases) = acknowledgement.as_ref().and_then(|ack| ack.leases.as_ref()) {
+            assert!(claimed.receipt.commit_sequence >= leases.effect_sequence);
+            assert_eq!(effect.effect_id, leases.effect_id);
+            assert_eq!(effect.attempt, leases.effect_attempt + 1);
+            assert_ne!(effect.token, leases.effect_token);
+        } else {
+            assert_eq!(effect.attempt, 1);
+        }
         assert!(
             effects
                 .validate(vec![effect.clone()], claimed.receipt)
@@ -384,11 +561,55 @@ pub(super) async fn run() {
                 .expect("successor Effect validation")
                 .output
         );
+        let destination = peer_effect
+            .deliver(&effect, now_ms())
+            .await
+            .expect("successor destination Effect delivery");
+        assert!(matches!(destination, StoredOutcome::Success { .. }));
+        let replay = peer_effect
+            .deliver(&effect, now_ms())
+            .await
+            .expect("duplicate destination Effect delivery");
+        assert_eq!(replay, destination);
+        assert_eq!(
+            peer_effect
+                .resolve(&effect, now_ms())
+                .await
+                .expect("successor destination inbox resolution"),
+            Resolution::Committed(destination.clone())
+        );
+        let destination_state = sql
+            .query(
+                None,
+                SqlBatch {
+                    statements: vec![
+                        SqlStatement {
+                            sql: "SELECT payload FROM qualification_rows WHERE id = 90".into(),
+                            parameters: Vec::new(),
+                        },
+                        SqlStatement {
+                            sql: "SELECT COUNT(*) FROM qualification_rows WHERE id = 90".into(),
+                            parameters: Vec::new(),
+                        },
+                    ],
+                },
+            )
+            .await
+            .expect("successor destination Effect observation");
+        assert_eq!(
+            destination_state.output[0].rows,
+            vec![vec![SqlValue::Blob(EFFECT_RESULT.to_vec())]]
+        );
+        assert_eq!(
+            destination_state.output[1].rows,
+            vec![vec![SqlValue::Integer(1)]]
+        );
+        assert!(destination_state.receipt.commit_sequence >= destination.commit_sequence());
         let acked = effects
             .ack(
                 identity(900_113, now_ms()),
                 effect.clone(),
-                EFFECT_RESULT.to_vec(),
+                destination.result().to_vec(),
             )
             .await
             .expect("successor Effect ack");
@@ -416,6 +637,19 @@ pub(super) async fn run() {
         );
     } else {
         assert!(claimed.output.is_empty(), "unacknowledged Effect appeared");
+        let absent = sql
+            .query(
+                None,
+                SqlBatch {
+                    statements: vec![SqlStatement {
+                        sql: "SELECT COUNT(*) FROM qualification_rows WHERE id = 90".into(),
+                        parameters: Vec::new(),
+                    }],
+                },
+            )
+            .await
+            .expect("successor destination Effect absence");
+        assert_eq!(absent.output[0].rows, vec![vec![SqlValue::Integer(0)]]);
     }
     successor.shutdown().await.expect("successor drain");
     assert_zero_reservations(&successor);

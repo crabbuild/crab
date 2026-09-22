@@ -8,14 +8,17 @@ use std::{
 
 use crab_cell_host::CellNodeBuilder;
 use crab_cell_runtime::{
-    ActivityRunOutcome, ActivitySupervisor, ApplicationId, BlobArtifactStore, BlobCondition,
-    BlobMutation, BlobMutationOutcome, BlobQuery, BlobQueryResult, CellAuthority, CellCatalog,
-    CellClient, CellReplica, CellStorageLayout, CellTarget, CronMutation, CronMutationOutcome,
-    CronQueryResult, EffectClaimRequest, EffectLeaseOutcome, IncarnationId, KvAtomicOutcome,
-    KvAtomicRequest, KvMutation, NodeLeaseGuard, Owner, QueueClaimRequest, QueueLeaseOutcome,
-    QueueSendOutcome, QueueSendRequest, QueueState, RecoveryManifestStore, ReplicaLimits,
-    SessionId, SqlBatch, SqlStatement, SqlValue, SqlWorkerPool, TenantId, WorkflowOutcome,
-    WorkflowStatus, partition_for_shard,
+    ActivityCompletion, ActivityCompletionOutcome, ActivityRunOutcome, ActivitySupervisor,
+    ApplicationId, BlobArtifactStore, BlobCondition, BlobMutation, BlobMutationOutcome, BlobQuery,
+    BlobQueryResult, CellAuthority, CellCatalog, CellClient, CellReplica, CellStorageLayout,
+    CellTarget, CronMutation, CronMutationOutcome, CronQueryResult, EffectAckRequest,
+    EffectClaimRequest, EffectLease, EffectLeaseCommand, EffectLeaseOutcome, EffectLeaseRequest,
+    IncarnationId, InvocationError, KvAtomicOutcome, KvAtomicRequest, KvMutation, NodeLeaseGuard,
+    Owner, QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome, QueueSendRequest, QueueState,
+    RecoveryManifestStore, ReplicaLimits, Resolution, SessionId, SqlBatch, SqlStatement, SqlValue,
+    SqlWorkerPool, StoredOutcome, TenantId, WorkflowActivityClaimCommand,
+    WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand, WorkflowOutcome, WorkflowStatus,
+    partition_for_shard,
 };
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};
@@ -33,6 +36,12 @@ mod qualification;
 mod qualification_fence;
 #[path = "support/qualification_fixture.rs"]
 mod qualification_fixture;
+#[path = "support/qualification_peer.rs"]
+#[expect(
+    dead_code,
+    reason = "this test uses only the signed Effect delivery helper"
+)]
+mod qualification_peer;
 
 use qualification::{assert_zero_reservations, fixed_id, identity, rustfs_public_store};
 use qualification_fence::fence_public_session;
@@ -44,6 +53,7 @@ const ROOT_ENV: &str = "CRAB_CELL_PROCESS_FAULT_ROOT";
 const SYNC_ENV: &str = "CRAB_CELL_PROCESS_FAULT_SYNC";
 const BEFORE_WRITE: &str = "before-write";
 const AFTER_ACK: &str = "after-ack";
+const AFTER_LEASE: &str = "after-lease";
 const SQL_PAYLOAD: &[u8] = b"acknowledged-before-owner-kill";
 const KV_SCOPE: &[u8] = b"process-fault";
 const KV_KEY: &[u8] = b"acknowledged";
@@ -56,7 +66,7 @@ const WORKFLOW_ID: &[u8] = b"published-workflow-before-owner-kill";
 const WORKFLOW_RESULT: &[u8] = b"workflow-result-before-owner-kill";
 const ACTIVITY_WORKFLOW_ID: &[u8] = b"published-activity-before-owner-kill";
 const EFFECT_WORKFLOW_ID: &[u8] = b"published-effect-before-owner-kill";
-const EFFECT_RESULT: &[u8] = b"effect-result-after-owner-kill";
+const EFFECT_RESULT: &[u8] = b"delivered-effect";
 
 #[derive(Deserialize, Serialize)]
 struct Acknowledgement {
@@ -78,6 +88,26 @@ struct Acknowledgement {
     activity_run_id: [u8; 16],
     effect_sequence: u64,
     effect_run_id: [u8; 16],
+    leases: Option<LeaseEvidence>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct LeaseEvidence {
+    queue_attempt: u32,
+    queue_token: [u8; 16],
+    queue_until_ms: i64,
+    queue_sequence: u64,
+    activity_id: [u8; 16],
+    activity_attempt: u32,
+    activity_token: [u8; 16],
+    activity_until_ms: i64,
+    activity_sequence: u64,
+    effect_id: [u8; 32],
+    effect_attempt: u32,
+    effect_token: [u8; 16],
+    effect_until_ms: i64,
+    effect_expires_at_ms: i64,
+    effect_sequence: u64,
 }
 
 struct ChildGuard(Child);
@@ -98,7 +128,7 @@ fn process_input() -> (Path, std::path::PathBuf) {
 fn process_case() -> String {
     let case = env::var(CASE_ENV).expect("fault case");
     assert!(
-        case == BEFORE_WRITE || case == AFTER_ACK,
+        case == BEFORE_WRITE || case == AFTER_ACK || case == AFTER_LEASE,
         "unknown fault case"
     );
     case
@@ -168,6 +198,20 @@ async fn rustfs_owner_kill_recovers_eight_acknowledged_primitives_in_successor_p
 #[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
 async fn rustfs_owner_kill_before_eight_primitive_writes_has_no_ghost_state() {
     run_process_fault(BEFORE_WRITE, "ready", b"absent").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an isolated RustFS bucket, prefix and explicit test credentials"]
+async fn rustfs_owner_kill_after_three_leases_reclaims_exact_attempts() {
+    let mut expected = Vec::from(SQL_PAYLOAD);
+    expected.extend_from_slice(KV_PAYLOAD);
+    expected.extend_from_slice(BLOB_PAYLOAD);
+    expected.extend_from_slice(QUEUE_PAYLOAD);
+    expected.extend_from_slice(CRON_PAYLOAD);
+    expected.extend_from_slice(WORKFLOW_RESULT);
+    expected.extend_from_slice(b"activity-result");
+    expected.extend_from_slice(EFFECT_RESULT);
+    run_process_fault(AFTER_LEASE, "ack", &expected).await;
 }
 
 async fn run_process_fault(case: &str, barrier: &str, expected: &[u8]) {

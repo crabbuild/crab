@@ -4,7 +4,7 @@ pub(super) async fn run() {
     let (root, sync) = process_input();
     let case = process_case();
     let (store, _) = rustfs_public_store();
-    let (node, typed, tenant, application, _directory, _registry, _handles, _store) =
+    let (node, typed, tenant, application, _directory, registry, handles, _store) =
         public_host_fixture_with_store(store.clone(), root.clone()).await;
     if case == BEFORE_WRITE {
         publish_marker(&sync, "ready", b"owner-bootstrapped");
@@ -182,7 +182,7 @@ pub(super) async fn run() {
         .start(
             identity(900_111, now_ms()),
             EFFECT_WORKFLOW_ID.to_vec(),
-            b"effect".to_vec(),
+            b"effect-valid".to_vec(),
         )
         .await
         .expect("acknowledged Effect workflow start");
@@ -193,6 +193,85 @@ pub(super) async fn run() {
     } = effect_started.output
     else {
         panic!("source Effect workflow did not complete");
+    };
+    let leases = if case == AFTER_LEASE {
+        let claimed = queue
+            .claim(
+                identity(900_115, now_ms()),
+                0,
+                QueueClaimRequest {
+                    limit: 1,
+                    lease_ms: 5_000,
+                },
+            )
+            .await
+            .expect("acknowledged source Queue claim");
+        let [queue_claim] = claimed.output.as_slice() else {
+            panic!("source Queue claim did not select one message");
+        };
+        assert_eq!(queue_claim.message_id, message_id);
+        assert_eq!(queue_claim.attempt, 1);
+        let workflow_target = CellTarget::new(
+            tenant,
+            application,
+            fixture::WORKFLOW_NAMESPACE,
+            &partition_for_shard(0),
+        )
+        .expect("source Workflow target");
+        let activity_client =
+            CellClient::local_many(registry, handles).expect("source Activity client");
+        let activity_claimed = activity_client
+            .command::<WorkflowActivityClaimCommand<fixture::ReferenceWorkflow>>(
+                &workflow_target,
+                identity(900_116, now_ms()),
+                WorkflowActivityClaimRequest {
+                    limit: 1,
+                    lease_ms: 5_000,
+                },
+            )
+            .await
+            .expect("acknowledged source Activity claim");
+        let [activity_claim] = activity_claimed.output.as_slice() else {
+            panic!("source Activity claim did not select one attempt");
+        };
+        assert_eq!(activity_claim.run_id, activity_run_id);
+        assert_eq!(activity_claim.attempt, 1);
+        let effects = typed
+            .effects::<fixture::ReferenceWorkflow>(workflow_target)
+            .expect("source Effects");
+        let effect_claimed = effects
+            .claim(
+                identity(900_117, now_ms()),
+                EffectClaimRequest {
+                    limit: 1,
+                    lease_ms: 5_000,
+                },
+            )
+            .await
+            .expect("acknowledged source Effect claim");
+        let [effect_claim] = effect_claimed.output.as_slice() else {
+            panic!("source Effect claim did not select one delivery");
+        };
+        assert_eq!(effect_claim.attempt, 1);
+        Some(LeaseEvidence {
+            queue_attempt: queue_claim.attempt,
+            queue_token: queue_claim.token,
+            queue_until_ms: queue_claim.lease_until_ms,
+            queue_sequence: claimed.receipt.commit_sequence,
+            activity_id: activity_claim.activity_id,
+            activity_attempt: activity_claim.attempt,
+            activity_token: activity_claim.token,
+            activity_until_ms: activity_claim.lease_until_ms,
+            activity_sequence: activity_claimed.receipt.commit_sequence,
+            effect_id: effect_claim.effect_id,
+            effect_attempt: effect_claim.attempt,
+            effect_token: effect_claim.token,
+            effect_until_ms: effect_claim.lease_until_ms,
+            effect_expires_at_ms: effect_claim.expires_at_ms,
+            effect_sequence: effect_claimed.receipt.commit_sequence,
+        })
+    } else {
+        None
     };
     let acknowledgement = Acknowledgement {
         sql_sequence: committed.receipt.commit_sequence,
@@ -213,6 +292,7 @@ pub(super) async fn run() {
         activity_run_id,
         effect_sequence: effect_started.receipt.commit_sequence,
         effect_run_id,
+        leases,
     };
     let bytes = serde_json::to_vec(&acknowledgement).expect("encode acknowledgement");
     publish_marker(&sync, "ack", &bytes);

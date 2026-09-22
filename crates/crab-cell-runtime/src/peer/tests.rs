@@ -43,6 +43,30 @@ fn signed_peer_request_carries_maximum_kv_value() {
     assert_eq!(verified.operation_tag(), 10);
 }
 
+#[test]
+fn short_operation_deadline_survives_peer_transit_without_extending_identity() {
+    let expires_at_ms = NOW_MS + 5_000;
+    let (authorization_expires_at_ms, remaining_ms) =
+        transport::peer_time_budget(NOW_MS, expires_at_ms).unwrap();
+    assert_eq!(remaining_ms, 5_000);
+    let mut request = mutation();
+    request.identity.as_mut().unwrap().expires_at_ms = expires_at_ms;
+    request.timeout_ms = remaining_ms;
+    let signer = signer();
+    let encoded = signer
+        .sign(
+            principal(),
+            NOW_MS,
+            authorization_expires_at_ms,
+            remaining_ms,
+            PeerOperation::Mutate(request),
+        )
+        .unwrap();
+    let verifier = verifier(&signer);
+    assert!(verifier.verify(&encoded, NOW_MS + 1_000).is_ok());
+    assert!(verifier.verify(&encoded, expires_at_ms).is_err());
+}
+
 fn principal() -> PeerPrincipal {
     PeerPrincipal {
         issuer: "https://identity.example".into(),
