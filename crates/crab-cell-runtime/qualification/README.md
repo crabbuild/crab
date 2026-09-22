@@ -129,3 +129,17 @@ name is not used, `CRAB_CELL_RUNTIME_PROTECTED_EVIDENCE_ARTIFACT`. A manually
 dispatched release can provide the same values as inputs. Missing, failed,
 stale, wrong-workflow, wrong-commit, symlinked, or malformed evidence fails
 closed; no synthetic receipt is accepted as a substitute.
+
+The public host's local process-fault smoke can be run without credentials:
+
+```text
+cargo test --locked -p crab-http-server --test public_cell_process_fault \
+  filesystem_owner_kill_preserves_three_acknowledged_settlements -- \
+  --exact --nocapture
+```
+
+It starts an owner, successor, and independent observer as separate processes,
+kills the owner after acknowledged leases and settlements, and verifies all
+primitive outcomes through the typed `CellNode` handle. The filesystem CAS
+backend is a deterministic lifecycle regression fixture only; it is not a
+provider, Kubernetes, or large-scale qualification receipt.

@@ -9,7 +9,7 @@ pub(super) async fn run() {
         let bytes = std::fs::read(sync.join("ack")).expect("owner acknowledgement");
         Some(serde_json::from_slice::<Acknowledgement>(&bytes).expect("decode acknowledgement"))
     };
-    let (store, _) = rustfs_public_store();
+    let (store, _) = process_store();
     let application = Arc::new(fixture::compiled());
     let tenant = TenantId::from_bytes([71; 16]);
     let application_id = ApplicationId::from_bytes([72; 16]);

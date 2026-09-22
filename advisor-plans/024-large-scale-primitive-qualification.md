@@ -27,6 +27,13 @@ existing pinned-signer and image/profile-bound matrix verification. Protected
 provider, Kubernetes, and scale receipts remain open until real runs produce
 the required signed evidence.
 
+The public host fault fixture also has a local three-process mode backed by the
+test-only filesystem CAS store. It kills the owner after all primitive leases
+and settlements, restores each Cell through `CellNode`, and verifies the same
+acknowledged outcomes from a successor and an independent observer. This is a
+repeatable host/lifecycle regression gate, not provider, Kubernetes, or scale
+evidence; those protected rows still require a retained signed run artifact.
+
 ## Why this matters
 
 Unit and local integration tests establish many correctness properties, but
