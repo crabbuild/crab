@@ -2982,6 +2982,39 @@ impl QualificationRunner {
         {
             return Err(Error::Control("qualification run environment identity"));
         }
+        if profile.requires_protected_evidence()
+            && (evidence.topology == "local"
+                || evidence.toolchain == "unknown"
+                || evidence.execution_profile != "release"
+                || evidence.ownership.is_empty()
+                || evidence
+                    .finished_at_ms
+                    .saturating_sub(evidence.started_at_ms)
+                    < run.elapsed_ms)
+        {
+            return Err(Error::Control(
+                "qualification run lacks protected execution proof",
+            ));
+        }
+        if profile.requires_fault_injection()
+            && (evidence.fault.eq_ignore_ascii_case("none")
+                || evidence.fault_schedule == b"none"
+                || evidence.ownership.len() < 2
+                || !evidence.ownership.windows(2).any(|observations| {
+                    observations[1].epoch() > observations[0].epoch()
+                        || observations[1].published_sequence()
+                            > observations[0].published_sequence()
+                })
+                || evidence.ownership.windows(2).any(|observations| {
+                    observations[1].epoch() < observations[0].epoch()
+                        || observations[1].published_sequence()
+                            < observations[0].published_sequence()
+                }))
+        {
+            return Err(Error::Control(
+                "qualification run lacks protected fault transition proof",
+            ));
+        }
         let encoded_run = run.encode()?;
         if Digest::from_bytes(*blake3::hash(artifacts[0]).as_bytes())
             != Digest::from_bytes(*blake3::hash(&encoded_run).as_bytes())
@@ -3929,7 +3962,7 @@ mod tests {
             execution_profile: "release".into(),
             topology: "three-process".into(),
             started_at_ms: 1,
-            finished_at_ms: 2,
+            finished_at_ms: 1_001,
             fault_schedule: b"none".to_vec(),
             ownership: vec![QualificationOwnership::new(
                 1,
@@ -3963,6 +3996,20 @@ mod tests {
         receipt
             .verify_primitive_run_artifact(&profile, &[&run_bytes, &workload_bytes])
             .unwrap();
+        let mut short_evidence = evidence.clone();
+        short_evidence.finished_at_ms = 2;
+        assert!(
+            runner
+                .emit_protected_run(
+                    &profile,
+                    "binder-source".into(),
+                    Digest::from_bytes([97; 32]),
+                    short_evidence,
+                    &run,
+                    &[&run_bytes, &workload_bytes],
+                )
+                .is_err()
+        );
         let mut dirty_evidence = evidence.clone();
         dirty_evidence.dirty = true;
         assert!(
