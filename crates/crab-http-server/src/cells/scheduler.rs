@@ -1143,11 +1143,17 @@ async fn recover_node_session(
         "pinned recovered Cell overlays"
     );
     let phase_started = std::time::Instant::now();
-    match coordinator
-        .finish(&directory, fenced, controls, super::unix_now_ms()?)
-        .await
+    let refreshed = match tokio::time::timeout(
+        RECOVERY_CLAIM_REFRESH_TIMEOUT,
+        directory.refresh_recovery_claim(&fenced, super::unix_now_ms()?),
+    )
+    .await
     {
-        Ok(_) => {}
+        Ok(result) => result,
+        Err(_) => Err(crab_cell_runtime::Error::Deadline),
+    };
+    let refreshed = match refreshed {
+        Ok(refreshed) => refreshed,
         Err(error) => {
             if let Some(metrics) = &metrics {
                 metrics.record_recovery_phase(
@@ -1157,12 +1163,41 @@ async fn recover_node_session(
             }
             return Err(error.into());
         }
+    };
+    fenced = refreshed;
+    let finish_fence = fenced.clone();
+    let completed = finish_recovery_with_timeout(
+        RECOVERY_CLAIM_STORAGE_TIMEOUT,
+        coordinator.finish(&directory, finish_fence, controls, super::unix_now_ms()?),
+    )
+    .await;
+    match completed {
+        Ok(_) => {}
+        Err(error) => {
+            if let Some(metrics) = &metrics {
+                metrics.record_recovery_phase(
+                    crate::metrics::RecoveryPhase::Seal,
+                    phase_started.elapsed(),
+                );
+            }
+            return Err(error);
+        }
     }
     if let Some(metrics) = &metrics {
         metrics.record_recovery_phase(crate::metrics::RecoveryPhase::Seal, phase_started.elapsed());
     }
     tracing::debug!(?session, ?claimant, "sealed recovered Cell node log");
     Ok(work)
+}
+
+async fn finish_recovery_with_timeout<T, F>(timeout: Duration, future: F) -> crate::Result<T>
+where
+    F: Future<Output = crab_cell_runtime::Result<T>>,
+{
+    tokio::time::timeout(timeout, future)
+        .await
+        .map_err(|_| crab_cell_runtime::Error::Deadline)?
+        .map_err(Into::into)
 }
 
 async fn claim_expired_with_timeout(

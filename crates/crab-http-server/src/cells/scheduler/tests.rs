@@ -241,6 +241,19 @@ async fn committed_claim_with_a_lost_response_is_resumed_after_timeout() {
 }
 
 #[tokio::test]
+async fn recovery_finish_is_bounded_when_storage_stalls() {
+    let result = finish_recovery_with_timeout(Duration::ZERO, async {
+        std::future::pending::<crab_cell_runtime::Result<()>>().await
+    })
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(crate::Error::Cell(crab_cell_runtime::Error::Deadline))
+    ));
+}
+
+#[tokio::test]
 async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
     let application = ApplicationId::from_bytes([61; 16]);
     let tenant = TenantId::from_bytes([62; 16]);
