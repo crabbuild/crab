@@ -676,7 +676,7 @@ root_after_state="$(jq --compact-output '.root' <<<"$control_after")"
 metrics_first=""
 for _ in $(seq 1 45); do
   candidate_metrics="$("${compose[@]}" exec -T server-c crab-http-server \
-    --config /etc/crab/server.toml cells metrics)"
+    --config /etc/crab/server.toml cells metrics 2>/dev/null || true)"
   if [ "$(metric_counter "$candidate_metrics" candidate_count)" -gt \
     "$(metric_counter "$metrics_c" candidate_count)" ]; then
     metrics_first="$candidate_metrics"
@@ -989,7 +989,7 @@ root_after_second_loss="$(jq --compact-output '.root' \
 metrics_second=""
 for _ in $(seq 1 45); do
   candidate_metrics="$("${compose[@]}" exec -T server-b crab-http-server \
-    --config /etc/crab/server.toml cells metrics)"
+    --config /etc/crab/server.toml cells metrics 2>/dev/null || true)"
   if [ "$(metric_counter "$candidate_metrics" candidate_count)" -gt \
     "$(metric_counter "$metrics_second_before" candidate_count)" ]; then
     metrics_second="$candidate_metrics"
@@ -1032,6 +1032,41 @@ service_session() {
   node_session "$1"
 }
 
+fallback_session() {
+  local service="$1"
+  local session=""
+  for _ in $(seq 1 45); do
+    if session="$(service_session "$service" 2>/dev/null)" &&
+      [[ "$session" =~ ^[0-9a-f]{32}$ ]]; then
+      printf '%s\n' "$session"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "${service} did not expose a cell session after restart." >&2
+  return 1
+}
+
+fallback_node_json() {
+  local service="$1"
+  local session="$2"
+  local node_json=""
+  for _ in $(seq 1 45); do
+    node_json="$(service_cli "$service" cells node --session "$session" --json \
+      2>/dev/null || true)"
+    if jq --exit-status --arg session "$session" \
+      '.session == $session and has("advertisement")' \
+      <<<"$node_json" >/dev/null 2>&1; then
+      printf '%s\n' "$node_json"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "${service} did not expose node session ${session} after restart." >&2
+  printf '%s\n' "$node_json" >&2
+  return 1
+}
+
 stop_fallback_member() {
   case "$1" in
     server)
@@ -1066,29 +1101,36 @@ done
 wait_for_healthy server
 wait_for_healthy server-c
 wait_for_healthy server-d
-session_a_fallback="$(service_session server)"
-session_c_fallback="$(service_session server-c)"
-session_d_fallback="$(service_session server-d)"
-node_a_fallback="$(service_cli server cells node --session "$session_a_fallback" --json)"
-node_c_fallback="$(service_cli server-c cells node --session "$session_c_fallback" --json)"
-node_d_fallback="$(service_cli server-d cells node --session "$session_d_fallback" --json)"
-node_b_before_fallback="$(service_cli server-b cells node \
-  --session "$session_after_second_loss" --json)"
+session_a_fallback="$(fallback_session server)"
+session_c_fallback="$(fallback_session server-c)"
+session_d_fallback="$(fallback_session server-d)"
+node_a_fallback="$(fallback_node_json server "$session_a_fallback")"
+node_c_fallback="$(fallback_node_json server-c "$session_c_fallback")"
+node_d_fallback="$(fallback_node_json server-d "$session_d_fallback")"
+node_b_before_fallback="$(fallback_node_json server-b "$session_after_second_loss")"
 fallback_members="$(jq -c '.advertisement.log.member_nodes' <<<"$node_b_before_fallback")"
-jq --exit-status \
+# A replacement owner may have an enrolled but inactive log: no fleet proof
+# has escaped that epoch yet, so the first fallback mutation must use object
+# coverage and remain recoverable without a follower witness.
+if ! jq --exit-status \
   '.live == true and .advertisement.log.state == "open" and
-   .advertisement.log.active == true and
    (.advertisement.log.member_nodes | length > 0)' \
-  <<<"$node_b_before_fallback" >/dev/null
+  <<<"$node_b_before_fallback" >/dev/null; then
+  echo "Fallback owner B did not expose an open live durability log." >&2
+  jq . <<<"$node_b_before_fallback" >&2 || true
+  exit 1
+fi
 
+# Capture the pre-mutation root so recovery proves that this object-covered
+# write advanced the successor's root after the owner disappears.
+control_before_fallback="$(service_cli server-b cells status --owner demo --name hello)"
+root_before_fallback="$(jq --compact-output '.root' <<<"$control_before_fallback")"
 fallback_response="$(post_json_eventually \
   "$node_b_origin" \
   "${repository_path}/labels" \
   '{"request_id":"00000000-0000-4000-8000-000000000106","name":"fallback-covered","color":"7c3aed","description":"Object-covered fallback recovery"}' \
   '.id == 3 and .name == "fallback-covered"' \
   'Node B did not accept the fallback-covered label.')"
-control_before_fallback="$(service_cli server-b cells status --owner demo --name hello)"
-root_before_fallback="$(jq --compact-output '.root' <<<"$control_before_fallback")"
 fallback_object_covered=false
 for _ in $(seq 1 60); do
   fallback_owner_metrics="$(service_cli server-b cells metrics)"

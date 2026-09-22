@@ -65,6 +65,38 @@ static WORKFLOW_NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     dead_letter: None,
 }];
 
+#[test]
+fn recovery_retry_backoff_is_bounded_and_monotonic() {
+    let mut retry = RecoveryRetryState::new(100);
+    assert!(retry.ready(100));
+
+    retry.record_failure(100);
+    assert_eq!(retry.next_attempt_ms, 1_100);
+    assert!(!retry.ready(1_099));
+    assert!(retry.ready(1_100));
+
+    retry.record_failure(1_100);
+    assert_eq!(retry.next_attempt_ms, 3_100);
+    for now_ms in [3_100, 7_100, 15_100, 30_100, 45_100, 60_100] {
+        retry.record_failure(now_ms);
+        assert!(retry.next_attempt_ms - now_ms <= RECOVERY_RETRY_MAX_MS);
+    }
+    assert_eq!(retry.next_attempt_ms - 60_100, RECOVERY_RETRY_MAX_MS);
+}
+
+#[tokio::test]
+async fn recovery_task_panics_become_retryable_failures() {
+    let result = super::catch_recovery_panic(async {
+        panic!("recovery worker panic");
+    })
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(crate::Error::Config("Cell node-log recovery task panicked"))
+    ));
+}
+
 #[derive(Debug)]
 struct HangingUpdateStore {
     inner: Arc<InMemory>,
@@ -238,6 +270,19 @@ async fn committed_claim_with_a_lost_response_is_resumed_after_timeout() {
     .unwrap();
     assert_eq!(resumed.session(), expired);
     assert_eq!(resumed.claimant(), claimant);
+}
+
+#[tokio::test]
+async fn recovery_finish_is_bounded_when_storage_stalls() {
+    let result = finish_recovery_with_timeout(Duration::ZERO, async {
+        std::future::pending::<crab_cell_runtime::Result<()>>().await
+    })
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(crate::Error::Cell(crab_cell_runtime::Error::Deadline))
+    ));
 }
 
 #[tokio::test]

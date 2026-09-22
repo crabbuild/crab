@@ -19,6 +19,7 @@ use crab_cell_runtime::{
     ReleaseStore, RequestId, SchedulerFleet, SessionId, preferred_scanner,
     recoverable_cells_from_scopes_with_summary,
 };
+use futures_util::FutureExt;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -36,10 +37,14 @@ const NODE_COLLECTION_INTERVAL_MS: i64 = 60_000;
 const NODE_COLLECTION_LIMIT: usize = 128;
 const MAX_NODE_RECOVERY_JOBS: usize = 2;
 const MAX_NODE_RECOVERY_CELLS: usize = 10_000;
+const RECOVERY_CANDIDATE_SCAN_LIMIT: usize = 128;
 const FOLLOWER_FIRST_GRACE_MS: i64 = 2_000;
 const RECOVERY_CLAIM_HEARTBEAT: Duration = Duration::from_secs(10);
 const RECOVERY_CLAIM_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 const RECOVERY_CLAIM_STORAGE_TIMEOUT: Duration = Duration::from_secs(5);
+const RECOVERY_RETRY_BASE_MS: i64 = 1_000;
+const RECOVERY_RETRY_MAX_MS: i64 = 15_000;
+const RECOVERY_RETRY_RETENTION_MS: i64 = 5 * 60 * 1_000;
 
 /// Shared scanner progress used by enrollment, readiness and metrics.
 #[derive(Clone)]
@@ -111,9 +116,10 @@ pub(crate) struct RepositoryCellScheduler {
     metrics: Option<crate::metrics::Metrics>,
     recovery_sessions: Arc<Mutex<HashSet<SessionId>>>,
     recovery_affinity_seen: HashMap<SessionId, i64>,
-    recovery_jobs: tokio::task::JoinSet<crate::Result<SessionId>>,
+    recovery_jobs: tokio::task::JoinSet<RecoveryJobResult>,
     recovery_manifests: RecoveryManifestStore,
     recovery_disk: crab_cell_runtime::DiskBudget,
+    recovery_retries: HashMap<SessionId, RecoveryRetryState>,
     next_migration_shard: u8,
     next_shard: u8,
     blocking_activities: Option<BlockingActivityPool>,
@@ -174,6 +180,7 @@ impl RepositoryCellScheduler {
             recovery_jobs: tokio::task::JoinSet::new(),
             recovery_manifests,
             recovery_disk,
+            recovery_retries: HashMap::new(),
             next_migration_shard: 0,
             next_shard: 0,
             blocking_activities,
@@ -218,7 +225,6 @@ impl RepositoryCellScheduler {
             }
             self.reap_activity_jobs();
             self.reap_migration_jobs();
-            self.reap_recovery_jobs();
             match self.scan_once().await {
                 Ok(()) => self.status.mark_completed(super::unix_now_ms()?),
                 Err(error) => {
@@ -252,9 +258,9 @@ impl RepositoryCellScheduler {
                 crab_cell_runtime::Error::Control("scheduler cycle limit is invalid").into(),
             );
         }
-        self.reap_migration_jobs();
-        self.reap_recovery_jobs();
         let now_ms = super::unix_now_ms()?;
+        self.reap_migration_jobs();
+        self.reap_recovery_jobs(now_ms);
         let advertisements = self.directory.live(now_ms, MAX_LIVE_NODES).await?;
         let nodes =
             self.fleet
@@ -652,13 +658,19 @@ impl RepositoryCellScheduler {
         }
     }
 
-    fn reap_recovery_jobs(&mut self) {
+    fn reap_recovery_jobs(&mut self, now_ms: i64) {
         while let Some(result) = self.recovery_jobs.try_join_next() {
             match result {
-                Ok(Ok(session)) => {
-                    tracing::info!(?session, "sealed recovered Cell node log");
-                }
-                Ok(Err(error)) => tracing::warn!(error = ?error, "Cell node-log recovery failed"),
+                Ok(RecoveryJobResult { session, result }) => match result {
+                    Ok(_) => {
+                        self.recovery_retries.remove(&session);
+                        tracing::info!(?session, "sealed recovered Cell node log");
+                    }
+                    Err(error) => {
+                        self.record_recovery_failure(session, now_ms);
+                        tracing::warn!(?session, error = ?error, "Cell node-log recovery failed");
+                    }
+                },
                 Err(error) if !error.is_cancelled() => {
                     tracing::warn!(error = %error, "Cell node-log recovery task failed");
                 }
@@ -666,8 +678,25 @@ impl RepositoryCellScheduler {
             }
         }
         if let Some(metrics) = &self.metrics {
-            metrics.update_recovery_states(self.recovery_jobs.len(), 0);
+            metrics.update_recovery_states(
+                self.recovery_jobs.len(),
+                self.recovery_waiting_count(now_ms),
+            );
         }
+    }
+
+    fn record_recovery_failure(&mut self, session: SessionId, now_ms: i64) {
+        self.recovery_retries
+            .entry(session)
+            .or_insert_with(|| RecoveryRetryState::new(now_ms))
+            .record_failure(now_ms);
+    }
+
+    fn recovery_waiting_count(&self, now_ms: i64) -> usize {
+        self.recovery_retries
+            .values()
+            .filter(|retry| !retry.ready(now_ms))
+            .count()
     }
 
     async fn schedule_node_recovery(
@@ -682,9 +711,10 @@ impl RepositoryCellScheduler {
         if available == 0 {
             return Ok(());
         }
+        let candidate_limit = RECOVERY_CANDIDATE_SCAN_LIMIT.max(available);
         let mut candidates = if let Some(node) = self.node {
             self.directory
-                .recovery_candidates_for_node(self.session, node, now_ms, available)
+                .recovery_candidates_for_node(self.session, node, now_ms, candidate_limit)
                 .await?
         } else {
             // A scheduler without a stable physical identity cannot prove
@@ -697,14 +727,14 @@ impl RepositoryCellScheduler {
                 .recovery_candidates_without_live_followers(
                     self.session,
                     now_ms,
-                    available.saturating_sub(candidates.len()),
+                    candidate_limit.saturating_sub(candidates.len()),
                 )
                 .await?;
             candidates.extend(fallback);
             if self.node.is_some() && candidates.len() < available {
                 let observed = self
                     .directory
-                    .recovery_candidates(self.session, now_ms, available)
+                    .recovery_candidates(self.session, now_ms, candidate_limit)
                     .await?;
                 let mut observed_sessions = HashSet::new();
                 for session in observed {
@@ -720,6 +750,17 @@ impl RepositoryCellScheduler {
             candidates.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
             candidates.dedup();
         }
+        self.recovery_retries.retain(|_, retry| {
+            now_ms.saturating_sub(retry.last_seen_ms) < RECOVERY_RETRY_RETENTION_MS
+        });
+        candidates.retain(|session| {
+            let retry = self
+                .recovery_retries
+                .entry(*session)
+                .or_insert_with(|| RecoveryRetryState::new(now_ms));
+            retry.last_seen_ms = now_ms;
+            retry.ready(now_ms)
+        });
         for session in candidates.into_iter().take(available) {
             let Some(reservation) = self.reserve_recovery(session)? else {
                 continue;
@@ -739,7 +780,7 @@ impl RepositoryCellScheduler {
                 let _reservation = reservation;
                 let started = std::time::Instant::now();
                 let metrics = context.metrics.clone();
-                let result = recover_node_session(context, session, claimant).await;
+                let result = recover_node_session_guarded(context, session, claimant).await;
                 if let Some(metrics) = metrics {
                     if let Ok(work) = &result {
                         metrics.record_recovery_work(*work);
@@ -760,12 +801,14 @@ impl RepositoryCellScheduler {
                         }),
                     );
                 }
-                result?;
-                Ok(session)
+                RecoveryJobResult { session, result }
             });
         }
         if let Some(metrics) = &self.metrics {
-            metrics.update_recovery_states(self.recovery_jobs.len(), 0);
+            metrics.update_recovery_states(
+                self.recovery_jobs.len(),
+                self.recovery_waiting_count(now_ms),
+            );
         }
         Ok(())
     }
@@ -839,6 +882,24 @@ impl RepositoryCellScheduler {
     }
 }
 
+async fn recover_node_session_guarded(
+    context: RecoveryContext,
+    session: SessionId,
+    claimant: SessionId,
+) -> crate::Result<RecoveryWorkSummary> {
+    catch_recovery_panic(recover_node_session(context, session, claimant)).await
+}
+
+async fn catch_recovery_panic<F>(future: F) -> crate::Result<RecoveryWorkSummary>
+where
+    F: Future<Output = crate::Result<RecoveryWorkSummary>> + Send,
+{
+    std::panic::AssertUnwindSafe(future)
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| Err(crate::Error::Config("Cell node-log recovery task panicked")))
+}
+
 struct MigrationShardScan {
     scan: CatalogShardScan,
     entries: VecDeque<CatalogProof>,
@@ -880,6 +941,44 @@ struct RecoverySessionReservation {
     session: SessionId,
     sessions: Arc<Mutex<HashSet<SessionId>>>,
     _job: crab_cell_runtime::NodeJobReservation,
+}
+
+struct RecoveryJobResult {
+    session: SessionId,
+    result: crate::Result<RecoveryWorkSummary>,
+}
+
+// Backoff only suppresses this scheduler's duplicate work; the persisted
+// recovery claim remains the authority and becomes eligible again after expiry.
+#[derive(Clone, Copy)]
+struct RecoveryRetryState {
+    failures: u32,
+    next_attempt_ms: i64,
+    last_seen_ms: i64,
+}
+
+impl RecoveryRetryState {
+    fn new(now_ms: i64) -> Self {
+        Self {
+            failures: 0,
+            next_attempt_ms: now_ms,
+            last_seen_ms: now_ms,
+        }
+    }
+
+    fn ready(self, now_ms: i64) -> bool {
+        now_ms >= self.next_attempt_ms
+    }
+
+    fn record_failure(&mut self, now_ms: i64) {
+        self.failures = self.failures.saturating_add(1);
+        let shift = self.failures.saturating_sub(1).min(4);
+        let delay = RECOVERY_RETRY_BASE_MS
+            .saturating_mul(1_i64 << shift)
+            .min(RECOVERY_RETRY_MAX_MS);
+        self.next_attempt_ms = now_ms.saturating_add(delay);
+        self.last_seen_ms = now_ms;
+    }
 }
 
 impl Drop for MigrationCellReservation {
@@ -1143,11 +1242,17 @@ async fn recover_node_session(
         "pinned recovered Cell overlays"
     );
     let phase_started = std::time::Instant::now();
-    match coordinator
-        .finish(&directory, fenced, controls, super::unix_now_ms()?)
-        .await
+    let refreshed = match tokio::time::timeout(
+        RECOVERY_CLAIM_REFRESH_TIMEOUT,
+        directory.refresh_recovery_claim(&fenced, super::unix_now_ms()?),
+    )
+    .await
     {
-        Ok(_) => {}
+        Ok(result) => result,
+        Err(_) => Err(crab_cell_runtime::Error::Deadline),
+    };
+    let refreshed = match refreshed {
+        Ok(refreshed) => refreshed,
         Err(error) => {
             if let Some(metrics) = &metrics {
                 metrics.record_recovery_phase(
@@ -1157,12 +1262,41 @@ async fn recover_node_session(
             }
             return Err(error.into());
         }
+    };
+    fenced = refreshed;
+    let finish_fence = fenced.clone();
+    let completed = finish_recovery_with_timeout(
+        RECOVERY_CLAIM_STORAGE_TIMEOUT,
+        coordinator.finish(&directory, finish_fence, controls, super::unix_now_ms()?),
+    )
+    .await;
+    match completed {
+        Ok(_) => {}
+        Err(error) => {
+            if let Some(metrics) = &metrics {
+                metrics.record_recovery_phase(
+                    crate::metrics::RecoveryPhase::Seal,
+                    phase_started.elapsed(),
+                );
+            }
+            return Err(error);
+        }
     }
     if let Some(metrics) = &metrics {
         metrics.record_recovery_phase(crate::metrics::RecoveryPhase::Seal, phase_started.elapsed());
     }
     tracing::debug!(?session, ?claimant, "sealed recovered Cell node log");
     Ok(work)
+}
+
+async fn finish_recovery_with_timeout<T, F>(timeout: Duration, future: F) -> crate::Result<T>
+where
+    F: Future<Output = crab_cell_runtime::Result<T>>,
+{
+    tokio::time::timeout(timeout, future)
+        .await
+        .map_err(|_| crab_cell_runtime::Error::Deadline)?
+        .map_err(Into::into)
 }
 
 async fn claim_expired_with_timeout(

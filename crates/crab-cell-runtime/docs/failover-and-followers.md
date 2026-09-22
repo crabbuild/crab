@@ -189,8 +189,15 @@ one-node fleet on the object path.
 The preferred
 shard-zero scanner now inventories expired active node
 logs, claims at most two concurrently, scans at most 10,000 affected Cells,
-renews each recovery claim while gathering and pinning, seals the session, and
-leaves a takeover proof that another request can reload. For commands, the
+renews each recovery claim while gathering and pinning, refreshes the claim
+once more before the final seal, and bounds that seal's object-store CAS so a
+stalled store returns a retryable deadline instead of holding an unbounded
+recovery task. Failed sessions use bounded in-memory exponential retry, capped
+below the 30-second claim lifetime, so an unavailable object store cannot keep
+all recovery workers hot or starve later sessions; the authoritative claim is
+still the only ownership record. It leaves a takeover proof that another
+request can reload. For
+commands, the
 actor keeps complete local cuts readable without making their directory entries
 durable, then submits those exact bytes before immutable-root preparation.
 Every selected follower must fsync the ticket before the shared node-session
@@ -1102,7 +1109,9 @@ claiming. It refuses a live lease. `Open -> Recovering` records claimant
 session, claim generation, and claim expiry. The claimant refreshes that field
 every ten seconds. Each refresh has a five-second deadline; a stalled object
 store therefore fails recovery closed instead of allowing a claimant to keep
-gathering after its 30-second claim expires.
+gathering after its 30-second claim expires. Before sealing, recovery renews
+the claim again and gives the final `Recovering -> Sealed` CAS its own
+five-second deadline; a timeout leaves the claim resumable by the scheduler.
 
 A second node waits behind a live claim. After the 30-second claim expiry, it
 may CAS takeover of recovery. All later operations are content-addressed,
@@ -1504,9 +1513,9 @@ structured logs or bounded administrative queries, never metric labels.
 The current server wiring emits durability-proof and follower-append events
 through `CellTelemetry`; it samples the signed node-log phase and session-lease
 remaining time, and records recovery duration and bounded failure class from the
-scheduler. Recovery `waiting` is intentionally reported as zero until admission
-owns a durable queued-candidate count; it must not be inferred from a saturated
-worker count.
+scheduler. Recovery `waiting` counts candidates in the bounded retry delay; it
+does not include sessions that have not yet been observed by this scheduler and
+must not be inferred from a saturated worker count.
 
 `cells status --owner OWNER --name REPOSITORY --json` reports from persistent
 control and signed node-session state:
