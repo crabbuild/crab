@@ -1904,17 +1904,22 @@ impl RecoveryCandidateWindow {
         if !window.insert(key) {
             return;
         }
-        if window.len() > self.limit
-            && let Some(last) = window.iter().next_back().copied()
-        {
-            window.remove(&last);
+        if window.len() > self.limit {
+            let evicted = if key >= self.start {
+                window.iter().next_back().copied()
+            } else {
+                window.iter().next().copied()
+            };
+            if let Some(evicted) = evicted {
+                window.remove(&evicted);
+            }
         }
     }
 
     fn finish(self) -> Vec<SessionId> {
         self.after
             .into_iter()
-            .chain(self.before)
+            .chain(self.before.into_iter().rev())
             .take(self.limit)
             .map(SessionId::from_bytes)
             .collect()

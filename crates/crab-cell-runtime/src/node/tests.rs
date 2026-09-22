@@ -44,7 +44,7 @@ fn recovery_candidate_window_rotates_without_growing_with_directory_size() {
         wrapped.finish(),
         [
             SessionId::from_bytes([4; 16]),
-            SessionId::from_bytes([1; 16])
+            SessionId::from_bytes([3; 16])
         ]
     );
 }
