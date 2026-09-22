@@ -142,6 +142,28 @@ pub(super) async fn run() {
         .get(fixed_id(900_108), None)
         .await
         .expect("observer Cron schedule");
+    let expired_pause = cron
+        .get(fixed_id(CRON_EXPIRY_OPERATION_ID), None)
+        .await
+        .expect("observer Cron expiry schedule");
+    if let Some(evidence) = acknowledgement
+        .as_ref()
+        .and_then(|ack| ack.expiry_cron.as_ref())
+    {
+        let CronQueryResult::Get(Some(schedule)) = expired_pause.output else {
+            panic!("acknowledged Cron expiry schedule disappeared");
+        };
+        assert_eq!(schedule.schedule_id, fixed_id(CRON_EXPIRY_OPERATION_ID));
+        assert_eq!(schedule.payload, CRON_EXPIRY_NONCE.to_be_bytes());
+        assert_eq!(schedule.generation, evidence.generation);
+        assert_eq!(schedule.next_due_ms, evidence.next_due_ms);
+        assert_eq!(schedule.interval_ms, 60_000);
+        assert_eq!(schedule.occurrence, 0);
+        assert!(schedule.enabled, "expired pause disabled the schedule");
+        assert!(expired_pause.receipt.commit_sequence >= evidence.sequence);
+    } else {
+        assert!(matches!(expired_pause.output, CronQueryResult::Get(None)));
+    }
     let workflow = typed
         .workflow::<fixture::ReferenceWorkflow>()
         .expect("observer Workflow");
@@ -390,6 +412,13 @@ pub(super) async fn run() {
             .is_some()
         {
             values.extend_from_slice(&KV_EXPIRY_NONCE.to_be_bytes());
+        }
+        if acknowledgement
+            .as_ref()
+            .and_then(|acknowledged| acknowledged.expiry_cron.as_ref())
+            .is_some()
+        {
+            values.extend_from_slice(&CRON_EXPIRY_NONCE.to_be_bytes());
         }
         values
     } else {
