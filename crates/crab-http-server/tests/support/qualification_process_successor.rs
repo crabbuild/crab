@@ -151,6 +151,19 @@ pub(super) async fn run() {
             "unacknowledged KV value appeared"
         );
     }
+    for key_id in [KV_EXPIRY_OPERATION_ID, KV_EXPIRY_OPERATION_ID + 1] {
+        let expired = kv
+            .get(KV_EXPIRY_SCOPE.to_vec(), fixed_id(key_id).to_vec(), None)
+            .await
+            .expect("successor KV expiry read");
+        assert!(expired.output.is_none(), "expired KV key appeared");
+        if let Some(sequence) = acknowledgement
+            .as_ref()
+            .and_then(|ack| ack.expiry_kv_sequence)
+        {
+            assert!(expired.receipt.commit_sequence >= sequence);
+        }
+    }
     let blob = typed
         .blob::<fixture::ReferenceBlob>()
         .expect("successor Blob");
@@ -602,6 +615,13 @@ pub(super) async fn run() {
             .is_some()
         {
             values.extend_from_slice(&SQL_EXPIRY_NONCE.to_be_bytes());
+        }
+        if acknowledgement
+            .as_ref()
+            .and_then(|ack| ack.expiry_kv_sequence)
+            .is_some()
+        {
+            values.extend_from_slice(&KV_EXPIRY_NONCE.to_be_bytes());
         }
         values
     } else {

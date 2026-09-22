@@ -348,6 +348,14 @@ the rejected row, the existing eight-primitive state, and zero reservations
 after drain. The three-process case passed on filesystem storage and isolated
 RustFS on 2026-09-22. It still lacks a scheduled case artifact and protected
 provider evidence, so the SQL expiry matrix bit remains unset.
+The KV expiry boundary now uses the same owner-kill sequence: a put is read
+with its version before TTL, a held signed mutation expires without dispatch,
+and the TTL key and rejected key are absent after expiry. A fresh successor
+and third process each restore from durable storage, confirm both keys remain
+absent at or after the acknowledged put sequence, preserve the unrelated
+acknowledged KV value/version, and drain to zero reservations. Filesystem and
+isolated RustFS three-process cases passed on 2026-09-22. The scheduled KV
+expiry artifact and protected provider evidence remain open.
 
 Implement one fault-capable executor through `CellNode` and typed
 `ApplicationHandle` capabilities. Each operation writes a unique, bounded

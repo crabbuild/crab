@@ -1328,7 +1328,10 @@ async fn run_scheduled_expiry_case(
             .sql(operation.index(), operation.nonce())
             .await
             .map(|_| ()),
-        "kv" => case.kv(operation.index(), operation.nonce()).await,
+        "kv" => case
+            .kv(operation.index(), operation.nonce())
+            .await
+            .map(|_| ()),
         _ => Err(Error::Control("unknown scheduled expiry primitive")),
     };
     drop(writer);
