@@ -433,7 +433,10 @@ impl NodeAdvertisement {
     }
 
     fn signing_bytes(&self) -> Result<Vec<u8>> {
-        let unsigned = serde_json::to_vec(&RawUnsignedIdentity::from(self))?;
+        let unsigned = serde_json::to_vec(&RawNodeSigningPayload {
+            identity: RawUnsignedIdentity::from(self),
+            capacity: RawCapacity::from(self.capacity),
+        })?;
         let mut bytes = Vec::with_capacity(SIGNING_DOMAIN.len() + unsigned.len());
         bytes.extend_from_slice(SIGNING_DOMAIN);
         bytes.extend_from_slice(&unsigned);
@@ -2151,6 +2154,8 @@ fn validate_successor(current: &NodeAdvertisement, next: &NodeAdvertisement) -> 
 }
 
 fn same_boot_identity(current: &NodeAdvertisement, next: &NodeAdvertisement) -> bool {
+    // Capacity is a fresh signed heartbeat measurement, so its signature may
+    // change without allowing the boot identity or signing key to change.
     current.node == next.node
         && current.session == next.session
         && current.endpoint == next.endpoint
@@ -2162,7 +2167,6 @@ fn same_boot_identity(current: &NodeAdvertisement, next: &NodeAdvertisement) -> 
         && current.module_digests == next.module_digests
         && current.peer_versions == next.peer_versions
         && current.failure_domain == next.failure_domain
-        && current.signature == next.signature
 }
 
 fn compare_member_candidate(
@@ -2297,6 +2301,13 @@ struct RawUnsignedIdentity {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+struct RawNodeSigningPayload {
+    identity: RawUnsignedIdentity,
+    capacity: RawCapacity,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct RawFailureDomain {
     zone: Option<String>,
     host: Option<String>,
@@ -2406,14 +2417,7 @@ impl From<&NodeAdvertisement> for RawAdvertisement {
                 expires_at_ms: value.expires_at_ms.to_string(),
             },
             log: value.log.as_ref().map(encode_log),
-            capacity: RawCapacity {
-                free_memory_bytes: value.capacity.free_memory_bytes.to_string(),
-                free_disk_bytes: value.capacity.free_disk_bytes.to_string(),
-                follower_free_bytes: value.capacity.follower_free_bytes.to_string(),
-                follower_retained_bytes: value.capacity.follower_retained_bytes.to_string(),
-                job_credits: value.capacity.job_credits,
-                log_protocol: value.capacity.log_protocol,
-            },
+            capacity: RawCapacity::from(value.capacity),
             placement: value.placement.map(|placement| RawPlacementCapacity {
                 memory_capacity_bytes: placement.memory_capacity_bytes.to_string(),
                 disk_capacity_bytes: placement.disk_capacity_bytes.to_string(),
@@ -2456,6 +2460,19 @@ struct RawCapacity {
     follower_retained_bytes: String,
     job_credits: u32,
     log_protocol: u32,
+}
+
+impl From<NodeCapacity> for RawCapacity {
+    fn from(value: NodeCapacity) -> Self {
+        Self {
+            free_memory_bytes: value.free_memory_bytes.to_string(),
+            free_disk_bytes: value.free_disk_bytes.to_string(),
+            follower_free_bytes: value.follower_free_bytes.to_string(),
+            follower_retained_bytes: value.follower_retained_bytes.to_string(),
+            job_credits: value.job_credits,
+            log_protocol: value.log_protocol,
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize)]

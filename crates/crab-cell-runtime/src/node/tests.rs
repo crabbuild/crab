@@ -1484,6 +1484,33 @@ async fn invalid_signature_expiry_and_identity_change_fail_closed() {
     );
 }
 
+#[tokio::test]
+async fn refresh_accepts_new_signed_capacity_for_same_boot_session() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let session = SessionId::from_bytes([1; 16]);
+    let created = directory
+        .create(advertisement_for(session, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    let next_capacity = NodeCapacity {
+        free_memory_bytes: 900,
+        free_disk_bytes: 1_800,
+        follower_free_bytes: 1_700,
+        follower_retained_bytes: 700,
+        job_credits: 2,
+        log_protocol: NODE_LOG_PROTOCOL_VERSION,
+    };
+    let next = advertisement_for_capacity(session, &key, 2, NOW_MS + 1_000, next_capacity);
+    assert_ne!(next.signature, created.advertisement().signature);
+    let refreshed = directory
+        .refresh(&created, next, NOW_MS + 1_000)
+        .await
+        .unwrap();
+    assert_eq!(refreshed.advertisement().capacity(), next_capacity);
+    assert!(refreshed.advertisement().verify_signature().is_ok());
+}
+
 #[test]
 fn placement_schema_is_mixed_version_safe_and_fail_closed() {
     let key = SigningKey::from_bytes(&[7; 32]);
