@@ -57,6 +57,10 @@ enum MutationFault {
         after_dispatch: bool,
         entered: Arc<Notify>,
     },
+    DelayReceive {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    },
 }
 
 impl MutationFault {
@@ -64,7 +68,7 @@ impl MutationFault {
         match self {
             Self::None => usize::MAX,
             Self::Drop { ordinal, .. } => *ordinal,
-            Self::Pause { .. } => 1,
+            Self::Pause { .. } | Self::DelayReceive { .. } => 1,
         }
     }
 }
@@ -92,14 +96,14 @@ impl PeerRoundTrip for FaultyMutationRoundTrip {
         let fault = self.fault.clone();
         let operation_tag = self.operation_tag;
         Box::pin(async move {
-            let now_ms = i64::try_from(
+            let mut now_ms = i64::try_from(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_err(|_| Error::Control("qualification peer clock failed"))?
                     .as_millis(),
             )
             .map_err(|_| Error::Control("qualification peer clock overflow"))?;
-            let verified = verifier.verify(&request, now_ms)?;
+            let mut verified = verifier.verify(&request, now_ms)?;
             if verified.target() != &target {
                 return Err(Error::Peer("qualification peer target differs"));
             }
@@ -125,6 +129,20 @@ impl PeerRoundTrip for FaultyMutationRoundTrip {
                     } => {
                         entered.notify_one();
                         std::future::pending::<()>().await;
+                    }
+                    MutationFault::DelayReceive { entered, release } => {
+                        entered.notify_one();
+                        release.notified().await;
+                        // Recheck the signed bytes at arrival time so a delayed
+                        // delivery cannot reuse the pre-delay validation clock.
+                        now_ms = i64::try_from(
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .map_err(|_| Error::Control("qualification peer clock failed"))?
+                                .as_millis(),
+                        )
+                        .map_err(|_| Error::Control("qualification peer clock overflow"))?;
+                        verified = verifier.verify(&request, now_ms)?;
                     }
                     _ => {}
                 }
@@ -277,6 +295,31 @@ pub fn peer_effect_client_with_paused_delivery(
     (
         EffectPeerClient::new(signer, qualification_principal(), round_trip),
         entered,
+        dispatched,
+    )
+}
+
+pub fn peer_effect_client_with_delayed_receive(
+    registry: Arc<Registry>,
+    handles: Vec<CellHandle>,
+) -> (EffectPeerClient, Arc<Notify>, Arc<Notify>, Arc<AtomicUsize>) {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    let (signer, round_trip) = peer_transport_with_fault(
+        registry,
+        handles,
+        MutationFault::DelayReceive {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        },
+        Arc::clone(&dispatched),
+        13,
+    );
+    (
+        EffectPeerClient::new(signer, qualification_principal(), round_trip),
+        entered,
+        release,
         dispatched,
     )
 }

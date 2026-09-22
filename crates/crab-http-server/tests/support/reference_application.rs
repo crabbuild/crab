@@ -404,7 +404,12 @@ impl WorkflowDefinition for ReferenceDefinition {
                 }],
             });
         }
-        if event == b"effect-valid" {
+        if event == b"effect-valid" || event == b"effect-expiring" {
+            let lifetime_ms = if event == b"effect-expiring" {
+                30_000
+            } else {
+                60_000
+            };
             let mut encoded = BoundedEncoder::new(1 << 20)?;
             SqlBatch {
                 statements: vec![SqlStatement {
@@ -428,7 +433,7 @@ impl WorkflowDefinition for ReferenceDefinition {
                         command_id: ReferenceSql::BATCH_COMMAND_ID,
                         codec_version: <ReferenceSql as SqlModule>::CODEC_VERSION,
                         input: encoded.finish(),
-                        expires_at_ms: context.now_ms() + 60_000,
+                        expires_at_ms: context.now_ms() + lifetime_ms,
                     },
                 }],
             });

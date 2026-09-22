@@ -57,8 +57,14 @@ reservations on both in-memory and isolated RustFS storage. Activity also
 checks an exact terminal Workflow result and duplicate completion without a
 second event. Blob checks that an acknowledged part stays invisible after the
 upload expires and a fresh upload can publish exact bytes under the same key.
-These are local same-process cases; destination Effect delivery expiry and
-protected scheduled expiry evidence remain open.
+`public_cell_effect_delivery_expiry.rs` delays one signed delivery at the peer
+receive boundary until the source intent expires. The receiving verifier rejects
+the expired identity before dispatch; a separate typed observer checks that the
+destination SQL row is absent, the source lease is no longer valid or claimable,
+the stale Ack is rejected, and runtime reservations drain. The in-memory and
+isolated RustFS cases passed on 2026-09-21. These are local same-process cases;
+the source Effect's terminal failed row is not exposed by a public query, and
+protected scheduled expiry evidence remains open.
 The workload's precomputed outcome counts are advisory; the run-artifact
 validator binds scheduled attempts and validates the measured outcomes. The
 local ten-row test still reuses the same primitive workload for every row.
