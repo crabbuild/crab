@@ -715,6 +715,24 @@ async fn lfs_rejects_invalid_batches_and_releases_disconnected_uploads() {
     server.shutdown_runtimes().await.unwrap();
 }
 
+#[tokio::test]
+async fn lfs_invalid_upload_is_rejected_before_cell_readiness() {
+    let mut server = maintenance_tests::fixture().await;
+    Arc::get_mut(&mut server)
+        .expect("fixture must not have another server owner")
+        .repository_cells = None;
+
+    let response = request(
+        &server,
+        "POST",
+        BATCH,
+        Body::from(json!({"operation":"upload","hash_algo":"sha1","objects":[]}).to_string()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    server.shutdown_runtimes().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn native_git_lfs_push_and_clone_transfer_exact_large_file() {
     use receive_tests::success;

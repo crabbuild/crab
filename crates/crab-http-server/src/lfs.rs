@@ -272,9 +272,6 @@ pub(crate) async fn batch(
     };
     let upload = matches!(batch.operation, Operation::Upload);
     let entry = repository(&server, &principal, &owner, &name, upload)?;
-    if upload {
-        ensure_active(&server, &principal, &entry).await?;
-    }
     if batch.objects.len() > 200 {
         return Err(Error::TooLarge);
     }
@@ -294,6 +291,9 @@ pub(crate) async fn batch(
         .iter()
         .map(|object| pointer(&object.oid, object.size))
         .collect::<Result<Vec<_>>>()?;
+    if upload {
+        ensure_active(&server, &principal, &entry).await?;
+    }
     // Host was validated by the boundary; authenticated deployments always use
     // their configured origin so action URLs cannot redirect Git credentials.
     let origin = match &server.auth {
