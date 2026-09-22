@@ -721,6 +721,32 @@ impl NodeDirectory {
             .await
     }
 
+    /// Claims an expired session only after the live claimant passes recovery
+    /// admission immediately before the fencing CAS.
+    ///
+    /// Candidate discovery is advisory and may be stale by the time a
+    /// scheduler reaches this boundary. The generic [`Self::claim_expired`]
+    /// API intentionally remains usable by low-level recovery tests and
+    /// callers that provide their own admission policy; production recovery
+    /// uses this stricter entry point so a drained claimant cannot acquire a
+    /// claim after its signed capacity has become ineligible.
+    pub async fn claim_expired_for_recovery(
+        &self,
+        session: SessionId,
+        claimant: SessionId,
+        now_ms: i64,
+    ) -> Result<FencedNodeSession> {
+        let advertisement = self
+            .load(claimant, now_ms)
+            .await?
+            .ok_or(Error::Node("node recovery claimant is not live"))?;
+        if !recovery_executor_eligible(advertisement.advertisement()) {
+            return Err(Error::Capacity("node recovery claimant is not eligible"));
+        }
+        self.claim_expired_inner(session, claimant, now_ms, false)
+            .await
+    }
+
     /// Claims an expired session for request-path takeover only when its node
     /// log is already inactive. An active log returns `PendingPublication`
     /// without writing a claim so the follower recovery scheduler can proceed.

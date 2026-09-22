@@ -905,6 +905,39 @@ async fn request_takeover_does_not_claim_active_node_log() {
 }
 
 #[tokio::test]
+async fn recovery_claim_rechecks_signed_admission_before_fencing() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let leader = SessionId::from_bytes([1; 16]);
+    let claimant = SessionId::from_bytes([2; 16]);
+    directory
+        .create(advertisement_for(leader, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    directory
+        .create(
+            advertisement_for_capacity(claimant, &key, 1, NOW_MS + 1, NodeCapacity::default()),
+            NOW_MS + 1,
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        directory
+            .claim_expired_for_recovery(leader, claimant, NOW_MS + 10_000)
+            .await,
+        Err(Error::Capacity("node recovery claimant is not eligible"))
+    ));
+    assert!(
+        directory
+            .takeover_proof(leader, claimant, NOW_MS + 10_000)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn expired_enrolled_log_becomes_a_renewable_recovery_claim() {
     let key = SigningKey::from_bytes(&[7; 32]);
     let directory = directory();
