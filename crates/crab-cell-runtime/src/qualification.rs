@@ -2067,6 +2067,7 @@ impl QualificationExecutionEvidence {
         if self.started_at_ms == 0
             || self.finished_at_ms < self.started_at_ms
             || self.fault_schedule.is_empty()
+            || self.fault_schedule.len() > MAX_RECEIPT_BYTES
             || self.ownership.len() > MAX_METRICS
             || self
                 .ownership
@@ -2424,6 +2425,9 @@ impl QualificationReceipt {
     ) -> Result<Self> {
         if started_at_ms == 0 || finished_at_ms < started_at_ms {
             return Err(Error::Control("qualification evidence timestamps"));
+        }
+        if fault_schedule.is_empty() || fault_schedule.len() > MAX_RECEIPT_BYTES {
+            return Err(Error::Control("qualification fault schedule"));
         }
         if raw_artifact_digests.is_empty() || raw_artifact_digests.len() > MAX_METRICS {
             return Err(Error::Control("qualification artifact digest count"));
@@ -4916,6 +4920,63 @@ mod tests {
             decoded
                 .raw_artifact_digests()
                 .any(|digest| { digest == Digest::from_bytes(*blake3::hash(artifact).as_bytes()) })
+        );
+    }
+
+    #[test]
+    fn evidence_requires_bounded_fault_schedule() {
+        let valid = QualificationExecutionEvidence {
+            provider: "rustfs".into(),
+            workload: "failover".into(),
+            fault: "owner-kill".into(),
+            toolchain: "rustc".into(),
+            execution_profile: "release".into(),
+            topology: "three-process".into(),
+            started_at_ms: 1,
+            finished_at_ms: 2,
+            fault_schedule: b"owner-kill".to_vec(),
+            ownership: Vec::new(),
+            dirty: false,
+        };
+        assert!(valid.encode().is_ok());
+
+        let mut empty = valid.clone();
+        empty.fault_schedule.clear();
+        assert!(empty.encode().is_err());
+
+        let mut oversized = valid;
+        oversized.fault_schedule = vec![0; MAX_RECEIPT_BYTES + 1];
+        assert!(oversized.encode().is_err());
+
+        let artifact = b"raw qualification output";
+        let digest = Digest::from_bytes(*blake3::hash(artifact).as_bytes());
+        let receipt = QualificationReceipt::new(
+            "source".into(),
+            Digest::from_bytes([1; 32]),
+            "rustfs".into(),
+            "failover".into(),
+            "owner-kill".into(),
+            Vec::new(),
+            digest,
+            true,
+        )
+        .expect("receipt identity");
+        assert!(
+            receipt
+                .clone()
+                .with_evidence(1, 2, b"", vec![digest], Vec::new())
+                .is_err()
+        );
+        assert!(
+            receipt
+                .with_evidence(
+                    1,
+                    2,
+                    &vec![0; MAX_RECEIPT_BYTES + 1],
+                    vec![digest],
+                    Vec::new()
+                )
+                .is_err()
         );
     }
 
