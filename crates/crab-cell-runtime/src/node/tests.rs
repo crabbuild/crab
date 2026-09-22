@@ -1480,7 +1480,35 @@ async fn invalid_signature_expiry_and_identity_change_fail_closed() {
         .capacity
         .free_memory_bytes
         .saturating_add(1);
-    assert!(tampered_capacity.verify_signature().is_err());
+    // Ordinary capacity hints remain a legacy liveness field. The optional
+    // placement block is the authenticated resource contract.
+    assert!(tampered_capacity.verify_signature().is_ok());
+    let signed = original
+        .clone()
+        .with_placement_capacity(
+            NodePlacementCapacity {
+                memory_capacity_bytes: 8_192,
+                disk_capacity_bytes: 16_384,
+                active_cells: 1,
+                max_active_cells: 8,
+                running_jobs: 1,
+                job_capacity: 4,
+                publication_backlog: 0,
+                hydration_backlog: 0,
+                primitive_backlog: 0,
+            }
+            .validated()
+            .unwrap(),
+            &key,
+        )
+        .unwrap();
+    let mut tampered_placement = signed;
+    tampered_placement
+        .placement
+        .as_mut()
+        .expect("signed placement is present")
+        .memory_capacity_bytes = 8_193;
+    assert!(tampered_placement.verify_signature().is_err());
     let mut tampered = original.encode().unwrap();
     let endpoint_byte = tampered
         .windows(b"node-1".len())
