@@ -759,6 +759,13 @@ fn runtime_cell_action(registry: &Registry, request: &VerifiedPeerRequest) -> Op
     match request.operation() {
         Some(peer_wire::peer_request::Operation::Mutate(mutation)) => {
             match mutation.operation.as_ref() {
+                Some(peer_wire::mutation_request::Operation::CellCommand(command))
+                    if request.target().namespace() == crate::cells::REPOSITORY_NAMESPACE
+                        && command.command_id == crate::cells::REPOSITORY_PROJECTION_COMMAND_ID
+                        && command.codec_version == 1 =>
+                {
+                    Some("repository.projection")
+                }
                 Some(peer_wire::mutation_request::Operation::CellCommand(command)) => registry
                     .internal_command_action(
                         request.target().namespace(),
@@ -771,6 +778,17 @@ fn runtime_cell_action(registry: &Registry, request: &VerifiedPeerRequest) -> Op
         Some(peer_wire::peer_request::Operation::Read(read)) => match read.operation.as_ref() {
             Some(peer_wire::read_request::Operation::Describe(true)) => {
                 runtime_principal_action(request)
+            }
+            Some(peer_wire::read_request::Operation::CellQuery(query))
+                if request.target().namespace() == crate::cells::REPOSITORY_NAMESPACE
+                    && matches!(
+                        query.query_id,
+                        crate::cells::REPOSITORY_PROJECTION_STATE_QUERY_ID
+                            | crate::cells::REPOSITORY_PROJECTION_ATTRIBUTION_QUERY_ID
+                    )
+                    && query.codec_version == 1 =>
+            {
+                Some("repository.projection")
             }
             Some(peer_wire::read_request::Operation::CellQuery(query)) => registry
                 .internal_query_action(
@@ -792,6 +810,7 @@ fn runtime_principal_action(request: &VerifiedPeerRequest) -> Option<&'static st
         "cell.activity.source",
         "cell.effect.source",
         "cell.scheduler.tick",
+        "repository.projection",
     ]
     .into_iter()
     .find(|action| request.permits(action))
@@ -2166,6 +2185,88 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn remote_projection_uses_only_its_fleet_capability() {
+        let session = SessionId::from_bytes([2; 16]);
+        let release = Digest::from_bytes([3; 32]);
+        let fleet = Digest::from_bytes([10; 32]);
+        let signer = PeerSigner::new(session, release, SigningKey::from_bytes(&[1; 32]));
+        let target = peer_wire::Target {
+            tenant_id: vec![4; 16],
+            application_id: vec![5; 16],
+            namespace_id: crate::cells::REPOSITORY_NAMESPACE.as_bytes().to_vec(),
+            partition: vec![6; 16],
+        };
+        let verify = |operation| {
+            let encoded = signer
+                .sign(
+                    PeerPrincipal {
+                        issuer: format!("crab-runtime:{}", encode_digest(fleet)),
+                        subject: encode_session(session),
+                        actions: vec!["repository.projection".into()],
+                    },
+                    NOW_MS,
+                    NOW_MS + 60_000,
+                    30_000,
+                    operation,
+                )
+                .unwrap();
+            PeerVerifier::new(session, release, signer.verifying_key())
+                .verify(&encoded, NOW_MS)
+                .unwrap()
+        };
+        let operations = [
+            peer_wire::read_request::Operation::Describe(true),
+            peer_wire::read_request::Operation::CellQuery(peer_wire::CellQuery {
+                query_id: crate::cells::REPOSITORY_PROJECTION_STATE_QUERY_ID,
+                codec_version: 1,
+                input: Vec::new(),
+            }),
+            peer_wire::read_request::Operation::CellQuery(peer_wire::CellQuery {
+                query_id: crate::cells::REPOSITORY_PROJECTION_ATTRIBUTION_QUERY_ID,
+                codec_version: 1,
+                input: Vec::new(),
+            }),
+        ];
+        let registry = crate::cells::compiled_registry().unwrap();
+        for operation in operations {
+            let request = verify(PeerOperation::Read(peer_wire::ReadRequest {
+                target: Some(target.clone()),
+                timeout_ms: 30_000,
+                minimum: None,
+                operation: Some(operation),
+            }));
+            assert_eq!(
+                runtime_cell_action(&registry, &request),
+                Some("repository.projection")
+            );
+            assert!(authorize_runtime_action(fleet, &request, "repository.projection").is_ok());
+        }
+        let request = verify(PeerOperation::Mutate(peer_wire::MutationRequest {
+            target: Some(target),
+            identity: Some(peer_wire::MutationIdentity {
+                request_id: RequestId::from_bytes([7; 16]).as_bytes().to_vec(),
+                incarnation: [8; 16].to_vec(),
+                issued_at_ms: NOW_MS,
+                expires_at_ms: NOW_MS + 60_000,
+            }),
+            timeout_ms: 30_000,
+            operation: Some(peer_wire::mutation_request::Operation::CellCommand(
+                peer_wire::CellCommand {
+                    command_id: crate::cells::REPOSITORY_PROJECTION_COMMAND_ID,
+                    codec_version: 1,
+                    input: Vec::new(),
+                },
+            )),
+        }));
+        assert_eq!(
+            runtime_cell_action(&registry, &request),
+            Some("repository.projection")
+        );
+        assert!(authorize_runtime_action(fleet, &request, "repository.projection").is_ok());
+        assert!(authorize_repository(&repository(), None, &request).is_err());
     }
 
     #[test]

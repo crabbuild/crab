@@ -567,6 +567,14 @@ if ! $a_advertisement_expired; then
   echo "Frozen node A did not leave the live advertisement set." >&2
   exit 1
 fi
+# Record the signed expiry, not when polling noticed it; recovery may seal
+# before that later observation, and dead-node status hides the advertisement.
+owner_advertisement="$("${compose[@]}" exec -T server-c crab-http-server \
+  --config /etc/crab/server.toml cells node \
+  --session "$session_before" --json)"
+advertisement_expired_ms="$(jq --exit-status --raw-output \
+  'select(.live == true) | .advertisement.expires_at_ms | select(type == "number" and . > 0)' \
+  <<<"$owner_advertisement")"
 owner_killed_ms="$(unix_millis)"
 kill_service server-b
 remove_stopped_service server-b
@@ -578,9 +586,12 @@ for _ in $(seq 1 45); do
   node_status="$("${compose[@]}" exec -T server-c crab-http-server \
     --config /etc/crab/server.toml cells node \
     --session "$session_before" --json)"
+  if jq --exit-status '.live == true' <<<"$node_status" >/dev/null; then
+    advertisement_expired_ms="$(jq --raw-output '.advertisement.expires_at_ms' \
+      <<<"$node_status")"
+  fi
   if jq --exit-status '.live == false' <<<"$node_status" >/dev/null; then
     advertisement_expired=true
-    advertisement_expired_ms="$(unix_millis)"
     break
   fi
   sleep 1
@@ -887,6 +898,12 @@ jq --exit-status \
    .advertisement.log.member_nodes == [$node_b]' \
   <<<"$node_before_second_loss" >/dev/null
 
+owner_advertisement="$("${compose[@]}" exec -T server-b crab-http-server \
+  --config /etc/crab/server.toml cells node \
+  --session "$session_after" --json)"
+second_advertisement_expired_ms="$(jq --exit-status --raw-output \
+  'select(.live == true) | .advertisement.expires_at_ms | select(type == "number" and . > 0)' \
+  <<<"$owner_advertisement")"
 second_owner_killed_ms="$(unix_millis)"
 kill_service server-c
 remove_stopped_service server-c
@@ -899,9 +916,12 @@ for _ in $(seq 1 60); do
   node_status="$("${compose[@]}" exec -T server-b crab-http-server \
     --config /etc/crab/server.toml cells node \
     --session "$session_after" --json 2>/dev/null || true)"
+  if jq --exit-status '.live == true' <<<"$node_status" >/dev/null 2>&1; then
+    second_advertisement_expired_ms="$(jq --raw-output '.advertisement.expires_at_ms' \
+      <<<"$node_status")"
+  fi
   if jq --exit-status '.live == false' <<<"$node_status" >/dev/null 2>&1; then
     second_advertisement_expired=true
-    second_advertisement_expired_ms="$(unix_millis)"
     break
   fi
   sleep 1
@@ -1130,6 +1150,11 @@ for member_service in server server-c server-d; do
 done
 
 fallback_origin="$(service_origin "$fallback_candidate_service")"
+owner_advertisement="$(service_cli "$fallback_candidate_service" cells node \
+  --session "$session_after_second_loss" --json)"
+fallback_advertisement_expired_ms="$(jq --exit-status --raw-output \
+  'select(.live == true) | .advertisement.expires_at_ms | select(type == "number" and . > 0)' \
+  <<<"$owner_advertisement")"
 fallback_owner_killed_ms="$(unix_millis)"
 kill_service server-b
 remove_stopped_service server-b
@@ -1141,9 +1166,12 @@ fallback_advertisement_expired=false
 for _ in $(seq 1 60); do
   fallback_node_status="$(service_cli "$fallback_candidate_service" cells node \
     --session "$session_after_second_loss" --json 2>/dev/null || true)"
+  if jq --exit-status '.live == true' <<<"$fallback_node_status" >/dev/null 2>&1; then
+    fallback_advertisement_expired_ms="$(jq --raw-output '.advertisement.expires_at_ms' \
+      <<<"$fallback_node_status")"
+  fi
   if jq --exit-status '.live == false' <<<"$fallback_node_status" >/dev/null 2>&1; then
     fallback_advertisement_expired=true
-    fallback_advertisement_expired_ms="$(unix_millis)"
     break
   fi
   sleep 1

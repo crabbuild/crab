@@ -239,7 +239,9 @@ Compose project, and then:
 Success prints a JSON receipt containing all three failovers' sessions, epochs
 and complete roots, the original member sets, follower replacement evidence,
 the non-member fallback identity, all follower-only/object-covered responses,
-and each process's admission envelope. The trap clears an injected bucket
+and each process's admission envelope. Advertisement expiry fields come from
+the last signed live advertisement, so a delayed poll cannot make a valid
+recovery appear to precede expiry. The trap clears an injected bucket
 policy and removes only the uniquely named qualification project and its
 volumes. Set
 `CRAB_HTTP_CLUSTER_BUILD=false` to reuse an already-built
