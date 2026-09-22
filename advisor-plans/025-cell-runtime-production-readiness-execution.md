@@ -136,6 +136,16 @@ The 32-bit single-row and ten-row in-memory smokes passed on 2026-09-22. All
 eight scheduled retry cases passed together on isolated RustFS, including
 exact typed observation and zero reservations after shutdown. The full 32-bit
 RustFS workload and protected matrix remain unqualified.
+A focused KV expiry test now selects the canonical scheduled KV expiry
+operation, publishes a TTL value, and observes its exact value and version from
+a separate typed client. It delays a signed KV mutation at the peer receive
+boundary until the mutation identity expires, verifies rejection before
+dispatch and `Expired` resolution, then observes both the expired TTL key and
+the rejected write absent. The in-memory and isolated RustFS cases passed on
+2026-09-22 with zero reservations after shutdown. This focused test does not
+produce a run artifact or mark the KV expiry bit in the full 32-bit workload;
+the unchanged five-second PR p99 gate and protected process/provider evidence
+remain open.
 The public Activity capability runs happy-path claims and completions inside
 `ActivitySupervisor`; the local duplicate case uses the typed claim and
 completion commands to observe Activity completion deduplication. The

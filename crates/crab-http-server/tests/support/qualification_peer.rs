@@ -275,6 +275,25 @@ pub fn peer_client_with_paused_mutation(
     (client, entered, dispatched)
 }
 
+pub fn peer_client_with_delayed_mutation_receive(
+    registry: Arc<Registry>,
+    handles: Vec<CellHandle>,
+) -> (CellClient, Arc<Notify>, Arc<Notify>, Arc<AtomicUsize>) {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    let client = peer_client_with_fault(
+        registry,
+        handles,
+        MutationFault::DelayReceive {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        },
+        Arc::clone(&dispatched),
+    );
+    (client, entered, release, dispatched)
+}
+
 pub fn peer_effect_client_with_paused_delivery(
     registry: Arc<Registry>,
     handles: Vec<CellHandle>,
