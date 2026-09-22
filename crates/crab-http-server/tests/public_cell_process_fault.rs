@@ -15,9 +15,10 @@ use crab_cell_runtime::{
     EffectClaimRequest, EffectLease, EffectLeaseCommand, EffectLeaseOutcome, EffectLeaseRequest,
     IncarnationId, InvocationError, KvAtomicOutcome, KvAtomicRequest, KvMutation, NodeLeaseGuard,
     Owner, QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome, QueueSendRequest, QueueState,
-    RecoveryManifestStore, ReplicaLimits, SessionId, SqlBatch, SqlStatement, SqlValue,
-    SqlWorkerPool, TenantId, WorkflowActivityClaimCommand, WorkflowActivityClaimRequest,
-    WorkflowActivityCompleteCommand, WorkflowOutcome, WorkflowStatus, partition_for_shard,
+    RecoveryManifestStore, ReplicaLimits, Resolution, SessionId, SqlBatch, SqlStatement, SqlValue,
+    SqlWorkerPool, StoredOutcome, TenantId, WorkflowActivityClaimCommand,
+    WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand, WorkflowOutcome, WorkflowStatus,
+    partition_for_shard,
 };
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,12 @@ mod qualification;
 mod qualification_fence;
 #[path = "support/qualification_fixture.rs"]
 mod qualification_fixture;
+#[path = "support/qualification_peer.rs"]
+#[expect(
+    dead_code,
+    reason = "this test uses only the signed Effect delivery helper"
+)]
+mod qualification_peer;
 
 use qualification::{assert_zero_reservations, fixed_id, identity, rustfs_public_store};
 use qualification_fence::fence_public_session;
@@ -59,7 +66,7 @@ const WORKFLOW_ID: &[u8] = b"published-workflow-before-owner-kill";
 const WORKFLOW_RESULT: &[u8] = b"workflow-result-before-owner-kill";
 const ACTIVITY_WORKFLOW_ID: &[u8] = b"published-activity-before-owner-kill";
 const EFFECT_WORKFLOW_ID: &[u8] = b"published-effect-before-owner-kill";
-const EFFECT_RESULT: &[u8] = b"effect-result-after-owner-kill";
+const EFFECT_RESULT: &[u8] = b"delivered-effect";
 
 #[derive(Deserialize, Serialize)]
 struct Acknowledgement {

@@ -99,6 +99,8 @@ pub(super) async fn run() {
         );
         restored_cells.push(restored);
     }
+    let peer_effect =
+        qualification_peer::peer_effect_client(application.registry(), restored_cells.clone());
     let direct = CellClient::local_many(application.registry(), restored_cells)
         .expect("successor direct client");
     let typed = successor
@@ -466,7 +468,10 @@ pub(super) async fn run() {
         let run = effect_state.output.expect("acknowledged Effect workflow");
         assert_eq!(run.run_id, acknowledged.effect_run_id);
         assert_eq!(run.status, WorkflowStatus::Completed);
-        assert_eq!(run.result.as_deref(), Some(b"effect-scheduled".as_slice()));
+        assert_eq!(
+            run.result.as_deref(),
+            Some(b"effect-valid-scheduled".as_slice())
+        );
         assert!(effect_state.receipt.commit_sequence >= acknowledged.effect_sequence);
     } else {
         assert!(
@@ -513,7 +518,7 @@ pub(super) async fn run() {
                     identity(900_125 + attempt, now_ms()),
                     EffectClaimRequest {
                         limit: 1,
-                        lease_ms: 10_000,
+                        lease_ms: 30_000,
                     },
                 )
                 .await
@@ -532,7 +537,7 @@ pub(super) async fn run() {
                 identity(900_112, now_ms()),
                 EffectClaimRequest {
                     limit: 1,
-                    lease_ms: 5_000,
+                    lease_ms: 30_000,
                 },
             )
             .await
@@ -556,11 +561,55 @@ pub(super) async fn run() {
                 .expect("successor Effect validation")
                 .output
         );
+        let destination = peer_effect
+            .deliver(&effect, now_ms())
+            .await
+            .expect("successor destination Effect delivery");
+        assert!(matches!(destination, StoredOutcome::Success { .. }));
+        let replay = peer_effect
+            .deliver(&effect, now_ms())
+            .await
+            .expect("duplicate destination Effect delivery");
+        assert_eq!(replay, destination);
+        assert_eq!(
+            peer_effect
+                .resolve(&effect, now_ms())
+                .await
+                .expect("successor destination inbox resolution"),
+            Resolution::Committed(destination.clone())
+        );
+        let destination_state = sql
+            .query(
+                None,
+                SqlBatch {
+                    statements: vec![
+                        SqlStatement {
+                            sql: "SELECT payload FROM qualification_rows WHERE id = 90".into(),
+                            parameters: Vec::new(),
+                        },
+                        SqlStatement {
+                            sql: "SELECT COUNT(*) FROM qualification_rows WHERE id = 90".into(),
+                            parameters: Vec::new(),
+                        },
+                    ],
+                },
+            )
+            .await
+            .expect("successor destination Effect observation");
+        assert_eq!(
+            destination_state.output[0].rows,
+            vec![vec![SqlValue::Blob(EFFECT_RESULT.to_vec())]]
+        );
+        assert_eq!(
+            destination_state.output[1].rows,
+            vec![vec![SqlValue::Integer(1)]]
+        );
+        assert!(destination_state.receipt.commit_sequence >= destination.commit_sequence());
         let acked = effects
             .ack(
                 identity(900_113, now_ms()),
                 effect.clone(),
-                EFFECT_RESULT.to_vec(),
+                destination.result().to_vec(),
             )
             .await
             .expect("successor Effect ack");
@@ -588,6 +637,19 @@ pub(super) async fn run() {
         );
     } else {
         assert!(claimed.output.is_empty(), "unacknowledged Effect appeared");
+        let absent = sql
+            .query(
+                None,
+                SqlBatch {
+                    statements: vec![SqlStatement {
+                        sql: "SELECT COUNT(*) FROM qualification_rows WHERE id = 90".into(),
+                        parameters: Vec::new(),
+                    }],
+                },
+            )
+            .await
+            .expect("successor destination Effect absence");
+        assert_eq!(absent.output[0].rows, vec![vec![SqlValue::Integer(0)]]);
     }
     successor.shutdown().await.expect("successor drain");
     assert_zero_reservations(&successor);

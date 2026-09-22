@@ -256,11 +256,11 @@ impl PeerClientTransport {
         expires_at_ms: i64,
         operation: PeerOperation,
     ) -> Result<wire::PeerReply> {
-        let remaining_ms = remaining_ms(now_ms, expires_at_ms)?;
+        let (authorization_expires_at_ms, remaining_ms) = peer_time_budget(now_ms, expires_at_ms)?;
         let request = self.signer.sign(
             self.principal.clone(),
             now_ms,
-            expires_at_ms,
+            authorization_expires_at_ms,
             remaining_ms,
             operation,
         )?;
@@ -740,6 +740,16 @@ fn remaining_ms(now_ms: i64, expires_at_ms: i64) -> Result<u32> {
         .ok_or(Error::Peer("peer request already expired"))?;
     u32::try_from(remaining.min(i64::from(DEFAULT_TIMEOUT_MS)))
         .map_err(|_| Error::Peer("peer deadline overflow"))
+}
+
+pub(super) fn peer_time_budget(now_ms: i64, operation_expires_at_ms: i64) -> Result<(i64, u32)> {
+    let remaining_ms = remaining_ms(now_ms, operation_expires_at_ms)?;
+    // Authorization must outlive the operation budget so transit does not
+    // invalidate a signed request before the peer can verify it.
+    let authorization_expires_at_ms = now_ms
+        .checked_add(60_000)
+        .ok_or(Error::Peer("peer authorization deadline overflow"))?;
+    Ok((authorization_expires_at_ms, remaining_ms))
 }
 
 fn unix_time_ms() -> Result<i64> {

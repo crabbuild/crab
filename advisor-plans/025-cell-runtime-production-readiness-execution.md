@@ -180,21 +180,23 @@ The successor starts with an empty local directory and checks exact SQL bytes,
 KV bytes/version, Blob bytes/ETag/size, Queue message ID/payload, Cron
 generation/due time, completed Workflow result/event sequence, each source
 commit sequence, exact restored roots, and higher owner epochs. It claims and
-acknowledges the Queue message, completes the pending Activity, settles the
-source Effect lease, checks both are no longer claimable, and drains runtime
+acknowledges the Queue message, completes the pending Activity, delivers the
+Effect to its SQL destination through the signed peer inbox, then settles the
+source lease. It checks one exact SQL row, identical replay and inbox resolution,
+no remaining claims, and zero runtime
 reservations to zero. A second boundary kills the owner before those writes;
 the successor checks all six values/schedules and both pending work items are
 absent. A third boundary kills the owner after Queue, Activity, and source
 Effect claims acknowledge. The independent successor rejects all three stale
 tokens after expiry, reclaims the same work on attempt two with new tokens,
-checks exact Activity result bytes and one terminal Workflow event, settles
-Queue and Effect leases, and drains reservations. All three concurrent RustFS
+checks exact Activity result bytes and one terminal Workflow event, delivers
+the reclaimed Effect exactly once to SQL, settles Queue and Effect leases,
+and drains reservations. All three concurrent RustFS
 cases passed on 2026-09-21. The test uses a test-controlled
 session fence. It is not a scheduled qualification case or protected
 three-process provider run, and it does not set matrix case bits. Activity
-completion and source Effect acknowledgement happen after takeover; their
-pre-kill acknowledgements cover scheduling, not settlement. This case does
-not execute or verify destination Effect delivery.
+completion and Effect destination delivery happen after takeover; their
+pre-kill acknowledgements cover scheduling, not settlement.
 
 Implement one fault-capable executor through `CellNode` and typed
 `ApplicationHandle` capabilities. Each operation writes a unique, bounded

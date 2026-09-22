@@ -182,7 +182,7 @@ pub(super) async fn run() {
         .start(
             identity(900_111, now_ms()),
             EFFECT_WORKFLOW_ID.to_vec(),
-            b"effect".to_vec(),
+            b"effect-valid".to_vec(),
         )
         .await
         .expect("acknowledged Effect workflow start");
