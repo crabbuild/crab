@@ -18,4 +18,4 @@ crab-storage.workspace = true
 ed25519-dalek.workspace = true
 object_store.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread"] }

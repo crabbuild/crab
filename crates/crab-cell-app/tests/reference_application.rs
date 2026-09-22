@@ -27,6 +27,8 @@ use crab_storage::Store;
 use ed25519_dalek::SigningKey;
 use object_store::memory::InMemory;
 
+#[path = "reference_application/fleet.rs"]
+mod fleet;
 #[path = "reference_application/performance.rs"]
 mod performance;
 
@@ -778,6 +780,7 @@ async fn bootstrap_reference_cell<F>(
     directory: &tempfile::TempDir,
     tenant: TenantId,
     application: ApplicationId,
+    session: crab_cell_runtime::SessionId,
     namespace: NamespaceId,
     role: CatalogRole,
     module: &'static str,
@@ -805,7 +808,6 @@ where
         .await?;
     let authority = CellAuthority::new(layout.clone());
     let incarnation = IncarnationId::from_bytes([incarnation_byte; 16]);
-    let session = crab_cell_runtime::SessionId::from_bytes([24; 16]);
     let observed = authority
         .create_initial(
             &proof,
@@ -1092,6 +1094,7 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
             &directory,
             tenant,
             application_id,
+            session,
             SQL_NAMESPACE,
             CatalogRole::Sql,
             SQL_MODULE,
@@ -1107,6 +1110,7 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
             &directory,
             tenant,
             application_id,
+            session,
             KV_NAMESPACE,
             CatalogRole::Kv,
             KV_MODULE,
@@ -1122,6 +1126,7 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
             &directory,
             tenant,
             application_id,
+            session,
             BLOB_NAMESPACE,
             CatalogRole::Blob,
             BLOB_MODULE,
@@ -1137,6 +1142,7 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
             &directory,
             tenant,
             application_id,
+            session,
             QUEUE_NAMESPACE,
             CatalogRole::Queue,
             QUEUE_MODULE,
@@ -1152,6 +1158,7 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
             &directory,
             tenant,
             application_id,
+            session,
             DEAD_LETTER_NAMESPACE,
             CatalogRole::Queue,
             DEAD_LETTER_MODULE,
@@ -1167,6 +1174,7 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
             &directory,
             tenant,
             application_id,
+            session,
             CRON_NAMESPACE,
             CatalogRole::Cron,
             CRON_MODULE,
@@ -1182,6 +1190,7 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
             &directory,
             tenant,
             application_id,
+            session,
             WORKFLOW_NAMESPACE,
             CatalogRole::Workflow,
             WORKFLOW_MODULE,

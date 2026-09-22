@@ -1,3 +1,4 @@
+use super::fleet::start_peer_servers;
 use super::*;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -7,7 +8,7 @@ use crab_cell_runtime::{
     PeerVerifier, VerifiedPeerRequest,
 };
 
-fn now_ms() -> i64 {
+pub(super) fn now_ms() -> i64 {
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -46,17 +47,19 @@ fn install_sql_tables(tx: &crab_ltx::rusqlite::Transaction<'_>) -> Result<()> {
 
 struct PerfFixture {
     _directory: tempfile::TempDir,
-    runtime: CellRuntime,
+    runtimes: Vec<CellRuntime>,
     typed: ApplicationHandle<ReferenceApplication>,
     registry: Arc<Registry>,
     client: CellClient,
     sql_target: CellTarget,
     cron_target: CellTarget,
-    sql_handle: CellHandle,
+    peer: EffectPeerClient,
+    servers: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl PerfFixture {
-    async fn start() -> Self {
+    async fn start(nodes: usize) -> Self {
+        assert!(nodes == 1 || nodes == 3);
         let application = Arc::new(compiled());
         let registry = application.registry();
         let tenant = TenantId::from_bytes([81; 16]);
@@ -68,13 +71,17 @@ impl PerfFixture {
             *application_id.as_bytes(),
         );
         let directory = tempfile::TempDir::new().unwrap();
-        let runtime = CellRuntime::new_with_replica_host(
-            SqlWorkerPool::new(4, 32).unwrap(),
-            64 * 1024 * 1024,
-            crab_cell_runtime::SessionId::from_bytes([24; 16]),
-            reference_host(),
-        )
-        .unwrap();
+        let runtimes = (0..nodes)
+            .map(|node| {
+                CellRuntime::new_with_replica_host(
+                    SqlWorkerPool::new(4, 32).unwrap(),
+                    64 * 1024 * 1024,
+                    node_session(node),
+                    reference_host(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
         type Schema = for<'a> fn(&crab_ltx::rusqlite::Transaction<'a>) -> Result<()>;
         let cells: [(NamespaceId, CatalogRole, &'static str, u8, Schema); 7] = [
             (
@@ -128,27 +135,86 @@ impl PerfFixture {
             ),
         ];
         let mut handles = Vec::new();
-        for (namespace, role, module, incarnation, schema) in cells {
-            handles.push(
-                bootstrap_reference_cell(
-                    &runtime,
-                    &registry,
-                    &layout,
-                    &directory,
-                    tenant,
-                    application_id,
-                    namespace,
-                    role,
-                    module,
-                    incarnation,
-                    schema,
-                )
-                .await
-                .unwrap(),
-            );
+        let mut owned = vec![Vec::new(); nodes];
+        for (cell_index, (namespace, role, module, incarnation, schema)) in
+            cells.into_iter().enumerate()
+        {
+            let node = cell_index % nodes;
+            let handle = bootstrap_reference_cell(
+                &runtimes[node],
+                &registry,
+                &layout,
+                &directory,
+                tenant,
+                application_id,
+                node_session(node),
+                namespace,
+                role,
+                module,
+                incarnation,
+                schema,
+            )
+            .await
+            .unwrap();
+            owned[node].push(handle.clone());
+            handles.push(handle);
         }
         let sql_handle = handles[0].clone();
-        let client = CellClient::local_many(Arc::clone(&registry), handles).unwrap();
+        let signer = Arc::new(PeerSigner::new(
+            crab_cell_runtime::SessionId::from_bytes([77; 16]),
+            registry.release_digest(),
+            SigningKey::from_bytes(&[78; 32]),
+        ));
+        let principal = PeerPrincipal {
+            issuer: "reference-performance".into(),
+            subject: "fleet-driver".into(),
+            actions: vec![
+                "cell.read".into(),
+                "cell.write".into(),
+                "reference.cron.deliver".into(),
+            ],
+        };
+        let verifier = Arc::new(PeerVerifier::new(
+            crab_cell_runtime::SessionId::from_bytes([77; 16]),
+            registry.release_digest(),
+            signer.verifying_key(),
+        ));
+        let (client, peer, servers) = if nodes == 1 {
+            let client = CellClient::local_many(Arc::clone(&registry), handles).unwrap();
+            let dispatcher = Arc::new(PeerDispatcher::new(
+                Arc::clone(&registry),
+                Arc::new(SqlResolver {
+                    target: CellTarget::new(
+                        tenant,
+                        application_id,
+                        SQL_NAMESPACE,
+                        &partition_for_shard(0),
+                    )
+                    .unwrap(),
+                    handle: sql_handle,
+                }),
+                Arc::new(CronAuthorizer),
+            ));
+            let peer = EffectPeerClient::new(
+                signer,
+                principal,
+                Arc::new(Loopback {
+                    verifier,
+                    dispatcher,
+                }),
+            );
+            (client, peer, Vec::new())
+        } else {
+            let (round_trip, servers) = start_peer_servers(&registry, verifier, owned).await;
+            let client = CellClient::peer(
+                Arc::clone(&registry),
+                Arc::clone(&signer),
+                principal.clone(),
+                Arc::clone(&round_trip),
+            );
+            let peer = EffectPeerClient::new(signer, principal, round_trip);
+            (client, peer, servers)
+        };
         let typed = ApplicationHandle::new(client.clone(), application, tenant, application_id)
             .with_blob_artifact_store(BlobArtifactStore::new(store));
         let sql_target = CellTarget::new(
@@ -167,49 +233,24 @@ impl PerfFixture {
         .unwrap();
         Self {
             _directory: directory,
-            runtime,
+            runtimes,
             typed,
             registry,
             client,
             sql_target,
             cron_target,
-            sql_handle,
+            peer,
+            servers,
         }
     }
 
     fn cron_peer(&self) -> EffectPeerClient {
-        let session = crab_cell_runtime::SessionId::from_bytes([77; 16]);
-        let signer = PeerSigner::new(
-            session,
-            self.registry.release_digest(),
-            SigningKey::from_bytes(&[78; 32]),
-        );
-        let verifier = Arc::new(PeerVerifier::new(
-            session,
-            self.registry.release_digest(),
-            signer.verifying_key(),
-        ));
-        let dispatcher = Arc::new(PeerDispatcher::new(
-            Arc::clone(&self.registry),
-            Arc::new(SqlResolver {
-                target: self.sql_target.clone(),
-                handle: self.sql_handle.clone(),
-            }),
-            Arc::new(CronAuthorizer),
-        ));
-        EffectPeerClient::new(
-            Arc::new(signer),
-            PeerPrincipal {
-                issuer: "reference-performance".into(),
-                subject: "cron-supervisor".into(),
-                actions: vec!["reference.cron.deliver".into()],
-            },
-            Arc::new(Loopback {
-                verifier,
-                dispatcher,
-            }),
-        )
+        self.peer.clone()
     }
+}
+
+fn node_session(node: usize) -> crab_cell_runtime::SessionId {
+    crab_cell_runtime::SessionId::from_bytes([24 + node as u8; 16])
 }
 
 struct SqlResolver {
@@ -270,7 +311,7 @@ impl PeerRoundTrip for Loopback {
     }
 }
 
-async fn measure<F, Fut>(name: &str, iterations: usize, mut action: F)
+async fn measure<F, Fut>(name: &str, iterations: usize, mut action: F) -> Vec<Duration>
 where
     F: FnMut(usize) -> Fut,
     Fut: Future<Output = ()>,
@@ -296,17 +337,28 @@ where
         percentile(99),
         percentile(100),
     );
+    samples
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "manual end-to-end performance run"]
 async fn reference_primitive_end_to_end_performance() {
+    run_reference_primitive_performance(1, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "manual three-node end-to-end performance run"]
+async fn reference_three_node_fleet_end_to_end_performance() {
+    run_reference_primitive_performance(3, true).await;
+}
+
+async fn run_reference_primitive_performance(nodes: usize, concurrent: bool) {
     let iterations = std::env::var("CRAB_CELL_PERF_ITERATIONS")
         .ok()
         .map(|value| value.parse::<usize>().unwrap())
         .unwrap_or(30);
     assert!((1..=1_000).contains(&iterations));
-    let fixture = PerfFixture::start().await;
+    let fixture = PerfFixture::start(nodes).await;
     let sql = fixture
         .typed
         .sql::<ReferenceSql>(fixture.sql_target.clone())
@@ -332,7 +384,7 @@ async fn reference_primitive_end_to_end_performance() {
     let peer = &peer;
     let fixture = &fixture;
 
-    measure("sql_order_insert_read", iterations, |index| async move {
+    let sql_run = measure("sql_order_insert_read", iterations, |index| async move {
         let committed = sql
             .batch(
                 identity(1, index, 0),
@@ -364,10 +416,9 @@ async fn reference_primitive_end_to_end_performance() {
             observed.output[0].rows,
             vec![vec![SqlValue::Integer(1_999 + index as i64)]]
         );
-    })
-    .await;
+    });
 
-    measure("kv_cart_put_get", iterations, |index| async move {
+    let kv_run = measure("kv_cart_put_get", iterations, |index| async move {
         let key = format!("cart/{index}").into_bytes();
         let value = format!("{{\"sku\":\"book\",\"quantity\":{}}}", index + 1).into_bytes();
         let committed = kv
@@ -390,10 +441,9 @@ async fn reference_primitive_end_to_end_performance() {
             .await
             .unwrap();
         assert_eq!(observed.output.unwrap().value, value);
-    })
-    .await;
+    });
 
-    measure(
+    let blob_run = measure(
         "blob_attachment_upload_read_32k",
         iterations,
         |index| async move {
@@ -459,10 +509,9 @@ async fn reference_primitive_end_to_end_performance() {
                 other => panic!("unexpected Blob read: {other:?}"),
             }
         },
-    )
-    .await;
+    );
 
-    measure(
+    let queue_run = measure(
         "queue_notification_send_claim_ack",
         iterations,
         |index| async move {
@@ -509,10 +558,9 @@ async fn reference_primitive_end_to_end_performance() {
                 .unwrap();
             assert!(matches!(ack.output, QueueLeaseOutcome::Applied { .. }));
         },
-    )
-    .await;
+    );
 
-    measure(
+    let workflow_run = measure(
         "workflow_fulfillment_activity",
         iterations,
         |index| async move {
@@ -542,34 +590,109 @@ async fn reference_primitive_end_to_end_performance() {
             assert_eq!(observed.run_id, run_id);
             assert_eq!(observed.status, WorkflowStatus::Completed);
         },
-    )
-    .await;
+    );
 
-    measure("cron_invoice_schedule_deliver", iterations, |index| async move {
-        let schedule_id = item_id(index);
-        let payload = format!("invoice/{index}").into_bytes();
-        let scheduled = cron.mutate(identity(6, index, 0), CronMutation::Upsert {
-            schedule_id, target_index: 0, target_partition: partition_for_shard(0).to_vec(),
-            payload: payload.clone(), interval_ms: 60_000, next_due_ms: now_ms() + 5,
-        }).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(6)).await;
-        let tick = fixture.registry.run_maintenance_once(
-            fixture.client.clone(), fixture.cron_target.clone(), identity(6, index, 1),
-            MaintenanceTickRequest { expected_commit_sequence: scheduled.receipt.commit_sequence },
-        ).await.unwrap();
-        assert!(matches!(tick.output, MaintenanceTickOutcome::Applied { processed: 1 }));
-        let fired = cron.get(schedule_id, Some(tick.receipt)).await.unwrap().output;
-        assert!(matches!(fired, CronQueryResult::Get(Some(schedule)) if schedule.occurrence == 1));
-        let delivered = fixture.registry.run_effect_once(
-            fixture.client.clone(), fixture.cron_target.clone(), (*peer).clone(), 5_000,
-        ).await.unwrap();
-        assert!(matches!(delivered, EffectRunOutcome::Delivered { .. }), "{delivered:?}");
-        let observed = sql.query(None, SqlBatch { statements: vec![SqlStatement {
+    let cron_run = measure(
+        "cron_invoice_schedule_deliver",
+        iterations,
+        |index| async move {
+            let schedule_id = item_id(index);
+            let payload = format!("invoice/{index}").into_bytes();
+            let scheduled = cron
+                .mutate(
+                    identity(6, index, 0),
+                    CronMutation::Upsert {
+                        schedule_id,
+                        target_index: 0,
+                        target_partition: partition_for_shard(0).to_vec(),
+                        payload: payload.clone(),
+                        interval_ms: 60_000,
+                        next_due_ms: now_ms() + 5,
+                    },
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(6)).await;
+            let tick = fixture
+                .registry
+                .run_maintenance_once(
+                    fixture.client.clone(),
+                    fixture.cron_target.clone(),
+                    identity(6, index, 1),
+                    MaintenanceTickRequest {
+                        expected_commit_sequence: scheduled.receipt.commit_sequence,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                tick.output,
+                MaintenanceTickOutcome::Applied { processed: 1 }
+            ));
+            let fired = cron
+                .get(schedule_id, Some(tick.receipt))
+                .await
+                .unwrap()
+                .output;
+            assert!(
+                matches!(fired, CronQueryResult::Get(Some(schedule)) if schedule.occurrence == 1)
+            );
+            let delivered = fixture
+                .registry
+                .run_effect_once(
+                    fixture.client.clone(),
+                    fixture.cron_target.clone(),
+                    (*peer).clone(),
+                    5_000,
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(delivered, EffectRunOutcome::Delivered { .. }),
+                "{delivered:?}"
+            );
+            let observed = sql.query(None, SqlBatch { statements: vec![SqlStatement {
             sql: "SELECT payload FROM invoice_receipts WHERE schedule_id = ?1 AND occurrence = 1".into(),
             parameters: vec![SqlValue::Blob(schedule_id.to_vec())],
         }] }).await.unwrap();
-        assert_eq!(observed.output[0].rows, vec![vec![SqlValue::Blob(payload)]]);
-    }).await;
+            assert_eq!(observed.output[0].rows, vec![vec![SqlValue::Blob(payload)]]);
+        },
+    );
 
-    fixture.runtime.shutdown().await.unwrap();
+    if concurrent {
+        let started = Instant::now();
+        let (sql, kv, blob, queue, workflow, cron) =
+            tokio::join!(sql_run, kv_run, blob_run, queue_run, workflow_run, cron_run);
+        let elapsed = started.elapsed();
+        let mut samples = [sql, kv, blob, queue, workflow, cron].concat();
+        samples.sort_unstable();
+        let percentile = |percent: usize| {
+            samples[(samples.len() * percent).div_ceil(100).saturating_sub(1)].as_secs_f64()
+                * 1_000.0
+        };
+        println!(
+            "PERF fleet_three_node_mixed: count={} elapsed_s={:.3} ops_per_s={:.2} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3}",
+            samples.len(),
+            elapsed.as_secs_f64(),
+            samples.len() as f64 / elapsed.as_secs_f64(),
+            percentile(50),
+            percentile(95),
+            percentile(99),
+            percentile(100),
+        );
+    } else {
+        sql_run.await;
+        kv_run.await;
+        blob_run.await;
+        queue_run.await;
+        workflow_run.await;
+        cron_run.await;
+    }
+
+    for server in &fixture.servers {
+        server.abort();
+    }
+    for runtime in &fixture.runtimes {
+        runtime.shutdown().await.unwrap();
+    }
 }
