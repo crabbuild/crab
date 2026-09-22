@@ -194,8 +194,9 @@ claims at most two concurrently, scans at most 10,000 affected Cells, renews
 each recovery claim while gathering and pinning, refreshes the claim once more
 before the final seal, and bounds that seal's object-store CAS so a stalled
 store returns a retryable deadline instead of holding an unbounded recovery
-task. The snapshot is advisory and every claim reloads the authoritative record
-before its CAS. Failed sessions use bounded in-memory exponential retry, capped
+task. The snapshot is advisory: each claim reloads the failed session and
+revalidates the claimant's live signed recovery admission immediately before
+its fencing CAS. Failed sessions use bounded in-memory exponential retry, capped
 below the 30-second claim lifetime, so an unavailable object store cannot keep
 all recovery workers hot or starve later sessions; the authoritative claim is
 still the only ownership record. It leaves a takeover proof that another

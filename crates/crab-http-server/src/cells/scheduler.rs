@@ -1306,10 +1306,13 @@ async fn claim_expired_with_timeout(
     now_ms: i64,
     timeout: Duration,
 ) -> crate::Result<crab_cell_runtime::FencedNodeSession> {
-    tokio::time::timeout(timeout, directory.claim_expired(session, claimant, now_ms))
-        .await
-        .map_err(|_| crab_cell_runtime::Error::Deadline)?
-        .map_err(Into::into)
+    tokio::time::timeout(
+        timeout,
+        directory.claim_expired_for_recovery(session, claimant, now_ms),
+    )
+    .await
+    .map_err(|_| crab_cell_runtime::Error::Deadline)?
+    .map_err(Into::into)
 }
 
 async fn await_with_claim_heartbeat<T, F>(

@@ -13,13 +13,13 @@ use crab_cell_runtime::CellStorageLayout;
 use crab_cell_runtime::{
     ActivityContext, ActivityExecution, ApplicationId, BlockingActivityHandler, BuildDescriptor,
     CellAuthority, CellCatalog, CellModule, CellReplica, CellRuntime, CellTarget, Digest,
-    IncarnationId, MaintenanceModule, MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor,
-    NamespaceId, NodeAdvertisement, NodeCapacity, OperationDescriptor, Owner, PeerRoundTrip,
-    PeerSigner, RecoveryManifestStore, RegistryBuilder, ReplicaLimits, RetainedCodeDescriptor,
-    SqlWorkerPool, TenantId, WorkflowAction, WorkflowActivityModule, WorkflowContext,
-    WorkflowDecision, WorkflowDefinition, WorkflowModule, WorkflowNamespace, WorkflowStatus,
-    install_workflow_schema, register_blocking_activity, register_maintenance, register_workflow,
-    register_workflow_activities,
+    IncarnationId, MaintenanceModule, MigrationDescriptor, ModuleDescriptor,
+    NODE_LOG_PROTOCOL_VERSION, NamespaceDescriptor, NamespaceId, NodeAdvertisement, NodeCapacity,
+    OperationDescriptor, Owner, PeerRoundTrip, PeerSigner, RecoveryManifestStore, RegistryBuilder,
+    ReplicaLimits, RetainedCodeDescriptor, SqlWorkerPool, TenantId, WorkflowAction,
+    WorkflowActivityModule, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowModule,
+    WorkflowNamespace, WorkflowStatus, install_workflow_schema, register_blocking_activity,
+    register_maintenance, register_workflow, register_workflow_activities,
 };
 use crab_storage::Store;
 use ed25519_dalek::SigningKey;
@@ -212,6 +212,7 @@ async fn committed_claim_with_a_lost_response_is_resumed_after_timeout() {
         free_memory_bytes: 1,
         free_disk_bytes: 1,
         job_credits: 1,
+        log_protocol: NODE_LOG_PROTOCOL_VERSION,
         ..NodeCapacity::default()
     };
     let advertisement =
