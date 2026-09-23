@@ -27,6 +27,8 @@ use object_store::{
 };
 use tokio::sync::Notify;
 
+use crate::support::fencing::fence_session;
+
 #[derive(Debug)]
 struct PausingStore {
     inner: Arc<InMemory>,
@@ -369,80 +371,6 @@ impl NodeLogTransport for LostAckFollowerTransport {
     ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<FollowerReceipt>> {
         self.inner.retire(member, request)
     }
-}
-
-async fn fence_session(
-    layout: &CellStorageLayout,
-    session: SessionId,
-    claimant: SessionId,
-) -> crab_cell_runtime::FencedNodeSession {
-    let fleet = Digest::from_bytes([90; 32]);
-    let image = Digest::from_bytes([91; 32]);
-    let release = Digest::from_bytes([92; 32]);
-    let directory = crab_cell_runtime::NodeDirectory::new(layout.clone(), fleet, image, release);
-    let key = ed25519_dalek::SigningKey::from_bytes(&[93; 32]);
-    directory
-        .create(
-            crab_cell_runtime::NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
-                session,
-                "https://expired.internal:8081".into(),
-                fleet,
-                Digest::from_bytes([94; 32]),
-                image,
-                release,
-                &key,
-                1,
-                1,
-                10_001,
-                vec![Digest::from_bytes([95; 32])],
-                vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
-                crab_cell_runtime::NodeCapacity {
-                    free_memory_bytes: 1,
-                    free_disk_bytes: 1,
-                    job_credits: 1,
-                    ..crab_cell_runtime::NodeCapacity::default()
-                },
-            )
-            .unwrap(),
-            1,
-        )
-        .await
-        .unwrap();
-    directory
-        .create(
-            crab_cell_runtime::NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*claimant.as_bytes()),
-                claimant,
-                "https://claimant.internal:8081".into(),
-                fleet,
-                Digest::from_bytes([94; 32]),
-                image,
-                release,
-                &key,
-                1,
-                10_000,
-                20_000,
-                vec![Digest::from_bytes([95; 32])],
-                vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
-                crab_cell_runtime::NodeCapacity {
-                    free_memory_bytes: 1,
-                    free_disk_bytes: 1,
-                    job_credits: 1,
-                    ..crab_cell_runtime::NodeCapacity::default()
-                },
-            )
-            .unwrap(),
-            10_000,
-        )
-        .await
-        .unwrap();
-    directory
-        .claim_expired(session, claimant, 10_001)
-        .await
-        .unwrap()
 }
 
 async fn fence_log_session(

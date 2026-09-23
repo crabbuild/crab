@@ -27,14 +27,12 @@ use crab_storage::Store;
 use ed25519_dalek::SigningKey;
 use object_store::memory::InMemory;
 
-#[path = "reference_application/fleet.rs"]
-mod fleet;
-#[path = "reference_application/performance.rs"]
-mod performance;
-#[path = "reference_application/performance_fixture.rs"]
-mod performance_fixture;
-#[path = "reference_application/process_performance.rs"]
-mod process_performance;
+mod reference_application {
+    pub mod fleet;
+    pub mod performance;
+    pub mod performance_fixture;
+    pub mod process_performance;
+}
 
 const SQL_NAMESPACE: NamespaceId = NamespaceId::from_bytes([1; 16]);
 const KV_NAMESPACE: NamespaceId = NamespaceId::from_bytes([2; 16]);

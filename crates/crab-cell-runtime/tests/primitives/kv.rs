@@ -1,7 +1,5 @@
 use std::{sync::Arc, time::UNIX_EPOCH};
 
-mod support;
-
 use crab_cell_runtime::{
     ApplicationId, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog,
     CellClient, CellModule, CellRuntime, CellTarget, Digest, IncarnationId, InvocationError,
@@ -18,7 +16,7 @@ use object_store::{memory::InMemory, path::Path};
 
 const KV_MODULE: &str = "kv-test";
 const KV_NAMESPACE: NamespaceId = NamespaceId::from_bytes([6; 16]);
-const KV_MIGRATION: &str = include_str!("../src/migrations/kv.sql");
+const KV_MIGRATION: &str = include_str!("../../src/migrations/kv.sql");
 
 struct TestKv;
 
@@ -518,7 +516,7 @@ async fn typed_kv_namespace_recovers_after_owner_loss() {
             replica,
             authority.clone(),
             stale,
-            support::fence_session(&layout, first_session, second_session)
+            crate::support::fencing::fence_session(&layout, first_session, second_session)
                 .await
                 .direct_takeover()
                 .unwrap(),

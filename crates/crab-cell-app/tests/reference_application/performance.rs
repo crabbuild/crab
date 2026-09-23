@@ -1,5 +1,5 @@
 use super::performance_fixture::{PerfFixture, identity, item_id, now_ms};
-use super::*;
+use crate::*;
 use std::time::{Duration, Instant};
 
 use crab_cell_runtime::{EffectRunOutcome, MaintenanceTickOutcome, MaintenanceTickRequest};

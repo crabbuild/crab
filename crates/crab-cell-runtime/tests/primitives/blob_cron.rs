@@ -1,7 +1,5 @@
 use std::{sync::Arc, time::UNIX_EPOCH};
 
-mod support;
-
 use crab_cell_runtime::{
     ApplicationId, BlobCondition, BlobModule, BlobMutation, BlobMutationOutcome, BlobNamespace,
     BlobQuery, BlobQueryResult, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority,
@@ -19,10 +17,10 @@ use object_store::{memory::InMemory, path::Path};
 
 const BLOB_MODULE: &str = "blob-test";
 const BLOB_NAMESPACE: NamespaceId = NamespaceId::from_bytes([1; 16]);
-const BLOB_MIGRATION: &str = include_str!("../src/migrations/blob.sql");
+const BLOB_MIGRATION: &str = include_str!("../../src/migrations/blob.sql");
 const CRON_MODULE: &str = "cron-test";
 const CRON_NAMESPACE: NamespaceId = NamespaceId::from_bytes([2; 16]);
-const CRON_MIGRATION: &str = include_str!("../src/migrations/cron.sql");
+const CRON_MIGRATION: &str = include_str!("../../src/migrations/cron.sql");
 const TARGET_MODULE: &str = "cron-target-test";
 const TARGET_NAMESPACE: NamespaceId = NamespaceId::from_bytes([3; 16]);
 const TARGET_MIGRATION: &str = "CREATE TABLE cron_target(value BLOB) STRICT;";
@@ -303,7 +301,8 @@ async fn typed_blob_and_cron_recover_after_owner_loss() {
         .unwrap()
         .unwrap();
     let blob_successor = SessionId::from_bytes([34; 16]);
-    let blob_takeover = support::fence_session(&layout, blob_session, blob_successor).await;
+    let blob_takeover =
+        crate::support::fencing::fence_session(&layout, blob_session, blob_successor).await;
     let blob_runtime = CellRuntime::new(
         SqlWorkerPool::new(1, 10).unwrap(),
         16 * 1024 * 1024,
@@ -462,7 +461,8 @@ async fn typed_blob_and_cron_recover_after_owner_loss() {
         .unwrap()
         .unwrap();
     let cron_successor = SessionId::from_bytes([35; 16]);
-    let cron_takeover = support::fence_session(&layout, cron_session, cron_successor).await;
+    let cron_takeover =
+        crate::support::fencing::fence_session(&layout, cron_session, cron_successor).await;
     let cron_runtime = CellRuntime::new(
         SqlWorkerPool::new(1, 10).unwrap(),
         16 * 1024 * 1024,

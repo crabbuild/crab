@@ -1,5 +1,5 @@
 use super::performance_fixture::now_ms;
-use super::*;
+use crate::*;
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,

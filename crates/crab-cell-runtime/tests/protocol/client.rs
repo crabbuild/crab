@@ -1,7 +1,5 @@
 use std::{future::Future, pin::Pin, sync::Arc, time::UNIX_EPOCH};
 
-mod support;
-
 use crab_cell_runtime::{
     ApplicationId, BoundedDecoder, BoundedEncoder, BuildDescriptor, CatalogEntry, CatalogProof,
     CatalogRole, CellAuthority, CellClient, CellDescription, CellModule, CellRuntime, CellTarget,
@@ -810,7 +808,8 @@ async fn typed_effect_source_publishes_claim_validation_ack_and_lost_lease() {
     drop(fixture.runtime.take().expect("fixture runtime is present"));
     let stale = fixture.authority.load(source_cell).await.unwrap().unwrap();
     let successor = SessionId::from_bytes([15; 16]);
-    let fenced = support::fence_session(&fixture.layout, fixture.session, successor).await;
+    let fenced =
+        crate::support::fencing::fence_session(&fixture.layout, fixture.session, successor).await;
     let runtime = CellRuntime::new(
         SqlWorkerPool::new(1, 4).unwrap(),
         4 * 1024 * 1024,

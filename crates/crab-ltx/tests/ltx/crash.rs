@@ -50,7 +50,7 @@ fn captured_sql_survives_process_kill_and_source_directory_loss() {
     let replica = tempfile::TempDir::new().unwrap();
     let restored = tempfile::TempDir::new().unwrap();
     let child = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "crash_writer", "--nocapture"])
+        .args(["crash_writer", "--nocapture"])
         .env("CRAB_LTX_CRASH_TEST_DIR", source.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
