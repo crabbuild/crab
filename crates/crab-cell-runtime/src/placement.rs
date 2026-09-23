@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use crate::{CellId, Error, NodeAdvertisement, NodeId, NodePlacementCapacity, Result, SessionId};
@@ -8,6 +9,11 @@ const MIN_TRANSFER_GAIN: u128 = 50_000;
 const MIN_RESIDENCE_MS: i64 = 60_000;
 const MAX_TRANSFERS_PER_TICK: usize = 2;
 const MAX_TRANSFER_BYTES_PER_TICK: u64 = 8 * 1024 * 1024 * 1024;
+/// A receiver fills to this fraction below its weighted ownership target, while
+/// the donor drains to its target exactly. The receiver's margin absorbs the
+/// sample lag between a batch and its publication: a stale count can overshoot
+/// by one batch, and the fleet cannot end up short by one deadband per donor.
+const BALANCE_DEADBAND_PERCENT: u128 = 2;
 
 /// Pressure class supplied by the signed node observation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -160,6 +166,27 @@ pub struct CellTransferIntent {
     pub job_credits: u32,
 }
 
+/// Weighted ownership balance of one complete fleet snapshot.
+///
+/// This is a count rule, not a resource rule: a node's weight is its declared
+/// cell capacity, so a node sized for twice the Cells carries twice the
+/// target. The densest member by Cells per unit of weight is the only donor,
+/// and one snapshot has at most one donor, so the fleet hands over from one
+/// place instead of every node pushing at once. A wrong count costs movement,
+/// never authority: every release still crosses the actor gate and the exact
+/// control CAS.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FleetBalance {
+    /// Boot session elected to donate from this snapshot.
+    pub donor: SessionId,
+    /// Cells the donor may release now, bounded by the fleet batch and by the
+    /// receivers' room below their deadband.
+    pub surplus: usize,
+    /// Sessions below their weighted target that can absorb a donation,
+    /// least dense first.
+    pub receivers: Vec<SessionId>,
+}
+
 /// Deterministic weighted placement policy. It never mutates authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlacementPlanner {
@@ -223,14 +250,97 @@ impl PlacementPlanner {
             .find(|score| score.eligibility == PlacementEligibility::Eligible))
     }
 
+    /// Computes the fleet's weighted ownership balance from one complete,
+    /// authenticated snapshot.
+    ///
+    /// `since_ms` is the instant the caller's previous movement batch was
+    /// dispatched. A sample taken at or before it may already be stale about
+    /// that batch, so the whole view fails closed: a mixed total would lower
+    /// every target and move Cells that come straight back. `None` therefore
+    /// means "move nothing on the count rule" — an empty, duplicated, stale, or
+    /// already balanced fleet. Pressure shedding and drains move Cells through
+    /// their own gates and are never weakened by this method.
+    pub fn fleet_balance(
+        &self,
+        now_ms: i64,
+        observations: &[PlacementObservation],
+        since_ms: i64,
+    ) -> Result<Option<FleetBalance>> {
+        if now_ms < 0 || observations.len() > 10_000 {
+            return Err(Error::Control("fleet balance snapshot is invalid"));
+        }
+        let mut nodes = HashSet::new();
+        let mut sessions = HashSet::new();
+        let mut owned = 0u128;
+        let mut weight = 0u128;
+        for observation in observations {
+            if !nodes.insert(observation.node) || !sessions.insert(observation.session) {
+                return Err(Error::Control("fleet balance snapshot duplicates a node"));
+            }
+            if !self.sampled_after(now_ms, *observation, since_ms) {
+                return Ok(None);
+            }
+            owned += u128::from(observation.active_cells);
+            weight += u128::from(observation.max_active_cells);
+        }
+        if weight == 0 {
+            return Ok(None);
+        }
+        let target = |observation: &PlacementObservation| -> u128 {
+            (owned * u128::from(observation.max_active_cells)).div_ceil(weight)
+        };
+        let Some(donor) = observations
+            .iter()
+            .max_by(|left, right| denser(left, right))
+        else {
+            return Ok(None);
+        };
+        let donor_surplus = u128::from(donor.active_cells).saturating_sub(target(donor));
+        let mut receivers = observations
+            .iter()
+            .filter(|observation| {
+                observation.session != donor.session
+                    && u128::from(observation.active_cells) < target(observation)
+                    && observation.pressure < PlacementPressure::Shedding
+                    && self.eligibility(now_ms, **observation) == PlacementEligibility::Eligible
+            })
+            .collect::<Vec<_>>();
+        receivers.sort_by(|left, right| denser(left, right));
+        let room = receivers
+            .iter()
+            .map(|observation| room(observation, target(observation)))
+            .sum::<u128>();
+        let count = usize::try_from(donor_surplus.min(room)).unwrap_or(MAX_TRANSFERS_PER_TICK);
+        let count = count.min(MAX_TRANSFERS_PER_TICK);
+        if count == 0 {
+            return Ok(None);
+        }
+        Ok(Some(FleetBalance {
+            donor: donor.session,
+            surplus: count,
+            receivers: receivers
+                .into_iter()
+                .map(|observation| observation.session)
+                .collect(),
+        }))
+    }
+
     /// Plans at most two settled transfers and 8 GiB of projected restore
     /// bytes from one authenticated fleet snapshot. Receiver capacity is
     /// projected across selected intents, then rechecked during activation.
+    ///
+    /// `balance` is the ownership balance of the same snapshot. When it elects
+    /// one of the demands' sources as the donor, its receivers may absorb that
+    /// bounded batch without the headroom-gain gate: the fleet owes those
+    /// Cells, and their idle headroom need not also be worse. Every other gate
+    /// — settlement, residence, cooldown, eligibility, and projected receiver
+    /// capacity — still applies to a balancing move.
     pub fn plan_transfers(
         &self,
         now_ms: i64,
         observations: &[PlacementObservation],
         demands: &[CellTransferDemand],
+        balance: Option<&FleetBalance>,
     ) -> Result<Vec<CellTransferIntent>> {
         if now_ms < 0 || observations.len() > 10_000 || demands.len() > 10_000 {
             return Err(Error::Control("transfer snapshot is invalid"));
@@ -252,6 +362,8 @@ impl PlacementPlanner {
         for observation in &mut projected {
             observation.current_owner = false;
         }
+        let accepting =
+            balance.map(|balance| balance.receivers.iter().copied().collect::<HashSet<_>>());
         let mut candidates = demands.to_vec();
         candidates.sort_by(|left, right| {
             let priority = |demand: &CellTransferDemand| {
@@ -269,6 +381,7 @@ impl PlacementPlanner {
         });
         let mut intents = Vec::new();
         let mut bytes = 0u64;
+        let mut donations = 0usize;
         for demand in candidates {
             if intents.len() == MAX_TRANSFERS_PER_TICK {
                 break;
@@ -313,6 +426,9 @@ impl PlacementPlanner {
             let mut owned_source = *source;
             owned_source.current_owner = true;
             let source_score = self.score(demand.cell, now_ms, owned_source).score;
+            let donates = balance.is_some_and(|balance| {
+                balance.donor == demand.source && donations < balance.surplus
+            });
             let destination = self
                 .rank(demand.cell, now_ms, &projected)?
                 .into_iter()
@@ -329,11 +445,25 @@ impl PlacementPlanner {
                                     && node.job_capacity.saturating_sub(node.running_jobs)
                                         >= demand.job_credits
                             })
-                        && (urgent || score.score >= source_score.saturating_add(MIN_TRANSFER_GAIN))
+                        && (urgent
+                            || (donates
+                                && accepting
+                                    .as_ref()
+                                    .is_some_and(|accepting| accepting.contains(&score.session)))
+                            || score.score >= source_score.saturating_add(MIN_TRANSFER_GAIN))
                 });
             let Some(destination) = destination else {
                 continue;
             };
+            // The find above tests the donation rule before the gain gate, so
+            // a receiver-bound intent that the gain gate would also admit is
+            // charged to the donation batch. Charging it is the conservative
+            // direction: it can only shrink this snapshot's donation budget.
+            let donation = !urgent
+                && donates
+                && accepting
+                    .as_ref()
+                    .is_some_and(|accepting| accepting.contains(&destination.session));
             let Some(receiver) = projected
                 .iter_mut()
                 .find(|node| node.session == destination.session)
@@ -345,6 +475,9 @@ impl PlacementPlanner {
             receiver.active_cells += 1;
             receiver.running_jobs += demand.job_credits;
             bytes = next_bytes;
+            if donation {
+                donations += 1;
+            }
             intents.push(CellTransferIntent {
                 cell: demand.cell,
                 source: demand.source,
@@ -421,14 +554,12 @@ impl PlacementPlanner {
     }
 
     fn eligibility(&self, now_ms: i64, observation: PlacementObservation) -> PlacementEligibility {
-        if !observation.authenticated {
-            return PlacementEligibility::Unauthenticated;
-        }
-        if observation.observed_at_ms < 0
-            || now_ms < observation.observed_at_ms
-            || now_ms.saturating_sub(observation.observed_at_ms) > self.max_observation_age_ms
-        {
-            return PlacementEligibility::Stale;
+        if !self.fresh(now_ms, observation) {
+            return if observation.authenticated {
+                PlacementEligibility::Stale
+            } else {
+                PlacementEligibility::Unauthenticated
+            };
         }
         if observation.draining {
             return PlacementEligibility::Draining;
@@ -452,6 +583,20 @@ impl PlacementPlanner {
         }
         PlacementEligibility::Eligible
     }
+
+    /// Whether one member is authenticated and inside the freshness window.
+    fn fresh(&self, now_ms: i64, observation: PlacementObservation) -> bool {
+        observation.authenticated
+            && observation.observed_at_ms >= 0
+            && observation.observed_at_ms <= now_ms
+            && now_ms.saturating_sub(observation.observed_at_ms) <= self.max_observation_age_ms
+    }
+
+    /// Whether one member's sample can still describe the fleet after the
+    /// caller's previous movement batch.
+    fn sampled_after(&self, now_ms: i64, observation: PlacementObservation, since_ms: i64) -> bool {
+        self.fresh(now_ms, observation) && observation.observed_at_ms > since_ms
+    }
 }
 
 fn ratio(numerator: u64, denominator: u64) -> u128 {
@@ -460,6 +605,26 @@ fn ratio(numerator: u64, denominator: u64) -> u128 {
     } else {
         u128::from(numerator.min(denominator)) * SCORE_SCALE / u128::from(denominator)
     }
+}
+
+/// Orders two members by owned Cells per unit of weight without division.
+/// The node id, then the session, breaks ties so one snapshot elects exactly
+/// one donor.
+fn denser(left: &PlacementObservation, right: &PlacementObservation) -> Ordering {
+    (u128::from(left.active_cells) * u128::from(right.max_active_cells))
+        .cmp(&(u128::from(right.active_cells) * u128::from(left.max_active_cells)))
+        .then_with(|| right.node.as_bytes().cmp(left.node.as_bytes()))
+        .then_with(|| right.session.as_bytes().cmp(left.session.as_bytes()))
+}
+
+/// Cells one member can still take before it reaches its deadband below its
+/// weighted target. A validated snapshot keeps every member at or below its
+/// declared Cell capacity, so the target itself already bounds the slots.
+fn room(observation: &PlacementObservation, target: u128) -> u128 {
+    let deadband = (target * BALANCE_DEADBAND_PERCENT).div_ceil(100);
+    target
+        .saturating_sub(deadband)
+        .saturating_sub(u128::from(observation.active_cells))
 }
 
 fn placement_hash(cell: CellId, node: NodeId, session: SessionId) -> u128 {
@@ -611,10 +776,10 @@ mod tests {
         let first = demand(1, donor.session);
         let second = demand(2, donor.session);
         let left = planner
-            .plan_transfers(100, &[donor, receiver], &[first, second])
+            .plan_transfers(100, &[donor, receiver], &[first, second], None)
             .unwrap();
         let right = planner
-            .plan_transfers(100, &[receiver, donor], &[second, first])
+            .plan_transfers(100, &[receiver, donor], &[second, first], None)
             .unwrap();
         assert_eq!(left, right);
         assert_eq!(left.len(), 1);
@@ -631,14 +796,14 @@ mod tests {
         let mut candidate = demand(1, donor.session);
         assert!(
             planner
-                .plan_transfers(100, &[donor, receiver], &[candidate])
+                .plan_transfers(100, &[donor, receiver], &[candidate], None)
                 .unwrap()
                 .is_empty()
         );
         candidate.settled = false;
         assert!(
             planner
-                .plan_transfers(100_000, &[donor, receiver], &[candidate])
+                .plan_transfers(100_000, &[donor, receiver], &[candidate], None)
                 .unwrap()
                 .is_empty()
         );
@@ -646,7 +811,7 @@ mod tests {
         receiver.observed_at_ms = 100_000;
         assert_eq!(
             planner
-                .plan_transfers(100_000, &[donor, receiver], &[candidate])
+                .plan_transfers(100_000, &[donor, receiver], &[candidate], None)
                 .unwrap()
                 .len(),
             0
@@ -656,7 +821,7 @@ mod tests {
         receiver.observed_at_ms = 100;
         assert!(
             planner
-                .plan_transfers(100_000, &[donor, receiver], &[candidate])
+                .plan_transfers(100_000, &[donor, receiver], &[candidate], None)
                 .unwrap()
                 .is_empty()
         );
@@ -669,12 +834,12 @@ mod tests {
         let candidate = demand(1, node.session);
         assert!(
             planner
-                .plan_transfers(100, &[node, node], &[candidate])
+                .plan_transfers(100, &[node, node], &[candidate], None)
                 .is_err()
         );
         assert!(
             planner
-                .plan_transfers(100, &[node], &[candidate, candidate])
+                .plan_transfers(100, &[node], &[candidate, candidate], None)
                 .is_err()
         );
     }
@@ -695,7 +860,7 @@ mod tests {
         candidate.disk_bytes = 100;
         assert_eq!(
             planner
-                .plan_transfers(100_000, &[donor, receiver], &[candidate])
+                .plan_transfers(100_000, &[donor, receiver], &[candidate], None)
                 .unwrap()
                 .len(),
             1
@@ -703,7 +868,7 @@ mod tests {
         candidate.last_moved_at_ms = Some(99_999);
         assert!(
             planner
-                .plan_transfers(100_000, &[donor, receiver], &[candidate])
+                .plan_transfers(100_000, &[donor, receiver], &[candidate], None)
                 .unwrap()
                 .is_empty()
         );
@@ -711,7 +876,7 @@ mod tests {
         candidate.stable_observations = 1;
         assert!(
             planner
-                .plan_transfers(100_000, &[donor, receiver], &[candidate])
+                .plan_transfers(100_000, &[donor, receiver], &[candidate], None)
                 .unwrap()
                 .is_empty()
         );
@@ -731,10 +896,182 @@ mod tests {
         second.disk_bytes = first.disk_bytes;
         assert_eq!(
             planner
-                .plan_transfers(100, &[donor, receiver], &[first, second])
+                .plan_transfers(100, &[donor, receiver], &[first, second], None)
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    fn owned(byte: u8, cells: u32, slots: u32) -> PlacementObservation {
+        let mut observation = observation(byte);
+        observation.observed_at_ms = 100_000;
+        observation.active_cells = cells;
+        observation.max_active_cells = slots;
+        observation
+    }
+
+    #[test]
+    fn balance_elects_one_weighted_donor_and_orders_receivers() {
+        let planner = PlacementPlanner::default();
+        let dense = owned(1, 20, 10);
+        let wide = owned(2, 5, 20);
+        let small = owned(3, 5, 10);
+        let left = planner
+            .fleet_balance(100_000, &[dense, wide, small], 0)
+            .unwrap()
+            .unwrap();
+        let right = planner
+            .fleet_balance(100_000, &[small, dense, wide], 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(left, right);
+        assert_eq!(left.donor, dense.session);
+        // Twelve Cells over target, eleven Cells of receiver room, and a
+        // two-Cell batch: the batch is the binding limit.
+        assert_eq!(left.surplus, 2);
+        assert_eq!(left.receivers, vec![wide.session, small.session]);
+        assert!(left.receivers.contains(&wide.session));
+        assert!(!left.receivers.contains(&dense.session));
+    }
+
+    #[test]
+    fn balance_breaks_a_density_tie_by_node_identity() {
+        let planner = PlacementPlanner::default();
+        let left = owned(1, 10, 10);
+        let right = owned(2, 10, 10);
+        let idle = owned(3, 0, 10);
+        let balance = planner
+            .fleet_balance(100_000, &[left, right, idle], 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(balance.donor, left.session);
+        assert_eq!(balance.receivers, vec![idle.session]);
+        let balance = planner
+            .fleet_balance(100_000, &[right, left, idle], 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(balance.donor, left.session);
+    }
+
+    #[test]
+    fn balance_deadband_bounds_the_donation() {
+        let planner = PlacementPlanner::default();
+        let donor = owned(1, 4, 10);
+        let roomy = owned(2, 0, 10);
+        // Two equal members own four Cells, so each targets two. The receiver
+        // fills to its deadband one below that target, so one Cell may move.
+        let balance = planner
+            .fleet_balance(100_000, &[donor, roomy], 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(balance.surplus, 1);
+        assert_eq!(balance.receivers, vec![roomy.session]);
+    }
+
+    #[test]
+    fn balance_view_fails_closed_on_mixed_or_unusable_samples() {
+        let planner = PlacementPlanner::default();
+        let donor = owned(1, 4, 10);
+        let receiver = owned(2, 0, 10);
+        assert!(planner.fleet_balance(100_000, &[], 0).unwrap().is_none());
+        assert!(
+            planner
+                .fleet_balance(100_000, &[donor, receiver], 100_000)
+                .unwrap()
+                .is_none()
+        );
+        let mut stale = receiver;
+        stale.observed_at_ms = 100_000 - MAX_OBSERVATION_AGE_MS - 1;
+        assert!(
+            planner
+                .fleet_balance(100_000, &[donor, stale], 0)
+                .unwrap()
+                .is_none()
+        );
+        let mut forged = receiver;
+        forged.authenticated = false;
+        assert!(
+            planner
+                .fleet_balance(100_000, &[donor, forged], 0)
+                .unwrap()
+                .is_none()
+        );
+        assert!(planner.fleet_balance(100_000, &[donor, donor], 0).is_err());
+        let mut draining = receiver;
+        draining.draining = true;
+        assert!(
+            planner
+                .fleet_balance(100_000, &[donor, draining], 0)
+                .unwrap()
+                .is_none()
+        );
+        let mut shedding = receiver;
+        shedding.pressure = PlacementPressure::Shedding;
+        assert!(
+            planner
+                .fleet_balance(100_000, &[donor, shedding], 0)
+                .unwrap()
+                .is_none()
+        );
+        let balanced = owned(3, 2, 10);
+        let equal = owned(4, 2, 10);
+        assert!(
+            planner
+                .fleet_balance(100_000, &[balanced, equal], 0)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn balance_moves_an_idle_cell_without_headroom_gain() {
+        let planner = PlacementPlanner::default();
+        let donor = owned(1, 3, 10);
+        let receiver = owned(2, 0, 10);
+        let candidate = demand(1, donor.session);
+        // Equal headroom ratios leave no material gain, so the transfer score
+        // gate refuses the move on its own.
+        assert!(
+            planner
+                .plan_transfers(100_000, &[donor, receiver], &[candidate], None)
+                .unwrap()
+                .is_empty()
+        );
+        let balance = planner
+            .fleet_balance(100_000, &[donor, receiver], 0)
+            .unwrap()
+            .unwrap();
+        let intents = planner
+            .plan_transfers(100_000, &[donor, receiver], &[candidate], Some(&balance))
+            .unwrap();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].destination, receiver.session);
+        assert_eq!(intents[0].cell, candidate.cell);
+    }
+
+    #[test]
+    fn balance_donation_requires_the_elected_donor() {
+        let planner = PlacementPlanner::default();
+        let dense = owned(1, 4, 10);
+        let first = owned(2, 0, 10);
+        let second = owned(3, 0, 10);
+        let balance = planner
+            .fleet_balance(100_000, &[dense, first, second], 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(balance.donor, dense.session);
+        let candidate = demand(1, first.session);
+        assert!(
+            planner
+                .plan_transfers(
+                    100_000,
+                    &[dense, first, second],
+                    &[candidate],
+                    Some(&balance),
+                )
+                .unwrap()
+                .is_empty()
         );
     }
 }

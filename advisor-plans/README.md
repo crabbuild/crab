@@ -630,3 +630,14 @@ provider, duration, and latency/error thresholds. The platform must continue
 to state its semantic exclusions: no multi-Cell ACID, no exactly-once external
 effects, no transparent hot-key splitting, and no general-purpose unbounded
 SQL or Blob service.
+
+## Celld comparison and primitive maturity audit
+
+[Cell runtime audit: celld comparison and primitive production
+readiness](cell-runtime-celld-audit-2026-09-22.md) reviews Celld's pinned
+`crates/logic` policy layer against `crab-cell-runtime`, records an
+eight-primitive readiness table with the remaining gaps per primitive, and
+lists the prioritized opportunities. It also records the weighted
+ownership-balance change implemented on Celld's `rebalance.rs` semantics: one
+elected donor, a two-percent receiver deadband, batch and receiver-room bounds,
+pre-batch samples rejected, and local planner plus router evidence.
