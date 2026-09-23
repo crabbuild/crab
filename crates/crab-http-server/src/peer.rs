@@ -856,10 +856,14 @@ pub(crate) async fn forward(
             .await
         {
             Ok(request) => request,
-            Err(_) => return peer_http_error(StatusCode::UNAUTHORIZED),
+            Err(error) => {
+                tracing::warn!(error = %error, "peer request authentication failed");
+                return peer_http_error(StatusCode::UNAUTHORIZED);
+            }
         }
     };
-    if server.authorize(&request).is_err() {
+    if let Err(error) = server.authorize(&request) {
+        tracing::warn!(error = %error, "peer request authorization failed");
         return peer_http_error(StatusCode::UNAUTHORIZED);
     }
     if matches!(
