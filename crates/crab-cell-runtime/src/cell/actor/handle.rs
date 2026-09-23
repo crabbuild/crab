@@ -9,7 +9,7 @@ use super::{
     Message, QueuedCommand, QueuedMigration, QueuedOperation, QueuedQuery, QueuedResolve,
     ResolveOperation, RuntimeInner, new_cell_admission,
 };
-use crate::resource::{ResourceCost, ResourceReservation};
+use crate::fleet::resource::{ResourceCost, ResourceReservation};
 use crate::{
     CatalogProof, CatalogRole, CellId, Digest, Error, InboxDelivery, IncarnationId, MigratedCell,
     MigrationPlan, MutationIdentity, PersistedWorkInventory, Resolution, StoredOutcome,
@@ -187,7 +187,7 @@ impl CellHandle {
     ) -> crate::Result<PersistedWorkInventory> {
         let encoded = self
             .query(1, 1, move |connection| {
-                crate::maintenance::inspect_persisted_work(connection, role)
+                crate::primitives::maintenance::inspect_persisted_work(connection, role)
                     .map(PersistedWorkInventory::encode)
             })
             .await?;

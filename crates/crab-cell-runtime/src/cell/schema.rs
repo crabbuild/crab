@@ -2,7 +2,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::{CellId, Error, IncarnationId, Result};
 
-const RUNTIME_SCHEMA: &str = include_str!("migrations/runtime.sql");
+const RUNTIME_SCHEMA: &str = include_str!("../migrations/runtime.sql");
 
 /// Installs runtime schema version one in a new SQLite Cell.
 ///
@@ -102,7 +102,7 @@ mod tests {
     fn embedded_runtime_migration_matches_normative_contract() {
         assert_eq!(
             RUNTIME_SCHEMA,
-            include_str!("../docs/contracts/runtime.sql")
+            include_str!("../../docs/contracts/runtime.sql")
         );
     }
 }

@@ -5,7 +5,7 @@ use crab_ltx::rusqlite::Connection;
 use crate::{
     BoundedDecoder, BoundedEncoder, CatalogRole, CodecError, Command, CommandContext,
     CommandResult, CronTarget, Error, QueueDeadLetterTarget, RegistryBuilder, SchedulerTickOutcome,
-    WireValue, WorkflowDefinition, scheduler::scheduler_tick_at,
+    WireValue, WorkflowDefinition, fleet::scheduler::scheduler_tick_at,
 };
 
 const REQUESTS: u8 = 1 << 0;

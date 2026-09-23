@@ -240,7 +240,7 @@ impl NodeLogShipper {
     /// the ticket reservation commits, so failures cannot create a sequence gap.
     pub async fn submit(&self, submission: NodeLogSubmission) -> Result<CommitTicket> {
         let frame_count = submission.frame_count()?;
-        if frame_count > crate::node_log::MAX_TICKET_FRAMES
+        if frame_count > crate::node::log::MAX_TICKET_FRAMES
             || submission.encoded_bytes > self.max_outstanding_bytes
         {
             return Err(Error::Capacity("node-log submission"));

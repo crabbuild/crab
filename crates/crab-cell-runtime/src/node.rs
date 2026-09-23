@@ -1,3 +1,11 @@
+pub mod durability;
+pub mod lease;
+pub mod log;
+pub mod log_recovery;
+pub mod log_shipper;
+pub mod log_state;
+pub mod log_transport;
+
 use std::{
     collections::{BTreeSet, HashSet},
     sync::Arc,
@@ -11,7 +19,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::placement::{PlacementObservation, PlacementPlanner, PlacementScore};
+use crate::fleet::placement::{PlacementObservation, PlacementPlanner, PlacementScore};
 use crate::{
     Digest, Error, NodeId, NodeLogPhase, NodeLogRotationBarrier, NodeLogStatus, NodeRecoveryClaim,
     Result, SessionId,
@@ -1396,7 +1404,7 @@ impl NodeDirectory {
         let desired = live
             .len()
             .saturating_sub(1)
-            .min(crate::node_log_state::MAX_NODE_LOG_MEMBERS);
+            .min(crate::node::log_state::MAX_NODE_LOG_MEMBERS);
         if desired == 0 {
             return Ok(Vec::new());
         }
@@ -2171,7 +2179,7 @@ impl NodeTombstone {
             claimant,
             claim_generation: u64::from(claimant.is_some()),
             claim_expires_at_ms: claimant.map(|_| {
-                retired_at_ms.saturating_add(crate::node_log_state::RECOVERY_CLAIM_LIFETIME_MS)
+                retired_at_ms.saturating_add(crate::node::log_state::RECOVERY_CLAIM_LIFETIME_MS)
             }),
             log,
         };
@@ -2200,7 +2208,7 @@ impl NodeTombstone {
         self.claim_generation = generation;
         self.claim_expires_at_ms = Some(
             now_ms
-                .checked_add(crate::node_log_state::RECOVERY_CLAIM_LIFETIME_MS)
+                .checked_add(crate::node::log_state::RECOVERY_CLAIM_LIFETIME_MS)
                 .ok_or(Error::Node("node recovery claim time overflow"))?,
         );
         if let Some(log) = &self.log {
@@ -2224,7 +2232,7 @@ impl NodeTombstone {
             return Err(Error::Fenced);
         }
         let next_expiry = now_ms
-            .checked_add(crate::node_log_state::RECOVERY_CLAIM_LIFETIME_MS)
+            .checked_add(crate::node::log_state::RECOVERY_CLAIM_LIFETIME_MS)
             .filter(|expires_at_ms| *expires_at_ms > current_expiry)
             .ok_or(Error::Node("node recovery claim expiry did not advance"))?;
         self.claim_expires_at_ms = Some(next_expiry);

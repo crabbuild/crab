@@ -2,24 +2,24 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crab_ltx::rusqlite::Transaction;
 
-use crate::effects::EffectBatch;
+use crate::primitives::effects::EffectBatch;
 use crate::{
     CatalogProof, CatalogShardScan, CellAuthority, CellCatalog, CellTarget, CronTarget, Error,
     NodeAdvertisement, QueueDeadLetterTarget, Result, SessionId, VersionedControl,
     WorkflowDefinition,
-    blob::blob_cleanup_expired,
-    cron::cron_fire_due_bounded,
-    effects::{
+    primitives::blob::blob_cleanup_expired,
+    primitives::cron::cron_fire_due_bounded,
+    primitives::effects::{
         effect_cleanup_terminal_bounded, effect_expire_ready_bounded,
         effect_reclaim_expired_bounded, inbox_cleanup_expired_bounded,
     },
-    kv::kv_cleanup_expired_bounded,
-    queue::{
+    primitives::kv::kv_cleanup_expired_bounded,
+    primitives::queue::{
         MAX_ATTEMPTS, QueueDeadLetterWriter, queue_cleanup_expired_bounded,
         queue_expire_ready_bounded, queue_expire_ready_bounded_with_dead_letter,
         queue_reclaim_expired_bounded, queue_reclaim_expired_bounded_with_dead_letter,
     },
-    workflow::{
+    primitives::workflow::{
         workflow_cleanup_terminal_bounded, workflow_fail_one_expired_activity,
         workflow_fire_one_due_timer, workflow_reclaim_expired_bounded,
     },

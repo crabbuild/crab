@@ -10,7 +10,7 @@ mod descriptor;
 
 use descriptor::{encode_release, requires_persisted_work_inventory, verify_rolling_compatibility};
 
-use crate::effects::EffectBatch;
+use crate::primitives::effects::EffectBatch;
 use crate::{
     ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome, ActivitySupervisor,
     ActivitySupervisorError, ActivitySupport, ApplicationId, BlockingActivityHandler,
@@ -1945,7 +1945,7 @@ fn validate_queue_bindings(
         if !module.commands.iter().any(|command| {
             command.id == binding.send_command_id
                 && command.codec_version == binding.codec_version
-                && command.input_limit >= crate::queue::QUEUE_SEND_MAX_INPUT_BYTES
+                && command.input_limit >= crate::primitives::queue::QUEUE_SEND_MAX_INPUT_BYTES
         }) {
             return Err(Error::Registry(
                 "Queue send binding is absent from its descriptor",

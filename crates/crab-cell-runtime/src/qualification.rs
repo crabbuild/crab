@@ -1,3 +1,5 @@
+pub mod cluster;
+
 use std::{
     collections::BTreeSet,
     future::Future,

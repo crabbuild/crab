@@ -1,9 +1,9 @@
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
-use crate::effects::EffectBatch;
+use crate::primitives::effects::EffectBatch;
 use crate::{
     CellTarget, Digest, EffectCommandIntent, Error, NamespaceId, RequestId, Result,
-    effects::validate_effect_command_intent,
+    primitives::effects::validate_effect_command_intent,
 };
 
 mod activity;
@@ -32,7 +32,7 @@ pub use api::{
     register_workflow,
 };
 
-const WORKFLOW_SCHEMA: &str = include_str!("migrations/workflow.sql");
+const WORKFLOW_SCHEMA: &str = include_str!("../migrations/workflow.sql");
 const MAX_WORKFLOW_BYTES: usize = 1 << 20;
 const MAX_ACTIONS: usize = 128;
 const MAX_EVENTS_PER_CELL: u64 = 100_000;
@@ -1300,7 +1300,7 @@ mod tests {
     fn embedded_workflow_migration_matches_normative_contract() {
         assert_eq!(
             WORKFLOW_SCHEMA,
-            include_str!("../docs/contracts/workflow.sql")
+            include_str!("../../docs/contracts/workflow.sql")
         );
     }
 
@@ -1322,7 +1322,7 @@ mod tests {
             b"workflow",
         )
         .unwrap();
-        crate::schema::install_runtime_schema_in(
+        crate::cell::schema::install_runtime_schema_in(
             &transaction,
             source.cell_id(),
             IncarnationId::from_bytes([4; 16]),

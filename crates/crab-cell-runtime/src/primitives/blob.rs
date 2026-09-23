@@ -17,7 +17,7 @@ mod tests;
 
 pub use api::{BlobCommand, BlobModule, BlobNamespace, BlobQueryCommand, register_blob};
 
-const BLOB_SCHEMA: &str = include_str!("migrations/blob.sql");
+const BLOB_SCHEMA: &str = include_str!("../migrations/blob.sql");
 pub(crate) const MAX_BLOB_PART_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_BLOB_READ_BYTES: u32 = 512 * 1024;
 pub(crate) const MAX_BLOB_PARTS: u32 = 4_096;

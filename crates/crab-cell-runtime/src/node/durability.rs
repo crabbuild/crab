@@ -248,7 +248,7 @@ impl NodeDurability {
         }
         self.shipper.shutdown().await?;
         let barrier = self.gate.begin_rotation()?;
-        crate::node_log::retire_node_log(Arc::clone(&self.transport), &barrier).await?;
+        crate::node::log::retire_node_log(Arc::clone(&self.transport), &barrier).await?;
         self.authority.close(&barrier).await?;
         self.closed
             .store(true, std::sync::atomic::Ordering::Release);

@@ -17,26 +17,26 @@ mod handle;
 pub use handle::CellHandle;
 use handle::{CellAdmission, WorkAdmission};
 
+use crate::cell::executor::{MAX_PENDING_PUBLICATIONS, PENDING_PUBLICATION_HIGH_WATER_BYTES};
 use crate::coordination::{
     AdmissionKind, CoordinationDecision, CoordinationEffect, CoordinationInput, CoordinationState,
     RejectReason, Residency,
 };
-use crate::eviction::{EvictionObservation, EvictionState, select_victims};
-use crate::executor::{MAX_PENDING_PUBLICATIONS, PENDING_PUBLICATION_HIGH_WATER_BYTES};
-use crate::pressure::{
+use crate::fleet::eviction::{EvictionObservation, EvictionState, select_victims};
+use crate::fleet::pressure::{
     MovementBudget, MovementPermit, PressureClassifier, PressureSample, PressureState,
 };
-use crate::publication::{CellDurabilitySubmitter, NodeDurabilitySlot, PendingDurability};
-use crate::resource::{
+use crate::fleet::resource::{
     ACTIVE_CELL_NATIVE_BYTES as ACTIVE_CELL_NATIVE_BYTES_USIZE, LedgerDiskAdmission,
     LedgerHostResourceAdmission, ResourceCost, ResourceLedger, ResourceReservation,
 };
+use crate::publication::{CellDurabilitySubmitter, NodeDurabilitySlot, PendingDurability};
 use crate::{
     ApplicationId, CatalogEntry, CatalogProof, CatalogRole, CellAuthority, CellId, CellPublisher,
     CellTarget, Digest, Error, InboxDelivery, MigrationOutcome, MigrationPlan, MutationIdentity,
     NodeDurability, NodeLeaseGuard, Owner, PendingCommit, Resolution, SessionId, SqlWorkerPool,
     StoredOutcome, Transition, VersionedControl, WorkerExecution,
-    worker::{CellReservation, Handler, Initializer, QueryHandler, WorkerState},
+    cell::worker::{CellReservation, Handler, Initializer, QueryHandler, WorkerState},
 };
 
 const INGRESS_REQUESTS: usize = 1_024;
@@ -1771,7 +1771,7 @@ enum TaskResult {
         cell: CellId,
         generation: u64,
         effect_id: u64,
-        result: crate::Result<crate::maintenance::TransferWorkInventory>,
+        result: crate::Result<crate::primitives::maintenance::TransferWorkInventory>,
     },
     Executed {
         cell: CellId,
@@ -2613,7 +2613,7 @@ fn transfer_candidate_observation(cell: CellId, active: &ActiveCell) -> Eviction
 fn transfer_observation(
     cell: CellId,
     active: &ActiveCell,
-    inventory: crate::maintenance::TransferWorkInventory,
+    inventory: crate::primitives::maintenance::TransferWorkInventory,
 ) -> EvictionObservation {
     let mut observation = eviction_observation(cell, active);
     observation.primitive_obligation = !inventory.is_settled();

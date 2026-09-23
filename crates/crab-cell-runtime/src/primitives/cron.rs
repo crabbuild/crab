@@ -1,6 +1,6 @@
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
-use crate::effects::EffectBatch;
+use crate::primitives::effects::EffectBatch;
 use crate::{
     BoundedEncoder, CellTarget, EffectCommandIntent, Error, NamespaceId, Result, WireValue,
 };
@@ -9,7 +9,7 @@ mod api;
 
 pub use api::{CronCommand, CronModule, CronNamespace, CronQueryCommand, register_cron};
 
-const CRON_SCHEMA: &str = include_str!("migrations/cron.sql");
+const CRON_SCHEMA: &str = include_str!("../migrations/cron.sql");
 const MIN_INTERVAL_MS: u64 = 1_000;
 const MAX_INTERVAL_MS: u64 = 365 * 24 * 60 * 60 * 1_000;
 const MAX_PAYLOAD_BYTES: usize = 256 * 1_024;
@@ -459,7 +459,7 @@ mod tests {
             b"cron-shard",
         )
         .unwrap();
-        crate::schema::install_runtime_schema_in(
+        crate::cell::schema::install_runtime_schema_in(
             &transaction,
             source.cell_id(),
             IncarnationId::from_bytes([5; 16]),
@@ -518,6 +518,6 @@ mod tests {
 
     #[test]
     fn checked_in_cron_schema_matches_runtime_schema() {
-        assert_eq!(CRON_SCHEMA, include_str!("../docs/contracts/cron.sql"));
+        assert_eq!(CRON_SCHEMA, include_str!("../../docs/contracts/cron.sql"));
     }
 }

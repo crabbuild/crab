@@ -214,7 +214,10 @@ async fn object_store_sweep_bounds_deletions_and_finishes_on_retry() {
 
 #[test]
 fn checked_in_blob_schema_matches_runtime_schema() {
-    assert_eq!(BLOB_SCHEMA, include_str!("../../docs/contracts/blob.sql"));
+    assert_eq!(
+        BLOB_SCHEMA,
+        include_str!("../../../docs/contracts/blob.sql")
+    );
 }
 
 #[test]

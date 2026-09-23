@@ -1,3 +1,7 @@
+//! Cell control record, transitions, and authority CAS ownership.
+
+pub mod authority;
+
 use serde::{Deserialize, Serialize};
 
 use crate::identity::{decode_hex, encode_hex};

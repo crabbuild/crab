@@ -801,7 +801,7 @@ mod tests {
             b"rollover",
         )
         .unwrap();
-        crate::schema::install_runtime_schema_in(
+        crate::cell::schema::install_runtime_schema_in(
             &transaction,
             source.cell_id(),
             crate::IncarnationId::from_bytes([2; 16]),

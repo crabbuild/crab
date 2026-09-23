@@ -1,6 +1,6 @@
 #[test]
 fn production_hot_paths_use_singleton_or_indexed_work() {
-    let queue = include_str!("../../src/queue.rs");
+    let queue = include_str!("../../src/primitives/queue.rs");
     let queue_info = queue
         .split_once("pub fn queue_info")
         .and_then(|(_, tail)| tail.split_once("pub fn verify_queue_counts"))
@@ -9,7 +9,7 @@ fn production_hot_paths_use_singleton_or_indexed_work() {
     assert!(!queue_info.contains("count("));
     assert!(queue_info.contains("ready_count"));
 
-    let workflow = include_str!("../../src/workflow.rs");
+    let workflow = include_str!("../../src/primitives/workflow.rs");
     let next_sequence = workflow
         .split_once("fn next_sequence")
         .and_then(|(_, tail)| tail.split_once("pub fn verify_workflow_event_count"))
@@ -18,7 +18,7 @@ fn production_hot_paths_use_singleton_or_indexed_work() {
     assert!(!next_sequence.contains("count("));
     assert!(next_sequence.contains("event_count"));
 
-    let effects = include_str!("../../src/effects.rs");
+    let effects = include_str!("../../src/primitives/effects.rs");
     let insertion = effects
         .split_once("fn effect_insert")
         .and_then(|(_, tail)| tail.split_once("fn effect_operation"))

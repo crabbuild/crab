@@ -9,10 +9,10 @@ use std::{
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
-use crate::maintenance::TransferWorkInventory;
-use crate::resource::{
+use crate::fleet::resource::{
     ACTIVE_CELL_NATIVE_BYTES, HYDRATION_JOB_CAPACITY, ResourceLedger, ResourceReservation,
 };
+use crate::primitives::maintenance::TransferWorkInventory;
 use crate::{
     CatalogRole, CellExecutor, CellId, CommandExecution, Digest, Error, HandlerOutcome,
     InboxDelivery, MigrationOutcome, MigrationPlan, MutationIdentity, PendingCommit,
@@ -28,7 +28,7 @@ const DEFAULT_PAGE_IO_DEADLINE: Duration = Duration::from_secs(30);
 pub const ACTIVE_CELL_PAGE_CACHE_BYTES: u64 =
     crab_ltx::MANAGED_SQLITE_CONNECTIONS * crab_ltx::MANAGED_CONNECTION_PAGE_CACHE_BYTES;
 
-pub use crate::resource::ACTIVE_CELL_FILE_DESCRIPTORS;
+pub use crate::fleet::resource::ACTIVE_CELL_FILE_DESCRIPTORS;
 
 pub(crate) type Handler = Box<
     dyn for<'connection> FnOnce(
@@ -1350,5 +1350,4 @@ async fn receive<T>(response: oneshot::Receiver<Result<T>>) -> Result<T> {
 }
 
 #[cfg(test)]
-#[path = "worker/tests.rs"]
 mod tests;

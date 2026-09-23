@@ -11,7 +11,7 @@ pub use api::{
     register_kv,
 };
 
-const KV_SCHEMA: &str = include_str!("migrations/kv.sql");
+const KV_SCHEMA: &str = include_str!("../migrations/kv.sql");
 const MAX_SCOPE_BYTES: usize = 1_024;
 const MAX_KEY_BYTES: usize = 1_024;
 const MAX_VALUE_BYTES: usize = 4 * 1024 * 1024;
@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn embedded_kv_migration_matches_normative_contract() {
-        assert_eq!(KV_SCHEMA, include_str!("../docs/contracts/kv.sql"));
+        assert_eq!(KV_SCHEMA, include_str!("../../docs/contracts/kv.sql"));
     }
 
     #[test]

@@ -65,7 +65,10 @@ fn insert_leased_message(connection: &mut Connection) -> [u8; 16] {
 
 #[test]
 fn embedded_queue_migration_matches_normative_contract() {
-    assert_eq!(QUEUE_SCHEMA, include_str!("../../docs/contracts/queue.sql"));
+    assert_eq!(
+        QUEUE_SCHEMA,
+        include_str!("../../../docs/contracts/queue.sql")
+    );
 }
 
 #[test]

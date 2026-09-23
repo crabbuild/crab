@@ -1,7 +1,7 @@
 use rand::RngCore;
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
-use crate::effects::EffectBatch;
+use crate::primitives::effects::EffectBatch;
 use crate::{
     BoundedEncoder, CellId, CellTarget, EffectCommandIntent, Error, IncarnationId, NamespaceId,
     Result, WireValue, partition_for_shard, shard_for_scope,
@@ -16,7 +16,7 @@ pub use api::{
     register_queue,
 };
 
-const QUEUE_SCHEMA: &str = include_str!("migrations/queue.sql");
+const QUEUE_SCHEMA: &str = include_str!("../migrations/queue.sql");
 const MAX_PAYLOAD_BYTES: usize = 256 * 1024;
 pub(crate) const QUEUE_SEND_MAX_INPUT_BYTES: u32 = MAX_PAYLOAD_BYTES as u32 + 32;
 const MAX_CLAIM_BYTES: usize = 512 * 1024;

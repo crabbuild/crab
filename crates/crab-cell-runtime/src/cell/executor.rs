@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use crab_ltx::{CaptureBatch, Db, TransactionError, rusqlite::OptionalExtension};
 
-use crate::maintenance::TransferWorkInventory;
+use crate::primitives::maintenance::TransferWorkInventory;
 use crate::{
     CatalogRole, CellId, Digest, Error, IncarnationId, PersistedWorkInventory, RequestId, Result,
 };
@@ -265,7 +265,7 @@ impl CellExecutor {
         initialize: impl FnOnce(&crab_ltx::rusqlite::Transaction<'_>) -> Result<()>,
     ) -> Result<(Self, CaptureBatch, Option<i64>)> {
         let initialized = db.transaction_with(|transaction| {
-            crate::schema::install_runtime_schema_in(transaction, cell, incarnation, schema)?;
+            crate::cell::schema::install_runtime_schema_in(transaction, cell, incarnation, schema)?;
             initialize(transaction)?;
             crate::scheduler_next_due_ms(transaction, 0)
         });
@@ -626,9 +626,9 @@ impl CellExecutor {
         if self.fenced {
             return Err(Error::Fenced);
         }
-        let result = self
-            .db
-            .query_with(|connection| crate::maintenance::inspect_persisted_work(connection, role));
+        let result = self.db.query_with(|connection| {
+            crate::primitives::maintenance::inspect_persisted_work(connection, role)
+        });
         if let Some(error) = self.db.take_io_error() {
             self.fenced = true;
             return Err(ltx_error(error));
@@ -656,7 +656,7 @@ impl CellExecutor {
             return Err(Error::Fenced);
         }
         let result = self.db.query_with(|connection| {
-            crate::maintenance::inspect_transfer_work(connection, role, now_ms)
+            crate::primitives::maintenance::inspect_transfer_work(connection, role, now_ms)
         });
         if let Some(error) = self.db.take_io_error() {
             self.fenced = true;
@@ -1043,13 +1043,13 @@ impl CellExecutor {
         !self.has_pending() && !self.fenced
     }
 
-    pub(crate) fn worker_state(&self) -> crate::worker::WorkerState {
+    pub(crate) fn worker_state(&self) -> crate::cell::worker::WorkerState {
         if self.fenced {
-            crate::worker::WorkerState::Fenced
+            crate::cell::worker::WorkerState::Fenced
         } else if self.has_pending() {
-            crate::worker::WorkerState::Pending
+            crate::cell::worker::WorkerState::Pending
         } else {
-            crate::worker::WorkerState::Ready
+            crate::cell::worker::WorkerState::Ready
         }
     }
 
