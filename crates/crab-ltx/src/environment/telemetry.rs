@@ -1,4 +1,4 @@
-//! Replica-only telemetry and scratch-monitor contracts.
+//! Object-store-only telemetry and scratch-monitor contracts.
 
 use std::{io, time::Duration};
 

@@ -1,4 +1,4 @@
-//! Replica-only verified directory cache.
+//! Object-store-only verified directory cache.
 
 use super::*;
 use std::{

@@ -1,6 +1,6 @@
 //! Injectable local I/O, clocks and jobs adapted from Celld host.rs.
 //!
-//! Replica-only resources, telemetry, directory cache, and executors are
+//! Object-store-only resources, telemetry, directory cache, and executors are
 //! gated at the module boundary instead of per item.
 
 #[cfg(feature = "replica")]

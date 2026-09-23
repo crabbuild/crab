@@ -1,4 +1,4 @@
-//! Replica-only host resource admission contracts.
+//! Object-store-only host resource admission contracts.
 
 /// Resource class charged by an embedding runtime for replica-host work.
 #[cfg(feature = "replica")]

@@ -1,4 +1,4 @@
-//! Replica-only executor and worker contracts.
+//! Object-store-only executor and worker contracts.
 
 use std::io;
 
