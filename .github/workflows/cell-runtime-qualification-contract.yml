@@ -127,9 +127,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Assertions below match literal workflow text; escaped dollars keep
-          # the patterns from expanding while staying shellcheck-clean.
-          protected_image_name="cell-runtime-protected-${{ github.run_id }}-${{ github.run_attempt }}"
+          # Assertions below match literal workflow text, so the dollar signs
+          # must reach grep verbatim rather than expand here.
           test -f .github/workflows/cell-runtime-protected-qualification.yml
           grep -F 'name: Cell runtime protected qualification' \
             .github/workflows/cell-runtime-protected-qualification.yml
@@ -139,7 +138,8 @@ jobs:
             .github/workflows/cell-runtime-protected-qualification.yml
           grep -F "test \"\$GITHUB_SHA\" = \"\$SOURCE_REF\"" \
             .github/workflows/cell-runtime-protected-qualification.yml
-          grep -F "$protected_image_name" \
+          # shellcheck disable=SC2016
+          grep -F 'cell-runtime-protected-${{ github.run_id }}-${{ github.run_attempt }}' \
             .github/workflows/cell-runtime-protected-qualification.yml
           grep -F "verify-protected-bundle \"\$protected_dir\"" \
             .github/workflows/cell-runtime-protected-qualification.yml
