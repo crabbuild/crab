@@ -5,10 +5,12 @@ use std::sync::{
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, oneshot};
 
-use super::{
+use super::admission::new_cell_admission;
+use super::state::{
     Message, QueuedCommand, QueuedMigration, QueuedOperation, QueuedQuery, QueuedResolve,
-    ResolveOperation, RuntimeInner, new_cell_admission,
+    ResolveOperation, RuntimeInner,
 };
+
 use crate::Error;
 use crate::cell::actor::MigratedCell;
 use crate::cell::catalog::CatalogProof;
@@ -22,8 +24,8 @@ use crate::primitives::effects::InboxDelivery;
 use crate::primitives::maintenance::PersistedWorkInventory;
 use crate::registry::MigrationPlan;
 
-const MAX_OPERATION_BYTES: usize = crate::codec::MAX_WIRE_BYTES;
-const MAX_RESULT_BYTES: usize = crate::codec::MAX_WIRE_BYTES;
+pub(super) const MAX_OPERATION_BYTES: usize = crate::codec::MAX_WIRE_BYTES;
+pub(super) const MAX_RESULT_BYTES: usize = crate::codec::MAX_WIRE_BYTES;
 
 /// Cloneable capability for one activated Cell.
 #[derive(Clone)]
@@ -45,9 +47,9 @@ pub(super) struct CellAdmission {
 }
 
 pub(super) struct WorkAdmission {
-    _request: OwnedSemaphorePermit,
-    _cell_bytes: OwnedSemaphorePermit,
-    _node_bytes: ResourceReservation,
+    pub(super) _request: OwnedSemaphorePermit,
+    pub(super) _cell_bytes: OwnedSemaphorePermit,
+    pub(super) _node_bytes: ResourceReservation,
 }
 
 impl CellHandle {
@@ -357,7 +359,7 @@ impl CellHandle {
         response.await.map_err(|_| Error::RuntimeClosed)?
     }
 
-    fn reserve_work(
+    pub(super) fn reserve_work(
         &self,
         operation_bytes: usize,
         max_result_bytes: usize,
@@ -406,7 +408,7 @@ impl CellHandle {
     }
 }
 
-fn try_one(
+pub(super) fn try_one(
     semaphore: Arc<Semaphore>,
     resource: &'static str,
 ) -> crate::Result<OwnedSemaphorePermit> {
@@ -415,7 +417,7 @@ fn try_one(
         .map_err(|error| admission_error(error, resource))
 }
 
-fn try_many(
+pub(super) fn try_many(
     semaphore: Arc<Semaphore>,
     permits: usize,
     resource: &'static str,
@@ -426,7 +428,7 @@ fn try_many(
         .map_err(|error| admission_error(error, resource))
 }
 
-fn admission_error(error: TryAcquireError, resource: &'static str) -> Error {
+pub(super) fn admission_error(error: TryAcquireError, resource: &'static str) -> Error {
     match error {
         TryAcquireError::Closed => Error::CellDraining,
         TryAcquireError::NoPermits => Error::Capacity(resource),
