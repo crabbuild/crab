@@ -1,10 +1,9 @@
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
-
-use super::{
-    BuildDescriptor, MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor,
-    OperationDescriptor, RetainedCodeDescriptor,
+use super::schemas::{
+    BuildDescriptor, MAX_DESCRIPTOR_BYTES, MigrationDescriptor, ModuleDescriptor,
+    NamespaceDescriptor, OperationDescriptor, RetainedCodeDescriptor,
 };
 use crate::Result;
 use crate::cell::catalog::CatalogRole;
@@ -152,7 +151,7 @@ fn operation_incompatibility(
 }
 
 fn decode_compatibility_release(bytes: &[u8]) -> Result<RawRelease> {
-    if bytes.is_empty() || bytes.len() > super::MAX_DESCRIPTOR_BYTES {
+    if bytes.is_empty() || bytes.len() > MAX_DESCRIPTOR_BYTES {
         return Err(crate::Error::Registry("release descriptor size is invalid"));
     }
     let release: RawRelease = serde_json::from_slice(bytes)?;
