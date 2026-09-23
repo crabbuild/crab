@@ -1,7 +1,8 @@
 use crate::cell::executor::{CellExecutor, StoredOutcome};
 use crate::control::Transition;
 use crate::control::authority::{CellAuthority, VersionedControl};
-use crate::identity::ApplicationId;
+use crate::fleet::telemetry::DurabilitySubmissionOutcome;
+use crate::identity::{ApplicationId, encode_hex};
 use crate::node::durability::NodeDurability;
 use crate::node::log::CommitTicket;
 use crate::node::log_shipper::NodeLogSubmission;
@@ -756,6 +757,8 @@ impl CellDurabilitySubmitter {
         cuts: &crab_ltx::CaptureBatch,
     ) -> Result<Option<PendingDurability>> {
         let Some(slot) = self.node_durability.as_ref() else {
+            self.telemetry
+                .durability_submission(DurabilitySubmissionOutcome::Unsupported);
             return Ok(None);
         };
         let Some((application, durability)) = slot
@@ -763,6 +766,8 @@ impl CellDurabilitySubmitter {
             .map_err(|_| Error::Control("Cell runtime node durability lock poisoned"))?
             .clone()
         else {
+            self.telemetry
+                .durability_submission(DurabilitySubmissionOutcome::Unavailable);
             return Ok(None);
         };
         self.check_node_lease()?;
@@ -776,11 +781,23 @@ impl CellDurabilitySubmitter {
         )?;
         let ticket = match durability.submit(submission).await {
             Ok(ticket) => ticket,
-            Err(_) => {
+            Err(error) => {
                 self.check_node_lease()?;
+                // The commit still succeeds through object coverage, so this
+                // event and its counter are the only way to observe that an
+                // enrolled lane refused the captured commit.
+                tracing::warn!(
+                    cell = %encode_hex(self.cell.as_bytes()),
+                    error = %error,
+                    "node-log submission rejected; using object coverage"
+                );
+                self.telemetry
+                    .durability_submission(DurabilitySubmissionOutcome::Rejected);
                 return Ok(None);
             }
         };
+        self.telemetry
+            .durability_submission(DurabilitySubmissionOutcome::Fleet);
         Ok(Some(PendingDurability {
             durability: std::sync::Arc::clone(&durability),
             ticket,
@@ -887,7 +904,10 @@ mod tests {
     use crab_storage::Store;
     use object_store::{memory::InMemory, path::Path};
 
-    use super::CellPublisher;
+    use super::{
+        CellDurabilitySubmitter, CellPublisher, DurabilitySubmissionOutcome, NodeDurabilitySlot,
+    };
+    use crate::Error;
     use crate::control::authority::CellAuthority;
     use crate::control::{Control, Owner};
     use crate::identity::IncarnationId;
@@ -1024,6 +1044,185 @@ mod tests {
         publisher.publish_prepared(&prepared, None).await.unwrap();
         let forced = publisher.control().value().ltx_root().unwrap();
         assert!(replica.open_root(&forced).await.unwrap().segment_count() < 32);
+        database.close().unwrap();
+    }
+
+    #[derive(Default)]
+    struct RecordingSubmissions {
+        outcomes: std::sync::Mutex<Vec<DurabilitySubmissionOutcome>>,
+    }
+
+    impl crate::fleet::telemetry::CellTelemetry for RecordingSubmissions {
+        fn durability_submission(&self, outcome: DurabilitySubmissionOutcome) {
+            self.outcomes.lock().unwrap().push(outcome);
+        }
+    }
+
+    #[tokio::test]
+    async fn commits_report_when_no_enrolled_lane_can_carry_them() {
+        let telemetry = crate::fleet::telemetry::CellTelemetryHandle::default();
+        let recording = Arc::new(RecordingSubmissions::default());
+        telemetry.install(recording.clone()).unwrap();
+        let cuts = CaptureBatch {
+            segments: Vec::new(),
+            position: Default::default(),
+            timing: Default::default(),
+        };
+        let submitter = CellDurabilitySubmitter {
+            cell: CellId::from_bytes([71; 32]),
+            incarnation: IncarnationId::from_bytes([72; 16]),
+            epoch: 1,
+            node_lease: None,
+            node_durability: None,
+            telemetry: telemetry.clone(),
+        };
+        assert!(submitter.submit(1, &cuts).await.unwrap().is_none());
+
+        let lane: NodeDurabilitySlot = Arc::new(std::sync::RwLock::new(None));
+        let submitter = CellDurabilitySubmitter {
+            node_durability: Some(lane),
+            telemetry,
+            ..submitter
+        };
+        assert!(submitter.submit(1, &cuts).await.unwrap().is_none());
+
+        assert_eq!(
+            *recording.outcomes.lock().unwrap(),
+            vec![
+                DurabilitySubmissionOutcome::Unsupported,
+                DurabilitySubmissionOutcome::Unavailable,
+            ]
+        );
+    }
+
+    /// Transport that refuses every follower request; the gate is fenced first,
+    /// so no frame reaches it in this test.
+    struct RefusingTransport;
+
+    impl crate::node::log_transport::NodeLogTransport for RefusingTransport {
+        fn append<'a>(
+            &'a self,
+            _member: crate::identity::NodeId,
+            _request: crate::node::log_transport::AppendRequest,
+        ) -> futures_util::future::BoxFuture<'a, crate::Result<crate::follower::FollowerReceipt>>
+        {
+            Box::pin(async { Err(Error::Node("test transport refuses appends")) })
+        }
+
+        fn seal<'a>(
+            &'a self,
+            _member: crate::identity::NodeId,
+            _request: crate::node::log_transport::SealRequest,
+        ) -> futures_util::future::BoxFuture<'a, crate::Result<crate::follower::FollowerReceipt>>
+        {
+            Box::pin(async { Err(Error::Node("test transport refuses seals")) })
+        }
+
+        fn retire<'a>(
+            &'a self,
+            _member: crate::identity::NodeId,
+            _request: crate::node::log_transport::RetireRequest,
+        ) -> futures_util::future::BoxFuture<'a, crate::Result<crate::follower::FollowerReceipt>>
+        {
+            Box::pin(async { Err(Error::Node("test transport refuses retirements")) })
+        }
+
+        fn tail<'a>(
+            &'a self,
+            _member: crate::identity::NodeId,
+            _request: crate::node::log_transport::TailRequest,
+        ) -> futures_util::future::BoxFuture<'a, crate::Result<Vec<bytes::Bytes>>> {
+            Box::pin(async { Err(Error::Node("test transport refuses tails")) })
+        }
+    }
+
+    /// Authority that refuses activation; the fenced gate never asks it anything.
+    struct RefusingAuthority;
+
+    impl crate::node::durability::NodeLogAuthority for RefusingAuthority {
+        fn activate<'a>(
+            &'a self,
+            _log_epoch: u64,
+        ) -> futures_util::future::BoxFuture<'a, crate::Result<()>> {
+            Box::pin(async { Err(Error::Node("test authority refuses activation")) })
+        }
+
+        fn advance_coverage<'a>(
+            &'a self,
+            _log_epoch: u64,
+            _tiered_through: u64,
+        ) -> futures_util::future::BoxFuture<'a, crate::Result<()>> {
+            Box::pin(async { Err(Error::Node("test authority refuses coverage")) })
+        }
+
+        fn close<'a>(
+            &'a self,
+            _barrier: &'a crate::node::log::NodeLogRotationBarrier,
+        ) -> futures_util::future::BoxFuture<'a, crate::Result<()>> {
+            Box::pin(async { Err(Error::Node("test authority refuses closing")) })
+        }
+    }
+
+    #[tokio::test]
+    async fn commits_report_a_fenced_lane_instead_of_failing() {
+        let telemetry = crate::fleet::telemetry::CellTelemetryHandle::default();
+        let recording = Arc::new(RecordingSubmissions::default());
+        telemetry.install(recording.clone()).unwrap();
+
+        let gate = crate::node::log::DurabilityGate::new(
+            SessionId::from_bytes([81; 16]),
+            crate::identity::NodeId::from_bytes([82; 16]),
+            9,
+            [crate::identity::NodeId::from_bytes([83; 16])],
+        )
+        .unwrap();
+        let transport: Arc<dyn crate::node::log_transport::NodeLogTransport> =
+            Arc::new(RefusingTransport);
+        let shipper = crate::node::log_shipper::NodeLogShipper::new_with_telemetry(
+            gate.clone(),
+            Arc::clone(&transport),
+            Limits::default(),
+            telemetry.clone(),
+        )
+        .unwrap();
+        let lease = crate::node::lease::NodeLeaseGuard::new(0, 60_000).unwrap();
+        let durability = Arc::new(crate::node::durability::NodeDurability::new(
+            gate.clone(),
+            shipper,
+            Arc::new(RefusingAuthority),
+            transport,
+            lease,
+        ));
+        gate.stop_shipping();
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut database =
+            Db::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
+        database
+            .transaction(|transaction| {
+                transaction.execute_batch("CREATE TABLE events(sequence INTEGER PRIMARY KEY)")?;
+                transaction.execute("INSERT INTO events VALUES (1)", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let cuts = database.capture_deferred().unwrap();
+
+        let submitter = CellDurabilitySubmitter {
+            cell: CellId::from_bytes([84; 32]),
+            incarnation: IncarnationId::from_bytes([85; 16]),
+            epoch: 1,
+            node_lease: None,
+            node_durability: Some(Arc::new(std::sync::RwLock::new(Some((
+                crate::identity::ApplicationId::from_bytes([86; 16]),
+                durability,
+            ))))),
+            telemetry,
+        };
+        assert!(submitter.submit(1, &cuts).await.unwrap().is_none());
+        assert_eq!(
+            *recording.outcomes.lock().unwrap(),
+            vec![DurabilitySubmissionOutcome::Rejected]
+        );
         database.close().unwrap();
     }
 }

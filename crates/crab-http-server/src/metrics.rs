@@ -23,6 +23,7 @@ const ADMISSION_COUNT: usize = 4;
 const TRANSFER_REJECTION_COUNT: usize = 2;
 const DURABILITY_SOURCE_COUNT: usize = 2;
 const APPEND_RESULT_COUNT: usize = 2;
+const DURABILITY_SUBMISSION_COUNT: usize = 4;
 const NODE_LOG_LANE_STATE_COUNT: usize = 3;
 const SELF_FENCE_REASON_COUNT: usize = 4;
 const RECOVERY_STATE_COUNT: usize = 2;
@@ -49,6 +50,8 @@ pub(crate) const ADMISSION_LABELS: [&str; ADMISSION_COUNT] =
 const TRANSFER_REJECTION_LABELS: [&str; TRANSFER_REJECTION_COUNT] = ["capacity", "coordination"];
 const DURABILITY_SOURCE_LABELS: [&str; DURABILITY_SOURCE_COUNT] = ["fleet", "object"];
 const APPEND_RESULT_LABELS: [&str; APPEND_RESULT_COUNT] = ["acked", "nacked"];
+const DURABILITY_SUBMISSION_LABELS: [&str; DURABILITY_SUBMISSION_COUNT] =
+    ["fleet", "unsupported", "unavailable", "rejected"];
 const RESIDENT_ROUTE_LABELS: [&str; 3] = ["hit", "miss", "refused"];
 const LTX_PHASE_LABELS: [&str; LTX_PHASE_COUNT] = [
     "capture",
@@ -161,6 +164,7 @@ struct MetricsInner {
     durability_proofs: [Counter; DURABILITY_SOURCE_COUNT],
     durability_wait: [Histogram; DURABILITY_SOURCE_COUNT],
     node_log_append_bytes: [Counter; APPEND_RESULT_COUNT],
+    durability_submissions: [Counter; DURABILITY_SUBMISSION_COUNT],
     resident_routes: [Counter; 3],
     ltx_phase_runs: [[Counter; 2]; LTX_PHASE_COUNT],
     ltx_phase_duration: [Histogram; LTX_PHASE_COUNT],
@@ -473,6 +477,15 @@ impl Metrics {
                         &key(
                             "crab_cell_node_log_append_bytes_total",
                             &[("result", result)],
+                        ),
+                        &METADATA,
+                    )
+                }),
+                durability_submissions: DURABILITY_SUBMISSION_LABELS.map(|outcome| {
+                    recorder.register_counter(
+                        &key(
+                            "crab_cell_durability_submissions_total",
+                            &[("outcome", outcome)],
                         ),
                         &METADATA,
                     )
@@ -920,6 +933,19 @@ impl crab_cell_runtime::fleet::telemetry::CellTelemetry for Metrics {
         };
         self.inner.durability_proofs[index].increment(1);
         self.inner.durability_wait[index].record(waited.as_secs_f64());
+    }
+
+    fn durability_submission(
+        &self,
+        outcome: crab_cell_runtime::fleet::telemetry::DurabilitySubmissionOutcome,
+    ) {
+        let index = match outcome {
+            crab_cell_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Fleet => 0,
+            crab_cell_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Unsupported => 1,
+            crab_cell_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Unavailable => 2,
+            crab_cell_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Rejected => 3,
+        };
+        self.inner.durability_submissions[index].increment(1);
     }
 
     fn node_log_append(&self, acknowledged: bool, bytes: u64) {
@@ -1686,6 +1712,11 @@ fn describe_metrics(recorder: &impl Recorder) {
     );
     describe_counter(
         recorder,
+        "crab_cell_durability_submissions_total",
+        "Commit node-log submissions by bounded outcome.",
+    );
+    describe_counter(
+        recorder,
         "crab_cell_resident_route_total",
         "Actor-owned resident route lookups by bounded outcome.",
     );
@@ -2041,6 +2072,18 @@ mod tests {
             crab_cell_runtime::node::log::DurabilitySource::Object,
             Duration::from_millis(50),
         );
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::durability_submission(
+            &metrics,
+            crab_cell_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Fleet,
+        );
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::durability_submission(
+            &metrics,
+            crab_cell_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Unavailable,
+        );
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::durability_submission(
+            &metrics,
+            crab_cell_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Rejected,
+        );
         <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::node_log_append(
             &metrics, true, 512,
         );
@@ -2185,6 +2228,13 @@ mod tests {
         assert!(rendered.contains("crab_cell_durability_proofs_total{source=\"fleet\"} 1"));
         assert!(rendered.contains("crab_cell_durability_proofs_total{source=\"object\"} 1"));
         assert!(rendered.contains("crab_cell_node_log_append_bytes_total{result=\"acked\"} 512"));
+        assert!(rendered.contains("crab_cell_durability_submissions_total{outcome=\"fleet\"} 1"));
+        assert!(
+            rendered.contains("crab_cell_durability_submissions_total{outcome=\"unavailable\"} 1")
+        );
+        assert!(
+            rendered.contains("crab_cell_durability_submissions_total{outcome=\"rejected\"} 1")
+        );
         assert!(rendered.contains("crab_cell_node_log_append_bytes_total{result=\"nacked\"} 128"));
         assert!(rendered.contains("crab_cell_resident_route_total{outcome=\"hit\"} 1"));
         assert!(rendered.contains("crab_cell_resident_route_total{outcome=\"miss\"} 1"));

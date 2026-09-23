@@ -1498,6 +1498,7 @@ Prometheus metrics must remain bounded in cardinality:
 
 ```text
 crab_cell_durability_proofs_total{source="fleet|object"}
+crab_cell_durability_submissions_total{outcome="fleet|unsupported|unavailable|rejected"}
 crab_cell_durability_wait_seconds{source="fleet|object"}
 crab_cell_node_log_append_bytes_total{result="acked|nacked"}
 crab_cell_node_log_uncovered_bytes
@@ -1522,6 +1523,15 @@ remaining time, and records recovery duration and bounded failure class from the
 scheduler. Recovery `waiting` counts candidates in the bounded retry delay; it
 does not include sessions that have not yet been observed by this scheduler and
 must not be inferred from a saturated worker count.
+
+Every captured commit also reports how its node-log submission resolved.
+`fleet` means an enrolled lane accepted the commit for shipping, while
+`unsupported` (this host installs no provider), `unavailable` (a provider exists
+without an enrolled lane), and `rejected` (the enrolled lane fenced or refused
+the submission) all describe commits that still succeed through object coverage.
+Those three outcomes are the only signal that a node intended fleet durability
+and silently fell back, so alert on them instead of inferring durability from
+commit success.
 
 `cells status --owner OWNER --name REPOSITORY --json` reports from persistent
 control and signed node-session state:
