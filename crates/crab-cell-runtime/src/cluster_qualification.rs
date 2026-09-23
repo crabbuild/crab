@@ -147,6 +147,11 @@ pub fn validate_cluster_receipt(
     validate_fleet_only_commit(&receipt.fleet_only_commit)?;
     validate_follower_replacement(&receipt.follower_replacement)?;
     validate_second_owner_loss(&receipt.second_owner_loss)?;
+    validate_owner_chain(
+        &receipt.owner_loss,
+        &receipt.second_owner_loss,
+        &receipt.fleet_only_commit,
+    )?;
     validate_fallback_owner_loss(&receipt.fallback_owner_loss)?;
     validate_capacity(&receipt.capacity)?;
     validate_measured_disk(&receipt.measured_disk)?;
@@ -447,6 +452,65 @@ impl WorkCycle {
         .into_iter()
         .all(|value| value == 0)
     }
+}
+
+fn validate_owner_chain(
+    owner_loss: &Value,
+    second_owner_loss: &Value,
+    fleet_only_commit: &Value,
+) -> Result<()> {
+    let first = as_object(owner_loss, "owner loss")?;
+    let second = as_object(second_owner_loss, "second owner loss")?;
+    let fleet = as_object(fleet_only_commit, "fleet-only commit")?;
+    let before = as_object(
+        object_value(fleet, "control_before_owner_loss")?,
+        "control before owner loss",
+    )?;
+    let owner = as_object(object_value(before, "owner")?, "owner")?;
+
+    // The two fault rows must describe one authority history, not unrelated
+    // passing takeovers spliced into a single receipt.
+    if session(owner, "session")? != session(first, "session_before")?
+        || number(before, "epoch")? != number(first, "epoch_before")?
+        || session(first, "session_after")? != session(second, "session_before")?
+        || number(first, "epoch_after")? != number(second, "epoch_before")?
+        || session(first, "session_before")? == session(second, "session_after")?
+    {
+        return Err(Error::Control("cluster qualification owner chain"));
+    }
+
+    require_same_root(
+        root(object_value(before, "root")?)?,
+        root(object_value(first, "root_before")?)?,
+    )?;
+    require_root_nonregression(
+        root(object_value(first, "root_continued")?)?,
+        root(object_value(second, "root_before")?)?,
+    )
+}
+
+fn require_same_root(left: RootEvidence<'_>, right: RootEvidence<'_>) -> Result<()> {
+    if left.digest != right.digest
+        || left.checksum != right.checksum
+        || left.txid != right.txid
+        || left.commit_sequence != right.commit_sequence
+    {
+        return Err(Error::Control("cluster qualification root chain"));
+    }
+    Ok(())
+}
+
+fn require_root_nonregression(before: RootEvidence<'_>, after: RootEvidence<'_>) -> Result<()> {
+    if after.txid < before.txid || after.commit_sequence < before.commit_sequence {
+        return Err(Error::Control("cluster qualification root chain"));
+    }
+    if after.txid == before.txid || after.commit_sequence == before.commit_sequence {
+        return require_same_root(before, after);
+    }
+    if after.digest == before.digest {
+        return Err(Error::Control("cluster qualification root chain"));
+    }
+    Ok(())
 }
 
 fn validate_owner_loss(value: &Value) -> Result<()> {
@@ -769,6 +833,7 @@ fn require_root_advance(before: RootEvidence<'_>, after: RootEvidence<'_>) -> Re
 #[derive(Clone, Copy)]
 struct RootEvidence<'a> {
     digest: &'a str,
+    checksum: u64,
     txid: u64,
     commit_sequence: u64,
 }
@@ -780,12 +845,14 @@ fn root(value: &Value) -> Result<RootEvidence<'_>> {
         return Err(Error::Control("root digest"));
     }
     let txid = number(object, "txid")?;
+    let checksum = number(object, "checksum")?;
     let commit_sequence = number(object, "commit_sequence")?;
     if txid == 0 || commit_sequence == 0 {
         return Err(Error::Control("root watermark"));
     }
     Ok(RootEvidence {
         digest,
+        checksum,
         txid,
         commit_sequence,
     })
@@ -867,13 +934,62 @@ fn is_lower_hex(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::{
         ClusterWorkEvidence, RecoveryPhaseEvidence, RecoveryPhaseTiming, WorkCycle,
-        validate_fallback_work, validate_follower_affinity, validate_metrics, validate_revision,
-        validate_timing, validate_work_cycle,
+        validate_fallback_work, validate_follower_affinity, validate_metrics, validate_owner_chain,
+        validate_revision, validate_timing, validate_work_cycle,
     };
+
+    fn chained_owner_losses() -> (Value, Value, Value) {
+        let first_root =
+            json!({"digest": "a".repeat(64), "checksum": 10, "txid": 1, "commit_sequence": 1});
+        let continued_root =
+            json!({"digest": "b".repeat(64), "checksum": 20, "txid": 2, "commit_sequence": 2});
+        let owner_loss = json!({
+            "session_before": "1".repeat(32),
+            "session_after": "2".repeat(32),
+            "epoch_before": 1,
+            "epoch_after": 2,
+            "root_before": first_root,
+            "root_continued": continued_root
+        });
+        let second_owner_loss = json!({
+            "session_before": "2".repeat(32),
+            "session_after": "3".repeat(32),
+            "epoch_before": 2,
+            "epoch_after": 3,
+            "root_before": continued_root
+        });
+        let fleet_only_commit = json!({
+            "control_before_owner_loss": {
+                "owner": {"session": "1".repeat(32)},
+                "epoch": 1,
+                "root": first_root
+            }
+        });
+        (owner_loss, second_owner_loss, fleet_only_commit)
+    }
+
+    #[test]
+    fn successive_owner_losses_bind_one_monotonic_history() {
+        let (owner_loss, second_owner_loss, fleet_only_commit) = chained_owner_losses();
+        assert!(validate_owner_chain(&owner_loss, &second_owner_loss, &fleet_only_commit).is_ok());
+
+        let mut spliced = second_owner_loss.clone();
+        spliced["session_before"] = json!("4".repeat(32));
+        assert!(validate_owner_chain(&owner_loss, &spliced, &fleet_only_commit).is_err());
+        let mut regressed = second_owner_loss.clone();
+        regressed["root_before"]["commit_sequence"] = json!(1);
+        assert!(validate_owner_chain(&owner_loss, &regressed, &fleet_only_commit).is_err());
+        let mut digest_mismatch = fleet_only_commit.clone();
+        digest_mismatch["control_before_owner_loss"]["root"]["digest"] = json!("d".repeat(64));
+        assert!(validate_owner_chain(&owner_loss, &second_owner_loss, &digest_mismatch).is_err());
+        let mut checksum_mismatch = fleet_only_commit.clone();
+        checksum_mismatch["control_before_owner_loss"]["root"]["checksum"] = json!(11);
+        assert!(validate_owner_chain(&owner_loss, &second_owner_loss, &checksum_mismatch).is_err());
+    }
 
     #[test]
     fn source_revision_requires_a_lowercase_commit_shape() {

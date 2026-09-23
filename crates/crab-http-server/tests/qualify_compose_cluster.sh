@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 set +x
+trap 'echo "Qualification command failed at line ${LINENO}." >&2' ERR
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 crate_dir="$(cd "${script_dir}/.." && pwd)"
@@ -158,15 +159,18 @@ assert_json_eventually() {
   local filter="$3"
   local message="$4"
   local candidate
+  local last_response=""
   for _ in $(seq 1 45); do
     candidate="$(curl --fail-with-body --silent --show-error --max-time 10 \
       "${origin}/${path}" 2>/dev/null || true)"
+    last_response="${candidate:0:512}"
     if jq --exit-status "$filter" <<<"$candidate" >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
   done
   echo "$message" >&2
+  echo "Last response: ${last_response:-<empty>}" >&2
   return 1
 }
 
