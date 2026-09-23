@@ -150,7 +150,9 @@ async fn prepared_root_reopens_without_a_mutable_head() {
     let rejected_path = expected_dir.path().join("scratch-rejected.sqlite");
     assert!(matches!(
         limited.restore(&rejected_path).await,
-        Err(crab_ltx::CrabError::Limit("scratch disk bytes"))
+        Err(crab_ltx::CrabError::Limit(
+            crab_ltx::LimitKind::ScratchDiskBytes
+        ))
     ));
     assert_eq!(scratch.available_permits(), 64);
     assert_eq!(read_bytes.load(Ordering::SeqCst), 0);
@@ -320,7 +322,9 @@ async fn scheduled_cell_compaction_promotes_fanout_and_preserves_root() {
         limited
             .prepare_scheduled_compaction(&root, scratch.path())
             .await,
-        Err(crab_ltx::CrabError::Limit("scratch disk bytes"))
+        Err(crab_ltx::CrabError::Limit(
+            crab_ltx::LimitKind::ScratchDiskBytes
+        ))
     ));
     assert_eq!(scratch_slots.available_permits(), 64);
     assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);

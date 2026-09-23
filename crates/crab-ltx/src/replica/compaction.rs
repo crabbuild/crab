@@ -152,7 +152,7 @@ async fn spool_selected_bodies(
         let start = total_bytes;
         total_bytes = total_bytes
             .checked_add(descriptor.info.size_bytes)
-            .ok_or(CrabError::Limit("compaction body spool"))?;
+            .ok_or(CrabError::Limit(crate::LimitKind::CompactionBodySpool))?;
         planned.push((descriptor.clone(), start));
     }
 
@@ -190,7 +190,7 @@ async fn spool_selected_bodies(
                     hasher.update(&bytes);
                     let output_offset = output_start
                         .checked_add(source_offset - source_start)
-                        .ok_or(CrabError::Limit("compaction body spool"))?;
+                        .ok_or(CrabError::Limit(crate::LimitKind::CompactionBodySpool))?;
                     file = replica
                         .host
                         .run(move || {
@@ -233,7 +233,7 @@ async fn spool_indexes(
         let start = total_bytes;
         total_bytes = total_bytes
             .checked_add(descriptor.index_length)
-            .ok_or(CrabError::Limit("compaction index spool"))?;
+            .ok_or(CrabError::Limit(crate::LimitKind::CompactionIndexSpool))?;
         planned.push((descriptor.clone(), start));
     }
 
@@ -266,7 +266,7 @@ async fn spool_indexes(
                     hasher.update(&bytes);
                     let output_offset = output_start
                         .checked_add(source_offset)
-                        .ok_or(CrabError::Limit("compaction index spool"))?;
+                        .ok_or(CrabError::Limit(crate::LimitKind::CompactionIndexSpool))?;
                     let returned = replica
                         .host
                         .run(move || {

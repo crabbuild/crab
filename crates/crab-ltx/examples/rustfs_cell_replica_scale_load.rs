@@ -124,10 +124,10 @@ async fn main() -> crab_ltx::Result<()> {
         writer = next_writer;
         written = written
             .checked_add(batch_bytes)
-            .ok_or(CrabError::Limit("Cell scale bytes"))?;
+            .ok_or(CrabError::Limit(crab_ltx::LimitKind::CellScaleBytes))?;
         sequence = sequence
             .checked_add(1)
-            .ok_or(CrabError::Limit("Cell scale sequence"))?;
+            .ok_or(CrabError::Limit(crab_ltx::LimitKind::CellScaleSequence))?;
         if written == target_bytes || (written / CUT_BYTES).is_multiple_of(8) {
             println!("prepared {written} / {target_bytes} bytes");
         }
@@ -231,9 +231,9 @@ fn stream_digest(path: &Path) -> crab_ltx::Result<(u64, [u8; 32])> {
             break;
         }
         hasher.update(&buffer[..read]);
-        length = length
-            .checked_add(read as u64)
-            .ok_or(CrabError::Limit("Cell scale checksum length"))?;
+        length = length.checked_add(read as u64).ok_or(CrabError::Limit(
+            crab_ltx::LimitKind::CellScaleChecksumLength,
+        ))?;
     }
     Ok((length, *hasher.finalize().as_bytes()))
 }

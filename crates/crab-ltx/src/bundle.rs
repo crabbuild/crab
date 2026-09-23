@@ -132,7 +132,7 @@ impl BundleBuilder {
             || entry.repository.len() > 4096
             || !valid_epoch(&entry.epoch)
         {
-            return Err(CrabError::Limit("bundle entries"));
+            return Err(CrabError::Limit(crate::LimitKind::BundleEntries));
         }
         crate::recovery::verify_segment(&entry.bytes, &entry.info, self.limits)?;
         let identity = (
@@ -147,9 +147,9 @@ impl BundleBuilder {
         let next_len = self
             .payload_len
             .checked_add(entry.info.size_bytes)
-            .ok_or(CrabError::Limit("bundle bytes"))?;
+            .ok_or(CrabError::Limit(crate::LimitKind::BundleBytes))?;
         if next_len > self.limits.max_plan_bytes {
-            return Err(CrabError::Limit("bundle bytes"));
+            return Err(CrabError::Limit(crate::LimitKind::BundleBytes));
         }
         let write_result = OpenOptions::new()
             .append(true)
@@ -175,15 +175,15 @@ impl BundleBuilder {
             return Err(CrabError::InvalidState("bundle builder has no valid rows"));
         }
         let footer = serde_json::to_vec(&self.rows)?;
-        let footer_len =
-            u32::try_from(footer.len()).map_err(|_| CrabError::Limit("bundle footer"))?;
+        let footer_len = u32::try_from(footer.len())
+            .map_err(|_| CrabError::Limit(crate::LimitKind::BundleFooter))?;
         let total = self
             .payload_len
             .checked_add(footer.len() as u64)
             .and_then(|length| length.checked_add(8))
-            .ok_or(CrabError::Limit("bundle bytes"))?;
+            .ok_or(CrabError::Limit(crate::LimitKind::BundleBytes))?;
         if total > self.limits.max_plan_bytes {
-            return Err(CrabError::Limit("bundle bytes"));
+            return Err(CrabError::Limit(crate::LimitKind::BundleBytes));
         }
         let mut file = OpenOptions::new().append(true).open(&self.path)?;
         file.write_all(&footer)?;
@@ -199,7 +199,7 @@ impl Bundle {
     pub fn encode(entries: Vec<BundleEntry>, limits: Limits) -> Result<Self> {
         let limits = limits.validate()?;
         if entries.is_empty() || entries.len() > limits.max_segments {
-            return Err(CrabError::Limit("bundle entries"));
+            return Err(CrabError::Limit(crate::LimitKind::BundleEntries));
         }
         let mut bytes = Vec::new();
         let mut rows = Vec::new();
@@ -212,7 +212,7 @@ impl Bundle {
             }
             crate::recovery::verify_segment(&entry.bytes, &entry.info, limits)?;
             if (bytes.len() as u64).saturating_add(entry.info.size_bytes) > limits.max_plan_bytes {
-                return Err(CrabError::Limit("bundle bytes"));
+                return Err(CrabError::Limit(crate::LimitKind::BundleBytes));
             }
             rows.push(BundleRow {
                 repository: entry.repository,
@@ -223,7 +223,8 @@ impl Bundle {
             bytes.extend(entry.bytes);
         }
         let footer = serde_json::to_vec(&rows)?;
-        let len = u32::try_from(footer.len()).map_err(|_| CrabError::Limit("bundle footer"))?;
+        let len = u32::try_from(footer.len())
+            .map_err(|_| CrabError::Limit(crate::LimitKind::BundleFooter))?;
         bytes.extend(footer);
         bytes.extend(len.to_le_bytes());
         bytes.extend(b"CRB1");
@@ -239,7 +240,7 @@ impl Bundle {
     pub fn decode_bytes(bytes: Bytes, limits: Limits) -> Result<Self> {
         let limits = limits.validate()?;
         if bytes.len() as u64 > limits.max_plan_bytes {
-            return Err(CrabError::Limit("bundle bytes"));
+            return Err(CrabError::Limit(crate::LimitKind::BundleBytes));
         }
         let (rows, payload_end) = decode_footer(&bytes, limits)?;
         validate_row_layout(&rows, payload_end, limits)?;
@@ -302,7 +303,7 @@ impl Bundle {
         let length = std::fs::metadata(&source)?.len();
         let limits = limits.validate()?;
         if length > limits.max_plan_bytes {
-            return Err(CrabError::Limit("bundle bytes"));
+            return Err(CrabError::Limit(crate::LimitKind::BundleBytes));
         }
         let digest = hash_file(&source)?;
         if digest != expected {
@@ -481,7 +482,7 @@ fn decode_footer(bytes: &[u8], limits: Limits) -> Result<(Vec<BundleRow>, u64)> 
     let start = trailer.checked_sub(length).ok_or(CrabError::LTXCorrupted)?;
     let rows: Vec<BundleRow> = serde_json::from_slice(&bytes[start..trailer])?;
     if rows.is_empty() || rows.len() > limits.max_segments {
-        return Err(CrabError::Limit("bundle entries"));
+        return Err(CrabError::Limit(crate::LimitKind::BundleEntries));
     }
     Ok((rows, start as u64))
 }
@@ -497,7 +498,7 @@ fn decode_file_rows(path: &Path, limits: Limits) -> Result<(Vec<BundleRow>, u64)
     let mut source = File::open(path)?;
     let length = source.metadata()?.len();
     if length > limits.max_plan_bytes {
-        return Err(CrabError::Limit("bundle bytes"));
+        return Err(CrabError::Limit(crate::LimitKind::BundleBytes));
     }
     let trailer_offset = length.checked_sub(8).ok_or(CrabError::LTXCorrupted)?;
     let mut trailer = [0; 8];
@@ -513,8 +514,8 @@ fn decode_file_rows(path: &Path, limits: Limits) -> Result<(Vec<BundleRow>, u64)
     let footer_start = trailer_offset
         .checked_sub(footer_length)
         .ok_or(CrabError::LTXCorrupted)?;
-    let footer_size =
-        usize::try_from(footer_length).map_err(|_| CrabError::Limit("bundle footer"))?;
+    let footer_size = usize::try_from(footer_length)
+        .map_err(|_| CrabError::Limit(crate::LimitKind::BundleFooter))?;
     let mut footer = vec![0; footer_size];
     read_exact_at(&mut source, footer_start, &mut footer)?;
     let rows: Vec<BundleRow> = serde_json::from_slice(&footer)?;
@@ -544,7 +545,7 @@ fn hash_file(path: &Path) -> Result<[u8; 32]> {
 
 fn validate_row_layout(rows: &[BundleRow], payload_end: u64, limits: Limits) -> Result<()> {
     if rows.is_empty() || rows.len() > limits.max_segments {
-        return Err(CrabError::Limit("bundle entries"));
+        return Err(CrabError::Limit(crate::LimitKind::BundleEntries));
     }
     let mut end = 0u64;
     let mut identities = BTreeSet::new();
