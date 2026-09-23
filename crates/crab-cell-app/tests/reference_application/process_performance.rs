@@ -29,7 +29,7 @@ impl Drop for ChildGuard {
 
 fn shared_store(root: &Path) -> Store {
     Store::new(Arc::new(
-        process_store::FilesystemCasStore::new(root).unwrap(),
+        crab_cell_runtime::test_support::FilesystemCasStore::new(root).unwrap(),
     ))
 }
 

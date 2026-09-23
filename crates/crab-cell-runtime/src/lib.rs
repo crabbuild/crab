@@ -53,6 +53,11 @@ mod scheduler;
 mod schema;
 mod sql;
 mod telemetry;
+// Test-only object-store instrumentation. Integration targets and the
+// `cell_movement_probe` binary enable the feature; in-crate unit tests do not
+// depend on it, so the module never enters a default build.
+#[cfg(feature = "test-support")]
+pub mod test_support;
 mod worker;
 mod workflow;
 

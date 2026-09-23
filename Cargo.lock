@@ -2195,7 +2195,6 @@ dependencies = [
  "crab-ltx",
  "crab-storage",
  "ed25519-dalek",
- "fs4",
  "futures-util",
  "object_store",
  "tempfile",

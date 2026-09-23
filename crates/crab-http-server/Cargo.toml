@@ -63,6 +63,7 @@ zip = { version = "6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+crab-cell-runtime = { workspace = true, features = ["test-support"] }
 crab-ltx = { workspace = true, features = ["replica"] }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }

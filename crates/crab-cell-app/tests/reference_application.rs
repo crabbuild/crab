@@ -35,8 +35,6 @@ mod performance;
 mod performance_fixture;
 #[path = "reference_application/process_performance.rs"]
 mod process_performance;
-#[path = "../../crab-cell-runtime/src/process_store.rs"]
-mod process_store;
 
 const SQL_NAMESPACE: NamespaceId = NamespaceId::from_bytes([1; 16]);
 const KV_NAMESPACE: NamespaceId = NamespaceId::from_bytes([2; 16]);

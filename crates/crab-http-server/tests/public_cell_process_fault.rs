@@ -27,9 +27,6 @@ use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-#[path = "../../crab-cell-runtime/src/process_store.rs"]
-mod process_store;
-
 #[path = "support/reference_application.rs"]
 mod fixture;
 #[path = "support/qualification_process_cron.rs"]
@@ -184,7 +181,7 @@ fn process_case() -> String {
 fn process_store() -> (Store, Path) {
     if env::var(STORE_BACKEND_ENV).ok().as_deref() == Some(FILESYSTEM_STORE_BACKEND) {
         let path = env::var(STORE_PATH_ENV).expect("filesystem fault store path");
-        let store = process_store::FilesystemCasStore::new(FilePath::new(&path))
+        let store = crab_cell_runtime::test_support::FilesystemCasStore::new(FilePath::new(&path))
             .expect("filesystem fault store");
         return (
             Store::new(Arc::new(store)),

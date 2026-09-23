@@ -8,10 +8,6 @@ use std::{
 };
 
 use bytes::Bytes;
-#[cfg(feature = "process-test-support")]
-#[path = "../src/process_store.rs"]
-mod process_store;
-
 use crab_cell_runtime::{
     ACTIVE_CELL_FILE_DESCRIPTORS, AppendRequest, ApplicationId, CatalogEntry, CatalogRole,
     CellAuthority, CellRuntime, CellTarget, ControlState, Digest, DiskBudget, DurabilityGate,
@@ -614,9 +610,9 @@ fn fixture_with_limits_and_store_at_prefix(
     }
 }
 
-#[cfg(feature = "process-test-support")]
+#[cfg(feature = "test-support")]
 fn filesystem_fixture(partition: &[u8], root: &std::path::Path) -> Fixture {
-    let store = process_store::FilesystemCasStore::new(root).unwrap();
+    let store = crab_cell_runtime::test_support::FilesystemCasStore::new(root).unwrap();
     fixture_with_limits_and_store(partition, Limits::default(), Store::new(Arc::new(store)))
 }
 
@@ -2498,7 +2494,7 @@ async fn released_cell_is_acquired_by_one_successor_runtime() {
     first_runtime.shutdown().await.unwrap();
 }
 
-#[cfg(feature = "process-test-support")]
+#[cfg(feature = "test-support")]
 #[tokio::test(flavor = "multi_thread")]
 async fn independent_processes_allow_one_idle_cell_winner() {
     let object_root = tempfile::TempDir::new().unwrap();
@@ -2571,7 +2567,7 @@ async fn independent_processes_allow_one_idle_cell_winner() {
     assert_eq!(final_control.value().ltx_root(), Some(root));
 }
 
-#[cfg(feature = "process-test-support")]
+#[cfg(feature = "test-support")]
 #[tokio::test(flavor = "multi_thread")]
 async fn independent_process_receiver_failure_returns_exact_idle_root() {
     let object_root = tempfile::TempDir::new().unwrap();
@@ -2632,7 +2628,7 @@ async fn independent_process_receiver_failure_returns_exact_idle_root() {
     assert_eq!(current.value().ltx_root(), root);
 }
 
-#[cfg(feature = "process-test-support")]
+#[cfg(feature = "test-support")]
 #[tokio::test(flavor = "multi_thread")]
 async fn crashed_process_is_fenced_before_successor_restore() {
     let object_root = tempfile::TempDir::new().unwrap();
@@ -2727,7 +2723,7 @@ async fn crashed_process_is_fenced_before_successor_restore() {
     runtime.shutdown().await.unwrap();
 }
 
-#[cfg(feature = "process-test-support")]
+#[cfg(feature = "test-support")]
 #[tokio::test(flavor = "multi_thread")]
 async fn lost_release_response_is_reconciled_before_successor_acquire() {
     let object_root = tempfile::TempDir::new().unwrap();
