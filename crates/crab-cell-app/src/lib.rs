@@ -471,7 +471,7 @@ impl<A> ApplicationHandle<A> {
 
     /// Returns the source effect capability for one explicitly selected Cell.
     ///
-    /// Effects are emitted by commands through [`CommandContext::emit_effect`];
+    /// Effects are emitted by commands through [`crab_cell_runtime::registry::CommandContext::emit_effect`];
     /// this capability is for claiming and acknowledging the resulting source
     /// ledger. The destination still owns external idempotency.
     pub fn effects<M: EffectModule>(&self, target: CellTarget) -> Result<EffectSource<M>> {
