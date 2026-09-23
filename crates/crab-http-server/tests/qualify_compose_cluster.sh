@@ -588,6 +588,15 @@ for _ in $(seq 1 60); do
 done
 if ! $log_ready; then
   echo "The owner did not enroll a two-follower durability log." >&2
+  printf '%s\n' "$node_before" >&2
+  for service in server server-b server-c; do
+    log_probe="$("${compose[@]}" exec -T "$service" crab-http-server \
+      --config /etc/crab/server.toml cells node \
+      --session "$(evidence_session "$service")" --json 2>/dev/null || true)"
+    printf '%s: %s\n' "$service" "$(jq --compact-output \
+      '{live, session, node: .advertisement.node, log: .advertisement.log}' \
+      <<<"$log_probe" 2>/dev/null || printf 'unavailable')" >&2
+  done
   exit 1
 fi
 
