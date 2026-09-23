@@ -150,7 +150,7 @@ jobs:
           )
           export CARGO_TARGET_DIR="$RUNNER_TEMP/crab-cell-runtime-protected-target"
           for requirement in "${required_profiles[@]}"; do
-            IFS='|' read -r profile_name matrix_name <<< "$requirement"
+            IFS='|' read -r profile_name _matrix_name <<< "$requirement"
             profile="$protected_dir/$profile_name.json"
             tracked="crates/crab-cell-runtime/qualification/profiles/$profile_name.json"
             test -f "$profile" && test ! -L "$profile"

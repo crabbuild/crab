@@ -1,6 +1,5 @@
 //! Admission, fencing, completion, and reply helpers.
 
-use super::state::*;
 use super::*;
 
 pub(super) fn fail_shutdown(shutdown: &mut Option<ShutdownState>, error: Error) {

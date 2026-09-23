@@ -2323,7 +2323,7 @@ mod tests {
         assert_eq!(descriptor["modules"][0]["name"], "repository");
         assert_eq!(
             descriptor["modules"][0]["code"],
-            "7ab0bff6f8f388b9fc2c1197816ceaf743c88d546cafafac049475786d57091e"
+            "9daa593f43f6bbde8385f16ab92d4fa0c1a48f77ccfb4a165f25b1fb0d493728"
         );
         assert_eq!(descriptor["modules"][0]["schema_min"], 1);
         assert_eq!(descriptor["modules"][0]["schema_max"], 2);
