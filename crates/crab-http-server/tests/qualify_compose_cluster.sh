@@ -97,6 +97,26 @@ freeze_service() {
   "${compose[@]}" kill --signal SIGSTOP "$service" >/dev/null
 }
 
+stop_service() {
+  local service="$1"
+  "${compose[@]}" stop "$service" >/dev/null
+}
+
+node_session() {
+  local service="$1"
+  # The single-quoted script must expand path inside the container, not locally.
+  # shellcheck disable=SC2016
+  "${compose[@]}" exec -T "$service" sh -ec '
+    for path in /var/lib/crab/cells/sessions/*; do
+      if [ -d "$path" ]; then
+        printf "%s\n" "${path##*/}"
+        exit 0
+      fi
+    done
+    exit 1
+  '
+}
+
 resume_service() {
   local service="$1"
   "${compose[@]}" kill --signal SIGCONT "$service" >/dev/null
@@ -356,6 +376,24 @@ fi
 # sidecar lets every node be restarted independently without replacing the
 # boot session of a surviving peer.
 
+# Every node enrolls its own node-log lane at its first tick that sees a
+# complete enough fleet, and the lane keeps that member set for the rest of the
+# session. Start the fleet in the order the failover scenario needs: the two
+# follower roles first, then the owner role (whose lane therefore names exactly
+# those two followers), and the spare last so no lane can elect it. The
+# Compose service ordering already runs B after C is healthy; this staging only
+# keeps D out of the enrollment window.
+for service in server server-b server-c server-d; do
+  stop_service "$service"
+done
+"${compose[@]}" up --detach --no-build server server-c >/dev/null
+wait_for_healthy server
+wait_for_healthy server-c
+"${compose[@]}" up --detach --no-build server-b >/dev/null
+wait_for_healthy server-b
+"${compose[@]}" up --detach --no-build server-d >/dev/null
+wait_for_healthy server-d
+
 capacity_a="$("${compose[@]}" exec -T server crab-http-server \
   --config /etc/crab/server.toml cells capacity --json --live)"
 capacity_b="$("${compose[@]}" exec -T server-b crab-http-server \
@@ -427,21 +465,6 @@ for pair in \
   test "$observed_disk" = "$expected_disk"
   test "$observed_cells" = "$expected_cells"
 done
-
-node_session() {
-  local service="$1"
-  # The single-quoted script must expand path inside the container, not locally.
-  # shellcheck disable=SC2016
-  "${compose[@]}" exec -T "$service" sh -ec '
-    for path in /var/lib/crab/cells/sessions/*; do
-      if [ -d "$path" ]; then
-        printf "%s\n" "${path##*/}"
-        exit 0
-      fi
-    done
-    exit 1
-  '
-}
 
 session_a="$(node_session server)"
 session_b="$(node_session server-b)"
@@ -578,7 +601,7 @@ for _ in $(seq 1 60); do
     --session "$session_before" --json)"
   if jq --exit-status --arg b_node "$b_node_id" \
     '.live == true and .advertisement.log.state == "open" and
-     (.advertisement.log.member_nodes | length) == 2 and
+     (.advertisement.log.member_nodes | length) >= 1 and
      (any(.advertisement.log.member_nodes[]; . == $b_node) | not)' \
     <<<"$node_before" >/dev/null; then
     log_ready=true
@@ -587,7 +610,7 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 if ! $log_ready; then
-  echo "The owner did not enroll a two-follower durability log." >&2
+  echo "The owner did not enroll a follower durability log." >&2
   printf '%s\n' "$node_before" >&2
   for service in server server-b server-c; do
     log_probe="$("${compose[@]}" exec -T "$service" crab-http-server \
@@ -608,15 +631,19 @@ while IFS= read -r member; do
   }
   member_services+=("$service")
 done < <(jq --raw-output '.advertisement.log.member_nodes[]' <<<"$node_before")
-if [ "${#member_services[@]}" -ne 2 ]; then
-  echo "The owner's log did not name exactly two followers." >&2
+if [ "${#member_services[@]}" -lt 1 ] || [ "${#member_services[@]}" -gt 2 ]; then
+  echo "The owner's log did not name one or two followers." >&2
   exit 1
 fi
 # The product elects the surviving original follower by node id, and this
 # scenario expires the other member immediately before killing the owner.
 # Expiring the smaller node id first therefore leaves the larger one as the
-# deterministic successor.
-if [[ "$(jq --raw-output '.advertisement.node' <<<"$(service_node "${member_services[0]}")")" \
+# deterministic successor. A single-member lane leaves nothing to expire: that
+# member is the successor on its own.
+if [ "${#member_services[@]}" -eq 1 ]; then
+  a_service=""
+  c_service="${member_services[0]}"
+elif [[ "$(jq --raw-output '.advertisement.node' <<<"$(service_node "${member_services[0]}")")" \
   < "$(jq --raw-output '.advertisement.node' <<<"$(service_node "${member_services[1]}")")" ]]; then
   a_service="${member_services[0]}"
   c_service="${member_services[1]}"
@@ -624,12 +651,19 @@ else
   a_service="${member_services[1]}"
   c_service="${member_services[0]}"
 fi
-a_origin="$(cluster_origin_for_service "$a_service")"
+a_origin=""
+if [ -n "$a_service" ]; then
+  a_origin="$(cluster_origin_for_service "$a_service")"
+  a_session="$(evidence_session "$a_service")"
+fi
 c_origin="$(cluster_origin_for_service "$c_service")"
 c_endpoint="$(cluster_endpoint_for_service "$c_service")"
-a_session="$(evidence_session "$a_service")"
 
-for origin in "$a_origin" "$c_origin" "$cluster_origin"; do
+read_origins=("$c_origin" "$cluster_origin")
+if [ -n "$a_origin" ]; then
+  read_origins+=("$a_origin")
+fi
+for origin in "${read_origins[@]}"; do
   assert_json_eventually \
     "$origin" \
     "${repository_path}/issues?state=all" \
@@ -654,11 +688,15 @@ jq --exit-status --argjson sequence_before "$sequence_before" \
 node_fleet_only="$("${compose[@]}" exec -T "$c_service" crab-http-server \
   --config /etc/crab/server.toml cells node \
   --session "$session_before" --json)"
-jq --exit-status \
+if ! jq --exit-status \
   '.live == true and .advertisement.log.state == "open" and
    .advertisement.log.active == true and
-   (.advertisement.log.member_nodes | length) == 2' \
-  <<<"$node_fleet_only" >/dev/null
+   (.advertisement.log.member_nodes | length) >= 1' \
+  <<<"$node_fleet_only" >/dev/null; then
+  echo "The owner did not activate its enrolled durability log." >&2
+  printf '%s\n' "$node_fleet_only" >&2
+  exit 1
+fi
 metrics_owner_fleet_only="$("${compose[@]}" exec -T "$b_service" crab-http-server \
   --config /etc/crab/server.toml cells metrics)"
 metrics_follower_fleet_only="$("${compose[@]}" exec -T "$c_service" crab-http-server \
@@ -674,24 +712,29 @@ awk '$1 == "crab_cell_node_log_uncovered_bytes" && $2 + 0 > 0 { found = 1 }
 awk '$1 == "crab_cell_follower_retained_bytes" && $2 + 0 > 0 { found = 1 }
      END { exit !found }' <<<"$metrics_follower_fleet_only"
 
-# Keep node C as the deterministic surviving follower: node A remains in the
-# log, but its signed advertisement must expire before the owner is killed.
-# The dedicated Compose namespace sidecar remains alive while A is frozen.
-freeze_service "$a_service"
-a_advertisement_expired=false
-for _ in $(seq 1 45); do
-  node_a_status="$("${compose[@]}" exec -T "$c_service" crab-http-server \
-    --config /etc/crab/server.toml cells node \
-    --session "$a_session" --json 2>/dev/null || true)"
-  if jq --exit-status '.live == false' <<<"$node_a_status" >/dev/null 2>&1; then
-    a_advertisement_expired=true
-    break
+# Keep the successor as the deterministic surviving follower: every other
+# member stays in the log, but its signed advertisement must expire before the
+# owner is killed. The dedicated Compose namespace sidecar remains alive while
+# the expired member is frozen.
+if [ -n "$a_service" ]; then
+  freeze_service "$a_service"
+fi
+if [ -n "$a_service" ]; then
+  a_advertisement_expired=false
+  for _ in $(seq 1 45); do
+    node_a_status="$("${compose[@]}" exec -T "$c_service" crab-http-server \
+      --config /etc/crab/server.toml cells node \
+      --session "$a_session" --json 2>/dev/null || true)"
+    if jq --exit-status '.live == false' <<<"$node_a_status" >/dev/null 2>&1; then
+      a_advertisement_expired=true
+      break
+    fi
+    sleep 1
+  done
+  if ! $a_advertisement_expired; then
+    echo "The expired member did not leave the live advertisement set." >&2
+    exit 1
   fi
-  sleep 1
-done
-if ! $a_advertisement_expired; then
-  echo "Frozen node A did not leave the live advertisement set." >&2
-  exit 1
 fi
 # Record the signed expiry, not when polling noticed it; recovery may seal
 # before that later observation, and dead-node status hides the advertisement.
@@ -851,9 +894,12 @@ jq --exit-status \
    .root.commit_sequence > $sequence_before' \
   <<<"$control_continued" >/dev/null
 
-resume_service "$a_service"
-# The namespace sidecar stays up while A self-fences; B can therefore rejoin
-# without recreating another node or racing a failed namespace provider.
+if [ -n "$a_service" ]; then
+  resume_service "$a_service"
+fi
+# The namespace sidecar stays up while the expired member self-fences; the
+# killed owner can therefore rejoin without recreating another node or racing a
+# failed namespace provider.
 "${compose[@]}" up --detach --no-build "$b_service" >/dev/null
 wait_for_healthy "$b_service"
 rejoin_ready=false
@@ -973,10 +1019,15 @@ jq --exit-status \
    any(.advertisement.log.member_nodes[]; . != $node_b)' \
   <<<"$node_before_follower_loss" >/dev/null
 
-# Freezing nodes A and D removes their leases and follower endpoints while the
-# dedicated Compose namespace sidecar remains available for node C.
-freeze_service "$a_service"
-freeze_service "$a_service"-d
+# Freezing every node except the owner and the rejoined follower removes their
+# leases and follower endpoints while the dedicated Compose namespace sidecar
+# remains available for the owner. That leaves the owner with one enrollable
+# member, so its lane must replace the expired ones with the rejoined follower.
+for candidate in server server-b server-c server-d; do
+  if [ "$candidate" != "$c_service" ] && [ "$candidate" != "$b_service" ]; then
+    freeze_service "$candidate"
+  fi
+done
 sleep 12
 after_follower_loss="$(post_json_eventually \
   "$c_origin" \
@@ -1221,15 +1272,21 @@ stop_fallback_member() {
 # A stale process fences itself once its lease is renewed after the freeze.
 # Remove the stopped node and its namespace proxy explicitly so the next start
 # models an orchestrator replacement rather than reusing the fenced process.
-for service in proxy "$a_service" "$c_service" server-d; do
+fallback_services=()
+for candidate in server server-b server-c server-d; do
+  if [ "$candidate" != "$b_service" ]; then
+    fallback_services+=("$candidate")
+  fi
+done
+for service in proxy "${fallback_services[@]}"; do
   kill_service "$service" >/dev/null 2>&1 || true
   remove_stopped_service "$service" >/dev/null 2>&1 || true
 done
-"${compose[@]}" up --detach --no-build "$a_service" "$c_service" server-d >/dev/null
+"${compose[@]}" up --detach --no-build "${fallback_services[@]}" >/dev/null
 "${compose[@]}" up --detach --no-build proxy >/dev/null
-wait_for_healthy "$a_service"
-wait_for_healthy "$c_service"
-wait_for_healthy server-d
+for service in "${fallback_services[@]}"; do
+  wait_for_healthy "$service"
+done
 session_server_fallback="$(fallback_session server)"
 session_server_b_fallback="$(fallback_session server-b)"
 session_server_c_fallback="$(fallback_session server-c)"
@@ -1294,12 +1351,6 @@ fallback_candidate_service=""
 fallback_candidate_session=""
 fallback_candidate_node=""
 fallback_candidate_record=""
-fallback_services=()
-for candidate in server server-b server-c server-d; do
-  if [ "$candidate" != "$b_service" ]; then
-    fallback_services+=("$candidate")
-  fi
-done
 
 for candidate in "${fallback_services[@]}"; do
   candidate_json="$(fallback_node_for_service "$candidate")"
