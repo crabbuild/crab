@@ -185,11 +185,12 @@ path. No crate gains or loses a dependency edge.
 
 `crab-ltx` is already module-shaped (`environment`, `bundle`, `replica`,
 `writable_vfs`, `node_frame`, plus root re-exports) and gets no file moves
-beyond stages 3–4. Stage 6 gives it the same treatment as the runtime: a frozen
-root list in `crates/crab-ltx/api-prelude.txt`, explicit `pub mod` ownership for
-the `capture`/`db`/`error`/`types` surfaces that today are re-exported flat, and
-the same checker rule. `pub use rusqlite;` stays: embedders need the exact
-`rusqlite` version this crate compiles against.
+beyond stages 3–4. Stage 6 gives it the same treatment as the runtime:
+`capture`, `db`, `error`, `recovery`, and `types` are public modules, the
+current flat surface is frozen in `crates/crab-ltx/api-prelude.txt`, and the
+layout checker validates it the same way as the runtime prelude.
+`pub use rusqlite;` stays: embedders need the exact `rusqlite` version this
+crate compiles against.
 
 Rules for the tree:
 
