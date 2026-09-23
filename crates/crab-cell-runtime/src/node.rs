@@ -1338,7 +1338,9 @@ impl NodeDirectory {
     ///
     /// Nodes that have not rolled out the placement block are omitted. They
     /// remain usable for ordinary authority routing but cannot become an
-    /// advisory destination through this method.
+    /// advisory destination through this method. This path chooses a new
+    /// owner when no live owner can be preferred, so no candidate receives
+    /// the owner stickiness bonus merely for handling the request.
     pub async fn choose_advertised_placement(
         &self,
         planner: &PlacementPlanner,

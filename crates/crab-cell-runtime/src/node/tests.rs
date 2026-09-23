@@ -325,6 +325,45 @@ async fn cold_placement_does_not_reward_the_requesting_node() {
 }
 
 #[tokio::test]
+async fn idle_placement_prefers_peer_with_more_active_cell_headroom() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let requester = SessionId::from_bytes([1; 16]);
+    let peer = SessionId::from_bytes([2; 16]);
+    for (session, active_cells) in [(requester, 4), (peer, 3)] {
+        let placement = NodePlacementCapacity {
+            memory_capacity_bytes: 1_000,
+            disk_capacity_bytes: 2_000,
+            active_cells,
+            max_active_cells: 10,
+            running_jobs: 0,
+            job_capacity: 3,
+            publication_backlog: 0,
+            hydration_backlog: 0,
+            primitive_backlog: 0,
+        }
+        .validated()
+        .unwrap();
+        let advertisement = advertisement_for(session, &key, 1, NOW_MS)
+            .with_placement_capacity(placement, &key)
+            .unwrap();
+        directory.create(advertisement, NOW_MS).await.unwrap();
+    }
+
+    let chosen = directory
+        .choose_advertised_placement(
+            &PlacementPlanner::default(),
+            crate::CellId::from_bytes([9; 32]),
+            NOW_MS + 1,
+            4,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(chosen.session, peer);
+}
+
+#[tokio::test]
 async fn stable_follower_node_resolves_a_new_session_for_old_log_recovery() {
     let key = SigningKey::from_bytes(&[7; 32]);
     let directory = directory();
