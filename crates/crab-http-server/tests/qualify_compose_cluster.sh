@@ -455,12 +455,14 @@ if ! $d_advertisement_expired; then
 fi
 
 create_response=""
+last_create_response=""
 for _ in $(seq 1 45); do
   candidate="$(curl --fail-with-body --silent --show-error --max-time 10 \
     --request POST \
     --header 'content-type: application/json' \
     --data '{"request_id":"00000000-0000-4000-8000-000000000101","title":"Owner loss qualification","body":"Created through node B"}' \
     "${node_b_origin}/${repository_path}/issues" 2>/dev/null || true)"
+  last_create_response="${candidate:0:512}"
   if jq --exit-status \
     '.number == 1 and .title == "Owner loss qualification"' \
     <<<"$candidate" >/dev/null 2>&1; then
@@ -471,6 +473,7 @@ for _ in $(seq 1 45); do
 done
 if [ -z "$create_response" ]; then
   echo "Node B did not activate and accept the initial idempotent write." >&2
+  echo "Last response: ${last_create_response:-<empty>}" >&2
   exit 1
 fi
 
@@ -480,12 +483,16 @@ session_before="$(jq --raw-output '.owner.session' <<<"$control_before")"
 epoch_before="$(jq --raw-output '.epoch' <<<"$control_before")"
 sequence_before="$(jq --raw-output '.root.commit_sequence' <<<"$control_before")"
 root_before_state="$(jq --compact-output '.root' <<<"$control_before")"
-jq --exit-status \
+if ! jq --exit-status \
   '.state == "serving" and .owner.endpoint == "https://localhost:8889/" and
    .owner_lease.state == "live" and
    .owner_lease.expires_at_ms > .owner_lease.observed_at_ms and
    .recovery == null and
-   .root.commit_sequence >= 1' <<<"$control_before" >/dev/null
+   .root.commit_sequence >= 1' <<<"$control_before" >/dev/null; then
+  echo "Node B did not publish the expected serving owner status after the initial write." >&2
+  printf '%s\n' "$control_before" >&2
+  exit 1
+fi
 
 log_ready=false
 for _ in $(seq 1 45); do
