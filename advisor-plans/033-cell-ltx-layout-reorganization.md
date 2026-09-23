@@ -28,9 +28,9 @@
   stops at the Crab PRs.
 - Status 2026-09-23: implemented as one branch
   (`codex/cell-ltx-layout-reorganization`) on user request instead of two PRs.
-  Stages 1–3, 5, 6a–6c are complete; stage 4 is complete for `node`,
-  `registry`, `crab-cell-host`, and `crab-ltx`'s environment, and remains for
-  `actor.rs` and `qualification.rs`.
+  All stages are complete: the actor, qualification, node, registry,
+  `crab-cell-host`, and `crab-ltx` environment splits are in, the suite layout
+  is enforced, and the runtime root surface is the 59-name prelude.
 
 ## Why this matters
 
@@ -570,5 +570,7 @@ Deviations from the plan text, all deliberate:
   Cron in one scenario.
 - `crab-cell-app` keeps its application-builder tests in `src/` (allow-listed):
   they drive the private registry validation path.
-- Stage 4 still owes `src/cell/actor.rs` and `src/qualification.rs` splits;
-  both compile and are covered by the suites above.
+- The actor and qualification splits landed after the first push:
+  `src/cell/actor.rs` is 1530 lines plus `actor/{state,admission,task}.rs`, and
+  `src/qualification.rs` is 2127 lines plus
+  `qualification/{profile,workload,receipt}.rs`.
