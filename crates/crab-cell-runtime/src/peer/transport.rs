@@ -7,11 +7,16 @@ use std::{
 
 use prost::Message;
 
-use crate::{
-    CellDescription, CellId, CellTarget, Digest, EffectClaim, Error, IncarnationId, MigrationPlan,
-    MutationIdentity, NodeAdvertisement, Receipt, Resolution, Result, StoredOutcome,
-    client::{CellTransport, EncodedCommand, EncodedObservation, EncodedQuery, EncodedResolve},
+use crate::cell::executor::{MutationIdentity, Resolution, StoredOutcome};
+use crate::client::{CellDescription, Receipt};
+use crate::client::{
+    CellTransport, EncodedCommand, EncodedObservation, EncodedQuery, EncodedResolve,
 };
+use crate::identity::{CellId, CellTarget, Digest, IncarnationId};
+use crate::node::NodeAdvertisement;
+use crate::primitives::effects::EffectClaim;
+use crate::registry::MigrationPlan;
+use crate::{Error, Result};
 
 use super::{PeerOperation, PeerPrincipal, PeerSigner, decode_peer_reply, wire};
 
@@ -483,8 +488,11 @@ fn checked_effect_request(
             .ok_or(Error::Peer("effect target is missing"))?,
     )?;
     if target.cell_id() != claim.destination
-        || crate::effect_operation_digest(target.cell_id(), claim.effect_id, &claim.operation)
-            != claim.operation_digest
+        || crate::primitives::effects::effect_operation_digest(
+            target.cell_id(),
+            claim.effect_id,
+            &claim.operation,
+        ) != claim.operation_digest
     {
         return Err(Error::Command("effect claim target or digest changed"));
     }

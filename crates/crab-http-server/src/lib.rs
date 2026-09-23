@@ -107,7 +107,11 @@ pub async fn enter_cell_maintenance(
             let grace_ms = u64::try_from(grace.as_millis())
                 .map_err(|_| Error::Config("Cell retention grace is too large"))?;
             let max_deletes = max_deletes.unwrap_or(10_000);
-            crab_cell_runtime::GarbageCollectionPolicy::new(0, grace_ms, max_deletes)?;
+            crab_cell_runtime::recovery::retention::GarbageCollectionPolicy::new(
+                0,
+                grace_ms,
+                max_deletes,
+            )?;
             Some(cells::RetentionRequest { grace, max_deletes })
         }
         (None, None) => None,

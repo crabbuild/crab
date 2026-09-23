@@ -8,7 +8,9 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use crab_cell_runtime::{Committed, InvocationError, MutationIdentity, Observed, RequestId};
+use crab_cell_runtime::cell::executor::MutationIdentity;
+use crab_cell_runtime::client::{Committed, InvocationError, Observed};
+use crab_cell_runtime::identity::RequestId;
 use crab_remote_git::{OperationKind, Revision, RevisionError};
 use gix_hash::ObjectId;
 use serde::{Deserialize, Serialize};

@@ -2,12 +2,19 @@ use std::{path::Path, sync::Arc};
 
 use crab_cell_app::CompiledApplication;
 use crab_cell_host::CellNodeBuilder;
-use crab_cell_runtime::CellStorageLayout;
-use crab_cell_runtime::{
-    ApplicationIdentity, CatalogEntry, CatalogProof, CatalogRole, CellAuthority, CellCatalog,
-    CellHandle, CellReplica, CellTarget, ControlState, IncarnationId, Owner, Registry,
-    ReleaseState, ReleaseStore, SessionId, SqlWorkerPool,
-};
+use crab_cell_runtime::cell::actor::CellHandle;
+use crab_cell_runtime::cell::application::ApplicationIdentity;
+use crab_cell_runtime::cell::catalog::CatalogRole;
+use crab_cell_runtime::cell::catalog::{CatalogEntry, CatalogProof, CellCatalog};
+use crab_cell_runtime::cell::worker::SqlWorkerPool;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::control::{ControlState, Owner};
+use crab_cell_runtime::identity::IncarnationId;
+use crab_cell_runtime::identity::{CellTarget, SessionId};
+use crab_cell_runtime::ltx::CellReplica;
+use crab_cell_runtime::ltx::CellStorageLayout;
+use crab_cell_runtime::recovery::release::{ReleaseState, ReleaseStore};
+use crab_cell_runtime::registry::Registry;
 use uuid::Uuid;
 
 use super::{REPOSITORY_NAMESPACE, initialize_repository_schema, repository_replica_limits};
@@ -283,7 +290,9 @@ pub(crate) async fn provision_repository(
 mod tests {
     use std::sync::Arc;
 
-    use crab_cell_runtime::{ApplicationId, CellAuthority, CellTarget, ControlState, TenantId};
+    use crab_cell_runtime::control::ControlState;
+    use crab_cell_runtime::control::authority::CellAuthority;
+    use crab_cell_runtime::identity::{ApplicationId, CellTarget, TenantId};
     use crab_storage::Store;
     use object_store::{memory::InMemory, path::Path as ObjectPath};
 

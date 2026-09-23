@@ -5,19 +5,45 @@ use std::{
 };
 
 use crab_cell_app::{ApplicationBuilder, CellApplication, CellType};
-use crab_cell_runtime::{
-    ActivityContext, ActivityExecution, ActivityHandler, ApplicationId, BlobModule, BoundedEncoder,
-    BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellHandle, CellModule, CellRuntime,
-    CellStorageLayout, CellTarget, Command, CommandContext, CommandResult, CronInvocation,
-    CronModule, CronTarget, Digest, EffectModule, IncarnationId, KvModule, MaintenanceModule,
-    ModuleDescriptor, NamespaceDescriptor, NamespaceId, OperationDescriptor, Owner,
-    QueueDeadLetterTarget, QueueModule, Registry, RegistryBuilder, Result, SqlBatch, SqlModule,
-    SqlResultSet, SqlStatement, SqlValue, TenantId, WireValue, WorkflowAction,
-    WorkflowActivityModule, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowModule,
-    WorkflowStatus, partition_for_shard, register_activity, register_blob, register_cron,
-    register_effect_delivery, register_kv, register_maintenance, register_queue, register_sql,
-    register_workflow, register_workflow_activities,
+use crab_cell_runtime::Result;
+use crab_cell_runtime::cell::actor::CellHandle;
+use crab_cell_runtime::cell::actor::CellRuntime;
+use crab_cell_runtime::cell::catalog::CatalogEntry;
+use crab_cell_runtime::cell::catalog::CatalogRole;
+use crab_cell_runtime::codec::{BoundedEncoder, WireValue};
+use crab_cell_runtime::control::Owner;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::identity::IncarnationId;
+use crab_cell_runtime::identity::{
+    ApplicationId, CellTarget, Digest, NamespaceId, TenantId, partition_for_shard,
 };
+use crab_cell_runtime::ltx::CellStorageLayout;
+use crab_cell_runtime::primitives::blob::BlobModule;
+use crab_cell_runtime::primitives::blob::register_blob;
+use crab_cell_runtime::primitives::cron::CronModule;
+use crab_cell_runtime::primitives::cron::{CronInvocation, CronTarget, register_cron};
+use crab_cell_runtime::primitives::effects::EffectModule;
+use crab_cell_runtime::primitives::effects::register_effect_delivery;
+use crab_cell_runtime::primitives::kv::KvModule;
+use crab_cell_runtime::primitives::kv::register_kv;
+use crab_cell_runtime::primitives::maintenance::{MaintenanceModule, register_maintenance};
+use crab_cell_runtime::primitives::queue::QueueModule;
+use crab_cell_runtime::primitives::queue::{QueueDeadLetterTarget, register_queue};
+use crab_cell_runtime::primitives::sql::SqlModule;
+use crab_cell_runtime::primitives::sql::{
+    SqlBatch, SqlResultSet, SqlStatement, SqlValue, register_sql,
+};
+use crab_cell_runtime::primitives::workflow::{
+    ActivityContext, ActivityExecution, ActivityHandler, WorkflowAction, WorkflowContext,
+    WorkflowDecision, WorkflowDefinition, WorkflowStatus, register_activity, register_workflow,
+    register_workflow_activities,
+};
+use crab_cell_runtime::primitives::workflow::{WorkflowActivityModule, WorkflowModule};
+use crab_cell_runtime::registry::{
+    BuildDescriptor, CellModule, Command, ModuleDescriptor, NamespaceDescriptor, Registry,
+    RegistryBuilder,
+};
+use crab_cell_runtime::registry::{CommandContext, CommandResult, OperationDescriptor};
 use crab_ltx::{CellReplica, DiskBudget, Host, Limits};
 
 pub const SQL_NAMESPACE: NamespaceId = NamespaceId::from_bytes([1; 16]);
@@ -48,16 +74,19 @@ fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-fn migration() -> &'static [crab_cell_runtime::MigrationDescriptor] {
-    static MIGRATION: OnceLock<&'static [crab_cell_runtime::MigrationDescriptor]> = OnceLock::new();
+fn migration() -> &'static [crab_cell_runtime::registry::MigrationDescriptor] {
+    static MIGRATION: OnceLock<&'static [crab_cell_runtime::registry::MigrationDescriptor]> =
+        OnceLock::new();
     MIGRATION.get_or_init(|| {
-        Box::leak(Box::new([crab_cell_runtime::MigrationDescriptor {
-            version: 1,
-            sql: "-- reference application migration v1",
-            digest: Digest::from_bytes(
-                *blake3::hash(b"-- reference application migration v1").as_bytes(),
-            ),
-        }]))
+        Box::leak(Box::new([
+            crab_cell_runtime::registry::MigrationDescriptor {
+                version: 1,
+                sql: "-- reference application migration v1",
+                digest: Digest::from_bytes(
+                    *blake3::hash(b"-- reference application migration v1").as_bytes(),
+                ),
+            },
+        ]))
     })
 }
 
@@ -425,7 +454,7 @@ impl WorkflowDefinition for ReferenceDefinition {
                 state: b"effect-valid-published".to_vec(),
                 result: Some(b"effect-valid-scheduled".to_vec()),
                 actions: vec![WorkflowAction::Effect {
-                    intent: crab_cell_runtime::EffectCommandIntent {
+                    intent: crab_cell_runtime::primitives::effects::EffectCommandIntent {
                         target: CellTarget::new(
                             context.source().tenant(),
                             context.source().application(),
@@ -446,7 +475,7 @@ impl WorkflowDefinition for ReferenceDefinition {
                 state: b"effect-published".to_vec(),
                 result: Some(b"effect-scheduled".to_vec()),
                 actions: vec![WorkflowAction::Effect {
-                    intent: crab_cell_runtime::EffectCommandIntent {
+                    intent: crab_cell_runtime::primitives::effects::EffectCommandIntent {
                         target: CellTarget::new(
                             context.source().tenant(),
                             context.source().application(),
@@ -619,7 +648,7 @@ where
         + 'static,
 {
     let target = CellTarget::new(tenant, application, namespace, &partition_for_shard(0))?;
-    let catalog = crab_cell_runtime::CellCatalog::new(layout.clone(), tenant);
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(layout.clone(), tenant);
     let proof = catalog
         .provision(CatalogEntry::new(
             &target,

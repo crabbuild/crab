@@ -1,6 +1,8 @@
-use crab_cell_runtime::{
-    CellStorageLayout, Digest, FencedNodeSession, NodeAdvertisement, NodeCapacity, NodeDirectory,
-    NodeFailureDomain, NodeId, SessionId,
+use crab_cell_runtime::identity::NodeId;
+use crab_cell_runtime::identity::{Digest, SessionId};
+use crab_cell_runtime::ltx::CellStorageLayout;
+use crab_cell_runtime::node::{
+    FencedNodeSession, NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain,
 };
 use ed25519_dalek::SigningKey;
 

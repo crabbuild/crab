@@ -1,5 +1,5 @@
 use super::performance_fixture::now_ms;
-use super::*;
+use crate::*;
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
@@ -7,9 +7,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crab_cell_runtime::{
-    CellId, MAX_PEER_REQUEST_BYTES, PeerAuthorizer, PeerCellResolver, PeerDispatcher,
-    PeerRoundTrip, PeerVerifier, VerifiedPeerRequest,
+use crab_cell_runtime::identity::CellId;
+use crab_cell_runtime::peer::{
+    MAX_PEER_REQUEST_BYTES, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerRoundTrip,
+    PeerVerifier, VerifiedPeerRequest,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};

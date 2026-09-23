@@ -2,9 +2,14 @@ use std::time::Duration;
 
 use axum::http::{StatusCode, header};
 use bytes::Bytes;
-use crab_cell_runtime::{
-    AppendRequest, Error as CellError, FollowerReceipt, FollowerStore, NodeDirectory, NodeId,
-    NodeLogTransport, RetireRequest, SealRequest, SessionId, TailRequest,
+use crab_cell_runtime::Error as CellError;
+use crab_cell_runtime::follower::FollowerReceipt;
+use crab_cell_runtime::follower::FollowerStore;
+use crab_cell_runtime::identity::NodeId;
+use crab_cell_runtime::identity::SessionId;
+use crab_cell_runtime::node::NodeDirectory;
+use crab_cell_runtime::node::log_transport::{
+    AppendRequest, NodeLogTransport, RetireRequest, SealRequest, TailRequest,
 };
 use futures_util::{StreamExt, future::BoxFuture};
 use serde::Deserialize;
@@ -248,7 +253,7 @@ impl NodeLogHttpTransport {
         &self,
         member: NodeId,
         request: TailRequest,
-    ) -> crab_cell_runtime::Result<crab_cell_runtime::FollowerTailPage> {
+    ) -> crab_cell_runtime::Result<crab_cell_runtime::follower::FollowerTailPage> {
         if let Some(store) = self.local_store(member) {
             let now_ms = now_ms().map_err(transport_error)?;
             self.directory
@@ -285,7 +290,7 @@ impl NodeLogHttpTransport {
             .await
             .map_err(transport_unknown)?;
         let page = decode_tail_page(response).await?;
-        Ok(crab_cell_runtime::FollowerTailPage {
+        Ok(crab_cell_runtime::follower::FollowerTailPage {
             next_sequence: page.next_sequence,
             frames: page.frames,
         })
@@ -329,7 +334,8 @@ impl NodeLogTransport for NodeLogHttpTransport {
         &'a self,
         member: NodeId,
         request: TailRequest,
-    ) -> BoxFuture<'a, crab_cell_runtime::Result<crab_cell_runtime::FollowerTailPage>> {
+    ) -> BoxFuture<'a, crab_cell_runtime::Result<crab_cell_runtime::follower::FollowerTailPage>>
+    {
         Box::pin(self.tail_page_inner(member, request))
     }
 }
@@ -528,7 +534,7 @@ mod tests {
         .unwrap();
         assert_eq!(u64::from_le_bytes(append[..8].try_into().unwrap()), 7);
 
-        let page = super::super::encode_tail_page(crab_cell_runtime::FollowerTailPage {
+        let page = super::super::encode_tail_page(crab_cell_runtime::follower::FollowerTailPage {
             frames: vec![Bytes::from_static(b"one"), Bytes::from_static(b"two")],
             next_sequence: Some(9),
         })

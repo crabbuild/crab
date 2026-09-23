@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) async fn verify(
     typed: &crab_cell_app::ApplicationHandle<fixture::ReferenceApplication>,
-    peer_effect: &crab_cell_runtime::EffectPeerClient,
+    peer_effect: &crab_cell_runtime::peer::EffectPeerClient,
     sql: &crab_cell_runtime::SqlCell<fixture::ReferenceSql>,
     cron: &crab_cell_runtime::CronNamespace<fixture::ReferenceCron>,
     tenant: TenantId,

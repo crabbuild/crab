@@ -1,7 +1,7 @@
 use super::fleet::{GatewayStats, start_balancer, start_gateway_peer_server, start_peer_server};
 use super::performance::run_reference_primitive_performance;
 use super::performance_fixture::{PerfFixture, node_session, owner_routes, perf_cells};
-use super::*;
+use crate::*;
 use std::{
     env,
     net::SocketAddr,
@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use crab_cell_runtime::{PeerSigner, PeerVerifier};
+use crab_cell_runtime::peer::{PeerSigner, PeerVerifier};
 use tokio::net::TcpListener;
 
 const ROLE_ENV: &str = "CRAB_CELL_PERF_PROCESS_NODE";
@@ -29,7 +29,7 @@ impl Drop for ChildGuard {
 
 fn shared_store(root: &Path) -> Store {
     Store::new(Arc::new(
-        process_store::FilesystemCasStore::new(root).unwrap(),
+        crab_cell_runtime::test_support::FilesystemCasStore::new(root).unwrap(),
     ))
 }
 

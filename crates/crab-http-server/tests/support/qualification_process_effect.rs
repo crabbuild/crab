@@ -3,7 +3,7 @@ use super::*;
 pub(super) async fn verify(
     typed: &crab_cell_app::ApplicationHandle<fixture::ReferenceApplication>,
     direct: &CellClient,
-    peer_effect: &crab_cell_runtime::EffectPeerClient,
+    peer_effect: &crab_cell_runtime::peer::EffectPeerClient,
     sql: &crab_cell_runtime::SqlCell<fixture::ReferenceSql>,
     workflow: &crab_cell_runtime::WorkflowNamespace<fixture::ReferenceWorkflow>,
     tenant: TenantId,

@@ -1,0 +1,82 @@
+# crab-cell-runtime
+
+Root `AGENTS.md`, `crates/AGENTS.md`, and `docs/README.md` apply.
+
+## Purpose and ownership
+
+Embedded SQLite Cell runtime: identities, control/CAS authority, the single-Cell
+actor and executor, schema installation, publication, follower durability,
+fleet placement, and qualification receipts. HTTP, authentication, provider
+construction, and product policy stay in `crab-http-server`.
+
+## Read first
+
+1. `src/lib.rs` — module declarations and the frozen root prelude.
+2. `src/cell/actor.rs` — admission, lifecycle, and the actor loop.
+3. `src/cell/executor.rs` and `src/cell/worker.rs` — command execution and the
+   bounded SQL worker pool.
+4. `src/publication.rs` and `src/recovery/manifest.rs` — exact-root publication
+   and recovery artifacts.
+5. `src/coordination.rs` — the pure `pub(crate)` coordination kernel.
+6. `docs/runtime.md` and `docs/delivery.md` — request path and evidence map.
+
+## Common changes
+
+| Task | Start here | Also inspect |
+| --- | --- | --- |
+| Add a primitive operation | `src/primitives/<name>.rs` | `src/registry/schemas.rs`, `tests/primitives/` |
+| Change admission or lifecycle | `src/cell/actor.rs` | `src/coordination.rs`, `tests/runtime/lifecycle.rs` |
+| Change publication | `src/publication.rs` | `src/recovery/`, `tests/runtime/publication.rs` |
+| Change node log or durability | `src/node/` | `src/follower.rs`, `tests/fleet/` |
+| Change placement or pressure | `src/fleet/` | `tests/fleet/`, `docs/canonical-ltx-scaling.md` |
+
+## Layout and tests
+
+- `src/` is production code. Integration tests live in `tests/` as one binary
+  per suite: `runtime`, `primitives`, `protocol`, `contracts`, `fleet`,
+  `qualification`. Suite modules live in the matching directory.
+- `tests/support/` holds the shared harness; suites declare `mod support;` and
+  refer to `crate::support::…`. Never add a `#[path]` attribute.
+- Tests that assert crate-private behavior stay in their module and are listed
+  in `tests-allow-list.txt` with a reason. New in-src tests must be added there;
+  prefer moving the behavior behind the public API when that is honest.
+- `api-prelude.txt` is the frozen root surface. Adding a root re-export means
+  editing both `src/lib.rs` and that file in the same commit.
+- Run `python3 crab/scripts/check-cell-ltx-layout.py` after layout changes.
+
+## Invariants
+
+- One fenced writer per Cell; a successful response follows durable publication
+  or a durable follower proof (`src/cell/actor.rs`, `src/publication.rs`).
+- Recovery verifies the authority-pinned root and every referenced object
+  (`src/recovery/manifest.rs`).
+- Staged xorbs flush before any bundle publication.
+- Every acquired lock is released on success, error, cancellation, and timeout.
+- `src/coordination.rs` stays sans-I/O: no `async`, no clock, no storage.
+
+## Features and platform
+
+- `test-support` enables `src/test_support.rs` and the `cell_movement_probe`
+  binary. Integration suites that need the process fixture run with
+  `--features test-support`.
+- `crab-ltx` is always consumed with its `replica` feature from this crate.
+
+## Verification
+
+```sh
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/<checkout> \
+  cargo test -p crab-cell-runtime --features test-support --locked
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/<checkout> \
+  cargo clippy -p crab-cell-runtime --all-targets --features test-support --locked -- -D warnings
+python3 crab/scripts/check-cell-ltx-layout.py
+```
+
+Use a target directory unique to the checkout; never share it between
+worktrees. Protected qualification receipts come from the workflows under
+`.github/workflows/cell-runtime-*.yml`, not from local runs.
+
+## Related documentation
+
+`docs/README.md`, `docs/runtime.md`, `docs/delivery.md`,
+`docs/canonical-ltx-scaling.md`, `qualification/README.md`, and
+`../../advisor-plans/033-cell-ltx-layout-reorganization.md`.

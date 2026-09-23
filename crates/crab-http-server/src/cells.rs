@@ -7,18 +7,39 @@ use std::{
 
 use crab_cell_app::{ApplicationBuilder, CellApplication, CellType, CompiledApplication};
 use crab_cell_host::CellNodeBuilder;
-use crab_cell_runtime::CellStorageLayout;
-use crab_cell_runtime::{
-    ApplicationId, ApplicationIdentity, ApplicationIdentityStore, BackupPin, BackupPinStore,
-    BackupRestore, BuildDescriptor, CatalogRole, CellAuthority, CellCatalog, CellGarbageCollector,
-    CellId, CellModule, CellRuntime, CellTarget, Control, ControlState, Digest, EffectModule,
-    GarbageCollectionPolicy, MaintenanceModule, MigrationDescriptor, MigrationFailure,
-    MigrationProgressState, MigrationProgressStore, ModuleDescriptor, NamespaceDescriptor,
-    NamespaceId, NodeAdvertisement, NodeCapacity, NodeDirectory, NodeLogPhase, OperationDescriptor,
-    Owner, PeerRoundTrip, PeerSigner, PinnedCatalogShard, Registry, RegistryBuilder, ReleaseRecord,
-    ReleaseState, ReleaseStore, ReplicaHost, ReplicaLimits, RequestId, SessionId, SqlWorkerPool,
-    TenantId, VersionedNodeAdvertisement, register_effect_delivery, register_maintenance,
+use crab_cell_runtime::cell::actor::CellRuntime;
+use crab_cell_runtime::cell::application::{ApplicationIdentity, ApplicationIdentityStore};
+use crab_cell_runtime::cell::catalog::CatalogRole;
+use crab_cell_runtime::cell::catalog::CellCatalog;
+use crab_cell_runtime::cell::worker::SqlWorkerPool;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::control::{Control, ControlState, Owner};
+use crab_cell_runtime::identity::RequestId;
+use crab_cell_runtime::identity::{
+    ApplicationId, CellId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
 };
+use crab_cell_runtime::ltx::CellStorageLayout;
+use crab_cell_runtime::ltx::{Host as ReplicaHost, Limits as ReplicaLimits};
+use crab_cell_runtime::node::log_state::NodeLogPhase;
+use crab_cell_runtime::node::{
+    NodeAdvertisement, NodeCapacity, NodeDirectory, VersionedNodeAdvertisement,
+};
+use crab_cell_runtime::peer::{PeerRoundTrip, PeerSigner};
+use crab_cell_runtime::primitives::effects::EffectModule;
+use crab_cell_runtime::primitives::effects::register_effect_delivery;
+use crab_cell_runtime::primitives::maintenance::{MaintenanceModule, register_maintenance};
+use crab_cell_runtime::recovery::backup::{
+    BackupPin, BackupPinStore, BackupRestore, PinnedCatalogShard,
+};
+use crab_cell_runtime::recovery::release::{ReleaseRecord, ReleaseState, ReleaseStore};
+use crab_cell_runtime::recovery::release_progress::{
+    MigrationFailure, MigrationProgressState, MigrationProgressStore,
+};
+use crab_cell_runtime::recovery::retention::{CellGarbageCollector, GarbageCollectionPolicy};
+use crab_cell_runtime::registry::{
+    BuildDescriptor, CellModule, ModuleDescriptor, NamespaceDescriptor, Registry, RegistryBuilder,
+};
+use crab_cell_runtime::registry::{MigrationDescriptor, OperationDescriptor};
 use ed25519_dalek::SigningKey;
 use object_store::path::Path;
 use serde::Serialize;
@@ -32,7 +53,7 @@ pub(crate) mod repository;
 mod router;
 mod scheduler;
 
-pub(crate) use crab_cell_runtime::RecoveryArtifactRegistry;
+pub(crate) use crab_cell_runtime::recovery::artifacts::RecoveryArtifactRegistry;
 #[cfg(test)]
 pub(crate) use initializer::initialize_repository_at;
 #[cfg(test)]
@@ -320,7 +341,8 @@ pub(crate) async fn prepare_release(
             if observed.record().revision() == expected_revision.saturating_add(1)
                 && observed.record().desired() == Some(registry.release_digest())
                 && observed.record().desired_image() == image
-                && observed.record().state() == crab_cell_runtime::ReleaseState::Prepared =>
+                && observed.record().state()
+                    == crab_cell_runtime::recovery::release::ReleaseState::Prepared =>
         {
             observed.record().operation()
         }
@@ -1813,7 +1835,7 @@ impl OfflineAdvertisement {
 
     fn advertisement(&self, now_ms: i64) -> Result<NodeAdvertisement> {
         NodeAdvertisement::sign(
-            crab_cell_runtime::NodeId::from_bytes(*self.session.as_bytes()),
+            crab_cell_runtime::identity::NodeId::from_bytes(*self.session.as_bytes()),
             self.session,
             self.endpoint.clone(),
             self.fleet,
@@ -1826,7 +1848,7 @@ impl OfflineAdvertisement {
             now_ms.saturating_add(OFFLINE_ADVERTISEMENT_LIFETIME_MS),
             self.module_digests.clone(),
             vec![1],
-            crab_cell_runtime::NodeFailureDomain::default(),
+            crab_cell_runtime::node::NodeFailureDomain::default(),
             NodeCapacity {
                 free_memory_bytes: 0,
                 free_disk_bytes: 0,
@@ -1860,7 +1882,7 @@ impl PeerRoundTrip for OfflinePeerRoundTrip {
 
 async fn verify_rolling_predecessor(
     releases: &ReleaseStore,
-    release: &crab_cell_runtime::ReleaseRecord,
+    release: &crab_cell_runtime::recovery::release::ReleaseRecord,
     registry: &Registry,
 ) -> Result<()> {
     let Some(current) = release.current() else {
@@ -2115,14 +2137,25 @@ mod tests {
     };
 
     use bytes::Bytes;
-    use crab_cell_runtime::CellStorageLayout;
-    use crab_cell_runtime::{
-        ApplicationIdentity, BuildDescriptor, CatalogEntry, CellAuthority, CellClient, CellModule,
-        CellReplica, CellRuntime, CellTarget, IncarnationId, InvocationError, MigrationDescriptor,
-        ModuleDescriptor, MutationIdentity, NamespaceDescriptor, NodeAdvertisement, NodeCapacity,
-        Owner, PeerCellResolver, RegistryBuilder, ReplicaHost, ReplicaLimits,
-        RetainedCodeDescriptor, SessionId, SqlWorkerPool,
+    use crab_cell_runtime::cell::actor::CellRuntime;
+    use crab_cell_runtime::cell::application::ApplicationIdentity;
+    use crab_cell_runtime::cell::catalog::CatalogEntry;
+    use crab_cell_runtime::cell::executor::MutationIdentity;
+    use crab_cell_runtime::cell::worker::SqlWorkerPool;
+    use crab_cell_runtime::client::{CellClient, InvocationError};
+    use crab_cell_runtime::control::Owner;
+    use crab_cell_runtime::control::authority::CellAuthority;
+    use crab_cell_runtime::identity::IncarnationId;
+    use crab_cell_runtime::identity::{CellTarget, SessionId};
+    use crab_cell_runtime::ltx::CellReplica;
+    use crab_cell_runtime::ltx::CellStorageLayout;
+    use crab_cell_runtime::ltx::{Host as ReplicaHost, Limits as ReplicaLimits};
+    use crab_cell_runtime::node::{NodeAdvertisement, NodeCapacity};
+    use crab_cell_runtime::peer::PeerCellResolver;
+    use crab_cell_runtime::registry::{
+        BuildDescriptor, CellModule, ModuleDescriptor, NamespaceDescriptor, RegistryBuilder,
     };
+    use crab_cell_runtime::registry::{MigrationDescriptor, RetainedCodeDescriptor};
     use crab_storage::{StorageError, Store};
     use ed25519_dalek::SigningKey;
     use object_store::memory::InMemory;
@@ -2348,7 +2381,7 @@ mod tests {
         directory
             .create(
                 NodeAdvertisement::sign(
-                    crab_cell_runtime::NodeId::from_bytes([13; 16]),
+                    crab_cell_runtime::identity::NodeId::from_bytes([13; 16]),
                     SessionId::from_bytes([13; 16]),
                     "https://node-1.internal:8081".into(),
                     fleet,
@@ -2361,7 +2394,7 @@ mod tests {
                     now_ms + 10_000,
                     registry.module_digests(),
                     vec![1],
-                    crab_cell_runtime::NodeFailureDomain::default(),
+                    crab_cell_runtime::node::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
@@ -2383,7 +2416,7 @@ mod tests {
         directory
             .create(
                 NodeAdvertisement::sign(
-                    crab_cell_runtime::NodeId::from_bytes([15; 16]),
+                    crab_cell_runtime::identity::NodeId::from_bytes([15; 16]),
                     SessionId::from_bytes([15; 16]),
                     "https://node-2.internal:8081".into(),
                     fleet,
@@ -2396,7 +2429,7 @@ mod tests {
                     now_ms + 10_000,
                     registry.module_digests(),
                     vec![1],
-                    crab_cell_runtime::NodeFailureDomain::default(),
+                    crab_cell_runtime::node::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
@@ -2444,7 +2477,7 @@ mod tests {
         foreign_directory
             .create(
                 NodeAdvertisement::sign(
-                    crab_cell_runtime::NodeId::from_bytes([17; 16]),
+                    crab_cell_runtime::identity::NodeId::from_bytes([17; 16]),
                     SessionId::from_bytes([17; 16]),
                     "https://foreign-node.internal:8081".into(),
                     fleet,
@@ -2457,7 +2490,7 @@ mod tests {
                     now_ms + 10_000,
                     vec![Digest::from_bytes([19; 32])],
                     vec![1],
-                    crab_cell_runtime::NodeFailureDomain::default(),
+                    crab_cell_runtime::node::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
@@ -2509,7 +2542,7 @@ mod tests {
         let session = directory
             .create(
                 NodeAdvertisement::sign(
-                    crab_cell_runtime::NodeId::from_bytes([55; 16]),
+                    crab_cell_runtime::identity::NodeId::from_bytes([55; 16]),
                     SessionId::from_bytes([55; 16]),
                     "https://node.internal:8789".into(),
                     fleet,
@@ -2522,7 +2555,7 @@ mod tests {
                     now_ms - 10_000,
                     registry.module_digests(),
                     vec![1],
-                    crab_cell_runtime::NodeFailureDomain::default(),
+                    crab_cell_runtime::node::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
@@ -3142,7 +3175,7 @@ mod tests {
         MigrationProgressStore::new(layout.clone(), identity)
             .unwrap()
             .failed(
-                crab_cell_runtime::MigrationProgressAttempt::new(
+                crab_cell_runtime::recovery::release_progress::MigrationProgressAttempt::new(
                     operation,
                     registry.release_digest(),
                     SessionId::from_bytes([44; 16]),
@@ -3333,7 +3366,7 @@ mod tests {
             .transition(
                 &initial,
                 published.clone(),
-                crab_cell_runtime::Transition::Publish,
+                crab_cell_runtime::control::Transition::Publish,
             )
             .await
             .unwrap();
@@ -3607,7 +3640,7 @@ mod tests {
             ReplicaLimits::default(),
         )
         .unwrap();
-        let catalog = crab_cell_runtime::CellCatalog::new(layout.clone(), tenant);
+        let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(layout.clone(), tenant);
         let proof = catalog
             .provision(
                 CatalogEntry::new(

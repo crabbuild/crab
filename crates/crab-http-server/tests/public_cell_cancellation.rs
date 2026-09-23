@@ -1,10 +1,18 @@
 use std::sync::atomic::Ordering;
 
-use crab_cell_runtime::{
-    CellTarget, CronCommand, CronMutation, CronMutationOutcome, CronQueryResult, KvAtomicCommand,
-    KvAtomicOutcome, KvAtomicRequest, KvMutation, Resolution, SqlBatch, SqlBatchCommand,
-    SqlResultSet, SqlStatement, SqlValue, WorkflowOutcome, WorkflowStart, WorkflowStartCommand,
-    WorkflowStatus, partition_for_shard,
+use crab_cell_runtime::cell::executor::Resolution;
+use crab_cell_runtime::identity::{CellTarget, partition_for_shard};
+use crab_cell_runtime::primitives::cron::{
+    CronCommand, CronMutation, CronMutationOutcome, CronQueryResult,
+};
+use crab_cell_runtime::primitives::kv::{
+    KvAtomicCommand, KvAtomicOutcome, KvAtomicRequest, KvMutation,
+};
+use crab_cell_runtime::primitives::sql::{
+    SqlBatch, SqlBatchCommand, SqlResultSet, SqlStatement, SqlValue,
+};
+use crab_cell_runtime::primitives::workflow::{
+    WorkflowOutcome, WorkflowStart, WorkflowStartCommand, WorkflowStatus,
 };
 
 #[path = "support/reference_application.rs"]

@@ -16,22 +16,22 @@ Each layer has one owner and one primary evidence surface.
 
 | Boundary | Primary source | Evidence |
 | --- | --- | --- |
-| Identity and Cell derivation | `src/identity.rs` | `tests/catalog.rs`, identity unit tests |
-| Control CAS and transitions | `src/authority.rs`, `src/control.rs` | authority and actor tests |
-| SQLite command ledger | `src/executor.rs`, `src/schema.rs` | `tests/actor.rs`, `tests/migration.rs` |
-| Fixed SQL workers | `src/worker.rs` | `tests/workers.rs` |
-| Publication and exact-root recovery | `src/publication.rs`, `crab-ltx` | `tests/publication.rs`, `crab-ltx/tests/cell_roots.rs` |
-| Catalog | `src/catalog.rs` | `tests/catalog.rs` |
-| Registry and codecs | `src/registry.rs`, `src/codec.rs` | `tests/registry.rs`, `tests/codec.rs` |
-| Typed client and peer dispatch | `src/client.rs`, `src/peer.rs` | `tests/client.rs`, peer unit tests |
-| SQL, KV, Blob, Queue, Cron, Workflow | `src/sql.rs`, `src/kv.rs`, `src/blob.rs`, `src/queue.rs`, `src/cron.rs`, `src/workflow.rs` | matching integration tests |
-| Effects and activities | `src/effects.rs`, `src/activity_pool.rs` | `tests/effects.rs`, workflow tests |
-| Scheduler | `src/scheduler.rs`, `src/maintenance.rs` | `tests/scheduler.rs` |
-| Release control | `src/release.rs`, `src/release_progress.rs` | release unit tests and server command tests |
-| Backup pins | `src/backup.rs`, `crab-ltx::CellReplica::reachable_objects` | runtime pin tests and server create/verify command tests |
-| Immutable retention | `src/retention.rs`, `crab-storage::Store::list_stream` | mark/sweep tests and server maintenance-fence tests |
-| Follower mechanics | `src/follower.rs`, `src/node_log.rs`, `src/node_log_recovery.rs` | verified-frame, object-covered queued-prefix, lost-ACK suffix, torn-tail, dual-proof, and seal/gather tests |
-| State-observing streams | `src/client.rs`; `crab-http-server/src/state_stream.rs` | `tests/client.rs`; `CellStateStream` enforces per-output receipts, cancellation, deadlines, and fencing; `state_observing_body` adapts it to one-at-a-time HTTP chunks without a second queue |
+| Identity and Cell derivation | `src/identity.rs` | `tests/contracts/identity.rs`, `tests/runtime/catalog.rs` |
+| Control CAS and transitions | `src/control.rs`, `src/control/authority.rs` | authority and actor tests |
+| SQLite command ledger | `src/cell/executor.rs`, `src/cell/schema.rs` | `tests/runtime/lifecycle.rs`, `tests/runtime/migration.rs` |
+| Fixed SQL workers | `src/cell/worker.rs` | `tests/runtime/workers.rs` |
+| Publication and exact-root recovery | `src/publication.rs`, `crab-ltx` | `tests/runtime/publication.rs`, `crab-ltx/tests/cell/roots.rs` |
+| Catalog | `src/cell/catalog.rs` | `tests/runtime/catalog.rs` |
+| Registry and codecs | `src/registry/`, `src/codec.rs` | `tests/contracts/registry.rs`, `tests/contracts/codec.rs` |
+| Typed client and peer dispatch | `src/client.rs`, `src/peer.rs` | `tests/protocol/client.rs`, peer unit tests |
+| SQL, KV, Blob, Queue, Cron, Workflow | `src/primitives/sql.rs`, `src/primitives/kv.rs`, `src/primitives/blob.rs`, `src/primitives/queue.rs`, `src/primitives/cron.rs`, `src/primitives/workflow.rs` | matching integration tests |
+| Effects and activities | `src/primitives/effects.rs`, `src/primitives/activity_pool.rs` | `tests/primitives/effects.rs`, `tests/primitives/workflow.rs` |
+| Scheduler | `src/fleet/scheduler.rs`, `src/primitives/maintenance.rs` | `tests/runtime/scheduler.rs` |
+| Release control | `src/recovery/release.rs`, `src/recovery/release_progress.rs` | release unit tests and server command tests |
+| Backup pins | `src/recovery/backup.rs`, `crab-ltx::CellReplica::reachable_objects` | runtime pin tests and server create/verify command tests |
+| Immutable retention | `src/recovery/retention.rs`, `crab-storage::Store::list_stream` | mark/sweep tests and server maintenance-fence tests |
+| Follower mechanics | `src/follower.rs`, `src/node/log.rs`, `src/node/log_recovery.rs` | verified-frame, object-covered queued-prefix, lost-ACK suffix, torn-tail, dual-proof, and seal/gather tests |
+| State-observing streams | `src/client.rs`; `crab-http-server/src/state_stream.rs` | `tests/protocol/client.rs`; `CellStateStream` enforces per-output receipts, cancellation, deadlines, and fencing; `state_observing_body` adapts it to one-at-a-time HTTP chunks without a second queue |
 | Product composition | `crab-http-server/src/cells/` | server route, restore, and lifecycle tests |
 
 Celld-style follower durability is connected to product command and schema-
@@ -190,8 +190,8 @@ AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
 CRAB_LTX_TEST_BUCKET="$BUCKET" \
 CRAB_LTX_TEST_ENDPOINT="$ENDPOINT" \
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
-  cargo test -p crab-ltx --features replica --test cell_roots \
-  exact_root_inventory_verifies_every_remote_dependency --locked -- --exact
+  cargo test -p crab-ltx --features replica --test cell --locked \
+  cell::roots::exact_root_inventory_verifies_every_remote_dependency -- --exact
 
 AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
 AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
@@ -199,8 +199,8 @@ CRAB_CELL_TEST_BUCKET="$BUCKET" \
 CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
 CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
-  cargo test -p crab-cell-runtime --test actor \
-  rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
+  cargo test -p crab-cell-runtime --test runtime \
+  runtime::lifecycle::rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
   --locked -- --ignored --exact
 
 AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
@@ -209,8 +209,8 @@ CRAB_CELL_TEST_BUCKET="$BUCKET" \
 CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
 CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX-mixed" \
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
-  cargo test -p crab-cell-runtime --test actor \
-  rustfs_mixed_primitive_inventory_churn_preserves_exact_roots \
+  cargo test -p crab-cell-runtime --test runtime \
+  runtime::lifecycle::rustfs_mixed_primitive_inventory_churn_preserves_exact_roots \
   --locked -- --ignored --exact
 
 AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
@@ -297,7 +297,7 @@ Required cases are:
 
 Mock-only tests do not satisfy source-loss or publication proof.
 
-`tests/publication.rs` injects the ambiguous publication window at the object
+`tests/runtime/publication.rs` injects the ambiguous publication window at the object
 store boundary: the backend accepts the control `Update`, then the decorator
 returns a connection-reset error. The publisher must reload the exact root,
 clear the retained cut, and return the recorded outcome without invoking the
@@ -342,14 +342,14 @@ The ignored qualification tests require one fresh bucket and a unique Cell prefi
 ```bash
 CRAB_LTX_TEST_BUCKET="$BUCKET" \
 CRAB_LTX_TEST_ENDPOINT="$ENDPOINT" \
-cargo test -p crab-ltx --features replica --test cell_roots \
+cargo test -p crab-ltx --features replica --test cell \
   exact_root_inventory_verifies_every_remote_dependency -- --exact
 
 CRAB_CELL_TEST_BUCKET="$BUCKET" \
 CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
 CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
-cargo test -p crab-cell-runtime --test actor \
-  rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
+cargo test -p crab-cell-runtime --test runtime \
+  runtime::lifecycle::rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
   -- --ignored --exact
 
 CRAB_CELL_TEST_BUCKET="$BUCKET" \

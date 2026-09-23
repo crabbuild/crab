@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 
-use crate::{Error, Result, SessionId};
+use crate::identity::SessionId;
+use crate::{Error, Result};
 
 const RECORD_MAGIC: &[u8; 4] = b"CFR1";
 const RECORD_HEADER_BYTES: usize = 52;

@@ -2,14 +2,26 @@ use std::{sync::Arc, time::UNIX_EPOCH};
 
 use crab_cell_app::{ApplicationBuilder, CellApplication, CellType, CompiledApplication};
 use crab_cell_host::CellNodeBuilder;
-use crab_cell_runtime::{
-    BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog, CellClient, CellModule,
-    CellReplica, CellStorageLayout, CellTarget, Digest, IncarnationId, MigrationDescriptor,
-    ModuleDescriptor, MutationIdentity, NamespaceDescriptor, NamespaceId, NodeLeaseGuard,
-    OperationDescriptor, Owner, RegistryBuilder, ReplicaHost, ReplicaLimits, RequestId, SessionId,
-    SqlBatch, SqlModule, SqlStatement, SqlValue, SqlWorkerPool, TenantId, partition_for_shard,
-    register_sql,
+use crab_cell_runtime::cell::catalog::CatalogRole;
+use crab_cell_runtime::cell::catalog::{CatalogEntry, CellCatalog};
+use crab_cell_runtime::cell::executor::MutationIdentity;
+use crab_cell_runtime::cell::worker::SqlWorkerPool;
+use crab_cell_runtime::client::CellClient;
+use crab_cell_runtime::control::Owner;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::identity::{
+    CellTarget, Digest, NamespaceId, SessionId, TenantId, partition_for_shard,
 };
+use crab_cell_runtime::identity::{IncarnationId, RequestId};
+use crab_cell_runtime::ltx::{CellReplica, CellStorageLayout};
+use crab_cell_runtime::ltx::{Host as ReplicaHost, Limits as ReplicaLimits};
+use crab_cell_runtime::node::lease::NodeLeaseGuard;
+use crab_cell_runtime::primitives::sql::SqlModule;
+use crab_cell_runtime::primitives::sql::{SqlBatch, SqlStatement, SqlValue, register_sql};
+use crab_cell_runtime::registry::{
+    BuildDescriptor, CellModule, ModuleDescriptor, NamespaceDescriptor, RegistryBuilder,
+};
+use crab_cell_runtime::registry::{MigrationDescriptor, OperationDescriptor};
 use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path};
 use tokio_util::sync::CancellationToken;

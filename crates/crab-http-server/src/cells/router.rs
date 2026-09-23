@@ -8,16 +8,33 @@ use std::{
     time::Duration,
 };
 
-use crab_cell_runtime::CellStorageLayout;
-use crab_cell_runtime::{
-    ACTIVE_CELL_NATIVE_BYTES, ACTIVE_CELL_PAGE_CACHE_BYTES, ApplicationIdentity, CatalogProof,
-    CatalogRole, CellAuthority, CellCatalog, CellClient, CellDescription, CellHandle, CellReplica,
-    CellRuntime, CellTarget, CellTransferDemand, ControlState, EffectPeerClient, FleetBalance,
-    MAX_ACTIVITY_PAYLOAD_BYTES, MigrationPeerClient, NodeByteReservation, NodeDirectory,
-    NodeJobReservation, Owner, PeerOperation, PeerPrincipal, PeerRoundTrip, PeerSigner,
-    PersistedWorkInventory, PlacementObservation, PlacementPlanner, Registry, ReleaseState,
-    ReleaseStore, VersionedControl, peer_wire,
+use crab_cell_runtime::cell::actor::CellRuntime;
+use crab_cell_runtime::cell::actor::{
+    ACTIVE_CELL_NATIVE_BYTES, CellHandle, NodeByteReservation, NodeJobReservation,
 };
+use crab_cell_runtime::cell::application::ApplicationIdentity;
+use crab_cell_runtime::cell::catalog::CatalogRole;
+use crab_cell_runtime::cell::catalog::{CatalogProof, CellCatalog};
+use crab_cell_runtime::cell::worker::ACTIVE_CELL_PAGE_CACHE_BYTES;
+use crab_cell_runtime::client::CellClient;
+use crab_cell_runtime::client::CellDescription;
+use crab_cell_runtime::control::authority::{CellAuthority, VersionedControl};
+use crab_cell_runtime::control::{ControlState, Owner};
+use crab_cell_runtime::fleet::placement::{
+    CellTransferDemand, FleetBalance, PlacementObservation, PlacementPlanner,
+};
+use crab_cell_runtime::identity::CellTarget;
+use crab_cell_runtime::ltx::CellReplica;
+use crab_cell_runtime::ltx::CellStorageLayout;
+use crab_cell_runtime::node::NodeDirectory;
+use crab_cell_runtime::peer::{
+    EffectPeerClient, MigrationPeerClient, PeerOperation, PeerPrincipal, PeerRoundTrip, PeerSigner,
+    wire as peer_wire,
+};
+use crab_cell_runtime::primitives::maintenance::PersistedWorkInventory;
+use crab_cell_runtime::primitives::workflow::MAX_ACTIVITY_PAYLOAD_BYTES;
+use crab_cell_runtime::recovery::release::{ReleaseState, ReleaseStore};
+use crab_cell_runtime::registry::Registry;
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -428,15 +445,15 @@ impl RepositoryCellRouter {
         self.recovery_artifacts.clone()
     }
 
-    pub(crate) fn recovery_disk_budget(&self) -> crab_cell_runtime::DiskBudget {
+    pub(crate) fn recovery_disk_budget(&self) -> crab_cell_runtime::ltx::DiskBudget {
         self.runtime.local_disk_budget()
     }
 
     fn recovery_manifest_store(
         &self,
         scratch: PathBuf,
-    ) -> crab_cell_runtime::RecoveryManifestStore {
-        let store = crab_cell_runtime::RecoveryManifestStore::new(
+    ) -> crab_cell_runtime::recovery::manifest::RecoveryManifestStore {
+        let store = crab_cell_runtime::recovery::manifest::RecoveryManifestStore::new(
             self.layout.clone(),
             repository_replica_limits(),
         )
@@ -1035,7 +1052,7 @@ impl RepositoryCellPeer {
     async fn activate_remote(
         &self,
         target: CellTarget,
-        node: crab_cell_runtime::NodeAdvertisement,
+        node: crab_cell_runtime::node::NodeAdvertisement,
         _principal: &PeerPrincipal,
         now_ms: i64,
     ) -> crate::Result<()> {
@@ -1070,7 +1087,7 @@ impl RepositoryCellPeer {
             .round_trip
             .send_to_node(target.clone(), node, request, 30_000)
             .await?;
-        let reply = crab_cell_runtime::decode_peer_reply(&reply)?;
+        let reply = crab_cell_runtime::peer::decode_peer_reply(&reply)?;
         match reply.outcome {
             Some(peer_wire::peer_reply::Outcome::Read(read)) => match read.result {
                 Some(peer_wire::read_reply::Result::Description(description))
@@ -1163,10 +1180,13 @@ mod tests {
         time::UNIX_EPOCH,
     };
 
-    use crab_cell_runtime::{
-        ApplicationId, IncarnationId, MutationIdentity, NodeAdvertisement, NodeCapacity,
-        PeerVerifier, RequestId, SessionId, SqlWorkerPool, TenantId, Transition,
-    };
+    use crab_cell_runtime::cell::executor::MutationIdentity;
+    use crab_cell_runtime::cell::worker::SqlWorkerPool;
+    use crab_cell_runtime::control::Transition;
+    use crab_cell_runtime::identity::{ApplicationId, SessionId, TenantId};
+    use crab_cell_runtime::identity::{IncarnationId, RequestId};
+    use crab_cell_runtime::node::{NodeAdvertisement, NodeCapacity};
+    use crab_cell_runtime::peer::PeerVerifier;
     use crab_storage::{StorageReadKind, Store};
     use ed25519_dalek::SigningKey;
     use object_store::{memory::InMemory, path::Path as ObjectPath};
@@ -1228,7 +1248,7 @@ mod tests {
                     .handle
                     .as_ref()
                     .ok_or(crab_cell_runtime::Error::CellNotActive)?;
-                crab_cell_runtime::encode_peer_reply(&peer_wire::PeerReply {
+                crab_cell_runtime::peer::encode_peer_reply(&peer_wire::PeerReply {
                     outcome: Some(peer_wire::peer_reply::Outcome::Read(peer_wire::ReadReply {
                         receipt: None,
                         result: Some(peer_wire::read_reply::Result::Description(
@@ -1318,7 +1338,7 @@ mod tests {
             owner(session),
         );
         let node = NodeAdvertisement::sign(
-            crab_cell_runtime::NodeId::from_bytes(*successor.as_bytes()),
+            crab_cell_runtime::identity::NodeId::from_bytes(*successor.as_bytes()),
             successor,
             owner(successor).endpoint,
             fleet,
@@ -1331,7 +1351,7 @@ mod tests {
             11_000,
             vec![crab_cell_runtime::Digest::from_bytes([10; 32])],
             vec![1],
-            crab_cell_runtime::NodeFailureDomain::default(),
+            crab_cell_runtime::node::NodeFailureDomain::default(),
             NodeCapacity {
                 free_memory_bytes: 1,
                 free_disk_bytes: 1,
@@ -1450,7 +1470,7 @@ mod tests {
                     layout.clone(),
                     *target.cell_id().as_bytes(),
                     *observed.value().incarnation.as_bytes(),
-                    crab_cell_runtime::ReplicaLimits::default(),
+                    crab_cell_runtime::ltx::Limits::default(),
                 )
                 .unwrap(),
                 authority,
@@ -1574,7 +1594,7 @@ mod tests {
         directory
             .create(
                 NodeAdvertisement::sign(
-                    crab_cell_runtime::NodeId::from_bytes(*stale_session.as_bytes()),
+                    crab_cell_runtime::identity::NodeId::from_bytes(*stale_session.as_bytes()),
                     stale_session,
                     owner(stale_session).endpoint,
                     crab_cell_runtime::Digest::from_bytes([21; 32]),
@@ -1587,7 +1607,7 @@ mod tests {
                     stale_issued_at_ms + 15_000,
                     registry.module_digests(),
                     vec![1],
-                    crab_cell_runtime::NodeFailureDomain::default(),
+                    crab_cell_runtime::node::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
@@ -1609,7 +1629,7 @@ mod tests {
         directory
             .create(
                 NodeAdvertisement::sign(
-                    crab_cell_runtime::NodeId::from_bytes(*third_session.as_bytes()),
+                    crab_cell_runtime::identity::NodeId::from_bytes(*third_session.as_bytes()),
                     third_session,
                     owner(third_session).endpoint,
                     crab_cell_runtime::Digest::from_bytes([21; 32]),
@@ -1622,7 +1642,7 @@ mod tests {
                     now_ms + 15_000,
                     registry.module_digests(),
                     vec![1],
-                    crab_cell_runtime::NodeFailureDomain::default(),
+                    crab_cell_runtime::node::NodeFailureDomain::default(),
                     NodeCapacity {
                         free_memory_bytes: 1,
                         free_disk_bytes: 1,
@@ -1684,7 +1704,7 @@ mod tests {
         max_active_cells: u32,
     ) -> NodeAdvertisement {
         NodeAdvertisement::sign(
-            crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+            crab_cell_runtime::identity::NodeId::from_bytes(*session.as_bytes()),
             session,
             owner(session).endpoint,
             fleet,
@@ -1697,7 +1717,7 @@ mod tests {
             issued_at_ms + 15_000,
             registry.module_digests(),
             vec![1],
-            crab_cell_runtime::NodeFailureDomain::default(),
+            crab_cell_runtime::node::NodeFailureDomain::default(),
             NodeCapacity {
                 free_memory_bytes: 16 * 1024 * 1024,
                 free_disk_bytes: 10 * 1024 * 1024 * 1024,
@@ -1707,7 +1727,7 @@ mod tests {
         )
         .unwrap()
         .with_placement_capacity(
-            crab_cell_runtime::NodePlacementCapacity {
+            crab_cell_runtime::node::NodePlacementCapacity {
                 memory_capacity_bytes: 16 * 1024 * 1024,
                 disk_capacity_bytes: 10 * 1024 * 1024 * 1024,
                 active_cells,
@@ -1992,7 +2012,7 @@ mod tests {
         handle
             .execute(mutation, digest, issued_at_ms, 64, 64, |transaction| {
                 transaction.execute_batch("CREATE TABLE transfer_state(value INTEGER NOT NULL); INSERT INTO transfer_state(value) VALUES (7)")?;
-                Ok(crab_cell_runtime::HandlerOutcome::Success(Vec::new()))
+                Ok(crab_cell_runtime::cell::executor::HandlerOutcome::Success(Vec::new()))
             })
             .await
             .unwrap();
@@ -2014,7 +2034,7 @@ mod tests {
         ] {
             let key = SigningKey::from_bytes(&[*session.as_bytes().first().unwrap(); 32]);
             let advertisement = NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+                crab_cell_runtime::identity::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 owner(session).endpoint,
                 fleet,
@@ -2027,7 +2047,7 @@ mod tests {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
+                crab_cell_runtime::node::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes,
                     free_disk_bytes,
@@ -2037,7 +2057,7 @@ mod tests {
             )
             .unwrap()
             .with_placement_capacity(
-                crab_cell_runtime::NodePlacementCapacity {
+                crab_cell_runtime::node::NodePlacementCapacity {
                     memory_capacity_bytes: 16 * 1024 * 1024,
                     disk_capacity_bytes: 10 * 1024 * 1024 * 1024,
                     active_cells,

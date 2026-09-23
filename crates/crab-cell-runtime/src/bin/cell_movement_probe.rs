@@ -5,13 +5,14 @@ use std::{
     time::Duration,
 };
 
-#[path = "../process_store.rs"]
-mod process_store;
-
-use crab_cell_runtime::{
-    ApplicationId, CellAuthority, CellCatalog, CellRuntime, CellTarget, IncarnationId, NamespaceId,
-    Owner, SessionId, SqlWorkerPool, TenantId,
-};
+use crab_cell_runtime::cell::actor::CellRuntime;
+use crab_cell_runtime::cell::catalog::CellCatalog;
+use crab_cell_runtime::cell::worker::SqlWorkerPool;
+use crab_cell_runtime::control::Owner;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::identity::IncarnationId;
+use crab_cell_runtime::identity::{ApplicationId, CellTarget, NamespaceId, SessionId, TenantId};
+use crab_cell_runtime::test_support::FilesystemCasStore;
 use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::Store;
@@ -49,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let cell = target.cell_id();
     let incarnation = IncarnationId::from_bytes([2; 16]);
-    let object_store = process_store::FilesystemCasStore::new(FilePath::new(&store_root))?;
+    let object_store = FilesystemCasStore::new(FilePath::new(&store_root))?;
     let shared_store = object_store.clone();
     let layout = CellStorageLayout::new(
         Store::new(Arc::new(shared_store)),

@@ -10,14 +10,14 @@
 
 #![doc = include_str!("../README.md")]
 
-mod capture;
+pub mod capture;
 #[cfg(feature = "replica")]
 mod cell_layout;
 mod codec;
 mod commit;
-mod db;
+pub mod db;
 pub mod environment;
-mod error;
+pub mod error;
 mod host;
 #[cfg(feature = "replica")]
 pub use cell_layout::{CellObjectKind, CellStorageLayout};
@@ -32,8 +32,8 @@ pub use environment::{
 mod ltx;
 mod lz4_block;
 mod pages;
-mod recovery;
-mod types;
+pub mod recovery;
+pub mod types;
 mod wal;
 
 #[cfg(feature = "replica")]

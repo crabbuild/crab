@@ -14,13 +14,16 @@ use std::{
 use crab_ltx::rusqlite::OptionalExtension;
 use tokio::sync::Notify;
 
-use crate::{
-    ActivityContext, ActivityExecution, ActivitySupport, CatalogRole, CellHandle, CellId,
-    CellTarget, Command, CommandInvocation, Digest, Error, IncarnationId, MutationIdentity,
-    OperationDescriptor, Query, QueryInvocation, Registry, RequestId, Resolution, Result,
-    StoredOutcome,
-    codec::{decode_wire, encode_wire},
+use crate::cell::actor::CellHandle;
+use crate::cell::catalog::CatalogRole;
+use crate::cell::executor::{MutationIdentity, Resolution, StoredOutcome};
+use crate::codec::{decode_wire, encode_wire};
+use crate::identity::{CellId, CellTarget, Digest, IncarnationId, RequestId};
+use crate::primitives::workflow::{ActivityContext, ActivityExecution, ActivitySupport};
+use crate::registry::{
+    Command, CommandInvocation, OperationDescriptor, Query, QueryInvocation, Registry,
 };
+use crate::{Error, Result};
 
 const CELL_COMMAND_TAG: u16 = 10;
 const MAX_STATE_STREAM_CHUNKS: usize = 1_024;
@@ -509,9 +512,9 @@ impl CellClient {
     #[must_use]
     pub fn peer(
         registry: Arc<Registry>,
-        signer: Arc<crate::PeerSigner>,
-        principal: crate::PeerPrincipal,
-        round_trip: Arc<dyn crate::PeerRoundTrip>,
+        signer: Arc<crate::peer::PeerSigner>,
+        principal: crate::peer::PeerPrincipal,
+        round_trip: Arc<dyn crate::peer::PeerRoundTrip>,
     ) -> Self {
         let transport = Arc::new(crate::peer::PeerClientTransport::new(
             signer, principal, round_trip,
@@ -602,7 +605,7 @@ impl CellClient {
         activity: &str,
         context: ActivityContext,
         input: Vec<u8>,
-        blocking: Option<crate::BlockingActivityReservation>,
+        blocking: Option<crate::primitives::activity_pool::BlockingActivityReservation>,
     ) -> Result<ActivityExecution> {
         self.registry
             .execute_activity(module, definition, activity, context, input, blocking)
@@ -957,7 +960,7 @@ pub(super) fn encoded_command_operation_digest(
     Ok(Digest::from_bytes(*hasher.finalize().as_bytes()))
 }
 
-fn decode_output<T: crate::WireValue>(
+fn decode_output<T: crate::codec::WireValue>(
     result: &[u8],
     limit: u32,
 ) -> std::result::Result<T, InvocationError<T>> {
@@ -966,7 +969,7 @@ fn decode_output<T: crate::WireValue>(
         .map_err(InvocationError::NotStarted)
 }
 
-fn decode_committed<T: crate::WireValue>(
+fn decode_committed<T: crate::codec::WireValue>(
     result: &[u8],
     limit: u32,
     receipt: Receipt,
@@ -979,7 +982,7 @@ fn decode_committed<T: crate::WireValue>(
     Ok(Committed { output, receipt })
 }
 
-pub(crate) fn decode_pending<T: crate::WireValue>(
+pub(crate) fn decode_pending<T: crate::codec::WireValue>(
     pending: &PendingMutation,
     outcome: StoredOutcome,
 ) -> std::result::Result<Committed<T>, InvocationError<T>> {

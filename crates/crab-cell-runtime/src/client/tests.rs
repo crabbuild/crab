@@ -13,12 +13,20 @@ use super::{
     CellClient, CellDescription, CellTransport, EncodedCommand, EncodedObservation, EncodedQuery,
     EncodedResolve, InvocationError, PendingMutation, decode_pending,
 };
-use crate::{
-    ApplicationId, BuildDescriptor, CatalogRole, CellModule, CellTarget, Command, CommandContext,
-    CommandResult, Digest, Error, IncarnationId, MigrationDescriptor, ModuleDescriptor,
-    MutationIdentity, NamespaceDescriptor, NamespaceId, OperationDescriptor, PeerPrincipal,
-    PeerRoundTrip, PeerSigner, Query, QueryContext, Receipt, RegistryBuilder, RequestId,
-    Resolution, RetainedCodeDescriptor, SessionId, StoredOutcome, TenantId,
+use crate::Error;
+use crate::cell::catalog::CatalogRole;
+use crate::cell::executor::StoredOutcome;
+use crate::cell::executor::{MutationIdentity, Resolution};
+use crate::client::Receipt;
+use crate::identity::{ApplicationId, CellTarget, Digest, NamespaceId, SessionId, TenantId};
+use crate::identity::{IncarnationId, RequestId};
+use crate::peer::{PeerPrincipal, PeerRoundTrip, PeerSigner};
+use crate::registry::{
+    BuildDescriptor, CellModule, Command, MigrationDescriptor, ModuleDescriptor,
+    NamespaceDescriptor, Query, RegistryBuilder,
+};
+use crate::registry::{
+    CommandContext, CommandResult, OperationDescriptor, QueryContext, RetainedCodeDescriptor,
 };
 
 const MODULE: &str = "pending-test";

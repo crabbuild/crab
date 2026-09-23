@@ -1,12 +1,19 @@
 use std::time::Duration;
 
-use crab_cell_runtime::{
-    ActivityCompletion, ActivityCompletionOutcome, BlobArtifactStore, BlobCondition, BlobMutation,
-    BlobMutationOutcome, BlobQuery, BlobQueryResult, CellClient, CellTarget, EffectClaimRequest,
-    EffectLeaseOutcome, InvocationError, QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome,
-    QueueSendRequest, QueueState, WorkflowActivityClaimCommand, WorkflowActivityClaimRequest,
-    WorkflowActivityCompleteCommand, WorkflowActivityValidateQuery,
-    WorkflowActivityValidateRequest, WorkflowOutcome, WorkflowStatus, partition_for_shard,
+use crab_cell_runtime::client::{CellClient, InvocationError};
+use crab_cell_runtime::identity::{CellTarget, partition_for_shard};
+use crab_cell_runtime::primitives::blob::BlobArtifactStore;
+use crab_cell_runtime::primitives::blob::{
+    BlobCondition, BlobMutation, BlobMutationOutcome, BlobQuery, BlobQueryResult,
+};
+use crab_cell_runtime::primitives::effects::{EffectClaimRequest, EffectLeaseOutcome};
+use crab_cell_runtime::primitives::queue::{
+    QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome, QueueSendRequest, QueueState,
+};
+use crab_cell_runtime::primitives::workflow::{
+    ActivityCompletion, ActivityCompletionOutcome, WorkflowActivityClaimCommand,
+    WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand, WorkflowActivityValidateQuery,
+    WorkflowActivityValidateRequest, WorkflowOutcome, WorkflowStatus,
 };
 
 #[path = "support/reference_application.rs"]

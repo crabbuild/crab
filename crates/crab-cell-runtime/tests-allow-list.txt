@@ -1,0 +1,55 @@
+bin/qualification_receipt.rs  # binary target; libtest cannot be imported by tests/
+cell/actor.rs  # asserts private projection helpers
+cell/executor.rs  # asserts private pending-publication state
+cell/schema.rs  # compares the private RUNTIME_SCHEMA constant
+cell/worker/tests.rs  # exercises private worker admission and bootstrap
+cell/worker.rs  # declares crate-private test modules
+client/tests.rs  # exercises the private transport/encoding seam
+client.rs  # declares crate-private test modules
+control.rs  # asserts private control transition helpers
+coordination/sim.rs  # deterministic simulator for the pub(crate) kernel
+coordination.rs  # pure pub(crate) kernel; simulator and state machine are crate-private
+fleet/eviction.rs  # asserts private eviction observations and victim selection
+fleet/placement.rs  # uses private observation-age bounds
+fleet/resource.rs  # asserts the private resource ledger
+fleet/telemetry.rs  # uses the private telemetry install seam
+follower/tests.rs  # asserts private lane and index constants
+follower.rs  # declares crate-private test modules
+identity.rs  # asserts private hex codec helpers
+node/durability.rs  # asserts private durability gate state
+node/lease.rs  # uses the private lease bound constant
+node/log.rs  # asserts private proof state
+node/log_recovery.rs  # uses private recovery page bounds
+node/log_shipper.rs  # asserts private shipping queue internals
+node/tests.rs  # asserts private node-directory cache and record handling
+node.rs  # declares crate-private test modules
+peer/tests.rs  # uses the private peer wire bound
+peer.rs  # declares crate-private test modules
+primitives/activity_pool/tests.rs  # drives the private activity job type
+primitives/activity_pool.rs  # declares crate-private test modules
+primitives/blob/api.rs  # asserts private blob wire envelopes
+primitives/blob/tests.rs  # uses private schema and digest helpers
+primitives/blob.rs  # declares crate-private test modules
+primitives/cron.rs  # asserts private cron wire envelopes
+primitives/effects/api.rs  # asserts private effect wire envelopes
+primitives/effects/tests.rs  # drives the private effect batch
+primitives/effects.rs  # declares crate-private test modules
+primitives/kv/api.rs  # asserts private kv wire envelopes
+primitives/kv.rs  # uses the private wire bound
+primitives/maintenance.rs  # uses private transfer-work inventory constants
+primitives/queue/api.rs  # asserts private queue wire envelopes
+primitives/queue/tests.rs  # asserts private queue schema and limits
+primitives/queue.rs  # declares crate-private test modules
+primitives/sql/api.rs  # asserts private SQL wire envelopes
+primitives/workflow/activity_api.rs  # asserts private activity lease bounds
+primitives/workflow/api.rs  # asserts private workflow wire envelopes
+primitives/workflow.rs  # uses the private workflow schema and codec
+publication.rs  # asserts private publisher state
+qualification/cluster.rs  # validates private cluster receipt helpers
+qualification.rs  # uses private qualification bounds and helpers
+recovery/artifacts.rs  # asserts the private artifact cache
+recovery/manifest.rs  # uses private manifest bounds and codecs
+recovery/release.rs  # asserts private release record fields
+recovery/retention/tests.rs  # asserts private retention scratch handling
+recovery/retention.rs  # declares crate-private test modules
+registry/descriptor.rs  # asserts private descriptor codecs

@@ -8,17 +8,34 @@ use std::{
     time::Duration,
 };
 
-use crab_cell_runtime::CellStorageLayout;
-use crab_cell_runtime::{
-    ActivityRunOutcome, ApplicationIdentity, BlockingActivityPool, BlockingActivityReservation,
-    CatalogProof, CatalogShardScan, CellAuthority, CellCatalog, CellId, CellTarget, ControlState,
-    DueCellScan, EffectRunOutcome, FencedNodeSession, InvocationError, MaintenanceTickOutcome,
-    MaintenanceTickRequest, MigrationFailure, MigrationProgressAttempt, MigrationProgressStore,
-    MutationIdentity, NodeDirectory, NodeId, NodeLogRecovery, NodeLogTransport,
-    RecoveryCoordinator, RecoveryManifestStore, RecoveryWorkSummary, Registry, ReleaseState,
-    ReleaseStore, RequestId, SchedulerFleet, SessionId, preferred_scanner,
+use crab_cell_runtime::cell::application::ApplicationIdentity;
+use crab_cell_runtime::cell::catalog::{CatalogProof, CatalogShardScan, CellCatalog};
+use crab_cell_runtime::cell::executor::MutationIdentity;
+use crab_cell_runtime::client::InvocationError;
+use crab_cell_runtime::control::ControlState;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::fleet::scheduler::{DueCellScan, SchedulerFleet, preferred_scanner};
+use crab_cell_runtime::identity::{CellId, CellTarget, SessionId};
+use crab_cell_runtime::identity::{NodeId, RequestId};
+use crab_cell_runtime::ltx::CellStorageLayout;
+use crab_cell_runtime::node::log_recovery::{
+    NodeLogRecovery, RecoveryCoordinator, RecoveryWorkSummary,
     recoverable_cells_from_scopes_with_summary,
 };
+use crab_cell_runtime::node::log_transport::NodeLogTransport;
+use crab_cell_runtime::node::{FencedNodeSession, NodeDirectory};
+use crab_cell_runtime::primitives::activity_pool::{
+    BlockingActivityPool, BlockingActivityReservation,
+};
+use crab_cell_runtime::primitives::effects::EffectRunOutcome;
+use crab_cell_runtime::primitives::maintenance::{MaintenanceTickOutcome, MaintenanceTickRequest};
+use crab_cell_runtime::primitives::workflow::ActivityRunOutcome;
+use crab_cell_runtime::recovery::manifest::RecoveryManifestStore;
+use crab_cell_runtime::recovery::release::{ReleaseState, ReleaseStore};
+use crab_cell_runtime::recovery::release_progress::{
+    MigrationFailure, MigrationProgressAttempt, MigrationProgressStore,
+};
+use crab_cell_runtime::registry::Registry;
 use futures_util::FutureExt;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -118,7 +135,7 @@ pub(crate) struct RepositoryCellScheduler {
     recovery_affinity_seen: HashMap<SessionId, i64>,
     recovery_jobs: tokio::task::JoinSet<RecoveryJobResult>,
     recovery_manifests: RecoveryManifestStore,
-    recovery_disk: crab_cell_runtime::DiskBudget,
+    recovery_disk: crab_cell_runtime::ltx::DiskBudget,
     recovery_retries: HashMap<SessionId, RecoveryRetryState>,
     next_migration_shard: u8,
     next_shard: u8,
@@ -203,7 +220,7 @@ impl RepositoryCellScheduler {
 
     pub(crate) fn with_node_recovery_disk(
         mut self,
-        recovery_disk: crab_cell_runtime::DiskBudget,
+        recovery_disk: crab_cell_runtime::ltx::DiskBudget,
     ) -> Self {
         self.recovery_manifests = self
             .recovery_manifests
@@ -485,7 +502,10 @@ impl RepositoryCellScheduler {
         Ok((attempted, false))
     }
 
-    async fn process(&mut self, due: crab_cell_runtime::DueCell) -> crate::Result<()> {
+    async fn process(
+        &mut self,
+        due: crab_cell_runtime::fleet::scheduler::DueCell,
+    ) -> crate::Result<()> {
         let entry = due.catalog().entry();
         let control = due.control().value();
         if !self.registry.supports_cell(
@@ -934,13 +954,13 @@ struct ActivityCellReservation {
 struct MigrationCellReservation {
     cell: CellId,
     cells: Arc<Mutex<HashSet<CellId>>>,
-    _job: crab_cell_runtime::NodeJobReservation,
+    _job: crab_cell_runtime::cell::actor::NodeJobReservation,
 }
 
 struct RecoverySessionReservation {
     session: SessionId,
     sessions: Arc<Mutex<HashSet<SessionId>>>,
-    _job: crab_cell_runtime::NodeJobReservation,
+    _job: crab_cell_runtime::cell::actor::NodeJobReservation,
 }
 
 struct RecoveryJobResult {
@@ -1010,11 +1030,11 @@ impl Drop for RecoverySessionReservation {
 
 struct RecoveryContext {
     directory: NodeDirectory,
-    catalog: crab_cell_runtime::CellCatalog,
+    catalog: crab_cell_runtime::cell::catalog::CellCatalog,
     authority: CellAuthority,
     manifests: RecoveryManifestStore,
     transport: Arc<dyn NodeLogTransport>,
-    recovery_disk: crab_cell_runtime::DiskBudget,
+    recovery_disk: crab_cell_runtime::ltx::DiskBudget,
     recovery_scratch: std::path::PathBuf,
     metrics: Option<crate::metrics::Metrics>,
 }
@@ -1305,7 +1325,7 @@ async fn claim_expired_with_timeout(
     claimant: SessionId,
     now_ms: i64,
     timeout: Duration,
-) -> crate::Result<crab_cell_runtime::FencedNodeSession> {
+) -> crate::Result<crab_cell_runtime::node::FencedNodeSession> {
     tokio::time::timeout(
         timeout,
         directory.claim_expired_for_recovery(session, claimant, now_ms),

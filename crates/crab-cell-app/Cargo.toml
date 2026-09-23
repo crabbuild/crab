@@ -14,10 +14,10 @@ crab-cell-runtime.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+crab-cell-runtime = { workspace = true, features = ["test-support"] }
 crab-ltx = { workspace = true, features = ["replica"] }
 crab-storage.workspace = true
 ed25519-dalek.workspace = true
-fs4 = "0.13"
 futures-util.workspace = true
 object_store.workspace = true
 tempfile.workspace = true

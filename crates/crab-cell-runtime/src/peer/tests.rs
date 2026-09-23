@@ -12,17 +12,18 @@ fn signer() -> PeerSigner {
 
 #[test]
 fn signed_peer_request_carries_maximum_kv_value() {
-    let input = crate::KvAtomicRequest {
+    let input = crate::primitives::kv::KvAtomicRequest {
         scope: b"scope".to_vec(),
         checks: Vec::new(),
-        mutations: vec![crate::KvMutation::Put {
+        mutations: vec![crate::primitives::kv::KvMutation::Put {
             key: b"key".to_vec(),
             value: vec![7; 4 * 1024 * 1024],
             expires_at_ms: None,
         }],
     };
-    let mut encoder = crate::BoundedEncoder::new(crate::codec::MAX_WIRE_BYTES as u32).unwrap();
-    crate::WireValue::encode(&input, &mut encoder).unwrap();
+    let mut encoder =
+        crate::codec::BoundedEncoder::new(crate::codec::MAX_WIRE_BYTES as u32).unwrap();
+    crate::codec::WireValue::encode(&input, &mut encoder).unwrap();
     let mut request = mutation();
     let Some(wire::mutation_request::Operation::CellCommand(command)) = &mut request.operation
     else {
@@ -110,8 +111,13 @@ fn effect_identity() -> wire::EffectIdentity {
     let source_sequence = 3;
     let ordinal = 2;
     wire::EffectIdentity {
-        effect_id: crate::effect_id(source_cell, source_incarnation, source_sequence, ordinal)
-            .to_vec(),
+        effect_id: crate::primitives::effects::effect_id(
+            source_cell,
+            source_incarnation,
+            source_sequence,
+            ordinal,
+        )
+        .to_vec(),
         source_cell: source_cell.as_bytes().to_vec(),
         source_incarnation: source_incarnation.as_bytes().to_vec(),
         source_sequence,
@@ -204,7 +210,7 @@ fn signed_effect_delivery_and_resolve_bind_derived_identity() {
         Some(wire::peer_request::Operation::DeliverEffect(_))
     ));
 
-    let digest = crate::effect_operation_digest(
+    let digest = crate::primitives::effects::effect_operation_digest(
         verified.target().cell_id(),
         <[u8; 32]>::try_from(effect_identity().effect_id).unwrap(),
         &delivery.encode_to_vec(),

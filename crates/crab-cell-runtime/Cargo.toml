@@ -11,11 +11,11 @@ description = "Embedded SQLite Cell runtime contracts for Crab"
 [[bin]]
 name = "cell_movement_probe"
 path = "src/bin/cell_movement_probe.rs"
-required-features = ["process-test-support"]
+required-features = ["test-support"]
 
 [features]
 default = []
-process-test-support = ["dep:async-trait", "dep:fs4"]
+test-support = ["dep:async-trait", "dep:fs4"]
 
 [dependencies]
 async-trait = { workspace = true, optional = true }

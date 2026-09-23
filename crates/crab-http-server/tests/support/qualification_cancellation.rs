@@ -7,9 +7,11 @@ use std::{
 };
 
 use crab_cell_app::ApplicationHandle;
-use crab_cell_runtime::{
-    BoundedDecoder, Command, PreparedCommand, Resolution, StoredOutcome, WireValue,
-};
+use crab_cell_runtime::cell::executor::Resolution;
+use crab_cell_runtime::cell::executor::StoredOutcome;
+use crab_cell_runtime::client::PreparedCommand;
+use crab_cell_runtime::codec::{BoundedDecoder, WireValue};
+use crab_cell_runtime::registry::Command;
 use tokio::sync::Notify;
 
 use crate::fixture;

@@ -1843,7 +1843,9 @@ RETIRED_STANDALONE_LTX_MARKERS = re.compile(
     r"(?:ltx/<epoch>|head\.json|manifest\.json)"
 )
 CELL_RUNTIME_COORDINATION_KERNEL_PATH = "crates/crab-cell-runtime/src/coordination.rs"
-CELL_RUNTIME_COORDINATION_ACTOR_PATH = "crates/crab-cell-runtime/src/actor.rs"
+# The actor adapter spans the actor module tree after the layout split; the
+# gate reads every file below this path.
+CELL_RUNTIME_COORDINATION_ACTOR_PATH = "crates/crab-cell-runtime/src/cell/actor"
 CELL_RUNTIME_COORDINATION_REQUIRED_KERNEL_PATTERNS = (
     "pub(crate) enum CoordinationInput",
     "pub(crate) enum CoordinationDecision",
@@ -1872,7 +1874,9 @@ CELL_RUNTIME_COORDINATION_FORBIDDEN_KERNEL_PATTERNS = (
 WORKSPACE_DEPENDENCY_POLICY = {
     "crab-cell-app": {
         "normal": {"crab-cell-runtime"},
-        "dev": {"crab-ltx", "crab-storage"},
+        # crab-cell-runtime is a dev edge so integration tests can enable its
+        # test-support feature without borrowing source files.
+        "dev": {"crab-cell-runtime", "crab-ltx", "crab-storage"},
     },
     "crab-cell-host": {"normal": {"crab-cell-app", "crab-cell-runtime"}},
     "crab-cell-runtime": {"normal": {"crab-ltx", "crab-storage"}},
@@ -1902,7 +1906,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-write",
             "crab-remote",
         },
-        "dev": {"crab-ltx"},
+        "dev": {"crab-cell-runtime", "crab-ltx"},
     },
     "crab": {
         "normal": {
@@ -2605,6 +2609,14 @@ def check_cell_runtime_coordination_kernel(root: Path) -> bool:
 
     if not actor.exists():
         violations.append(f"{CELL_RUNTIME_COORDINATION_ACTOR_PATH}: missing actor adapter")
+    elif actor.is_dir():
+        actor_text = "\n".join(
+            candidate.read_text(encoding="utf-8")
+            for candidate in sorted(actor.rglob("*.rs"))
+        )
+        for pattern in CELL_RUNTIME_COORDINATION_REQUIRED_ACTOR_PATTERNS:
+            if pattern not in actor_text:
+                violations.append(f"{CELL_RUNTIME_COORDINATION_ACTOR_PATH}: missing {pattern!r}")
     else:
         actor_text = actor.read_text(encoding="utf-8")
         for pattern in CELL_RUNTIME_COORDINATION_REQUIRED_ACTOR_PATTERNS:

@@ -296,7 +296,7 @@ fn validate_cells(cells: &CellsConfig, management_listen: SocketAddr) -> Result<
             "cells.peer_tls_server_name must be a DNS name without a port",
         ));
     }
-    crab_cell_runtime::NodeFailureDomain::new(
+    crab_cell_runtime::node::NodeFailureDomain::new(
         cells.failure_zone.clone(),
         cells.failure_host.clone(),
     )?;

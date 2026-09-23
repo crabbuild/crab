@@ -641,3 +641,24 @@ lists the prioritized opportunities. It also records the weighted
 ownership-balance change implemented on Celld's `rebalance.rs` semantics: one
 elected donor, a two-percent receiver deadband, batch and receiver-room bounds,
 pre-batch samples rejected, and local planner plus router evidence.
+
+## Cell and LTX layout re-organization for Cellule extraction
+
+Created 2026-09-22; planned against `3ab2526492b`. The four Cell and LTX
+crates are the source for the `cellule-*` workspace, which becomes the upstream
+after its first release. This track fixes the layout before the extraction:
+crate-local `src/` stays production code, `tests/` owns the suites, one
+feature-gated `test_support` module replaces path-included source, fixtures
+move into a single shared harness, and oversized files split at existing seams.
+
+| Plan | Outcome | Priority | Effort | Depends on | Status |
+| --- | --- | --- | --- | --- | --- |
+| [033](033-cell-ltx-layout-reorganization.md) | Canonical src/tests layout, `test-support` module, capability-named suites, shared harness, allow-listed in-src tests, and the layout checker for `crab-cell-runtime`/`app`/`host`/`ltx` | P1 | L | None | TODO |
+
+Stages 1–5 are behavior-free and contract-free; they may land as one PR
+independent of other Cell-runtime work. Stage 6 is decided as Option A: PR 2
+introduces the subsystem module tree, migrates `crab-http-server`,
+`crab-cell-app`, and `crab-cell-host` to module paths, then freezes the root
+prelude in `crates/crab-cell-runtime/api-prelude.txt`. The Cellule-side rename,
+hardening merge, and release work are separate and are described in the plan's
+handoff section.

@@ -2,15 +2,17 @@ use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use prost::Message;
 
-use crate::{
-    CellDescription, CellHandle, CellTarget, CommandInvocation, Digest, Error, InboxDelivery,
-    IncarnationId, MutationIdentity, Receipt, Registry, RequestId, Resolution, Result,
-    StoredOutcome,
-    client::{
-        CellTransport, EncodedCommand, EncodedObservation, EncodedQuery, EncodedResolve,
-        LocalCellTransport, encoded_command_operation_digest, local_description, receipt,
-    },
+use crate::cell::actor::CellHandle;
+use crate::cell::executor::{MutationIdentity, Resolution, StoredOutcome};
+use crate::client::{CellDescription, Receipt};
+use crate::client::{
+    CellTransport, EncodedCommand, EncodedObservation, EncodedQuery, EncodedResolve,
+    LocalCellTransport, encoded_command_operation_digest, local_description, receipt,
 };
+use crate::identity::{CellTarget, Digest, IncarnationId, RequestId};
+use crate::primitives::effects::InboxDelivery;
+use crate::registry::{CommandInvocation, Registry};
+use crate::{Error, Result};
 
 use super::{VerifiedPeerRequest, wire};
 
@@ -337,7 +339,7 @@ impl PeerDispatcher {
         let encoded_request = request.encode_to_vec();
         let delivery = InboxDelivery {
             effect_id,
-            operation_digest: crate::effect_operation_digest(
+            operation_digest: crate::primitives::effects::effect_operation_digest(
                 target.cell_id(),
                 effect_id,
                 &encoded_operation,
@@ -482,7 +484,7 @@ fn validate_effect_incarnation(value: &[u8], expected: CellDescription) -> Resul
 fn exact_effect_id(identity: &wire::EffectIdentity) -> Result<[u8; 32]> {
     let effect_id = <[u8; 32]>::try_from(identity.effect_id.as_slice())
         .map_err(|_| Error::Peer("invalid effect ID length"))?;
-    let expected = crate::effect_id(
+    let expected = crate::primitives::effects::effect_id(
         crate::CellId::try_from(identity.source_cell.as_slice())?,
         IncarnationId::try_from(identity.source_incarnation.as_slice())?,
         identity.source_sequence,

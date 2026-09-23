@@ -1,0 +1,16 @@
+capture/wal.rs  # asserts private WAL encoding and index handling
+capture.rs  # asserts private capture engine state
+cell_layout.rs  # asserts private cell layout helpers
+codec.rs  # asserts private LTX codec internals
+db.rs  # drives the private managed database and admissions
+environment/directory_cache.rs  # declares crate-private test modules
+environment.rs  # drives the private disk budget, cache, and executor hooks
+error.rs  # asserts private error classification
+format_tests.rs  # independent literal LTX vectors over private encoders
+host.rs  # asserts private host file helpers
+paged_io.rs  # drives private sparse page I/O
+pages.rs  # asserts private page checksum handling
+replica/cache.rs  # asserts the private directory cache
+replica/directory.rs  # asserts private radix directory internals
+replica/root.rs  # asserts private root codec bounds
+replica.rs  # asserts private replica capture state

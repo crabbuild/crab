@@ -7,10 +7,12 @@ use std::{
 };
 
 use axum::http::{StatusCode, header};
-use crab_cell_runtime::{
-    ApplicationIdentity, CellAuthority, CellTarget, Digest, Error as CellError, NodeAdvertisement,
-    NodeDirectory, PeerRoundTrip, SessionId, peer_wire,
-};
+use crab_cell_runtime::Error as CellError;
+use crab_cell_runtime::cell::application::ApplicationIdentity;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::identity::{CellTarget, Digest, SessionId};
+use crab_cell_runtime::node::{NodeAdvertisement, NodeDirectory};
+use crab_cell_runtime::peer::{PeerRoundTrip, wire as peer_wire};
 use futures_util::StreamExt;
 
 use super::{now_ms, remaining_timeout};
@@ -53,7 +55,7 @@ impl PeerHttpRoundTrip {
         request: Vec<u8>,
         timeout_ms: u32,
     ) -> crab_cell_runtime::Result<Vec<u8>> {
-        if request.len() > crab_cell_runtime::MAX_PEER_REQUEST_BYTES {
+        if request.len() > crab_cell_runtime::peer::MAX_PEER_REQUEST_BYTES {
             return Err(CellError::Peer("request exceeds peer byte limit"));
         }
         let started = Instant::now();
@@ -247,9 +249,9 @@ impl PeerHttpRoundTrip {
                 .get(header::CACHE_CONTROL)
                 .and_then(|value| value.to_str().ok())
                 != Some("no-store")
-            || response
-                .content_length()
-                .is_some_and(|length| length > crab_cell_runtime::MAX_PEER_REQUEST_BYTES as u64)
+            || response.content_length().is_some_and(|length| {
+                length > crab_cell_runtime::peer::MAX_PEER_REQUEST_BYTES as u64
+            })
         {
             return Ok(PeerHttpAttempt::Unknown(CellError::Peer(
                 "remote peer response metadata is invalid",
@@ -262,14 +264,16 @@ impl PeerHttpRoundTrip {
                 Ok(chunk) => chunk,
                 Err(error) => return Ok(PeerHttpAttempt::Unknown(peer_transport(error))),
             };
-            if body.len().saturating_add(chunk.len()) > crab_cell_runtime::MAX_PEER_REQUEST_BYTES {
+            if body.len().saturating_add(chunk.len())
+                > crab_cell_runtime::peer::MAX_PEER_REQUEST_BYTES
+            {
                 return Ok(PeerHttpAttempt::Unknown(CellError::Peer(
                     "remote peer response exceeds the byte limit",
                 )));
             }
             body.extend_from_slice(&chunk);
         }
-        let decoded = match crab_cell_runtime::decode_peer_reply(&body) {
+        let decoded = match crab_cell_runtime::peer::decode_peer_reply(&body) {
             Ok(decoded) => decoded,
             Err(error) => return Ok(PeerHttpAttempt::Unknown(error)),
         };

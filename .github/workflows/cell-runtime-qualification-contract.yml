@@ -82,7 +82,7 @@ jobs:
       - name: Run production hot-path preflight guards
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
-        run: cargo test -p crab-cell-runtime --test qualification_preflight --locked
+        run: cargo test -p crab-cell-runtime --test qualification --locked
       - name: Verify application and host boundaries
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
@@ -155,9 +155,21 @@ jobs:
         run: |
           set -euo pipefail
           for filter in qualification placement pressure resource; do
-            cargo test -p crab-cell-runtime "${filter}" --locked
+            cargo test -p crab-cell-runtime --features test-support --lib "${filter}" --locked
+            cargo test -p crab-cell-runtime --features test-support \
+              --test fleet --test qualification "${filter}" --locked
           done
           cargo test -p crab-cell-runtime --bin qualification_receipt --locked
+      - name: Verify the Cell and LTX crate layout
+        run: python3 crab/scripts/check-cell-ltx-layout.py
+      - name: Verify the process-test-support suites
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
+        run: |
+          set -euo pipefail
+          cargo test -p crab-cell-runtime --features test-support --locked
+          cargo test -p crab-cell-app --locked
+          cargo test -p crab-cell-host --locked
       - name: Verify canonical LTX contracts
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
