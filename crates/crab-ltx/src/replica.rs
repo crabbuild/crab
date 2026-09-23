@@ -672,14 +672,14 @@ impl CellReplica {
         }
         let captured_bytes = cuts.segments.iter().try_fold(0_u64, |total, segment| {
             if segment.info().size_bytes > self.limits.max_capture_bytes {
-                return Err(CrabError::Limit("captured Cell LTX bytes"));
+                return Err(CrabError::Limit(crate::LimitKind::CapturedCellLtxBytes));
             }
             total
                 .checked_add(segment.info().size_bytes)
-                .ok_or(CrabError::Limit("captured Cell LTX bytes"))
+                .ok_or(CrabError::Limit(crate::LimitKind::CapturedCellLtxBytes))
         })?;
         if captured_bytes > self.limits.max_capture_bytes {
-            return Err(CrabError::Limit("captured Cell LTX bytes"));
+            return Err(CrabError::Limit(crate::LimitKind::CapturedCellLtxBytes));
         }
         let load_base = async {
             match base {
@@ -819,7 +819,7 @@ impl CellReplica {
     ) -> Result<PreparedRoot> {
         self.validate_metadata(commit_sequence, schema)?;
         if bundle.len() > self.limits.max_plan_bytes {
-            return Err(CrabError::Limit("Cell bundle bytes"));
+            return Err(CrabError::Limit(crate::LimitKind::CellBundleBytes));
         }
         let base_graph = match base {
             Some(root) => Some(self.load_graph(root).await?),
@@ -841,9 +841,9 @@ impl CellReplica {
             }
             selected_bytes = selected_bytes
                 .checked_add(row.info.size_bytes)
-                .ok_or(CrabError::Limit("captured Cell bundle bytes"))?;
+                .ok_or(CrabError::Limit(crate::LimitKind::CapturedCellBundleBytes))?;
             if selected_bytes > self.limits.max_capture_bytes {
-                return Err(CrabError::Limit("captured Cell bundle bytes"));
+                return Err(CrabError::Limit(crate::LimitKind::CapturedCellBundleBytes));
             }
             prospective.push(SegmentDescriptor::bundled(
                 row.info.clone(),
@@ -952,7 +952,7 @@ impl CellReplica {
                 total
                     .checked_add(descriptor.info.size_bytes)
                     .and_then(|value| value.checked_add(descriptor.index_length))
-                    .ok_or(CrabError::Limit("Cell root bytes"))
+                    .ok_or(CrabError::Limit(crate::LimitKind::CellRootBytes))
             })?;
         let byte_pressure = stored_bytes >= replica.limits.max_plan_bytes.saturating_mul(3) / 4;
         let selected = if graph.descriptors.len() > 1
@@ -1171,7 +1171,7 @@ impl CellReplica {
             segment_pages.push(digest);
         }
         if segment_pages.len() > MAX_SEGMENT_PAGES {
-            return Err(CrabError::Limit("Cell root segment pages"));
+            return Err(CrabError::Limit(crate::LimitKind::CellRootSegmentPages));
         }
         let document = RootDocument {
             cell: self.cell,
@@ -1497,7 +1497,7 @@ impl CellReplica {
     fn validate_chain(&self, descriptors: &[SegmentDescriptor], target: Position) -> Result<()> {
         if descriptors.is_empty() || descriptors.len() > MAX_SEGMENTS.min(self.limits.max_segments)
         {
-            return Err(CrabError::Limit("Cell root segments"));
+            return Err(CrabError::Limit(crate::LimitKind::CellRootSegments));
         }
         let mut previous = Position::default();
         let mut page_size = None;
@@ -1508,7 +1508,7 @@ impl CellReplica {
             total = total
                 .checked_add(info.size_bytes)
                 .and_then(|value| value.checked_add(descriptor.index_length))
-                .ok_or(CrabError::Limit("Cell root bytes"))?;
+                .ok_or(CrabError::Limit(crate::LimitKind::CellRootBytes))?;
             if total > self.limits.max_plan_bytes
                 || previous.txid.checked_add(1) != Some(info.min_txid)
                 || info.pre_checksum != previous.checksum
@@ -1618,7 +1618,7 @@ impl CellReplica {
     async fn put_bundle(&self, bundle: &crate::bundle::Bundle) -> Result<()> {
         let digest = bundle.digest();
         if bundle.len() > self.limits.max_plan_bytes {
-            return Err(CrabError::Limit("Cell bundle bytes"));
+            return Err(CrabError::Limit(crate::LimitKind::CellBundleBytes));
         }
         let path = self.layout.incarnation_object_path(
             &self.cell,
@@ -1792,12 +1792,12 @@ fn compaction_scratch_bytes(graph: &LoadedGraph, range: std::ops::Range<usize>) 
         .try_fold(base, |total, descriptor| {
             total
                 .checked_add(descriptor.index_length)
-                .ok_or(CrabError::Limit("scratch disk bytes"))
+                .ok_or(CrabError::Limit(crate::LimitKind::ScratchDiskBytes))
         })?;
     selected.iter().try_fold(indexes, |total, descriptor| {
         total
             .checked_add(descriptor.info.size_bytes)
-            .ok_or(CrabError::Limit("scratch disk bytes"))
+            .ok_or(CrabError::Limit(crate::LimitKind::ScratchDiskBytes))
     })
 }
 

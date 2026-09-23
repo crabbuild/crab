@@ -145,7 +145,7 @@ impl DiskBudget {
                     .filter(|next| *next <= self.inner.capacity)
             })
             .map(|_| ())
-            .map_err(|_| crate::CrabError::Limit("local disk bytes"))
+            .map_err(|_| crate::CrabError::Limit(crate::LimitKind::LocalDiskBytes))
     }
 
     fn reconcile_admissions(&self, bytes: u64) -> crate::Result<()> {
@@ -217,7 +217,7 @@ impl DiskReservation {
         };
         let next = held
             .checked_add(bytes)
-            .ok_or(crate::CrabError::Limit("local disk bytes"))?;
+            .ok_or(crate::CrabError::Limit(crate::LimitKind::LocalDiskBytes))?;
         self.budget.add(bytes)?;
         if let Err(error) = self.budget.reconcile_admissions(self.budget.used()) {
             let _ = self.budget.remove(bytes);
@@ -788,17 +788,17 @@ impl Host {
         const MIB: u64 = 1 << 20;
         let units = bytes
             .checked_add(MIB - 1)
-            .ok_or(crate::CrabError::Limit("scratch disk bytes"))?
+            .ok_or(crate::CrabError::Limit(crate::LimitKind::ScratchDiskBytes))?
             / MIB;
-        let units =
-            u32::try_from(units).map_err(|_| crate::CrabError::Limit("scratch disk bytes"))?;
+        let units = u32::try_from(units)
+            .map_err(|_| crate::CrabError::Limit(crate::LimitKind::ScratchDiskBytes))?;
         if units == 0 || units > self.scratch_capacity {
-            return Err(crate::CrabError::Limit("scratch disk bytes"));
+            return Err(crate::CrabError::Limit(crate::LimitKind::ScratchDiskBytes));
         }
         let mut host = self.clone();
         if let Some(permit) = &host.scratch {
             if permit.num_permits() < units as usize {
-                return Err(crate::CrabError::Limit("scratch disk bytes"));
+                return Err(crate::CrabError::Limit(crate::LimitKind::ScratchDiskBytes));
             }
             return Ok(host);
         }
@@ -813,7 +813,7 @@ impl Host {
         let reserved_bytes = u64::try_from(reserved_units)
             .ok()
             .and_then(|units| units.checked_mul(MIB))
-            .ok_or(crate::CrabError::Limit("scratch disk bytes"))?;
+            .ok_or(crate::CrabError::Limit(crate::LimitKind::ScratchDiskBytes))?;
         self.scratch_monitor
             .ensure_available(reserved_bytes)
             .map_err(crate::CrabError::Io)?;

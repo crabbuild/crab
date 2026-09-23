@@ -1168,7 +1168,9 @@ fn transaction_error(error: TransactionError<Error>) -> Error {
 
 fn admission_error(error: crab_ltx::CrabError) -> Error {
     match error {
-        crab_ltx::CrabError::Limit("local disk bytes") => Error::Capacity("local disk bytes"),
+        crab_ltx::CrabError::Limit(crab_ltx::LimitKind::LocalDiskBytes) => {
+            Error::Capacity("local disk bytes")
+        }
         error => error.into(),
     }
 }
@@ -1333,5 +1335,21 @@ mod tests {
         assert_eq!(pending.digest(), None);
         assert_eq!(pending.commit_sequence(), 1);
         assert!(!pending.cuts().segments.is_empty());
+    }
+
+    #[test]
+    fn only_local_disk_admission_limits_become_capacity_errors() {
+        let disk = admission_error(crab_ltx::CrabError::Limit(
+            crab_ltx::LimitKind::LocalDiskBytes,
+        ));
+        assert!(matches!(disk, Error::Capacity("local disk bytes")));
+
+        let database = crab_ltx::CrabError::Limit(crab_ltx::LimitKind::DatabaseBytes);
+        assert!(matches!(
+            admission_error(database),
+            Error::Ltx(crab_ltx::CrabError::Limit(
+                crab_ltx::LimitKind::DatabaseBytes
+            ))
+        ));
     }
 }

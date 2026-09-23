@@ -13,7 +13,7 @@ pub(crate) fn full_job_scratch_bytes(page_size: u32, database_pages: u32) -> Res
         .checked_mul(u64::from(database_pages))
         .and_then(|bytes| bytes.checked_mul(2))
         .and_then(|bytes| bytes.checked_add(HEADROOM))
-        .ok_or(CrabError::Limit("scratch disk bytes"))
+        .ok_or(CrabError::Limit(crate::LimitKind::ScratchDiskBytes))
 }
 
 /// A fully verified, explicit snapshot-plus-deltas plan ending at an exact position.
@@ -50,7 +50,7 @@ struct MaterializationState {
 impl MaterializationState {
     fn apply(&mut self, bytes: &[u8], info: &SegmentInfo, limits: Limits) -> Result<()> {
         if bytes.len() as u64 > limits.max_file_bytes {
-            return Err(CrabError::Limit("LTX bytes"));
+            return Err(CrabError::Limit(crate::LimitKind::LtxBytes));
         }
         if bytes.len() as u64 != info.size_bytes {
             return Err(CrabError::ChecksumMismatch);
@@ -79,7 +79,7 @@ impl MaterializationState {
         let image_len = usize::try_from(header.commit)
             .ok()
             .and_then(|pages| pages.checked_mul(header.page_size as usize))
-            .ok_or(CrabError::Limit("database bytes"))?;
+            .ok_or(CrabError::Limit(crate::LimitKind::DatabaseBytes))?;
         self.image.resize(image_len, 0);
         let mut checksums = self.checksums.begin_apply(
             header.page_size,
@@ -91,10 +91,10 @@ impl MaterializationState {
             checksums.page(page.pgno, &self.page)?;
             let offset = (page.pgno as usize - 1)
                 .checked_mul(header.page_size as usize)
-                .ok_or(CrabError::Limit("database bytes"))?;
+                .ok_or(CrabError::Limit(crate::LimitKind::DatabaseBytes))?;
             let end = offset
                 .checked_add(header.page_size as usize)
-                .ok_or(CrabError::Limit("database bytes"))?;
+                .ok_or(CrabError::Limit(crate::LimitKind::DatabaseBytes))?;
             self.image[offset..end].copy_from_slice(&self.page);
         }
         checksums.finish()?;
@@ -122,7 +122,7 @@ impl MaterializationState {
             return Err(CrabError::ChecksumMismatch);
         }
         let database_pages = u32::try_from(self.image.len() / self.page_size as usize)
-            .map_err(|_| CrabError::Limit("database pages"))?;
+            .map_err(|_| CrabError::Limit(crate::LimitKind::DatabasePages))?;
         Ok(MaterializedPlan {
             image: self.image,
             checksums: self.checksums,
@@ -155,7 +155,7 @@ impl VerifiedPlan {
             return Err(CrabError::TxNotAvailable);
         }
         if segments.len() > limits.max_segments {
-            return Err(CrabError::Limit("plan segments"));
+            return Err(CrabError::Limit(crate::LimitKind::PlanSegments));
         }
         let mut infos = Vec::with_capacity(segments.len());
         let mut materialization = MaterializationState::default();
@@ -163,9 +163,9 @@ impl VerifiedPlan {
         for segment in segments {
             total = total
                 .checked_add(segment.info().size_bytes)
-                .ok_or(CrabError::Limit("plan bytes"))?;
+                .ok_or(CrabError::Limit(crate::LimitKind::PlanBytes))?;
             if total > limits.max_plan_bytes || segment.info().size_bytes > limits.max_file_bytes {
-                return Err(CrabError::Limit("plan bytes"));
+                return Err(CrabError::Limit(crate::LimitKind::PlanBytes));
             }
             let bytes = host.read(segment.path(), segment.info().size_bytes)?;
             materialization.apply(&bytes, segment.info(), limits)?;
@@ -195,7 +195,7 @@ fn validate_header(header: &ltx::Header, limits: Limits) -> Result<()> {
         return Err(CrabError::LTXCorrupted);
     }
     if u64::from(header.commit) * u64::from(header.page_size) > limits.max_database_bytes {
-        return Err(CrabError::Limit("database bytes"));
+        return Err(CrabError::Limit(crate::LimitKind::DatabaseBytes));
     }
     Ok(())
 }
@@ -203,7 +203,7 @@ fn validate_header(header: &ltx::Header, limits: Limits) -> Result<()> {
 #[cfg_attr(not(feature = "replica"), expect(dead_code))]
 pub(crate) fn verify_segment(bytes: &[u8], info: &SegmentInfo, limits: Limits) -> Result<()> {
     if bytes.len() as u64 > limits.max_file_bytes {
-        return Err(CrabError::Limit("LTX bytes"));
+        return Err(CrabError::Limit(crate::LimitKind::LtxBytes));
     }
     if bytes.len() as u64 != info.size_bytes || *blake3::hash(bytes).as_bytes() != info.blake3 {
         return Err(CrabError::ChecksumMismatch);
@@ -239,7 +239,7 @@ pub(crate) fn compact_to_file(
     let first = plan.infos.first().ok_or(CrabError::TxNotAvailable)?;
     let last = plan.infos.last().ok_or(CrabError::TxNotAvailable)?;
     if plan.infos.len() > plan.limits.max_segments {
-        return Err(CrabError::Limit("compaction inputs"));
+        return Err(CrabError::Limit(crate::LimitKind::CompactionInputs));
     }
     let materialized = plan.materialize();
     if materialized.checksums.checksum() != materialized.position.checksum {
@@ -271,10 +271,10 @@ pub(crate) fn compact_to_file(
         }
         let start = (page as usize - 1)
             .checked_mul(page_size)
-            .ok_or(CrabError::Limit("database bytes"))?;
+            .ok_or(CrabError::Limit(crate::LimitKind::DatabaseBytes))?;
         let end = start
             .checked_add(page_size)
-            .ok_or(CrabError::Limit("database bytes"))?;
+            .ok_or(CrabError::Limit(crate::LimitKind::DatabaseBytes))?;
         let data = materialized
             .image
             .get(start..end)
@@ -367,7 +367,7 @@ fn digest_reader(mut reader: impl Read) -> Result<(u64, [u8; 32])> {
         }
         size = size
             .checked_add(read as u64)
-            .ok_or(CrabError::Limit("LTX bytes"))?;
+            .ok_or(CrabError::Limit(crate::LimitKind::LtxBytes))?;
         digest.update(&buffer[..read]);
     }
     Ok((size, *digest.finalize().as_bytes()))

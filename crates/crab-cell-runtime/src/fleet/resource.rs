@@ -430,7 +430,7 @@ impl crab_ltx::HostResourceAdmission for LedgerHostResourceAdmission {
             return Err(crab_ltx::CrabError::InvalidState("runtime ledger closed"));
         };
         let units = usize::try_from(units)
-            .map_err(|_| crab_ltx::CrabError::Limit("runtime host resource units"))?;
+            .map_err(|_| crab_ltx::CrabError::Limit(crab_ltx::LimitKind::HostResourceUnits))?;
         let cost = match kind {
             crab_ltx::HostResourceKind::Io => ResourceCost::zero().with_io_slots(units),
             crab_ltx::HostResourceKind::BlockingJob => {

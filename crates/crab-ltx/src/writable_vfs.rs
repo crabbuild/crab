@@ -350,7 +350,7 @@ unsafe extern "C" fn x_write(
                 app.local_disk.try_grow(
                     missing
                         .checked_mul(u64::from(app.page_size))
-                        .ok_or(CrabError::Limit("local disk bytes"))?,
+                        .ok_or(CrabError::Limit(crate::LimitKind::LocalDiskBytes))?,
                 )?;
                 let write = (*(*base).pMethods)
                     .xWrite
