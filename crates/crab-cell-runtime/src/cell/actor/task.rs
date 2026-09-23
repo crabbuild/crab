@@ -1,7 +1,6 @@
 //! The actor loop, task handlers, activation, and eviction.
 
 use super::admission::*;
-use super::state::*;
 use super::*;
 
 pub(super) async fn run(

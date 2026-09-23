@@ -138,8 +138,13 @@ jobs:
             .github/workflows/cell-runtime-protected-qualification.yml
           grep -F "test \"\$GITHUB_SHA\" = \"\$SOURCE_REF\"" \
             .github/workflows/cell-runtime-protected-qualification.yml
-          # shellcheck disable=SC2016
-          grep -F 'cell-runtime-protected-${{ github.run_id }}-${{ github.run_attempt }}' \
+          # GitHub expands dollar-brace expressions before the shell runs, so
+          # the artifact-name contract is asserted from its literal pieces.
+          grep -F 'name: cell-runtime-protected-' \
+            .github/workflows/cell-runtime-protected-qualification.yml
+          grep -F 'github.run_id' \
+            .github/workflows/cell-runtime-protected-qualification.yml
+          grep -F 'github.run_attempt' \
             .github/workflows/cell-runtime-protected-qualification.yml
           grep -F "verify-protected-bundle \"\$protected_dir\"" \
             .github/workflows/cell-runtime-protected-qualification.yml
