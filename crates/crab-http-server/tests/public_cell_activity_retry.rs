@@ -128,9 +128,12 @@ async fn run_activity_claim_fault(
         .await
         .expect("Activity run after claim fault");
     assert!(matches!(completed, ActivityRunOutcome::Completed { .. }));
+    // The supervisor reserves a fresh bounded lease before the terminal
+    // completion, so one successful run dispatches the claim, the extension,
+    // and the completion.
     assert_eq!(
         dispatched.load(Ordering::Acquire),
-        if drop_before_dispatch { 2 } else { 3 }
+        if drop_before_dispatch { 3 } else { 4 }
     );
     let observed = workflow
         .state(workflow_id, None)
@@ -185,7 +188,7 @@ async fn run_activity_completion_fault(
     drop_before_dispatch: bool,
 ) {
     let (peer_client, dropped, dispatched) =
-        peer_client_with_one_lost_mutation(registry, handles, drop_before_dispatch, 2);
+        peer_client_with_one_lost_mutation(registry, handles, drop_before_dispatch, 3);
     let peer =
         node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
     let peer_activity = ActivitySupervisor::new(
@@ -229,7 +232,9 @@ async fn run_activity_completion_fault(
         panic!("Activity did not complete after response fault: {outcome:?}");
     };
     assert_eq!(dropped.load(Ordering::Acquire), 1);
-    assert_eq!(dispatched.load(Ordering::Acquire), 2);
+    // Claim, pre-completion lease extension, then the (retried or resolved)
+    // terminal completion.
+    assert_eq!(dispatched.load(Ordering::Acquire), 3);
     let observed = workflow
         .state(workflow_id, Some(receipt))
         .await
