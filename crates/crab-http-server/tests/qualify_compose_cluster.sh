@@ -654,7 +654,6 @@ fi
 a_origin=""
 if [ -n "$a_service" ]; then
   a_origin="$(cluster_origin_for_service "$a_service")"
-  a_session="$(evidence_session "$a_service")"
 fi
 c_origin="$(cluster_origin_for_service "$c_service")"
 c_endpoint="$(cluster_endpoint_for_service "$c_service")"
@@ -675,6 +674,31 @@ deny_cell_objects='{"Version":"2012-10-17","Statement":[{"Sid":"DenyCellImmutabl
 "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
   --endpoint-url http://rustfs:9000 s3api put-bucket-policy \
   --bucket crab-http-server --policy "$deny_cell_objects" >/dev/null
+# The fleet-only mutation is only meaningful while the immutable Cell objects
+# are unwritable: that is what forces the commit onto the follower-acked path.
+# Prove the deny covers the immutable prefix instead of trusting the request,
+# so a missing or ineffective policy fails here with its own message.
+policy_probe_key="repositories/cells/v1/apps/00000000000000000000000000000000/cells/0000000000000000000000000000000000000000000000000000000000000000/inc/00000000000000000000000000000000/objects/qualification-policy-probe"
+immutable_object_put_rejected=false
+for _ in $(seq 1 30); do
+  # Any readable file is a valid probe body; /etc/hosts exists in every image.
+  if "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
+    --endpoint-url http://rustfs:9000 s3api put-object \
+    --bucket crab-http-server --key "$policy_probe_key" \
+    --body /etc/hosts >/dev/null 2>&1; then
+    "${compose[@]}" run --rm --no-deps --entrypoint aws bucket-init \
+      --endpoint-url http://rustfs:9000 s3api delete-object \
+      --bucket crab-http-server --key "$policy_probe_key" >/dev/null 2>&1 || true
+    sleep 1
+  else
+    immutable_object_put_rejected=true
+    break
+  fi
+done
+if ! $immutable_object_put_rejected; then
+  echo "The Cell immutable object deny policy does not reject writes." >&2
+  exit 1
+fi
 fleet_only_response="$(post_json_eventually \
   "$b_origin" \
   "${repository_path}/labels" \
@@ -683,8 +707,17 @@ fleet_only_response="$(post_json_eventually \
   'Node B did not accept the follower-only label.')"
 control_fleet_only="$("${compose[@]}" exec -T "$b_service" crab-http-server \
   --config /etc/crab/server.toml cells status --owner demo --name hello)"
-jq --exit-status --argjson sequence_before "$sequence_before" \
-  '.root.commit_sequence == $sequence_before' <<<"$control_fleet_only" >/dev/null
+if ! jq --exit-status --argjson sequence_before "$sequence_before" \
+  '.root.commit_sequence == $sequence_before' <<<"$control_fleet_only" >/dev/null; then
+  echo "The follower-acked label advanced the object root." >&2
+  printf '%s\n' "$control_fleet_only" >&2
+  "${compose[@]}" exec -T "$c_service" crab-http-server \
+    --config /etc/crab/server.toml cells node --session "$session_before" --json >&2 || true
+  "${compose[@]}" exec -T "$b_service" crab-http-server \
+    --config /etc/crab/server.toml cells metrics 2>/dev/null \
+    | grep -E "crab_cell_node_log_uncovered_bytes|crab_cell_follower_retained_bytes" >&2 || true
+  exit 1
+fi
 node_fleet_only="$("${compose[@]}" exec -T "$c_service" crab-http-server \
   --config /etc/crab/server.toml cells node \
   --session "$session_before" --json)"
@@ -712,30 +745,10 @@ awk '$1 == "crab_cell_node_log_uncovered_bytes" && $2 + 0 > 0 { found = 1 }
 awk '$1 == "crab_cell_follower_retained_bytes" && $2 + 0 > 0 { found = 1 }
      END { exit !found }' <<<"$metrics_follower_fleet_only"
 
-# Keep the successor as the deterministic surviving follower: every other
-# member stays in the log, but its signed advertisement must expire before the
-# owner is killed. The dedicated Compose namespace sidecar remains alive while
-# the expired member is frozen.
-if [ -n "$a_service" ]; then
-  freeze_service "$a_service"
-fi
-if [ -n "$a_service" ]; then
-  a_advertisement_expired=false
-  for _ in $(seq 1 45); do
-    node_a_status="$("${compose[@]}" exec -T "$c_service" crab-http-server \
-      --config /etc/crab/server.toml cells node \
-      --session "$a_session" --json 2>/dev/null || true)"
-    if jq --exit-status '.live == false' <<<"$node_a_status" >/dev/null 2>&1; then
-      a_advertisement_expired=true
-      break
-    fi
-    sleep 1
-  done
-  if ! $a_advertisement_expired; then
-    echo "The expired member did not leave the live advertisement set." >&2
-    exit 1
-  fi
-fi
+# Kill the owner without expiring its other member: the product then elects the
+# canonical original follower itself, and the surviving member stays live so the
+# follower-replacement phase can lose a live member instead of observing a race
+# that already happened during the takeover.
 # Record the signed expiry, not when polling noticed it; recovery may seal
 # before that later observation, and dead-node status hides the advertisement.
 owner_advertisement="$("${compose[@]}" exec -T "$c_service" crab-http-server \
@@ -815,11 +828,10 @@ for _ in $(seq 1 45); do
     2>/dev/null || true)"
   if jq --exit-status \
     --arg session_before "$session_before" \
-    --arg endpoint "$c_endpoint" \
     --argjson epoch_before "$epoch_before" \
     --argjson sequence_before "$sequence_before" \
-    '.state == "serving" and .owner.endpoint == $endpoint and
-     .owner.session != $session_before and .epoch > $epoch_before and
+    '.state == "serving" and .owner.session != $session_before and
+     .epoch > $epoch_before and
      .owner_lease.state == "live" and
      .owner_lease.expires_at_ms > .owner_lease.observed_at_ms and
      .recovery == null and
@@ -831,6 +843,19 @@ for _ in $(seq 1 45); do
 done
 if [ -z "$control_after" ]; then
   echo "Node C did not publish a serving status after owner takeover." >&2
+  exit 1
+fi
+# The product elects the original follower from the live members, so read the
+# successor back instead of predicting which member wins, and require it to be
+# one of the owner's enrolled members.
+c_endpoint="$(jq --raw-output '.owner.endpoint' <<<"$control_after")"
+c_service="$(cluster_service_for_endpoint "$c_endpoint")"
+c_origin="$(cluster_origin_for_service "$c_service")"
+c_node_id="$(jq --raw-output '.advertisement.node' <<<"$(service_node "$c_service")")"
+if ! jq --exit-status --arg node "$c_node_id" \
+  'any(.advertisement.log.member_nodes[]; . == $node)' <<<"$node_before" >/dev/null; then
+  echo "The elected successor is not one of the owner's enrolled members." >&2
+  printf '%s\n' "$node_before" >&2
   exit 1
 fi
 recovery_sealed_ms="$(unix_millis)"
@@ -894,12 +919,8 @@ jq --exit-status \
    .root.commit_sequence > $sequence_before' \
   <<<"$control_continued" >/dev/null
 
-if [ -n "$a_service" ]; then
-  resume_service "$a_service"
-fi
-# The namespace sidecar stays up while the expired member self-fences; the
-# killed owner can therefore rejoin without recreating another node or racing a
-# failed namespace provider.
+# The namespace sidecar stays up, so the killed owner can rejoin without
+# recreating another node or racing a failed namespace provider.
 "${compose[@]}" up --detach --no-build "$b_service" >/dev/null
 wait_for_healthy "$b_service"
 rejoin_ready=false
@@ -1019,16 +1040,37 @@ jq --exit-status \
    any(.advertisement.log.member_nodes[]; . != $node_b)' \
   <<<"$node_before_follower_loss" >/dev/null
 
-# Freezing every node except the owner and the rejoined follower removes their
-# leases and follower endpoints while the dedicated Compose namespace sidecar
-# remains available for the owner. That leaves the owner with one enrollable
-# member, so its lane must replace the expired ones with the rejoined follower.
+# Freeze the owner's live member (plus every other node that is neither the
+# owner nor the rejoined follower) and wait for the frozen advertisement to
+# expire: the owner must then replace its lost member with the rejoined node,
+# which is what the receipt records as the follower replacement.
+losable_services=()
+losable_sessions=()
 for candidate in server server-b server-c server-d; do
   if [ "$candidate" != "$c_service" ] && [ "$candidate" != "$b_service" ]; then
+    losable_services+=("$candidate")
+    losable_sessions+=("$(node_session "$candidate")")
     freeze_service "$candidate"
   fi
 done
-sleep 12
+for index in "${!losable_services[@]}"; do
+  candidate_session="${losable_sessions[$index]}"
+  candidate_expired=false
+  for _ in $(seq 1 45); do
+    candidate_status="$("${compose[@]}" exec -T "$c_service" crab-http-server \
+      --config /etc/crab/server.toml cells node \
+      --session "$candidate_session" --json 2>/dev/null || true)"
+    if jq --exit-status '.live == false' <<<"$candidate_status" >/dev/null 2>&1; then
+      candidate_expired=true
+      break
+    fi
+    sleep 1
+  done
+  if ! $candidate_expired; then
+    echo "${losable_services[$index]} did not leave the live advertisement set." >&2
+    exit 1
+  fi
+done
 after_follower_loss="$(post_json_eventually \
   "$c_origin" \
   "${repository_path}/issues" \
@@ -1306,6 +1348,16 @@ fallback_node_for_service() {
   esac
 }
 
+fallback_session_for_service() {
+  case "$1" in
+    server) printf '%s\n' "$session_server_fallback" ;;
+    server-b) printf '%s\n' "$session_server_b_fallback" ;;
+    server-c) printf '%s\n' "$session_server_c_fallback" ;;
+    server-d) printf '%s\n' "$session_server_d_fallback" ;;
+    *) return 2 ;;
+  esac
+}
+
 node_b_before_fallback="$(fallback_node_for_service "$b_service")"
 fallback_members="$(jq -c '.advertisement.log.member_nodes' <<<"$node_b_before_fallback")"
 # A replacement owner may have an enrolled but inactive log: no fleet proof
@@ -1370,16 +1422,33 @@ if [ -z "$fallback_candidate_service" ]; then
 fi
 fallback_metrics_before="$(service_cli "$fallback_candidate_service" cells metrics)"
 
+# Remove every live node except the owner and the recorded candidate, so the
+# bounded any-node recovery can only elect the candidate the receipt names, and
+# wait until only the candidate still advertises.
 for member_service in "${fallback_services[@]}"; do
-  member_node_json="$(fallback_node_for_service "$member_service")"
-  member_node="$(jq -r '.advertisement.node' <<<"$member_node_json")"
-  if jq --exit-status --arg node "$member_node" \
-    'any(.[]; . == $node)' <<<"$fallback_members" >/dev/null; then
-    if [ "$member_service" = "$fallback_candidate_service" ]; then
-      echo "fallback candidate is also an original follower" >&2
-      exit 1
+  if [ "$member_service" = "$fallback_candidate_service" ]; then
+    continue
+  fi
+  stop_fallback_member "$member_service"
+done
+for member_service in "${fallback_services[@]}"; do
+  if [ "$member_service" = "$fallback_candidate_service" ]; then
+    continue
+  fi
+  member_session="$(fallback_session_for_service "$member_service")"
+  member_expired=false
+  for _ in $(seq 1 45); do
+    member_status="$(service_cli "$fallback_candidate_service" cells node \
+      --session "$member_session" --json 2>/dev/null || true)"
+    if jq --exit-status '.live == false' <<<"$member_status" >/dev/null 2>&1; then
+      member_expired=true
+      break
     fi
-    stop_fallback_member "$member_service"
+    sleep 1
+  done
+  if ! $member_expired; then
+    echo "${member_service} did not leave the live advertisement set." >&2
+    exit 1
   fi
 done
 
@@ -1562,6 +1631,7 @@ jq --null-input \
   --argjson restored_labels "$restored_labels" \
   --argjson control_fleet_only "$control_fleet_only" \
   --argjson owner_uncovered_bytes "$owner_uncovered_bytes" \
+  --argjson immutable_object_put_rejected "$immutable_object_put_rejected" \
   --argjson follower_retained_bytes "$follower_retained_bytes" \
   --argjson node_before_follower_loss "$node_before_follower_loss" \
   --argjson node_after_follower_loss "$node_after_follower_loss" \
@@ -1630,7 +1700,7 @@ jq --null-input \
       control_before_owner_loss: $control_fleet_only,
       owner_uncovered_bytes: $owner_uncovered_bytes,
       follower_retained_bytes: $follower_retained_bytes,
-      immutable_object_put_rejected: true,
+      immutable_object_put_rejected: $immutable_object_put_rejected,
       owner_disk_removed_before_policy_restore: true
     },
     follower_replacement: {
