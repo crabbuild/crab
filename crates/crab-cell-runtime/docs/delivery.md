@@ -190,8 +190,8 @@ AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
 CRAB_LTX_TEST_BUCKET="$BUCKET" \
 CRAB_LTX_TEST_ENDPOINT="$ENDPOINT" \
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
-  cargo test -p crab-ltx --features replica --test cell_roots \
-  exact_root_inventory_verifies_every_remote_dependency --locked -- --exact
+  cargo test -p crab-ltx --features replica --test cell --locked \
+  cell::roots::exact_root_inventory_verifies_every_remote_dependency -- --exact
 
 AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
 AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
@@ -199,8 +199,8 @@ CRAB_CELL_TEST_BUCKET="$BUCKET" \
 CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
 CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
-  cargo test -p crab-cell-runtime --test actor \
-  rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
+  cargo test -p crab-cell-runtime --test runtime \
+  runtime::lifecycle::rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
   --locked -- --ignored --exact
 
 AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
@@ -209,8 +209,8 @@ CRAB_CELL_TEST_BUCKET="$BUCKET" \
 CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
 CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX-mixed" \
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
-  cargo test -p crab-cell-runtime --test actor \
-  rustfs_mixed_primitive_inventory_churn_preserves_exact_roots \
+  cargo test -p crab-cell-runtime --test runtime \
+  runtime::lifecycle::rustfs_mixed_primitive_inventory_churn_preserves_exact_roots \
   --locked -- --ignored --exact
 
 AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
@@ -342,14 +342,14 @@ The ignored qualification tests require one fresh bucket and a unique Cell prefi
 ```bash
 CRAB_LTX_TEST_BUCKET="$BUCKET" \
 CRAB_LTX_TEST_ENDPOINT="$ENDPOINT" \
-cargo test -p crab-ltx --features replica --test cell_roots \
+cargo test -p crab-ltx --features replica --test cell \
   exact_root_inventory_verifies_every_remote_dependency -- --exact
 
 CRAB_CELL_TEST_BUCKET="$BUCKET" \
 CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
 CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
-cargo test -p crab-cell-runtime --test actor \
-  rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
+cargo test -p crab-cell-runtime --test runtime \
+  runtime::lifecycle::rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
   -- --ignored --exact
 
 CRAB_CELL_TEST_BUCKET="$BUCKET" \

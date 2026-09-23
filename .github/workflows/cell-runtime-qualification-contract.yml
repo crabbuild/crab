@@ -82,7 +82,7 @@ jobs:
       - name: Run production hot-path preflight guards
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
-        run: cargo test -p crab-cell-runtime --test qualification_preflight --locked
+        run: cargo test -p crab-cell-runtime --test qualification --locked
       - name: Verify application and host boundaries
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
