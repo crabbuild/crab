@@ -564,7 +564,7 @@ pub(super) async fn load_checksums(
         ));
     }
     if u64::from(verification.database_pages) * 8 > limits.max_database_bytes {
-        return Err(CrabError::Limit("checksum file bytes"));
+        return Err(CrabError::Limit(crate::LimitKind::ChecksumFileBytes));
     }
 
     let mut file = verification.host.filesystem.create(&checksum_path)?;

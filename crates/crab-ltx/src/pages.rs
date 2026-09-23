@@ -133,7 +133,7 @@ impl PageChecksums {
             return Err(CrabError::LTXCorrupted);
         }
         if u64::from(page_size) * u64::from(commit) > limit {
-            return Err(CrabError::Limit("database bytes"));
+            return Err(CrabError::Limit(crate::LimitKind::DatabaseBytes));
         }
 
         let previous_count = self.count;

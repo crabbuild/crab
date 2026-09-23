@@ -75,7 +75,7 @@ pub fn encode_node_frame(
 
     let capacity = HEADER_BYTES
         .checked_add(body.len())
-        .ok_or(CrabError::Limit("node frame bytes"))?;
+        .ok_or(CrabError::Limit(crate::LimitKind::NodeFrameBytes))?;
     let mut encoded = Vec::with_capacity(capacity);
     encoded.extend_from_slice(MAGIC);
     encoded.extend_from_slice(&VERSION.to_le_bytes());
@@ -126,7 +126,7 @@ pub fn inspect_node_frame(encoded: Bytes, limits: Limits) -> Result<VerifiedNode
         || body_len > usize::MAX as u64
         || encoded.len() != HEADER_BYTES.saturating_add(body_len as usize)
     {
-        return Err(CrabError::Limit("node frame bytes"));
+        return Err(CrabError::Limit(crate::LimitKind::NodeFrameBytes));
     }
     validate_scope(scope)?;
     let body = encoded.slice(HEADER_BYTES..);
@@ -159,7 +159,7 @@ fn validate_scope(scope: NodeFrameScope) -> Result<()> {
 
 fn validate_body(body: &[u8], segment: &SegmentInfo, limits: Limits) -> Result<()> {
     if body.len() as u64 > limits.max_capture_bytes {
-        return Err(CrabError::Limit("node frame body"));
+        return Err(CrabError::Limit(crate::LimitKind::NodeFrameBody));
     }
     crate::recovery::verify_segment(body, segment, limits)
 }

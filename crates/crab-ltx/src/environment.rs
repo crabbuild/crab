@@ -55,7 +55,7 @@ mod tests {
         assert_eq!(budget.available(), 0);
         assert!(matches!(
             budget.try_reserve(1),
-            Err(crate::CrabError::Limit("local disk bytes"))
+            Err(crate::CrabError::Limit(crate::LimitKind::LocalDiskBytes))
         ));
 
         first.resize(2).unwrap();

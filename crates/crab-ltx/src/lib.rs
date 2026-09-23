@@ -65,7 +65,7 @@ mod format_tests;
 
 pub use capture::CheckpointMode;
 pub use db::{Db, MANAGED_CONNECTION_PAGE_CACHE_BYTES, MANAGED_SQLITE_CONNECTIONS};
-pub use error::{CrabError, QueryError, Result, TransactionError};
+pub use error::{CrabError, LimitKind, QueryError, Result, TransactionError};
 pub use recovery::{VerifiedPlan, compact_exact, restore_exact};
 pub use rusqlite;
 pub use types::{CaptureBatch, CaptureTiming, Limits, LocalSegment, Position, SegmentInfo};

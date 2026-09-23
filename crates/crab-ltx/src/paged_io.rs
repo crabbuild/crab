@@ -310,7 +310,7 @@ impl Io {
             .try_send(request)
             .map_err(|error| match error {
                 tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                    CrabError::Limit("paged request queue")
+                    CrabError::Limit(crate::LimitKind::PagedRequestQueue)
                 }
                 tokio::sync::mpsc::error::TrySendError::Closed(_) => {
                     CrabError::InvalidState("paged I/O closed")

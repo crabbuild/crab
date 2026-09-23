@@ -17,6 +17,7 @@ HostResourceAdmission
 HostResourceKind
 HostResourcePermit
 Hydration
+LimitKind
 Limits
 LocalSegment
 LtxPhase

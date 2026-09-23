@@ -176,7 +176,7 @@ impl Db {
         if u64::from(materialized.database_pages) * u64::from(materialized.page_size)
             > limits.max_database_bytes
         {
-            return Err(CrabError::Limit("database bytes"));
+            return Err(CrabError::Limit(crate::LimitKind::DatabaseBytes));
         }
         let database_bytes =
             u64::from(materialized.database_pages) * u64::from(materialized.page_size);
@@ -285,7 +285,7 @@ impl Db {
         let page_size: u32 = writer.query_row("PRAGMA page_size", [], |row| row.get(0))?;
         let max_pages = limits.max_database_bytes / u64::from(page_size);
         if max_pages == 0 {
-            return Err(CrabError::Limit("database page size"));
+            return Err(CrabError::Limit(crate::LimitKind::DatabasePageSize));
         }
         writer.pragma_update(None, "max_page_count", max_pages)?;
         let observer = crate::commit::CommitObserver::install(&writer);
@@ -346,7 +346,7 @@ impl Db {
             .map_err(crate::TransactionError::Capture)?;
         let disk_before = self.local_disk.bytes();
         let write_bytes = self.limits.max_capture_bytes.checked_mul(2).ok_or(
-            crate::TransactionError::Admission(CrabError::Limit("local disk bytes")),
+            crate::TransactionError::Admission(CrabError::Limit(crate::LimitKind::LocalDiskBytes)),
         )?;
         self.local_disk
             .try_grow(write_bytes)
@@ -591,7 +591,7 @@ impl Db {
                 self.limits
                     .max_capture_bytes
                     .checked_mul(2)
-                    .ok_or(CrabError::Limit("local disk bytes"))?,
+                    .ok_or(CrabError::Limit(crate::LimitKind::LocalDiskBytes))?,
             )?;
             let before = self.capture.pos();
             self.capture.start_timing(self.host.now_monotonic());
@@ -694,35 +694,31 @@ impl Db {
         if self.retained_segments >= self.limits.max_segments
             || self.retained_bytes >= self.limits.max_plan_bytes
         {
-            return Err(CrabError::Limit(
-                "retained capture artifacts; rotate session",
-            ));
+            return Err(CrabError::Limit(crate::LimitKind::RetainedCaptureArtifacts));
         }
         Ok(())
     }
 
     fn account(&mut self, info: &SegmentInfo) -> Result<()> {
         if info.size_bytes > self.limits.max_file_bytes {
-            return Err(CrabError::Limit("LTX file bytes"));
+            return Err(CrabError::Limit(crate::LimitKind::LtxFileBytes));
         }
         self.retained_bytes = self
             .retained_bytes
             .checked_add(info.size_bytes)
-            .ok_or(CrabError::Limit("retained bytes"))?;
+            .ok_or(CrabError::Limit(crate::LimitKind::RetainedBytes))?;
         self.retained_segments += 1;
         if self.retained_segments > self.limits.max_segments
             || self.retained_bytes > self.limits.max_plan_bytes
         {
-            return Err(CrabError::Limit(
-                "retained capture artifacts; rotate session",
-            ));
+            return Err(CrabError::Limit(crate::LimitKind::RetainedCaptureArtifacts));
         }
         Ok(())
     }
 
     fn account_capture(&mut self, info: &SegmentInfo) -> Result<()> {
         if info.size_bytes > self.limits.max_capture_bytes {
-            return Err(CrabError::Limit("captured LTX bytes"));
+            return Err(CrabError::Limit(crate::LimitKind::CapturedLtxBytes));
         }
         self.account(info)
     }
@@ -740,9 +736,9 @@ impl Db {
         };
         let live = database_bytes
             .checked_add(self.retained_bytes)
-            .ok_or(CrabError::Limit("local disk bytes"))?
+            .ok_or(CrabError::Limit(crate::LimitKind::LocalDiskBytes))?
             .checked_add(wal_bytes)
-            .ok_or(CrabError::Limit("local disk bytes"))?;
+            .ok_or(CrabError::Limit(crate::LimitKind::LocalDiskBytes))?;
         self.local_disk.resize(live)
     }
 }
@@ -1114,7 +1110,10 @@ mod tests {
             Ok(())
         });
 
-        assert!(matches!(result, Err(CrabError::Limit("local disk bytes"))));
+        assert!(matches!(
+            result,
+            Err(CrabError::Limit(crate::LimitKind::LocalDiskBytes))
+        ));
         assert!(!ran.get());
         assert_eq!(budget.used(), 0);
     }
@@ -1132,7 +1131,10 @@ mod tests {
 
         let result = Db::open_with_host(&path, Limits::default(), host);
 
-        assert!(matches!(result, Err(CrabError::Limit("local disk bytes"))));
+        assert!(matches!(
+            result,
+            Err(CrabError::Limit(crate::LimitKind::LocalDiskBytes))
+        ));
         assert!(!CaptureEngine::meta_path_for(&path).exists());
     }
 
@@ -1158,7 +1160,10 @@ mod tests {
 
         let result = Db::resume_with_host(&plan, &destination, limits, host);
 
-        assert!(matches!(result, Err(CrabError::Limit("local disk bytes"))));
+        assert!(matches!(
+            result,
+            Err(CrabError::Limit(crate::LimitKind::LocalDiskBytes))
+        ));
         assert!(!destination.exists());
     }
 

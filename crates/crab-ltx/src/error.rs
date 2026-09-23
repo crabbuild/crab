@@ -1,7 +1,135 @@
 //! Errors retain their local I/O, SQLite, or codec cause.
 
+use std::fmt;
+
 /// Result of a local replication operation.
 pub type Result<T> = std::result::Result<T, CrabError>;
+
+/// Bounded resource that a capture, recovery, or replica step refused to exceed.
+///
+/// Callers map these classes onto their own capacity errors, so the variant —
+/// not a message string — is the contract. `InvalidState` messages stay free
+/// form because no caller dispatches on them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LimitKind {
+    /// One captured Cell bundle exceeded the bundle byte budget.
+    CapturedCellBundleBytes,
+    /// One captured bundle exceeded the bundle entry budget.
+    BundleEntries,
+    /// One bundle exceeded the bundle byte budget.
+    BundleBytes,
+    /// One bundle footer exceeded its byte budget.
+    BundleFooter,
+    /// One captured Cell LTX object exceeded the object byte budget.
+    CapturedCellLtxBytes,
+    /// One captured LTX object exceeded the object byte budget.
+    CapturedLtxBytes,
+    /// One captured Cell bundle exceeded the bundle byte budget.
+    CellBundleBytes,
+    /// The Cell root exceeded its byte budget.
+    CellRootBytes,
+    /// The Cell root exceeded its segment-count budget.
+    CellRootSegments,
+    /// One Cell scale-load batch exceeded its byte budget.
+    CellScaleBytes,
+    /// The Cell scale-load checksum exceeded its byte budget.
+    CellScaleChecksumLength,
+    /// The Cell scale-load run exceeded its sequence budget.
+    CellScaleSequence,
+    /// The Cell root descriptor pages exceeded their page budget.
+    CellRootSegmentPages,
+    /// One Cell segment page exceeded its byte budget.
+    CellSegmentPageBytes,
+    /// The checksum sidecar exceeded its byte budget.
+    ChecksumFileBytes,
+    /// A compaction body spool exceeded its byte budget.
+    CompactionBodySpool,
+    /// A compaction index spool exceeded its byte budget.
+    CompactionIndexSpool,
+    /// A compaction read set exceeded its input budget.
+    CompactionInputs,
+    /// The database exceeded its byte budget.
+    DatabaseBytes,
+    /// The database page size fell outside the supported range.
+    DatabasePageSize,
+    /// The database exceeded its page-count budget.
+    DatabasePages,
+    /// The host refused to charge the reserved host resource units.
+    HostResourceUnits,
+    /// The host refused to admit the requested local disk bytes.
+    LocalDiskBytes,
+    /// One LTX object exceeded the object byte budget.
+    LtxBytes,
+    /// One LTX file exceeded its byte budget.
+    LtxFileBytes,
+    /// The LTX page index exceeded its byte budget.
+    LtxPageIndexBytes,
+    /// One node frame body exceeded its byte budget.
+    NodeFrameBody,
+    /// One node frame exceeded its byte budget.
+    NodeFrameBytes,
+    /// The paged request queue exceeded its entry budget.
+    PagedRequestQueue,
+    /// A recovery plan exceeded its byte budget.
+    PlanBytes,
+    /// A recovery plan exceeded its segment budget.
+    PlanSegments,
+    /// Retained replica bytes exceeded the retained-bytes budget.
+    RetainedBytes,
+    /// Retained capture artifacts exceeded the session plan budget.
+    RetainedCaptureArtifacts,
+    /// Scratch files exceeded the scratch disk byte budget.
+    ScratchDiskBytes,
+}
+
+impl LimitKind {
+    /// Stable diagnostic text for this limit class.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CapturedCellBundleBytes => "captured Cell bundle bytes",
+            Self::BundleEntries => "bundle entries",
+            Self::BundleBytes => "bundle bytes",
+            Self::BundleFooter => "bundle footer",
+            Self::CapturedCellLtxBytes => "captured Cell LTX bytes",
+            Self::CapturedLtxBytes => "captured LTX bytes",
+            Self::CellBundleBytes => "Cell bundle bytes",
+            Self::CellRootBytes => "Cell root bytes",
+            Self::CellRootSegments => "Cell root segments",
+            Self::CellScaleBytes => "Cell scale bytes",
+            Self::CellScaleChecksumLength => "Cell scale checksum length",
+            Self::CellScaleSequence => "Cell scale sequence",
+            Self::CellRootSegmentPages => "Cell root segment pages",
+            Self::CellSegmentPageBytes => "Cell segment page bytes",
+            Self::ChecksumFileBytes => "checksum file bytes",
+            Self::CompactionBodySpool => "compaction body spool",
+            Self::CompactionIndexSpool => "compaction index spool",
+            Self::CompactionInputs => "compaction inputs",
+            Self::DatabaseBytes => "database bytes",
+            Self::DatabasePageSize => "database page size",
+            Self::DatabasePages => "database pages",
+            Self::HostResourceUnits => "host resource units",
+            Self::LocalDiskBytes => "local disk bytes",
+            Self::LtxBytes => "LTX bytes",
+            Self::LtxFileBytes => "LTX file bytes",
+            Self::LtxPageIndexBytes => "LTX page index bytes",
+            Self::NodeFrameBody => "node frame body",
+            Self::NodeFrameBytes => "node frame bytes",
+            Self::PagedRequestQueue => "paged request queue",
+            Self::PlanBytes => "plan bytes",
+            Self::PlanSegments => "plan segments",
+            Self::RetainedBytes => "retained bytes",
+            Self::RetainedCaptureArtifacts => "retained capture artifacts; rotate session",
+            Self::ScratchDiskBytes => "scratch disk bytes",
+        }
+    }
+}
+
+impl fmt::Display for LimitKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
 
 /// Failure from a managed transaction without erasing a handler's domain error.
 ///
@@ -58,7 +186,7 @@ pub enum CrabError {
     #[error("SQLite failure: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("resource limit exceeded: {0}")]
-    Limit(&'static str),
+    Limit(LimitKind),
     #[cfg(feature = "replica")]
     #[error("sparse page I/O exceeded its deadline")]
     Deadline,
@@ -74,19 +202,31 @@ impl CrabError {
     /// Reports whether compacting an existing Cell graph can admit an append.
     #[must_use]
     pub fn is_cell_graph_limit(&self) -> bool {
-        matches!(self, Self::Limit("Cell root segments" | "Cell root bytes"))
+        matches!(
+            self,
+            Self::Limit(LimitKind::CellRootSegments | LimitKind::CellRootBytes)
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::CrabError;
+    use super::{CrabError, LimitKind};
 
     #[test]
     fn only_cell_graph_admission_limits_are_compaction_retryable() {
-        assert!(CrabError::Limit("Cell root segments").is_cell_graph_limit());
-        assert!(CrabError::Limit("Cell root bytes").is_cell_graph_limit());
-        assert!(!CrabError::Limit("LTX file bytes").is_cell_graph_limit());
+        assert!(CrabError::Limit(LimitKind::CellRootSegments).is_cell_graph_limit());
+        assert!(CrabError::Limit(LimitKind::CellRootBytes).is_cell_graph_limit());
+        assert!(!CrabError::Limit(LimitKind::LtxFileBytes).is_cell_graph_limit());
         assert!(!CrabError::ChecksumMismatch.is_cell_graph_limit());
+    }
+
+    #[test]
+    fn limit_kinds_keep_their_diagnostic_text() {
+        assert_eq!(
+            CrabError::Limit(LimitKind::LocalDiskBytes).to_string(),
+            "resource limit exceeded: local disk bytes"
+        );
+        assert_eq!(LimitKind::CellRootBytes.as_str(), "Cell root bytes");
     }
 }

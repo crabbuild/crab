@@ -200,14 +200,14 @@ pub(super) fn encode_root(root: &RootDocument) -> Result<Vec<u8>> {
         version: 1,
     })?;
     if bytes.len() as u64 > ROOT_BYTES {
-        return Err(CrabError::Limit("Cell root bytes"));
+        return Err(CrabError::Limit(crate::LimitKind::CellRootBytes));
     }
     Ok(bytes)
 }
 
 pub(super) fn decode_root(bytes: &[u8]) -> Result<RootDocument> {
     if bytes.len() as u64 > ROOT_BYTES {
-        return Err(CrabError::Limit("Cell root bytes"));
+        return Err(CrabError::Limit(crate::LimitKind::CellRootBytes));
     }
     let wire: RootWire = serde_json::from_slice(bytes)?;
     if wire.version != 1 {
@@ -258,14 +258,14 @@ pub(super) fn encode_segment_page(segments: &[SegmentDescriptor]) -> Result<Vec<
         .collect::<Vec<_>>();
     let bytes = serde_json::to_vec(&wire)?;
     if bytes.len() as u64 > SEGMENT_PAGE_BYTES {
-        return Err(CrabError::Limit("Cell segment page bytes"));
+        return Err(CrabError::Limit(crate::LimitKind::CellSegmentPageBytes));
     }
     Ok(bytes)
 }
 
 pub(super) fn decode_segment_page(bytes: &[u8]) -> Result<Vec<SegmentDescriptor>> {
     if bytes.len() as u64 > SEGMENT_PAGE_BYTES {
-        return Err(CrabError::Limit("Cell segment page bytes"));
+        return Err(CrabError::Limit(crate::LimitKind::CellSegmentPageBytes));
     }
     let wire: Vec<SegmentWire> = serde_json::from_slice(bytes)?;
     let segments = wire

@@ -130,7 +130,7 @@ pub(crate) fn encode_index_from_pages(pages: &[crate::codec::EncodedPage]) -> Re
         pages
             .len()
             .checked_mul(ENTRY_BYTES)
-            .ok_or(CrabError::Limit("LTX page index bytes"))?,
+            .ok_or(CrabError::Limit(crate::LimitKind::LtxPageIndexBytes))?,
     );
     for page in pages {
         append_index_page(&mut index, page)?;
