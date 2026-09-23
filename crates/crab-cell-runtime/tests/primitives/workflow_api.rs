@@ -9,22 +9,41 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-use crab_cell_runtime::{
-    ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome, ApplicationId,
-    BlockingActivityHandler, BlockingActivityPool, BuildDescriptor, CatalogEntry, CatalogRole,
-    CellAuthority, CellCatalog, CellClient, CellModule, CellRuntime, CellTarget, Digest,
-    DueCellScan, Error, IncarnationId, InvocationError, MaintenanceModule, MaintenanceTickCommand,
-    MaintenanceTickOutcome, MaintenanceTickRequest, MigrationDescriptor, ModuleDescriptor,
-    MutationIdentity, NamespaceDescriptor, NamespaceId, OperationDescriptor, Owner,
-    RegistryBuilder, RequestId, SessionId, SqlWorkerPool, TenantId, WorkflowAction,
-    WorkflowActivityClaimCommand, WorkflowActivityCompleteCommand, WorkflowActivityExtendCommand,
-    WorkflowActivityModule, WorkflowActivityValidateQuery, WorkflowCancelCommand, WorkflowContext,
-    WorkflowControlCommand, WorkflowDecision, WorkflowDefinition, WorkflowGetQuery, WorkflowModule,
-    WorkflowNamespace, WorkflowOutcome, WorkflowSignal, WorkflowSignalCommand,
-    WorkflowStartCommand, WorkflowStatus, install_workflow_schema, register_activity,
-    register_blocking_activity, register_maintenance, register_workflow,
-    register_workflow_activities,
+use crab_cell_runtime::Error;
+use crab_cell_runtime::cell::actor::CellRuntime;
+use crab_cell_runtime::cell::catalog::CatalogRole;
+use crab_cell_runtime::cell::catalog::{CatalogEntry, CellCatalog};
+use crab_cell_runtime::cell::executor::MutationIdentity;
+use crab_cell_runtime::cell::worker::SqlWorkerPool;
+use crab_cell_runtime::client::{CellClient, InvocationError};
+use crab_cell_runtime::control::Owner;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::fleet::scheduler::DueCellScan;
+use crab_cell_runtime::identity::{
+    ApplicationId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
 };
+use crab_cell_runtime::identity::{IncarnationId, RequestId};
+use crab_cell_runtime::primitives::activity_pool::BlockingActivityPool;
+use crab_cell_runtime::primitives::maintenance::{
+    MaintenanceModule, MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest,
+    register_maintenance,
+};
+use crab_cell_runtime::primitives::workflow::{
+    ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome,
+    BlockingActivityHandler, WorkflowAction, WorkflowActivityClaimCommand,
+    WorkflowActivityCompleteCommand, WorkflowActivityExtendCommand, WorkflowActivityValidateQuery,
+    WorkflowCancelCommand, WorkflowContext, WorkflowControlCommand, WorkflowDecision,
+    WorkflowDefinition, WorkflowGetQuery, WorkflowOutcome, WorkflowSignal, WorkflowSignalCommand,
+    WorkflowStartCommand, WorkflowStatus, install_workflow_schema, register_activity,
+    register_blocking_activity, register_workflow, register_workflow_activities,
+};
+use crab_cell_runtime::primitives::workflow::{
+    WorkflowActivityModule, WorkflowModule, WorkflowNamespace,
+};
+use crab_cell_runtime::registry::{
+    BuildDescriptor, CellModule, ModuleDescriptor, NamespaceDescriptor, RegistryBuilder,
+};
+use crab_cell_runtime::registry::{MigrationDescriptor, OperationDescriptor};
 use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::Store;
@@ -984,9 +1003,11 @@ async fn native_activity_heartbeats_and_recovers_after_node_loss() {
         registry
             .run_activity_once(client.clone(), &target, 5_000, None)
             .await,
-        Err(crab_cell_runtime::ActivitySupervisorError::Runtime(
-            Error::Capacity("blocking activity slot was not reserved")
-        ))
+        Err(
+            crab_cell_runtime::primitives::workflow::ActivitySupervisorError::Runtime(
+                Error::Capacity("blocking activity slot was not reserved")
+            )
+        )
     ));
     let completed = registry
         .run_activity_once(client, &target, 5_000, blocking_pool.try_reserve().unwrap())
@@ -1097,9 +1118,10 @@ async fn native_activity_heartbeats_and_recovers_after_node_loss() {
             {
                 Ok(outcome) => outcome,
                 Err(error) => {
-                    return Err::<ActivityRunOutcome, crab_cell_runtime::ActivitySupervisorError>(
-                        error,
-                    );
+                    return Err::<
+                        ActivityRunOutcome,
+                        crab_cell_runtime::primitives::workflow::ActivitySupervisorError,
+                    >(error);
                 }
             };
             if matches!(
@@ -1162,7 +1184,10 @@ async fn native_activity_heartbeats_and_recovers_after_node_loss() {
             authority.clone(),
             stale_owner,
             takeover,
-            crab_cell_runtime::RecoveryManifestStore::new(layout.clone(), Limits::default()),
+            crab_cell_runtime::recovery::manifest::RecoveryManifestStore::new(
+                layout.clone(),
+                Limits::default(),
+            ),
             directory.path().join("activity-second.sqlite"),
             Owner {
                 session: second_session,

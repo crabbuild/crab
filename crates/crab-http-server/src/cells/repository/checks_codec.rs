@@ -1,4 +1,4 @@
-use crab_cell_runtime::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use crab_cell_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 
 use super::{
     CheckAnnotationRecord, CheckOutputRecord, CheckReportInput, CheckRunDetail, CheckRunKey,

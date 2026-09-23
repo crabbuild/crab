@@ -9,11 +9,18 @@ use super::{
     Message, QueuedCommand, QueuedMigration, QueuedOperation, QueuedQuery, QueuedResolve,
     ResolveOperation, RuntimeInner, new_cell_admission,
 };
+use crate::Error;
+use crate::cell::actor::MigratedCell;
+use crate::cell::catalog::CatalogProof;
+use crate::cell::catalog::CatalogRole;
+use crate::cell::executor::StoredOutcome;
+use crate::cell::executor::{MutationIdentity, Resolution};
 use crate::fleet::resource::{ResourceCost, ResourceReservation};
-use crate::{
-    CatalogProof, CatalogRole, CellId, Digest, Error, InboxDelivery, IncarnationId, MigratedCell,
-    MigrationPlan, MutationIdentity, PersistedWorkInventory, Resolution, StoredOutcome,
-};
+use crate::identity::IncarnationId;
+use crate::identity::{CellId, Digest};
+use crate::primitives::effects::InboxDelivery;
+use crate::primitives::maintenance::PersistedWorkInventory;
+use crate::registry::MigrationPlan;
 
 const MAX_OPERATION_BYTES: usize = crate::codec::MAX_WIRE_BYTES;
 const MAX_RESULT_BYTES: usize = crate::codec::MAX_WIRE_BYTES;
@@ -82,7 +89,8 @@ impl CellHandle {
     where
         F: for<'connection> FnOnce(
                 &crab_ltx::rusqlite::Transaction<'connection>,
-            ) -> crate::Result<crate::HandlerOutcome>
+            )
+                -> crate::Result<crate::cell::executor::HandlerOutcome>
             + Send
             + 'static,
     {
@@ -124,7 +132,8 @@ impl CellHandle {
     where
         F: for<'connection> FnOnce(
                 &crab_ltx::rusqlite::Transaction<'connection>,
-            ) -> crate::Result<crate::HandlerOutcome>
+            )
+                -> crate::Result<crate::cell::executor::HandlerOutcome>
             + Send
             + 'static,
     {

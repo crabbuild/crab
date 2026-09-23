@@ -30,7 +30,7 @@ fn production_hot_paths_use_singleton_or_indexed_work() {
 
 #[test]
 fn qualification_workload_and_profile_are_reproducible() {
-    use crab_cell_runtime::{QualificationProfile, QualificationWorkload};
+    use crab_cell_runtime::qualification::{QualificationProfile, QualificationWorkload};
 
     let profile = QualificationProfile::pr_contract();
     let workload = QualificationWorkload::generate(&profile, 17).expect("workload generation");

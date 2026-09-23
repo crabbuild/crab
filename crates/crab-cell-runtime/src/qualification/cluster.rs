@@ -1,7 +1,9 @@
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use crate::{Digest, Error, Result, identity::encode_hex};
+use crate::identity::Digest;
+use crate::identity::encode_hex;
+use crate::{Error, Result};
 
 const MAX_CLUSTER_RECEIPT_BYTES: usize = 8 << 20;
 const CLUSTER_RECEIPT_SCHEMA_VERSION: u64 = 6;

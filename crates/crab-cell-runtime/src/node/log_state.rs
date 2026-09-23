@@ -1,4 +1,6 @@
-use crate::{Digest, Error, NodeId, Result, SessionId};
+use crate::identity::NodeId;
+use crate::identity::{Digest, SessionId};
+use crate::{Error, Result};
 
 pub(crate) const RECOVERY_CLAIM_LIFETIME_MS: i64 = 30_000;
 pub(crate) const MAX_NODE_LOG_MEMBERS: usize = 2;

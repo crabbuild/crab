@@ -13,7 +13,7 @@ struct SparseActivation {
     _source: tempfile::TempDir,
     _destination: tempfile::TempDir,
     cell: CellId,
-    incarnation: crate::IncarnationId,
+    incarnation: crate::identity::IncarnationId,
     root: crab_ltx::RootRef,
     database: crab_ltx::CellWritableDatabase,
     destination: PathBuf,
@@ -53,7 +53,7 @@ async fn worker_and_runtime_reservations_share_one_node_ledger() {
 
 async fn sparse_activation(cell_byte: u8, store: Store) -> SparseActivation {
     let cell = CellId::from_bytes([cell_byte; 32]);
-    let incarnation = crate::IncarnationId::from_bytes([cell_byte + 16; 16]);
+    let incarnation = crate::identity::IncarnationId::from_bytes([cell_byte + 16; 16]);
     let layout = CellStorageLayout::new(store, Path::from("sparse-workers"), [9; 16]);
     let replica = CellReplica::new(
         layout,

@@ -1,13 +1,24 @@
 use std::sync::Arc;
 
-use crab_cell_runtime::{
+use crab_cell_runtime::cell::actor::CellRuntime;
+use crab_cell_runtime::cell::catalog::CatalogRole;
+use crab_cell_runtime::cell::catalog::{CatalogEntry, CellCatalog};
+use crab_cell_runtime::cell::executor::{HandlerOutcome, MutationIdentity};
+use crab_cell_runtime::cell::schema::install_runtime_schema;
+use crab_cell_runtime::cell::worker::SqlWorkerPool;
+use crab_cell_runtime::control::Owner;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::identity::{
+    ApplicationId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
+};
+use crab_cell_runtime::identity::{IncarnationId, RequestId};
+use crab_cell_runtime::peer::wire as peer_wire;
+use crab_cell_runtime::primitives::effects::EffectCommandIntent;
+use crab_cell_runtime::primitives::workflow::{
     ActivityCompletion, ActivityCompletionOutcome, ActivityLeaseOutcome, ActivitySupport,
-    ActivityTokenSource, ApplicationId, CatalogEntry, CatalogRole, CellAuthority, CellCatalog,
-    CellRuntime, CellTarget, Digest, EffectCommandIntent, HandlerOutcome, IncarnationId,
-    MutationIdentity, NamespaceId, Owner, RequestId, SessionId, SqlWorkerPool, TenantId,
-    WorkflowAction, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowOutcome,
-    WorkflowSignal, WorkflowStart, WorkflowStatus, install_runtime_schema, install_workflow_schema,
-    peer_wire, workflow_cancel, workflow_claim_activities, workflow_cleanup_terminal,
+    ActivityTokenSource, WorkflowAction, WorkflowContext, WorkflowDecision, WorkflowDefinition,
+    WorkflowOutcome, WorkflowSignal, WorkflowStart, WorkflowStatus, install_workflow_schema,
+    workflow_cancel, workflow_claim_activities, workflow_cleanup_terminal,
     workflow_complete_activity, workflow_extend_activity, workflow_fire_timer, workflow_signal,
     workflow_start, workflow_validate_activity_claim,
 };
@@ -210,14 +221,16 @@ fn workflow_event_counter_tracks_history_and_reports_drift() {
     };
     let transaction = connection.transaction().unwrap();
     workflow_start(&transaction, &source, 10, &start(5), &definition).unwrap();
-    crab_cell_runtime::verify_workflow_event_count(&transaction).unwrap();
+    crab_cell_runtime::primitives::workflow::verify_workflow_event_count(&transaction).unwrap();
     transaction
         .execute(
             "UPDATE workflow_control SET event_count = event_count + 1 WHERE singleton = 1",
             [],
         )
         .unwrap();
-    assert!(crab_cell_runtime::verify_workflow_event_count(&transaction).is_err());
+    assert!(
+        crab_cell_runtime::primitives::workflow::verify_workflow_event_count(&transaction).is_err()
+    );
 }
 
 #[test]
@@ -345,8 +358,13 @@ fn terminal_transition_inserts_effect_with_cell_command_identity() {
         .unwrap();
     assert_eq!(
         stored.0,
-        crab_cell_runtime::effect_id(source.cell_id(), IncarnationId::from_bytes([2; 16]), 1, 0,)
-            .to_vec()
+        crab_cell_runtime::primitives::effects::effect_id(
+            source.cell_id(),
+            IncarnationId::from_bytes([2; 16]),
+            1,
+            0,
+        )
+        .to_vec()
     );
     assert_eq!(stored.2, 20_000);
     let request = peer_wire::EffectRequest::decode(stored.1.as_slice()).unwrap();

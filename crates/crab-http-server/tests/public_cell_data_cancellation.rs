@@ -1,10 +1,17 @@
 use std::sync::atomic::Ordering;
 
-use crab_cell_runtime::{
+use crab_cell_runtime::cell::executor::Resolution;
+use crab_cell_runtime::identity::{CellTarget, partition_for_shard};
+use crab_cell_runtime::primitives::blob::{
     BlobCommand, BlobCondition, BlobMutation, BlobMutationOutcome, BlobQuery, BlobQueryResult,
-    CellTarget, EffectAckRequest, EffectClaimRequest, EffectLease, EffectLeaseCommand,
-    EffectLeaseOutcome, EffectLeaseRequest, QueueClaimRequest, QueueLeaseOutcome, QueueSendCommand,
-    QueueSendOutcome, QueueSendRequest, QueueState, Resolution, partition_for_shard,
+};
+use crab_cell_runtime::primitives::effects::{
+    EffectAckRequest, EffectClaimRequest, EffectLease, EffectLeaseCommand, EffectLeaseOutcome,
+    EffectLeaseRequest,
+};
+use crab_cell_runtime::primitives::queue::{
+    QueueClaimRequest, QueueLeaseOutcome, QueueSendCommand, QueueSendOutcome, QueueSendRequest,
+    QueueState,
 };
 
 #[path = "support/reference_application.rs"]

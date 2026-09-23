@@ -1,8 +1,9 @@
 //! Canonical expired-session fixture shared by integration suites.
 
-use crab_cell_runtime::{
-    Digest, FencedNodeSession, NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain,
-    NodeId, SessionId,
+use crab_cell_runtime::identity::NodeId;
+use crab_cell_runtime::identity::{Digest, SessionId};
+use crab_cell_runtime::node::{
+    FencedNodeSession, NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain,
 };
 use crab_ltx::CellStorageLayout;
 

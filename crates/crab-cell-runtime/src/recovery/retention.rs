@@ -7,11 +7,16 @@ use futures_util::StreamExt as _;
 use object_store::{ObjectMeta, path::Path};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::{
-    ApplicationIdentity, BackupPinStore, CellAuthority, CellCatalog, Control, ControlState, Error,
-    ReleaseRecord, ReleaseState, ReleaseStore, ReplicaHost, ReplicaLimits, RequestId, Result,
-    identity::decode_hex,
-};
+use crate::cell::application::ApplicationIdentity;
+use crate::cell::catalog::CellCatalog;
+use crate::control::authority::CellAuthority;
+use crate::control::{Control, ControlState};
+use crate::identity::RequestId;
+use crate::identity::decode_hex;
+use crate::ltx::{Host as ReplicaHost, Limits as ReplicaLimits};
+use crate::recovery::backup::BackupPinStore;
+use crate::recovery::release::{ReleaseRecord, ReleaseState, ReleaseStore};
+use crate::{Error, Result};
 
 const CANDIDATE_BATCH: usize = 256;
 const MAX_DELETES_PER_RUN: u64 = 100_000;

@@ -1,7 +1,10 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use crate::{CellId, Error, NodeAdvertisement, NodeId, NodePlacementCapacity, Result, SessionId};
+use crate::identity::NodeId;
+use crate::identity::{CellId, SessionId};
+use crate::node::{NodeAdvertisement, NodePlacementCapacity};
+use crate::{Error, Result};
 
 const MAX_OBSERVATION_AGE_MS: i64 = 30_000;
 const SCORE_SCALE: u128 = 1_000;
@@ -82,7 +85,7 @@ impl PlacementObservation {
     fn from_signed_capacity(
         advertisement: &NodeAdvertisement,
         placement: NodePlacementCapacity,
-        capacity: crate::NodeCapacity,
+        capacity: crate::node::NodeCapacity,
         _now_ms: i64,
         current_owner: bool,
     ) -> Self {

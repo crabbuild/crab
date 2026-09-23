@@ -1,10 +1,11 @@
 use std::marker::PhantomData;
 
-use crate::{
-    BoundedDecoder, BoundedEncoder, CatalogRole, CellClient, CellTarget, CodecError, Command,
-    CommandContext, CommandResult, Committed, InvocationError, Observed, Query, QueryContext,
-    Receipt, RegistryBuilder, WireValue,
-};
+use crate::cell::catalog::CatalogRole;
+use crate::client::{CellClient, Committed, InvocationError, Observed, Receipt};
+use crate::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use crate::identity::CellTarget;
+use crate::registry::{Command, Query, RegistryBuilder};
+use crate::registry::{CommandContext, CommandResult, QueryContext};
 
 use super::{
     MAX_PARAMETERS, MAX_ROWS, MAX_STATEMENTS, SqlBatch, SqlResultSet, SqlStatement, SqlValue,
@@ -86,7 +87,7 @@ impl<M: SqlModule> SqlCell<M> {
     /// Executes one bounded parameterized batch and publishes its receipt.
     pub async fn batch(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         batch: SqlBatch,
     ) -> std::result::Result<Committed<Vec<SqlResultSet>>, InvocationError<Vec<SqlResultSet>>> {
         self.client

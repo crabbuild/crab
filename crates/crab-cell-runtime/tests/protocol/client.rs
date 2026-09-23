@@ -1,17 +1,37 @@
 use std::{future::Future, pin::Pin, sync::Arc, time::UNIX_EPOCH};
 
-use crab_cell_runtime::{
-    ApplicationId, BoundedDecoder, BoundedEncoder, BuildDescriptor, CatalogEntry, CatalogProof,
-    CatalogRole, CellAuthority, CellClient, CellDescription, CellModule, CellRuntime, CellTarget,
-    CodecError, Command, CommandContext, CommandResult, Digest, EffectClaim, EffectClaimRequest,
-    EffectCommandIntent, EffectLeaseOutcome, EffectModule, EffectPeerClient, EffectRunOutcome,
-    EffectSource, IncarnationId, InvocationError, MigrationDescriptor, ModuleDescriptor,
-    MutationIdentity, NamespaceDescriptor, NamespaceId, OperationDescriptor, Owner, PeerAuthorizer,
-    PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerRoundTrip, PeerSigner, PeerVerifier,
-    Query, QueryContext, Receipt, Registry, RegistryBuilder, RequestId, Resolution, SessionId,
-    SqlBatch, SqlStatement, SqlValue, SqlWorkerPool, TenantId, VerifiedPeerRequest, WireValue,
-    command_operation_digest, effect_id, effect_operation_digest, peer_wire as wire,
-    register_effect_delivery,
+use crab_cell_runtime::cell::actor::CellRuntime;
+use crab_cell_runtime::cell::catalog::CatalogRole;
+use crab_cell_runtime::cell::catalog::{CatalogEntry, CatalogProof};
+use crab_cell_runtime::cell::executor::MutationIdentity;
+use crab_cell_runtime::cell::executor::Resolution;
+use crab_cell_runtime::cell::worker::SqlWorkerPool;
+use crab_cell_runtime::client::{CellClient, InvocationError};
+use crab_cell_runtime::client::{CellDescription, Receipt, command_operation_digest};
+use crab_cell_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use crab_cell_runtime::control::Owner;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::identity::{
+    ApplicationId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
+};
+use crab_cell_runtime::identity::{IncarnationId, RequestId};
+use crab_cell_runtime::peer::wire;
+use crab_cell_runtime::peer::{
+    EffectPeerClient, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerPrincipal,
+    PeerRoundTrip, PeerSigner, PeerVerifier, VerifiedPeerRequest,
+};
+use crab_cell_runtime::primitives::effects::{
+    EffectClaim, EffectClaimRequest, EffectCommandIntent, EffectLeaseOutcome, EffectRunOutcome,
+    effect_id, effect_operation_digest, register_effect_delivery,
+};
+use crab_cell_runtime::primitives::effects::{EffectModule, EffectSource};
+use crab_cell_runtime::primitives::sql::{SqlBatch, SqlStatement, SqlValue};
+use crab_cell_runtime::registry::{
+    BuildDescriptor, CellModule, Command, ModuleDescriptor, NamespaceDescriptor, Query, Registry,
+    RegistryBuilder,
+};
+use crab_cell_runtime::registry::{
+    CommandContext, CommandResult, MigrationDescriptor, OperationDescriptor, QueryContext,
 };
 use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
@@ -372,16 +392,16 @@ struct Fixture {
     session: SessionId,
     incarnation: IncarnationId,
     target: CellTarget,
-    handle: Option<crab_cell_runtime::CellHandle>,
+    handle: Option<crab_cell_runtime::cell::actor::CellHandle>,
     registry: Arc<Registry>,
 }
 
 impl Fixture {
-    fn handle(&self) -> &crab_cell_runtime::CellHandle {
+    fn handle(&self) -> &crab_cell_runtime::cell::actor::CellHandle {
         self.handle.as_ref().expect("fixture handle is present")
     }
 
-    fn take_handle(&mut self) -> crab_cell_runtime::CellHandle {
+    fn take_handle(&mut self) -> crab_cell_runtime::cell::actor::CellHandle {
         self.handle.take().expect("fixture handle is present")
     }
 }
@@ -406,7 +426,8 @@ async fn fixture() -> Fixture {
         Limits::default(),
     )
     .unwrap();
-    let catalog = crab_cell_runtime::CellCatalog::new(layout.clone(), target.tenant());
+    let catalog =
+        crab_cell_runtime::cell::catalog::CellCatalog::new(layout.clone(), target.tenant());
     let proof = catalog
         .provision(
             CatalogEntry::new(
@@ -481,7 +502,7 @@ fn mutation(byte: u8) -> MutationIdentity {
 
 struct LocalResolver {
     target: CellTarget,
-    handle: crab_cell_runtime::CellHandle,
+    handle: crab_cell_runtime::cell::actor::CellHandle,
 }
 
 impl PeerCellResolver for LocalResolver {
@@ -490,8 +511,9 @@ impl PeerCellResolver for LocalResolver {
         target: CellTarget,
     ) -> Pin<
         Box<
-            dyn Future<Output = crab_cell_runtime::Result<crab_cell_runtime::CellHandle>>
-                + Send
+            dyn Future<
+                    Output = crab_cell_runtime::Result<crab_cell_runtime::cell::actor::CellHandle>,
+                > + Send
                 + 'static,
         >,
     > {
@@ -823,7 +845,7 @@ async fn typed_effect_source_publishes_claim_validation_ack_and_lost_lease() {
             fixture.authority.clone(),
             stale,
             fenced.direct_takeover().unwrap(),
-            crab_cell_runtime::RecoveryManifestStore::new(
+            crab_cell_runtime::recovery::manifest::RecoveryManifestStore::new(
                 fixture.layout.clone(),
                 Limits::default(),
             ),
@@ -945,7 +967,7 @@ async fn effect_supervisor_delivers_to_inbox_and_acknowledges_source() {
         matches!(
             &outcome,
             EffectRunOutcome::Delivered {
-                destination: crab_cell_runtime::StoredOutcome::Success {
+                destination: crab_cell_runtime::cell::executor::StoredOutcome::Success {
                     result,
                     commit_sequence: 3,
                 },

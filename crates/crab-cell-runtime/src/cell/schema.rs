@@ -1,6 +1,8 @@
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::{CellId, Error, IncarnationId, Result};
+use crate::identity::CellId;
+use crate::identity::IncarnationId;
+use crate::{Error, Result};
 
 const RUNTIME_SCHEMA: &str = include_str!("../migrations/runtime.sql");
 

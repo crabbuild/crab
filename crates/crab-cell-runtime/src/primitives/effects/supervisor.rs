@@ -5,10 +5,12 @@ use std::{
 
 use rand::RngCore;
 
-use crate::{
-    EffectPeerClient, Error, InvocationError, MutationIdentity, PendingMutation, Receipt,
-    RequestId, Resolution, StoredOutcome,
-};
+use crate::Error;
+use crate::cell::executor::StoredOutcome;
+use crate::cell::executor::{MutationIdentity, Resolution};
+use crate::client::{InvocationError, PendingMutation, Receipt};
+use crate::identity::RequestId;
+use crate::peer::EffectPeerClient;
 
 use super::{EffectClaim, EffectClaimRequest, EffectLeaseOutcome, EffectModule, EffectSource};
 

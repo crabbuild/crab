@@ -5,10 +5,11 @@ use std::sync::{Arc, Mutex};
 use futures_util::future::join_all;
 use tokio::sync::Notify;
 
-use crate::{
-    Error, NodeDirectory, NodeId, NodeLogTransport, Result, RetireRequest, SessionId,
-    VersionedNodeAdvertisement,
-};
+use crate::identity::NodeId;
+use crate::identity::SessionId;
+use crate::node::log_transport::{NodeLogTransport, RetireRequest};
+use crate::node::{NodeDirectory, VersionedNodeAdvertisement};
+use crate::{Error, Result};
 
 pub(crate) const MAX_TICKET_FRAMES: u64 = 1_024;
 

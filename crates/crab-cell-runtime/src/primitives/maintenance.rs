@@ -2,11 +2,16 @@ use std::marker::PhantomData;
 
 use crab_ltx::rusqlite::Connection;
 
-use crate::{
-    BoundedDecoder, BoundedEncoder, CatalogRole, CodecError, Command, CommandContext,
-    CommandResult, CronTarget, Error, QueueDeadLetterTarget, RegistryBuilder, SchedulerTickOutcome,
-    WireValue, WorkflowDefinition, fleet::scheduler::scheduler_tick_at,
-};
+use crate::Error;
+use crate::cell::catalog::CatalogRole;
+use crate::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use crate::fleet::scheduler::SchedulerTickOutcome;
+use crate::fleet::scheduler::scheduler_tick_at;
+use crate::primitives::cron::CronTarget;
+use crate::primitives::queue::QueueDeadLetterTarget;
+use crate::primitives::workflow::WorkflowDefinition;
+use crate::registry::{Command, RegistryBuilder};
+use crate::registry::{CommandContext, CommandResult};
 
 const REQUESTS: u8 = 1 << 0;
 const INBOX: u8 = 1 << 1;
@@ -332,10 +337,12 @@ mod tests {
     use crab_ltx::rusqlite::Connection;
 
     use super::*;
-    use crate::{
-        CellId, IncarnationId, install_cron_schema, install_queue_schema, install_runtime_schema,
-        install_workflow_schema,
-    };
+    use crate::cell::schema::install_runtime_schema;
+    use crate::identity::CellId;
+    use crate::identity::IncarnationId;
+    use crate::primitives::cron::install_cron_schema;
+    use crate::primitives::queue::install_queue_schema;
+    use crate::primitives::workflow::install_workflow_schema;
 
     #[test]
     fn maintenance_codecs_reject_unbounded_results() {

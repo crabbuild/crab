@@ -4,6 +4,6 @@
 //! so the runtime re-exports the exact LTX types its own API uses.
 
 pub use crab_ltx::{
-    CaptureTiming, CellObjectKind, CellReplica, CellStorageLayout, DiskBudget, Host, Limits,
-    LtxPhase, LtxReadOrigin, LtxRequestOutcome, ScratchMonitor,
+    CaptureTiming, CellObjectKind, CellReplica, CellStorageLayout, DiskBudget, DiskReservation,
+    Host, Limits, LtxPhase, LtxReadOrigin, LtxRequestOutcome, ScratchMonitor,
 };

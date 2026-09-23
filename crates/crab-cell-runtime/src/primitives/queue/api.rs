@@ -1,11 +1,14 @@
 use std::marker::PhantomData;
 
-use crate::{
-    ApplicationId, BoundedDecoder, BoundedEncoder, CatalogRole, CellClient, CellTarget, CodecError,
-    Command, CommandContext, CommandResult, Committed, InvocationError, MaintenanceModule,
-    NamespaceId, Observed, Query, QueryContext, Receipt, RegistryBuilder, TenantId, WireValue,
-    partition_for_shard, register_maintenance, shard_for_scope,
+use crate::cell::catalog::CatalogRole;
+use crate::client::{CellClient, Committed, InvocationError, Observed, Receipt};
+use crate::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use crate::identity::{
+    ApplicationId, CellTarget, NamespaceId, TenantId, partition_for_shard, shard_for_scope,
 };
+use crate::primitives::maintenance::{MaintenanceModule, register_maintenance};
+use crate::registry::{Command, Query, RegistryBuilder};
+use crate::registry::{CommandContext, CommandResult, QueryContext};
 
 use super::{
     MAX_ATTEMPTS, MAX_CLAIM_ITEMS, MAX_PAYLOAD_BYTES, QueueControlAction, QueueControlOutcome,
@@ -338,7 +341,7 @@ impl<M: QueueModule> QueueNamespace<M> {
     /// Sends one producer-deduplicated message to its deterministic shard.
     pub async fn send(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         request: QueueSendRequest,
     ) -> std::result::Result<Committed<QueueSendOutcome>, InvocationError<QueueSendOutcome>> {
         let target = self
@@ -352,7 +355,7 @@ impl<M: QueueModule> QueueNamespace<M> {
     /// Claims a bounded message batch from one explicitly selected shard.
     pub async fn claim(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         shard: u32,
         request: QueueClaimRequest,
     ) -> std::result::Result<Committed<Vec<QueueMessage>>, InvocationError<Vec<QueueMessage>>> {
@@ -382,7 +385,7 @@ impl<M: QueueModule> QueueNamespace<M> {
     /// Acknowledges one exact live message lease on its claimed shard.
     pub async fn ack(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         shard: u32,
         message_id: [u8; 16],
         token: [u8; 16],
@@ -394,7 +397,7 @@ impl<M: QueueModule> QueueNamespace<M> {
     /// Returns one exact live lease to its shard after a bounded delay.
     pub async fn retry(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         shard: u32,
         message_id: [u8; 16],
         token: [u8; 16],
@@ -413,7 +416,7 @@ impl<M: QueueModule> QueueNamespace<M> {
     /// Extends one exact live lease without shortening its current deadline.
     pub async fn extend(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         shard: u32,
         message_id: [u8; 16],
         token: [u8; 16],
@@ -432,7 +435,7 @@ impl<M: QueueModule> QueueNamespace<M> {
     /// Pauses new claims while allowing live lease settlement.
     pub async fn pause(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         shard: u32,
     ) -> std::result::Result<Committed<QueueControlOutcome>, InvocationError<QueueControlOutcome>>
     {
@@ -443,7 +446,7 @@ impl<M: QueueModule> QueueNamespace<M> {
     /// Resumes claims on one queue shard.
     pub async fn resume(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         shard: u32,
     ) -> std::result::Result<Committed<QueueControlOutcome>, InvocationError<QueueControlOutcome>>
     {
@@ -454,7 +457,7 @@ impl<M: QueueModule> QueueNamespace<M> {
     /// Deletes a bounded batch of non-leased messages.
     pub async fn purge(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         shard: u32,
         limit: u32,
     ) -> std::result::Result<Committed<QueueControlOutcome>, InvocationError<QueueControlOutcome>>
@@ -466,7 +469,7 @@ impl<M: QueueModule> QueueNamespace<M> {
     /// Returns a bounded batch of dead messages to ready state.
     pub async fn redrive(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         shard: u32,
         limit: u32,
     ) -> std::result::Result<Committed<QueueControlOutcome>, InvocationError<QueueControlOutcome>>
@@ -491,7 +494,7 @@ impl<M: QueueModule> QueueNamespace<M> {
 
     async fn control(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         shard: u32,
         action: QueueControlAction,
     ) -> std::result::Result<Committed<QueueControlOutcome>, InvocationError<QueueControlOutcome>>
@@ -506,7 +509,7 @@ impl<M: QueueModule> QueueNamespace<M> {
 
     async fn apply_lease(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         shard: u32,
         message_id: [u8; 16],
         token: [u8; 16],

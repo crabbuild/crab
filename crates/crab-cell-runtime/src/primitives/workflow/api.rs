@@ -1,11 +1,14 @@
 use std::marker::PhantomData;
 
-use crate::{
-    ApplicationId, BoundedDecoder, BoundedEncoder, CatalogRole, CellClient, CellTarget, CodecError,
-    Command, CommandContext, CommandResult, Committed, Digest, InvocationError, NamespaceId,
-    Observed, Query, QueryContext, Receipt, RegistryBuilder, RequestId, TenantId, WireValue,
-    partition_for_shard, shard_for_scope,
+use crate::cell::catalog::CatalogRole;
+use crate::client::{CellClient, Committed, InvocationError, Observed, Receipt};
+use crate::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use crate::identity::RequestId;
+use crate::identity::{
+    ApplicationId, CellTarget, Digest, NamespaceId, TenantId, partition_for_shard, shard_for_scope,
 };
+use crate::registry::{Command, Query, RegistryBuilder};
+use crate::registry::{CommandContext, CommandResult, QueryContext};
 
 use super::{
     MAX_WORKFLOW_BYTES, WorkflowControl, WorkflowControlAction, WorkflowDefinition,
@@ -250,7 +253,7 @@ impl<M: WorkflowModule> WorkflowNamespace<M> {
     /// Starts one workflow with the runtime mutation identity as its run identity.
     pub async fn start(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         workflow_id: Vec<u8>,
         event: Vec<u8>,
     ) -> std::result::Result<Committed<WorkflowOutcome>, InvocationError<WorkflowOutcome>> {
@@ -270,7 +273,7 @@ impl<M: WorkflowModule> WorkflowNamespace<M> {
     /// Delivers one idempotent external signal to its workflow-ID shard.
     pub async fn signal(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         signal: WorkflowSignal,
     ) -> std::result::Result<Committed<WorkflowOutcome>, InvocationError<WorkflowOutcome>> {
         let target = self
@@ -284,7 +287,7 @@ impl<M: WorkflowModule> WorkflowNamespace<M> {
     /// Cancels one running workflow and its outstanding local work.
     pub async fn cancel(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         signal: WorkflowSignal,
     ) -> std::result::Result<Committed<WorkflowOutcome>, InvocationError<WorkflowOutcome>> {
         let target = self
@@ -298,7 +301,7 @@ impl<M: WorkflowModule> WorkflowNamespace<M> {
     /// Pauses a quiescent run so timers and new activity claims stop.
     pub async fn pause(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         workflow_id: Vec<u8>,
         run_id: [u8; 16],
     ) -> std::result::Result<Committed<WorkflowOutcome>, InvocationError<WorkflowOutcome>> {
@@ -309,7 +312,7 @@ impl<M: WorkflowModule> WorkflowNamespace<M> {
     /// Resumes a paused run without changing its deterministic history.
     pub async fn resume(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         workflow_id: Vec<u8>,
         run_id: [u8; 16],
     ) -> std::result::Result<Committed<WorkflowOutcome>, InvocationError<WorkflowOutcome>> {
@@ -320,7 +323,7 @@ impl<M: WorkflowModule> WorkflowNamespace<M> {
     /// Replaces a terminal run with a new run of the current definition.
     pub async fn restart(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         workflow_id: Vec<u8>,
         run_id: [u8; 16],
         event: Vec<u8>,
@@ -337,7 +340,7 @@ impl<M: WorkflowModule> WorkflowNamespace<M> {
 
     async fn control(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         workflow_id: Vec<u8>,
         run_id: [u8; 16],
         action: WorkflowControlAction,
@@ -804,7 +807,7 @@ mod tests {
         crate::cell::schema::install_runtime_schema_in(
             &transaction,
             source.cell_id(),
-            crate::IncarnationId::from_bytes([2; 16]),
+            crate::identity::IncarnationId::from_bytes([2; 16]),
             1,
         )
         .unwrap();

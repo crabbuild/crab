@@ -9,15 +9,22 @@ use std::{
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
+use crate::cell::catalog::CatalogRole;
+use crate::cell::executor::{
+    CellExecutor, CommandExecution, HandlerOutcome, MigrationOutcome, PendingCommit,
+    PendingMigration, StoredOutcome,
+};
+use crate::cell::executor::{MutationIdentity, Resolution};
+use crate::fleet::resource::ResourceCost;
 use crate::fleet::resource::{
     ACTIVE_CELL_NATIVE_BYTES, HYDRATION_JOB_CAPACITY, ResourceLedger, ResourceReservation,
 };
+use crate::identity::{CellId, Digest};
+use crate::primitives::effects::InboxDelivery;
+use crate::primitives::maintenance::PersistedWorkInventory;
 use crate::primitives::maintenance::TransferWorkInventory;
-use crate::{
-    CatalogRole, CellExecutor, CellId, CommandExecution, Digest, Error, HandlerOutcome,
-    InboxDelivery, MigrationOutcome, MigrationPlan, MutationIdentity, PendingCommit,
-    PendingMigration, PersistedWorkInventory, Resolution, ResourceCost, Result, StoredOutcome,
-};
+use crate::registry::MigrationPlan;
+use crate::{Error, Result};
 
 const MAX_WORKERS: usize = 16;
 const MAX_ACTIVE_CELLS: usize = 10_000;
@@ -160,7 +167,7 @@ impl SqlWorkerPool {
         cell: CellId,
         replica: crab_ltx::CellReplica,
         destination: PathBuf,
-        incarnation: crate::IncarnationId,
+        incarnation: crate::identity::IncarnationId,
         schema: u32,
         initialize: Initializer,
         reservation: CellReservation,
@@ -207,7 +214,7 @@ impl SqlWorkerPool {
         cell: CellId,
         database: crab_ltx::CellWritableDatabase,
         destination: PathBuf,
-        incarnation: crate::IncarnationId,
+        incarnation: crate::identity::IncarnationId,
         schema: u32,
         root: crab_ltx::RootRef,
         reservation: CellReservation,
@@ -780,7 +787,7 @@ enum WorkerCommand {
         cell: CellId,
         database: Box<crab_ltx::CellWritableDatabase>,
         destination: PathBuf,
-        incarnation: crate::IncarnationId,
+        incarnation: crate::identity::IncarnationId,
         schema: u32,
         root: crab_ltx::RootRef,
         reservation: CellReservation,
@@ -923,7 +930,7 @@ struct WorkerBootstrap {
     cell: CellId,
     replica: crab_ltx::CellReplica,
     destination: PathBuf,
-    incarnation: crate::IncarnationId,
+    incarnation: crate::identity::IncarnationId,
     schema: u32,
     initialize: Initializer,
     reservation: CellReservation,

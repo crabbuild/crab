@@ -1,11 +1,13 @@
 use std::marker::PhantomData;
 
-use crate::{
-    ApplicationId, BoundedDecoder, BoundedEncoder, CatalogRole, CellClient, CellTarget, CodecError,
-    Command, CommandContext, CommandResult, Committed, InvocationError, NamespaceId, Observed,
-    Query, QueryContext, Receipt, RegistryBuilder, TenantId, WireValue, partition_for_shard,
-    shard_for_scope,
+use crate::cell::catalog::CatalogRole;
+use crate::client::{CellClient, Committed, InvocationError, Observed, Receipt};
+use crate::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use crate::identity::{
+    ApplicationId, CellTarget, NamespaceId, TenantId, partition_for_shard, shard_for_scope,
 };
+use crate::registry::{Command, Query, RegistryBuilder};
+use crate::registry::{CommandContext, CommandResult, QueryContext};
 
 use super::{
     KvAtomicOutcome, KvAtomicRequest, KvCheck, KvCondition, KvEntry, KvMutation, KvMutationResult,
@@ -161,7 +163,7 @@ impl<M: KvModule> KvNamespace<M> {
     /// Atomically checks and mutates one scope-derived shard.
     pub async fn atomic(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         request: KvAtomicRequest,
     ) -> std::result::Result<Committed<KvAtomicOutcome>, InvocationError<KvAtomicOutcome>> {
         let target = self

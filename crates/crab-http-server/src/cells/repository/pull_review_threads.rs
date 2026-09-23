@@ -1420,7 +1420,7 @@ fn next_version(value: u64) -> crab_cell_runtime::Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use crab_cell_runtime::{BoundedDecoder, BoundedEncoder, WireValue};
+    use crab_cell_runtime::codec::{BoundedDecoder, BoundedEncoder, WireValue};
 
     use super::*;
 

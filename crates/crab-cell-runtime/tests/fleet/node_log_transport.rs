@@ -1,4 +1,9 @@
 //! Node log transport tests extracted from `src/node_log_transport.rs`.
+use crab_cell_runtime::follower::FollowerReceipt;
+use crab_cell_runtime::identity::NodeId;
+use crab_cell_runtime::node::log_transport::{
+    AppendRequest, NodeLogTransport, RetireRequest, SealRequest, TailRequest,
+};
 
 use bytes::Bytes;
 use futures_util::future::BoxFuture;

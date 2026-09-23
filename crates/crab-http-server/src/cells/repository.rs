@@ -1,7 +1,7 @@
-use crab_cell_runtime::{
-    BoundedDecoder, BoundedEncoder, CellModule, Command, CommandContext, CommandResult, Query,
-    QueryContext, RegistryBuilder, SqlBatch, SqlResultSet, SqlStatement, SqlValue, WireValue,
-};
+use crab_cell_runtime::codec::{BoundedDecoder, BoundedEncoder, WireValue};
+use crab_cell_runtime::primitives::sql::{SqlBatch, SqlResultSet, SqlStatement, SqlValue};
+use crab_cell_runtime::registry::{CellModule, Command, Query, RegistryBuilder};
+use crab_cell_runtime::registry::{CommandContext, CommandResult, QueryContext};
 
 use super::RepositoryModule;
 

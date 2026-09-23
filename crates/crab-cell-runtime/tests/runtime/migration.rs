@@ -8,16 +8,30 @@ use std::{
     },
 };
 
-use crab_cell_runtime::{
-    ApplicationId, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog,
-    CellModule, CellRuntime, CellTarget, ControlState, Digest, DurabilityGate, HandlerOutcome,
-    IncarnationId, LocalFollowerTransport, MigrationDescriptor, MigrationPeerClient,
-    ModuleDescriptor, NamespaceDescriptor, NamespaceId, NodeDurability, NodeId, NodeLeaseGuard,
-    NodeLogAuthority, NodeLogRotationBarrier, NodeLogShipper, NodeLogTransport, Owner,
-    PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerRoundTrip, PeerSigner,
-    PeerVerifier, Registry, RegistryBuilder, RetainedCodeDescriptor, SessionId, SqlWorkerPool,
-    TenantId, VerifiedPeerRequest,
+use crab_cell_runtime::cell::actor::CellRuntime;
+use crab_cell_runtime::cell::catalog::CatalogRole;
+use crab_cell_runtime::cell::catalog::{CatalogEntry, CellCatalog};
+use crab_cell_runtime::cell::executor::HandlerOutcome;
+use crab_cell_runtime::cell::worker::SqlWorkerPool;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::control::{ControlState, Owner};
+use crab_cell_runtime::identity::{
+    ApplicationId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
 };
+use crab_cell_runtime::identity::{IncarnationId, NodeId};
+use crab_cell_runtime::node::durability::{NodeDurability, NodeLogAuthority};
+use crab_cell_runtime::node::lease::NodeLeaseGuard;
+use crab_cell_runtime::node::log::{DurabilityGate, NodeLogRotationBarrier};
+use crab_cell_runtime::node::log_shipper::NodeLogShipper;
+use crab_cell_runtime::node::log_transport::{LocalFollowerTransport, NodeLogTransport};
+use crab_cell_runtime::peer::{
+    MigrationPeerClient, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerPrincipal,
+    PeerRoundTrip, PeerSigner, PeerVerifier, VerifiedPeerRequest,
+};
+use crab_cell_runtime::registry::{
+    BuildDescriptor, CellModule, ModuleDescriptor, NamespaceDescriptor, Registry, RegistryBuilder,
+};
+use crab_cell_runtime::registry::{MigrationDescriptor, RetainedCodeDescriptor};
 use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::Store;
@@ -209,7 +223,7 @@ fn compiled_registry() -> Registry {
 
 struct RuntimeResolver {
     target: CellTarget,
-    proof: crab_cell_runtime::CatalogProof,
+    proof: crab_cell_runtime::cell::catalog::CatalogProof,
     authority: CellAuthority,
     runtime: CellRuntime,
 }
@@ -220,8 +234,9 @@ impl PeerCellResolver for RuntimeResolver {
         target: CellTarget,
     ) -> Pin<
         Box<
-            dyn Future<Output = crab_cell_runtime::Result<crab_cell_runtime::CellHandle>>
-                + Send
+            dyn Future<
+                    Output = crab_cell_runtime::Result<crab_cell_runtime::cell::actor::CellHandle>,
+                > + Send
                 + 'static,
         >,
     > {
@@ -361,7 +376,7 @@ async fn migration_replaces_capability_publishes_schema_and_restores_exact_root(
     let follower_store = crab_cell_runtime::FollowerStore::open(
         follower_directory.path().to_owned(),
         Limits::default(),
-        crab_cell_runtime::DiskBudget::new(1 << 30),
+        crab_cell_runtime::ltx::DiskBudget::new(1 << 30),
     )
     .unwrap();
     let transport: Arc<dyn NodeLogTransport> =
@@ -469,8 +484,8 @@ async fn migration_replaces_capability_publishes_schema_and_restores_exact_root(
     let written = migrated
         .handle
         .execute(
-            crab_cell_runtime::MutationIdentity {
-                request_id: crab_cell_runtime::RequestId::from_bytes([68; 16]),
+            crab_cell_runtime::cell::executor::MutationIdentity {
+                request_id: crab_cell_runtime::identity::RequestId::from_bytes([68; 16]),
                 issued_at_ms: 10,
                 expires_at_ms: 1_000,
             },
@@ -708,7 +723,7 @@ async fn authenticated_peer_migration_derives_plan_and_reconciles_retry() {
         )
         .await
         .unwrap();
-    let expected = crab_cell_runtime::CellDescription {
+    let expected = crab_cell_runtime::client::CellDescription {
         cell: target.cell_id(),
         incarnation,
         code: handle.code(),

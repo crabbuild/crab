@@ -9,17 +9,33 @@ use std::{
 };
 
 use bytes::Bytes;
-use crab_cell_runtime::CellStorageLayout;
-use crab_cell_runtime::{
-    ActivityContext, ActivityExecution, ApplicationId, BlockingActivityHandler, BuildDescriptor,
-    CellAuthority, CellCatalog, CellModule, CellReplica, CellRuntime, CellTarget, Digest,
-    IncarnationId, MaintenanceModule, MigrationDescriptor, ModuleDescriptor,
-    NODE_LOG_PROTOCOL_VERSION, NamespaceDescriptor, NamespaceId, NodeAdvertisement, NodeCapacity,
-    OperationDescriptor, Owner, PeerRoundTrip, PeerSigner, RecoveryManifestStore, RegistryBuilder,
-    ReplicaLimits, RetainedCodeDescriptor, SqlWorkerPool, TenantId, WorkflowAction,
-    WorkflowActivityModule, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowModule,
-    WorkflowNamespace, WorkflowStatus, install_workflow_schema, register_blocking_activity,
-    register_maintenance, register_workflow, register_workflow_activities,
+use crab_cell_runtime::cell::actor::CellRuntime;
+use crab_cell_runtime::cell::catalog::CellCatalog;
+use crab_cell_runtime::cell::worker::SqlWorkerPool;
+use crab_cell_runtime::control::Owner;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::identity::IncarnationId;
+use crab_cell_runtime::identity::{ApplicationId, CellTarget, Digest, NamespaceId, TenantId};
+use crab_cell_runtime::ltx::CellReplica;
+use crab_cell_runtime::ltx::CellStorageLayout;
+use crab_cell_runtime::ltx::Limits as ReplicaLimits;
+use crab_cell_runtime::node::{NODE_LOG_PROTOCOL_VERSION, NodeAdvertisement, NodeCapacity};
+use crab_cell_runtime::peer::{PeerRoundTrip, PeerSigner};
+use crab_cell_runtime::primitives::maintenance::{MaintenanceModule, register_maintenance};
+use crab_cell_runtime::primitives::workflow::{
+    ActivityContext, ActivityExecution, BlockingActivityHandler, WorkflowAction, WorkflowContext,
+    WorkflowDecision, WorkflowDefinition, WorkflowStatus, install_workflow_schema,
+    register_blocking_activity, register_workflow, register_workflow_activities,
+};
+use crab_cell_runtime::primitives::workflow::{
+    WorkflowActivityModule, WorkflowModule, WorkflowNamespace,
+};
+use crab_cell_runtime::recovery::manifest::RecoveryManifestStore;
+use crab_cell_runtime::registry::{
+    BuildDescriptor, CellModule, ModuleDescriptor, NamespaceDescriptor, RegistryBuilder,
+};
+use crab_cell_runtime::registry::{
+    MigrationDescriptor, OperationDescriptor, RetainedCodeDescriptor,
 };
 use crab_storage::Store;
 use ed25519_dalek::SigningKey;
@@ -218,7 +234,7 @@ async fn committed_claim_with_a_lost_response_is_resumed_after_timeout() {
     let advertisement =
         |session: crab_cell_runtime::SessionId, issued_at_ms: i64, expires_at_ms: i64| {
             NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+                crab_cell_runtime::identity::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 "https://claim-timeout.internal:8081".into(),
                 fleet,
@@ -231,7 +247,7 @@ async fn committed_claim_with_a_lost_response_is_resumed_after_timeout() {
                 expires_at_ms,
                 vec![Digest::from_bytes([59; 32])],
                 vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
+                crab_cell_runtime::node::NodeFailureDomain::default(),
                 capacity,
             )
             .unwrap()
@@ -311,7 +327,7 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
         follower_free_bytes: 1 << 30,
         follower_retained_bytes: 0,
         job_credits: 1,
-        log_protocol: crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION,
+        log_protocol: crab_cell_runtime::node::NODE_LOG_PROTOCOL_VERSION,
     };
     let advertisement = |session: crab_cell_runtime::SessionId,
                          endpoint: &str,
@@ -319,7 +335,7 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
                          issued_at_ms,
                          expires_at_ms| {
         NodeAdvertisement::sign(
-            crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+            crab_cell_runtime::identity::NodeId::from_bytes(*session.as_bytes()),
             session,
             endpoint.into(),
             fleet,
@@ -332,7 +348,7 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
             expires_at_ms,
             vec![Digest::from_bytes([71; 32])],
             vec![1],
-            crab_cell_runtime::NodeFailureDomain::default(),
+            crab_cell_runtime::node::NodeFailureDomain::default(),
             capacity,
         )
         .unwrap()
@@ -408,7 +424,7 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
     let follower = crab_cell_runtime::FollowerStore::open(
         follower_directory.path().to_owned(),
         super::super::repository_replica_limits(),
-        crab_cell_runtime::DiskBudget::new(1 << 30),
+        crab_cell_runtime::ltx::DiskBudget::new(1 << 30),
     )
     .unwrap();
     let source = tempfile::TempDir::new().unwrap();
@@ -442,11 +458,12 @@ async fn expired_active_node_log_is_recovered_and_sealed_automatically() {
     .clone();
     follower.append(leader, 1, vec![frame], 0).await.unwrap();
     database.close().unwrap();
-    let transport: Arc<dyn crab_cell_runtime::NodeLogTransport> =
-        Arc::new(crab_cell_runtime::LocalFollowerTransport::new(
-            crab_cell_runtime::NodeId::from_bytes(*member.as_bytes()),
+    let transport: Arc<dyn crab_cell_runtime::node::log_transport::NodeLogTransport> = Arc::new(
+        crab_cell_runtime::node::log_transport::LocalFollowerTransport::new(
+            crab_cell_runtime::identity::NodeId::from_bytes(*member.as_bytes()),
             follower,
-        ));
+        ),
+    );
     recover_node_session(
         RecoveryContext {
             directory: directory.clone(),
@@ -718,10 +735,11 @@ async fn scan_executes_registered_workflow_activity_without_blocking_the_scanner
         &0_u32.to_be_bytes(),
     )
     .unwrap();
-    let catalog = crab_cell_runtime::CellCatalog::new(layout.clone(), identity.tenant());
+    let catalog =
+        crab_cell_runtime::cell::catalog::CellCatalog::new(layout.clone(), identity.tenant());
     let proof = catalog
         .provision(
-            crab_cell_runtime::CatalogEntry::new(
+            crab_cell_runtime::cell::catalog::CatalogEntry::new(
                 &target,
                 crab_cell_runtime::CatalogRole::Workflow,
                 registry.module_code(WORKFLOW_MODULE).unwrap(),
@@ -796,7 +814,7 @@ async fn scan_executes_registered_workflow_activity_without_blocking_the_scanner
     node_directory
         .create(
             NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+                crab_cell_runtime::identity::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 endpoint,
                 fleet,
@@ -809,7 +827,7 @@ async fn scan_executes_registered_workflow_activity_without_blocking_the_scanner
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
+                crab_cell_runtime::node::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
@@ -969,7 +987,7 @@ async fn scan_cursor_advances_when_the_cycle_budget_is_exhausted() {
     node_directory
         .create(
             NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+                crab_cell_runtime::identity::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 endpoint,
                 fleet,
@@ -982,7 +1000,7 @@ async fn scan_cursor_advances_when_the_cycle_budget_is_exhausted() {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
+                crab_cell_runtime::node::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
@@ -1106,7 +1124,8 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
         95,
     )
     .await;
-    let catalog = crab_cell_runtime::CellCatalog::new(layout.clone(), identity.tenant());
+    let catalog =
+        crab_cell_runtime::cell::catalog::CellCatalog::new(layout.clone(), identity.tenant());
     let proof = catalog.lookup(target.cell_id()).await.unwrap().unwrap();
     let idle = authority.load(target.cell_id()).await.unwrap().unwrap();
     let replica = CellReplica::new(
@@ -1143,7 +1162,7 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
     node_directory
         .create(
             NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*remote_session.as_bytes()),
+                crab_cell_runtime::identity::NodeId::from_bytes(*remote_session.as_bytes()),
                 remote_session,
                 remote_endpoint,
                 fleet,
@@ -1156,7 +1175,7 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
+                crab_cell_runtime::node::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 0,
                     free_disk_bytes: 0,
@@ -1173,7 +1192,7 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
     node_directory
         .create(
             NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*local_session.as_bytes()),
+                crab_cell_runtime::identity::NodeId::from_bytes(*local_session.as_bytes()),
                 local_session,
                 local_endpoint.clone(),
                 fleet,
@@ -1186,7 +1205,7 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
+                crab_cell_runtime::node::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
@@ -1309,7 +1328,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
     node_directory
         .create(
             NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*stale_session.as_bytes()),
+                crab_cell_runtime::identity::NodeId::from_bytes(*stale_session.as_bytes()),
                 stale_session,
                 "https://stale.internal:8789".into(),
                 fleet,
@@ -1322,7 +1341,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
                 stale_issued_at_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
+                crab_cell_runtime::node::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1,
                     free_disk_bytes: 1,
@@ -1338,7 +1357,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
     node_directory
         .create(
             NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+                crab_cell_runtime::identity::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 endpoint,
                 fleet,
@@ -1351,7 +1370,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
+                crab_cell_runtime::node::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
@@ -1394,7 +1413,10 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
     let after = authority.load(target.cell_id()).await.unwrap().unwrap();
     assert_eq!(after.value().root.as_ref().unwrap().commit_sequence, 1);
     assert!(after.value().next_due_ms.is_some_and(|due| due > now_ms));
-    assert_eq!(after.value().state, crab_cell_runtime::ControlState::Idle);
+    assert_eq!(
+        after.value().state,
+        crab_cell_runtime::control::ControlState::Idle
+    );
     assert_eq!(status.progress(), 2);
     assert!(status.is_healthy(super::super::unix_now_ms().unwrap()));
     assert!(
@@ -1449,10 +1471,11 @@ async fn activating_release_migrates_idle_cell_before_ready_gate() {
         b"retained-workflow",
     )
     .unwrap();
-    let catalog = crab_cell_runtime::CellCatalog::new(layout.clone(), identity.tenant());
+    let catalog =
+        crab_cell_runtime::cell::catalog::CellCatalog::new(layout.clone(), identity.tenant());
     let proof = catalog
         .provision(
-            crab_cell_runtime::CatalogEntry::new(
+            crab_cell_runtime::cell::catalog::CatalogEntry::new(
                 &target,
                 crab_cell_runtime::CatalogRole::Workflow,
                 WORKFLOW_PREDECESSOR,
@@ -1497,7 +1520,8 @@ async fn activating_release_migrates_idle_cell_before_ready_gate() {
         .await
         .unwrap();
 
-    let releases = crab_cell_runtime::ReleaseStore::new(layout.clone(), identity).unwrap();
+    let releases =
+        crab_cell_runtime::recovery::release::ReleaseStore::new(layout.clone(), identity).unwrap();
     let ready = releases.load().await.unwrap().unwrap();
     let operation = RequestId::from_bytes([76; 16]);
     let second_image = format!("sha256:{}", "4b".repeat(32));
@@ -1526,7 +1550,7 @@ async fn activating_release_migrates_idle_cell_before_ready_gate() {
     node_directory
         .create(
             NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+                crab_cell_runtime::identity::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 endpoint,
                 fleet,
@@ -1539,7 +1563,7 @@ async fn activating_release_migrates_idle_cell_before_ready_gate() {
                 now_ms + 15_000,
                 registry.module_digests(),
                 vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
+                crab_cell_runtime::node::NodeFailureDomain::default(),
                 NodeCapacity {
                     free_memory_bytes: 1024 * 1024 * 1024,
                     free_disk_bytes: 1024 * 1024 * 1024,
@@ -1598,15 +1622,18 @@ async fn activating_release_migrates_idle_cell_before_ready_gate() {
     assert_eq!(migrated.value().schema, 1);
     assert_eq!(migrated.value().root.as_ref().unwrap().commit_sequence, 1);
     assert_eq!(migrated.value().state, ControlState::Idle);
-    let progress = crab_cell_runtime::MigrationProgressStore::new(layout.clone(), identity)
-        .unwrap()
-        .load(target.cell_id(), operation)
-        .await
-        .unwrap()
-        .unwrap();
+    let progress = crab_cell_runtime::recovery::release_progress::MigrationProgressStore::new(
+        layout.clone(),
+        identity,
+    )
+    .unwrap()
+    .load(target.cell_id(), operation)
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(
         progress.state(),
-        crab_cell_runtime::MigrationProgressState::Completed
+        crab_cell_runtime::recovery::release_progress::MigrationProgressState::Completed
     );
     assert_eq!(progress.attempts(), 1);
     super::super::verify_current_cells(&layout, identity, &registry)

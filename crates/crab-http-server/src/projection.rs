@@ -4,9 +4,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crab_cell_runtime::{
-    CellClient, CellTarget, Committed, InvocationError, MutationIdentity, RequestId,
-};
+use crab_cell_runtime::cell::executor::MutationIdentity;
+use crab_cell_runtime::client::{CellClient, Committed, InvocationError};
+use crab_cell_runtime::identity::CellTarget;
+use crab_cell_runtime::identity::RequestId;
 use crab_metadata::manifest_store::{RepositorySnapshot, read_repository_snapshot};
 use crab_metadata::path_state::{PathStateIndex, load_path_state};
 use crab_metadata::split_commit_graph::{SplitCommitGraph, load_split_commit_graph};

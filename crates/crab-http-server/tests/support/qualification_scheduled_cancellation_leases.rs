@@ -1,15 +1,25 @@
 use std::sync::atomic::Ordering;
 
-use crab_cell_runtime::{
-    ActivityCompletion, ActivityCompletionOutcome, BlobCommand, BlobCondition, BlobMutation,
-    BlobMutationOutcome, BlobQuery, BlobQueryResult, CellTarget, EffectAckRequest,
-    EffectClaimRequest, EffectLease, EffectLeaseCommand, EffectLeaseOutcome, EffectLeaseRequest,
-    EffectState, EffectStatus, Error, MutationIdentity, QueueClaimRequest, QueueLeaseOutcome,
-    QueueSendCommand, QueueSendOutcome, QueueSendRequest, QueueState, Resolution, Result,
-    WorkflowActivityClaimCommand, WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand,
-    WorkflowActivityValidateQuery, WorkflowActivityValidateRequest, WorkflowOutcome,
-    WorkflowStatus, effect_id, partition_for_shard,
+use crab_cell_runtime::cell::executor::MutationIdentity;
+use crab_cell_runtime::cell::executor::Resolution;
+use crab_cell_runtime::identity::{CellTarget, partition_for_shard};
+use crab_cell_runtime::primitives::blob::{
+    BlobCommand, BlobCondition, BlobMutation, BlobMutationOutcome, BlobQuery, BlobQueryResult,
 };
+use crab_cell_runtime::primitives::effects::{
+    EffectAckRequest, EffectClaimRequest, EffectLease, EffectLeaseCommand, EffectLeaseOutcome,
+    EffectLeaseRequest, EffectState, EffectStatus, effect_id,
+};
+use crab_cell_runtime::primitives::queue::{
+    QueueClaimRequest, QueueLeaseOutcome, QueueSendCommand, QueueSendOutcome, QueueSendRequest,
+    QueueState,
+};
+use crab_cell_runtime::primitives::workflow::{
+    ActivityCompletion, ActivityCompletionOutcome, WorkflowActivityClaimCommand,
+    WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand, WorkflowActivityValidateQuery,
+    WorkflowActivityValidateRequest, WorkflowOutcome, WorkflowStatus,
+};
+use crab_cell_runtime::{Error, Result};
 
 use crate::{
     fixture,

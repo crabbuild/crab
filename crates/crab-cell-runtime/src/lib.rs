@@ -29,179 +29,43 @@ pub mod qualification;
 pub mod recovery;
 pub mod registry;
 
-pub use cell::actor::{
-    ACTIVE_CELL_NATIVE_BYTES, CellHandle, CellRuntime, CellRuntimeStats, MigratedCell,
-    NodeByteReservation, NodeJobReservation,
-};
-pub use cell::application::{ApplicationIdentity, ApplicationIdentityStore};
-pub use cell::catalog::{
-    CatalogEntry, CatalogProof, CatalogRole, CatalogScanPage, CatalogShardScan, CellCatalog,
-};
-pub use cell::executor::{
-    CellExecutor, CommandExecution, HandlerOutcome, MigrationOutcome, MutationIdentity,
-    PendingCommit, PendingMigration, Resolution, StoredOutcome,
-};
-pub use cell::schema::{install_runtime_schema, verify_runtime_schema};
-pub use cell::worker::{
-    ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_PAGE_CACHE_BYTES, SqlWorkerPool, WorkerExecution,
-};
+pub use cell::actor::{CellRuntime, CellRuntimeStats};
+
+pub use cell::catalog::CatalogRole;
+pub use cell::executor::{MutationIdentity, Resolution};
+
+pub use cell::worker::SqlWorkerPool;
 pub use client::{
-    CellClient, CellDescription, CellStateStream, Committed, InvocationError, Observed,
-    PendingMutation, PreparedCommand, Receipt, StateStreamCancellation, command_operation_digest,
+    CellClient, Committed, InvocationError, Observed, PendingMutation, PreparedCommand, Receipt,
 };
-pub use codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
-pub use control::authority::{CellAuthority, VersionedControl};
-pub use control::{Control, ControlState, Owner, RecoveryOverlayRef, RootRef, Transition};
-pub use crab_ltx::{
-    CaptureTiming, CellObjectKind, CellReplica, CellStorageLayout, DiskBudget, DiskReservation,
-    Host as ReplicaHost, Limits as ReplicaLimits, LtxPhase, LtxReadOrigin, LtxRequestOutcome,
-    ScratchMonitor,
-};
+
 pub use error::{Error, Result};
-pub use fleet::placement::{
-    CellTransferDemand, CellTransferIntent, FleetBalance, PlacementEligibility,
-    PlacementObservation, PlacementPlanner, PlacementPressure, PlacementScore,
-};
-pub use fleet::pressure::{
-    MovementBudget, MovementKind, MovementPermit, PressureClassifier, PressureSample, PressureState,
-};
-pub use fleet::resource::{ResourceCost, ResourceSnapshot};
-pub use fleet::scheduler::{
-    DueCell, DueCellScan, SchedulerFleet, SchedulerTickOutcome, preferred_scanner,
-    scheduler_next_due_ms, scheduler_tick,
-};
-pub use fleet::telemetry::{CellTelemetry, CellTelemetryHandle, ResidentRouteOutcome};
-pub use follower::{FollowerReceipt, FollowerStore, FollowerTailPage, RetiredFollowerLane};
+
+pub use follower::FollowerStore;
 pub use identity::{
-    ApplicationId, CellId, CellTarget, Digest, IncarnationId, NamespaceId, NodeId, RequestId,
-    SessionId, TenantId, partition_for_shard, shard_for_scope,
+    ApplicationId, CellId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
+    partition_for_shard, shard_for_scope,
 };
-pub use node::durability::{NodeDurability, NodeDurabilityConfig, NodeLogAuthority};
+pub use node::durability::NodeDurabilityConfig;
 pub use node::lease::NodeLeaseGuard;
-pub use node::log::{
-    CommitTicket, DurabilityGate, DurabilityProof, DurabilitySource, NodeLogRotationBarrier,
-    RecoveredCellTail, RecoveryBase, RotatedNodeLog, build_recovery_overlays,
-    build_recovery_overlays_file_backed, build_recovery_overlays_file_backed_stream,
-    close_node_log, rotate_node_log,
-};
-pub use node::log_recovery::{
-    CompletedNodeRecovery, NodeLogRecovery, RecoverableCellInventory, RecoveryCell,
-    RecoveryCoordinator, RecoveryCoordinatorResult, RecoveryInventorySummary, RecoveryWorkSummary,
-    SealedSession, recoverable_cells, recoverable_cells_from_frames, recoverable_cells_from_scopes,
-    recoverable_cells_from_scopes_with_summary,
-};
-pub use node::log_shipper::{NodeLogShipper, NodeLogSubmission};
-pub use node::log_state::{NodeLogPhase, NodeLogStatus, NodeRecoveryClaim};
-pub use node::log_transport::{
-    AppendRequest, LocalFollowerTransport, NodeLogTransport, RetireRequest, SealRequest,
-    TailRequest,
-};
-pub use node::{
-    FencedNodeSession, NODE_LOG_PROTOCOL_VERSION, NodeAdvertisement, NodeCapacity, NodeDirectory,
-    NodeFailureDomain, NodePlacementCapacity, NodeTakeoverProof, SealedNodeLog,
-    VersionedNodeAdvertisement,
-};
-pub use peer::{
-    EffectPeerClient, MAX_PEER_REQUEST_BYTES, MigrationPeerClient, PeerAuthorizer,
-    PeerCellResolver, PeerDispatcher, PeerOperation, PeerPrincipal, PeerRoundTrip, PeerSigner,
-    PeerVerifier, VerifiedPeerRequest, claimed_peer_session, decode_peer_reply, encode_peer_reply,
-    wire as peer_wire,
-};
-pub use primitives::activity_pool::{BlockingActivityPool, BlockingActivityReservation};
-pub use primitives::blob::{
-    BlobArtifactStore, BlobCommand, BlobCondition, BlobGarbageCollectionReport, BlobMetadata,
-    BlobModule, BlobMutation, BlobMutationOutcome, BlobNamespace, BlobPage, BlobQuery,
-    BlobQueryCommand, BlobQueryResult, BlobRead, blob_cleanup_expired, blob_mutate, blob_query,
-    install_blob_schema, register_blob,
-};
-pub use primitives::cron::{
-    CronCommand, CronInvocation, CronModule, CronMutation, CronMutationOutcome, CronNamespace,
-    CronQuery, CronQueryCommand, CronQueryResult, CronSchedule, CronTarget, cron_mutate,
-    cron_query, install_cron_schema, register_cron,
-};
-pub use primitives::effects::{
-    EffectAckRequest, EffectClaim, EffectClaimCommand, EffectClaimRequest, EffectCommandIntent,
-    EffectLease, EffectLeaseCommand, EffectLeaseOutcome, EffectLeaseRequest, EffectModule,
-    EffectRunOutcome, EffectSource, EffectState, EffectStatus, EffectStatusQuery,
-    EffectStatusRequest, EffectSupervisor, EffectSupervisorError, EffectTokenSource,
-    EffectValidateClaimQuery, EffectValidateRequest, InboxApplyOutcome, InboxDelivery,
-    SystemEffectTokens, effect_ack_delivered, effect_claim, effect_cleanup_terminal, effect_extend,
-    effect_id, effect_operation_digest, effect_retry, effect_status, effect_validate_claim,
-    inbox_apply, inbox_cleanup_expired, inbox_resolve, register_effect_delivery,
-};
-pub use primitives::kv::{
-    KvAtomicCommand, KvAtomicOutcome, KvAtomicRequest, KvCheck, KvCondition, KvEntry, KvGetQuery,
-    KvGetRequest, KvListQuery, KvListRequest, KvModule, KvMutation, KvMutationResult, KvNamespace,
-    KvPage, install_kv_schema, kv_atomic, kv_cleanup_expired, kv_get, kv_list, register_kv,
-};
-pub use primitives::maintenance::{
-    MaintenanceModule, MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest,
-    PersistedWorkInventory, register_maintenance,
-};
-pub use primitives::queue::{
-    QueueClaimCommand, QueueClaimRequest, QueueControlAction, QueueControlCommand,
-    QueueControlOutcome, QueueDeadLetterTarget, QueueInfo, QueueInfoQuery, QueueInfoRequest,
-    QueueLeaseAction, QueueLeaseCommand, QueueLeaseOutcome, QueueLeaseRequest, QueueMessage,
-    QueueModule, QueueNamespace, QueueSendCommand, QueueSendOutcome, QueueSendRequest, QueueState,
-    QueueTokenSource, QueueValidateClaimQuery, QueueValidateRequest, SystemQueueTokens,
-    install_queue_schema, queue_apply_lease, queue_claim, queue_cleanup_expired, queue_control,
-    queue_info, queue_send, queue_validate_claim, register_queue, verify_queue_counts,
-};
-pub use primitives::sql::{
-    SqlBatch, SqlBatchCommand, SqlBatchQuery, SqlCell, SqlModule, SqlResultSet, SqlStatement,
-    SqlValue, register_sql, sql_batch, sql_query_batch,
-};
+
+pub use primitives::blob::{BlobArtifactStore, BlobModule, BlobNamespace};
+pub use primitives::cron::{CronModule, CronNamespace};
+pub use primitives::effects::{EffectModule, EffectSource};
+pub use primitives::kv::{KvModule, KvNamespace};
+
+pub use primitives::queue::{QueueModule, QueueNamespace};
+pub use primitives::sql::{SqlCell, SqlModule};
 pub use primitives::workflow::{
-    ActivityCancellation, ActivityClaim, ActivityCompletion, ActivityCompletionOutcome,
-    ActivityContext, ActivityExecution, ActivityHandler, ActivityLeaseOutcome, ActivityRunOutcome,
-    ActivitySupervisor, ActivitySupervisorError, ActivitySupport, ActivityTokenSource,
-    BlockingActivityHandler, MAX_ACTIVITY_PAYLOAD_BYTES, SystemActivityTokens, WorkflowAction,
-    WorkflowActivities, WorkflowActivityClaimCommand, WorkflowActivityClaimRequest,
-    WorkflowActivityCompleteCommand, WorkflowActivityExtendCommand, WorkflowActivityExtendRequest,
-    WorkflowActivityModule, WorkflowActivityValidateQuery, WorkflowActivityValidateRequest,
-    WorkflowCancelCommand, WorkflowContext, WorkflowControl, WorkflowControlAction,
-    WorkflowControlCommand, WorkflowDecision, WorkflowDefinition, WorkflowGetQuery,
-    WorkflowGetRequest, WorkflowModule, WorkflowNamespace, WorkflowOutcome, WorkflowRun,
-    WorkflowSignal, WorkflowSignalCommand, WorkflowStart, WorkflowStartCommand, WorkflowStatus,
-    install_workflow_schema, register_activity, register_blocking_activity, register_workflow,
-    register_workflow_activities, verify_workflow_event_count, workflow_cancel,
-    workflow_claim_activities, workflow_cleanup_terminal, workflow_complete_activity,
-    workflow_control, workflow_extend_activity, workflow_fire_timer, workflow_signal,
-    workflow_start, workflow_state, workflow_validate_activity_claim,
+    WorkflowActivities, WorkflowActivityModule, WorkflowModule, WorkflowNamespace,
 };
-pub use publication::CellPublisher;
-pub use qualification::cluster::validate_cluster_receipt;
+
 pub use qualification::{
-    QUALIFICATION_CASE_COVERAGE_BYTES, QUALIFICATION_CASE_COVERAGE_OPERATIONS, QUALIFICATION_CASES,
-    QUALIFICATION_MATRIX_ROWS, QUALIFICATION_MATRIX_SCHEMA_VERSION, QUALIFICATION_PRIMITIVES,
-    QUALIFICATION_PROFILE_SCHEMA_VERSION, QUALIFICATION_PROTECTED_EVIDENCE_MAX_AGE_MS,
-    QUALIFICATION_PROTECTED_EVIDENCE_MAX_CLOCK_SKEW_MS,
-    QUALIFICATION_PROVIDER_EVIDENCE_SCHEMA_VERSION, QUALIFICATION_RESOURCE_METRICS,
-    QUALIFICATION_RUN_ARTIFACT_SCHEMA_VERSION, QUALIFICATION_SCHEMA_VERSION, QualificationCase,
-    QualificationExecution, QualificationExecutionEvidence, QualificationMatrixEntry,
-    QualificationMatrixManifest, QualificationMetric, QualificationOperation,
-    QualificationOperationExecutor, QualificationOperationIter, QualificationOutcome,
-    QualificationOwnership, QualificationPrimitiveCounts, QualificationProfile,
-    QualificationProviderEvidence, QualificationReceipt, QualificationRunArtifact,
-    QualificationRunSummary, QualificationRunner, QualificationWorkload,
+    QualificationExecution, QualificationOperation, QualificationOperationExecutor,
+    QualificationProfile, QualificationRunSummary, QualificationWorkload,
 };
-pub use recovery::artifacts::RecoveryArtifactRegistry;
-pub use recovery::backup::{BackupPin, BackupPinStore, BackupRestore, PinnedCatalogShard};
-pub use recovery::manifest::{
-    PinnedRecoveryCell, PinnedRecoveryCells, RecoveryArtifact, RecoveryArtifactKey,
-    RecoveryArtifactStore, RecoveryManifestStore, RecoveryPublicationSummary,
-};
-pub use recovery::release::{ReleaseRecord, ReleaseState, ReleaseStore, VersionedRelease};
-pub use recovery::release_progress::{
-    MigrationFailure, MigrationProgress, MigrationProgressAttempt, MigrationProgressState,
-    MigrationProgressStore,
-};
-pub use recovery::retention::{
-    CellGarbageCollector, GarbageCollectionPolicy, GarbageCollectionReport,
-};
+
 pub use registry::{
-    BuildDescriptor, CellModule, Command, CommandContext, CommandInvocation, CommandResult,
-    MigrationDescriptor, MigrationPlan, ModuleDescriptor, NamespaceDescriptor, OperationDescriptor,
-    Query, QueryContext, QueryInvocation, Registry, RegistryBuilder, RegistryError,
-    RetainedCodeDescriptor,
+    BuildDescriptor, CellModule, Command, MigrationDescriptor, ModuleDescriptor,
+    NamespaceDescriptor, Query, Registry, RegistryBuilder,
 };

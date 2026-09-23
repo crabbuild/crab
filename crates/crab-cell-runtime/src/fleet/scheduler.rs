@@ -2,28 +2,31 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crab_ltx::rusqlite::Transaction;
 
+use crate::cell::catalog::{CatalogProof, CatalogShardScan, CellCatalog};
+use crate::control::authority::{CellAuthority, VersionedControl};
+use crate::identity::{CellTarget, SessionId};
+use crate::node::NodeAdvertisement;
+use crate::primitives::blob::blob_cleanup_expired;
+use crate::primitives::cron::CronTarget;
+use crate::primitives::cron::cron_fire_due_bounded;
 use crate::primitives::effects::EffectBatch;
-use crate::{
-    CatalogProof, CatalogShardScan, CellAuthority, CellCatalog, CellTarget, CronTarget, Error,
-    NodeAdvertisement, QueueDeadLetterTarget, Result, SessionId, VersionedControl,
-    WorkflowDefinition,
-    primitives::blob::blob_cleanup_expired,
-    primitives::cron::cron_fire_due_bounded,
-    primitives::effects::{
-        effect_cleanup_terminal_bounded, effect_expire_ready_bounded,
-        effect_reclaim_expired_bounded, inbox_cleanup_expired_bounded,
-    },
-    primitives::kv::kv_cleanup_expired_bounded,
-    primitives::queue::{
-        MAX_ATTEMPTS, QueueDeadLetterWriter, queue_cleanup_expired_bounded,
-        queue_expire_ready_bounded, queue_expire_ready_bounded_with_dead_letter,
-        queue_reclaim_expired_bounded, queue_reclaim_expired_bounded_with_dead_letter,
-    },
-    primitives::workflow::{
-        workflow_cleanup_terminal_bounded, workflow_fail_one_expired_activity,
-        workflow_fire_one_due_timer, workflow_reclaim_expired_bounded,
-    },
+use crate::primitives::effects::{
+    effect_cleanup_terminal_bounded, effect_expire_ready_bounded, effect_reclaim_expired_bounded,
+    inbox_cleanup_expired_bounded,
 };
+use crate::primitives::kv::kv_cleanup_expired_bounded;
+use crate::primitives::queue::QueueDeadLetterTarget;
+use crate::primitives::queue::{
+    MAX_ATTEMPTS, QueueDeadLetterWriter, queue_cleanup_expired_bounded, queue_expire_ready_bounded,
+    queue_expire_ready_bounded_with_dead_letter, queue_reclaim_expired_bounded,
+    queue_reclaim_expired_bounded_with_dead_letter,
+};
+use crate::primitives::workflow::WorkflowDefinition;
+use crate::primitives::workflow::{
+    workflow_cleanup_terminal_bounded, workflow_fail_one_expired_activity,
+    workflow_fire_one_due_timer, workflow_reclaim_expired_bounded,
+};
+use crate::{Error, Result};
 
 const WORKFLOW_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const MAX_TICK_ITEMS: usize = 128;
@@ -171,7 +174,7 @@ impl DueCellScan {
                     .value()
                     .next_due_ms
                     .is_some_and(|deadline| deadline <= now_ms)
-                && control.value().state != crate::ControlState::Tombstoned
+                && control.value().state != crate::control::ControlState::Tombstoned
             {
                 due.push(DueCell {
                     catalog: proof,

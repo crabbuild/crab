@@ -3,10 +3,15 @@ use std::sync::Arc;
 use futures_util::future::BoxFuture;
 use tokio::sync::{Mutex, OnceCell};
 
-use crate::{
-    CommitTicket, DurabilityGate, DurabilityProof, DurabilitySource, Error, NodeId, NodeLeaseGuard,
-    NodeLogRotationBarrier, NodeLogShipper, NodeLogSubmission, NodeLogTransport, Result, SessionId,
+use crate::identity::NodeId;
+use crate::identity::SessionId;
+use crate::node::lease::NodeLeaseGuard;
+use crate::node::log::{
+    CommitTicket, DurabilityGate, DurabilityProof, DurabilitySource, NodeLogRotationBarrier,
 };
+use crate::node::log_shipper::{NodeLogShipper, NodeLogSubmission};
+use crate::node::log_transport::NodeLogTransport;
+use crate::{Error, Result};
 
 /// Authoritative node-session mutations required by follower durability.
 ///
@@ -38,7 +43,7 @@ pub struct NodeDurabilityConfig {
     authority: Arc<dyn NodeLogAuthority>,
     node_lease: NodeLeaseGuard,
     limits: crab_ltx::Limits,
-    telemetry: crate::CellTelemetryHandle,
+    telemetry: crate::fleet::telemetry::CellTelemetryHandle,
 }
 
 impl NodeDurabilityConfig {
@@ -56,7 +61,7 @@ impl NodeDurabilityConfig {
         authority: Arc<dyn NodeLogAuthority>,
         node_lease: NodeLeaseGuard,
         limits: crab_ltx::Limits,
-        telemetry: crate::CellTelemetryHandle,
+        telemetry: crate::fleet::telemetry::CellTelemetryHandle,
     ) -> Result<Self> {
         if session.as_bytes().iter().all(|byte| *byte == 0)
             || node.as_bytes().iter().all(|byte| *byte == 0)
@@ -264,9 +269,11 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
-    use crate::{
-        AppendRequest, ApplicationId, CellId, FollowerReceipt, IncarnationId, NodeId,
-        NodeLogTransport, RetireRequest, SealRequest, SessionId, TailRequest,
+    use crate::follower::FollowerReceipt;
+    use crate::identity::{ApplicationId, CellId, SessionId};
+    use crate::identity::{IncarnationId, NodeId};
+    use crate::node::log_transport::{
+        AppendRequest, NodeLogTransport, RetireRequest, SealRequest, TailRequest,
     };
 
     #[derive(Default)]

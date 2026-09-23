@@ -3,10 +3,9 @@ use crab_ltx::CellStorageLayout;
 use crab_storage::{ETag, StorageError};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    ApplicationId, CellId, CellTarget, Digest, Error, NamespaceId, Result, TenantId,
-    identity::encode_hex,
-};
+use crate::identity::encode_hex;
+use crate::identity::{ApplicationId, CellId, CellTarget, Digest, NamespaceId, TenantId};
+use crate::{Error, Result};
 
 const MAX_HEAD_BYTES: u64 = 32 * 1024;
 const MAX_PAGE_BYTES: u64 = 1024 * 1024;
@@ -224,7 +223,10 @@ impl CellCatalog {
         self.application
     }
 
-    pub(crate) fn matches_identity(&self, identity: crate::ApplicationIdentity) -> bool {
+    pub(crate) fn matches_identity(
+        &self,
+        identity: crate::cell::application::ApplicationIdentity,
+    ) -> bool {
         self.tenant == identity.tenant() && self.application == identity.application()
     }
 

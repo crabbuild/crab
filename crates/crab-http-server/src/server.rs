@@ -20,11 +20,18 @@ use crab_cell_host::{
     CellNode, CellNodeBuilder, CellNodeFacility, FOLLOWER_STORE_COMPONENT,
     NODE_DURABILITY_PROVIDER_COMPONENT, NodeDurabilitySupervisorConfig, NodeState,
 };
-use crab_cell_runtime::{
-    ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_NATIVE_BYTES, ACTIVE_CELL_PAGE_CACHE_BYTES,
-    ApplicationIdentityStore, CellRuntime, Digest, NodeDirectory, Owner, PeerRoundTrip, PeerSigner,
-    ReleaseState, ReleaseStore, ReplicaHost, ScratchMonitor, SessionId, SqlWorkerPool,
-};
+use crab_cell_runtime::cell::actor::ACTIVE_CELL_NATIVE_BYTES;
+use crab_cell_runtime::cell::actor::CellRuntime;
+use crab_cell_runtime::cell::application::ApplicationIdentityStore;
+use crab_cell_runtime::cell::worker::SqlWorkerPool;
+use crab_cell_runtime::cell::worker::{ACTIVE_CELL_FILE_DESCRIPTORS, ACTIVE_CELL_PAGE_CACHE_BYTES};
+use crab_cell_runtime::control::Owner;
+use crab_cell_runtime::identity::{Digest, SessionId};
+use crab_cell_runtime::ltx::Host as ReplicaHost;
+use crab_cell_runtime::ltx::ScratchMonitor;
+use crab_cell_runtime::node::NodeDirectory;
+use crab_cell_runtime::peer::{PeerRoundTrip, PeerSigner};
+use crab_cell_runtime::recovery::release::{ReleaseState, ReleaseStore};
 use crab_metadata::manifest_store::read_manifest;
 use crab_remote_git::{
     OperationLimits, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
@@ -217,13 +224,13 @@ impl CellRuntimeBudget {
         })
     }
 
-    pub(crate) fn local_disk(self) -> crab_cell_runtime::DiskBudget {
-        crab_cell_runtime::DiskBudget::new(self.local_disk_mebibytes as u64 * MIB)
+    pub(crate) fn local_disk(self) -> crab_cell_runtime::ltx::DiskBudget {
+        crab_cell_runtime::ltx::DiskBudget::new(self.local_disk_mebibytes as u64 * MIB)
     }
 
     pub(crate) fn replica_host(
         self,
-        local_disk: crab_cell_runtime::DiskBudget,
+        local_disk: crab_cell_runtime::ltx::DiskBudget,
         scratch_root: PathBuf,
     ) -> ReplicaHost {
         let scratch_monitor = Arc::new(ActualScratchMonitor {
@@ -307,7 +314,7 @@ pub(crate) fn test_cell_capacity_report() -> CellCapacityReport {
 
 struct ActualScratchMonitor {
     root: PathBuf,
-    local_disk: crab_cell_runtime::DiskBudget,
+    local_disk: crab_cell_runtime::ltx::DiskBudget,
     reserve_bytes: u64,
 }
 
@@ -725,7 +732,8 @@ pub(crate) struct Server {
     #[cfg(test)]
     pub(crate) follower_store: Option<crab_cell_runtime::FollowerStore>,
     #[cfg(test)]
-    pub(crate) node_log_transport: Option<Arc<dyn crab_cell_runtime::NodeLogTransport>>,
+    pub(crate) node_log_transport:
+        Option<Arc<dyn crab_cell_runtime::node::log_transport::NodeLogTransport>>,
     pub options: RepositoryOptions,
     pub cursor_key: [u8; 32],
     pub admission: Semaphore,
@@ -818,8 +826,8 @@ impl Server {
 
     pub(crate) fn node_log_transport(
         &self,
-    ) -> Option<Arc<dyn crab_cell_runtime::NodeLogTransport>> {
-        self.node_component::<Arc<dyn crab_cell_runtime::NodeLogTransport>>(
+    ) -> Option<Arc<dyn crab_cell_runtime::node::log_transport::NodeLogTransport>> {
+        self.node_component::<Arc<dyn crab_cell_runtime::node::log_transport::NodeLogTransport>>(
             CELL_COMPONENT_NODE_LOG_TRANSPORT,
         )
         .map(|transport| transport.as_ref().clone())
@@ -1037,7 +1045,7 @@ pub async fn serve(config: Config) -> Result<()> {
         peer_tls.signing_key().clone(),
         session,
         config.cells.peer_advertise.to_string(),
-        crab_cell_runtime::NodeFailureDomain::new(
+        crab_cell_runtime::node::NodeFailureDomain::new(
             config.cells.failure_zone.clone(),
             config.cells.failure_host.clone(),
         )?,
@@ -1124,19 +1132,20 @@ pub async fn serve(config: Config) -> Result<()> {
     );
     let peer_round_trip: Arc<dyn PeerRoundTrip> = Arc::new(crate::peer::PeerHttpRoundTrip::new(
         startup.identity,
-        crab_cell_runtime::CellAuthority::new(startup.layout.clone()),
+        crab_cell_runtime::control::authority::CellAuthority::new(startup.layout.clone()),
         directory.clone(),
         peer_tls.client_identity(),
         session,
     ));
-    let node_log_transport: Arc<dyn crab_cell_runtime::NodeLogTransport> = Arc::new(
-        crate::peer::NodeLogHttpTransport::new(
-            directory.clone(),
-            peer_tls.client_identity(),
-            session,
-        )
-        .with_local_follower(node, (*follower_store).clone()),
-    );
+    let node_log_transport: Arc<dyn crab_cell_runtime::node::log_transport::NodeLogTransport> =
+        Arc::new(
+            crate::peer::NodeLogHttpTransport::new(
+                directory.clone(),
+                peer_tls.client_identity(),
+                session,
+            )
+            .with_local_follower(node, (*follower_store).clone()),
+        );
     node_publisher.install_node_log_transport(Arc::clone(&node_log_transport))?;
     cell_node.install_node_durability_provider(
         Arc::clone(&node_publisher),
@@ -1866,7 +1875,7 @@ fn management_router(server: Arc<Server>) -> Router {
         .route(
             "/internal/cells/v1/forward",
             post(crate::peer::forward).layer(axum::extract::DefaultBodyLimit::max(
-                crab_cell_runtime::MAX_PEER_REQUEST_BYTES,
+                crab_cell_runtime::peer::MAX_PEER_REQUEST_BYTES,
             )),
         )
         .route(
@@ -2438,7 +2447,7 @@ mod tests {
         let available = fs4::available_space(directory.path()).unwrap();
         let monitor = ActualScratchMonitor {
             root: directory.path().to_owned(),
-            local_disk: crab_cell_runtime::DiskBudget::new(MIB),
+            local_disk: crab_cell_runtime::ltx::DiskBudget::new(MIB),
             reserve_bytes: available,
         };
 

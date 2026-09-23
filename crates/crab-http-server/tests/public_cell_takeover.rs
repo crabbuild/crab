@@ -4,17 +4,38 @@ use std::{
 };
 
 use crab_cell_host::CellNodeBuilder;
-use crab_cell_runtime::{
-    ActivityRunOutcome, ActivitySupervisor, ApplicationId, BlobArtifactStore, BlobCondition,
-    BlobMutation, BlobQuery, BlobQueryResult, CatalogRole, CellAuthority, CellCatalog, CellClient,
-    CellReplica, CellStorageLayout, CellTarget, CronMutation, CronQueryResult, EffectClaimRequest,
-    EffectLeaseOutcome, IncarnationId, KvAtomicOutcome, KvAtomicRequest, KvMutation,
-    NodeLeaseGuard, Owner, QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome,
-    QueueSendRequest, QueueState, RecoveryManifestStore, ReplicaLimits, SessionId, SqlBatch,
-    SqlStatement, SqlValue, SqlWorkerPool, TenantId, WorkflowOutcome, WorkflowStatus,
-    install_blob_schema, install_cron_schema, install_kv_schema, install_queue_schema,
-    install_workflow_schema, partition_for_shard,
+use crab_cell_runtime::cell::catalog::CatalogRole;
+use crab_cell_runtime::cell::catalog::CellCatalog;
+use crab_cell_runtime::cell::worker::SqlWorkerPool;
+use crab_cell_runtime::client::CellClient;
+use crab_cell_runtime::control::Owner;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::identity::IncarnationId;
+use crab_cell_runtime::identity::{
+    ApplicationId, CellTarget, SessionId, TenantId, partition_for_shard,
 };
+use crab_cell_runtime::ltx::Limits as ReplicaLimits;
+use crab_cell_runtime::ltx::{CellReplica, CellStorageLayout};
+use crab_cell_runtime::node::lease::NodeLeaseGuard;
+use crab_cell_runtime::primitives::blob::BlobArtifactStore;
+use crab_cell_runtime::primitives::blob::{
+    BlobCondition, BlobMutation, BlobQuery, BlobQueryResult, install_blob_schema,
+};
+use crab_cell_runtime::primitives::cron::{CronMutation, CronQueryResult, install_cron_schema};
+use crab_cell_runtime::primitives::effects::{EffectClaimRequest, EffectLeaseOutcome};
+use crab_cell_runtime::primitives::kv::{
+    KvAtomicOutcome, KvAtomicRequest, KvMutation, install_kv_schema,
+};
+use crab_cell_runtime::primitives::queue::{
+    QueueClaimRequest, QueueLeaseOutcome, QueueSendOutcome, QueueSendRequest, QueueState,
+    install_queue_schema,
+};
+use crab_cell_runtime::primitives::sql::{SqlBatch, SqlStatement, SqlValue};
+use crab_cell_runtime::primitives::workflow::{
+    ActivityRunOutcome, ActivitySupervisor, WorkflowOutcome, WorkflowStatus,
+    install_workflow_schema,
+};
+use crab_cell_runtime::recovery::manifest::RecoveryManifestStore;
 use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path};
 use tokio_util::sync::CancellationToken;
@@ -246,7 +267,9 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
         )
         .await
         .expect("acknowledged Blob commit");
-    let crab_cell_runtime::BlobMutationOutcome::Committed { etag, size } = committed.output else {
+    let crab_cell_runtime::primitives::blob::BlobMutationOutcome::Committed { etag, size } =
+        committed.output
+    else {
         panic!("source Blob was not committed");
     };
     let source_queue = source_handle
@@ -287,7 +310,7 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
         .expect("acknowledged Cron schedule");
     assert!(matches!(
         scheduled.output,
-        crab_cell_runtime::CronMutationOutcome::Applied { .. }
+        crab_cell_runtime::primitives::cron::CronMutationOutcome::Applied { .. }
     ));
     let source_workflow = source_handle
         .workflow::<fixture::ReferenceWorkflow>()

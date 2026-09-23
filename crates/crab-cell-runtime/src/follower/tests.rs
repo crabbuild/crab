@@ -163,10 +163,12 @@ async fn append_skips_an_object_covered_queued_prefix() {
             .unwrap();
         assert_eq!(receipt.base_sequence, covered + 1);
         assert_eq!(receipt.durable_through, 2);
-        let member = crate::NodeId::from_bytes([2; 16]);
-        let recovery = crate::NodeLogRecovery::new(
-            Arc::new(crate::LocalFollowerTransport::new(member, store)),
-            crate::NodeId::from_bytes([1; 16]),
+        let member = crate::identity::NodeId::from_bytes([2; 16]);
+        let recovery = crate::node::log_recovery::NodeLogRecovery::new(
+            Arc::new(crate::node::log_transport::LocalFollowerTransport::new(
+                member, store,
+            )),
+            crate::identity::NodeId::from_bytes([1; 16]),
             leader,
             2,
             vec![member],

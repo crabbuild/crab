@@ -1,11 +1,12 @@
 use std::marker::PhantomData;
 
-use crate::{
-    ApplicationId, BoundedDecoder, BoundedEncoder, CatalogRole, CellClient, CellTarget, CodecError,
-    Command, CommandContext, CommandResult, Committed, InvocationError, MaintenanceModule,
-    NamespaceId, Observed, Query, QueryContext, Receipt, RegistryBuilder, TenantId, WireValue,
-    register_maintenance, shard_for_scope,
-};
+use crate::cell::catalog::CatalogRole;
+use crate::client::{CellClient, Committed, InvocationError, Observed, Receipt};
+use crate::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use crate::identity::{ApplicationId, CellTarget, NamespaceId, TenantId, shard_for_scope};
+use crate::primitives::maintenance::{MaintenanceModule, register_maintenance};
+use crate::registry::{Command, Query, RegistryBuilder};
+use crate::registry::{CommandContext, CommandResult, QueryContext};
 
 use super::{
     BlobArtifactStore, BlobCondition, BlobMetadata, BlobMutation, BlobMutationOutcome, BlobPage,
@@ -119,7 +120,7 @@ impl<M: BlobModule> BlobNamespace<M> {
     /// Applies one multipart or conditional mutation on the key's shard.
     pub async fn mutate(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         mutation: BlobMutation,
     ) -> std::result::Result<Committed<BlobMutationOutcome>, InvocationError<BlobMutationOutcome>>
     {

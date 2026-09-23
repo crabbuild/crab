@@ -6,13 +6,20 @@ use std::sync::Arc;
 
 use futures_util::{StreamExt, future::join_all, stream};
 
-use crate::{
-    ApplicationId, CatalogProof, CellAuthority, CellCatalog, CellId, Digest, Error,
-    FencedNodeSession, FollowerReceipt, NodeDirectory, NodeId, NodeLogPhase, NodeLogTransport,
-    NodeTakeoverProof, RecoveryBase, RecoveryManifestStore, Result, SealRequest, SealedNodeLog,
-    SessionId, TailRequest, Transition, VersionedControl, build_recovery_overlays_file_backed,
-    build_recovery_overlays_file_backed_stream,
+use crate::cell::catalog::{CatalogProof, CellCatalog};
+use crate::control::Transition;
+use crate::control::authority::{CellAuthority, VersionedControl};
+use crate::follower::FollowerReceipt;
+use crate::identity::NodeId;
+use crate::identity::{ApplicationId, CellId, Digest, SessionId};
+use crate::node::log::{
+    RecoveryBase, build_recovery_overlays_file_backed, build_recovery_overlays_file_backed_stream,
 };
+use crate::node::log_state::NodeLogPhase;
+use crate::node::log_transport::{NodeLogTransport, SealRequest, TailRequest};
+use crate::node::{FencedNodeSession, NodeDirectory, NodeTakeoverProof, SealedNodeLog};
+use crate::recovery::manifest::RecoveryManifestStore;
+use crate::{Error, Result};
 
 const MAX_RECOVERY_CATALOG_HEAD_READS: usize = 32;
 
@@ -473,7 +480,7 @@ pub struct CompletedNodeRecovery {
 /// Recovery controls and publication work produced by one sealed recovery.
 pub struct RecoveryCoordinatorResult {
     pub controls: Vec<VersionedControl>,
-    pub publication: crate::RecoveryPublicationSummary,
+    pub publication: crate::recovery::manifest::RecoveryPublicationSummary,
 }
 
 /// Scans one application catalog for published Cells owned by a dead session.
@@ -720,7 +727,7 @@ impl RecoveryCoordinator {
         if sealed.frame_count() == 0 {
             return Ok(RecoveryCoordinatorResult {
                 controls: Vec::new(),
-                publication: crate::RecoveryPublicationSummary::default(),
+                publication: crate::recovery::manifest::RecoveryPublicationSummary::default(),
             });
         }
         let scratch = self.manifests.recovery_scratch_directory();
@@ -743,7 +750,7 @@ impl RecoveryCoordinator {
         if tails.is_empty() {
             return Ok(RecoveryCoordinatorResult {
                 controls: Vec::new(),
-                publication: crate::RecoveryPublicationSummary::default(),
+                publication: crate::recovery::manifest::RecoveryPublicationSummary::default(),
             });
         }
         let pinned = self
@@ -1334,8 +1341,9 @@ mod tests {
     use futures_util::future::BoxFuture;
 
     use super::*;
-    use crate::{
-        AppendRequest, FollowerStore, LocalFollowerTransport, NodeLogTransport, RetireRequest,
+    use crate::follower::FollowerStore;
+    use crate::node::log_transport::{
+        AppendRequest, LocalFollowerTransport, NodeLogTransport, RetireRequest,
     };
 
     fn scope(cell: u8, sequence: u64) -> crab_ltx::NodeFrameScope {
@@ -1412,7 +1420,7 @@ mod tests {
             &'a self,
             member: NodeId,
             request: AppendRequest,
-        ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
+        ) -> BoxFuture<'a, Result<crate::follower::FollowerReceipt>> {
             Box::pin(async move {
                 self.store(member)?
                     .append(
@@ -1429,7 +1437,7 @@ mod tests {
             &'a self,
             member: NodeId,
             request: SealRequest,
-        ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
+        ) -> BoxFuture<'a, Result<crate::follower::FollowerReceipt>> {
             Box::pin(async move {
                 self.store(member)?
                     .seal(request.leader_session, request.log_epoch)
@@ -1441,7 +1449,7 @@ mod tests {
             &'a self,
             member: NodeId,
             request: RetireRequest,
-        ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
+        ) -> BoxFuture<'a, Result<crate::follower::FollowerReceipt>> {
             Box::pin(async move {
                 self.store(member)?
                     .retire(
@@ -1475,7 +1483,7 @@ mod tests {
             &'a self,
             member: NodeId,
             request: AppendRequest,
-        ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
+        ) -> BoxFuture<'a, Result<crate::follower::FollowerReceipt>> {
             self.good.append(member, request)
         }
 
@@ -1483,10 +1491,10 @@ mod tests {
             &'a self,
             member: NodeId,
             request: SealRequest,
-        ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
+        ) -> BoxFuture<'a, Result<crate::follower::FollowerReceipt>> {
             if member == self.failed {
                 return Box::pin(async {
-                    Ok(crate::FollowerReceipt {
+                    Ok(crate::follower::FollowerReceipt {
                         base_sequence: 1,
                         durable_through: 1,
                     })
@@ -1499,7 +1507,7 @@ mod tests {
             &'a self,
             member: NodeId,
             request: RetireRequest,
-        ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
+        ) -> BoxFuture<'a, Result<crate::follower::FollowerReceipt>> {
             self.good.retire(member, request)
         }
 
@@ -1518,7 +1526,7 @@ mod tests {
             &'a self,
             member: NodeId,
             request: TailRequest,
-        ) -> BoxFuture<'a, Result<crate::FollowerTailPage>> {
+        ) -> BoxFuture<'a, Result<crate::follower::FollowerTailPage>> {
             if member == self.failed {
                 return Box::pin(async { Err(Error::Node("injected follower read failure")) });
             }

@@ -8,11 +8,12 @@ use futures_util::future::BoxFuture;
 use object_store::{memory::InMemory, path::Path};
 
 use super::*;
-use crate::{
-    AppendRequest, ApplicationId, CellTarget, NamespaceId, NodeLogTransport, PeerOperation,
-    PeerPrincipal, PeerSigner, PlacementPlanner, RetireRequest, SealRequest, TailRequest, TenantId,
-    peer_wire,
+use crate::fleet::placement::PlacementPlanner;
+use crate::identity::{ApplicationId, CellTarget, NamespaceId, TenantId};
+use crate::node::log_transport::{
+    AppendRequest, NodeLogTransport, RetireRequest, SealRequest, TailRequest,
 };
+use crate::peer::{PeerOperation, PeerPrincipal, PeerSigner, wire as peer_wire};
 
 const NOW_MS: i64 = 1_000_000;
 
@@ -113,7 +114,7 @@ impl NodeLogTransport for UnavailableFollowerTransport {
         &'a self,
         _member: NodeId,
         _request: AppendRequest,
-    ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
+    ) -> BoxFuture<'a, Result<crate::follower::FollowerReceipt>> {
         Box::pin(async { Err(Error::Node("injected unavailable follower")) })
     }
 
@@ -121,7 +122,7 @@ impl NodeLogTransport for UnavailableFollowerTransport {
         &'a self,
         _member: NodeId,
         _request: SealRequest,
-    ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
+    ) -> BoxFuture<'a, Result<crate::follower::FollowerReceipt>> {
         Box::pin(async { Err(Error::Node("injected unavailable follower")) })
     }
 
@@ -129,7 +130,7 @@ impl NodeLogTransport for UnavailableFollowerTransport {
         &'a self,
         _member: NodeId,
         _request: RetireRequest,
-    ) -> BoxFuture<'a, Result<crate::FollowerReceipt>> {
+    ) -> BoxFuture<'a, Result<crate::follower::FollowerReceipt>> {
         Box::pin(async { Err(Error::Node("injected unavailable follower")) })
     }
 
@@ -817,10 +818,11 @@ async fn node_log_enrollment_activation_and_coverage_are_authoritative() {
         .await
         .unwrap();
     let gate =
-        crate::DurabilityGate::new(leader, node(leader), 4, [node(first), node(second)]).unwrap();
+        crate::node::log::DurabilityGate::new(leader, node(leader), 4, [node(first), node(second)])
+            .unwrap();
     let ticket = gate.issue(27).unwrap();
     gate.prove_object(ticket).unwrap();
-    let rotated = crate::rotate_node_log(
+    let rotated = crate::node::log::rotate_node_log(
         &directory,
         Arc::new(UnavailableFollowerTransport),
         &covered,
@@ -874,11 +876,12 @@ async fn clean_node_log_close_clears_authority_before_session_withdrawal() {
         .advance_log_coverage(&active, 2, NOW_MS + 3)
         .await
         .unwrap();
-    let gate = crate::DurabilityGate::new(leader, node(leader), 4, [node(member)]).unwrap();
+    let gate =
+        crate::node::log::DurabilityGate::new(leader, node(leader), 4, [node(member)]).unwrap();
     let ticket = gate.issue(2).unwrap();
     gate.prove_object(ticket).unwrap();
 
-    let closed = crate::close_node_log(
+    let closed = crate::node::log::close_node_log(
         &directory,
         Arc::new(UnavailableFollowerTransport),
         &covered,

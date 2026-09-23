@@ -1,10 +1,10 @@
 use std::marker::PhantomData;
 
-use crate::{
-    BoundedDecoder, BoundedEncoder, CellClient, CellTarget, CodecError, Command, CommandContext,
-    CommandResult, Committed, InvocationError, Observed, Query, QueryContext, Receipt,
-    RegistryBuilder, WireValue,
-};
+use crate::client::{CellClient, Committed, InvocationError, Observed, Receipt};
+use crate::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use crate::identity::CellTarget;
+use crate::registry::{Command, Query, RegistryBuilder};
+use crate::registry::{CommandContext, CommandResult, QueryContext};
 
 use super::{
     EffectClaim, EffectLease, EffectLeaseOutcome, EffectState, EffectStatus,
@@ -192,7 +192,7 @@ impl<M: EffectModule> EffectSource<M> {
 
     pub async fn claim(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         request: EffectClaimRequest,
     ) -> std::result::Result<Committed<Vec<EffectClaim>>, InvocationError<Vec<EffectClaim>>> {
         self.client
@@ -228,7 +228,7 @@ impl<M: EffectModule> EffectSource<M> {
 
     pub async fn ack(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         claim: EffectClaim,
         result: Vec<u8>,
     ) -> std::result::Result<Committed<EffectLeaseOutcome>, InvocationError<EffectLeaseOutcome>>
@@ -247,7 +247,7 @@ impl<M: EffectModule> EffectSource<M> {
 
     pub async fn retry(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         claim: EffectClaim,
     ) -> std::result::Result<Committed<EffectLeaseOutcome>, InvocationError<EffectLeaseOutcome>>
     {

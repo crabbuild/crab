@@ -6,14 +6,27 @@
 
 use std::{marker::PhantomData, sync::Arc};
 
-use crab_cell_runtime::{
-    ApplicationId, BlobArtifactStore, BlobModule, BlobNamespace, BuildDescriptor, CatalogRole,
-    CellClient, CellModule, CellTarget, Command, Committed, CronModule, CronNamespace, Digest,
-    EffectModule, EffectSource, Error, InvocationError, KvModule, KvNamespace, NamespaceId,
-    Observed, PendingMutation, PreparedCommand, Query, QueueModule, QueueNamespace, Registry,
-    RegistryBuilder, Resolution, Result, SqlCell, SqlModule, TenantId, WorkflowActivities,
-    WorkflowActivityModule, WorkflowModule, WorkflowNamespace, partition_for_shard,
+use crab_cell_runtime::cell::catalog::CatalogRole;
+use crab_cell_runtime::cell::executor::Resolution;
+use crab_cell_runtime::client::{
+    CellClient, Committed, InvocationError, Observed, PendingMutation, PreparedCommand,
 };
+use crab_cell_runtime::identity::{
+    ApplicationId, CellTarget, Digest, NamespaceId, TenantId, partition_for_shard,
+};
+use crab_cell_runtime::primitives::blob::{BlobArtifactStore, BlobModule, BlobNamespace};
+use crab_cell_runtime::primitives::cron::{CronModule, CronNamespace};
+use crab_cell_runtime::primitives::effects::{EffectModule, EffectSource};
+use crab_cell_runtime::primitives::kv::{KvModule, KvNamespace};
+use crab_cell_runtime::primitives::queue::{QueueModule, QueueNamespace};
+use crab_cell_runtime::primitives::sql::{SqlCell, SqlModule};
+use crab_cell_runtime::primitives::workflow::{
+    WorkflowActivities, WorkflowActivityModule, WorkflowModule, WorkflowNamespace,
+};
+use crab_cell_runtime::registry::{
+    BuildDescriptor, CellModule, Command, Query, Registry, RegistryBuilder,
+};
+use crab_cell_runtime::{Error, Result};
 
 const DESCRIPTOR_MAGIC: &[u8] = b"crab.application.v1\0";
 const MAX_APPLICATION_NAME_BYTES: usize = 128;
@@ -590,7 +603,8 @@ fn role_code(role: CatalogRole) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crab_cell_runtime::{CellModule, Digest, ModuleDescriptor, NamespaceDescriptor};
+    use crab_cell_runtime::identity::Digest;
+    use crab_cell_runtime::registry::{CellModule, ModuleDescriptor, NamespaceDescriptor};
 
     struct SqlModule;
 

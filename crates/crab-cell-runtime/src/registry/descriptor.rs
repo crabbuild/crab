@@ -6,7 +6,10 @@ use super::{
     BuildDescriptor, MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor,
     OperationDescriptor, RetainedCodeDescriptor,
 };
-use crate::{CatalogRole, Digest, Result, identity::encode_hex};
+use crate::Result;
+use crate::cell::catalog::CatalogRole;
+use crate::identity::Digest;
+use crate::identity::encode_hex;
 
 pub(super) fn encode_release(
     build: &BuildDescriptor,

@@ -1,27 +1,65 @@
 use std::{future::Future, pin::Pin, sync::Arc, sync::OnceLock, time::UNIX_EPOCH};
 
 use crab_cell_app::{ApplicationBuilder, ApplicationHandle, CellApplication, CellType};
-use crab_cell_runtime::{
-    ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome, ApplicationId,
-    BlobArtifactStore, BlobCondition, BlobModule, BlobMutation, BlobMutationOutcome, BlobQuery,
-    BlobQueryResult, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellClient,
-    CellHandle, CellModule, CellRuntime, CellStorageLayout, CellTarget, Command, CommandContext,
-    CommandResult, CronInvocation, CronModule, CronMutation, CronQueryResult, CronTarget, Digest,
-    EffectClaimRequest, EffectLeaseOutcome, EffectModule, Error, FencedNodeSession, IncarnationId,
-    InvocationError, KvAtomicCommand, KvAtomicRequest, KvGetQuery, KvGetRequest, KvModule,
-    KvMutation, MaintenanceModule, ModuleDescriptor, MutationIdentity, NamespaceDescriptor,
-    NamespaceId, NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain, NodeId,
-    OperationDescriptor, Owner, QualificationExecution, QualificationOperation,
-    QualificationOperationExecutor, QualificationProfile, QualificationWorkload, QueueClaimRequest,
-    QueueDeadLetterTarget, QueueLeaseOutcome, QueueModule, QueueSendRequest, Registry,
-    RegistryBuilder, RequestId, Result, SqlBatch, SqlModule, SqlStatement, SqlValue, SqlWorkerPool,
-    TenantId, WorkflowAction, WorkflowActivityModule, WorkflowContext, WorkflowDecision,
-    WorkflowDefinition, WorkflowModule, WorkflowStatus, install_blob_schema, install_cron_schema,
-    install_kv_schema, install_queue_schema, install_workflow_schema, partition_for_shard,
-    register_activity, register_blob, register_cron, register_effect_delivery, register_kv,
-    register_maintenance, register_queue, register_sql, register_workflow,
-    register_workflow_activities,
+use crab_cell_runtime::cell::actor::CellHandle;
+use crab_cell_runtime::cell::actor::CellRuntime;
+use crab_cell_runtime::cell::catalog::CatalogEntry;
+use crab_cell_runtime::cell::catalog::CatalogRole;
+use crab_cell_runtime::cell::executor::MutationIdentity;
+use crab_cell_runtime::cell::worker::SqlWorkerPool;
+use crab_cell_runtime::client::{CellClient, InvocationError};
+use crab_cell_runtime::control::Owner;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::identity::{
+    ApplicationId, CellTarget, Digest, NamespaceId, TenantId, partition_for_shard,
 };
+use crab_cell_runtime::identity::{IncarnationId, NodeId, RequestId};
+use crab_cell_runtime::ltx::CellStorageLayout;
+use crab_cell_runtime::node::{
+    FencedNodeSession, NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain,
+};
+use crab_cell_runtime::primitives::blob::{BlobArtifactStore, BlobModule};
+use crab_cell_runtime::primitives::blob::{
+    BlobCondition, BlobMutation, BlobMutationOutcome, BlobQuery, BlobQueryResult,
+    install_blob_schema, register_blob,
+};
+use crab_cell_runtime::primitives::cron::CronModule;
+use crab_cell_runtime::primitives::cron::{
+    CronInvocation, CronMutation, CronQueryResult, CronTarget, install_cron_schema, register_cron,
+};
+use crab_cell_runtime::primitives::effects::EffectModule;
+use crab_cell_runtime::primitives::effects::{
+    EffectClaimRequest, EffectLeaseOutcome, register_effect_delivery,
+};
+use crab_cell_runtime::primitives::kv::KvModule;
+use crab_cell_runtime::primitives::kv::{
+    KvAtomicCommand, KvAtomicRequest, KvGetQuery, KvGetRequest, KvMutation, install_kv_schema,
+    register_kv,
+};
+use crab_cell_runtime::primitives::maintenance::{MaintenanceModule, register_maintenance};
+use crab_cell_runtime::primitives::queue::QueueModule;
+use crab_cell_runtime::primitives::queue::{
+    QueueClaimRequest, QueueDeadLetterTarget, QueueLeaseOutcome, QueueSendRequest,
+    install_queue_schema, register_queue,
+};
+use crab_cell_runtime::primitives::sql::SqlModule;
+use crab_cell_runtime::primitives::sql::{SqlBatch, SqlStatement, SqlValue, register_sql};
+use crab_cell_runtime::primitives::workflow::{
+    ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome, WorkflowAction,
+    WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowStatus, install_workflow_schema,
+    register_activity, register_workflow, register_workflow_activities,
+};
+use crab_cell_runtime::primitives::workflow::{WorkflowActivityModule, WorkflowModule};
+use crab_cell_runtime::qualification::{
+    QualificationExecution, QualificationOperation, QualificationOperationExecutor,
+    QualificationProfile, QualificationWorkload,
+};
+use crab_cell_runtime::registry::{
+    BuildDescriptor, CellModule, Command, ModuleDescriptor, NamespaceDescriptor, Registry,
+    RegistryBuilder,
+};
+use crab_cell_runtime::registry::{CommandContext, CommandResult, OperationDescriptor};
+use crab_cell_runtime::{Error, Result};
 use crab_ltx::{CellReplica, DiskBudget, Host, Limits};
 use crab_storage::Store;
 use ed25519_dalek::SigningKey;
@@ -62,16 +100,19 @@ fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-fn migration() -> &'static [crab_cell_runtime::MigrationDescriptor] {
-    static MIGRATION: OnceLock<&'static [crab_cell_runtime::MigrationDescriptor]> = OnceLock::new();
+fn migration() -> &'static [crab_cell_runtime::registry::MigrationDescriptor] {
+    static MIGRATION: OnceLock<&'static [crab_cell_runtime::registry::MigrationDescriptor]> =
+        OnceLock::new();
     MIGRATION.get_or_init(|| {
-        Box::leak(Box::new([crab_cell_runtime::MigrationDescriptor {
-            version: 1,
-            sql: "-- reference application migration v1",
-            digest: Digest::from_bytes(
-                *blake3::hash(b"-- reference application migration v1").as_bytes(),
-            ),
-        }]))
+        Box::leak(Box::new([
+            crab_cell_runtime::registry::MigrationDescriptor {
+                version: 1,
+                sql: "-- reference application migration v1",
+                digest: Digest::from_bytes(
+                    *blake3::hash(b"-- reference application migration v1").as_bytes(),
+                ),
+            },
+        ]))
     })
 }
 
@@ -421,7 +462,7 @@ impl WorkflowDefinition for ReferenceDefinition {
                 state: b"effect-published".to_vec(),
                 result: Some(b"effect-scheduled".to_vec()),
                 actions: vec![WorkflowAction::Effect {
-                    intent: crab_cell_runtime::EffectCommandIntent {
+                    intent: crab_cell_runtime::primitives::effects::EffectCommandIntent {
                         target: CellTarget::new(
                             context.source().tenant(),
                             context.source().application(),
@@ -691,7 +732,7 @@ async fn reference_application_uses_typed_handle_for_a_real_commit() {
         object_store::path::Path::from("reference-application"),
         *application_id.as_bytes(),
     );
-    let catalog = crab_cell_runtime::CellCatalog::new(layout.clone(), tenant);
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(layout.clone(), tenant);
     let proof = catalog
         .provision(
             CatalogEntry::new(
@@ -801,7 +842,7 @@ where
         + 'static,
 {
     let target = CellTarget::new(tenant, application, namespace, &partition_for_shard(0))?;
-    let catalog = crab_cell_runtime::CellCatalog::new(layout.clone(), tenant);
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(layout.clone(), tenant);
     let proof = catalog
         .provision(CatalogEntry::new(
             &target,
@@ -1039,7 +1080,10 @@ impl QualificationOperationExecutor for TypedQualificationExecutor {
                 }
                 "activity" => {
                     let activities = handle.activities::<ReferenceWorkflow>()?;
-                    let supervisor = crab_cell_runtime::ActivitySupervisor::new(activities, 5_000)?;
+                    let supervisor =
+                        crab_cell_runtime::primitives::workflow::ActivitySupervisor::new(
+                            activities, 5_000,
+                        )?;
                     supervisor
                         .run_once(0, None)
                         .await
@@ -1452,7 +1496,7 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
     assert!(matches!(acked.output, QueueLeaseOutcome::Applied { .. }));
     assert!(matches!(
         sent.output,
-        crab_cell_runtime::QueueSendOutcome::Sent { .. }
+        crab_cell_runtime::primitives::queue::QueueSendOutcome::Sent { .. }
     ));
 
     let cron = typed.cron::<ReferenceCron>().unwrap();
@@ -1486,10 +1530,10 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
         .await
         .unwrap();
     let activity_run_id = match activity_started.output {
-        crab_cell_runtime::WorkflowOutcome::Applied { run_id, .. } => run_id,
+        crab_cell_runtime::primitives::workflow::WorkflowOutcome::Applied { run_id, .. } => run_id,
         outcome => panic!("unexpected activity start outcome: {outcome:?}"),
     };
-    let activity = crab_cell_runtime::ActivitySupervisor::new(
+    let activity = crab_cell_runtime::primitives::workflow::ActivitySupervisor::new(
         typed.activities::<ReferenceWorkflow>().unwrap(),
         5_000,
     )
@@ -1609,7 +1653,7 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
     )
     .unwrap();
     let authority = CellAuthority::new(layout.clone());
-    let catalog = crab_cell_runtime::CellCatalog::new(layout.clone(), tenant);
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(layout.clone(), tenant);
     seed_reference_session(&layout, session).await;
     let mut restored_handles = Vec::new();
     for (namespace, module, incarnation_byte) in [
@@ -1640,7 +1684,10 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
                     .await
                     .direct_takeover()
                     .unwrap(),
-                crab_cell_runtime::RecoveryManifestStore::new(layout.clone(), Limits::default()),
+                crab_cell_runtime::recovery::manifest::RecoveryManifestStore::new(
+                    layout.clone(),
+                    Limits::default(),
+                ),
                 restored_directory
                     .path()
                     .join(format!("{module}-takeover.sqlite")),
@@ -1739,7 +1786,7 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
         )
         .await
         .unwrap();
-    let restored_activity = crab_cell_runtime::ActivitySupervisor::new(
+    let restored_activity = crab_cell_runtime::primitives::workflow::ActivitySupervisor::new(
         restored.activities::<ReferenceWorkflow>().unwrap(),
         5_000,
     )

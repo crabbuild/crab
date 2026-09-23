@@ -1,6 +1,7 @@
 //! Pressure shedding tests extracted from `src/pressure.rs`.
-
-use crab_cell_runtime::*;
+use crab_cell_runtime::fleet::pressure::{
+    MovementBudget, PressureClassifier, PressureSample, PressureState,
+};
 
 fn sample(at_ms: i64, memory: u16) -> PressureSample {
     PressureSample {

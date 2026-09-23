@@ -29,7 +29,7 @@ pub enum Error {
     #[error("Cell runtime JSON failed")]
     Json(#[from] serde_json::Error),
     #[error("Cell wire codec failed")]
-    Codec(#[from] crate::CodecError),
+    Codec(#[from] crate::codec::CodecError),
     #[error("invalid Cell peer protocol: {0}")]
     Peer(&'static str),
     #[error("Cell peer Protobuf decoding failed")]
@@ -86,7 +86,7 @@ pub enum Error {
     Deadline,
     #[error("accepted Cell command outcome is unknown")]
     OutcomeUnknown {
-        request_id: crate::RequestId,
+        request_id: crate::identity::RequestId,
         operation_digest: crate::Digest,
         #[source]
         source: Box<Error>,

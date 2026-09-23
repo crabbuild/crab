@@ -1,14 +1,28 @@
 use std::{sync::Arc, time::UNIX_EPOCH};
 
-use crab_cell_runtime::{
-    ApplicationId, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog,
-    CellClient, CellId, CellModule, CellRuntime, CellTarget, Digest, IncarnationId,
-    InvocationError, MigrationDescriptor, ModuleDescriptor, MutationIdentity, NamespaceDescriptor,
-    NamespaceId, OperationDescriptor, Owner, RegistryBuilder, RequestId, SessionId, SqlBatch,
-    SqlCell, SqlModule, SqlResultSet, SqlStatement, SqlValue, SqlWorkerPool, TenantId,
-    install_blob_schema, install_cron_schema, install_runtime_schema, register_sql, sql_batch,
-    sql_query_batch,
+use crab_cell_runtime::cell::actor::CellRuntime;
+use crab_cell_runtime::cell::catalog::CatalogRole;
+use crab_cell_runtime::cell::catalog::{CatalogEntry, CellCatalog};
+use crab_cell_runtime::cell::executor::MutationIdentity;
+use crab_cell_runtime::cell::schema::install_runtime_schema;
+use crab_cell_runtime::cell::worker::SqlWorkerPool;
+use crab_cell_runtime::client::{CellClient, InvocationError};
+use crab_cell_runtime::control::Owner;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::identity::{
+    ApplicationId, CellId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
 };
+use crab_cell_runtime::identity::{IncarnationId, RequestId};
+use crab_cell_runtime::primitives::blob::install_blob_schema;
+use crab_cell_runtime::primitives::cron::install_cron_schema;
+use crab_cell_runtime::primitives::sql::{
+    SqlBatch, SqlResultSet, SqlStatement, SqlValue, register_sql, sql_batch, sql_query_batch,
+};
+use crab_cell_runtime::primitives::sql::{SqlCell, SqlModule};
+use crab_cell_runtime::registry::{
+    BuildDescriptor, CellModule, ModuleDescriptor, NamespaceDescriptor, RegistryBuilder,
+};
+use crab_cell_runtime::registry::{MigrationDescriptor, OperationDescriptor};
 use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits, rusqlite::Connection};
 use crab_storage::Store;

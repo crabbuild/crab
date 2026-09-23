@@ -3,10 +3,13 @@ use crab_ltx::CellStorageLayout;
 use crab_storage::{ETag, StorageError};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    ApplicationIdentity, CatalogEntry, CatalogProof, CellCatalog, Digest, Error, Registry,
-    RequestId, Result, identity::encode_hex,
-};
+use crate::cell::application::ApplicationIdentity;
+use crate::cell::catalog::{CatalogEntry, CatalogProof, CellCatalog};
+use crate::identity::Digest;
+use crate::identity::RequestId;
+use crate::identity::encode_hex;
+use crate::registry::Registry;
+use crate::{Error, Result};
 
 const MAX_RELEASE_BYTES: u64 = 8 * 1024;
 const MAX_DESCRIPTOR_BYTES: u64 = 256 * 1024;
@@ -709,7 +712,7 @@ mod tests {
     use object_store::{memory::InMemory, path::Path};
 
     use super::*;
-    use crate::{ApplicationId, TenantId};
+    use crate::identity::{ApplicationId, TenantId};
 
     fn fixture() -> (ReleaseStore, Vec<u8>, Digest) {
         let identity = ApplicationIdentity::new(

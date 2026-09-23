@@ -1,4 +1,6 @@
-use crab_cell_runtime::{Committed, InvocationError, MutationIdentity, Observed, RequestId};
+use crab_cell_runtime::cell::executor::MutationIdentity;
+use crab_cell_runtime::client::{Committed, InvocationError, Observed};
+use crab_cell_runtime::identity::RequestId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

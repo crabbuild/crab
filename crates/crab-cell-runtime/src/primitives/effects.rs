@@ -2,10 +2,12 @@ use prost::Message;
 use rand::RngCore;
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
-use crate::{
-    CellId, CellTarget, Digest, Error, HandlerOutcome, IncarnationId, Resolution, Result,
-    StoredOutcome, peer_wire as wire,
-};
+use crate::cell::executor::Resolution;
+use crate::cell::executor::{HandlerOutcome, StoredOutcome};
+use crate::identity::IncarnationId;
+use crate::identity::{CellId, CellTarget, Digest};
+use crate::peer::wire;
+use crate::{Error, Result};
 
 mod api;
 mod supervisor;

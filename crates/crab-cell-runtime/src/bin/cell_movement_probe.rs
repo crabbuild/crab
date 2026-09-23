@@ -5,10 +5,14 @@ use std::{
     time::Duration,
 };
 
-use crab_cell_runtime::{
-    ApplicationId, CellAuthority, CellCatalog, CellRuntime, CellTarget, IncarnationId, NamespaceId,
-    Owner, SessionId, SqlWorkerPool, TenantId, test_support::FilesystemCasStore,
-};
+use crab_cell_runtime::cell::actor::CellRuntime;
+use crab_cell_runtime::cell::catalog::CellCatalog;
+use crab_cell_runtime::cell::worker::SqlWorkerPool;
+use crab_cell_runtime::control::Owner;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::identity::IncarnationId;
+use crab_cell_runtime::identity::{ApplicationId, CellTarget, NamespaceId, SessionId, TenantId};
+use crab_cell_runtime::test_support::FilesystemCasStore;
 use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::Store;

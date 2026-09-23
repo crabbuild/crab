@@ -1,4 +1,5 @@
-use crate::{CellId, ResourceCost};
+use crate::fleet::resource::ResourceCost;
+use crate::identity::CellId;
 
 /// Lifecycle class used when choosing a local Cell to evict.
 ///

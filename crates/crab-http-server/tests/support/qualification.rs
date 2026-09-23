@@ -4,7 +4,8 @@ use std::{
 };
 
 use crab_cell_host::CellNode;
-use crab_cell_runtime::{MutationIdentity, RequestId};
+use crab_cell_runtime::cell::executor::MutationIdentity;
+use crab_cell_runtime::identity::RequestId;
 use crab_storage::{ObjectStoreCredentials, Store, build_explicit_store};
 use object_store::path::Path;
 

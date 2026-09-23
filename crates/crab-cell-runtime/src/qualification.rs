@@ -11,7 +11,8 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use serde::{Deserialize, Serialize};
 
-use crate::{Digest, Error, Result};
+use crate::identity::Digest;
+use crate::{Error, Result};
 
 const MAX_LABEL_BYTES: usize = 256;
 const MAX_METRICS: usize = 64;

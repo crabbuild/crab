@@ -2,7 +2,8 @@ use super::performance_fixture::{PerfFixture, identity, item_id, now_ms};
 use crate::*;
 use std::time::{Duration, Instant};
 
-use crab_cell_runtime::{EffectRunOutcome, MaintenanceTickOutcome, MaintenanceTickRequest};
+use crab_cell_runtime::primitives::effects::EffectRunOutcome;
+use crab_cell_runtime::primitives::maintenance::{MaintenanceTickOutcome, MaintenanceTickRequest};
 
 async fn measure<F, Fut>(name: &str, iterations: usize, mut action: F) -> Vec<Duration>
 where
@@ -67,7 +68,7 @@ pub(super) async fn run_reference_primitive_performance(
     let blob = fixture.typed.blob::<ReferenceBlob>().unwrap();
     let queue = fixture.typed.queue::<ReferenceQueue>().unwrap();
     let workflow = fixture.typed.workflow::<ReferenceWorkflow>().unwrap();
-    let activity = crab_cell_runtime::ActivitySupervisor::new(
+    let activity = crab_cell_runtime::primitives::workflow::ActivitySupervisor::new(
         fixture.typed.activities::<ReferenceWorkflow>().unwrap(),
         5_000,
     )
@@ -228,7 +229,7 @@ pub(super) async fn run_reference_primitive_performance(
                 .unwrap();
             assert!(matches!(
                 sent.output,
-                crab_cell_runtime::QueueSendOutcome::Sent { .. }
+                crab_cell_runtime::primitives::queue::QueueSendOutcome::Sent { .. }
             ));
             let claimed = queue
                 .claim(
@@ -273,7 +274,10 @@ pub(super) async fn run_reference_primitive_performance(
                 .await
                 .unwrap();
             let run_id = match started.output {
-                crab_cell_runtime::WorkflowOutcome::Applied { run_id, .. } => run_id,
+                crab_cell_runtime::primitives::workflow::WorkflowOutcome::Applied {
+                    run_id,
+                    ..
+                } => run_id,
                 other => panic!("unexpected Workflow start: {other:?}"),
             };
             assert!(matches!(

@@ -8,15 +8,32 @@ use std::{
 };
 
 use bytes::Bytes;
-use crab_cell_runtime::{
-    ACTIVE_CELL_FILE_DESCRIPTORS, AppendRequest, ApplicationId, CatalogEntry, CatalogRole,
-    CellAuthority, CellRuntime, CellTarget, ControlState, Digest, DiskBudget, DurabilityGate,
-    FollowerReceipt, HandlerOutcome, InboxDelivery, IncarnationId, MutationIdentity, NamespaceId,
-    NodeDurability, NodeId, NodeLeaseGuard, NodeLogAuthority, NodeLogRotationBarrier,
-    NodeLogShipper, NodeLogTransport, Owner, PressureSample, PressureState, ReplicaHost, RequestId,
-    Resolution, RetireRequest, SealRequest, SessionId, SqlWorkerPool, StoredOutcome, TailRequest,
-    TenantId, Transition, install_queue_schema, install_workflow_schema,
+use crab_cell_runtime::cell::actor::CellRuntime;
+use crab_cell_runtime::cell::catalog::CatalogEntry;
+use crab_cell_runtime::cell::catalog::CatalogRole;
+use crab_cell_runtime::cell::executor::Resolution;
+use crab_cell_runtime::cell::executor::{HandlerOutcome, MutationIdentity, StoredOutcome};
+use crab_cell_runtime::cell::worker::ACTIVE_CELL_FILE_DESCRIPTORS;
+use crab_cell_runtime::cell::worker::SqlWorkerPool;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::control::{ControlState, Owner, Transition};
+use crab_cell_runtime::fleet::pressure::{PressureSample, PressureState};
+use crab_cell_runtime::follower::FollowerReceipt;
+use crab_cell_runtime::identity::{
+    ApplicationId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
 };
+use crab_cell_runtime::identity::{IncarnationId, NodeId, RequestId};
+use crab_cell_runtime::ltx::{DiskBudget, Host as ReplicaHost};
+use crab_cell_runtime::node::durability::{NodeDurability, NodeLogAuthority};
+use crab_cell_runtime::node::lease::NodeLeaseGuard;
+use crab_cell_runtime::node::log::{DurabilityGate, NodeLogRotationBarrier};
+use crab_cell_runtime::node::log_shipper::NodeLogShipper;
+use crab_cell_runtime::node::log_transport::{
+    AppendRequest, NodeLogTransport, RetireRequest, SealRequest, TailRequest,
+};
+use crab_cell_runtime::primitives::effects::InboxDelivery;
+use crab_cell_runtime::primitives::queue::install_queue_schema;
+use crab_cell_runtime::primitives::workflow::install_workflow_schema;
 use crab_ltx::{CellObjectKind, CellStorageLayout};
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{ObjectStoreCredentials, RetryPolicy, Store, build_explicit_store};
@@ -327,7 +344,7 @@ impl NodeLogTransport for TestNodeTransport {
 }
 
 struct LostAckFollowerTransport {
-    inner: crab_cell_runtime::LocalFollowerTransport,
+    inner: crab_cell_runtime::node::log_transport::LocalFollowerTransport,
     acknowledged_once: AtomicBool,
 }
 
@@ -379,16 +396,17 @@ async fn fence_log_session(
     claimant: SessionId,
     member: SessionId,
     tiered_through: u64,
-) -> crab_cell_runtime::FencedNodeSession {
+) -> crab_cell_runtime::node::FencedNodeSession {
     let fleet = Digest::from_bytes([90; 32]);
     let image = Digest::from_bytes([91; 32]);
     let release = Digest::from_bytes([92; 32]);
-    let directory = crab_cell_runtime::NodeDirectory::new(layout.clone(), fleet, image, release);
+    let directory =
+        crab_cell_runtime::node::NodeDirectory::new(layout.clone(), fleet, image, release);
     let key = ed25519_dalek::SigningKey::from_bytes(&[93; 32]);
     let signed =
         |session: crab_cell_runtime::SessionId, endpoint: &str, issued_at_ms, expires_at_ms| {
-            crab_cell_runtime::NodeAdvertisement::sign(
-                crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+            crab_cell_runtime::node::NodeAdvertisement::sign(
+                crab_cell_runtime::identity::NodeId::from_bytes(*session.as_bytes()),
                 session,
                 endpoint.into(),
                 fleet,
@@ -401,14 +419,14 @@ async fn fence_log_session(
                 expires_at_ms,
                 vec![Digest::from_bytes([95; 32])],
                 vec![1],
-                crab_cell_runtime::NodeFailureDomain::default(),
-                crab_cell_runtime::NodeCapacity {
+                crab_cell_runtime::node::NodeFailureDomain::default(),
+                crab_cell_runtime::node::NodeCapacity {
                     free_memory_bytes: 1,
                     free_disk_bytes: 1,
                     follower_free_bytes: 1,
                     follower_retained_bytes: 0,
                     job_credits: 1,
-                    log_protocol: crab_cell_runtime::NODE_LOG_PROTOCOL_VERSION,
+                    log_protocol: crab_cell_runtime::node::NODE_LOG_PROTOCOL_VERSION,
                 },
             )
             .unwrap()
@@ -459,14 +477,16 @@ async fn recovery_inventory_reads_catalog_heads_concurrently() {
         Limits::default(),
         Store::new(object_store),
     );
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let authority = CellAuthority::new(fixture.layout.clone());
     pausing.require_parallel_catalog_heads();
 
     let inventory = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        crab_cell_runtime::recoverable_cells(
+        crab_cell_runtime::node::log_recovery::recoverable_cells(
             &catalog,
             &authority,
             SessionId::from_bytes([99; 16]),
@@ -544,14 +564,21 @@ fn filesystem_fixture(partition: &[u8], root: &std::path::Path) -> Fixture {
     fixture_with_limits_and_store(partition, Limits::default(), Store::new(Arc::new(store)))
 }
 
-async fn activate(fixture: &Fixture, node_bytes: usize) -> crab_cell_runtime::CellHandle {
+async fn activate(
+    fixture: &Fixture,
+    node_bytes: usize,
+) -> crab_cell_runtime::cell::actor::CellHandle {
     activate_runtime(fixture, node_bytes).await.1
 }
 
 async fn activate_runtime(
     fixture: &Fixture,
     node_bytes: usize,
-) -> (CellRuntime, crab_cell_runtime::CellHandle, SqlWorkerPool) {
+) -> (
+    CellRuntime,
+    crab_cell_runtime::cell::actor::CellHandle,
+    SqlWorkerPool,
+) {
     let session = SessionId::from_bytes([4; 16]);
     let pool = SqlWorkerPool::new(2, 10).unwrap();
     let runtime = CellRuntime::new(pool.clone(), node_bytes, session).unwrap();
@@ -1141,7 +1168,10 @@ async fn lost_ack_suffix_recovers_an_ambiguous_command_without_reexecution() {
     )
     .unwrap();
     let transport: Arc<dyn NodeLogTransport> = Arc::new(LostAckFollowerTransport {
-        inner: crab_cell_runtime::LocalFollowerTransport::new(member, follower_store.clone()),
+        inner: crab_cell_runtime::node::log_transport::LocalFollowerTransport::new(
+            member,
+            follower_store.clone(),
+        ),
         acknowledged_once: AtomicBool::new(false),
     });
     let gate =
@@ -1236,8 +1266,10 @@ async fn lost_ack_suffix_recovers_an_ambiguous_command_without_reexecution() {
     store.allow_puts();
     assert!(runtime.shutdown().await.is_err());
 
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .lookup(fixture.target.cell_id())
         .await
@@ -1250,19 +1282,25 @@ async fn lost_ack_suffix_recovers_an_ambiguous_command_without_reexecution() {
         .unwrap();
     assert_eq!(stale.value().root.as_ref().unwrap().commit_sequence, 1);
     let fenced = fence_log_session(&fixture.layout, leader, successor, follower, 1).await;
-    let recovery = crab_cell_runtime::NodeLogRecovery::from_fenced(
+    let recovery = crab_cell_runtime::node::log_recovery::NodeLogRecovery::from_fenced(
         Arc::clone(&transport),
         &fenced,
         Limits::default(),
     )
     .unwrap();
-    let manifests =
-        crab_cell_runtime::RecoveryManifestStore::new(fixture.layout.clone(), Limits::default());
-    let coordinator = crab_cell_runtime::RecoveryCoordinator::new(recovery, manifests.clone());
-    let inventory = crab_cell_runtime::recoverable_cells(&catalog, &authority, leader, 10)
-        .await
-        .unwrap();
-    let directory = crab_cell_runtime::NodeDirectory::new(
+    let manifests = crab_cell_runtime::recovery::manifest::RecoveryManifestStore::new(
+        fixture.layout.clone(),
+        Limits::default(),
+    );
+    let coordinator = crab_cell_runtime::node::log_recovery::RecoveryCoordinator::new(
+        recovery,
+        manifests.clone(),
+    );
+    let inventory =
+        crab_cell_runtime::node::log_recovery::recoverable_cells(&catalog, &authority, leader, 10)
+            .await
+            .unwrap();
+    let directory = crab_cell_runtime::node::NodeDirectory::new(
         fixture.layout.clone(),
         Digest::from_bytes([90; 32]),
         Digest::from_bytes([91; 32]),
@@ -1338,11 +1376,11 @@ async fn runtime_stats_follow_active_cell_lifecycle() {
     assert_eq!(runtime.stats().active_cells(), 1);
     assert_eq!(
         runtime.stats().resident_bytes(),
-        crab_cell_runtime::ACTIVE_CELL_NATIVE_BYTES as usize
+        crab_cell_runtime::cell::actor::ACTIVE_CELL_NATIVE_BYTES as usize
     );
     assert_eq!(
         runtime.stats().resident_capacity_bytes(),
-        10 * crab_cell_runtime::ACTIVE_CELL_NATIVE_BYTES as usize
+        10 * crab_cell_runtime::cell::actor::ACTIVE_CELL_NATIVE_BYTES as usize
     );
     assert_eq!(
         runtime.stats().file_descriptors(),
@@ -1456,8 +1494,10 @@ async fn restored_sparse_route_promotes_before_zero_origin_reads() {
     handle.drain().await.unwrap();
     first_runtime.shutdown().await.unwrap();
 
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .lookup(fixture.target.cell_id())
         .await
@@ -1563,8 +1603,10 @@ async fn shutdown_releases_a_hydration_reservation_after_an_origin_wait() {
     handle.drain().await.unwrap();
     first_runtime.shutdown().await.unwrap();
 
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .lookup(fixture.target.cell_id())
         .await
@@ -1626,8 +1668,10 @@ async fn failed_idle_receiver_does_not_leave_authority_owned() {
     handle.drain().await.unwrap();
     first_runtime.shutdown().await.unwrap();
 
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .lookup(fixture.target.cell_id())
         .await
@@ -1754,7 +1798,7 @@ async fn churn_evicts_idle_cells_and_restores_exact_roots() {
     assert_eq!(evicted_idle.value().ltx_root(), Some(evicted_root));
     assert_eq!(runtime.stats().active_cells(), 1);
 
-    let catalog = crab_cell_runtime::CellCatalog::new(
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
         evicted_fixture.layout.clone(),
         evicted_fixture.target.tenant(),
     );
@@ -1857,8 +1901,10 @@ async fn retained_request_outcome_moves_with_exact_root() {
         .unwrap()
         .unwrap();
     assert_eq!(idle.value().state, ControlState::Idle);
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .lookup(fixture.target.cell_id())
         .await
@@ -2141,8 +2187,10 @@ async fn stop_acquiring_keeps_existing_cell_serving() {
             .unwrap(),
         0_i64.to_be_bytes()
     );
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(second.layout.clone(), second.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        second.layout.clone(),
+        second.target.tenant(),
+    );
     let proof = catalog
         .provision(
             CatalogEntry::new(
@@ -2299,12 +2347,14 @@ async fn mixed_primitive_inventory_churn(store: Store, prefix: Path) {
         .unwrap()
         .unwrap();
 
-    let queue_proof =
-        crab_cell_runtime::CellCatalog::new(queue.layout.clone(), queue.target.tenant())
-            .lookup(queue.target.cell_id())
-            .await
-            .unwrap()
-            .unwrap();
+    let queue_proof = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        queue.layout.clone(),
+        queue.target.tenant(),
+    )
+    .lookup(queue.target.cell_id())
+    .await
+    .unwrap()
+    .unwrap();
     let restored = runtime
         .acquire_idle_restored(
             queue_proof,
@@ -2333,7 +2383,7 @@ async fn mixed_primitive_inventory_churn(store: Store, prefix: Path) {
         1_i64.to_be_bytes()
     );
     assert_eq!(
-        crab_cell_runtime::CellAuthority::new(queue.layout.clone())
+        crab_cell_runtime::control::authority::CellAuthority::new(queue.layout.clone())
             .load(queue.target.cell_id())
             .await
             .unwrap()
@@ -2373,8 +2423,10 @@ async fn released_cell_is_acquired_by_one_successor_runtime() {
         .unwrap()
         .unwrap();
     assert_eq!(idle.value().state, ControlState::Idle);
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .lookup(fixture.target.cell_id())
         .await
@@ -2602,8 +2654,10 @@ async fn crashed_process_is_fenced_before_successor_restore() {
         stale.value().owner.as_ref().map(|owner| owner.session),
         Some(SessionId::from_bytes([85; 16]))
     );
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .lookup(fixture.target.cell_id())
         .await
@@ -2624,7 +2678,7 @@ async fn crashed_process_is_fenced_before_successor_restore() {
             authority.clone(),
             stale,
             fenced.direct_takeover().unwrap(),
-            crab_cell_runtime::RecoveryManifestStore::new(
+            crab_cell_runtime::recovery::manifest::RecoveryManifestStore::new(
                 fixture.layout.clone(),
                 Limits::default(),
             ),
@@ -2698,8 +2752,10 @@ async fn lost_release_response_is_reconciled_before_successor_acquire() {
         .unwrap();
     assert_eq!(idle.value().state, ControlState::Idle);
     let root = idle.value().ltx_root().unwrap();
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .lookup(fixture.target.cell_id())
         .await
@@ -2755,7 +2811,7 @@ async fn lost_release_response_is_reconciled_before_successor_acquire() {
 }
 
 async fn wait_for_persisted_work(
-    handle: &crab_cell_runtime::CellHandle,
+    handle: &crab_cell_runtime::cell::actor::CellHandle,
     role: CatalogRole,
     blocker: &'static str,
 ) {
@@ -2781,7 +2837,7 @@ async fn bootstrap_on(
     runtime: &CellRuntime,
     fixture: &Fixture,
     session: SessionId,
-) -> crab_cell_runtime::CellHandle {
+) -> crab_cell_runtime::cell::actor::CellHandle {
     bootstrap_role_on(
         runtime,
         fixture,
@@ -2803,7 +2859,7 @@ async fn bootstrap_role_on<F>(
     session: SessionId,
     role: CatalogRole,
     initialize: F,
-) -> crab_cell_runtime::CellHandle
+) -> crab_cell_runtime::cell::actor::CellHandle
 where
     F: for<'connection> FnOnce(
             &crab_ltx::rusqlite::Transaction<'connection>,
@@ -2811,8 +2867,10 @@ where
         + Send
         + 'static,
 {
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .provision(
             CatalogEntry::new(&fixture.target, role, Digest::from_bytes([5; 32]), 1).unwrap(),
@@ -3310,8 +3368,10 @@ async fn effect_delivery_survives_cancellation_and_exact_root_restore() {
     );
     handle.drain().await.unwrap();
 
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .lookup(fixture.target.cell_id())
         .await
@@ -3535,8 +3595,10 @@ async fn idle_control_is_acquired_before_exact_root_restore() {
     let handle = activate(&fixture, 16 * 1024 * 1024).await;
     handle.drain().await.unwrap();
 
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .lookup(fixture.target.cell_id())
         .await
@@ -3598,8 +3660,10 @@ async fn unchanged_dead_owner_is_taken_over_then_restored() {
     let handle = activate(&fixture, 16 * 1024 * 1024).await;
     drop(handle);
 
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .lookup(fixture.target.cell_id())
         .await
@@ -3632,7 +3696,7 @@ async fn unchanged_dead_owner_is_taken_over_then_restored() {
             authority.clone(),
             stale,
             takeover,
-            crab_cell_runtime::RecoveryManifestStore::new(
+            crab_cell_runtime::recovery::manifest::RecoveryManifestStore::new(
                 fixture.layout.clone(),
                 Limits::default(),
             ),
@@ -3673,8 +3737,10 @@ async fn failed_takeover_receiver_does_not_leave_authority_owned() {
     let handle = activate(&fixture, 16 * 1024 * 1024).await;
     drop(handle);
 
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .lookup(fixture.target.cell_id())
         .await
@@ -3709,7 +3775,7 @@ async fn failed_takeover_receiver_does_not_leave_authority_owned() {
                 authority.clone(),
                 stale,
                 takeover.direct_takeover().unwrap(),
-                crab_cell_runtime::RecoveryManifestStore::new(
+                crab_cell_runtime::recovery::manifest::RecoveryManifestStore::new(
                     fixture.layout.clone(),
                     Limits::default(),
                 ),
@@ -3749,8 +3815,10 @@ async fn recover_retained_tail(rooted: bool) {
     let handle = activate(&fixture, 16 * 1024 * 1024).await;
     drop(handle);
 
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .lookup(fixture.target.cell_id())
         .await
@@ -3838,18 +3906,19 @@ async fn recover_retained_tail(rooted: bool) {
     let follower_store = crab_cell_runtime::FollowerStore::open(
         follower_directory.path().to_owned(),
         Limits::default(),
-        crab_cell_runtime::DiskBudget::new(1 << 30),
+        crab_cell_runtime::ltx::DiskBudget::new(1 << 30),
     )
     .unwrap();
-    let transport: Arc<dyn crab_cell_runtime::NodeLogTransport> =
-        Arc::new(crab_cell_runtime::LocalFollowerTransport::new(
-            crab_cell_runtime::NodeId::from_bytes(*follower.as_bytes()),
+    let transport: Arc<dyn crab_cell_runtime::node::log_transport::NodeLogTransport> = Arc::new(
+        crab_cell_runtime::node::log_transport::LocalFollowerTransport::new(
+            crab_cell_runtime::identity::NodeId::from_bytes(*follower.as_bytes()),
             follower_store,
-        ));
+        ),
+    );
     transport
         .append(
-            crab_cell_runtime::NodeId::from_bytes(*follower.as_bytes()),
-            crab_cell_runtime::AppendRequest {
+            crab_cell_runtime::identity::NodeId::from_bytes(*follower.as_bytes()),
+            crab_cell_runtime::node::log_transport::AppendRequest {
                 leader_session: leader,
                 log_epoch: 1,
                 frames,
@@ -3858,27 +3927,33 @@ async fn recover_retained_tail(rooted: bool) {
         )
         .await
         .unwrap();
-    let manifests =
-        crab_cell_runtime::RecoveryManifestStore::new(fixture.layout.clone(), Limits::default());
+    let manifests = crab_cell_runtime::recovery::manifest::RecoveryManifestStore::new(
+        fixture.layout.clone(),
+        Limits::default(),
+    );
     let successor = SessionId::from_bytes([42; 16]);
     let fenced = fence_log_session(&fixture.layout, leader, successor, follower, 0).await;
     assert!(matches!(
         fenced.direct_takeover(),
         Err(crab_cell_runtime::Error::PendingPublication)
     ));
-    let recovery = crab_cell_runtime::NodeLogRecovery::from_fenced(
+    let recovery = crab_cell_runtime::node::log_recovery::NodeLogRecovery::from_fenced(
         Arc::clone(&transport),
         &fenced,
         Limits::default(),
     )
     .unwrap();
-    let coordinator = crab_cell_runtime::RecoveryCoordinator::new(recovery, manifests.clone());
-    let inventory = crab_cell_runtime::recoverable_cells(&catalog, &authority, leader, 10)
-        .await
-        .unwrap();
+    let coordinator = crab_cell_runtime::node::log_recovery::RecoveryCoordinator::new(
+        recovery,
+        manifests.clone(),
+    );
+    let inventory =
+        crab_cell_runtime::node::log_recovery::recoverable_cells(&catalog, &authority, leader, 10)
+            .await
+            .unwrap();
     assert_eq!(inventory.len(), 1);
     if rooted {
-        let directory = crab_cell_runtime::NodeDirectory::new(
+        let directory = crab_cell_runtime::node::NodeDirectory::new(
             fixture.layout.clone(),
             Digest::from_bytes([90; 32]),
             Digest::from_bytes([91; 32]),
@@ -3891,7 +3966,7 @@ async fn recover_retained_tail(rooted: bool) {
         assert!(completed.controls.is_empty());
         assert_eq!(
             completed.sealed.log().phase(),
-            crab_cell_runtime::NodeLogPhase::Sealed
+            crab_cell_runtime::node::log_state::NodeLogPhase::Sealed
         );
         return;
     }
@@ -3901,11 +3976,17 @@ async fn recover_retained_tail(rooted: bool) {
         .unwrap();
     assert_eq!(attached.len(), 1);
     drop(coordinator);
-    let resumed_recovery =
-        crab_cell_runtime::NodeLogRecovery::from_fenced(transport, &fenced, Limits::default())
-            .unwrap();
-    let resumed = crab_cell_runtime::RecoveryCoordinator::new(resumed_recovery, manifests.clone());
-    let directory = crab_cell_runtime::NodeDirectory::new(
+    let resumed_recovery = crab_cell_runtime::node::log_recovery::NodeLogRecovery::from_fenced(
+        transport,
+        &fenced,
+        Limits::default(),
+    )
+    .unwrap();
+    let resumed = crab_cell_runtime::node::log_recovery::RecoveryCoordinator::new(
+        resumed_recovery,
+        manifests.clone(),
+    );
+    let directory = crab_cell_runtime::node::NodeDirectory::new(
         fixture.layout.clone(),
         Digest::from_bytes([90; 32]),
         Digest::from_bytes([91; 32]),
@@ -3915,7 +3996,7 @@ async fn recover_retained_tail(rooted: bool) {
         .recover_and_seal(
             &directory,
             fenced.clone(),
-            vec![crab_cell_runtime::RecoveryCell {
+            vec![crab_cell_runtime::node::log_recovery::RecoveryCell {
                 application: fixture.target.application(),
                 authority: authority.clone(),
                 observed: attached[0].clone(),
@@ -3927,13 +4008,13 @@ async fn recover_retained_tail(rooted: bool) {
     assert_eq!(completed.controls[0].value(), attached[0].value());
     assert_eq!(
         completed.sealed.log().phase(),
-        crab_cell_runtime::NodeLogPhase::Sealed
+        crab_cell_runtime::node::log_state::NodeLogPhase::Sealed
     );
     let repeated = resumed
         .recover_and_seal(
             &directory,
             fenced.clone(),
-            vec![crab_cell_runtime::RecoveryCell {
+            vec![crab_cell_runtime::node::log_recovery::RecoveryCell {
                 application: fixture.target.application(),
                 authority: authority.clone(),
                 observed: completed.controls[0].clone(),
@@ -3997,8 +4078,10 @@ async fn recover_retained_tail(rooted: bool) {
 #[tokio::test]
 async fn unchanged_unpublished_owner_is_taken_over_then_bootstrapped() {
     let fixture = fixture();
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .provision(
             CatalogEntry::new(
@@ -4086,8 +4169,10 @@ async fn unchanged_unpublished_owner_is_taken_over_then_bootstrapped() {
 #[tokio::test]
 async fn slow_bootstrap_renews_unpublished_ownership_before_publication() {
     let fixture = fixture();
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .provision(
             CatalogEntry::new(
@@ -4218,8 +4303,10 @@ async fn native_handler_deadline_discards_late_commit_and_reopens_authoritative_
     assert_eq!(after.value().root, before);
     assert!(after.value().owner.is_none());
 
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .lookup(fixture.target.cell_id())
         .await
@@ -4310,8 +4397,10 @@ async fn native_handler_panic_discards_transaction_and_reopens_authoritative_roo
     assert_eq!(idle.value().root, before);
     assert!(idle.value().owner.is_none());
 
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .lookup(fixture.target.cell_id())
         .await
@@ -4735,8 +4824,10 @@ async fn per_cell_request_admission_caps_inflight_and_queued_commands() {
 #[tokio::test]
 async fn activation_rejects_control_owned_by_another_node_session() {
     let fixture = fixture();
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .provision(
             CatalogEntry::new(
@@ -4785,8 +4876,10 @@ async fn activation_rejects_control_owned_by_another_node_session() {
 #[tokio::test]
 async fn failed_bootstrap_keeps_control_unpublished_and_releases_cell_capacity() {
     let fixture = fixture();
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .provision(
             CatalogEntry::new(
@@ -4860,8 +4953,10 @@ async fn failed_bootstrap_keeps_control_unpublished_and_releases_cell_capacity()
 #[tokio::test]
 async fn panicking_bootstrap_keeps_worker_alive_and_releases_cell_capacity() {
     let fixture = fixture_for(b"panicking-bootstrap");
-    let catalog =
-        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
     let proof = catalog
         .provision(
             CatalogEntry::new(
@@ -4980,7 +5075,8 @@ async fn source_loss_takeover(store: Store, prefix: Path) {
         Limits::default(),
     )
     .unwrap();
-    let catalog = crab_cell_runtime::CellCatalog::new(layout.clone(), target.tenant());
+    let catalog =
+        crab_cell_runtime::cell::catalog::CellCatalog::new(layout.clone(), target.tenant());
     let proof = catalog
         .provision(
             CatalogEntry::new(
@@ -5087,7 +5183,10 @@ async fn source_loss_takeover(store: Store, prefix: Path) {
             replica,
             authority.clone(),
             takeover,
-            crab_cell_runtime::RecoveryManifestStore::new(layout.clone(), Limits::default()),
+            crab_cell_runtime::recovery::manifest::RecoveryManifestStore::new(
+                layout.clone(),
+                Limits::default(),
+            ),
             second_local.path().join("cell.sqlite"),
         )
         .await

@@ -17,7 +17,16 @@ mod handle;
 pub use handle::CellHandle;
 use handle::{CellAdmission, WorkAdmission};
 
+use crate::Error;
+use crate::cell::catalog::{CatalogEntry, CatalogProof, CatalogRole};
 use crate::cell::executor::{MAX_PENDING_PUBLICATIONS, PENDING_PUBLICATION_HIGH_WATER_BYTES};
+use crate::cell::executor::{
+    MigrationOutcome, MutationIdentity, PendingCommit, Resolution, StoredOutcome,
+};
+use crate::cell::worker::{CellReservation, Handler, Initializer, QueryHandler, WorkerState};
+use crate::cell::worker::{SqlWorkerPool, WorkerExecution};
+use crate::control::authority::{CellAuthority, VersionedControl};
+use crate::control::{Owner, Transition};
 use crate::coordination::{
     AdmissionKind, CoordinationDecision, CoordinationEffect, CoordinationInput, CoordinationState,
     RejectReason, Residency,
@@ -30,14 +39,13 @@ use crate::fleet::resource::{
     ACTIVE_CELL_NATIVE_BYTES as ACTIVE_CELL_NATIVE_BYTES_USIZE, LedgerDiskAdmission,
     LedgerHostResourceAdmission, ResourceCost, ResourceLedger, ResourceReservation,
 };
+use crate::identity::{ApplicationId, CellId, CellTarget, Digest, SessionId};
+use crate::node::durability::NodeDurability;
+use crate::node::lease::NodeLeaseGuard;
+use crate::primitives::effects::InboxDelivery;
+use crate::publication::CellPublisher;
 use crate::publication::{CellDurabilitySubmitter, NodeDurabilitySlot, PendingDurability};
-use crate::{
-    ApplicationId, CatalogEntry, CatalogProof, CatalogRole, CellAuthority, CellId, CellPublisher,
-    CellTarget, Digest, Error, InboxDelivery, MigrationOutcome, MigrationPlan, MutationIdentity,
-    NodeDurability, NodeLeaseGuard, Owner, PendingCommit, Resolution, SessionId, SqlWorkerPool,
-    StoredOutcome, Transition, VersionedControl, WorkerExecution,
-    cell::worker::{CellReservation, Handler, Initializer, QueryHandler, WorkerState},
-};
+use crate::registry::MigrationPlan;
 
 const INGRESS_REQUESTS: usize = 1_024;
 const CELL_REQUESTS: usize = 64;
@@ -337,7 +345,7 @@ pub(super) struct RuntimeInner {
     replica_host: crab_ltx::Host,
     node_lease: Arc<RuntimeNodeLease>,
     node_durability: NodeDurabilitySlot,
-    telemetry: crate::CellTelemetryHandle,
+    telemetry: crate::fleet::telemetry::CellTelemetryHandle,
     unpublished_node_log_bytes: Arc<AtomicU64>,
 }
 
@@ -449,7 +457,7 @@ impl CellRuntime {
             replica_host.dirty_capacity(),
             replica_host.scratch_capacity() as usize,
         )?;
-        let telemetry = crate::CellTelemetryHandle::default();
+        let telemetry = crate::fleet::telemetry::CellTelemetryHandle::default();
         let mut replica_host = replica_host.with_ltx_telemetry(Arc::new(telemetry.clone()));
         replica_host.install_resource_admission(Arc::new(LedgerHostResourceAdmission {
             state: resources.weak(),
@@ -485,13 +493,16 @@ impl CellRuntime {
     }
 
     /// Installs the process telemetry sink before Cell work begins.
-    pub fn install_telemetry(&self, telemetry: Arc<dyn crate::CellTelemetry>) -> crate::Result<()> {
+    pub fn install_telemetry(
+        &self,
+        telemetry: Arc<dyn crate::fleet::telemetry::CellTelemetry>,
+    ) -> crate::Result<()> {
         self.inner.telemetry.install(telemetry)
     }
 
     /// Returns the shared sink used by node-log components for this runtime.
     #[must_use]
-    pub fn telemetry_handle(&self) -> crate::CellTelemetryHandle {
+    pub fn telemetry_handle(&self) -> crate::fleet::telemetry::CellTelemetryHandle {
         self.inner.telemetry.clone()
     }
 
@@ -899,7 +910,7 @@ impl CellRuntime {
     {
         self.ensure_acquiring()?;
         self.activation_cell(&catalog, &observed)?;
-        if observed.value().state != crate::ControlState::Recovering
+        if observed.value().state != crate::control::ControlState::Recovering
             || observed.value().root.is_some()
         {
             return Err(Error::Control("bootstrap requires an unpublished control"));
@@ -935,7 +946,7 @@ impl CellRuntime {
         replica: crab_ltx::CellReplica,
         authority: CellAuthority,
         mut observed: VersionedControl,
-        takeover: crate::NodeTakeoverProof,
+        takeover: crate::node::NodeTakeoverProof,
         destination: PathBuf,
         owner: Owner,
         initialize: F,
@@ -953,7 +964,7 @@ impl CellRuntime {
             return Err(Error::Fenced);
         }
         loop {
-            if observed.value().state != crate::ControlState::Recovering
+            if observed.value().state != crate::control::ControlState::Recovering
                 || observed.value().owner.is_none()
                 || observed.value().root.is_some()
             {
@@ -1023,7 +1034,7 @@ impl CellRuntime {
         replica: crab_ltx::CellReplica,
         authority: CellAuthority,
         observed: VersionedControl,
-        recovery_store: crate::RecoveryManifestStore,
+        recovery_store: crate::recovery::manifest::RecoveryManifestStore,
         destination: PathBuf,
     ) -> crate::Result<CellHandle> {
         self.ensure_acquiring()?;
@@ -1057,7 +1068,7 @@ impl CellRuntime {
         self.ensure_acquiring()?;
         let rollback_node_lease = self.inner.node_lease.guard()?;
         self.claiming_cell(&catalog, &observed, &owner)?;
-        if observed.value().state != crate::ControlState::Idle
+        if observed.value().state != crate::control::ControlState::Idle
             || observed.value().owner.is_some()
             || observed.value().root.is_none()
         {
@@ -1125,8 +1136,8 @@ impl CellRuntime {
         replica: crab_ltx::CellReplica,
         authority: CellAuthority,
         mut observed: VersionedControl,
-        takeover: crate::NodeTakeoverProof,
-        recovery_store: crate::RecoveryManifestStore,
+        takeover: crate::node::NodeTakeoverProof,
+        recovery_store: crate::recovery::manifest::RecoveryManifestStore,
         destination: PathBuf,
         owner: Owner,
     ) -> crate::Result<CellHandle> {
@@ -1142,7 +1153,7 @@ impl CellRuntime {
         loop {
             if !matches!(
                 observed.value().state,
-                crate::ControlState::Recovering | crate::ControlState::Serving
+                crate::control::ControlState::Recovering | crate::control::ControlState::Serving
             ) || observed.value().owner.is_none()
                 || observed.value().root.is_none()
             {
@@ -1239,7 +1250,7 @@ impl CellRuntime {
         replica: &crab_ltx::CellReplica,
         authority: &CellAuthority,
         observed: VersionedControl,
-        recovery_store: &crate::RecoveryManifestStore,
+        recovery_store: &crate::recovery::manifest::RecoveryManifestStore,
     ) -> crate::Result<VersionedControl> {
         let Some(recovery) = observed.value().recovery.as_ref() else {
             return Ok(observed);
@@ -1470,19 +1481,19 @@ impl CellRuntime {
             Err(_) => {
                 self.inner
                     .telemetry
-                    .resident_route(crate::ResidentRouteOutcome::Refused);
+                    .resident_route(crate::fleet::telemetry::ResidentRouteOutcome::Refused);
                 return Err(Error::RuntimeClosed);
             }
         };
         let Some(local) = local else {
             self.inner
                 .telemetry
-                .resident_route(crate::ResidentRouteOutcome::Miss);
+                .resident_route(crate::fleet::telemetry::ResidentRouteOutcome::Miss);
             return Ok(None);
         };
         self.inner
             .telemetry
-            .resident_route(crate::ResidentRouteOutcome::Hit);
+            .resident_route(crate::fleet::telemetry::ResidentRouteOutcome::Hit);
         let entry = CatalogEntry::new(target, role, local.code, local.schema)?;
         Ok(Some(CellHandle {
             cell: target.cell_id(),
@@ -1504,7 +1515,7 @@ enum Activation {
 struct RestoredActivation {
     database: crab_ltx::CellWritableDatabase,
     destination: PathBuf,
-    incarnation: crate::IncarnationId,
+    incarnation: crate::identity::IncarnationId,
     schema: u32,
     root: crab_ltx::RootRef,
     reservation: CellReservation,
@@ -1513,7 +1524,7 @@ struct RestoredActivation {
 struct BootstrapActivation {
     replica: crab_ltx::CellReplica,
     destination: PathBuf,
-    incarnation: crate::IncarnationId,
+    incarnation: crate::identity::IncarnationId,
     schema: u32,
     initialize: Initializer,
     reservation: CellReservation,
@@ -1664,7 +1675,7 @@ enum QueuedWork {
 struct ActiveCell {
     generation: u64,
     admission: Arc<CellAdmission>,
-    incarnation: crate::IncarnationId,
+    incarnation: crate::identity::IncarnationId,
     code: Digest,
     schema: u32,
     role: CatalogRole,
@@ -1676,7 +1687,7 @@ struct ActiveCell {
     unpublished_node_logs: usize,
     queue: VecDeque<QueuedWork>,
     coordination: CoordinationState,
-    persisted_work: crate::PersistedWorkInventory,
+    persisted_work: crate::primitives::maintenance::PersistedWorkInventory,
     inventory_refreshing: bool,
     drain: Option<oneshot::Sender<crate::Result<()>>>,
     // Transfer closes the old capability and installs a fresh one; failed fresh
@@ -1736,7 +1747,7 @@ struct ShutdownState {
 
 struct LocalCell {
     admission: Arc<CellAdmission>,
-    incarnation: crate::IncarnationId,
+    incarnation: crate::identity::IncarnationId,
     code: Digest,
     schema: u32,
 }
@@ -1753,7 +1764,7 @@ enum TaskResult {
             Arc<crab_ltx::rusqlite::InterruptHandle>,
             Option<crab_ltx::Hydration>,
         )>,
-        persisted_work: crate::Result<crate::PersistedWorkInventory>,
+        persisted_work: crate::Result<crate::primitives::maintenance::PersistedWorkInventory>,
     },
     Hydrated {
         cell: CellId,
@@ -1765,7 +1776,7 @@ enum TaskResult {
         cell: CellId,
         generation: u64,
         effect_id: u64,
-        result: crate::Result<crate::PersistedWorkInventory>,
+        result: crate::Result<crate::primitives::maintenance::PersistedWorkInventory>,
     },
     TransferPreflight {
         cell: CellId,
@@ -2969,7 +2980,7 @@ fn start_next(
     if matches!(&work, QueuedWork::Command(_) | QueuedWork::Migration(_)) {
         // Durable command outcomes, effects, Queue rows, and Workflow runs
         // remain release obligations until a fresh inventory proves otherwise.
-        active.persisted_work = crate::PersistedWorkInventory::unknown();
+        active.persisted_work = crate::primitives::maintenance::PersistedWorkInventory::unknown();
     }
     let generation = active.generation;
     active.last_used_ms = unix_millis();
@@ -3687,7 +3698,7 @@ fn handle_task(
                     Err(_) => {
                         // An inventory read is a safety precondition for
                         // eviction. Unknown accounting must remain ineligible.
-                        crate::PersistedWorkInventory::unknown()
+                        crate::primitives::maintenance::PersistedWorkInventory::unknown()
                     }
                 };
                 cells.insert(
@@ -4688,7 +4699,9 @@ async fn rollback_failed_acquisition(
         .load(claimed.value().cell)
         .await?
         .ok_or(Error::Fenced)?;
-    if current.value().state == crate::ControlState::Idle && current.value().owner.is_none() {
+    if current.value().state == crate::control::ControlState::Idle
+        && current.value().owner.is_none()
+    {
         return Ok(());
     }
     if current.value().epoch != claimed.value().epoch
@@ -4713,7 +4726,8 @@ async fn rollback_failed_acquisition(
                 .load(claimed.value().cell)
                 .await?
                 .ok_or(Error::Fenced)?;
-            if (latest.value().state == crate::ControlState::Idle && latest.value().owner.is_none())
+            if (latest.value().state == crate::control::ControlState::Idle
+                && latest.value().owner.is_none())
                 || latest.value().epoch != claimed.value().epoch
                 || latest.value().owner != claimed.value().owner
                 || latest.value().root != claimed.value().root

@@ -1,10 +1,11 @@
 use std::sync::atomic::Ordering;
 
-use crab_cell_runtime::{
-    ActivityClaim, ActivityCompletion, ActivityCompletionOutcome, CellTarget, Resolution,
-    WorkflowActivityClaimCommand, WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand,
-    WorkflowActivityValidateQuery, WorkflowActivityValidateRequest, WorkflowOutcome,
-    WorkflowStatus, partition_for_shard,
+use crab_cell_runtime::cell::executor::Resolution;
+use crab_cell_runtime::identity::{CellTarget, partition_for_shard};
+use crab_cell_runtime::primitives::workflow::{
+    ActivityClaim, ActivityCompletion, ActivityCompletionOutcome, WorkflowActivityClaimCommand,
+    WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand, WorkflowActivityValidateQuery,
+    WorkflowActivityValidateRequest, WorkflowOutcome, WorkflowStatus,
 };
 
 #[path = "support/reference_application.rs"]

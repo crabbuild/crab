@@ -1,15 +1,29 @@
 use std::{sync::Arc, time::UNIX_EPOCH};
 
-use crab_cell_runtime::{
-    ApplicationId, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog,
-    CellClient, CellModule, CellRuntime, CellTarget, Digest, IncarnationId, InvocationError,
-    MaintenanceModule, MigrationDescriptor, ModuleDescriptor, MutationIdentity,
-    NamespaceDescriptor, NamespaceId, OperationDescriptor, Owner, QueueClaimRequest,
-    QueueLeaseAction, QueueLeaseOutcome, QueueModule, QueueNamespace, QueueSendOutcome,
-    QueueSendRequest, QueueState, QueueTokenSource, RegistryBuilder, RequestId, SessionId,
-    SqlWorkerPool, TenantId, install_queue_schema, install_runtime_schema, queue_apply_lease,
-    queue_claim, queue_cleanup_expired, queue_send, queue_validate_claim, register_queue,
+use crab_cell_runtime::cell::actor::CellRuntime;
+use crab_cell_runtime::cell::catalog::CatalogRole;
+use crab_cell_runtime::cell::catalog::{CatalogEntry, CellCatalog};
+use crab_cell_runtime::cell::executor::MutationIdentity;
+use crab_cell_runtime::cell::schema::install_runtime_schema;
+use crab_cell_runtime::cell::worker::SqlWorkerPool;
+use crab_cell_runtime::client::{CellClient, InvocationError};
+use crab_cell_runtime::control::Owner;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::identity::{
+    ApplicationId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
 };
+use crab_cell_runtime::identity::{IncarnationId, RequestId};
+use crab_cell_runtime::primitives::maintenance::MaintenanceModule;
+use crab_cell_runtime::primitives::queue::{
+    QueueClaimRequest, QueueLeaseAction, QueueLeaseOutcome, QueueSendOutcome, QueueSendRequest,
+    QueueState, QueueTokenSource, install_queue_schema, queue_apply_lease, queue_claim,
+    queue_cleanup_expired, queue_send, queue_validate_claim, register_queue,
+};
+use crab_cell_runtime::primitives::queue::{QueueModule, QueueNamespace};
+use crab_cell_runtime::registry::{
+    BuildDescriptor, CellModule, ModuleDescriptor, NamespaceDescriptor, RegistryBuilder,
+};
+use crab_cell_runtime::registry::{MigrationDescriptor, OperationDescriptor};
 use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::Store;
@@ -129,14 +143,16 @@ impl QueueModule for SourceQueue {
 impl MaintenanceModule for SourceQueue {
     const MODULE: &'static str = SOURCE_MODULE;
     const TICK_COMMAND_ID: u32 = 4;
-    const QUEUE_DEAD_LETTER: Option<crab_cell_runtime::QueueDeadLetterTarget> =
-        Some(crab_cell_runtime::QueueDeadLetterTarget::new(
-            DEAD_LETTER_MODULE,
-            DEAD_LETTER_NAMESPACE,
-            1,
-            1,
-            1,
-        ));
+    const QUEUE_DEAD_LETTER: Option<crab_cell_runtime::primitives::queue::QueueDeadLetterTarget> =
+        Some(
+            crab_cell_runtime::primitives::queue::QueueDeadLetterTarget::new(
+                DEAD_LETTER_MODULE,
+                DEAD_LETTER_NAMESPACE,
+                1,
+                1,
+                1,
+            ),
+        );
 }
 
 impl CellModule for SourceQueue {
@@ -172,14 +188,16 @@ impl QueueModule for BadSourceQueue {
 impl MaintenanceModule for BadSourceQueue {
     const MODULE: &'static str = "bad-source-queue-test";
     const TICK_COMMAND_ID: u32 = 4;
-    const QUEUE_DEAD_LETTER: Option<crab_cell_runtime::QueueDeadLetterTarget> =
-        Some(crab_cell_runtime::QueueDeadLetterTarget::new(
-            DEAD_LETTER_MODULE,
-            DEAD_LETTER_NAMESPACE,
-            2,
-            1,
-            1,
-        ));
+    const QUEUE_DEAD_LETTER: Option<crab_cell_runtime::primitives::queue::QueueDeadLetterTarget> =
+        Some(
+            crab_cell_runtime::primitives::queue::QueueDeadLetterTarget::new(
+                DEAD_LETTER_MODULE,
+                DEAD_LETTER_NAMESPACE,
+                2,
+                1,
+                1,
+            ),
+        );
 }
 
 impl CellModule for BadSourceQueue {
@@ -697,7 +715,10 @@ async fn typed_queue_namespace_recovers_after_owner_loss() {
                 .await
                 .direct_takeover()
                 .unwrap(),
-            crab_cell_runtime::RecoveryManifestStore::new(layout.clone(), Limits::default()),
+            crab_cell_runtime::recovery::manifest::RecoveryManifestStore::new(
+                layout.clone(),
+                Limits::default(),
+            ),
             directory.path().join("second.sqlite"),
             Owner {
                 session: second_session,

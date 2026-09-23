@@ -3,12 +3,22 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crab_cell_runtime::{
-    BlobArtifactStore, BlobCondition, BlobMutation, BlobQuery, BlobQueryResult, CellTarget,
-    CronMutation, CronQueryResult, EffectClaimRequest, InvocationError, KvAtomicRequest,
-    KvMutation, QueueClaimRequest, QueueLeaseOutcome, QueueSendRequest, QueueState, Resolution,
-    SqlBatch, SqlStatement, SqlValue, StoredOutcome, WorkflowStatus, partition_for_shard,
+use crab_cell_runtime::cell::executor::Resolution;
+use crab_cell_runtime::cell::executor::StoredOutcome;
+use crab_cell_runtime::client::InvocationError;
+use crab_cell_runtime::identity::{CellTarget, partition_for_shard};
+use crab_cell_runtime::primitives::blob::BlobArtifactStore;
+use crab_cell_runtime::primitives::blob::{
+    BlobCondition, BlobMutation, BlobQuery, BlobQueryResult,
 };
+use crab_cell_runtime::primitives::cron::{CronMutation, CronQueryResult};
+use crab_cell_runtime::primitives::effects::EffectClaimRequest;
+use crab_cell_runtime::primitives::kv::{KvAtomicRequest, KvMutation};
+use crab_cell_runtime::primitives::queue::{
+    QueueClaimRequest, QueueLeaseOutcome, QueueSendRequest, QueueState,
+};
+use crab_cell_runtime::primitives::sql::{SqlBatch, SqlStatement, SqlValue};
+use crab_cell_runtime::primitives::workflow::WorkflowStatus;
 
 #[path = "support/reference_application.rs"]
 mod fixture;

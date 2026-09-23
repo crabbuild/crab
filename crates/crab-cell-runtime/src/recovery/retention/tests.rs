@@ -6,9 +6,12 @@ use crab_storage::{ObjectStoreCredentials, Store, build_explicit_store};
 use object_store::{memory::InMemory, path::Path};
 
 use super::*;
-use crate::{
-    ApplicationId, CatalogEntry, CatalogRole, CellId, CellTarget, Digest, IncarnationId,
-    NamespaceId, Owner, RootRef, SessionId, TenantId,
+use crate::cell::catalog::CatalogEntry;
+use crate::cell::catalog::CatalogRole;
+use crate::control::{Owner, RootRef};
+use crate::identity::IncarnationId;
+use crate::identity::{
+    ApplicationId, CellId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
 };
 
 fn identity() -> ApplicationIdentity {
@@ -104,14 +107,14 @@ fn idle_control(
     control
 }
 
-async fn pinned_catalog(catalog: &CellCatalog) -> Vec<crate::PinnedCatalogShard> {
+async fn pinned_catalog(catalog: &CellCatalog) -> Vec<crate::recovery::backup::PinnedCatalogShard> {
     let mut pinned = Vec::with_capacity(256);
     for shard in 0_u8..=u8::MAX {
         let mut scan = catalog.scan_shard(shard).await.unwrap();
         let revision = scan.revision();
         let pages = scan.page_digests().to_vec();
         while scan.next_page().await.unwrap().is_some() {}
-        pinned.push(crate::PinnedCatalogShard {
+        pinned.push(crate::recovery::backup::PinnedCatalogShard {
             shard,
             revision,
             pages,

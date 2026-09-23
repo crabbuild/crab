@@ -18,10 +18,17 @@ use std::{
 };
 
 use crab_cell_app::{ApplicationHandle, CellApplication, CompiledApplication};
-use crab_cell_runtime::{
-    ApplicationId, CellClient, CellId, CellRuntime, CellRuntimeStats, DiskBudget, Error,
-    FollowerStore, NodeDurabilityConfig, QualificationOperationExecutor, QualificationRunSummary,
-    QualificationWorkload, ReplicaHost, ReplicaLimits, SessionId, SqlWorkerPool, TenantId,
+use crab_cell_runtime::Error;
+use crab_cell_runtime::cell::actor::{CellRuntime, CellRuntimeStats};
+use crab_cell_runtime::cell::worker::SqlWorkerPool;
+use crab_cell_runtime::client::CellClient;
+use crab_cell_runtime::follower::FollowerStore;
+use crab_cell_runtime::identity::{ApplicationId, CellId, SessionId, TenantId};
+use crab_cell_runtime::ltx::DiskBudget;
+use crab_cell_runtime::ltx::{Host as ReplicaHost, Limits as ReplicaLimits};
+use crab_cell_runtime::node::durability::NodeDurabilityConfig;
+use crab_cell_runtime::qualification::{
+    QualificationOperationExecutor, QualificationRunSummary, QualificationWorkload,
 };
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -50,7 +57,7 @@ pub enum NodeDurabilityRotation {
 ///
 /// The provider is responsible for authority and transport enrollment. The
 /// host consumes the resulting provider-neutral configuration and is the only
-/// owner that constructs and installs [`crab_cell_runtime::NodeDurability`].
+/// owner that constructs and installs [`crab_cell_runtime::node::durability::NodeDurability`].
 pub trait NodeDurabilityProvider: Send + Sync + 'static {
     fn recruit(
         self: Arc<Self>,
@@ -809,7 +816,7 @@ impl CellNode {
     /// Installs the product's metrics adapter before the node is advertised.
     pub fn install_telemetry(
         &self,
-        telemetry: Arc<dyn crab_cell_runtime::CellTelemetry>,
+        telemetry: Arc<dyn crab_cell_runtime::fleet::telemetry::CellTelemetry>,
     ) -> crab_cell_runtime::Result<()> {
         self.runtime.install_telemetry(telemetry)
     }
@@ -1473,11 +1480,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crab_cell_runtime::{
-        BuildDescriptor, CatalogRole, CellModule, Digest, ModuleDescriptor, NamespaceDescriptor,
-        NodeLeaseGuard, QualificationExecution, QualificationOperation,
-        QualificationOperationExecutor, QualificationProfile, QualificationWorkload,
-        RegistryBuilder,
+    use crab_cell_runtime::cell::catalog::CatalogRole;
+    use crab_cell_runtime::identity::Digest;
+    use crab_cell_runtime::node::lease::NodeLeaseGuard;
+    use crab_cell_runtime::qualification::{
+        QualificationExecution, QualificationOperation, QualificationOperationExecutor,
+        QualificationProfile, QualificationWorkload,
+    };
+    use crab_cell_runtime::registry::{
+        BuildDescriptor, CellModule, ModuleDescriptor, NamespaceDescriptor, RegistryBuilder,
     };
 
     struct Module;
@@ -1492,7 +1503,7 @@ mod tests {
                 retained_codes: &[],
                 schema_min: 1,
                 schema_max: 1,
-                migrations: &[crab_cell_runtime::MigrationDescriptor {
+                migrations: &[crab_cell_runtime::registry::MigrationDescriptor {
                     version: 1,
                     sql: "-- host migration v1",
                     digest: Digest::from_bytes([

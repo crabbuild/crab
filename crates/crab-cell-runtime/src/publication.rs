@@ -1,7 +1,11 @@
-use crate::{
-    ApplicationId, CellAuthority, CellExecutor, CommitTicket, Error, NodeDurability,
-    NodeLogSubmission, Result, StoredOutcome, Transition, VersionedControl,
-};
+use crate::cell::executor::{CellExecutor, StoredOutcome};
+use crate::control::Transition;
+use crate::control::authority::{CellAuthority, VersionedControl};
+use crate::identity::ApplicationId;
+use crate::node::durability::NodeDurability;
+use crate::node::log::CommitTicket;
+use crate::node::log_shipper::NodeLogSubmission;
+use crate::{Error, Result};
 
 const MAX_RETRY_DELAY_MS: u64 = 1_000;
 const COMPACTION_CHECK_INTERVAL: u8 = 8;
@@ -17,11 +21,11 @@ pub(crate) type NodeDurabilitySlot =
 #[derive(Clone)]
 pub(crate) struct CellDurabilitySubmitter {
     cell: crate::CellId,
-    incarnation: crate::IncarnationId,
+    incarnation: crate::identity::IncarnationId,
     epoch: u64,
     node_lease: Option<crate::NodeLeaseGuard>,
     node_durability: Option<NodeDurabilitySlot>,
-    telemetry: crate::CellTelemetryHandle,
+    telemetry: crate::fleet::telemetry::CellTelemetryHandle,
 }
 
 /// Coordinates immutable preparation, authority CAS and result release.
@@ -39,7 +43,7 @@ pub struct CellPublisher {
     renew_at: std::time::Instant,
     node_lease: Option<crate::NodeLeaseGuard>,
     node_durability: Option<NodeDurabilitySlot>,
-    telemetry: crate::CellTelemetryHandle,
+    telemetry: crate::fleet::telemetry::CellTelemetryHandle,
 }
 
 impl CellPublisher {
@@ -63,7 +67,7 @@ impl CellPublisher {
             renew_at: std::time::Instant::now() + RENEW_INTERVAL,
             node_lease: None,
             node_durability: None,
-            telemetry: crate::CellTelemetryHandle::default(),
+            telemetry: crate::fleet::telemetry::CellTelemetryHandle::default(),
         }
     }
 
@@ -77,14 +81,17 @@ impl CellPublisher {
         self
     }
 
-    pub(crate) fn with_telemetry(mut self, telemetry: crate::CellTelemetryHandle) -> Self {
+    pub(crate) fn with_telemetry(
+        mut self,
+        telemetry: crate::fleet::telemetry::CellTelemetryHandle,
+    ) -> Self {
         self.telemetry = telemetry;
         self
     }
 
     pub(crate) async fn submit_migration_durability(
         &self,
-        pending: &crate::PendingMigration,
+        pending: &crate::cell::executor::PendingMigration,
     ) -> Result<Option<PendingDurability>> {
         self.durability_submitter()
             .submit(pending.commit_sequence(), pending.cuts())
@@ -105,7 +112,7 @@ impl CellPublisher {
 
     pub(crate) fn record_object_proof(&self, waited: std::time::Duration) {
         self.telemetry
-            .durability_proof(crate::DurabilitySource::Object, waited);
+            .durability_proof(crate::node::log::DurabilitySource::Object, waited);
     }
 
     #[must_use]
@@ -267,7 +274,7 @@ impl CellPublisher {
 
     pub(crate) async fn prepare(
         &mut self,
-        pending: &crate::PendingCommit,
+        pending: &crate::cell::executor::PendingCommit,
     ) -> Result<crab_ltx::PreparedRoot> {
         self.prepare_append(
             pending.cuts(),
@@ -294,7 +301,7 @@ impl CellPublisher {
     /// Prepares the captured cut under its registry-selected target schema.
     pub async fn prepare_migration(
         &mut self,
-        pending: &crate::PendingMigration,
+        pending: &crate::cell::executor::PendingMigration,
     ) -> Result<crab_ltx::PreparedRoot> {
         if self.observed.value().schema != pending.from_schema() {
             return Err(Error::Fenced);
@@ -691,7 +698,7 @@ impl CellPublisher {
         if value.root.is_none()
             || !matches!(
                 value.state,
-                crate::ControlState::Recovering | crate::ControlState::Serving
+                crate::control::ControlState::Recovering | crate::control::ControlState::Serving
             )
         {
             return Err(Error::Control(
@@ -714,13 +721,13 @@ pub(crate) struct PendingDurability {
     durability: std::sync::Arc<NodeDurability>,
     ticket: CommitTicket,
     submitted_at: std::time::Instant,
-    telemetry: crate::CellTelemetryHandle,
+    telemetry: crate::fleet::telemetry::CellTelemetryHandle,
 }
 
 impl PendingDurability {
     pub(crate) async fn prove(&self) -> Result<()> {
         let proof = self.durability.prove(self.ticket).await?;
-        if proof.source() == crate::DurabilitySource::Fleet {
+        if proof.source() == crate::node::log::DurabilitySource::Fleet {
             self.telemetry
                 .durability_proof(proof.source(), self.submitted_at.elapsed());
         }
@@ -881,7 +888,10 @@ mod tests {
     use object_store::{memory::InMemory, path::Path};
 
     use super::CellPublisher;
-    use crate::{CellAuthority, CellId, Control, Digest, IncarnationId, Owner, SessionId};
+    use crate::control::authority::CellAuthority;
+    use crate::control::{Control, Owner};
+    use crate::identity::IncarnationId;
+    use crate::identity::{CellId, Digest, SessionId};
 
     #[tokio::test]
     async fn quiet_compaction_publishes_exact_root_after_eight_appends() {

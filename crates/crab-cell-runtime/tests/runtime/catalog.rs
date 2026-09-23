@@ -1,9 +1,13 @@
 use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
-use crab_cell_runtime::{
-    ApplicationId, CatalogEntry, CatalogRole, CellAuthority, CellCatalog, CellTarget, Digest,
-    IncarnationId, NamespaceId, Owner, SessionId, TenantId,
+use crab_cell_runtime::cell::catalog::CatalogRole;
+use crab_cell_runtime::cell::catalog::{CatalogEntry, CellCatalog};
+use crab_cell_runtime::control::Owner;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::identity::IncarnationId;
+use crab_cell_runtime::identity::{
+    ApplicationId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
 };
 use crab_ltx::CellStorageLayout;
 use crab_storage::Store;

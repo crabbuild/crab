@@ -28,10 +28,10 @@ pub(super) async fn restore_cells(
     tenant: TenantId,
     application: ApplicationId,
     session: SessionId,
-    fenced: Option<&crab_cell_runtime::FencedNodeSession>,
+    fenced: Option<&crab_cell_runtime::node::FencedNodeSession>,
     directory: &FilePath,
     role: &str,
-) -> Vec<crab_cell_runtime::CellHandle> {
+) -> Vec<crab_cell_runtime::cell::actor::CellHandle> {
     let authority = CellAuthority::new(layout.clone());
     let mut restored_cells = Vec::new();
     for (namespace, module, incarnation_byte) in [
@@ -85,7 +85,7 @@ pub(super) async fn restore_cells(
         } else {
             assert_eq!(
                 observed.value().state,
-                crab_cell_runtime::ControlState::Idle
+                crab_cell_runtime::control::ControlState::Idle
             );
             assert!(observed.value().owner.is_none());
             node.runtime()

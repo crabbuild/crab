@@ -5,11 +5,15 @@ use crab_ltx::CellStorageLayout;
 use crab_storage::StorageError;
 use serde::{Deserialize, Serialize};
 
+use crate::cell::application::ApplicationIdentity;
+use crate::cell::catalog::CellCatalog;
+use crate::control::Control;
+use crate::identity::Digest;
+use crate::identity::RequestId;
 use crate::identity::{decode_hex, encode_hex};
-use crate::{
-    ApplicationIdentity, CellCatalog, Control, Digest, Error, ReleaseRecord, ReleaseState,
-    ReleaseStore, ReplicaHost, ReplicaLimits, RequestId, Result,
-};
+use crate::ltx::{Host as ReplicaHost, Limits as ReplicaLimits};
+use crate::recovery::release::{ReleaseRecord, ReleaseState, ReleaseStore};
+use crate::{Error, Result};
 
 mod restore;
 pub use restore::BackupRestore;

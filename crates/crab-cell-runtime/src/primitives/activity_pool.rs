@@ -6,7 +6,8 @@ use std::{
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
-use crate::{ActivityExecution, Error, Result};
+use crate::primitives::workflow::ActivityExecution;
+use crate::{Error, Result};
 
 const MAX_ACTIVITY_WORKERS: usize = 16;
 

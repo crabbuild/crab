@@ -20,10 +20,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::fleet::placement::{PlacementObservation, PlacementPlanner, PlacementScore};
-use crate::{
-    Digest, Error, NodeId, NodeLogPhase, NodeLogRotationBarrier, NodeLogStatus, NodeRecoveryClaim,
-    Result, SessionId,
-};
+use crate::identity::NodeId;
+use crate::identity::{Digest, SessionId};
+use crate::node::log::NodeLogRotationBarrier;
+use crate::node::log_state::{NodeLogPhase, NodeLogStatus, NodeRecoveryClaim};
+use crate::{Error, Result};
 
 const MAX_NODE_BYTES: u64 = 64 * 1024;
 const MAX_ENDPOINT_BYTES: usize = 512;
@@ -1664,8 +1665,8 @@ impl NodeDirectory {
         certificate: Digest,
         certificate_public_key: [u8; 32],
         now_ms: i64,
-    ) -> Result<crate::VerifiedPeerRequest> {
-        let session = crate::claimed_peer_session(input)?;
+    ) -> Result<crate::peer::VerifiedPeerRequest> {
+        let session = crate::peer::claimed_peer_session(input)?;
         let enrolled = self
             .load(session, now_ms)
             .await?
@@ -1680,7 +1681,7 @@ impl NodeDirectory {
                 "mTLS certificate key does not match peer session",
             ));
         }
-        crate::PeerVerifier::new(
+        crate::peer::PeerVerifier::new(
             session,
             self.release,
             enrolled.advertisement.verifying_key()?,

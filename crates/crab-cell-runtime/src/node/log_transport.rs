@@ -1,7 +1,11 @@
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
 
-use crate::{Error, FollowerReceipt, FollowerStore, FollowerTailPage, NodeId, Result, SessionId};
+use crate::follower::FollowerStore;
+use crate::follower::{FollowerReceipt, FollowerTailPage};
+use crate::identity::NodeId;
+use crate::identity::SessionId;
+use crate::{Error, Result};
 
 /// One ordered follower append with the leader's safe truncation watermark.
 pub struct AppendRequest {

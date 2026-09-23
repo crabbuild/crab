@@ -1,7 +1,9 @@
-use crab_cell_runtime::{
-    BuildDescriptor, CatalogRole, CellModule, Digest, MigrationDescriptor, ModuleDescriptor,
-    NamespaceDescriptor, NamespaceId, OperationDescriptor, Registry, RegistryBuilder,
+use crab_cell_runtime::cell::catalog::CatalogRole;
+use crab_cell_runtime::identity::{Digest, NamespaceId};
+use crab_cell_runtime::registry::{
+    BuildDescriptor, CellModule, ModuleDescriptor, NamespaceDescriptor, Registry, RegistryBuilder,
 };
+use crab_cell_runtime::registry::{MigrationDescriptor, OperationDescriptor};
 
 const MIGRATION_SQL: &str = "-- contract migration v1";
 const WORKFLOW_DEFINITION: Digest = Digest::from_bytes([41; 32]);

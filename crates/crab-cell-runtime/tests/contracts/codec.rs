@@ -1,4 +1,4 @@
-use crab_cell_runtime::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use crab_cell_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 
 fn roundtrip<T>(value: T, limit: u32) -> T
 where

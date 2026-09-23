@@ -1,14 +1,27 @@
 use std::{sync::Arc, time::UNIX_EPOCH};
 
-use crab_cell_runtime::{
-    ApplicationId, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog,
-    CellClient, CellModule, CellRuntime, CellTarget, Digest, IncarnationId, InvocationError,
-    KvAtomicOutcome, KvAtomicRequest, KvCheck, KvCondition, KvListRequest, KvModule, KvMutation,
-    KvNamespace, MigrationDescriptor, ModuleDescriptor, MutationIdentity, NamespaceDescriptor,
-    NamespaceId, OperationDescriptor, Owner, RegistryBuilder, RequestId, SessionId, SqlWorkerPool,
-    TenantId, install_kv_schema, install_runtime_schema, kv_atomic, kv_cleanup_expired, kv_get,
-    kv_list, register_kv,
+use crab_cell_runtime::cell::actor::CellRuntime;
+use crab_cell_runtime::cell::catalog::CatalogRole;
+use crab_cell_runtime::cell::catalog::{CatalogEntry, CellCatalog};
+use crab_cell_runtime::cell::executor::MutationIdentity;
+use crab_cell_runtime::cell::schema::install_runtime_schema;
+use crab_cell_runtime::cell::worker::SqlWorkerPool;
+use crab_cell_runtime::client::{CellClient, InvocationError};
+use crab_cell_runtime::control::Owner;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::identity::{
+    ApplicationId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
 };
+use crab_cell_runtime::identity::{IncarnationId, RequestId};
+use crab_cell_runtime::primitives::kv::{
+    KvAtomicOutcome, KvAtomicRequest, KvCheck, KvCondition, KvListRequest, KvMutation,
+    install_kv_schema, kv_atomic, kv_cleanup_expired, kv_get, kv_list, register_kv,
+};
+use crab_cell_runtime::primitives::kv::{KvModule, KvNamespace};
+use crab_cell_runtime::registry::{
+    BuildDescriptor, CellModule, ModuleDescriptor, NamespaceDescriptor, RegistryBuilder,
+};
+use crab_cell_runtime::registry::{MigrationDescriptor, OperationDescriptor};
 use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::Store;
@@ -520,7 +533,10 @@ async fn typed_kv_namespace_recovers_after_owner_loss() {
                 .await
                 .direct_takeover()
                 .unwrap(),
-            crab_cell_runtime::RecoveryManifestStore::new(layout.clone(), Limits::default()),
+            crab_cell_runtime::recovery::manifest::RecoveryManifestStore::new(
+                layout.clone(),
+                Limits::default(),
+            ),
             directory.path().join("second.sqlite"),
             Owner {
                 session: second_session,

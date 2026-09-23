@@ -1,4 +1,6 @@
 //! Application identity tests extracted from `src/application.rs`.
+use crab_cell_runtime::cell::application::{ApplicationIdentity, ApplicationIdentityStore};
+use crab_cell_runtime::ltx::CellStorageLayout;
 
 use std::sync::Arc;
 

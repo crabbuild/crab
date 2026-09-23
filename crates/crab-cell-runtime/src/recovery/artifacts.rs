@@ -8,10 +8,9 @@ use std::{
     },
 };
 
-use crate::{
-    DiskBudget, DiskReservation, Error, RecoveryArtifact, RecoveryArtifactKey,
-    RecoveryArtifactStore, ReplicaLimits, Result,
-};
+use crate::ltx::{DiskBudget, DiskReservation, Limits as ReplicaLimits};
+use crate::recovery::manifest::{RecoveryArtifact, RecoveryArtifactKey, RecoveryArtifactStore};
+use crate::{Error, Result};
 
 const MAX_ARTIFACTS: usize = 256;
 
@@ -282,9 +281,10 @@ fn reclaim_stale_files(root: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        ApplicationId, CellId, Digest, IncarnationId, RecoveryArtifactKey, RootRef, SessionId,
-    };
+    use crate::control::RootRef;
+    use crate::identity::IncarnationId;
+    use crate::identity::{ApplicationId, CellId, Digest, SessionId};
+    use crate::recovery::manifest::RecoveryArtifactKey;
     use crab_ltx::{Limits, Position, bundle::BundleBuilder, bundle::BundleEntry};
     use tempfile::TempDir;
 

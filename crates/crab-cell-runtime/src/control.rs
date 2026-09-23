@@ -4,8 +4,10 @@ pub mod authority;
 
 use serde::{Deserialize, Serialize};
 
+use crate::identity::IncarnationId;
+use crate::identity::{CellId, Digest, SessionId};
 use crate::identity::{decode_hex, encode_hex};
-use crate::{CellId, Digest, Error, IncarnationId, Result, SessionId};
+use crate::{Error, Result};
 
 const MAX_CONTROL_BYTES: usize = 8 * 1024;
 const CHECKSUM_FLAG: u64 = 1 << 63;

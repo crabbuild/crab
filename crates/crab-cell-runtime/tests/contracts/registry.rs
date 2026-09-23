@@ -1,11 +1,20 @@
 use std::sync::OnceLock;
 
-use crab_cell_runtime::{
-    ApplicationId, BoundedDecoder, BoundedEncoder, BuildDescriptor, CatalogRole, CellId,
-    CellModule, CellTarget, Command, CommandContext, CommandInvocation, CommandResult, Digest,
-    Error, HandlerOutcome, MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, NamespaceId,
-    OperationDescriptor, Query, QueryContext, QueryInvocation, Registry, RegistryBuilder, SqlBatch,
-    SqlStatement, SqlValue, TenantId, WireValue,
+use crab_cell_runtime::Error;
+use crab_cell_runtime::cell::catalog::CatalogRole;
+use crab_cell_runtime::cell::executor::HandlerOutcome;
+use crab_cell_runtime::codec::{BoundedDecoder, BoundedEncoder, WireValue};
+use crab_cell_runtime::identity::{
+    ApplicationId, CellId, CellTarget, Digest, NamespaceId, TenantId,
+};
+use crab_cell_runtime::primitives::sql::{SqlBatch, SqlStatement, SqlValue};
+use crab_cell_runtime::registry::{
+    BuildDescriptor, CellModule, Command, ModuleDescriptor, NamespaceDescriptor, Query, Registry,
+    RegistryBuilder,
+};
+use crab_cell_runtime::registry::{
+    CommandContext, CommandInvocation, CommandResult, MigrationDescriptor, OperationDescriptor,
+    QueryContext, QueryInvocation,
 };
 
 const MIGRATION: &str = "CREATE TABLE items(value BLOB NOT NULL)";

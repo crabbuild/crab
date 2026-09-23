@@ -1,9 +1,10 @@
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
+use crate::codec::{BoundedEncoder, WireValue};
+use crate::identity::{CellTarget, NamespaceId};
 use crate::primitives::effects::EffectBatch;
-use crate::{
-    BoundedEncoder, CellTarget, EffectCommandIntent, Error, NamespaceId, Result, WireValue,
-};
+use crate::primitives::effects::EffectCommandIntent;
+use crate::{Error, Result};
 
 mod api;
 
@@ -435,7 +436,8 @@ fn validate_now(now_ms: i64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ApplicationId, IncarnationId, TenantId};
+    use crate::identity::IncarnationId;
+    use crate::identity::{ApplicationId, TenantId};
     use crab_ltx::rusqlite::Connection;
 
     const SOURCE_NAMESPACE: NamespaceId = NamespaceId::from_bytes([1; 16]);

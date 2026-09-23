@@ -1,10 +1,9 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use prost::Message;
 
-use crate::{
-    ApplicationId, CellTarget, Digest, Error, IncarnationId, NamespaceId, Result, SessionId,
-    TenantId,
-};
+use crate::identity::IncarnationId;
+use crate::identity::{ApplicationId, CellTarget, Digest, NamespaceId, SessionId, TenantId};
+use crate::{Error, Result};
 
 mod dispatch;
 mod protobuf;
@@ -715,7 +714,7 @@ fn validate_effect_identity(identity: &wire::EffectIdentity, now_ms: i64) -> Res
     let source_cell = crate::CellId::try_from(identity.source_cell.as_slice())?;
     let source_incarnation = IncarnationId::try_from(identity.source_incarnation.as_slice())?;
     if identity.effect_id.as_slice()
-        != crate::effect_id(
+        != crate::primitives::effects::effect_id(
             source_cell,
             source_incarnation,
             identity.source_sequence,

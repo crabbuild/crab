@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use crab_cell_runtime::{PeerSigner, PeerVerifier};
+use crab_cell_runtime::peer::{PeerSigner, PeerVerifier};
 use tokio::net::TcpListener;
 
 const ROLE_ENV: &str = "CRAB_CELL_PERF_PROCESS_NODE";

@@ -1,11 +1,15 @@
 use std::{future::Future, pin::Pin, time::Duration};
 
-use crab_cell_runtime::{
-    Digest, QUALIFICATION_PROTECTED_EVIDENCE_MAX_AGE_MS,
-    QUALIFICATION_PROTECTED_EVIDENCE_MAX_CLOCK_SKEW_MS, QualificationExecution,
-    QualificationOperation, QualificationOperationExecutor, QualificationOwnership,
-    QualificationProfile, QualificationProviderEvidence, QualificationReceipt, QualificationRunner,
-    QualificationWorkload, Result,
+use crab_cell_runtime::Result;
+use crab_cell_runtime::identity::Digest;
+use crab_cell_runtime::qualification::{
+    QUALIFICATION_PROTECTED_EVIDENCE_MAX_AGE_MS,
+    QUALIFICATION_PROTECTED_EVIDENCE_MAX_CLOCK_SKEW_MS, QualificationOwnership,
+    QualificationProviderEvidence, QualificationReceipt, QualificationRunner,
+};
+use crab_cell_runtime::qualification::{
+    QualificationExecution, QualificationOperation, QualificationOperationExecutor,
+    QualificationProfile, QualificationWorkload,
 };
 use ed25519_dalek::SigningKey;
 
@@ -232,21 +236,25 @@ async fn public_protected_matrix_binds_run_artifact_profile_and_signer() {
             summary.metrics().expect("run metrics")
         } else {
             vec![
-                crab_cell_runtime::QualificationMetric::new("cells".into(), 1, "cells".into())
-                    .expect("cell metric"),
-                crab_cell_runtime::QualificationMetric::new(
+                crab_cell_runtime::qualification::QualificationMetric::new(
+                    "cells".into(),
+                    1,
+                    "cells".into(),
+                )
+                .expect("cell metric"),
+                crab_cell_runtime::qualification::QualificationMetric::new(
                     "operations".into(),
                     8,
                     "operations".into(),
                 )
                 .expect("operation metric"),
-                crab_cell_runtime::QualificationMetric::new(
+                crab_cell_runtime::qualification::QualificationMetric::new(
                     "duration_secs".into(),
                     1,
                     "seconds".into(),
                 )
                 .expect("duration metric"),
-                crab_cell_runtime::QualificationMetric::new(
+                crab_cell_runtime::qualification::QualificationMetric::new(
                     "p99_latency_ms".into(),
                     1,
                     "ms".into(),
@@ -351,7 +359,7 @@ async fn public_protected_matrix_binds_run_artifact_profile_and_signer() {
             } else {
                 metric.value()
             };
-            crab_cell_runtime::QualificationMetric::new(
+            crab_cell_runtime::qualification::QualificationMetric::new(
                 metric.name().into(),
                 value,
                 metric.unit().into(),

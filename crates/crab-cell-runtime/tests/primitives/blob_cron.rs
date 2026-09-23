@@ -1,14 +1,33 @@
 use std::{sync::Arc, time::UNIX_EPOCH};
 
-use crab_cell_runtime::{
-    ApplicationId, BlobCondition, BlobModule, BlobMutation, BlobMutationOutcome, BlobNamespace,
-    BlobQuery, BlobQueryResult, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority,
-    CellCatalog, CellClient, CellModule, CellRuntime, CellTarget, Command, CommandContext,
-    CommandResult, CronInvocation, CronModule, CronMutation, CronNamespace, CronQueryResult,
-    CronTarget, Digest, IncarnationId, MaintenanceModule, MaintenanceTickOutcome,
-    MaintenanceTickRequest, MigrationDescriptor, ModuleDescriptor, MutationIdentity,
-    NamespaceDescriptor, NamespaceId, OperationDescriptor, Owner, RegistryBuilder, RequestId,
-    SessionId, SqlWorkerPool, TenantId, register_blob, register_cron,
+use crab_cell_runtime::cell::actor::CellRuntime;
+use crab_cell_runtime::cell::catalog::CatalogRole;
+use crab_cell_runtime::cell::catalog::{CatalogEntry, CellCatalog};
+use crab_cell_runtime::cell::executor::MutationIdentity;
+use crab_cell_runtime::cell::worker::SqlWorkerPool;
+use crab_cell_runtime::client::CellClient;
+use crab_cell_runtime::control::Owner;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::identity::{
+    ApplicationId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
+};
+use crab_cell_runtime::identity::{IncarnationId, RequestId};
+use crab_cell_runtime::primitives::blob::{
+    BlobCondition, BlobMutation, BlobMutationOutcome, BlobQuery, BlobQueryResult, register_blob,
+};
+use crab_cell_runtime::primitives::blob::{BlobModule, BlobNamespace};
+use crab_cell_runtime::primitives::cron::{
+    CronInvocation, CronMutation, CronQueryResult, CronTarget, register_cron,
+};
+use crab_cell_runtime::primitives::cron::{CronModule, CronNamespace};
+use crab_cell_runtime::primitives::maintenance::{
+    MaintenanceModule, MaintenanceTickOutcome, MaintenanceTickRequest,
+};
+use crab_cell_runtime::registry::{
+    BuildDescriptor, CellModule, Command, ModuleDescriptor, NamespaceDescriptor, RegistryBuilder,
+};
+use crab_cell_runtime::registry::{
+    CommandContext, CommandResult, MigrationDescriptor, OperationDescriptor,
 };
 use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
@@ -222,7 +241,7 @@ async fn typed_blob_and_cron_recover_after_owner_loss() {
             authority.clone(),
             blob_control,
             directory.path().join("blob.sqlite"),
-            crab_cell_runtime::install_blob_schema,
+            crab_cell_runtime::primitives::blob::install_blob_schema,
         )
         .await
         .unwrap();
@@ -326,7 +345,10 @@ async fn typed_blob_and_cron_recover_after_owner_loss() {
             authority.clone(),
             stale_blob,
             blob_takeover.direct_takeover().unwrap(),
-            crab_cell_runtime::RecoveryManifestStore::new(layout.clone(), Limits::default()),
+            crab_cell_runtime::recovery::manifest::RecoveryManifestStore::new(
+                layout.clone(),
+                Limits::default(),
+            ),
             directory.path().join("blob-takeover.sqlite"),
             Owner {
                 session: blob_successor,
@@ -408,7 +430,7 @@ async fn typed_blob_and_cron_recover_after_owner_loss() {
             authority.clone(),
             cron_control,
             directory.path().join("cron.sqlite"),
-            crab_cell_runtime::install_cron_schema,
+            crab_cell_runtime::primitives::cron::install_cron_schema,
         )
         .await
         .unwrap();
@@ -486,7 +508,10 @@ async fn typed_blob_and_cron_recover_after_owner_loss() {
             authority.clone(),
             stale_cron,
             cron_takeover.direct_takeover().unwrap(),
-            crab_cell_runtime::RecoveryManifestStore::new(layout.clone(), Limits::default()),
+            crab_cell_runtime::recovery::manifest::RecoveryManifestStore::new(
+                layout.clone(),
+                Limits::default(),
+            ),
             directory.path().join("cron-takeover.sqlite"),
             Owner {
                 session: cron_successor,

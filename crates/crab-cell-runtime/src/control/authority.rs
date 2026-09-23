@@ -2,7 +2,11 @@ use bytes::Bytes;
 use crab_ltx::CellStorageLayout;
 use crab_storage::{ETag, StorageError};
 
-use crate::{CatalogProof, CellId, Control, Error, IncarnationId, Owner, Result, Transition};
+use crate::cell::catalog::CatalogProof;
+use crate::control::{Control, Owner, Transition};
+use crate::identity::CellId;
+use crate::identity::IncarnationId;
+use crate::{Error, Result};
 
 const MAX_CONTROL_BYTES: u64 = 8 * 1024;
 
@@ -94,9 +98,9 @@ impl CellAuthority {
         if control.owner.is_some()
             || !matches!(
                 control.state,
-                crate::ControlState::Idle | crate::ControlState::Tombstoned
+                crate::control::ControlState::Idle | crate::control::ControlState::Tombstoned
             )
-            || (control.state == crate::ControlState::Idle && control.root.is_none())
+            || (control.state == crate::control::ControlState::Idle && control.root.is_none())
         {
             return Err(Error::Control("restored control is not safely unowned"));
         }

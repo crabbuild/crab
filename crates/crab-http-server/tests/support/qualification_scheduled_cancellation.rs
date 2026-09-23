@@ -4,12 +4,22 @@ use std::sync::{
 };
 
 use crab_cell_app::ApplicationHandle;
-use crab_cell_runtime::{
-    ApplicationId, CellTarget, CronCommand, CronMutation, CronMutationOutcome, CronQueryResult,
-    Error, KvAtomicCommand, KvAtomicOutcome, KvAtomicRequest, KvMutation, MutationIdentity,
-    Resolution, Result, SqlBatch, SqlBatchCommand, SqlResultSet, SqlStatement, SqlValue, TenantId,
-    WorkflowOutcome, WorkflowStart, WorkflowStartCommand, WorkflowStatus, partition_for_shard,
+use crab_cell_runtime::cell::executor::MutationIdentity;
+use crab_cell_runtime::cell::executor::Resolution;
+use crab_cell_runtime::identity::{ApplicationId, CellTarget, TenantId, partition_for_shard};
+use crab_cell_runtime::primitives::cron::{
+    CronCommand, CronMutation, CronMutationOutcome, CronQueryResult,
 };
+use crab_cell_runtime::primitives::kv::{
+    KvAtomicCommand, KvAtomicOutcome, KvAtomicRequest, KvMutation,
+};
+use crab_cell_runtime::primitives::sql::{
+    SqlBatch, SqlBatchCommand, SqlResultSet, SqlStatement, SqlValue,
+};
+use crab_cell_runtime::primitives::workflow::{
+    WorkflowOutcome, WorkflowStart, WorkflowStartCommand, WorkflowStatus,
+};
+use crab_cell_runtime::{Error, Result};
 use tokio::sync::Notify;
 
 use crate::{

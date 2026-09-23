@@ -908,11 +908,15 @@ impl Metrics {
     }
 }
 
-impl crab_cell_runtime::CellTelemetry for Metrics {
-    fn durability_proof(&self, source: crab_cell_runtime::DurabilitySource, waited: Duration) {
+impl crab_cell_runtime::fleet::telemetry::CellTelemetry for Metrics {
+    fn durability_proof(
+        &self,
+        source: crab_cell_runtime::node::log::DurabilitySource,
+        waited: Duration,
+    ) {
         let index = match source {
-            crab_cell_runtime::DurabilitySource::Fleet => 0,
-            crab_cell_runtime::DurabilitySource::Object => 1,
+            crab_cell_runtime::node::log::DurabilitySource::Fleet => 0,
+            crab_cell_runtime::node::log::DurabilitySource::Object => 1,
         };
         self.inner.durability_proofs[index].increment(1);
         self.inner.durability_wait[index].record(waited.as_secs_f64());
@@ -922,80 +926,85 @@ impl crab_cell_runtime::CellTelemetry for Metrics {
         self.inner.node_log_append_bytes[usize::from(!acknowledged)].increment(bytes);
     }
 
-    fn resident_route(&self, outcome: crab_cell_runtime::ResidentRouteOutcome) {
+    fn resident_route(&self, outcome: crab_cell_runtime::fleet::telemetry::ResidentRouteOutcome) {
         let index = match outcome {
-            crab_cell_runtime::ResidentRouteOutcome::Hit => 0,
-            crab_cell_runtime::ResidentRouteOutcome::Miss => 1,
-            crab_cell_runtime::ResidentRouteOutcome::Refused => 2,
+            crab_cell_runtime::fleet::telemetry::ResidentRouteOutcome::Hit => 0,
+            crab_cell_runtime::fleet::telemetry::ResidentRouteOutcome::Miss => 1,
+            crab_cell_runtime::fleet::telemetry::ResidentRouteOutcome::Refused => 2,
         };
         self.inner.resident_routes[index].increment(1);
     }
 
-    fn ltx_phase(&self, phase: crab_cell_runtime::LtxPhase, elapsed: Duration, succeeded: bool) {
+    fn ltx_phase(
+        &self,
+        phase: crab_cell_runtime::ltx::LtxPhase,
+        elapsed: Duration,
+        succeeded: bool,
+    ) {
         let index = match phase {
-            crab_cell_runtime::LtxPhase::Capture => 0,
-            crab_cell_runtime::LtxPhase::Preparation => 1,
-            crab_cell_runtime::LtxPhase::SchemaCheck => 2,
-            crab_cell_runtime::LtxPhase::WalExistence => 3,
-            crab_cell_runtime::LtxPhase::PositionResolution => 4,
-            crab_cell_runtime::LtxPhase::WalRead => 5,
-            crab_cell_runtime::LtxPhase::PageCollection => 6,
-            crab_cell_runtime::LtxPhase::Verification => 7,
-            crab_cell_runtime::LtxPhase::Encode => 8,
-            crab_cell_runtime::LtxPhase::LocalWrite => 9,
-            crab_cell_runtime::LtxPhase::Fsync => 10,
-            crab_cell_runtime::LtxPhase::ParentSync => 11,
-            crab_cell_runtime::LtxPhase::Checkpoint => 12,
-            crab_cell_runtime::LtxPhase::RootOpen => 13,
-            crab_cell_runtime::LtxPhase::Directory => 14,
-            crab_cell_runtime::LtxPhase::FrameFetch => 15,
-            crab_cell_runtime::LtxPhase::RestoreWrite => 16,
-            crab_cell_runtime::LtxPhase::Compaction => 17,
+            crab_cell_runtime::ltx::LtxPhase::Capture => 0,
+            crab_cell_runtime::ltx::LtxPhase::Preparation => 1,
+            crab_cell_runtime::ltx::LtxPhase::SchemaCheck => 2,
+            crab_cell_runtime::ltx::LtxPhase::WalExistence => 3,
+            crab_cell_runtime::ltx::LtxPhase::PositionResolution => 4,
+            crab_cell_runtime::ltx::LtxPhase::WalRead => 5,
+            crab_cell_runtime::ltx::LtxPhase::PageCollection => 6,
+            crab_cell_runtime::ltx::LtxPhase::Verification => 7,
+            crab_cell_runtime::ltx::LtxPhase::Encode => 8,
+            crab_cell_runtime::ltx::LtxPhase::LocalWrite => 9,
+            crab_cell_runtime::ltx::LtxPhase::Fsync => 10,
+            crab_cell_runtime::ltx::LtxPhase::ParentSync => 11,
+            crab_cell_runtime::ltx::LtxPhase::Checkpoint => 12,
+            crab_cell_runtime::ltx::LtxPhase::RootOpen => 13,
+            crab_cell_runtime::ltx::LtxPhase::Directory => 14,
+            crab_cell_runtime::ltx::LtxPhase::FrameFetch => 15,
+            crab_cell_runtime::ltx::LtxPhase::RestoreWrite => 16,
+            crab_cell_runtime::ltx::LtxPhase::Compaction => 17,
         };
         self.inner.ltx_phase_runs[index][usize::from(!succeeded)].increment(1);
         self.inner.ltx_phase_duration[index].record(elapsed.as_secs_f64());
     }
 
-    fn ltx_logical_read(&self, origin: crab_cell_runtime::LtxReadOrigin) {
+    fn ltx_logical_read(&self, origin: crab_cell_runtime::ltx::LtxReadOrigin) {
         let index = match origin {
-            crab_cell_runtime::LtxReadOrigin::Cold => 0,
-            crab_cell_runtime::LtxReadOrigin::Sparse => 1,
-            crab_cell_runtime::LtxReadOrigin::Hydrating => 2,
-            crab_cell_runtime::LtxReadOrigin::Resident => 3,
+            crab_cell_runtime::ltx::LtxReadOrigin::Cold => 0,
+            crab_cell_runtime::ltx::LtxReadOrigin::Sparse => 1,
+            crab_cell_runtime::ltx::LtxReadOrigin::Hydrating => 2,
+            crab_cell_runtime::ltx::LtxReadOrigin::Resident => 3,
         };
         self.inner.ltx_logical_reads[index].increment(1);
     }
 
     fn ltx_origin_request(
         &self,
-        origin: crab_cell_runtime::LtxReadOrigin,
-        outcome: crab_cell_runtime::LtxRequestOutcome,
+        origin: crab_cell_runtime::ltx::LtxReadOrigin,
+        outcome: crab_cell_runtime::ltx::LtxRequestOutcome,
         bytes: u64,
     ) {
         let index = match origin {
-            crab_cell_runtime::LtxReadOrigin::Cold => 0,
-            crab_cell_runtime::LtxReadOrigin::Sparse => 1,
-            crab_cell_runtime::LtxReadOrigin::Hydrating => 2,
-            crab_cell_runtime::LtxReadOrigin::Resident => 3,
+            crab_cell_runtime::ltx::LtxReadOrigin::Cold => 0,
+            crab_cell_runtime::ltx::LtxReadOrigin::Sparse => 1,
+            crab_cell_runtime::ltx::LtxReadOrigin::Hydrating => 2,
+            crab_cell_runtime::ltx::LtxReadOrigin::Resident => 3,
         };
         let outcome = match outcome {
-            crab_cell_runtime::LtxRequestOutcome::Succeeded => 0,
-            crab_cell_runtime::LtxRequestOutcome::Failed => 1,
+            crab_cell_runtime::ltx::LtxRequestOutcome::Succeeded => 0,
+            crab_cell_runtime::ltx::LtxRequestOutcome::Failed => 1,
         };
         self.inner.ltx_origin_requests[index][outcome].increment(1);
         self.inner.ltx_origin_bytes[index].increment(bytes);
     }
 
-    fn ltx_capture(&self, timing: &crab_cell_runtime::CaptureTiming, succeeded: bool) {
-        <Self as crab_cell_runtime::CellTelemetry>::ltx_phase(
+    fn ltx_capture(&self, timing: &crab_cell_runtime::ltx::CaptureTiming, succeeded: bool) {
+        <Self as crab_cell_runtime::fleet::telemetry::CellTelemetry>::ltx_phase(
             self,
-            crab_cell_runtime::LtxPhase::Capture,
+            crab_cell_runtime::ltx::LtxPhase::Capture,
             Duration::from_nanos(timing.total_nanos),
             succeeded,
         );
         let phase = |phase, nanos| {
             if nanos > 0 {
-                <Self as crab_cell_runtime::CellTelemetry>::ltx_phase(
+                <Self as crab_cell_runtime::fleet::telemetry::CellTelemetry>::ltx_phase(
                     self,
                     phase,
                     Duration::from_nanos(nanos),
@@ -1004,42 +1013,48 @@ impl crab_cell_runtime::CellTelemetry for Metrics {
             }
         };
         phase(
-            crab_cell_runtime::LtxPhase::Preparation,
+            crab_cell_runtime::ltx::LtxPhase::Preparation,
             timing.preparation_nanos,
         );
         phase(
-            crab_cell_runtime::LtxPhase::SchemaCheck,
+            crab_cell_runtime::ltx::LtxPhase::SchemaCheck,
             timing.schema_check_nanos,
         );
         phase(
-            crab_cell_runtime::LtxPhase::WalExistence,
+            crab_cell_runtime::ltx::LtxPhase::WalExistence,
             timing.wal_existence_nanos,
         );
         phase(
-            crab_cell_runtime::LtxPhase::PositionResolution,
+            crab_cell_runtime::ltx::LtxPhase::PositionResolution,
             timing.position_resolution_nanos,
         );
-        phase(crab_cell_runtime::LtxPhase::WalRead, timing.wal_read_nanos);
         phase(
-            crab_cell_runtime::LtxPhase::PageCollection,
+            crab_cell_runtime::ltx::LtxPhase::WalRead,
+            timing.wal_read_nanos,
+        );
+        phase(
+            crab_cell_runtime::ltx::LtxPhase::PageCollection,
             timing.page_collection_nanos,
         );
         phase(
-            crab_cell_runtime::LtxPhase::Verification,
+            crab_cell_runtime::ltx::LtxPhase::Verification,
             timing.verification_nanos,
         );
-        phase(crab_cell_runtime::LtxPhase::Encode, timing.encode_nanos);
         phase(
-            crab_cell_runtime::LtxPhase::LocalWrite,
+            crab_cell_runtime::ltx::LtxPhase::Encode,
+            timing.encode_nanos,
+        );
+        phase(
+            crab_cell_runtime::ltx::LtxPhase::LocalWrite,
             timing.local_write_nanos,
         );
-        phase(crab_cell_runtime::LtxPhase::Fsync, timing.fsync_nanos);
+        phase(crab_cell_runtime::ltx::LtxPhase::Fsync, timing.fsync_nanos);
         phase(
-            crab_cell_runtime::LtxPhase::ParentSync,
+            crab_cell_runtime::ltx::LtxPhase::ParentSync,
             timing.parent_sync_nanos,
         );
         phase(
-            crab_cell_runtime::LtxPhase::Checkpoint,
+            crab_cell_runtime::ltx::LtxPhase::Checkpoint,
             timing.checkpoint_nanos,
         );
         self.inner.ltx_wal_reads[0].increment(u64::from(timing.wal_sparse_reads));
@@ -1148,7 +1163,7 @@ pub(crate) enum RecoveryPhase {
 impl Metrics {
     pub(crate) fn update_node_log(
         &self,
-        log: Option<&crab_cell_runtime::NodeLogStatus>,
+        log: Option<&crab_cell_runtime::node::log_state::NodeLogStatus>,
         lease_remaining: Duration,
     ) {
         let Some(log) = log else {
@@ -1161,11 +1176,11 @@ impl Metrics {
             return;
         };
         let state = match log.phase() {
-            crab_cell_runtime::NodeLogPhase::Open if log.active() => 0,
-            crab_cell_runtime::NodeLogPhase::Open | crab_cell_runtime::NodeLogPhase::Recovering => {
-                1
-            }
-            crab_cell_runtime::NodeLogPhase::Sealed | crab_cell_runtime::NodeLogPhase::Retired => 2,
+            crab_cell_runtime::node::log_state::NodeLogPhase::Open if log.active() => 0,
+            crab_cell_runtime::node::log_state::NodeLogPhase::Open
+            | crab_cell_runtime::node::log_state::NodeLogPhase::Recovering => 1,
+            crab_cell_runtime::node::log_state::NodeLogPhase::Sealed
+            | crab_cell_runtime::node::log_state::NodeLogPhase::Retired => 2,
         };
         for (index, lane) in self.inner.node_log_lanes.iter().enumerate() {
             lane.set(f64::from(index == state));
@@ -1220,7 +1235,10 @@ impl Metrics {
         self.inner.node_log_recovery_phase_seconds[phase as usize].record(elapsed.as_secs_f64());
     }
 
-    pub(crate) fn record_recovery_work(&self, work: crab_cell_runtime::RecoveryWorkSummary) {
+    pub(crate) fn record_recovery_work(
+        &self,
+        work: crab_cell_runtime::node::log_recovery::RecoveryWorkSummary,
+    ) {
         let values = [
             work.candidate_count,
             work.affected_cells,
@@ -2013,57 +2031,61 @@ mod tests {
         let metrics = Metrics::new().unwrap();
         metrics.record_transfer_admission_rejection(false);
         metrics.record_transfer_admission_rejection(true);
-        <Metrics as crab_cell_runtime::CellTelemetry>::durability_proof(
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::durability_proof(
             &metrics,
-            crab_cell_runtime::DurabilitySource::Fleet,
+            crab_cell_runtime::node::log::DurabilitySource::Fleet,
             Duration::from_millis(25),
         );
-        <Metrics as crab_cell_runtime::CellTelemetry>::durability_proof(
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::durability_proof(
             &metrics,
-            crab_cell_runtime::DurabilitySource::Object,
+            crab_cell_runtime::node::log::DurabilitySource::Object,
             Duration::from_millis(50),
         );
-        <Metrics as crab_cell_runtime::CellTelemetry>::node_log_append(&metrics, true, 512);
-        <Metrics as crab_cell_runtime::CellTelemetry>::node_log_append(&metrics, false, 128);
-        <Metrics as crab_cell_runtime::CellTelemetry>::resident_route(
-            &metrics,
-            crab_cell_runtime::ResidentRouteOutcome::Hit,
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::node_log_append(
+            &metrics, true, 512,
         );
-        <Metrics as crab_cell_runtime::CellTelemetry>::resident_route(
-            &metrics,
-            crab_cell_runtime::ResidentRouteOutcome::Miss,
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::node_log_append(
+            &metrics, false, 128,
         );
-        <Metrics as crab_cell_runtime::CellTelemetry>::ltx_phase(
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::resident_route(
             &metrics,
-            crab_cell_runtime::LtxPhase::RootOpen,
+            crab_cell_runtime::fleet::telemetry::ResidentRouteOutcome::Hit,
+        );
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::resident_route(
+            &metrics,
+            crab_cell_runtime::fleet::telemetry::ResidentRouteOutcome::Miss,
+        );
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::ltx_phase(
+            &metrics,
+            crab_cell_runtime::ltx::LtxPhase::RootOpen,
             Duration::from_millis(10),
             true,
         );
-        <Metrics as crab_cell_runtime::CellTelemetry>::ltx_phase(
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::ltx_phase(
             &metrics,
-            crab_cell_runtime::LtxPhase::FrameFetch,
+            crab_cell_runtime::ltx::LtxPhase::FrameFetch,
             Duration::from_millis(5),
             false,
         );
-        <Metrics as crab_cell_runtime::CellTelemetry>::ltx_logical_read(
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::ltx_logical_read(
             &metrics,
-            crab_cell_runtime::LtxReadOrigin::Resident,
+            crab_cell_runtime::ltx::LtxReadOrigin::Resident,
         );
-        <Metrics as crab_cell_runtime::CellTelemetry>::ltx_origin_request(
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::ltx_origin_request(
             &metrics,
-            crab_cell_runtime::LtxReadOrigin::Cold,
-            crab_cell_runtime::LtxRequestOutcome::Succeeded,
+            crab_cell_runtime::ltx::LtxReadOrigin::Cold,
+            crab_cell_runtime::ltx::LtxRequestOutcome::Succeeded,
             1_024,
         );
-        <Metrics as crab_cell_runtime::CellTelemetry>::ltx_origin_request(
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::ltx_origin_request(
             &metrics,
-            crab_cell_runtime::LtxReadOrigin::Hydrating,
-            crab_cell_runtime::LtxRequestOutcome::Failed,
+            crab_cell_runtime::ltx::LtxReadOrigin::Hydrating,
+            crab_cell_runtime::ltx::LtxRequestOutcome::Failed,
             4_096,
         );
-        <Metrics as crab_cell_runtime::CellTelemetry>::ltx_capture(
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::ltx_capture(
             &metrics,
-            &crab_cell_runtime::CaptureTiming {
+            &crab_cell_runtime::ltx::CaptureTiming {
                 schema_check_nanos: 1_000_000,
                 wal_sparse_reads: 1,
                 wal_image_bytes: 8_192,
@@ -2090,7 +2112,7 @@ mod tests {
             Some(RecoveryFailureReason::Storage),
         );
         metrics.record_recovery_phase(RecoveryPhase::Witness, Duration::from_millis(20));
-        metrics.record_recovery_work(crab_cell_runtime::RecoveryWorkSummary {
+        metrics.record_recovery_work(crab_cell_runtime::node::log_recovery::RecoveryWorkSummary {
             candidate_count: 1,
             affected_cells: 2,
             catalog_shards: 1,

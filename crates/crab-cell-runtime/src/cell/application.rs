@@ -4,7 +4,9 @@ use crab_storage::{StorageError, Store};
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 
-use crate::{ApplicationId, Error, Result, TenantId, identity::encode_hex};
+use crate::identity::encode_hex;
+use crate::identity::{ApplicationId, TenantId};
+use crate::{Error, Result};
 
 const MAX_IDENTITY_BYTES: u64 = 1_024;
 

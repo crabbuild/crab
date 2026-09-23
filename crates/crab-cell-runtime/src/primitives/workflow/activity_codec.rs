@@ -1,4 +1,4 @@
-use crate::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use crate::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 
 use super::{
     ActivityClaim, ActivityCompletion, ActivityCompletionOutcome, ActivityLeaseOutcome,

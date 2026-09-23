@@ -8,16 +8,19 @@ use super::{
     BackupPin, BackupPinStore, MAX_PAGE_BYTES, MAX_SHARD_BYTES, PinnedCatalogShard, decode_page,
     decode_shard,
 };
-use crate::{
-    ApplicationIdentityStore, CellAuthority, CellCatalog, Control, ControlState, Digest, Error,
-    ReleaseRecord, ReleaseState, ReleaseStore, Result,
-};
+use crate::cell::application::ApplicationIdentityStore;
+use crate::cell::catalog::CellCatalog;
+use crate::control::authority::CellAuthority;
+use crate::control::{Control, ControlState};
+use crate::identity::Digest;
+use crate::recovery::release::{ReleaseRecord, ReleaseState, ReleaseStore};
+use crate::{Error, Result};
 
 /// Verified result of installing one pin into a separate storage prefix.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackupRestore {
     application: crate::ApplicationId,
-    pin: crate::RequestId,
+    pin: crate::identity::RequestId,
     control_count: u64,
     immutable_object_count: u64,
     nonempty_catalog_shards: u16,
@@ -30,7 +33,7 @@ impl BackupRestore {
     }
 
     #[must_use]
-    pub const fn pin(&self) -> crate::RequestId {
+    pub const fn pin(&self) -> crate::identity::RequestId {
         self.pin
     }
 

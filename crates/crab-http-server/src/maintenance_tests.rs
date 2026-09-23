@@ -13,7 +13,7 @@ const TTL: Duration = Duration::from_secs(60);
 
 struct UnavailableRoundTrip;
 
-impl crab_cell_runtime::PeerRoundTrip for UnavailableRoundTrip {
+impl crab_cell_runtime::peer::PeerRoundTrip for UnavailableRoundTrip {
     fn send(
         &self,
         _target: crab_cell_runtime::CellTarget,
@@ -98,11 +98,11 @@ pub(super) async fn fixture() -> Arc<Server> {
         .repositories
         .get(&("team".into(), "repo".into()))
         .unwrap();
-    let identity = crab_cell_runtime::ApplicationIdentity::new(
+    let identity = crab_cell_runtime::cell::application::ApplicationIdentity::new(
         crab_cell_runtime::TenantId::from_bytes([31; 16]),
         crab_cell_runtime::ApplicationId::from_bytes([32; 16]),
     );
-    let layout = crab_cell_runtime::CellStorageLayout::new(
+    let layout = crab_cell_runtime::ltx::CellStorageLayout::new(
         repository.store.clone(),
         object_store::path::Path::from("maintenance-test-cells"),
         *identity.application().as_bytes(),
@@ -143,19 +143,19 @@ pub(super) async fn fixture() -> Arc<Server> {
         Arc::clone(&registry),
         cell_runtime.clone(),
         crate::cells::RepositoryCellPeer::new(
-            crab_cell_runtime::NodeDirectory::new(
+            crab_cell_runtime::node::NodeDirectory::new(
                 layout,
                 crab_cell_runtime::Digest::from_bytes([34; 32]),
                 crab_cell_runtime::Digest::from_bytes([35; 32]),
                 registry.release_digest(),
             ),
-            Arc::new(crab_cell_runtime::PeerSigner::new(
+            Arc::new(crab_cell_runtime::peer::PeerSigner::new(
                 cell_session,
                 registry.release_digest(),
                 ed25519_dalek::SigningKey::from_bytes(&[36; 32]),
             )),
             Arc::new(UnavailableRoundTrip),
-            crab_cell_runtime::Owner {
+            crab_cell_runtime::control::Owner {
                 session: cell_session,
                 endpoint: "https://server.test:8081".into(),
             },
@@ -246,11 +246,11 @@ fn enable_catalog_readiness(server: &mut Arc<Server>) {
         store.clone(),
         "catalog",
     )));
-    let identity = crab_cell_runtime::ApplicationIdentity::new(
+    let identity = crab_cell_runtime::cell::application::ApplicationIdentity::new(
         crab_cell_runtime::TenantId::from_bytes([1; 16]),
         crab_cell_runtime::ApplicationId::from_bytes([2; 16]),
     );
-    let layout = crab_cell_runtime::CellStorageLayout::new(
+    let layout = crab_cell_runtime::ltx::CellStorageLayout::new(
         store,
         object_store::path::Path::from("catalog"),
         *identity.application().as_bytes(),
@@ -258,11 +258,12 @@ fn enable_catalog_readiness(server: &mut Arc<Server>) {
     let registry = Arc::new(crate::cells::compiled_registry().unwrap());
     let resolver =
         crate::peer::LocalCellResolver::new(layout.clone(), identity, server.cell_runtime.clone());
-    let releases = crab_cell_runtime::ReleaseStore::new(layout.clone(), identity).unwrap();
+    let releases =
+        crab_cell_runtime::recovery::release::ReleaseStore::new(layout.clone(), identity).unwrap();
     server.peer_receiver = Some(crate::peer::PeerReceiver::new(
-        crab_cell_runtime::NodeId::from_bytes([9; 16]),
+        crab_cell_runtime::identity::NodeId::from_bytes([9; 16]),
         crab_cell_runtime::SessionId::from_bytes([9; 16]),
-        crab_cell_runtime::NodeDirectory::new(
+        crab_cell_runtime::node::NodeDirectory::new(
             layout,
             crab_cell_runtime::Digest::from_bytes([3; 32]),
             crab_cell_runtime::Digest::from_bytes([4; 32]),

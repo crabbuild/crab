@@ -1,11 +1,12 @@
 use rand::RngCore;
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
+use crate::codec::{BoundedEncoder, WireValue};
+use crate::identity::IncarnationId;
+use crate::identity::{CellId, CellTarget, NamespaceId, partition_for_shard, shard_for_scope};
 use crate::primitives::effects::EffectBatch;
-use crate::{
-    BoundedEncoder, CellId, CellTarget, EffectCommandIntent, Error, IncarnationId, NamespaceId,
-    Result, WireValue, partition_for_shard, shard_for_scope,
-};
+use crate::primitives::effects::EffectCommandIntent;
+use crate::{Error, Result};
 
 mod api;
 

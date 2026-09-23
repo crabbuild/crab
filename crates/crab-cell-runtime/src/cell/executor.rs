@@ -2,10 +2,12 @@ use std::collections::VecDeque;
 
 use crab_ltx::{CaptureBatch, Db, TransactionError, rusqlite::OptionalExtension};
 
+use crate::cell::catalog::CatalogRole;
+use crate::identity::{CellId, Digest};
+use crate::identity::{IncarnationId, RequestId};
+use crate::primitives::maintenance::PersistedWorkInventory;
 use crate::primitives::maintenance::TransferWorkInventory;
-use crate::{
-    CatalogRole, CellId, Digest, Error, IncarnationId, PersistedWorkInventory, RequestId, Result,
-};
+use crate::{Error, Result};
 
 const MAX_RESULT_BYTES: usize = crate::codec::MAX_WIRE_BYTES;
 const MAX_REQUEST_LIFETIME_MS: i64 = 24 * 60 * 60 * 1000;
@@ -267,7 +269,7 @@ impl CellExecutor {
         let initialized = db.transaction_with(|transaction| {
             crate::cell::schema::install_runtime_schema_in(transaction, cell, incarnation, schema)?;
             initialize(transaction)?;
-            crate::scheduler_next_due_ms(transaction, 0)
+            crate::fleet::scheduler::scheduler_next_due_ms(transaction, 0)
         });
         let next_due_ms = match initialized {
             Ok(next_due_ms) => next_due_ms,
@@ -461,7 +463,7 @@ impl CellExecutor {
             {
                 return Err(Error::Command("runtime metadata row missing"));
             }
-            let next_due_ms = crate::scheduler_next_due_ms(transaction, logical_time_ms)?;
+            let next_due_ms = crate::fleet::scheduler::scheduler_next_due_ms(transaction, logical_time_ms)?;
             Ok(TransactionResult::Committed {
                 outcome: stored_outcome(outcome, result, sequence)?,
                 logical_time_ms,
@@ -475,7 +477,7 @@ impl CellExecutor {
     /// Applies or replays one destination inbox operation through normal publication.
     pub fn deliver_effect(
         &mut self,
-        delivery: crate::InboxDelivery,
+        delivery: crate::primitives::effects::InboxDelivery,
         now_ms: i64,
         max_result_bytes: usize,
         handler: impl FnOnce(&crab_ltx::rusqlite::Transaction<'_>) -> Result<HandlerOutcome>,
@@ -495,7 +497,7 @@ impl CellExecutor {
         let transaction = self.db.transaction_with(|transaction| {
             let (commit_sequence, prior_logical_time_ms) =
                 runtime_metadata(transaction, cell, incarnation, schema)?;
-            let applied = crate::inbox_apply(
+            let applied = crate::primitives::effects::inbox_apply(
                 transaction,
                 now_ms,
                 delivery,
@@ -503,7 +505,7 @@ impl CellExecutor {
                 handler,
             )?;
             let (outcome, duplicate) = match applied {
-                crate::InboxApplyOutcome::Success {
+                crate::primitives::effects::InboxApplyOutcome::Success {
                     result,
                     commit_sequence,
                     duplicate,
@@ -514,7 +516,7 @@ impl CellExecutor {
                     },
                     duplicate,
                 ),
-                crate::InboxApplyOutcome::Rejected {
+                crate::primitives::effects::InboxApplyOutcome::Rejected {
                     result,
                     commit_sequence,
                     duplicate,
@@ -525,8 +527,8 @@ impl CellExecutor {
                     },
                     duplicate,
                 ),
-                crate::InboxApplyOutcome::Conflict => return Err(Error::RequestConflict),
-                crate::InboxApplyOutcome::Expired => return Err(Error::EffectExpired),
+                crate::primitives::effects::InboxApplyOutcome::Conflict => return Err(Error::RequestConflict),
+                crate::primitives::effects::InboxApplyOutcome::Expired => return Err(Error::EffectExpired),
             };
             if duplicate {
                 return Ok(TransactionResult::Recorded(outcome));
@@ -548,7 +550,7 @@ impl CellExecutor {
             {
                 return Err(Error::Command("runtime metadata row missing"));
             }
-            let next_due_ms = crate::scheduler_next_due_ms(transaction, logical_time_ms)?;
+            let next_due_ms = crate::fleet::scheduler::scheduler_next_due_ms(transaction, logical_time_ms)?;
             Ok(TransactionResult::Committed {
                 outcome,
                 logical_time_ms,
@@ -744,7 +746,7 @@ impl CellExecutor {
     /// Resolves one destination inbox identity from the logical SQLite state.
     pub fn resolve_effect(
         &mut self,
-        delivery: crate::InboxDelivery,
+        delivery: crate::primitives::effects::InboxDelivery,
         now_ms: i64,
         max_result_bytes: usize,
     ) -> Result<Resolution> {
@@ -752,7 +754,12 @@ impl CellExecutor {
             return Ok(Resolution::Unknown);
         }
         let result = self.db.query_with(|connection| {
-            crate::inbox_resolve(connection, now_ms, delivery, max_result_bytes)
+            crate::primitives::effects::inbox_resolve(
+                connection,
+                now_ms,
+                delivery,
+                max_result_bytes,
+            )
         });
         if let Some(error) = self.db.take_io_error() {
             self.fenced = true;
@@ -814,7 +821,7 @@ impl CellExecutor {
     }
 
     /// Applies one trusted registry migration and retains its captured cut.
-    pub fn migrate(&mut self, plan: crate::MigrationPlan, now_ms: i64) -> Result<()> {
+    pub fn migrate(&mut self, plan: crate::registry::MigrationPlan, now_ms: i64) -> Result<()> {
         if self.fenced {
             return Err(Error::Fenced);
         }
@@ -877,7 +884,7 @@ impl CellExecutor {
             if metadata != (sequence, logical_time_ms) {
                 return Err(Error::Control("migration metadata did not validate"));
             }
-            let next_due_ms = crate::scheduler_next_due_ms(transaction, logical_time_ms)?;
+            let next_due_ms = crate::fleet::scheduler::scheduler_next_due_ms(transaction, logical_time_ms)?;
             Ok((sequence, next_due_ms))
         });
         if let Some(error) = self.db.take_io_error() {
@@ -1228,14 +1235,14 @@ mod tests {
                 crate::ModuleDescriptor {
                     name: CODE_ONLY_MODULE,
                     source_digest: Digest::from_bytes([46; 32]),
-                    retained_codes: &[crate::RetainedCodeDescriptor {
+                    retained_codes: &[crate::registry::RetainedCodeDescriptor {
                         code: PREDECESSOR_CODE,
                         schema_min: 1,
                         schema_max: 1,
                     }],
                     schema_min: 1,
                     schema_max: 1,
-                    migrations: Box::leak(Box::new([crate::MigrationDescriptor {
+                    migrations: Box::leak(Box::new([crate::registry::MigrationDescriptor {
                         version: 1,
                         sql,
                         digest: Digest::from_bytes(*blake3::hash(sql.as_bytes()).as_bytes()),
@@ -1277,7 +1284,7 @@ mod tests {
         let cell = CellId::from_bytes([31; 32]);
         let incarnation = IncarnationId::from_bytes([32; 16]);
         let mut connection = crab_ltx::rusqlite::Connection::open(&path).unwrap();
-        crate::install_runtime_schema(&mut connection, cell, incarnation, 1).unwrap();
+        crate::cell::schema::install_runtime_schema(&mut connection, cell, incarnation, 1).unwrap();
         drop(connection);
         let mut db = Db::open(&path, crab_ltx::Limits::default()).unwrap();
         db.transaction(|transaction| {
@@ -1308,7 +1315,7 @@ mod tests {
         let cell = CellId::from_bytes([41; 32]);
         let incarnation = IncarnationId::from_bytes([42; 16]);
         let mut connection = crab_ltx::rusqlite::Connection::open(&path).unwrap();
-        crate::install_runtime_schema(&mut connection, cell, incarnation, 1).unwrap();
+        crate::cell::schema::install_runtime_schema(&mut connection, cell, incarnation, 1).unwrap();
         drop(connection);
         let db = Db::open(&path, crab_ltx::Limits::default()).unwrap();
         let mut executor = CellExecutor::new(db, cell, incarnation, 1);

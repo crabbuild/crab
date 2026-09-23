@@ -5,10 +5,11 @@ use crab_ltx::CellStorageLayout;
 use crab_storage::StorageError;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    ApplicationId, CellId, Digest, Error, IncarnationId, RecoveredCellTail, RecoveryOverlayRef,
-    Result, RootRef, SessionId,
-};
+use crate::control::{RecoveryOverlayRef, RootRef};
+use crate::identity::IncarnationId;
+use crate::identity::{ApplicationId, CellId, Digest, SessionId};
+use crate::node::log::RecoveredCellTail;
+use crate::{Error, Result};
 
 const MAX_MANIFEST_BYTES: u64 = 2 << 20;
 const MULTIPART_BYTES: usize = 8 << 20;
@@ -815,7 +816,7 @@ mod tests {
     use object_store::{ObjectStoreExt, memory::InMemory, path::Path};
 
     use super::*;
-    use crate::{RecoveryBase, build_recovery_overlays};
+    use crate::node::log::{RecoveryBase, build_recovery_overlays};
 
     struct RecoveryFixture {
         inner: Arc<InMemory>,
@@ -985,10 +986,10 @@ mod tests {
             .unwrap();
         assert_eq!(prepared.predecessor(), Some(fixture.base));
         assert_eq!(prepared.root().position, fixture.final_position);
-        let mut control = crate::Control::initial(
+        let mut control = crate::control::Control::initial(
             fixture.pinned.cell,
             fixture.pinned.incarnation,
-            crate::Owner {
+            crate::control::Owner {
                 session: SessionId::from_bytes([1; 16]),
                 endpoint: "https://dead.internal:8081".into(),
             },
@@ -996,19 +997,19 @@ mod tests {
             1,
         )
         .unwrap();
-        control.state = crate::ControlState::Serving;
+        control.state = crate::control::ControlState::Serving;
         control.root = Some(runtime_root(fixture.base));
         let attached = control
             .attach_recovery(fixture.pinned.recovery.clone())
             .unwrap();
         let takeover = attached
-            .takeover(crate::Owner {
+            .takeover(crate::control::Owner {
                 session: SessionId::from_bytes([13; 16]),
                 endpoint: "https://successor.internal:8081".into(),
             })
             .unwrap();
         let published = takeover.publish_recovery(&prepared, None).unwrap();
-        assert_eq!(published.state, crate::ControlState::Recovering);
+        assert_eq!(published.state, crate::control::ControlState::Recovering);
         assert!(published.recovery.is_none());
         assert_eq!(published.root.unwrap().txid, fixture.final_position.txid);
     }

@@ -1,9 +1,13 @@
 use super::EffectBatch;
-use crate::{
-    ApplicationId, CellId, CellTarget, Digest, EffectCommandIntent, EffectLeaseOutcome,
-    EffectTokenSource, HandlerOutcome, InboxApplyOutcome, InboxDelivery, IncarnationId,
-    NamespaceId, TenantId, effect_ack_delivered, effect_claim, effect_cleanup_terminal,
-    effect_validate_claim, inbox_apply, inbox_cleanup_expired, install_runtime_schema, peer_wire,
+use crate::cell::executor::HandlerOutcome;
+use crate::cell::schema::install_runtime_schema;
+use crate::identity::IncarnationId;
+use crate::identity::{ApplicationId, CellId, CellTarget, Digest, NamespaceId, TenantId};
+use crate::peer::wire as peer_wire;
+use crate::primitives::effects::{
+    EffectCommandIntent, EffectLeaseOutcome, EffectTokenSource, InboxApplyOutcome, InboxDelivery,
+    effect_ack_delivered, effect_claim, effect_cleanup_terminal, effect_validate_claim,
+    inbox_apply, inbox_cleanup_expired,
 };
 use prost::Message;
 
@@ -454,7 +458,7 @@ fn manual_retry_preserves_identity_and_never_reopens_terminal_effect() {
         .unwrap()
         .remove(0);
     assert_eq!(
-        crate::effect_retry(&transaction, 4_999, &claim).unwrap(),
+        crate::primitives::effects::effect_retry(&transaction, 4_999, &claim).unwrap(),
         EffectLeaseOutcome::Failed
     );
     assert!(

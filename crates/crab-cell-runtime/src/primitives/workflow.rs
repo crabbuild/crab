@@ -1,10 +1,11 @@
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
+use crate::identity::RequestId;
+use crate::identity::{CellTarget, Digest, NamespaceId};
 use crate::primitives::effects::EffectBatch;
-use crate::{
-    CellTarget, Digest, EffectCommandIntent, Error, NamespaceId, RequestId, Result,
-    primitives::effects::validate_effect_command_intent,
-};
+use crate::primitives::effects::EffectCommandIntent;
+use crate::primitives::effects::validate_effect_command_intent;
+use crate::{Error, Result};
 
 mod activity;
 mod activity_api;
@@ -1271,7 +1272,8 @@ fn validate_now(now_ms: i64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ApplicationId, IncarnationId, TenantId};
+    use crate::identity::IncarnationId;
+    use crate::identity::{ApplicationId, TenantId};
     use crab_ltx::rusqlite::Connection;
 
     struct RunningDefinition;

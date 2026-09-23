@@ -1,4 +1,7 @@
 //! Authority CAS tests.
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::control::{Control, Transition};
+use crab_cell_runtime::ltx::CellStorageLayout;
 
 use std::sync::Arc;
 
@@ -8,7 +11,9 @@ use object_store::{memory::InMemory, path::Path};
 use bytes::Bytes;
 use crab_cell_runtime::*;
 
-use crab_cell_runtime::{ControlState, Digest, IncarnationId, Owner, RootRef, SessionId};
+use crab_cell_runtime::control::{ControlState, Owner, RootRef};
+use crab_cell_runtime::identity::IncarnationId;
+use crab_cell_runtime::identity::{Digest, SessionId};
 
 fn control() -> Control {
     Control::initial(

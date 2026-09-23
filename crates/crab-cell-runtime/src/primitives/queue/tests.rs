@@ -4,7 +4,7 @@ use super::*;
 
 fn connection() -> Connection {
     let mut connection = Connection::open_in_memory().unwrap();
-    crate::install_runtime_schema(
+    crate::cell::schema::install_runtime_schema(
         &mut connection,
         source_target().cell_id(),
         IncarnationId::from_bytes([2; 16]),
@@ -109,15 +109,15 @@ fn dead_transition_atomically_links_one_canonical_queue_effect() {
         )
         .unwrap();
     assert_eq!(linked.len(), 32);
-    let effect = crate::peer_wire::EffectRequest::decode(operation.as_slice()).unwrap();
+    let effect = crate::peer::wire::EffectRequest::decode(operation.as_slice()).unwrap();
     assert!(effect.destination_incarnation.is_empty());
     let command = match effect.operation {
-        Some(crate::peer_wire::effect_request::Operation::CellCommand(command)) => command,
+        Some(crate::peer::wire::effect_request::Operation::CellCommand(command)) => command,
         None => panic!("dead letter must use the typed Queue command"),
     };
     assert_eq!(command.command_id, 7);
     let mut decoder =
-        crate::BoundedDecoder::new(&command.input, QUEUE_SEND_MAX_INPUT_BYTES).unwrap();
+        crate::codec::BoundedDecoder::new(&command.input, QUEUE_SEND_MAX_INPUT_BYTES).unwrap();
     let request = QueueSendRequest::decode(&mut decoder).unwrap();
     decoder.finish().unwrap();
     assert_eq!(request.payload, b"original");

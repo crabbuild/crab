@@ -5,12 +5,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crab_cell_runtime::{
-    Digest, QUALIFICATION_MATRIX_ROWS, QualificationExecutionEvidence, QualificationMatrixEntry,
-    QualificationMatrixManifest, QualificationMetric, QualificationOwnership, QualificationProfile,
-    QualificationReceipt, QualificationRunArtifact, QualificationRunner, QualificationWorkload,
-    validate_cluster_receipt,
+use crab_cell_runtime::identity::Digest;
+use crab_cell_runtime::qualification::cluster::validate_cluster_receipt;
+use crab_cell_runtime::qualification::{
+    QUALIFICATION_MATRIX_ROWS, QualificationExecutionEvidence, QualificationMatrixEntry,
+    QualificationMatrixManifest, QualificationMetric, QualificationOwnership, QualificationReceipt,
+    QualificationRunArtifact, QualificationRunner,
 };
+use crab_cell_runtime::qualification::{QualificationProfile, QualificationWorkload};
 use ed25519_dalek::SigningKey;
 use rand::Rng;
 
@@ -782,11 +784,14 @@ mod tests {
         reject_symlinks, require_manifest_output, require_trusted_signer, resolve_manifest_path,
         verify_protected_bundle,
     };
-    use crab_cell_runtime::{
-        Digest, QUALIFICATION_MATRIX_ROWS, QualificationExecution, QualificationExecutionEvidence,
-        QualificationOperation, QualificationOperationExecutor, QualificationOwnership,
-        QualificationProfile, QualificationProviderEvidence, QualificationReceipt,
-        QualificationWorkload,
+    use crab_cell_runtime::identity::Digest;
+    use crab_cell_runtime::qualification::{
+        QUALIFICATION_MATRIX_ROWS, QualificationExecutionEvidence, QualificationOwnership,
+        QualificationProviderEvidence, QualificationReceipt,
+    };
+    use crab_cell_runtime::qualification::{
+        QualificationExecution, QualificationOperation, QualificationOperationExecutor,
+        QualificationProfile, QualificationWorkload,
     };
     use ed25519_dalek::Signer;
     use std::{fs, future::Future, path::Path, pin::Pin, time::Duration};
@@ -918,26 +923,30 @@ mod tests {
             .expect("binder elapsed duration")
             .max(1);
         let resources = [
-            crab_cell_runtime::QualificationMetric::new(
+            crab_cell_runtime::qualification::QualificationMetric::new(
                 "peak_rss_bytes".into(),
                 19,
                 "bytes".into(),
             )
             .expect("RSS metric"),
-            crab_cell_runtime::QualificationMetric::new(
+            crab_cell_runtime::qualification::QualificationMetric::new(
                 "peak_local_disk_bytes".into(),
                 29,
                 "bytes".into(),
             )
             .expect("disk metric"),
-            crab_cell_runtime::QualificationMetric::new(
+            crab_cell_runtime::qualification::QualificationMetric::new(
                 "peak_file_descriptors".into(),
                 39,
                 "count".into(),
             )
             .expect("FD metric"),
-            crab_cell_runtime::QualificationMetric::new("bucket_calls".into(), 49, "count".into())
-                .expect("bucket metric"),
+            crab_cell_runtime::qualification::QualificationMetric::new(
+                "bucket_calls".into(),
+                49,
+                "count".into(),
+            )
+            .expect("bucket metric"),
         ];
         let run = summary
             .artifact_with_resource_metrics(&workload, &resources)

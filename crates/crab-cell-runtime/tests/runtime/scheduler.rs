@@ -1,9 +1,18 @@
-use crab_cell_runtime::{
-    ApplicationId, CellTarget, Digest, EffectCommandIntent, IncarnationId, NamespaceId,
-    NodeAdvertisement, NodeCapacity, SchedulerFleet, SessionId, TenantId, WorkflowAction,
-    WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowStatus, effect_id,
-    install_kv_schema, install_queue_schema, install_runtime_schema, install_workflow_schema,
-    preferred_scanner, scheduler_next_due_ms, scheduler_tick,
+use crab_cell_runtime::cell::schema::install_runtime_schema;
+use crab_cell_runtime::fleet::scheduler::{
+    SchedulerFleet, preferred_scanner, scheduler_next_due_ms, scheduler_tick,
+};
+use crab_cell_runtime::identity::IncarnationId;
+use crab_cell_runtime::identity::{
+    ApplicationId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
+};
+use crab_cell_runtime::node::{NodeAdvertisement, NodeCapacity};
+use crab_cell_runtime::primitives::effects::{EffectCommandIntent, effect_id};
+use crab_cell_runtime::primitives::kv::install_kv_schema;
+use crab_cell_runtime::primitives::queue::install_queue_schema;
+use crab_cell_runtime::primitives::workflow::{
+    WorkflowAction, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowStatus,
+    install_workflow_schema,
 };
 use ed25519_dalek::SigningKey;
 
@@ -406,7 +415,7 @@ fn advertisement_with_capacity(
     capacity: NodeCapacity,
 ) -> NodeAdvertisement {
     NodeAdvertisement::sign(
-        crab_cell_runtime::NodeId::from_bytes([session; 16]),
+        crab_cell_runtime::identity::NodeId::from_bytes([session; 16]),
         SessionId::from_bytes([session; 16]),
         format!("https://node-{session}.internal:8789"),
         Digest::from_bytes([1; 32]),
@@ -419,7 +428,7 @@ fn advertisement_with_capacity(
         issued_at_ms + 10_000,
         vec![Digest::from_bytes([5; 32])],
         vec![1],
-        crab_cell_runtime::NodeFailureDomain::default(),
+        crab_cell_runtime::node::NodeFailureDomain::default(),
         capacity,
     )
     .unwrap()

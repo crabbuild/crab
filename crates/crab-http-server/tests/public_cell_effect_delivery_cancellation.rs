@@ -1,10 +1,12 @@
 use std::{sync::atomic::Ordering, time::Duration};
 
-use crab_cell_runtime::{
-    CellTarget, EffectClaimRequest, EffectLeaseOutcome, EffectState, EffectStatus, Resolution,
-    SqlBatch, SqlResultSet, SqlStatement, SqlValue, WorkflowOutcome, WorkflowStatus,
-    partition_for_shard,
+use crab_cell_runtime::cell::executor::Resolution;
+use crab_cell_runtime::identity::{CellTarget, partition_for_shard};
+use crab_cell_runtime::primitives::effects::{
+    EffectClaimRequest, EffectLeaseOutcome, EffectState, EffectStatus,
 };
+use crab_cell_runtime::primitives::sql::{SqlBatch, SqlResultSet, SqlStatement, SqlValue};
+use crab_cell_runtime::primitives::workflow::{WorkflowOutcome, WorkflowStatus};
 
 #[path = "support/reference_application.rs"]
 mod fixture;

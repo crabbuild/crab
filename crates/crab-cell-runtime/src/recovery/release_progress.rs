@@ -3,10 +3,10 @@ use crab_ltx::CellStorageLayout;
 use crab_storage::{ETag, StorageError};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    ApplicationIdentity, CellId, Digest, Error, RequestId, Result, SessionId,
-    identity::{decode_hex, encode_hex},
-};
+use crate::cell::application::ApplicationIdentity;
+use crate::identity::{CellId, Digest, RequestId, SessionId};
+use crate::identity::{decode_hex, encode_hex};
+use crate::{Error, Result};
 
 const MAX_PROGRESS_BYTES: u64 = 4 * 1024;
 const MAX_WRITE_ATTEMPTS: usize = 4;

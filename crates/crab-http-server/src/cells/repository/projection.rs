@@ -1,9 +1,9 @@
 //! Rebuildable Git browse projections stored in the repository Cell.
 
-use crab_cell_runtime::{
-    BoundedDecoder, BoundedEncoder, CellModule, Command, CommandContext, CommandResult, Query,
-    QueryContext, RegistryBuilder, SqlBatch, SqlResultSet, SqlStatement, SqlValue, WireValue,
-};
+use crab_cell_runtime::codec::{BoundedDecoder, BoundedEncoder, WireValue};
+use crab_cell_runtime::primitives::sql::{SqlBatch, SqlResultSet, SqlStatement, SqlValue};
+use crab_cell_runtime::registry::{CellModule, Command, Query, RegistryBuilder};
+use crab_cell_runtime::registry::{CommandContext, CommandResult, QueryContext};
 use serde::{Deserialize, Serialize};
 
 use super::RepositoryModule;
@@ -31,9 +31,12 @@ pub(crate) struct ProjectionBatch {
 }
 
 impl WireValue for ProjectionBatch {
-    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), crab_cell_runtime::CodecError> {
+    fn encode(
+        &self,
+        encoder: &mut BoundedEncoder,
+    ) -> Result<(), crab_cell_runtime::codec::CodecError> {
         if self.source.len() > MAX_SOURCE_BYTES || self.payload.len() > MAX_BATCH_BYTES {
-            return Err(crab_cell_runtime::CodecError::Limit);
+            return Err(crab_cell_runtime::codec::CodecError::Limit);
         }
         encoder.write_u8(self.operation)?;
         encoder.write_u64(self.epoch_id)?;
@@ -41,13 +44,15 @@ impl WireValue for ProjectionBatch {
         encoder.write_bytes(&self.payload)
     }
 
-    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, crab_cell_runtime::CodecError> {
+    fn decode(
+        decoder: &mut BoundedDecoder<'_>,
+    ) -> Result<Self, crab_cell_runtime::codec::CodecError> {
         let operation = decoder.read_u8()?;
         let epoch_id = decoder.read_u64()?;
         let source = decoder.read_bytes()?;
         let payload = decoder.read_bytes()?;
         if source.len() > MAX_SOURCE_BYTES || payload.len() > MAX_BATCH_BYTES {
-            return Err(crab_cell_runtime::CodecError::Limit);
+            return Err(crab_cell_runtime::codec::CodecError::Limit);
         }
         Ok(Self {
             operation,
@@ -64,11 +69,16 @@ pub(crate) struct ProjectionAck {
 }
 
 impl WireValue for ProjectionAck {
-    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), crab_cell_runtime::CodecError> {
+    fn encode(
+        &self,
+        encoder: &mut BoundedEncoder,
+    ) -> Result<(), crab_cell_runtime::codec::CodecError> {
         self.epoch_id.encode(encoder)
     }
 
-    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, crab_cell_runtime::CodecError> {
+    fn decode(
+        decoder: &mut BoundedDecoder<'_>,
+    ) -> Result<Self, crab_cell_runtime::codec::CodecError> {
         Ok(Self {
             epoch_id: Option::<u64>::decode(decoder)?,
         })
@@ -79,11 +89,16 @@ impl WireValue for ProjectionAck {
 pub(crate) struct ProjectionState;
 
 impl WireValue for ProjectionState {
-    fn encode(&self, _encoder: &mut BoundedEncoder) -> Result<(), crab_cell_runtime::CodecError> {
+    fn encode(
+        &self,
+        _encoder: &mut BoundedEncoder,
+    ) -> Result<(), crab_cell_runtime::codec::CodecError> {
         Ok(())
     }
 
-    fn decode(_decoder: &mut BoundedDecoder<'_>) -> Result<Self, crab_cell_runtime::CodecError> {
+    fn decode(
+        _decoder: &mut BoundedDecoder<'_>,
+    ) -> Result<Self, crab_cell_runtime::codec::CodecError> {
         Ok(Self)
     }
 }
@@ -96,13 +111,18 @@ pub(crate) struct ProjectionStateView {
 }
 
 impl WireValue for ProjectionStateView {
-    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), crab_cell_runtime::CodecError> {
+    fn encode(
+        &self,
+        encoder: &mut BoundedEncoder,
+    ) -> Result<(), crab_cell_runtime::codec::CodecError> {
         self.ready_epoch.encode(encoder)?;
         self.source_token.encode(encoder)?;
         self.generation.encode(encoder)
     }
 
-    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, crab_cell_runtime::CodecError> {
+    fn decode(
+        decoder: &mut BoundedDecoder<'_>,
+    ) -> Result<Self, crab_cell_runtime::codec::CodecError> {
         Ok(Self {
             ready_epoch: Option::<u64>::decode(decoder)?,
             source_token: Option::<String>::decode(decoder)?,

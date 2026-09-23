@@ -12,12 +12,15 @@ use std::{
 
 use rand::RngCore;
 
-use crate::{
-    ApplicationId, BlockingActivityReservation, CatalogRole, CellClient, CellTarget, Command,
-    CommandContext, CommandResult, Committed, Error, InvocationError, MutationIdentity, Observed,
-    PendingMutation, Query, QueryContext, Receipt, RegistryBuilder, RequestId, Resolution,
-    TenantId, partition_for_shard,
-};
+use crate::Error;
+use crate::cell::catalog::CatalogRole;
+use crate::cell::executor::{MutationIdentity, Resolution};
+use crate::client::{CellClient, Committed, InvocationError, Observed, PendingMutation, Receipt};
+use crate::identity::RequestId;
+use crate::identity::{ApplicationId, CellTarget, TenantId, partition_for_shard};
+use crate::primitives::activity_pool::BlockingActivityReservation;
+use crate::registry::{Command, Query, RegistryBuilder};
+use crate::registry::{CommandContext, CommandResult, QueryContext};
 
 use super::{
     ActivityClaim, ActivityCompletion, ActivityCompletionOutcome, ActivityLeaseOutcome,

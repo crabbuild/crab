@@ -4,10 +4,11 @@ use bytes::Bytes;
 use futures_util::future::join_all;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
-use crate::{
-    AppendRequest, ApplicationId, CellId, CommitTicket, DurabilityGate, Error, IncarnationId,
-    NodeId, NodeLogTransport, Result,
-};
+use crate::identity::{ApplicationId, CellId};
+use crate::identity::{IncarnationId, NodeId};
+use crate::node::log::{CommitTicket, DurabilityGate};
+use crate::node::log_transport::{AppendRequest, NodeLogTransport};
+use crate::{Error, Result};
 
 const MAX_BATCH_FRAMES: usize = 64;
 const MAX_QUEUED_SUBMISSIONS: usize = 512;
@@ -176,7 +177,7 @@ impl NodeLogShipper {
             gate,
             transport,
             limits,
-            crate::CellTelemetryHandle::default(),
+            crate::fleet::telemetry::CellTelemetryHandle::default(),
             BATCH_INTERVAL,
         )
     }
@@ -186,7 +187,7 @@ impl NodeLogShipper {
         gate: DurabilityGate,
         transport: Arc<dyn NodeLogTransport>,
         limits: crab_ltx::Limits,
-        telemetry: crate::CellTelemetryHandle,
+        telemetry: crate::fleet::telemetry::CellTelemetryHandle,
     ) -> Result<Self> {
         Self::start(gate, transport, limits, telemetry, BATCH_INTERVAL)
     }
@@ -195,7 +196,7 @@ impl NodeLogShipper {
         gate: DurabilityGate,
         transport: Arc<dyn NodeLogTransport>,
         limits: crab_ltx::Limits,
-        telemetry: crate::CellTelemetryHandle,
+        telemetry: crate::fleet::telemetry::CellTelemetryHandle,
         interval: Duration,
     ) -> Result<Self> {
         let (leader, log_epoch, members) = gate.shipping_scope()?;
@@ -346,7 +347,7 @@ async fn run_shipper(
     log_epoch: u64,
     members: Vec<NodeId>,
     max_batch_bytes: u64,
-    telemetry: crate::CellTelemetryHandle,
+    telemetry: crate::fleet::telemetry::CellTelemetryHandle,
     interval: Duration,
 ) {
     let mut pending = VecDeque::<QueuedFrame>::new();
@@ -506,9 +507,11 @@ mod tests {
     use futures_util::future::BoxFuture;
 
     use super::*;
-    use crate::{
-        FollowerReceipt, FollowerStore, LocalFollowerTransport, RetireRequest, SealRequest,
-        SessionId, TailRequest,
+    use crate::follower::FollowerReceipt;
+    use crate::follower::FollowerStore;
+    use crate::identity::SessionId;
+    use crate::node::log_transport::{
+        LocalFollowerTransport, RetireRequest, SealRequest, TailRequest,
     };
 
     #[derive(Default)]
@@ -524,7 +527,7 @@ mod tests {
         appends: Mutex<Vec<(bool, u64)>>,
     }
 
-    impl crate::CellTelemetry for RecordingTelemetry {
+    impl crate::fleet::telemetry::CellTelemetry for RecordingTelemetry {
         fn node_log_append(&self, acknowledged: bool, bytes: u64) {
             self.appends.lock().unwrap().push((acknowledged, bytes));
         }
@@ -703,7 +706,7 @@ mod tests {
             gate.clone(),
             transport.clone(),
             crab_ltx::Limits::default(),
-            crate::CellTelemetryHandle::default(),
+            crate::fleet::telemetry::CellTelemetryHandle::default(),
             Duration::from_millis(50),
         )
         .unwrap();
@@ -716,11 +719,11 @@ mod tests {
         let second = second.unwrap();
         assert_eq!(
             gate.prove(first).await.unwrap().source(),
-            crate::DurabilitySource::Fleet
+            crate::node::log::DurabilitySource::Fleet
         );
         assert_eq!(
             gate.prove(second).await.unwrap().source(),
-            crate::DurabilitySource::Fleet
+            crate::node::log::DurabilitySource::Fleet
         );
         shipper.shutdown().await.unwrap();
 
@@ -736,7 +739,7 @@ mod tests {
         gate.activate_fleet().unwrap();
         let transport = Arc::new(RecordingTransport::default());
         let telemetry = Arc::new(RecordingTelemetry::default());
-        let handle = crate::CellTelemetryHandle::default();
+        let handle = crate::fleet::telemetry::CellTelemetryHandle::default();
         handle.install(telemetry.clone()).unwrap();
         let shipper = NodeLogShipper::new_with_telemetry(
             gate,
@@ -765,7 +768,7 @@ mod tests {
             gate.clone(),
             transport.clone(),
             crab_ltx::Limits::default(),
-            crate::CellTelemetryHandle::default(),
+            crate::fleet::telemetry::CellTelemetryHandle::default(),
             Duration::from_millis(50),
         )
         .unwrap();
@@ -773,7 +776,7 @@ mod tests {
         let ticket = shipper.submit(submission(&cuts)).await.unwrap();
         assert_eq!(
             gate.prove(ticket).await.unwrap().source(),
-            crate::DurabilitySource::Fleet
+            crate::node::log::DurabilitySource::Fleet
         );
         shipper.shutdown().await.unwrap();
 
@@ -828,7 +831,7 @@ mod tests {
 
         assert_eq!(
             gate.prove(second).await.unwrap().source(),
-            crate::DurabilitySource::Fleet
+            crate::node::log::DurabilitySource::Fleet
         );
         assert_eq!(store.seal(leader, 2).await.unwrap().base_sequence, 2);
         assert_eq!(store.read_tail(leader, 2, 2).await.unwrap().len(), 1);
@@ -865,7 +868,7 @@ mod tests {
             gate.prove_object(ticket).unwrap();
             assert_eq!(
                 gate.prove(ticket).await.unwrap().source(),
-                crate::DurabilitySource::Object
+                crate::node::log::DurabilitySource::Object
             );
         }
     }
@@ -880,7 +883,7 @@ mod tests {
             gate.clone(),
             transport,
             crab_ltx::Limits::default(),
-            crate::CellTelemetryHandle::default(),
+            crate::fleet::telemetry::CellTelemetryHandle::default(),
             Duration::from_millis(1),
         )
         .unwrap();
@@ -903,7 +906,7 @@ mod tests {
         gate.prove_object(ticket).unwrap();
         assert_eq!(
             gate.prove(ticket).await.unwrap().source(),
-            crate::DurabilitySource::Object
+            crate::node::log::DurabilitySource::Object
         );
     }
 
@@ -918,7 +921,7 @@ mod tests {
             gate.clone(),
             transport,
             crab_ltx::Limits::default(),
-            crate::CellTelemetryHandle::default(),
+            crate::fleet::telemetry::CellTelemetryHandle::default(),
             Duration::from_millis(1),
         )
         .unwrap();
@@ -926,7 +929,7 @@ mod tests {
         let started = tokio::time::Instant::now();
         let ticket = shipper.submit(submission(&cuts)).await.unwrap();
         let proof = gate.prove(ticket).await.unwrap();
-        assert_eq!(proof.source(), crate::DurabilitySource::Fleet);
+        assert_eq!(proof.source(), crate::node::log::DurabilitySource::Fleet);
         assert!(started.elapsed() >= delay);
         shipper.shutdown().await.unwrap();
     }
@@ -952,7 +955,7 @@ mod tests {
             gate.clone(),
             transport,
             crab_ltx::Limits::default(),
-            crate::CellTelemetryHandle::default(),
+            crate::fleet::telemetry::CellTelemetryHandle::default(),
             Duration::from_millis(1),
         )
         .unwrap();
@@ -966,7 +969,7 @@ mod tests {
         gate.prove_object(ticket).unwrap();
         assert_eq!(
             gate.prove(ticket).await.unwrap().source(),
-            crate::DurabilitySource::Object
+            crate::node::log::DurabilitySource::Object
         );
     }
 
@@ -1016,7 +1019,7 @@ mod tests {
         assert_eq!(ticket.first_sequence(), 1);
         assert_eq!(
             gate.prove(ticket).await.unwrap().source(),
-            crate::DurabilitySource::Fleet
+            crate::node::log::DurabilitySource::Fleet
         );
         shipper.shutdown().await.unwrap();
     }

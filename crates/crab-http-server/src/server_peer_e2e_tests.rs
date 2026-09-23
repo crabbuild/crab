@@ -2,10 +2,11 @@
 
 use super::*;
 
-use crab_cell_runtime::CellStorageLayout;
-use crab_cell_runtime::{
-    ApplicationId, ApplicationIdentity, CellAuthority, Digest, NodeDirectory, SessionId, TenantId,
-};
+use crab_cell_runtime::cell::application::ApplicationIdentity;
+use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::identity::{ApplicationId, Digest, SessionId, TenantId};
+use crab_cell_runtime::ltx::CellStorageLayout;
+use crab_cell_runtime::node::NodeDirectory;
 use crab_storage::{ObjectStoreCredentials, build_explicit_store};
 use object_store::{memory::InMemory, path::Path as ObjectPath};
 use serde_json::Value;
@@ -155,7 +156,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             peer_tls.signing_key().clone(),
             ingress_session,
             "https://localhost:2".into(),
-            crab_cell_runtime::NodeFailureDomain::default(),
+            crab_cell_runtime::node::NodeFailureDomain::default(),
             peer_tls.fleet(),
             peer_tls.certificate(),
             image,
@@ -173,7 +174,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             peer_tls.signing_key().clone(),
             owner_session,
             management_endpoint.clone(),
-            crab_cell_runtime::NodeFailureDomain::default(),
+            crab_cell_runtime::node::NodeFailureDomain::default(),
             peer_tls.fleet(),
             peer_tls.certificate(),
             image,
@@ -199,13 +200,13 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         owner_runtime.clone(),
         crate::cells::RepositoryCellPeer::new(
             directory.clone(),
-            Arc::new(crab_cell_runtime::PeerSigner::new(
+            Arc::new(crab_cell_runtime::peer::PeerSigner::new(
                 owner_session,
                 registry.release_digest(),
                 peer_tls.signing_key().clone(),
             )),
             Arc::new(UnavailablePeer),
-            crab_cell_runtime::Owner {
+            crab_cell_runtime::control::Owner {
                 session: owner_session,
                 endpoint: management_endpoint,
             },
@@ -250,7 +251,13 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             owner_session,
             directory.clone(),
             Arc::clone(&registry),
-            Arc::new(crab_cell_runtime::ReleaseStore::new(cell_layout.clone(), identity).unwrap()),
+            Arc::new(
+                crab_cell_runtime::recovery::release::ReleaseStore::new(
+                    cell_layout.clone(),
+                    identity,
+                )
+                .unwrap(),
+            ),
             LocalCellResolver::new(cell_layout.clone(), identity, owner_runtime.clone()),
             Arc::new(UnavailablePeer),
         )),
@@ -290,13 +297,13 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         ingress_runtime.clone(),
         crate::cells::RepositoryCellPeer::new(
             directory.clone(),
-            Arc::new(crab_cell_runtime::PeerSigner::new(
+            Arc::new(crab_cell_runtime::peer::PeerSigner::new(
                 ingress_session,
                 registry.release_digest(),
                 peer_tls.signing_key().clone(),
             )),
             round_trip,
-            crab_cell_runtime::Owner {
+            crab_cell_runtime::control::Owner {
                 session: ingress_session,
                 endpoint: "https://localhost:2".into(),
             },
@@ -596,7 +603,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     let stale_owner = authority.load(target.cell_id()).await.unwrap().unwrap();
     let takeover = stale_owner
         .value()
-        .takeover(crab_cell_runtime::Owner {
+        .takeover(crab_cell_runtime::control::Owner {
             session: ingress_session,
             endpoint: "https://localhost:2".into(),
         })
@@ -605,7 +612,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .transition(
             &stale_owner,
             takeover,
-            crab_cell_runtime::Transition::Takeover,
+            crab_cell_runtime::control::Transition::Takeover,
         )
         .await
         .unwrap();
@@ -785,7 +792,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     let released = authority.load(target.cell_id()).await.unwrap().unwrap();
     assert_eq!(
         released.value().state,
-        crab_cell_runtime::ControlState::Idle
+        crab_cell_runtime::control::ControlState::Idle
     );
     assert!(released.value().owner.is_none());
     assert!(

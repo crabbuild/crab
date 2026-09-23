@@ -10,19 +10,28 @@ mod descriptor;
 
 use descriptor::{encode_release, requires_persisted_work_inventory, verify_rolling_compatibility};
 
+use crate::cell::catalog::CatalogRole;
+use crate::cell::executor::{HandlerOutcome, MutationIdentity};
+use crate::client::{CellClient, Committed, InvocationError};
+use crate::codec::WireValue;
+use crate::codec::{decode_wire, encode_wire};
+use crate::identity::{ApplicationId, CellId, CellTarget, Digest, NamespaceId, TenantId};
+use crate::peer::EffectPeerClient;
+use crate::primitives::activity_pool::BlockingActivityReservation;
 use crate::primitives::effects::EffectBatch;
-use crate::{
-    ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome, ActivitySupervisor,
-    ActivitySupervisorError, ActivitySupport, ApplicationId, BlockingActivityHandler,
-    BlockingActivityReservation, CatalogRole, CellClient, CellId, CellTarget, Committed, Digest,
-    EffectCommandIntent, EffectModule, EffectPeerClient, EffectRunOutcome, EffectSupervisor,
-    EffectSupervisorError, Error, HandlerOutcome, InvocationError, MaintenanceModule,
-    MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest, MutationIdentity,
-    NamespaceId, Result, SqlBatch, SqlResultSet, TenantId, WireValue, WorkflowActivities,
-    WorkflowActivityModule, WorkflowDefinition,
-    codec::{decode_wire, encode_wire},
-    sql_batch, sql_query_batch,
+use crate::primitives::effects::{
+    EffectCommandIntent, EffectModule, EffectRunOutcome, EffectSupervisor, EffectSupervisorError,
 };
+use crate::primitives::maintenance::{
+    MaintenanceModule, MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest,
+};
+use crate::primitives::sql::{SqlBatch, SqlResultSet, sql_batch, sql_query_batch};
+use crate::primitives::workflow::{
+    ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome, ActivitySupervisor,
+    ActivitySupervisorError, ActivitySupport, BlockingActivityHandler, WorkflowActivities,
+    WorkflowActivityModule, WorkflowDefinition,
+};
+use crate::{Error, Result};
 
 const MAX_DESCRIPTOR_BYTES: usize = 256 * 1024;
 const MAX_MODULES: usize = 128;
@@ -419,7 +428,8 @@ pub struct RegistryBuilder {
     queue_bindings: Vec<QueueBinding>,
     blob_bindings: Vec<PrimitiveBinding>,
     cron_bindings: Vec<CronBinding>,
-    maintenance_bindings: BTreeMap<&'static str, Option<crate::QueueDeadLetterTarget>>,
+    maintenance_bindings:
+        BTreeMap<&'static str, Option<crate::primitives::queue::QueueDeadLetterTarget>>,
     maintenance_runners: BTreeMap<&'static str, MaintenanceRunner>,
     effect_runners: BTreeMap<&'static str, EffectRunner>,
     maintenance_operations: BTreeMap<&'static str, (u32, u32)>,
@@ -488,7 +498,7 @@ impl RegistryBuilder {
         namespace: NamespaceId,
         send_command_id: u32,
         codec_version: u32,
-        dead_letter: Option<crate::QueueDeadLetterTarget>,
+        dead_letter: Option<crate::primitives::queue::QueueDeadLetterTarget>,
     ) -> Result<()> {
         if self
             .queue_bindings
@@ -511,7 +521,7 @@ impl RegistryBuilder {
         &mut self,
         module: &'static str,
         namespace: NamespaceId,
-        targets: &'static [crate::CronTarget],
+        targets: &'static [crate::primitives::cron::CronTarget],
     ) -> Result<()> {
         if self
             .cron_bindings
@@ -548,7 +558,7 @@ impl RegistryBuilder {
     pub(crate) fn bind_maintenance_module(
         &mut self,
         module: &'static str,
-        queue_dead_letter: Option<crate::QueueDeadLetterTarget>,
+        queue_dead_letter: Option<crate::primitives::queue::QueueDeadLetterTarget>,
     ) -> Result<()> {
         if self
             .maintenance_bindings
@@ -903,14 +913,14 @@ struct QueueBinding {
     namespace: NamespaceId,
     send_command_id: u32,
     codec_version: u32,
-    dead_letter: Option<crate::QueueDeadLetterTarget>,
+    dead_letter: Option<crate::primitives::queue::QueueDeadLetterTarget>,
 }
 
 #[derive(Clone, Copy)]
 struct CronBinding {
     module: &'static str,
     namespace: NamespaceId,
-    targets: &'static [crate::CronTarget],
+    targets: &'static [crate::primitives::cron::CronTarget],
 }
 
 #[derive(Clone, Copy)]
@@ -1598,7 +1608,7 @@ fn typed_activity<A: ActivityHandler>(context: ActivityContext, input: Vec<u8>) 
             ActivityExecution::Completed(result) => result,
             ActivityExecution::Failed { details, .. } => details,
         };
-        if payload.len() > crate::MAX_ACTIVITY_PAYLOAD_BYTES {
+        if payload.len() > crate::primitives::workflow::MAX_ACTIVITY_PAYLOAD_BYTES {
             return Err(Error::Command("activity handler result exceeds 256 KiB"));
         }
         Ok(outcome)
@@ -1614,7 +1624,7 @@ fn typed_blocking_activity<A: BlockingActivityHandler>(
         ActivityExecution::Completed(result) => result,
         ActivityExecution::Failed { details, .. } => details,
     };
-    if payload.len() > crate::MAX_ACTIVITY_PAYLOAD_BYTES {
+    if payload.len() > crate::primitives::workflow::MAX_ACTIVITY_PAYLOAD_BYTES {
         return Err(Error::Command("activity handler result exceeds 256 KiB"));
     }
     Ok(outcome)
@@ -2068,7 +2078,7 @@ fn validate_primitive_bindings(
 }
 
 fn validate_maintenance_bindings(
-    maintenance: &BTreeMap<&'static str, Option<crate::QueueDeadLetterTarget>>,
+    maintenance: &BTreeMap<&'static str, Option<crate::primitives::queue::QueueDeadLetterTarget>>,
     queues: &[QueueBinding],
 ) -> Result<()> {
     for (module, configured) in maintenance {

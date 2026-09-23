@@ -1,11 +1,14 @@
 use std::marker::PhantomData;
 
-use crate::{
-    ApplicationId, BoundedDecoder, BoundedEncoder, CatalogRole, CellClient, CellTarget, CodecError,
-    Command, CommandContext, CommandResult, Committed, InvocationError, MaintenanceModule,
-    NamespaceId, Observed, Query, QueryContext, Receipt, RegistryBuilder, TenantId, WireValue,
-    partition_for_shard, register_maintenance, shard_for_scope,
+use crate::cell::catalog::CatalogRole;
+use crate::client::{CellClient, Committed, InvocationError, Observed, Receipt};
+use crate::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use crate::identity::{
+    ApplicationId, CellTarget, NamespaceId, TenantId, partition_for_shard, shard_for_scope,
 };
+use crate::primitives::maintenance::{MaintenanceModule, register_maintenance};
+use crate::registry::{Command, Query, RegistryBuilder};
+use crate::registry::{CommandContext, CommandResult, QueryContext};
 
 use super::{
     CronInvocation, CronMutation, CronMutationOutcome, CronQuery, CronQueryResult, CronSchedule,
@@ -111,7 +114,7 @@ impl<M: CronModule> CronNamespace<M> {
     /// Applies one durable schedule mutation on its deterministic shard.
     pub async fn mutate(
         &self,
-        identity: crate::MutationIdentity,
+        identity: crate::cell::executor::MutationIdentity,
         mutation: CronMutation,
     ) -> std::result::Result<Committed<CronMutationOutcome>, InvocationError<CronMutationOutcome>>
     {

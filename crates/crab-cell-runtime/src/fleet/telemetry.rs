@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use crate::DurabilitySource;
+use crate::node::log::DurabilitySource;
 
 /// Outcome of an actor-owned resident route lookup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
