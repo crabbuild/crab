@@ -390,13 +390,46 @@ impl Drop for ResourceReservation {
     }
 }
 
+/// Reports one host that outlived the runtime which owned its ledger.
+///
+/// The LTX layer consults these admissions on every disk and slot operation, so
+/// a stale host would otherwise log per call; one line names the runtime
+/// session that must be matched against the deployment's shut-down sessions.
+fn warn_dropped_ledger(
+    session: crate::identity::SessionId,
+    warned: &std::sync::atomic::AtomicBool,
+    operation: &'static str,
+) {
+    if !warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::warn!(
+            session = %crate::identity::encode_hex(session.as_bytes()),
+            operation,
+            "runtime ledger closed; a host outlived the Cell runtime that owned it"
+        );
+    }
+}
+
 pub(crate) struct LedgerDiskAdmission {
-    pub(crate) state: Weak<Mutex<ResourceSnapshot>>,
+    state: Weak<Mutex<ResourceSnapshot>>,
+    session: crate::identity::SessionId,
+    warned: std::sync::atomic::AtomicBool,
+}
+
+impl LedgerDiskAdmission {
+    /// Binds one disk admission to the ledger of the runtime that installs it.
+    pub(crate) fn new(session: crate::identity::SessionId, ledger: &ResourceLedger) -> Self {
+        Self {
+            state: ledger.weak(),
+            session,
+            warned: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
 }
 
 impl crab_ltx::DiskBudgetAdmission for LedgerDiskAdmission {
     fn reconcile(&self, bytes: u64) -> crab_ltx::Result<()> {
         let Some(state) = self.state.upgrade() else {
+            warn_dropped_ledger(self.session, &self.warned, "disk reconcile");
             return Err(crab_ltx::CrabError::InvalidState("runtime ledger closed"));
         };
         ResourceLedger { state }
@@ -411,7 +444,20 @@ impl crab_ltx::DiskBudgetAdmission for LedgerDiskAdmission {
 }
 
 pub(crate) struct LedgerHostResourceAdmission {
-    pub(crate) state: Weak<Mutex<ResourceSnapshot>>,
+    state: Weak<Mutex<ResourceSnapshot>>,
+    session: crate::identity::SessionId,
+    warned: std::sync::atomic::AtomicBool,
+}
+
+impl LedgerHostResourceAdmission {
+    /// Binds one host admission to the ledger of the runtime that installs it.
+    pub(crate) fn new(session: crate::identity::SessionId, ledger: &ResourceLedger) -> Self {
+        Self {
+            state: ledger.weak(),
+            session,
+            warned: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
 }
 
 struct LedgerHostResourcePermit {
@@ -427,6 +473,7 @@ impl crab_ltx::HostResourceAdmission for LedgerHostResourceAdmission {
         units: u32,
     ) -> crab_ltx::Result<Box<dyn crab_ltx::HostResourcePermit>> {
         let Some(state) = self.state.upgrade() else {
+            warn_dropped_ledger(self.session, &self.warned, "host resource reserve");
             return Err(crab_ltx::CrabError::InvalidState("runtime ledger closed"));
         };
         let units = usize::try_from(units)
@@ -549,9 +596,10 @@ mod tests {
         let budget = crab_ltx::DiskBudget::new(20);
         let existing = budget.try_reserve(1).unwrap();
         budget
-            .install_admission(Arc::new(LedgerDiskAdmission {
-                state: ledger.weak(),
-            }))
+            .install_admission(Arc::new(LedgerDiskAdmission::new(
+                crate::identity::SessionId::from_bytes([7; 16]),
+                &ledger,
+            )))
             .unwrap();
         assert_eq!(ledger.snapshot().unwrap().used.disk_bytes(), 1);
         drop(existing);
@@ -586,9 +634,10 @@ mod tests {
                 .with_dirty_jobs(1)
                 .with_scratch_units(2),
         );
-        let admission = LedgerHostResourceAdmission {
-            state: ledger.weak(),
-        };
+        let admission = LedgerHostResourceAdmission::new(
+            crate::identity::SessionId::from_bytes([8; 16]),
+            &ledger,
+        );
         let io = admission
             .reserve(crab_ltx::HostResourceKind::Io, 1)
             .unwrap();
@@ -610,5 +659,31 @@ mod tests {
         drop(scratch);
         drop(io);
         assert_eq!(ledger.snapshot().unwrap().used, ResourceCost::zero());
+    }
+
+    #[test]
+    fn admissions_fail_closed_once_their_runtime_ledger_is_gone() {
+        let session = crate::identity::SessionId::from_bytes([9; 16]);
+        let ledger = ResourceLedger::new(ResourceCost::zero().with_disk_bytes(10).with_io_slots(1));
+        let disk = LedgerDiskAdmission::new(session, &ledger);
+        let host = LedgerHostResourceAdmission::new(session, &ledger);
+        drop(ledger);
+
+        let closed = match crab_ltx::DiskBudgetAdmission::reconcile(&disk, 1) {
+            Ok(()) => panic!("a closed ledger reconciled disk bytes"),
+            Err(error) => error,
+        };
+        assert!(
+            closed.to_string().contains("runtime ledger closed"),
+            "{closed}"
+        );
+        let closed = match host.reserve(crab_ltx::HostResourceKind::Io, 1) {
+            Ok(_) => panic!("a closed ledger admitted host slots"),
+            Err(error) => error,
+        };
+        assert!(
+            closed.to_string().contains("runtime ledger closed"),
+            "{closed}"
+        );
     }
 }
