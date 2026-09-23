@@ -1,3 +1,5 @@
+use crate::node::directory::RecoveryCandidateRecord;
+use crate::node::directory::RecoveryCandidateWindow;
 use std::sync::Arc;
 
 use bytes::Bytes;
