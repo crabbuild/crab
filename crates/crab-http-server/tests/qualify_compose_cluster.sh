@@ -1292,11 +1292,11 @@ fallback_node_json() {
 stop_fallback_member() {
   case "$1" in
     server)
-      # Freezing A removes its heartbeat and follower endpoint without stopping
-      # the dedicated Compose namespace used by the remaining nodes.
+      # The base service owns the Compose namespace the proxy shares, so freeze
+      # it instead of removing the container its namespace depends on.
       freeze_service server
       ;;
-    server-c|server-d)
+    server-b|server-c|server-d)
       kill_service "$1"
       remove_stopped_service "$1"
       ;;
