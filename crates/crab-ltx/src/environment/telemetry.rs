@@ -1,10 +1,6 @@
 //! Replica-only telemetry and scratch-monitor contracts.
 
-use std::{
-    io,
-    time::Duration,
-};
-
+use std::{io, time::Duration};
 
 /// Finite replica phases exposed to an embedding runtime.
 #[cfg(feature = "replica")]

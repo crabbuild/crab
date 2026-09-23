@@ -355,6 +355,9 @@ crate-interface-check:
 crate-behavior-check:
 	@$(PYTHON) scripts/check-crate-behavior.py --cargo "$(CARGO)"
 
+cell-ltx-layout-check:
+	@$(PYTHON) scripts/check-cell-ltx-layout.py
+
 shipped-binary-version-check:
 	@$(PYTHON) scripts/release/check-shipped-binary-versions.py --cargo "$(CARGO)"
 

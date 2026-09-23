@@ -26,9 +26,6 @@ pub use resources::{HostResourceAdmission, HostResourceKind, HostResourcePermit}
 #[cfg(feature = "replica")]
 pub use telemetry::{LtxPhase, LtxReadOrigin, LtxRequestOutcome, LtxTelemetry, ScratchMonitor};
 
-
-
-
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "replica")]
@@ -37,7 +34,10 @@ mod tests {
     use std::{
         io,
         path::{Path, PathBuf},
-        sync::{Arc, atomic::{AtomicBool, Ordering}},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
         time::Duration,
     };
 

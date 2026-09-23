@@ -26,6 +26,11 @@
   tree, consumer migration, prelude freeze). The Cellule synthesis is a
   separate change in the Cellule repository (see "Cellule handoff"); this plan
   stops at the Crab PRs.
+- Status 2026-09-23: implemented as one branch
+  (`codex/cell-ltx-layout-reorganization`) on user request instead of two PRs.
+  Stages 1–3, 5, 6a–6c are complete; stage 4 is complete for `node`,
+  `registry`, `crab-cell-host`, and `crab-ltx`'s environment, and remains for
+  `actor.rs` and `qualification.rs`.
 
 ## Why this matters
 
@@ -524,3 +529,46 @@ the checker, not this table, is the source of truth after stage 5.
 Update this plan's status to TODO, IN PROGRESS, DONE, or BLOCKED with the exact
 failed gate as stages land. Once stage 5 is green, `tests-allow-list.txt` and
 the crate guides own the rules; this plan becomes history.
+
+## Implementation record (2026-09-23)
+
+Landed on `codex/cell-ltx-layout-reorganization`:
+
+- Stage 1: `src/test_support.rs` behind `test-support`; four `#[path]` includes
+  deleted; `crab-cell-app` and `crab-http-server` enable the feature through
+  dev-dependencies; `fs4` dropped from `crab-cell-app`.
+- Stage 2: six runtime suites (`runtime`, `primitives`, `protocol`,
+  `contracts`, `fleet`, `qualification`), plus `cell`/`ltx`/`host` in
+  `crab-ltx`, `reference_application`/`contracts` in `crab-cell-app`, and
+  `node` in `crab-cell-host`; one canonical `fence_session`; 473 runtime tests
+  preserved.
+- Stage 3: application, authority, node-log transport, pressure, cron API,
+  workflow activity codec, backup pin, and release-progress tests moved to
+  `tests/`; `release_progress` now uses public accessors. Everything that
+  asserts private state stays in `src/` and is listed in the allow-lists.
+- Stage 5: crate guides and `CLAUDE.md` symlinks for the two crates that lacked
+  them, crate README, allow-lists, `crab/scripts/check-cell-ltx-layout.py`
+  (also a `cell-ltx-layout-check` make target), CI steps, and the refreshed
+  evidence map in `docs/delivery.md`.
+- Stage 6: subsystem module tree with 15 public modules; consumers import
+  module paths; the root keeps a 59-name prelude frozen in
+  `crates/crab-cell-runtime/api-prelude.txt`; `crab_ltx` types are reached
+  through `crab_cell_runtime::ltx`.
+
+Deviations from the plan text, all deliberate:
+
+- Suite roots are `tests/<suite>.rs` with modules in `tests/<suite>/` instead of
+  `tests/<suite>/main.rs`. Crate-root file semantics would otherwise force a
+  `#[path]` attribute for the shared `tests/support/` harness; the chosen form
+  keeps every suite `#[path]`-free.
+- Root re-exports stay in `lib.rs` because `pub use` inside a submodule would
+  change every path; `api-prelude.txt` is the frozen list the checker compares
+  against.
+- Fixtures used by exactly one suite stay in that suite; only the shared
+  `fence_session` lives in `tests/support/`.
+- `tests/blob_cron.rs` was not split: its single owner-loss test covers Blob and
+  Cron in one scenario.
+- `crab-cell-app` keeps its application-builder tests in `src/` (allow-listed):
+  they drive the private registry validation path.
+- Stage 4 still owes `src/cell/actor.rs` and `src/qualification.rs` splits;
+  both compile and are covered by the suites above.

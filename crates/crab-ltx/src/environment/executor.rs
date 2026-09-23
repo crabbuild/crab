@@ -2,7 +2,6 @@
 
 use std::io;
 
-
 /// Blocking dispatch boundary; success means the job was accepted for execution.
 ///
 /// The dispatcher must eventually run or drop the job. Dropped jobs and panics

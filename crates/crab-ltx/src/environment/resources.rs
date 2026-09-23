@@ -1,6 +1,5 @@
 //! Replica-only host resource admission contracts.
 
-
 /// Resource class charged by an embedding runtime for replica-host work.
 #[cfg(feature = "replica")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
