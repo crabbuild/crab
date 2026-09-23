@@ -461,8 +461,9 @@ volume is unavailable, stop and report rather than using a local `target/`.
 
 - [ ] No `#[path]` attributes in the four crates; `process_store` is a gated
       `test_support` module and `crab-cell-app` carries no file-include dev-deps.
-- [ ] `crab-cell-app` and `crab-cell-host` have zero `#[cfg(test)]` modules in
-      `src/`.
+- [ ] `crab-cell-host` has zero `#[cfg(test)]` modules in `src/`;
+      `crab-cell-app` keeps one allow-listed module that drives the private
+      registry validation path, which the public API does not expose.
 - [ ] `crab-cell-runtime` and `crab-ltx` remaining in-src tests are exactly the
       allow-list, each with a named private item.
 - [ ] Suites are capability-named with `main.rs` roots, one shared
