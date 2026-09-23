@@ -1,7 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    },
     time::Duration,
 };
 
@@ -9,7 +12,7 @@ use crab_cell_runtime::CellStorageLayout;
 use crab_cell_runtime::{
     ACTIVE_CELL_NATIVE_BYTES, ACTIVE_CELL_PAGE_CACHE_BYTES, ApplicationIdentity, CatalogProof,
     CatalogRole, CellAuthority, CellCatalog, CellClient, CellDescription, CellHandle, CellReplica,
-    CellRuntime, CellTarget, CellTransferDemand, ControlState, EffectPeerClient,
+    CellRuntime, CellTarget, CellTransferDemand, ControlState, EffectPeerClient, FleetBalance,
     MAX_ACTIVITY_PAYLOAD_BYTES, MigrationPeerClient, NodeByteReservation, NodeDirectory,
     NodeJobReservation, Owner, PeerOperation, PeerPrincipal, PeerRoundTrip, PeerSigner,
     PersistedWorkInventory, PlacementObservation, PlacementPlanner, Registry, ReleaseState,
@@ -55,6 +58,10 @@ pub(crate) struct RepositoryCellRouter {
     activation: Arc<[Mutex<()>]>,
     operation: Arc<[Arc<RwLock<()>>]>,
     rebalance_evidence: Arc<Mutex<HashMap<crab_cell_runtime::CellId, RebalanceEvidence>>>,
+    // Latest instant this node dispatched a movement batch. A balancing view
+    // sampled at or before it may predate the released ownership, so the whole
+    // fleet view is discarded until every member samples again.
+    rebalance_settled_at_ms: Arc<AtomicI64>,
 }
 
 #[derive(Clone)]
@@ -120,6 +127,7 @@ impl RepositoryCellRouter {
                 .collect::<Vec<_>>()
                 .into(),
             rebalance_evidence: Arc::new(Mutex::new(HashMap::new())),
+            rebalance_settled_at_ms: Arc::new(AtomicI64::new(0)),
         })
     }
 
@@ -156,6 +164,25 @@ impl RepositoryCellRouter {
                 PlacementObservation::from_signed_advertisement(node, now_ms, false).ok()
             })
             .collect::<Vec<_>>();
+        // Ownership balancing counts the whole fleet. One live node that
+        // cannot publish the signed placement block leaves a partial total that
+        // lowers every target, so balancing waits for a complete view; drains
+        // and material headroom gain keep their own per-node gates.
+        let complete_view = observations.len() == live.len();
+        let balance: Option<FleetBalance> = if complete_view {
+            self.placement.fleet_balance(
+                now_ms,
+                &observations,
+                self.rebalance_settled_at_ms.load(Ordering::Acquire),
+            )?
+        } else {
+            tracing::debug!(
+                live = live.len(),
+                observed = observations.len(),
+                "Cell balancing waits for a complete signed placement view"
+            );
+            None
+        };
         let Some(source) = observations
             .iter()
             .find(|node| node.session == self.peer.owner.session)
@@ -214,9 +241,9 @@ impl RepositoryCellRouter {
             .collect::<Vec<_>>();
         drop(evidence);
         let mut progress = RebalanceProgress::default();
-        for intent in self
-            .placement
-            .plan_transfers(now_ms, &observations, &demands)?
+        for intent in
+            self.placement
+                .plan_transfers(now_ms, &observations, &demands, balance.as_ref())?
         {
             let Some(node) = live
                 .iter()
@@ -279,6 +306,10 @@ impl RepositoryCellRouter {
             } else {
                 progress.activated += 1;
             }
+        }
+        if progress.released > 0 {
+            self.rebalance_settled_at_ms
+                .store(now_ms, Ordering::Release);
         }
         Ok(progress)
     }
@@ -1640,6 +1671,255 @@ mod tests {
         let owned = authority.load(target.cell_id()).await.unwrap().unwrap();
         assert_eq!(owned.value().owner.as_ref(), Some(&owner(third_session)));
         third_runtime.shutdown().await.unwrap();
+    }
+
+    fn fleet_advertisement(
+        registry: &Registry,
+        fleet: crab_cell_runtime::Digest,
+        image: crab_cell_runtime::Digest,
+        session: SessionId,
+        key: &SigningKey,
+        issued_at_ms: i64,
+        active_cells: u32,
+        max_active_cells: u32,
+    ) -> NodeAdvertisement {
+        NodeAdvertisement::sign(
+            crab_cell_runtime::NodeId::from_bytes(*session.as_bytes()),
+            session,
+            owner(session).endpoint,
+            fleet,
+            crab_cell_runtime::Digest::from_bytes([49; 32]),
+            image,
+            registry.release_digest(),
+            key,
+            1,
+            issued_at_ms,
+            issued_at_ms + 15_000,
+            registry.module_digests(),
+            vec![1],
+            crab_cell_runtime::NodeFailureDomain::default(),
+            NodeCapacity {
+                free_memory_bytes: 16 * 1024 * 1024,
+                free_disk_bytes: 10 * 1024 * 1024 * 1024,
+                job_credits: 10,
+                ..NodeCapacity::default()
+            },
+        )
+        .unwrap()
+        .with_placement_capacity(
+            crab_cell_runtime::NodePlacementCapacity {
+                memory_capacity_bytes: 16 * 1024 * 1024,
+                disk_capacity_bytes: 10 * 1024 * 1024 * 1024,
+                active_cells,
+                max_active_cells,
+                running_jobs: 0,
+                job_capacity: 10,
+                publication_backlog: 0,
+                hydration_backlog: 0,
+                primitive_backlog: 0,
+            }
+            .validated()
+            .unwrap(),
+            key,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn fleet_rebalance_donates_ownership_surplus_without_headroom_gain() {
+        let identity = ApplicationIdentity::new(
+            TenantId::from_bytes([51; 16]),
+            ApplicationId::from_bytes([52; 16]),
+        );
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("fleet-ownership-balance"),
+            *identity.application().as_bytes(),
+        );
+        let registry = Arc::new(crate::cells::compiled_registry().unwrap());
+        bootstrap_release_at(
+            &layout,
+            identity,
+            &registry,
+            &format!("sha256:{}", "d".repeat(64)),
+        )
+        .await
+        .unwrap();
+        let source = SessionId::from_bytes([53; 16]);
+        let receiver = SessionId::from_bytes([54; 16]);
+        let source_key = SigningKey::from_bytes(&[53; 32]);
+        let receiver_key = SigningKey::from_bytes(&[54; 32]);
+        let source_runtime =
+            CellRuntime::new(SqlWorkerPool::new(1, 4).unwrap(), 16 * 1024 * 1024, source).unwrap();
+        let receiver_runtime = CellRuntime::new(
+            SqlWorkerPool::new(1, 4).unwrap(),
+            16 * 1024 * 1024,
+            receiver,
+        )
+        .unwrap();
+        let source_dir = tempfile::TempDir::new().unwrap();
+        let receiver_dir = tempfile::TempDir::new().unwrap();
+        let mut handles = Vec::new();
+        for (index, repository) in [[55_u8; 16], [56_u8; 16]].into_iter().enumerate() {
+            let target = CellTarget::new(
+                identity.tenant(),
+                identity.application(),
+                REPOSITORY_NAMESPACE,
+                &repository,
+            )
+            .unwrap();
+            let (proof, authority) =
+                crate::cells::provision_repository(&layout, identity, &registry, &target)
+                    .await
+                    .unwrap();
+            let observed = authority
+                .create_initial(
+                    &proof,
+                    IncarnationId::from_bytes([60 + index as u8; 16]),
+                    owner(source),
+                )
+                .await
+                .unwrap();
+            handles.push(
+                source_runtime
+                    .bootstrap(
+                        proof,
+                        CellReplica::new(
+                            layout.clone(),
+                            *target.cell_id().as_bytes(),
+                            *observed.value().incarnation.as_bytes(),
+                            repository_replica_limits(),
+                        )
+                        .unwrap(),
+                        authority,
+                        observed,
+                        source_dir.path().join(format!("balance-{index}.sqlite")),
+                        |transaction| initialize_repository_schema(transaction).map_err(Into::into),
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let destination = router(
+            identity,
+            layout.clone(),
+            Arc::clone(&registry),
+            receiver_runtime.clone(),
+            receiver,
+            receiver_dir.path().to_path_buf(),
+        );
+        let fleet = crab_cell_runtime::Digest::from_bytes([21; 32]);
+        let image = crab_cell_runtime::Digest::from_bytes([22; 32]);
+        let directory = NodeDirectory::new(layout.clone(), fleet, image, registry.release_digest());
+        let now_ms = crate::cells::unix_now_ms().unwrap() + 65_000;
+        // Both nodes publish the same headroom ratios, so no material score
+        // gain can move a Cell. Only the ownership count can.
+        let mut published = Vec::new();
+        for (session, key, active_cells, max_active_cells) in [
+            (source, &source_key, 2, 10),
+            (receiver, &receiver_key, 0, 1_000),
+        ] {
+            let advertisement = fleet_advertisement(
+                &registry,
+                fleet,
+                image,
+                session,
+                key,
+                now_ms,
+                active_cells,
+                max_active_cells,
+            );
+            published.push(directory.create(advertisement, now_ms).await.unwrap());
+        }
+        let source_router = RepositoryCellRouter::new(
+            identity,
+            layout.clone(),
+            Arc::clone(&registry),
+            source_runtime.clone(),
+            RepositoryCellPeer::new(
+                directory.clone(),
+                Arc::new(PeerSigner::new(
+                    source,
+                    registry.release_digest(),
+                    source_key.clone(),
+                )),
+                Arc::new(ActivatingPeer {
+                    destination: destination.clone(),
+                    source,
+                    release: registry.release_digest(),
+                    verifying_key: source_key.verifying_key(),
+                    now_ms,
+                }),
+                owner(source),
+            ),
+            source_dir.path().to_path_buf(),
+        )
+        .unwrap();
+        let candidates = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let candidates = source_runtime.idle_transfer_candidates().await.unwrap();
+                if candidates.len() == 2 {
+                    break candidates;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        {
+            let mut evidence = source_router.rebalance_evidence.lock().await;
+            for (cell, generation, _, _) in &candidates {
+                evidence.insert(
+                    *cell,
+                    RebalanceEvidence {
+                        generation: *generation,
+                        first_seen_ms: now_ms - 65_000,
+                        last_sample_ms: now_ms - 1,
+                        samples: 2,
+                    },
+                );
+            }
+        }
+        // The larger peer is below its weighted share, so exactly one Cell
+        // moves: the donor's surplus, not the whole batch.
+        let progress = source_router.rebalance_once_at(now_ms).await.unwrap();
+        assert_eq!((progress.released, progress.activated), (1, 1));
+        assert_eq!(source_runtime.stats().active_cells(), 1);
+        assert_eq!(receiver_runtime.stats().active_cells(), 1);
+        // The same samples cannot describe the fleet after the batch, so the
+        // next tick moves nothing instead of releasing from a stale count.
+        let repeated = source_router.rebalance_once_at(now_ms).await.unwrap();
+        assert_eq!((repeated.released, repeated.activated), (0, 0));
+        // Fresh samples show the fleet at its weighted target, so convergence
+        // does not depend on the movement cooldown.
+        let settled = now_ms + 4_000;
+        for (index, (session, key, active_cells, max_active_cells)) in [
+            (source, &source_key, 1, 10),
+            (receiver, &receiver_key, 1, 1_000),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let next = fleet_advertisement(
+                &registry,
+                fleet,
+                image,
+                session,
+                key,
+                settled,
+                active_cells,
+                max_active_cells,
+            );
+            published[index] = directory
+                .refresh(&published[index], next, settled)
+                .await
+                .unwrap();
+        }
+        let converged = source_router.rebalance_once_at(settled).await.unwrap();
+        assert_eq!((converged.released, converged.activated), (0, 0));
+        assert_eq!(source_runtime.stats().active_cells(), 1);
+        receiver_runtime.shutdown().await.unwrap();
+        source_runtime.shutdown().await.unwrap();
     }
 
     #[tokio::test]

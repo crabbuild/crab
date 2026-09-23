@@ -131,7 +131,7 @@ the path should be replaced.
 | --- | --- | --- | --- |
 | Protocol assurance | `Control` retains pure persistent transitions. The runtime now has a private coordination state machine, deterministic simulator, and pinned TLA+ model; async adapters carry activation generations and typed per-effect intents/IDs while parity coverage is still expanding. | One private sans-I/O coordination kernel used by production and simulation, a replayable adversarial scheduler, and a TLA+ model of the same durable state machine. | Pinned seeds find deliberately broken variants; model configurations check single-writer and acknowledged-durability invariants; remaining work is full decision extraction/parity, not a second policy path. |
 | Warm request latency | `RepositoryCellRouter::route_existing` first asks the actor-owned resident lookup; sparse activation receives bounded background `Db::hydrate_step` work on the existing SQL worker. The zero-origin post-promotion qualification is still outstanding. | Actor-owned resident lookup before remote metadata, plus bounded background hydration. A fully hydrated local read performs zero object-store operations from route through SQL result. | An instrumented store observes zero calls for qualified resident reads; cold, sparse, hydrating, resident, local-write, fleet-proof, and object-proof latency are reported separately. |
-| Fleet balancing | Signed versioned placement observations carry measured node headroom, Cell/job counts, and three backlog counters. The private server loop plans bounded transfers, the actor confirms exact settled releases, and the receiver restores through ordinary authority acquisition. Cold activation also sends one authenticated hint to a preferred live node. Local and process race tests cover exact-root preservation, stale-owner fencing/recovery, and failed receiver rollback; protected multi-process movement proof remains. | Deterministic weighted placement over signed live capacity, actor-approved quiescent release, idle eviction, cgroup-aware pressure tiers, hysteresis, and paced drains. Placement remains advisory; existing control CAS remains authoritative. | Skew, membership change, stale samples, pressure, receiver death, rolling drain, and oscillation tests preserve authority and converge within declared movement and latency bounds. |
+| Fleet balancing | Signed versioned placement observations carry measured node headroom, Cell/job counts, and three backlog counters. The private server loop plans bounded transfers, the actor confirms exact settled releases, and the receiver restores through ordinary authority acquisition. Ownership counts now balance by weighted share beside the material headroom-gain path: one elected donor per complete snapshot, a two-percent receiver deadband, and batch, surplus, and room bounds. Cold activation also sends one authenticated hint to a preferred live node. Local, planner, and process race tests cover exact-root preservation, stale-owner fencing/recovery, donation without headroom gain, refusal to mix pre-batch counts, convergence at target, and failed receiver rollback; protected multi-process movement proof remains. | Deterministic weighted placement over signed live capacity, actor-approved quiescent release, idle eviction, cgroup-aware pressure tiers, hysteresis, and paced drains. Placement remains advisory; existing control CAS remains authoritative. | Skew, membership change, stale samples, pressure, receiver death, rolling drain, and oscillation tests preserve authority and converge within declared movement and latency bounds. |
 
 The Celld comparison is pinned to upstream commit `10cb1303dac710dcb3b557e318e08c855261f68b`.
 Its documentation reports about 1.1 ms p50 and 7 ms p99 for one fixed-host
@@ -605,7 +605,28 @@ visible but cannot receive new Cells. The pure transfer planner caps one
 tick at two Cells and 8 GiB of projected disk restore, with absolute receiver
 memory, disk, Cell-slot, and job-credit checks. It requires two stable samples
 and a 60-second residence/cooldown for ordinary movement; explicit drain and
-sustained shedding bypass the score-gain gate only. These are advisory limits;
+sustained shedding bypass the score-gain gate only.
+
+Ownership movement has two ordinary reasons, and both stay advisory. A
+balancing move answers a count question: each member's weight is its declared
+Cell capacity, its target is the fleet's owned Cells shared by that weight
+(rounded up, so the targets always cover the fleet), and only the member with
+the most Cells per unit of weight may donate. That donor releases at most its
+surplus, at most the two-Cell batch, and at most the receivers' room below a
+two-percent deadband. Receivers are members below their own target that are
+fresh, eligible, and not shedding, least dense first. One snapshot therefore
+elects one donor and cannot hand a Cell to a member that its own next sample
+would send back. A relief move answers a resource question and keeps the
+material headroom-gain gate. Both paths share settlement, residence, cooldown,
+and projected receiver capacity, so a balancing move cannot skip an actor
+gate.
+
+A balancing view fails closed. Every live member must publish a fresh signed
+placement block, and every sample must be taken after the instant this node
+dispatched its previous movement batch: a partial or mixed total lowers every
+target and moves Cells that come straight back. Without that complete view the
+loop moves nothing on the count rule and keeps the drain and relief paths,
+which carry their own per-node freshness checks. These are advisory limits;
 the actor still rechecks the exact Cell generation and a transfer-specific,
 indexed durable-work inspection before release. Retained request/inbox
 outcomes, Blob metadata, Queue producer identities, and future Cron schedules
