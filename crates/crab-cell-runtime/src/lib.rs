@@ -17,8 +17,6 @@ mod cluster_qualification;
 mod codec;
 mod control;
 mod coordination;
-#[cfg(test)]
-mod coordination_sim;
 mod cron;
 mod effects;
 mod error;

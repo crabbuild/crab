@@ -4,8 +4,8 @@ use crab_ltx::{CellObjectKind, CellStorageLayout};
 use crab_storage::Store;
 use object_store::{ObjectStoreExt as _, memory::InMemory, path::Path};
 
-use super::*;
-use crate::{
+use crab_cell_runtime::*;
+use crab_cell_runtime::{
     ApplicationId, ApplicationIdentityStore, CatalogEntry, CatalogRole, CellAuthority, CellTarget,
     ControlState, Digest, IncarnationId, NamespaceId, Owner, ReleaseStore, SessionId, TenantId,
 };
@@ -87,7 +87,7 @@ async fn pin_verifies_roots_and_fails_closed_when_a_dependency_is_missing() {
     control.revision = 2;
     control.progress = 2;
     control.state = ControlState::Serving;
-    control.root = Some(crate::RootRef::from_ltx(cell, incarnation, root).unwrap());
+    control.root = Some(crab_cell_runtime::RootRef::from_ltx(cell, incarnation, root).unwrap());
     control.encode().unwrap();
 
     let catalog = CellCatalog::new(layout.clone(), identity.tenant());

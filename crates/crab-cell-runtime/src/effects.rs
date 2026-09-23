@@ -11,7 +11,6 @@ mod api;
 mod supervisor;
 
 #[cfg(test)]
-#[path = "effects_tests.rs"]
 mod tests;
 
 pub use api::{

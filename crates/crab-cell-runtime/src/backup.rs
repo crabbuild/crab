@@ -682,6 +682,3 @@ fn nibble(value: u8) -> Result<u8> {
         _ => Err(Error::Backup("pin control encoding is invalid")),
     }
 }
-
-#[cfg(test)]
-mod tests;

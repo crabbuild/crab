@@ -1,5 +1,8 @@
 use std::{collections::BTreeMap, fmt};
 
+#[cfg(test)]
+mod sim;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AdmissionKind {
     Command,

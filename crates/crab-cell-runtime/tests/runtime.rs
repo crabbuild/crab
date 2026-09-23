@@ -7,10 +7,12 @@
 mod support;
 
 mod runtime {
+    pub mod backup;
     pub mod catalog;
     pub mod lifecycle;
     pub mod migration;
     pub mod publication;
+    pub mod release_progress;
     pub mod scheduler;
     pub mod workers;
 }
