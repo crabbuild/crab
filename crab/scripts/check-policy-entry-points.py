@@ -77,7 +77,7 @@ INVENTORY = {
         "pressure-seam decision",
     ),
     (
-        "crates/crab-cell-runtime/src/cell/actor.rs",
+        "crates/crab-cell-runtime/src/cell/actor/acquire.rs",
         "takeover_unpublished",
     ): (
         "deferred",
