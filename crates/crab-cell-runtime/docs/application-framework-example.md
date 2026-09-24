@@ -192,15 +192,34 @@ impl CellApplication for Commerce {
 The resulting generated client exposes only the declared capabilities:
 
 ```rust,ignore
-pub struct CommerceClient {
-    pub fn orders(&self, id: OrderId) -> OrderClient;
-    pub fn inventory(&self, sku: &str) -> InventoryClient;
-    pub fn shopping_carts(&self) -> KvNamespace<ShoppingCarts>;
-    pub fn invoice_documents(&self) -> BlobNamespace<InvoiceDocuments>;
-    pub fn fulfillment_jobs(&self) -> QueueNamespace<FulfillmentJobs>;
-    pub fn subscription_renewals(&self) -> CronNamespace<SubscriptionRenewals>;
-    pub fn checkout_runs(&self) -> WorkflowNamespace<CheckoutRuns>;
-    pub fn customer_orders(&self, customer: CustomerId) -> CustomerOrderIndexClient;
+// The generated surface; bodies are elided because the generator writes them.
+pub struct CommerceClient;
+
+impl CommerceClient {
+    pub fn orders(&self, id: OrderId) -> OrderClient {
+        todo!()
+    }
+    pub fn inventory(&self, sku: &str) -> InventoryClient {
+        todo!()
+    }
+    pub fn shopping_carts(&self) -> KvNamespace<ShoppingCarts> {
+        todo!()
+    }
+    pub fn invoice_documents(&self) -> BlobNamespace<InvoiceDocuments> {
+        todo!()
+    }
+    pub fn fulfillment_jobs(&self) -> QueueNamespace<FulfillmentJobs> {
+        todo!()
+    }
+    pub fn subscription_renewals(&self) -> CronNamespace<SubscriptionRenewals> {
+        todo!()
+    }
+    pub fn checkout_runs(&self) -> WorkflowNamespace<CheckoutRuns> {
+        todo!()
+    }
+    pub fn customer_orders(&self, customer: CustomerId) -> CustomerOrderIndexClient {
+        todo!()
+    }
 }
 ```
 
