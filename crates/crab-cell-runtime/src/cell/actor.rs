@@ -18,6 +18,7 @@ use task::*;
 mod admission;
 mod state;
 mod task;
+mod tasks;
 
 pub use handle::CellHandle;
 use handle::{CellAdmission, WorkAdmission};
