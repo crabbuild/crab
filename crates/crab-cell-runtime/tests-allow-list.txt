@@ -57,6 +57,7 @@ primitives/queue/tests.rs  # asserts private queue schema and limits
 primitives/queue.rs  # declares crate-private test modules
 primitives/sql/api.rs  # asserts private SQL wire envelopes
 primitives/workflow/activity_api.rs  # asserts private activity lease bounds
+primitives/workflow/activity_api/supervisor.rs  # asserts the private attempt cancellation guard
 primitives/workflow/api/codec.rs  # asserts private workflow wire envelopes
 primitives/workflow/tests.rs  # uses the private workflow schema and codec
 primitives/workflow.rs  # declares crate-private test modules
