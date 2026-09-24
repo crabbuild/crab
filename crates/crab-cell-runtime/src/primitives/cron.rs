@@ -609,4 +609,199 @@ mod tests {
             "a settled schedule does not fire the same occurrences twice"
         );
     }
+
+    #[test]
+    fn fire_budget_stops_at_the_tick_limit_with_occurrences_left_due() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let transaction = connection.transaction().unwrap();
+        let source = CellTarget::new(
+            TenantId::from_bytes([3; 16]),
+            ApplicationId::from_bytes([4; 16]),
+            SOURCE_NAMESPACE,
+            b"cron-shard",
+        )
+        .unwrap();
+        crate::cell::schema::install_runtime_schema_in(
+            &transaction,
+            source.cell_id(),
+            IncarnationId::from_bytes([5; 16]),
+            1,
+        )
+        .unwrap();
+        install_cron_schema(&transaction).unwrap();
+        cron_mutate(
+            &transaction,
+            200,
+            10,
+            TARGETS,
+            &CronMutation::Upsert {
+                schedule_id: [21; 16],
+                target_index: 0,
+                target_partition: b"destination".to_vec(),
+                payload: b"compact".to_vec(),
+                interval_ms: 1_000,
+                next_due_ms: 1_000,
+            },
+        )
+        .unwrap();
+        let mut effects = EffectBatch::new(&transaction, &source, 1, 4_000).unwrap();
+        assert_eq!(
+            cron_fire_due_bounded(&transaction, &mut effects, &source, 4_000, TARGETS, 1).unwrap(),
+            1,
+            "one tick fires at most its budget"
+        );
+        let schedule = load_schedule(&transaction, [21; 16]).unwrap().unwrap();
+        assert_eq!(
+            (schedule.next_due_ms, schedule.occurrence),
+            (2_000, 1),
+            "the remaining occurrences stay due for the next tick"
+        );
+    }
+
+    #[test]
+    fn unavailable_target_index_fails_the_fire_instead_of_skipping() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let transaction = connection.transaction().unwrap();
+        let source = CellTarget::new(
+            TenantId::from_bytes([3; 16]),
+            ApplicationId::from_bytes([4; 16]),
+            SOURCE_NAMESPACE,
+            b"cron-shard",
+        )
+        .unwrap();
+        crate::cell::schema::install_runtime_schema_in(
+            &transaction,
+            source.cell_id(),
+            IncarnationId::from_bytes([5; 16]),
+            1,
+        )
+        .unwrap();
+        install_cron_schema(&transaction).unwrap();
+        transaction
+            .execute(
+                "INSERT INTO cron_schedules(schedule_id, target_index, target_partition, payload, interval_ms, next_due_ms, occurrence, enabled, generation, updated_at_ms) VALUES (?1, 1, X'00', X'00', 1000, 1000, 0, 1, 1, 10)",
+                [[22_u8; 16].as_slice()],
+            )
+            .unwrap();
+        let mut effects = EffectBatch::new(&transaction, &source, 1, 2_000).unwrap();
+        assert!(
+            cron_fire_due_bounded(&transaction, &mut effects, &source, 2_000, TARGETS, 1).is_err()
+        );
+    }
+
+    #[test]
+    fn repeated_pause_keeps_the_generation_and_resume_bumps_it() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let transaction = connection.transaction().unwrap();
+        crate::cell::schema::install_runtime_schema_in(
+            &transaction,
+            CellTarget::new(
+                TenantId::from_bytes([3; 16]),
+                ApplicationId::from_bytes([4; 16]),
+                SOURCE_NAMESPACE,
+                b"cron-shard",
+            )
+            .unwrap()
+            .cell_id(),
+            IncarnationId::from_bytes([5; 16]),
+            1,
+        )
+        .unwrap();
+        install_cron_schema(&transaction).unwrap();
+        let schedule_id = [23; 16];
+        cron_mutate(
+            &transaction,
+            200,
+            10,
+            TARGETS,
+            &CronMutation::Upsert {
+                schedule_id,
+                target_index: 0,
+                target_partition: b"destination".to_vec(),
+                payload: b"compact".to_vec(),
+                interval_ms: 1_000,
+                next_due_ms: 1_000,
+            },
+        )
+        .unwrap();
+        let paused = cron_mutate(
+            &transaction,
+            200,
+            10,
+            TARGETS,
+            &CronMutation::Pause { schedule_id },
+        )
+        .unwrap();
+        let repaused = cron_mutate(
+            &transaction,
+            200,
+            10,
+            TARGETS,
+            &CronMutation::Pause { schedule_id },
+        )
+        .unwrap();
+        let resumed = cron_mutate(
+            &transaction,
+            200,
+            10,
+            TARGETS,
+            &CronMutation::Resume {
+                schedule_id,
+                next_due_ms: 3_000,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (paused, repaused, resumed),
+            (
+                CronMutationOutcome::Applied { generation: 2 },
+                CronMutationOutcome::Applied { generation: 2 },
+                CronMutationOutcome::Applied { generation: 3 },
+            )
+        );
+    }
+
+    #[test]
+    fn upsert_accepts_a_due_exactly_at_the_five_year_boundary() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let transaction = connection.transaction().unwrap();
+        install_cron_schema(&transaction).unwrap();
+        let outcome = cron_mutate(
+            &transaction,
+            200,
+            10,
+            TARGETS,
+            &CronMutation::Upsert {
+                schedule_id: [24; 16],
+                target_index: 0,
+                target_partition: b"destination".to_vec(),
+                payload: b"compact".to_vec(),
+                interval_ms: 1_000,
+                next_due_ms: 10 + MAX_FUTURE_MS,
+            },
+        );
+        assert!(matches!(outcome, Ok(CronMutationOutcome::Applied { .. })));
+    }
+
+    #[test]
+    fn upsert_rejects_a_due_past_the_five_year_boundary() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let transaction = connection.transaction().unwrap();
+        install_cron_schema(&transaction).unwrap();
+        let outcome = cron_mutate(
+            &transaction,
+            200,
+            10,
+            TARGETS,
+            &CronMutation::Upsert {
+                schedule_id: [25; 16],
+                target_index: 0,
+                target_partition: b"destination".to_vec(),
+                payload: b"compact".to_vec(),
+                interval_ms: 1_000,
+                next_due_ms: 11 + MAX_FUTURE_MS,
+            },
+        );
+        assert!(outcome.is_err());
+    }
 }
