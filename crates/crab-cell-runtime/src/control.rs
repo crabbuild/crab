@@ -19,9 +19,13 @@ const CHECKSUM_FLAG: u64 = 1 << 63;
 /// Exact immutable recovery root published by the current Cell control record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RootRef {
+    /// Digest of the published root record.
     pub digest: Digest,
+    /// Transaction id the root publishes.
     pub txid: u64,
+    /// Checksum the root publishes.
     pub checksum: u64,
+    /// Root commit sequence.
     pub commit_sequence: u64,
 }
 
@@ -62,21 +66,32 @@ impl RootRef {
 /// Enrolled process currently responsible for one Cell.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Owner {
+    /// Boot session currently responsible for the Cell.
     pub session: SessionId,
+    /// Endpoint the owner advertises for peer delivery.
     pub endpoint: String,
 }
 
 /// Exact recovered follower tail pinned before a dead owner's Cell can move.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecoveryOverlayRef {
+    /// Session whose sealed log the overlay was recovered from.
     pub leader_session: SessionId,
+    /// Node-log epoch the overlay covers.
     pub log_epoch: u64,
+    /// Digest of the recovery manifest that pins the overlay.
     pub manifest_digest: Digest,
+    /// First node-log sequence the overlay covers.
     pub first_node_sequence: u64,
+    /// Last node-log sequence the overlay covers.
     pub last_node_sequence: u64,
+    /// Published root the overlay supersedes.
     pub predecessor: RootRef,
+    /// Transaction id the recovered tail reaches.
     pub final_txid: u64,
+    /// Checksum the recovered tail reaches.
     pub final_checksum: u64,
+    /// Commit sequence the recovered tail reaches.
     pub final_commit_sequence: u64,
 }
 
@@ -106,40 +121,65 @@ impl RecoveryOverlayRef {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ControlState {
+    /// The Cell has no published root yet and is being initialized or recovered.
     Recovering,
+    /// The Cell has an owner and serves requests.
     Serving,
+    /// The Cell has no owner and another node may acquire it.
     Idle,
+    /// The Cell is permanently retired.
     Tombstoned,
 }
 
 /// Strict, versioned owner/root authority stored with an object-store ETag.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Control {
+    /// Cell this record describes.
     pub cell: CellId,
+    /// Incarnation the record was created for.
     pub incarnation: IncarnationId,
+    /// Ownership epoch, raised when an owner fences its predecessor.
     pub epoch: u64,
+    /// Monotonic revision of this record.
     pub revision: u64,
+    /// Owner-reported progress watermark.
     pub progress: u64,
+    /// Durable lifecycle state.
     pub state: ControlState,
+    /// Enrolled owner, absent while the Cell is idle.
     pub owner: Option<Owner>,
+    /// Published immutable root, absent before the first publication.
     pub root: Option<RootRef>,
+    /// Recovered overlay pinned before the Cell moved.
     pub recovery: Option<RecoveryOverlayRef>,
+    /// Application code digest the owner installed.
     pub code: Digest,
+    /// Schema version the owner installed.
     pub schema: u32,
+    /// Logical time the owner asked to be renewed by.
     pub next_due_ms: Option<i64>,
 }
 
 /// Named transition whose complete predicate must pass before an ETag update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Transition {
+    /// Extends the current owner's lease without changing the root.
     Renew,
+    /// Installs a new owner for an existing root.
     Activate,
+    /// Advances the published root.
     Publish,
+    /// Moves the Cell to a destination while the source keeps authority.
     Migrate,
+    /// Returns the Cell to idle so another node may acquire it.
     Release,
+    /// Pins a recovered overlay against the current published root.
     AttachRecovery,
+    /// Publishes the recovered overlay as the new root.
     PublishRecovery,
+    /// Fences the previous owner and installs this one.
     Takeover,
+    /// Retires the Cell permanently.
     Tombstone,
 }
 

@@ -37,21 +37,34 @@ use witness::*;
 /// Bounded work counters emitted for one node-log recovery attempt.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RecoveryWorkSummary {
+    /// Recovery candidates examined.
     pub candidate_count: u64,
+    /// Cells whose tails needed recovery.
     pub affected_cells: u64,
+    /// Catalog shards scanned.
     pub catalog_shards: u64,
+    /// Catalog pages read.
     pub catalog_pages: u64,
+    /// Control records read.
     pub control_reads: u64,
+    /// Follower pages read.
     pub follower_pages: u64,
+    /// Follower frames read.
     pub follower_frames: u64,
+    /// Follower bytes read.
     pub follower_bytes: u64,
+    /// Peer requests issued.
     pub peer_requests: u64,
+    /// Bundle bytes transferred.
     pub bundle_bytes: u64,
+    /// Object-store reads.
     pub object_reads: u64,
+    /// Object-store writes.
     pub object_writes: u64,
 }
 
 impl RecoveryWorkSummary {
+    /// Adds another summary's counters, failing if one would overflow.
     pub fn merge(&mut self, other: Self) -> Result<()> {
         self.candidate_count = self
             .candidate_count
@@ -108,24 +121,35 @@ impl RecoveryWorkSummary {
 /// Catalog work counters collected while validating recovered frame scopes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RecoveryInventorySummary {
+    /// Cells owned by the dead session.
     pub affected_cells: u64,
+    /// Catalog shards scanned.
     pub catalog_shards: u64,
+    /// Catalog pages read.
     pub catalog_pages: u64,
+    /// Control records read.
     pub control_reads: u64,
 }
 
 /// Recovery Cells together with the bounded catalog work needed to discover them.
 pub struct RecoverableCellInventory {
+    /// Dead-session Cells the scan discovered.
     pub cells: Vec<RecoveryCell>,
+    /// Catalog work the scan performed.
     pub summary: RecoveryInventorySummary,
 }
 
 /// Verified uncovered suffix gathered after every reachable follower is sealed.
 pub struct SealedSession {
+    /// Session whose log was sealed.
     pub leader_session: SessionId,
+    /// Node-log epoch that was sealed.
     pub log_epoch: u64,
+    /// Highest node-log sequence the sealed log tiered.
     pub tiered_through: u64,
+    /// Highest node-log sequence the sealed log made durable.
     pub durable_through: u64,
+    /// Verified frames of the recovered suffix.
     pub frames: Vec<crab_ltx::VerifiedNodeFrame>,
     witness: Option<SealedWitness>,
     work: RecoveryWorkSummary,
@@ -135,6 +159,7 @@ pub struct SealedSession {
 }
 
 impl SealedSession {
+    /// Returns the number of frames in the recovered suffix.
     #[must_use]
     pub fn frame_count(&self) -> u64 {
         self.witness
@@ -142,6 +167,7 @@ impl SealedSession {
             .map_or(self.frames.len() as u64, |witness| witness.frame_count)
     }
 
+    /// Returns the work counters gathered while sealing.
     #[must_use]
     pub const fn work(&self) -> RecoveryWorkSummary {
         self.work
@@ -207,8 +233,11 @@ pub struct NodeLogRecovery {
 
 /// One dead-session Cell control that may need a recovered tail attached.
 pub struct RecoveryCell {
+    /// Application the Cell belongs to.
     pub application: ApplicationId,
+    /// Control authority the recovery writes through.
     pub authority: CellAuthority,
+    /// Control record and token the scan observed.
     pub observed: VersionedControl,
 }
 
@@ -220,14 +249,19 @@ pub struct RecoveryCoordinator {
 
 /// Completed dead-session recovery with every overlay pinned before log seal.
 pub struct CompletedNodeRecovery {
+    /// Proof that the dead session's node log is sealed.
     pub sealed: SealedNodeLog,
+    /// Recovered controls with their overlays attached.
     pub controls: Vec<VersionedControl>,
+    /// Proof that the predecessor cannot add newer durable Cell state.
     pub takeover: NodeTakeoverProof,
 }
 
 /// Recovery controls and publication work produced by one sealed recovery.
 pub struct RecoveryCoordinatorResult {
+    /// Controls the recovery updated.
     pub controls: Vec<VersionedControl>,
+    /// Publication work the sealed recovery produced.
     pub publication: crate::recovery::manifest::RecoveryPublicationSummary,
 }
 
@@ -302,6 +336,8 @@ pub async fn recoverable_cells_from_scopes(
     )
 }
 
+/// Scans one application catalog for published Cells owned by a dead session,
+/// bounded by the supplied frame scopes and `limit`.
 pub async fn recoverable_cells_from_scopes_with_summary(
     catalog: &CellCatalog,
     authority: &CellAuthority,
@@ -406,6 +442,7 @@ pub async fn recoverable_cells_from_scopes_with_summary(
 }
 
 impl RecoveryCoordinator {
+    /// Creates a coordinator over one node-log recovery and manifest store.
     #[must_use]
     pub const fn new(recovery: NodeLogRecovery, manifests: RecoveryManifestStore) -> Self {
         Self {
@@ -443,6 +480,8 @@ impl RecoveryCoordinator {
             .controls)
     }
 
+    /// Attaches overlays from an already sealed witness and returns the work
+    /// counters for the recovery attempt.
     pub async fn recover_sealed_with_summary(
         &self,
         fenced: FencedNodeSession,

@@ -84,80 +84,96 @@ impl NodeAdvertisement {
         Ok(advertisement)
     }
 
+    /// Returns the node identity this advertisement describes.
     #[must_use]
     pub const fn node(&self) -> NodeId {
         self.node
     }
 
+    /// Returns the boot session that signed the advertisement.
     #[must_use]
     pub const fn session(&self) -> SessionId {
         self.session
     }
 
+    /// Returns the peer endpoint the node advertises.
     #[must_use]
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
 
+    /// Returns the fleet the node belongs to.
     #[must_use]
     pub const fn fleet(&self) -> Digest {
         self.fleet
     }
 
+    /// Returns the certificate the node authenticates with.
     #[must_use]
     pub const fn certificate(&self) -> Digest {
         self.certificate
     }
 
+    /// Returns the compiled image the node runs.
     #[must_use]
     pub const fn image(&self) -> Digest {
         self.image
     }
 
+    /// Returns the release the node runs.
     #[must_use]
     pub const fn release(&self) -> Digest {
         self.release
     }
 
+    /// Returns the key that verifies this advertisement's signatures.
     pub fn verifying_key(&self) -> Result<VerifyingKey> {
         VerifyingKey::from_bytes(&self.public_key).map_err(Error::PeerSignature)
     }
 
+    /// Returns the recovery progress watermark the node reports.
     #[must_use]
     pub const fn progress(&self) -> u64 {
         self.progress
     }
 
+    /// Returns the generation this advertisement replaced.
     #[must_use]
     pub const fn generation(&self) -> u64 {
         self.generation
     }
 
+    /// Returns the logical time the advertisement stops being valid.
     #[must_use]
     pub const fn expires_at_ms(&self) -> i64 {
         self.expires_at_ms
     }
 
+    /// Returns the logical time the advertisement was signed.
     #[must_use]
     pub const fn issued_at_ms(&self) -> i64 {
         self.issued_at_ms
     }
 
+    /// Returns the module digests the running image declares.
     #[must_use]
     pub fn module_digests(&self) -> &[Digest] {
         &self.module_digests
     }
 
+    /// Returns the peer protocol versions the node accepts.
     #[must_use]
     pub fn peer_versions(&self) -> &[u32] {
         &self.peer_versions
     }
 
+    /// Returns the failure domain the node reports for placement.
     #[must_use]
     pub const fn failure_domain(&self) -> &NodeFailureDomain {
         &self.failure_domain
     }
 
+    /// Returns the signed capacity block, when the node publishes one.
     #[must_use]
     pub const fn capacity(&self) -> NodeCapacity {
         self.capacity
@@ -195,6 +211,7 @@ impl NodeAdvertisement {
             && self.placement_signature.iter().any(|byte| *byte != 0)
     }
 
+    /// Returns the node-log status, when the node has an enrolled log.
     #[must_use]
     pub const fn log(&self) -> Option<&NodeLogStatus> {
         self.log.as_ref()
@@ -366,31 +383,37 @@ pub struct FencedNodeSession {
 }
 
 impl FencedNodeSession {
+    /// Returns the node whose session was fenced.
     #[must_use]
     pub const fn node(&self) -> NodeId {
         self.node
     }
 
+    /// Returns the predecessor session that was fenced.
     #[must_use]
     pub const fn session(&self) -> SessionId {
         self.session
     }
 
+    /// Returns the session that fenced it.
     #[must_use]
     pub const fn claimant(&self) -> SessionId {
         self.claimant
     }
 
+    /// Returns the claim generation the fence was issued under.
     #[must_use]
     pub const fn claim_generation(&self) -> u64 {
         self.claim_generation
     }
 
+    /// Returns the logical time the claim expires.
     #[must_use]
     pub const fn claim_expires_at_ms(&self) -> i64 {
         self.claim_expires_at_ms
     }
 
+    /// Returns the node-log status observed while fencing.
     #[must_use]
     pub const fn log(&self) -> Option<&NodeLogStatus> {
         self.log.as_ref()
@@ -416,11 +439,13 @@ pub struct NodeTakeoverProof {
 }
 
 impl NodeTakeoverProof {
+    /// Returns the predecessor session this proof covers.
     #[must_use]
     pub const fn session(&self) -> SessionId {
         self.session
     }
 
+    /// Returns the session permitted to take over.
     #[must_use]
     pub const fn claimant(&self) -> SessionId {
         self.claimant
@@ -456,11 +481,13 @@ pub struct SealedNodeLog {
 }
 
 impl SealedNodeLog {
+    /// Returns the session whose log was sealed.
     #[must_use]
     pub const fn session(&self) -> SessionId {
         self.session
     }
 
+    /// Returns the status of the sealed log.
     #[must_use]
     pub const fn log(&self) -> &NodeLogStatus {
         &self.log
@@ -468,6 +495,7 @@ impl SealedNodeLog {
 }
 
 impl VersionedNodeAdvertisement {
+    /// Returns the decoded advertisement.
     #[must_use]
     pub const fn advertisement(&self) -> &NodeAdvertisement {
         &self.advertisement
