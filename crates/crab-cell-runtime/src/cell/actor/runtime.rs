@@ -6,6 +6,61 @@
 
 use super::*;
 
+/// Converts one node ledger snapshot into the pressure observation the actor
+/// classifies.
+///
+/// Memory is the resident and retained reservations against their own ceilings,
+/// disk is the replica reservation against the replica budget, and jobs are the
+/// same worker/primitive/hydration aggregate the placement block advertises, so
+/// a node cannot look calm locally and pressed to the fleet.
+pub(super) fn pressure_sample(
+    snapshot: ResourceSnapshot,
+    at_ms: i64,
+) -> crate::Result<PressureSample> {
+    let used = snapshot.used;
+    let limit = snapshot.limit;
+    let memory_used = used
+        .resident_bytes()
+        .checked_add(used.retained_bytes())
+        .ok_or(Error::Capacity("pressure sample"))?;
+    let memory_limit = limit
+        .resident_bytes()
+        .checked_add(limit.retained_bytes())
+        .ok_or(Error::Capacity("pressure sample"))?;
+    let memory_used = u64::try_from(memory_used).map_err(|_| Error::Capacity("pressure sample"))?;
+    let memory_limit =
+        u64::try_from(memory_limit).map_err(|_| Error::Capacity("pressure sample"))?;
+    let jobs_used = used
+        .worker_jobs()
+        .checked_add(used.primitive_jobs())
+        .and_then(|jobs| jobs.checked_add(used.hydration_jobs()))
+        .ok_or(Error::Capacity("pressure sample"))?;
+    let jobs_limit = limit
+        .worker_jobs()
+        .checked_add(limit.primitive_jobs())
+        .and_then(|jobs| jobs.checked_add(limit.hydration_jobs()))
+        .ok_or(Error::Capacity("pressure sample"))?;
+    let jobs_used = u64::try_from(jobs_used).map_err(|_| Error::Capacity("pressure sample"))?;
+    let jobs_limit = u64::try_from(jobs_limit).map_err(|_| Error::Capacity("pressure sample"))?;
+    Ok(PressureSample {
+        at_ms,
+        memory_used_permille: permille(memory_used, memory_limit)?,
+        disk_used_permille: permille(used.disk_bytes(), limit.disk_bytes())?,
+        jobs_used_permille: permille(jobs_used, jobs_limit)?,
+        // The ledger is read synchronously, so no sample can be late.
+        stale: false,
+    })
+}
+
+/// Scales `used / limit` to permille, saturating at full utilization.
+fn permille(used: u64, limit: u64) -> crate::Result<u16> {
+    if limit == 0 {
+        return Err(Error::Capacity("pressure sample limit"));
+    }
+    let scaled = u128::from(used).saturating_mul(1_000) / u128::from(limit);
+    Ok(u16::try_from(scaled.min(1_000)).unwrap_or(1_000))
+}
+
 impl CellRuntime {
     /// Starts one dispatcher on the current Tokio runtime.
     pub fn new(
@@ -310,6 +365,10 @@ impl CellRuntime {
     /// Feeds one measured node sample into the actor-owned hysteretic pressure
     /// controller. Sustained shedding starts the same bounded idle-eviction
     /// path exposed by [`Self::evict_idle`].
+    ///
+    /// Samples are ordered by `at_ms`, and the actor samples its own ledger on
+    /// the wall clock, so a caller must not observe an older node time than the
+    /// node itself already has.
     pub async fn observe_pressure(&self, sample: PressureSample) -> crate::Result<PressureState> {
         self.ensure_running()?;
         let (reply, response) = oneshot::channel();

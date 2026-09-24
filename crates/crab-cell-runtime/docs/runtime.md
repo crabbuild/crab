@@ -232,6 +232,12 @@ The node scheduler:
 
 A Tick advances at most 128 ledger, expiry, lease, timer, or retention items. Protected shares prevent one maintenance class from starving another, and a Tick that reserves a share for a class it does not run fails instead of silently shrinking its usable work.
 
+## Shed under node pressure
+
+The actor samples its own reservation ledger four times a second: memory is resident plus retained bytes, disk is the replica budget, and jobs are the worker, primitive, and hydration aggregate the placement block advertises. The sample therefore reports what this node admits, not a host guess.
+
+The hysteretic classifier enters shedding at 80 percent on any dimension and returns to normal below 60 percent, and either transition needs evidence sustained for one second. While shedding, the actor starts one bounded eviction per sample through the same movement budget and victim selection a transfer uses, so a hot node releases settled Cells instead of admitting work it cannot hold. A brief spike never triggers a move.
+
 ## Drain in ownership order
 
 A clean per-Cell drain closes SQLite before releasing control to `Idle`. Releasing control first would allow a successor to open while the previous writer still owns local mutable state.
