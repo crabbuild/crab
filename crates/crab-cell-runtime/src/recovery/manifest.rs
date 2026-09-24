@@ -17,24 +17,34 @@ const MULTIPART_BYTES: usize = 8 << 20;
 
 /// One control-ready pointer returned after bundle and manifest publication.
 pub struct PinnedRecoveryCell {
+    /// Application the recovered Cell belongs to.
     pub application: ApplicationId,
+    /// Cell the pointer addresses.
     pub cell: CellId,
+    /// Incarnation the overlay belongs to.
     pub incarnation: IncarnationId,
+    /// Cell epoch the overlay was published under.
     pub cell_epoch: u64,
+    /// Control-ready overlay reference.
     pub recovery: RecoveryOverlayRef,
 }
 
 /// Bounded object publication counters for one recovery manifest.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RecoveryPublicationSummary {
+    /// Bundle bytes transferred.
     pub bundle_bytes: u64,
+    /// Object-store reads.
     pub object_reads: u64,
+    /// Object-store writes.
     pub object_writes: u64,
 }
 
 /// Control-ready recovery pointers and their publication work summary.
 pub struct PinnedRecoveryCells {
+    /// Control-ready pointers, one per recovered Cell.
     pub cells: Vec<PinnedRecoveryCell>,
+    /// Publication work the pinning performed.
     pub summary: RecoveryPublicationSummary,
 }
 
@@ -100,6 +110,7 @@ impl RecoveryArtifactKey {
         }
     }
 
+    /// Returns the digest of the pinned bundle.
     #[must_use]
     pub const fn bundle_digest(&self) -> [u8; 32] {
         self.bundle_digest
@@ -176,6 +187,8 @@ pub struct RecoveryManifestStore {
 }
 
 impl RecoveryManifestStore {
+    /// Creates a manifest store over one layout, with recovery disk bounded by
+    /// the plan byte limit.
     #[must_use]
     pub fn new(layout: CellStorageLayout, limits: crab_ltx::Limits) -> Self {
         let recovery_disk = crab_ltx::DiskBudget::new(limits.max_plan_bytes);
@@ -234,6 +247,8 @@ impl RecoveryManifestStore {
             .cells)
     }
 
+    /// Publishes bundles and manifests for the recovered tails and returns the
+    /// pointers together with their publication work summary.
     pub async fn pin_with_summary(
         &self,
         leader_session: SessionId,
