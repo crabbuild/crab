@@ -57,6 +57,9 @@ const PRIMITIVE_KIND_COUNT: usize = 2;
 const PRIMITIVE_OUTCOME_COUNT: usize = 3;
 const PRIMITIVE_KIND_LABELS: [&str; PRIMITIVE_KIND_COUNT] = ["command", "query"];
 const PRIMITIVE_OUTCOME_LABELS: [&str; PRIMITIVE_OUTCOME_COUNT] = ["success", "rejected", "failed"];
+const SCHEDULER_TICK_OUTCOME_COUNT: usize = 4;
+const SCHEDULER_TICK_OUTCOME_LABELS: [&str; SCHEDULER_TICK_OUTCOME_COUNT] =
+    ["applied", "stale", "rejected", "unresolved"];
 const LTX_PHASE_LABELS: [&str; LTX_PHASE_COUNT] = [
     "capture",
     "preparation",
@@ -203,6 +206,8 @@ struct MetricsInner {
     catalog_refresh_failures: Counter,
     transfer_admission_rejections: [Counter; TRANSFER_REJECTION_COUNT],
     primitive_modules: Vec<PrimitiveModuleMetrics>,
+    scheduler_ticks: [Counter; SCHEDULER_TICK_OUTCOME_COUNT],
+    scheduler_items: Counter,
     projection_probes: [Counter; PROJECTION_PROBE_RESULT_COUNT],
     projection_probe_seconds: [Histogram; PROJECTION_PROBE_RESULT_COUNT],
     projection_build_seconds: [[Histogram; PROJECTION_BUILD_RESULT_COUNT]; PROJECTION_PHASE_COUNT],
@@ -261,6 +266,19 @@ impl PrimitiveModuleMetrics {
             }),
         }
     }
+}
+
+/// Terminal outcome of one Cell maintenance Tick attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SchedulerTickOutcome {
+    /// The Tick ran and returned the items it advanced.
+    Applied,
+    /// The Cell already moved past the commit sequence the Tick expected.
+    Stale,
+    /// The registry committed a rejection instead of running the Tick.
+    Rejected,
+    /// The Tick could not be resolved at all, so the Cell was released.
+    Unresolved,
 }
 
 #[derive(Default)]
@@ -378,6 +396,16 @@ impl Metrics {
                 ),
                 scheduler_lag_seconds: recorder.register_gauge(
                     &Key::from_static_name("crab_http_server_scheduler_lag_seconds"),
+                    &METADATA,
+                ),
+                scheduler_ticks: SCHEDULER_TICK_OUTCOME_LABELS.map(|outcome| {
+                    recorder.register_counter(
+                        &key("crab_cell_scheduler_ticks_total", &[("outcome", outcome)]),
+                        &METADATA,
+                    )
+                }),
+                scheduler_items: recorder.register_counter(
+                    &Key::from_static_name("crab_cell_scheduler_items_total"),
                     &METADATA,
                 ),
                 draining: recorder.register_gauge(
@@ -1337,6 +1365,20 @@ impl Metrics {
         }
     }
 
+    /// Records one maintenance Tick attempt and the items an applied Tick advanced.
+    pub(crate) fn record_scheduler_tick(&self, outcome: SchedulerTickOutcome, items: u64) {
+        let index = match outcome {
+            SchedulerTickOutcome::Applied => 0,
+            SchedulerTickOutcome::Stale => 1,
+            SchedulerTickOutcome::Rejected => 2,
+            SchedulerTickOutcome::Unresolved => 3,
+        };
+        self.inner.scheduler_ticks[index].increment(1);
+        if items != 0 {
+            self.inner.scheduler_items.increment(items);
+        }
+    }
+
     pub(crate) fn record_recovery_phase(&self, phase: RecoveryPhase, elapsed: Duration) {
         self.inner.node_log_recovery_phase_seconds[phase as usize].record(elapsed.as_secs_f64());
     }
@@ -1565,6 +1607,16 @@ impl Drop for ObservedBody {
 }
 
 fn describe_metrics(recorder: &impl Recorder) {
+    describe_counter(
+        recorder,
+        "crab_cell_scheduler_ticks_total",
+        "Cell maintenance Tick attempts by terminal outcome.",
+    );
+    describe_counter(
+        recorder,
+        "crab_cell_scheduler_items_total",
+        "Ledger items advanced by applied Cell maintenance Ticks.",
+    );
     describe_counter(
         recorder,
         "crab_cell_primitive_operations_total",
@@ -2415,6 +2467,22 @@ mod tests {
             "crab_cell_primitive_operation_seconds_count{module=\"repository\",kind=\"command\"} 1"
         ));
         assert!(!rendered.contains("module=\"unregistered\""));
+    }
+
+    #[test]
+    fn scheduler_ticks_render_by_outcome_and_items() {
+        let metrics = Metrics::new(&[]).unwrap();
+        metrics.record_scheduler_tick(SchedulerTickOutcome::Applied, 3);
+        metrics.record_scheduler_tick(SchedulerTickOutcome::Stale, 0);
+        metrics.record_scheduler_tick(SchedulerTickOutcome::Rejected, 0);
+        metrics.record_scheduler_tick(SchedulerTickOutcome::Unresolved, 0);
+
+        let rendered = metrics.render(snapshot());
+        assert!(rendered.contains("crab_cell_scheduler_ticks_total{outcome=\"applied\"} 1"));
+        assert!(rendered.contains("crab_cell_scheduler_ticks_total{outcome=\"stale\"} 1"));
+        assert!(rendered.contains("crab_cell_scheduler_ticks_total{outcome=\"rejected\"} 1"));
+        assert!(rendered.contains("crab_cell_scheduler_ticks_total{outcome=\"unresolved\"} 1"));
+        assert!(rendered.contains("crab_cell_scheduler_items_total 3"));
     }
 
     #[test]

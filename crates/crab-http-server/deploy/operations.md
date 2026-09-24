@@ -248,6 +248,8 @@ Monitor these platform and application signals:
 | `crab_http_server_cell_runtime_active_cells` | Usage approaches the resource-derived active-Cell capacity |
 | `crab_http_server_cell_runtime_retained_bytes` | Node-wide retained work approaches its byte capacity |
 | `crab_http_server_cell_runtime_local_disk_reserved_bytes` | Replica reservations approach the shared local-disk capacity |
+| `crab_cell_scheduler_ticks_total` | `stale`, `rejected`, or `unresolved` grows without applied Ticks |
+| `crab_cell_scheduler_items_total` | Maintenance advances plateau while Cells keep committing |
 | `crab_cell_primitive_operations_total` | A primitive module's `failed` or `rejected` rate rises above its baseline |
 | `crab_cell_primitive_operation_seconds` | One primitive module's command or query tail grows |
 | `repository catalog refresh failed` | Running pods stop discovering catalog changes |
