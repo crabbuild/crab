@@ -90,6 +90,7 @@ impl<'a> QueueDeadLetterWriter<'a> {
 
 /// Source of unpredictable queue lease tokens.
 pub trait QueueTokenSource {
+    /// Returns an unpredictable lease token.
     fn next_token(&mut self) -> Result<[u8; 16]>;
 }
 
@@ -107,9 +108,13 @@ impl QueueTokenSource for SystemQueueTokens {
 /// Durable queue lifecycle state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueueState {
+    /// The message is available for its next delivery.
     Ready,
+    /// Delivery is leased to one consumer token.
     Leased,
+    /// A consumer acknowledged the message.
     Acked,
+    /// The message exhausted its attempts and waits for redrive or purge.
     Dead,
 }
 
@@ -137,72 +142,130 @@ impl QueueState {
 /// Identity and scheduling input for an idempotent queue send.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueueSendRequest {
+    /// Producer identity that deduplicates the send.
     pub producer_id: [u8; 16],
+    /// Message bytes.
     pub payload: Vec<u8>,
+    /// Logical time the message becomes visible.
     pub available_at_ms: i64,
 }
 
 /// Result of producer-level queue deduplication.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum QueueSendOutcome {
-    Sent { message_id: [u8; 16] },
+    /// The message was stored under this stable identity.
+    Sent {
+        /// Message identity, reused for a repeated producer send.
+        message_id: [u8; 16],
+    },
+    /// This producer already sent a message with different bytes.
     ProducerConflict,
 }
 
 /// A published queue delivery lease.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueueMessage {
+    /// Stable message identity.
     pub message_id: [u8; 16],
+    /// Message bytes.
     pub payload: Vec<u8>,
+    /// Lease token required to acknowledge, retry, or extend.
     pub token: [u8; 16],
+    /// Delivery attempt this lease represents.
     pub attempt: u32,
+    /// Logical time the lease expires.
     pub lease_until_ms: i64,
 }
 
 /// Conditional mutation of one current queue lease.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueueLeaseAction {
+    /// Acknowledges the message and finishes it.
     Ack,
-    Retry { delay_ms: u32 },
-    Extend { extension_ms: u32 },
+    /// Returns the message for another delivery.
+    Retry {
+        /// Delay before the message is visible again.
+        delay_ms: u32,
+    },
+    /// Extends the current lease.
+    Extend {
+        /// Additional lease time to grant.
+        extension_ms: u32,
+    },
 }
 
 /// Business outcome of a queue lease mutation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueueLeaseOutcome {
+    /// The mutation was applied to the current lease.
     Applied {
+        /// Message state after the mutation.
         state: QueueState,
+        /// New lease expiry, when the message is still leased.
         lease_until_ms: Option<i64>,
     },
+    /// The token no longer matches the current lease.
     LeaseLost,
 }
 
 /// Administrative mutation applied to one queue shard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueueControlAction {
+    /// Stops the shard from leasing messages.
     Pause,
+    /// Allows leasing again and starts a new generation.
     Resume,
-    Purge { limit: u32 },
-    Redrive { limit: u32 },
+    /// Removes up to `limit` messages from the shard.
+    Purge {
+        /// Maximum messages to remove.
+        limit: u32,
+    },
+    /// Returns up to `limit` dead messages to the ready state.
+    Redrive {
+        /// Maximum dead messages to return.
+        limit: u32,
+    },
 }
 
 /// Result of one queue control mutation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueueControlOutcome {
-    Paused { generation: u64 },
-    Resumed { generation: u64 },
-    Purged { messages: u32 },
-    Redriven { messages: u32 },
+    /// The shard is paused at this generation.
+    Paused {
+        /// Pause/resume generation the shard counted.
+        generation: u64,
+    },
+    /// The shard resumed with a new generation.
+    Resumed {
+        /// Pause/resume generation the shard counted.
+        generation: u64,
+    },
+    /// The purge removed messages.
+    Purged {
+        /// Number of messages removed.
+        messages: u32,
+    },
+    /// The redrive returned dead messages to ready.
+    Redriven {
+        /// Number of messages returned.
+        messages: u32,
+    },
 }
 
 /// Bounded queue shard state returned to operators.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QueueInfo {
+    /// Whether the shard currently leases messages.
     pub paused: bool,
+    /// Pause/resume generation the shard counted.
     pub generation: u64,
+    /// Messages available for delivery.
     pub ready: u64,
+    /// Messages currently leased to a consumer.
     pub leased: u64,
+    /// Messages acknowledged.
     pub acked: u64,
+    /// Messages that exhausted their attempts.
     pub dead: u64,
 }
 

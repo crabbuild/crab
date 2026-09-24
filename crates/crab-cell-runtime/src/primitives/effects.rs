@@ -47,30 +47,51 @@ const INBOX_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 /// Durable source-side effect state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EffectState {
+    /// The effect awaits its next delivery attempt.
     Ready,
+    /// Delivery is leased to one destination.
     Leased,
+    /// The destination applied the effect.
     Delivered,
+    /// The destination rejected the effect terminally.
     Failed,
 }
 
 /// Durable source-side effect outcome and lease state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EffectStatus {
+    /// Current durable state.
     pub state: EffectState,
+    /// Delivery attempts made so far.
     pub attempt: u32,
+    /// Whether a live lease token exists; the token itself is never revealed.
     pub token_present: bool,
+    /// Lease expiry, while the effect is leased.
     pub lease_until_ms: Option<i64>,
+    /// Logical time the effect stops being deliverable.
     pub expires_at_ms: i64,
+    /// Result recorded once the destination answered.
     pub result: Option<Vec<u8>>,
 }
 
 /// Business outcome of a source-side effect lease mutation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EffectLeaseOutcome {
+    /// The destination applied the effect.
     Delivered,
-    Retrying { due_at_ms: i64 },
+    /// The effect returns for another attempt.
+    Retrying {
+        /// Logical time the next attempt becomes claimable.
+        due_at_ms: i64,
+    },
+    /// The destination rejected the effect terminally.
     Failed,
-    Extended { lease_until_ms: i64 },
+    /// The lease was extended.
+    Extended {
+        /// New lease expiry.
+        lease_until_ms: i64,
+    },
+    /// The token no longer matches the source lease.
     LeaseLost,
 }
 
@@ -143,10 +164,15 @@ struct EffectIntent {
 /// One stable typed command whose destination incarnation is resolved at delivery time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EffectCommandIntent {
+    /// Destination Cell, resolved against its current incarnation at delivery.
     pub target: CellTarget,
+    /// Registered command the destination executes.
     pub command_id: u32,
+    /// Input codec version the destination must support.
     pub codec_version: u32,
+    /// Command input bytes.
     pub input: Vec<u8>,
+    /// Logical time the effect stops being deliverable.
     pub expires_at_ms: i64,
 }
 
@@ -305,6 +331,7 @@ impl EffectBatch {
 
 /// Source of unpredictable effect lease tokens.
 pub trait EffectTokenSource {
+    /// Returns an unpredictable, non-zero lease token.
     fn next_token(&mut self) -> Result<[u8; 16]>;
 }
 
@@ -326,23 +353,36 @@ impl EffectTokenSource for SystemEffectTokens {
 /// One published source-side delivery lease.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EffectClaim {
+    /// Durable effect identity.
     pub effect_id: [u8; 32],
+    /// Cell the effect was allocated for.
     pub destination: CellId,
+    /// Opaque operation bytes carried with the effect.
     pub operation: Vec<u8>,
+    /// Digest of the operation bytes.
     pub operation_digest: Digest,
+    /// Delivery attempt this claim represents.
     pub attempt: u32,
+    /// Lease token required to settle the claim.
     pub token: [u8; 16],
+    /// Logical time the claim expires.
     pub lease_until_ms: i64,
+    /// Logical time the effect stops being deliverable.
     pub expires_at_ms: i64,
+    /// Source commit sequence that created the effect.
     pub created_sequence: u64,
 }
 
 /// Minimal identity needed to mutate one exact source lease.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EffectLease {
+    /// Effect being settled.
     pub effect_id: [u8; 32],
+    /// Attempt the token belongs to.
     pub attempt: u32,
+    /// Lease token that must match the current claim.
     pub token: [u8; 16],
+    /// Expiry recorded with the lease.
     pub expires_at_ms: i64,
 }
 
@@ -360,25 +400,38 @@ impl From<&EffectClaim> for EffectLease {
 /// Exact target-side identity and expiry carried by a private delivery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InboxDelivery {
+    /// Effect identity the destination records.
     pub effect_id: [u8; 32],
+    /// Digest of the operation bytes.
     pub operation_digest: Digest,
+    /// Logical time after which the delivery must be refused.
     pub expires_at_ms: i64,
 }
 
 /// Durable target-side result of an effect delivery.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InboxApplyOutcome {
+    /// The destination applied the effect.
     Success {
+        /// Handler result bytes returned to the source.
         result: Vec<u8>,
+        /// Destination commit sequence the result is bound to.
         commit_sequence: u64,
+        /// Whether this delivery repeated an already-applied effect.
         duplicate: bool,
     },
+    /// The destination refused the effect terminally.
     Rejected {
+        /// Handler result bytes returned to the source.
         result: Vec<u8>,
+        /// Destination commit sequence the result is bound to.
         commit_sequence: u64,
+        /// Whether this delivery repeated an already-applied effect.
         duplicate: bool,
     },
+    /// The same effect ID arrived with different operation bytes.
     Conflict,
+    /// The delivery arrived after its expiry.
     Expired,
 }
 
