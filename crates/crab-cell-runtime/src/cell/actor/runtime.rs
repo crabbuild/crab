@@ -153,6 +153,7 @@ impl CellRuntime {
             pool.clone(),
             Arc::clone(&node_lease),
             Arc::clone(&unpublished_node_log_bytes),
+            telemetry.clone(),
         ));
         Ok(Self {
             inner: Arc::new(RuntimeInner {

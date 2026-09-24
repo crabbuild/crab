@@ -1,7 +1,31 @@
 //! Pressure shedding tests extracted from `src/pressure.rs`.
+use std::sync::{Arc, Mutex};
+
+use crab_cell_runtime::cell::actor::CellRuntime;
+use crab_cell_runtime::cell::worker::SqlWorkerPool;
 use crab_cell_runtime::fleet::pressure::{
     MovementBudget, PressureClassifier, PressureSample, PressureState,
 };
+use crab_cell_runtime::fleet::telemetry::CellTelemetry;
+use crab_cell_runtime::identity::SessionId;
+
+/// Records the pressure tiers one node reports to its telemetry sink.
+#[derive(Default)]
+struct RecordingPressureTelemetry {
+    states: Mutex<Vec<PressureState>>,
+}
+
+impl CellTelemetry for RecordingPressureTelemetry {
+    fn pressure_state(&self, state: PressureState) {
+        self.states.lock().unwrap().push(state);
+    }
+}
+
+impl RecordingPressureTelemetry {
+    fn observed(&self) -> Vec<PressureState> {
+        self.states.lock().unwrap().clone()
+    }
+}
 
 fn sample(at_ms: i64, memory: u16) -> PressureSample {
     PressureSample {
@@ -71,4 +95,49 @@ fn movement_budget_bounds_concurrency_and_rate() {
     assert!(budget.try_start(0).is_err());
     let _next = budget.try_start(100).unwrap();
     assert_eq!(budget.in_flight(), 1);
+}
+
+#[tokio::test]
+async fn node_reports_every_pressure_tier_it_classifies() {
+    let session = SessionId::from_bytes([123; 16]);
+    let runtime = CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 1_024, session).unwrap();
+    let recording = Arc::new(RecordingPressureTelemetry::default());
+    runtime.install_telemetry(recording.clone()).unwrap();
+
+    // The actor samples this node's own ledger on the wall clock, so keep the
+    // observations ahead of anything its tick could already have reported.
+    let base_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+        + 5_000;
+    let high = PressureSample {
+        at_ms: base_ms,
+        memory_used_permille: 900,
+        disk_used_permille: 100,
+        jobs_used_permille: 100,
+        stale: false,
+    };
+    assert_eq!(
+        runtime.observe_pressure(high).await.unwrap(),
+        PressureState::Normal
+    );
+    assert_eq!(
+        runtime
+            .observe_pressure(PressureSample {
+                at_ms: base_ms + 1_000,
+                ..high
+            })
+            .await
+            .unwrap(),
+        PressureState::Shedding
+    );
+
+    let observed = recording.observed();
+    assert!(observed.contains(&PressureState::Normal), "{observed:?}");
+    assert!(observed.contains(&PressureState::Shedding), "{observed:?}");
+    runtime.shutdown().await.unwrap();
 }

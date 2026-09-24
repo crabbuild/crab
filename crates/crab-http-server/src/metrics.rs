@@ -53,6 +53,9 @@ const APPEND_RESULT_LABELS: [&str; APPEND_RESULT_COUNT] = ["acked", "nacked"];
 const DURABILITY_SUBMISSION_LABELS: [&str; DURABILITY_SUBMISSION_COUNT] =
     ["fleet", "unsupported", "unavailable", "rejected"];
 const RESIDENT_ROUTE_LABELS: [&str; 3] = ["hit", "miss", "refused"];
+const PRESSURE_TIER_COUNT: usize = 4;
+const PRESSURE_TIER_LABELS: [&str; PRESSURE_TIER_COUNT] =
+    ["normal", "constrained", "shedding", "critical"];
 const PRIMITIVE_KIND_COUNT: usize = 2;
 const PRIMITIVE_OUTCOME_COUNT: usize = 3;
 const PRIMITIVE_KIND_LABELS: [&str; PRIMITIVE_KIND_COUNT] = ["command", "query"];
@@ -173,6 +176,7 @@ struct MetricsInner {
     node_log_append_bytes: [Counter; APPEND_RESULT_COUNT],
     durability_submissions: [Counter; DURABILITY_SUBMISSION_COUNT],
     resident_routes: [Counter; 3],
+    pressure_tiers: [Gauge; PRESSURE_TIER_COUNT],
     ltx_phase_runs: [[Counter; 2]; LTX_PHASE_COUNT],
     ltx_phase_duration: [Histogram; LTX_PHASE_COUNT],
     ltx_logical_reads: [Counter; LTX_READ_ORIGIN_COUNT],
@@ -567,6 +571,12 @@ impl Metrics {
                 resident_routes: RESIDENT_ROUTE_LABELS.map(|outcome| {
                     recorder.register_counter(
                         &key("crab_cell_resident_route_total", &[("outcome", outcome)]),
+                        &METADATA,
+                    )
+                }),
+                pressure_tiers: PRESSURE_TIER_LABELS.map(|tier| {
+                    recorder.register_gauge(
+                        &key("crab_cell_pressure_tier", &[("tier", tier)]),
                         &METADATA,
                     )
                 }),
@@ -1067,6 +1077,22 @@ impl crab_cell_runtime::fleet::telemetry::CellTelemetry for Metrics {
             crab_cell_runtime::fleet::telemetry::ResidentRouteOutcome::Refused => 2,
         };
         self.inner.resident_routes[index].increment(1);
+    }
+
+    fn pressure_state(&self, state: crab_cell_runtime::fleet::pressure::PressureState) {
+        use crab_cell_runtime::fleet::pressure::PressureState;
+
+        // The classifier converts `Recovering` back to `Normal` inside one
+        // observation, so the tier it reports is always one of these four.
+        let active = match state {
+            PressureState::Normal | PressureState::Recovering => 0,
+            PressureState::Constrained => 1,
+            PressureState::Shedding => 2,
+            PressureState::Critical => 3,
+        };
+        for (index, tier) in self.inner.pressure_tiers.iter().enumerate() {
+            tier.set(if index == active { 1.0 } else { 0.0 });
+        }
     }
 
     fn ltx_phase(
@@ -2441,6 +2467,22 @@ mod tests {
             "crab_http_server_transfer_admission_rejections_total{reason=\"coordination\"} 1"
         ));
         assert!(!rendered.contains("repository=\""));
+    }
+
+    #[test]
+    fn pressure_tier_renders_only_the_active_state() {
+        use crab_cell_runtime::fleet::telemetry::CellTelemetry;
+
+        let metrics = Metrics::new(&[]).unwrap();
+        <Metrics as CellTelemetry>::pressure_state(
+            &metrics,
+            crab_cell_runtime::fleet::pressure::PressureState::Shedding,
+        );
+
+        let rendered = metrics.render(snapshot());
+        assert!(rendered.contains("crab_cell_pressure_tier{tier=\"shedding\"} 1"));
+        assert!(rendered.contains("crab_cell_pressure_tier{tier=\"normal\"} 0"));
+        assert!(rendered.contains("crab_cell_pressure_tier{tier=\"critical\"} 0"));
     }
 
     #[test]

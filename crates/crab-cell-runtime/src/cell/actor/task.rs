@@ -11,6 +11,7 @@ pub(super) async fn run(
     pool: SqlWorkerPool,
     node_lease: Arc<RuntimeNodeLease>,
     unpublished_node_log_bytes: Arc<AtomicU64>,
+    telemetry: crate::fleet::telemetry::CellTelemetryHandle,
 ) {
     let mut cells = HashMap::<CellId, ActiveCell>::new();
     let mut transitioning = HashSet::<CellId>::new();
@@ -83,7 +84,7 @@ pub(super) async fn run(
                         }
                         break;
                     };
-                    handle_message(message, &mut receiver, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease, &mut pressure, &mut movement, &mut movement_permits, &mut next_generation);
+                    handle_message(message, &mut receiver, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease, &telemetry, &mut pressure, &mut movement, &mut movement_permits, &mut next_generation);
                 }
                 _ = renewal_tick.tick() => {
                     start_due_renewals(&pool, &mut cells, &mut tasks, &node_lease);
@@ -101,6 +102,7 @@ pub(super) async fn run(
                 _ = pressure_tick.tick() => {
                     sample_node_pressure(
                         &pool,
+                        &telemetry,
                         &mut pressure,
                         &mut cells,
                         &mut transitioning,
@@ -132,7 +134,7 @@ pub(super) async fn run(
                     }
                     break;
                 };
-                    handle_message(message, &mut receiver, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease, &mut pressure, &mut movement, &mut movement_permits, &mut next_generation);
+                    handle_message(message, &mut receiver, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown, &node_lease, &telemetry, &mut pressure, &mut movement, &mut movement_permits, &mut next_generation);
             }
             result = tasks.join_next() => {
                 let Some(Ok(result)) = result else {
@@ -156,6 +158,7 @@ pub(super) async fn run(
             _ = pressure_tick.tick() => {
                 sample_node_pressure(
                     &pool,
+                    &telemetry,
                     &mut pressure,
                     &mut cells,
                     &mut transitioning,
@@ -174,6 +177,7 @@ pub(super) async fn run(
 /// sample: pressure policy must never stop the actor loop.
 fn sample_node_pressure(
     pool: &SqlWorkerPool,
+    telemetry: &crate::fleet::telemetry::CellTelemetryHandle,
     pressure: &mut PressureClassifier,
     cells: &mut HashMap<CellId, ActiveCell>,
     transitioning: &mut HashSet<CellId>,
@@ -189,6 +193,7 @@ fn sample_node_pressure(
     };
     let _ = classify_pressure_sample(
         sample,
+        telemetry,
         pressure,
         pool,
         cells,
@@ -203,8 +208,13 @@ fn sample_node_pressure(
 ///
 /// The external observation message and the actor's own ledger sample share
 /// this path, so both keep one hysteresis and one movement budget.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the shedding path owns actor state, tasks, the movement budget, and its sink separately"
+)]
 fn classify_pressure_sample(
     sample: PressureSample,
+    telemetry: &crate::fleet::telemetry::CellTelemetryHandle,
     pressure: &mut PressureClassifier,
     pool: &SqlWorkerPool,
     cells: &mut HashMap<CellId, ActiveCell>,
@@ -214,6 +224,7 @@ fn classify_pressure_sample(
     movement_permits: &mut HashMap<CellId, MovementPermit>,
 ) -> crate::Result<PressureState> {
     let state = pressure.observe(sample)?;
+    telemetry.pressure_state(state);
     if matches!(state, PressureState::Shedding | PressureState::Critical)
         && movement_permits.len() < 2
     {
@@ -293,6 +304,7 @@ pub(super) fn handle_message(
     tasks: &mut JoinSet<TaskResult>,
     shutdown: &mut Option<ShutdownState>,
     node_lease: &RuntimeNodeLease,
+    telemetry: &crate::fleet::telemetry::CellTelemetryHandle,
     pressure: &mut PressureClassifier,
     movement: &mut MovementBudget,
     movement_permits: &mut HashMap<CellId, MovementPermit>,
@@ -678,6 +690,7 @@ pub(super) fn handle_message(
         Message::ObservePressure { sample, reply } => {
             let result = classify_pressure_sample(
                 sample,
+                telemetry,
                 pressure,
                 pool,
                 cells,

@@ -1,6 +1,7 @@
 //! Bounded operational telemetry emitted by the runtime.
 use std::{sync::Arc, time::Duration};
 
+use crate::fleet::pressure::PressureState;
 use crate::node::log::DurabilitySource;
 
 /// Outcome of an actor-owned resident route lookup.
@@ -104,6 +105,14 @@ pub trait CellTelemetry: Send + Sync {
 
     /// Aggregates one fixed-size capture ledger without dynamic labels.
     fn ltx_capture(&self, _timing: &crab_ltx::CaptureTiming, _succeeded: bool) {}
+
+    /// Records the node's current hysteretic pressure tier.
+    ///
+    /// One node reports one tier at a time, and the classifier only hands out
+    /// `Normal`, `Constrained`, `Shedding`, or `Critical`, so a sink can render
+    /// this as a bounded gauge family instead of a growing label set. The tier a
+    /// node reports is the one that decides whether it sheds settled Cells.
+    fn pressure_state(&self, _state: PressureState) {}
 }
 
 /// Shared late-bound telemetry sink used by runtime components.
@@ -146,6 +155,12 @@ impl CellTelemetryHandle {
     pub(crate) fn node_log_append(&self, acknowledged: bool, bytes: u64) {
         if let Some(telemetry) = self.inner.get() {
             telemetry.node_log_append(acknowledged, bytes);
+        }
+    }
+
+    pub(crate) fn pressure_state(&self, state: PressureState) {
+        if let Some(telemetry) = self.inner.get() {
+            telemetry.pressure_state(state);
         }
     }
 
