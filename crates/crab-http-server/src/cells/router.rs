@@ -799,7 +799,11 @@ impl RepositoryCellRouter {
         {
             return Ok(Some(RepositoryCell {
                 target: target.clone(),
-                client: CellClient::local(Arc::clone(&self.registry), handle.clone()),
+                client: CellClient::local_with_telemetry(
+                    Arc::clone(&self.registry),
+                    handle.clone(),
+                    self.runtime.telemetry_handle(),
+                ),
                 handle: Some(handle),
                 _operation: None,
             }));
@@ -837,7 +841,11 @@ impl RepositoryCellRouter {
             .await?
             .map(|handle| RepositoryCell {
                 target: target.clone(),
-                client: CellClient::local(Arc::clone(&self.registry), handle.clone()),
+                client: CellClient::local_with_telemetry(
+                    Arc::clone(&self.registry),
+                    handle.clone(),
+                    self.runtime.telemetry_handle(),
+                ),
                 handle: Some(handle),
                 _operation: None,
             }))
@@ -950,7 +958,11 @@ impl RepositoryCellRouter {
         Ok(ScheduledRepositoryCell {
             cell: RepositoryCell {
                 target,
-                client: CellClient::local(Arc::clone(&self.registry), handle.clone()),
+                client: CellClient::local_with_telemetry(
+                    Arc::clone(&self.registry),
+                    handle.clone(),
+                    self.runtime.telemetry_handle(),
+                ),
                 handle: Some(handle),
                 _operation: None,
             },

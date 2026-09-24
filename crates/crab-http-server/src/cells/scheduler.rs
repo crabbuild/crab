@@ -553,22 +553,27 @@ impl RepositoryCellScheduler {
                 },
             )
             .await;
-        let processed = match tick {
+        // Record every attempt: a stale, rejected, or unresolved Tick makes the
+        // scheduler look idle over metrics unless the outcome itself is visible.
+        let (outcome, processed) = match tick {
             Ok(committed) => match committed.output {
-                MaintenanceTickOutcome::Applied { processed } => processed,
-                MaintenanceTickOutcome::Stale => {
-                    return self.release_after(cell, release_after).await;
+                MaintenanceTickOutcome::Applied { processed } => {
+                    (crate::metrics::SchedulerTickOutcome::Applied, processed)
                 }
+                MaintenanceTickOutcome::Stale => (crate::metrics::SchedulerTickOutcome::Stale, 0),
             },
             Err(InvocationError::Rejected(_)) => {
-                return self.release_after(cell, release_after).await;
+                (crate::metrics::SchedulerTickOutcome::Rejected, 0)
             }
             Err(error) => {
                 tracing::warn!(error = %error, "Cell Tick was not resolved");
-                return self.release_after(cell, release_after).await;
+                (crate::metrics::SchedulerTickOutcome::Unresolved, 0)
             }
         };
-        if processed != 0 {
+        if let Some(metrics) = &self.metrics {
+            metrics.record_scheduler_tick(outcome, u64::from(processed));
+        }
+        if outcome != crate::metrics::SchedulerTickOutcome::Applied || processed != 0 {
             return self.release_after(cell, release_after).await;
         }
         if self.registry.has_activity_runner(cell.target.namespace())

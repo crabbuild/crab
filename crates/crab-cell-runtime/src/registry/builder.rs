@@ -485,6 +485,7 @@ impl RegistryBuilder {
                     .then_some(*namespace)
             })
             .collect();
+        let module_names = self.modules.iter().map(|module| module.name).collect();
         Ok(Registry {
             release_bytes,
             release_digest,
@@ -492,6 +493,7 @@ impl RegistryBuilder {
             module_schemas,
             module_migrations,
             module_retained_codes,
+            module_names,
             commands: self.commands,
             command_descriptors,
             queries: self.queries,
@@ -537,6 +539,7 @@ pub struct Registry {
     pub(super) release_bytes: Vec<u8>,
     pub(super) release_digest: Digest,
     pub(super) module_codes: BTreeMap<String, Digest>,
+    pub(super) module_names: Vec<&'static str>,
     pub(super) module_schemas: BTreeMap<String, (u32, u32)>,
     pub(super) module_migrations: BTreeMap<&'static str, &'static [MigrationDescriptor]>,
     pub(super) module_retained_codes: BTreeMap<&'static str, &'static [RetainedCodeDescriptor]>,
@@ -575,6 +578,12 @@ impl Registry {
     #[must_use]
     pub fn module_schema_range(&self, module: &str) -> Option<(u32, u32)> {
         self.module_schemas.get(module).copied()
+    }
+
+    /// Returns the compiled module names in sorted order.
+    #[must_use]
+    pub fn module_names(&self) -> &[&'static str] {
+        &self.module_names
     }
 
     /// Returns the sorted module-code inventory advertised by eligible nodes.

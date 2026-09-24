@@ -27,10 +27,48 @@ pub enum DurabilitySubmissionOutcome {
     Rejected,
 }
 
+/// Kind of one registered primitive call observed at the execution boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrimitiveOperationKind {
+    Command,
+    Query,
+}
+
+/// Terminal outcome of one registered primitive call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrimitiveOperationOutcome {
+    /// The handler committed a result the caller consumes as success.
+    Success,
+    /// The handler committed a rejection the caller consumes as the result.
+    Rejected,
+    /// The operation failed before a committed result existed.
+    Failed,
+}
+
+impl From<&crate::Result<crate::cell::executor::HandlerOutcome>> for PrimitiveOperationOutcome {
+    fn from(result: &crate::Result<crate::cell::executor::HandlerOutcome>) -> Self {
+        match result {
+            Ok(crate::cell::executor::HandlerOutcome::Success(_)) => Self::Success,
+            Ok(crate::cell::executor::HandlerOutcome::Rejected(_)) => Self::Rejected,
+            Err(_) => Self::Failed,
+        }
+    }
+}
+
 /// Bounded operational events emitted by the Cell durability runtime.
 ///
 /// Implementations must keep labels finite and must not block the Cell actor.
 pub trait CellTelemetry: Send + Sync {
+    /// Records one registered primitive call by owning module and outcome.
+    fn primitive_operation(
+        &self,
+        _module: &'static str,
+        _kind: PrimitiveOperationKind,
+        _outcome: PrimitiveOperationOutcome,
+        _elapsed: Duration,
+    ) {
+    }
+
     /// Records one completed fleet or object durability proof.
     fn durability_proof(&self, _source: DurabilitySource, _waited: Duration) {}
 
@@ -78,6 +116,18 @@ impl CellTelemetryHandle {
     pub(crate) fn durability_proof(&self, source: DurabilitySource, waited: Duration) {
         if let Some(telemetry) = self.inner.get() {
             telemetry.durability_proof(source, waited);
+        }
+    }
+
+    pub(crate) fn primitive_operation(
+        &self,
+        module: &'static str,
+        kind: PrimitiveOperationKind,
+        outcome: PrimitiveOperationOutcome,
+        elapsed: Duration,
+    ) {
+        if let Some(telemetry) = self.inner.get() {
+            telemetry.primitive_operation(module, kind, outcome, elapsed);
         }
     }
 

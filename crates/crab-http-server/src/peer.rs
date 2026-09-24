@@ -933,15 +933,16 @@ pub(crate) async fn forward(
             Err(_) => peer_http_error(StatusCode::SERVICE_UNAVAILABLE),
         };
     }
+    let Ok(runtime) = server.cell_runtime() else {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    };
     let dispatcher = PeerDispatcher::new(
         Arc::clone(&receiver.registry),
         Arc::new(receiver.resolver.clone()),
         Arc::clone(&server) as Arc<dyn PeerAuthorizer>,
-    );
+    )
+    .with_telemetry(runtime.telemetry_handle());
     let reply = dispatcher.dispatch(&request, now_ms).await;
-    let Ok(runtime) = server.cell_runtime() else {
-        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
-    };
     let Some(_codec) = reserve_peer_codec(&runtime) else {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     };

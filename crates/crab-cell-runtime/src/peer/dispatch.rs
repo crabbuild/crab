@@ -1,4 +1,4 @@
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Instant};
 
 use prost::Message;
 
@@ -8,6 +8,9 @@ use crate::client::{CellDescription, Receipt};
 use crate::client::{
     CellTransport, EncodedCommand, EncodedObservation, EncodedQuery, EncodedResolve,
     LocalCellTransport, encoded_command_operation_digest, local_description, receipt,
+};
+use crate::fleet::telemetry::{
+    CellTelemetryHandle, PrimitiveOperationKind, PrimitiveOperationOutcome,
 };
 use crate::identity::{CellTarget, Digest, IncarnationId, RequestId};
 use crate::primitives::effects::InboxDelivery;
@@ -36,6 +39,7 @@ pub struct PeerDispatcher {
     registry: Arc<Registry>,
     resolver: Arc<dyn PeerCellResolver>,
     authorizer: Arc<dyn PeerAuthorizer>,
+    telemetry: CellTelemetryHandle,
 }
 
 impl PeerDispatcher {
@@ -49,7 +53,15 @@ impl PeerDispatcher {
             registry,
             resolver,
             authorizer,
+            telemetry: CellTelemetryHandle::default(),
         }
+    }
+
+    /// Reports primitive operations executed for peer requests.
+    #[must_use]
+    pub fn with_telemetry(mut self, telemetry: CellTelemetryHandle) -> Self {
+        self.telemetry = telemetry;
+        self
     }
 
     /// Authorizes, resolves and dispatches one verified request without a second SQL path.
@@ -65,6 +77,7 @@ impl PeerDispatcher {
             registry: Arc::clone(&self.registry),
             handles: Arc::new(HashMap::from([(handle.cell_id(), handle.clone())])),
             handle,
+            telemetry: self.telemetry.clone(),
         };
         match request.operation() {
             Some(wire::peer_request::Operation::Mutate(mutation)) => {
@@ -347,6 +360,7 @@ impl PeerDispatcher {
             expires_at_ms: identity.expires_at_ms,
         };
         let registry = Arc::clone(&self.registry);
+        let telemetry = self.telemetry.clone();
         let schema = transport.handle.schema();
         let input = command.input.clone();
         let operation_id = command.command_id;
@@ -359,7 +373,8 @@ impl PeerDispatcher {
                 encoded_request.len(),
                 descriptor.output_limit as usize,
                 move |transaction| {
-                    registry.execute_command(
+                    let started = Instant::now();
+                    let result = registry.execute_command(
                         transaction,
                         CommandInvocation {
                             module,
@@ -371,7 +386,14 @@ impl PeerDispatcher {
                             now_ms,
                             input: &input,
                         },
-                    )
+                    );
+                    telemetry.primitive_operation(
+                        module,
+                        PrimitiveOperationKind::Command,
+                        PrimitiveOperationOutcome::from(&result),
+                        started.elapsed(),
+                    );
+                    result
                 },
             )
             .await
