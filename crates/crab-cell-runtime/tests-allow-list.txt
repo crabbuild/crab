@@ -22,7 +22,8 @@ follower.rs  # declares crate-private test modules
 identity.rs  # asserts private hex codec helpers
 node/durability.rs  # asserts private durability gate state
 node/lease.rs  # uses the private lease bound constant
-node/log.rs  # asserts private proof state
+node/log/tests.rs  # asserts private proof state
+node/log.rs  # declares crate-private test modules
 node/log_recovery/tests.rs  # uses private recovery page bounds and witness records
 node/log_recovery.rs  # declares crate-private test modules
 node/log_shipper.rs  # asserts private shipping queue internals
