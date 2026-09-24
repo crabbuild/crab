@@ -1,0 +1,38 @@
+name: Cell property qualification
+
+# The property suites run in every pull request with a small case count. This
+# job raises it an order of magnitude on a schedule, so the same suites can find
+# rarer schedules without slowing review. proptest reads PROPTEST_CASES from the
+# environment and prefers it over each suite's own case count.
+
+on:
+  schedule:
+    - cron: "43 5 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: cell-property-qualification
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deep:
+    name: Cell and LTX property suites at depth
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-property-target
+      PROPTEST_CASES: "1000"
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
+      - name: Run the Cell runtime suites
+        run: cargo test -p crab-cell-runtime --features test-support --locked
+      - name: Run the LTX suites
+        run: cargo test -p crab-ltx --features replica --locked
