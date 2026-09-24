@@ -2,6 +2,8 @@ use object_store::path::Path;
 
 use crab_storage::Store;
 
+use crate::hex::encode_hex;
+
 /// Typed physical paths for one application's SQLite Cell objects.
 #[derive(Clone)]
 pub struct CellStorageLayout {
@@ -99,13 +101,13 @@ impl CellStorageLayout {
     /// Returns the release descriptor path for one digest.
     #[must_use]
     pub fn release_descriptor_path(&self, digest: &[u8; 32]) -> Path {
-        self.application_path(&format!("releases/{}.json", hex(digest)))
+        self.application_path(&format!("releases/{}.json", encode_hex(digest)))
     }
 
     /// Returns the control record path for one Cell.
     #[must_use]
     pub fn control_path(&self, cell: &[u8; 32]) -> Path {
-        self.application_path(&format!("cells/{}/control.json", hex(cell)))
+        self.application_path(&format!("cells/{}/control.json", encode_hex(cell)))
     }
 
     /// Returns the immutable object path for one Cell incarnation.
@@ -119,9 +121,9 @@ impl CellStorageLayout {
     ) -> Path {
         self.application_path(&format!(
             "cells/{}/inc/{}/objects/{}.{}",
-            hex(cell),
-            hex(incarnation),
-            hex(digest),
+            encode_hex(cell),
+            encode_hex(incarnation),
+            encode_hex(digest),
             kind.extension()
         ))
     }
@@ -142,9 +144,9 @@ impl CellStorageLayout {
     ) -> Path {
         self.application_path(&format!(
             "cells/{}/inc/{}/objects/.staging/{}.{}",
-            hex(cell),
-            hex(incarnation),
-            hex(digest),
+            encode_hex(cell),
+            encode_hex(incarnation),
+            encode_hex(digest),
             kind.extension()
         ))
     }
@@ -158,19 +160,19 @@ impl CellStorageLayout {
     /// Returns the catalog page object path for one digest.
     #[must_use]
     pub fn catalog_object_path(&self, digest: &[u8; 32]) -> Path {
-        self.application_path(&format!("catalog/objects/{}.json", hex(digest)))
+        self.application_path(&format!("catalog/objects/{}.json", encode_hex(digest)))
     }
 
     /// Returns the catalog pin record path for one pin.
     #[must_use]
     pub fn pin_path(&self, pin: &[u8; 16]) -> Path {
-        self.application_path(&format!("pins/{}.json", hex(pin)))
+        self.application_path(&format!("pins/{}.json", encode_hex(pin)))
     }
 
     /// Returns the catalog pin object path for one digest.
     #[must_use]
     pub fn pin_object_path(&self, digest: &[u8; 32]) -> Path {
-        self.application_path(&format!("pins/objects/{}.json", hex(digest)))
+        self.application_path(&format!("pins/objects/{}.json", encode_hex(digest)))
     }
 
     /// Returns the release-migration progress path for one Cell operation.
@@ -178,8 +180,8 @@ impl CellStorageLayout {
     pub fn migration_path(&self, cell: &[u8; 32], operation: &[u8; 16], suffix: &str) -> Path {
         self.application_path(&format!(
             "cells/{}/migration/{}/{}",
-            hex(cell),
-            hex(operation),
+            encode_hex(cell),
+            encode_hex(operation),
             suffix
         ))
     }
@@ -190,7 +192,7 @@ impl CellStorageLayout {
         Path::from(format!(
             "{}/cells/v1/nodes/{}.json",
             self.root,
-            hex(session)
+            encode_hex(session)
         ))
     }
 
@@ -206,8 +208,8 @@ impl CellStorageLayout {
         Path::from(format!(
             "{}/cells/v1/node-logs/{}/{epoch}/bundles/{}.bundle",
             self.root,
-            hex(leader),
-            hex(digest)
+            encode_hex(leader),
+            encode_hex(digest)
         ))
     }
 
@@ -217,8 +219,8 @@ impl CellStorageLayout {
         Path::from(format!(
             "{}/cells/v1/node-logs/{}/{epoch}/recovery/{}.json",
             self.root,
-            hex(leader),
-            hex(digest)
+            encode_hex(leader),
+            encode_hex(digest)
         ))
     }
 
@@ -226,20 +228,10 @@ impl CellStorageLayout {
         Path::from(format!(
             "{}/cells/v1/apps/{}/{}",
             self.root,
-            hex(&self.application),
+            encode_hex(&self.application),
             suffix
         ))
     }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(TABLE[(byte >> 4) as usize] as char);
-        encoded.push(TABLE[(byte & 0x0f) as usize] as char);
-    }
-    encoded
 }
 
 #[cfg(test)]
