@@ -52,7 +52,7 @@ primitives/effects.rs  # declares crate-private test modules
 primitives/kv/api.rs  # asserts private kv wire envelopes
 primitives/kv.rs  # uses the private wire bound
 primitives/maintenance.rs  # uses private transfer-work inventory constants
-primitives/queue/api.rs  # asserts private queue wire envelopes
+primitives/queue/api/codec.rs  # asserts private queue wire envelopes and limits
 primitives/queue/tests.rs  # asserts private queue schema and limits
 primitives/queue.rs  # declares crate-private test modules
 primitives/sql/api.rs  # asserts private SQL wire envelopes
