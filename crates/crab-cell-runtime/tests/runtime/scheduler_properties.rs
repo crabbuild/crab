@@ -163,7 +163,7 @@ proptest! {
             }
         }
 
-        scheduler_tick(&transaction, &target(), NOW_MS, &[]).unwrap();
+        scheduler_tick(&transaction, &target(), NOW_MS, &[], None, &[]).unwrap();
 
         prop_assert_eq!(
             count(&transaction, "kv_entries"),
@@ -188,7 +188,7 @@ proptest! {
             "expired ready messages must be dead-lettered"
         );
 
-        scheduler_tick(&transaction, &target(), NOW_MS, &[]).unwrap();
+        scheduler_tick(&transaction, &target(), NOW_MS, &[], None, &[]).unwrap();
         prop_assert_eq!(
             count(&transaction, "kv_entries"),
             live_kv,
@@ -275,7 +275,7 @@ proptest! {
 
         // First Tick: expired ready rows fail, a live lease is never reclaimed,
         // and only terminal rows past retention are removed immediately.
-        scheduler_tick(&transaction, &target(), NOW_MS, &[]).unwrap();
+        scheduler_tick(&transaction, &target(), NOW_MS, &[], None, &[]).unwrap();
         prop_assert_eq!(
             state_count(&transaction, "sys_effects", 0),
             live_ready + reclaimed,
@@ -304,7 +304,7 @@ proptest! {
 
         // Second Tick: the failures from the first Tick are now terminal and past
         // retention, so exactly the rows inside retention remain.
-        scheduler_tick(&transaction, &target(), NOW_MS, &[]).unwrap();
+        scheduler_tick(&transaction, &target(), NOW_MS, &[], None, &[]).unwrap();
         prop_assert_eq!(
             count(&transaction, "sys_effects"),
             live_ready + live_leases + reclaimed + live_done + live_failed,
