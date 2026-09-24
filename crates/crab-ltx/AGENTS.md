@@ -14,11 +14,28 @@ outside this crate.
 
 1. `src/lib.rs` — public surface and feature gating.
 2. `src/db.rs` — managed connections, transactions, and capture boundary.
-3. `src/capture/` and `src/ltx.rs` — WAL capture and LTX encoding.
+3. `src/capture.rs` with `src/capture/{wal,checkpoint,verify}.rs`, and
+   `src/ltx.rs` — WAL capture and LTX encoding.
 4. `src/recovery.rs` — verified plans and exact restore.
-5. `src/replica.rs` and `src/replica/` — Cell roots, directories, uploads,
-   compaction.
+5. `src/replica.rs` and `src/replica/` — Cell roots, directories, uploads, and
+   compaction (see the module map below).
 6. `UPSTREAM.md` — Celld lineage, licenses, and review rules for imports.
+
+## Module map
+
+Subsystem roots keep the shared contract; the named child modules own one
+concern each. Module files sit beside their root (`foo.rs` + `foo/`).
+
+- Capture: `capture.rs` + `capture/{wal,checkpoint,verify}.rs`.
+- Replica: `replica.rs` +
+  `replica/{cache,compaction,directory,restore,root,upload,verify}.rs`,
+  `replica/compaction/scratch.rs`, `replica/directory/{initial,update}.rs`.
+- Environment: `environment.rs` +
+  `environment/{directory_cache,executor,host,resources,telemetry,tests}.rs`.
+- Storage and IO: `pages.rs`, `paged.rs`, `paged_io.rs`, `writable_vfs.rs`,
+  `wal.rs`, `bundle.rs`, `codec.rs`, `lz4_block.rs`, `node_frame.rs`,
+  `cell_layout.rs`.
+- Top level: `host.rs`, `types.rs`, `error.rs`, `commit.rs`, `format_tests.rs`.
 
 ## Common changes
 
