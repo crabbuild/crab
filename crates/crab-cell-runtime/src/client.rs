@@ -47,31 +47,42 @@ use local::{decode_output, unix_time_ms, validate_minimum};
 /// Immutable owner metadata used to fence a routed invocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CellDescription {
+    /// Cell the description belongs to.
     pub cell: CellId,
+    /// Incarnation that currently owns the Cell.
     pub incarnation: IncarnationId,
+    /// Application code digest the owner installed.
     pub code: Digest,
+    /// Schema version the owner installed.
     pub schema: u32,
 }
 
 /// Durable observation position returned with every typed result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Receipt {
+    /// Cell the observation came from.
     pub cell: CellId,
+    /// Incarnation that produced it.
     pub incarnation: IncarnationId,
+    /// Highest committed sequence the result observed.
     pub commit_sequence: u64,
 }
 
 /// Typed command result released only after authoritative publication.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Committed<T> {
+    /// Typed command output.
     pub output: T,
+    /// Publication receipt the output can be observed at.
     pub receipt: Receipt,
 }
 
 /// Typed read result and the exact SQLite position it observed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Observed<T> {
+    /// Typed read output.
     pub output: T,
+    /// Position the read observed.
     pub receipt: Receipt,
 }
 
@@ -243,21 +254,25 @@ pub struct PendingMutation {
 }
 
 impl PendingMutation {
+    /// Returns the identity that resolves this mutation.
     #[must_use]
     pub const fn identity(&self) -> MutationIdentity {
         self.identity
     }
 
+    /// Returns the digest of the operation that was submitted.
     #[must_use]
     pub const fn operation_digest(&self) -> Digest {
         self.operation_digest
     }
 
+    /// Returns the incarnation the mutation targeted.
     #[must_use]
     pub const fn incarnation(&self) -> IncarnationId {
         self.incarnation
     }
 
+    /// Returns the Cell the mutation targeted.
     #[must_use]
     pub const fn target(&self) -> &CellTarget {
         &self.target
@@ -324,12 +339,18 @@ impl<C: Command> PreparedCommand<C> {
 
 /// Outcome-aware typed invocation failure.
 pub enum InvocationError<T> {
+    /// The command committed a rejection; the committed value carries it.
     Rejected(Box<Committed<T>>),
+    /// The command may have committed; resolve the mutation before retrying.
     Pending(Box<PendingMutation>),
+    /// The published result could not be decoded.
     InvalidPublishedResult {
+        /// Receipt the published result was observed at.
         receipt: Receipt,
+        /// Decoding failure that produced this error.
         source: Box<Error>,
     },
+    /// The invocation failed before it was submitted.
     NotStarted(Error),
 }
 
