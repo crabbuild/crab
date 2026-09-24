@@ -252,6 +252,7 @@ Monitor these platform and application signals:
 | `crab_cell_scheduler_items_total` | Maintenance advances plateau while Cells keep committing |
 | `crab_cell_primitive_operations_total` | A primitive module's `failed` or `rejected` rate rises above its baseline |
 | `crab_cell_primitive_operation_seconds` | One primitive module's command or query tail grows |
+| `crab_cell_pressure_tier` | A node reports `constrained`, `shedding`, or `critical`; `shedding` means it is releasing settled Cells |
 | `repository catalog refresh failed` | Running pods stop discovering catalog changes |
 | Publication or LFS transfer failures | A write may need client retry or operator outcome inspection |
 | LFS lock conflicts | Inspect the lock owner and ID; use force unlock only after confirming the holder no longer owns the edit |
