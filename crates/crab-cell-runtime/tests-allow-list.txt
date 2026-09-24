@@ -13,20 +13,23 @@ coordination/sim.rs  # deterministic simulator for the pub(crate) kernel
 coordination/tests.rs  # asserts the private kernel state machine
 coordination.rs  # pure pub(crate) kernel; declares its test modules
 fleet/eviction.rs  # asserts private eviction observations and victim selection
-fleet/placement.rs  # uses private observation-age bounds
+fleet/placement/tests.rs  # uses private observation-age bounds
+fleet/placement.rs  # declares crate-private test modules
 fleet/resource.rs  # asserts the private resource ledger
 fleet/scheduler.rs  # asserts the private primitive probe and class budget
 fleet/telemetry.rs  # uses the private telemetry install seam
 follower/tests.rs  # asserts private lane and index constants
 follower.rs  # declares crate-private test modules
 identity.rs  # asserts private hex codec helpers
-node/durability.rs  # asserts private durability gate state
+node/durability/tests.rs  # asserts private durability gate state
+node/durability.rs  # declares crate-private test modules
 node/lease.rs  # uses the private lease bound constant
 node/log/tests.rs  # asserts private proof state
 node/log.rs  # declares crate-private test modules
 node/log_recovery/tests.rs  # uses private recovery page bounds and witness records
 node/log_recovery.rs  # declares crate-private test modules
-node/log_shipper.rs  # asserts private shipping queue internals
+node/log_shipper/tests.rs  # asserts private shipping queue internals
+node/log_shipper.rs  # declares crate-private test modules
 node/tests/candidates.rs  # asserts private recovery-candidate windows and snapshots
 node/tests/log.rs  # asserts private node-log enrollment and takeover authority
 node/tests/placement.rs  # asserts private signed-capacity placement
@@ -67,8 +70,10 @@ qualification/tests/workload.rs  # asserts private workload generation and bound
 qualification/tests.rs  # declares crate-private test modules; holds the shared executor fixtures
 qualification.rs  # declares crate-private test modules
 recovery/artifacts.rs  # asserts the private artifact cache
-recovery/manifest.rs  # uses private manifest bounds and codecs
-recovery/release.rs  # asserts private release record fields
+recovery/manifest/tests.rs  # uses private manifest bounds and codecs
+recovery/manifest.rs  # declares crate-private test modules
+recovery/release/tests.rs  # asserts private release record fields
+recovery/release.rs  # declares crate-private test modules
 recovery/retention/tests.rs  # asserts private retention scratch handling
 recovery/retention.rs  # declares crate-private test modules
 registry/descriptor.rs  # asserts private descriptor codecs
