@@ -1,3 +1,4 @@
+//! Node advertisements, capacity, the node directory, leases, and the durability log.
 pub mod durability;
 pub mod lease;
 pub mod log;

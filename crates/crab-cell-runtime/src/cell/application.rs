@@ -1,3 +1,4 @@
+//! Application identities and the store that binds a repository application to its Cell.
 use bytes::Bytes;
 use crab_ltx::CellStorageLayout;
 use crab_storage::{StorageError, Store};

@@ -1,3 +1,4 @@
+//! Node-log transport requests: append, retire, seal, and tail.
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
 

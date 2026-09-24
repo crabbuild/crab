@@ -1,3 +1,4 @@
+//! Backup pins over revision-pinned catalog shards and pages.
 use std::collections::BTreeMap;
 
 use bytes::Bytes;

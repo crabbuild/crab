@@ -1,3 +1,4 @@
+//! Queue primitive: lease-based messages, retries, and dead letters.
 use rand::RngCore;
 use rusqlite::{Connection, OptionalExtension, Transaction};
 

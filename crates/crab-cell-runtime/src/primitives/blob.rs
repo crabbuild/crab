@@ -1,3 +1,4 @@
+//! Blob primitive: content-addressed parts with lease-based uploads.
 use std::collections::BTreeSet;
 
 use bytes::Bytes;

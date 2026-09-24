@@ -1,3 +1,4 @@
+//! Node-log recovery: inventory, witnesses, and owner-loss coordination.
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};

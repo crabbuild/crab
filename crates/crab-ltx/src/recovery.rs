@@ -1,3 +1,4 @@
+//! Recovery planning: scratch budgets, verified plans, and materialized plans.
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

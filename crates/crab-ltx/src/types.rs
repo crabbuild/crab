@@ -1,5 +1,6 @@
 // Contains adapted Celld lib.rs types at the revision in UPSTREAM.md.
 // Apache-2.0; modified by Crab contributors. See LICENSE.
+//! Shared LTX types: positions, limits, segment info, and read origins.
 
 use std::path::{Path, PathBuf};
 

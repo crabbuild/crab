@@ -1,3 +1,4 @@
+//! Persisted and transferable work inventory used by the scheduler.
 use std::marker::PhantomData;
 
 use crab_ltx::rusqlite::Connection;

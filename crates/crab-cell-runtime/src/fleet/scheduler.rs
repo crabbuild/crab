@@ -1,3 +1,4 @@
+//! Scheduler Tick: due timers, primitive maintenance classes, and dead letters.
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crab_ltx::rusqlite::Transaction;

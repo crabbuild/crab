@@ -1,3 +1,4 @@
+//! Recovery artifact cache and its admission.
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},

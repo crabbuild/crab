@@ -1,3 +1,4 @@
+//! Release records for one application's operator transitions.
 use bytes::Bytes;
 use crab_ltx::CellStorageLayout;
 use crab_storage::{ETag, StorageError};

@@ -1,3 +1,4 @@
+//! Single-Cell executor: commands, queries, migrations, and pending publication.
 use std::collections::VecDeque;
 
 use crab_ltx::{CaptureBatch, Db, TransactionError, rusqlite::OptionalExtension};

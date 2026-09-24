@@ -1,3 +1,4 @@
+//! Bounded SQL worker pool and its per-shard worker loop.
 use std::{
     collections::HashMap,
     panic::{AssertUnwindSafe, catch_unwind},

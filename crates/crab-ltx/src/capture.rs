@@ -1,5 +1,6 @@
 // Derived from denoland/celld, commit 10cb1303dac710dcb3b557e318e08c855261f68b.
 // Apache-2.0; see LICENSE and UPSTREAM.md. Modified by Crab contributors.
+//! Synchronous capture of sealed SQLite cuts into LTX frames.
 
 use crate::error::{CrabError, Result};
 use crate::ltx::{self, lock_pgno};

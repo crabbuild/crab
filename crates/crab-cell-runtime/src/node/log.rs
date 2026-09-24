@@ -1,3 +1,4 @@
+//! Node log: durability gate, rotation barrier, and recovery overlays.
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};

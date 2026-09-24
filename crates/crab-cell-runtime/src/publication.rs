@@ -1,3 +1,4 @@
+//! Immutable root preparation, authority CAS, and result release.
 use crate::cell::executor::{CellExecutor, StoredOutcome};
 use crate::control::Transition;
 use crate::control::authority::{CellAuthority, VersionedControl};
