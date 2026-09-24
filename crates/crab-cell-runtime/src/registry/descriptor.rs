@@ -450,6 +450,106 @@ mod tests {
         serde_json::to_vec(value).unwrap()
     }
 
+    fn compatibility_error(previous: &Value, candidate: &Value) -> crate::Error {
+        verify_rolling_compatibility(&bytes(previous), &bytes(candidate)).unwrap_err()
+    }
+
+    fn incompatible_base() -> Value {
+        release(
+            &"77".repeat(32),
+            json!([{"code": "66".repeat(32), "schema_max": 1, "schema_min": 1}]),
+        )
+    }
+
+    #[test]
+    fn rolling_release_rejects_a_removed_module() {
+        let previous = release(&"66".repeat(32), json!([]));
+        let mut candidate = incompatible_base();
+        candidate["modules"] = json!([]);
+        assert!(matches!(
+            compatibility_error(&previous, &candidate),
+            crate::Error::Registry("rolling release removes a compiled module")
+        ));
+    }
+
+    #[test]
+    fn rolling_release_rejects_a_narrowed_module_schema() {
+        let previous = release(&"66".repeat(32), json!([]));
+        let mut candidate = incompatible_base();
+        candidate["modules"][0]["schema_min"] = json!(2);
+        assert!(matches!(
+            compatibility_error(&previous, &candidate),
+            crate::Error::Registry("rolling release narrows a module schema range")
+        ));
+    }
+
+    #[test]
+    fn rolling_release_rejects_a_removed_query_codec() {
+        let previous = release(&"66".repeat(32), json!([]));
+        let mut candidate = incompatible_base();
+        candidate["modules"][0]["queries"] = json!([]);
+        assert!(matches!(
+            compatibility_error(&previous, &candidate),
+            crate::Error::Registry("rolling release removes a query codec")
+        ));
+    }
+
+    #[test]
+    fn rolling_release_rejects_a_narrowed_command_contract() {
+        let previous = release(&"66".repeat(32), json!([]));
+        let mut candidate = incompatible_base();
+        candidate["modules"][0]["commands"][0]["input_limit"] = json!(8);
+        assert!(matches!(
+            compatibility_error(&previous, &candidate),
+            crate::Error::Registry("rolling release narrows a command contract")
+        ));
+    }
+
+    #[test]
+    fn rolling_release_rejects_a_narrowed_query_contract() {
+        let previous = release(&"66".repeat(32), json!([]));
+        let mut candidate = incompatible_base();
+        candidate["modules"][0]["queries"][0]["output_limit"] = json!(8);
+        assert!(matches!(
+            compatibility_error(&previous, &candidate),
+            crate::Error::Registry("rolling release narrows a query contract")
+        ));
+    }
+
+    #[test]
+    fn rolling_release_rejects_a_removed_migration_digest() {
+        let previous = release(&"66".repeat(32), json!([]));
+        let mut candidate = incompatible_base();
+        candidate["modules"][0]["migrations"] = json!([]);
+        assert!(matches!(
+            compatibility_error(&previous, &candidate),
+            crate::Error::Registry("rolling release removes a migration digest")
+        ));
+    }
+
+    #[test]
+    fn rolling_release_rejects_a_removed_activity_type() {
+        let previous = release(&"66".repeat(32), json!([]));
+        let mut candidate = incompatible_base();
+        candidate["modules"][0]["activities"] = json!([]);
+        assert!(matches!(
+            compatibility_error(&previous, &candidate),
+            crate::Error::Registry("rolling release removes an activity type")
+        ));
+    }
+
+    #[test]
+    fn rolling_release_accepts_widened_contracts() {
+        let previous = release(&"66".repeat(32), json!([]));
+        let mut candidate = incompatible_base();
+        candidate["modules"][0]["schema_min"] = json!(0);
+        candidate["modules"][0]["schema_max"] = json!(2);
+        candidate["modules"][0]["commands"][0]["input_limit"] = json!(32);
+        candidate["modules"][0]["queries"][0]["output_limit"] = json!(32);
+        verify_rolling_compatibility(&bytes(&previous), &bytes(&candidate)).unwrap();
+        assert!(!requires_persisted_work_inventory(&bytes(&previous), &bytes(&candidate)).unwrap());
+    }
+
     #[test]
     fn rolling_release_retains_executable_and_persisted_work_contracts() {
         let old_code = "66".repeat(32);
