@@ -10,32 +10,45 @@ use crate::{Error, Result};
 
 /// One ordered follower append with the leader's safe truncation watermark.
 pub struct AppendRequest {
+    /// Leader issuing the append.
     pub leader_session: SessionId,
+    /// Node-log epoch the append belongs to.
     pub log_epoch: u64,
+    /// Ordered frames to append.
     pub frames: Vec<Bytes>,
+    /// Highest sequence the leader knows is durable elsewhere, so the follower
+    /// may truncate below it.
     pub covered_through: u64,
 }
 
 /// Recovery request that atomically closes one follower lane to new appends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SealRequest {
+    /// Leader whose lane is being sealed.
     pub leader_session: SessionId,
+    /// Epoch of the lane to seal.
     pub log_epoch: u64,
 }
 
 /// Leader-authorized deletion of one fully object-covered follower lane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RetireRequest {
+    /// Leader authorizing the retirement.
     pub leader_session: SessionId,
+    /// Epoch of the lane to retire.
     pub log_epoch: u64,
+    /// Highest sequence object storage covers.
     pub covered_through: u64,
 }
 
 /// Bounded read of one already sealed follower tail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TailRequest {
+    /// Leader whose sealed tail is read.
     pub leader_session: SessionId,
+    /// Epoch of the sealed lane.
     pub log_epoch: u64,
+    /// First sequence the follower should return.
     pub first_sequence: u64,
 }
 
@@ -44,24 +57,28 @@ pub struct TailRequest {
 /// Implementations own mTLS, peer enrollment, request deadlines, and response
 /// size limits. Follower storage and LTX verification remain runtime concerns.
 pub trait NodeLogTransport: Send + Sync {
+    /// Appends one ordered batch to a member's lane.
     fn append<'a>(
         &'a self,
         member: NodeId,
         request: AppendRequest,
     ) -> BoxFuture<'a, Result<FollowerReceipt>>;
 
+    /// Closes the member's lane to new appends.
     fn seal<'a>(
         &'a self,
         member: NodeId,
         request: SealRequest,
     ) -> BoxFuture<'a, Result<FollowerReceipt>>;
 
+    /// Deletes a fully object-covered member lane.
     fn retire<'a>(
         &'a self,
         member: NodeId,
         request: RetireRequest,
     ) -> BoxFuture<'a, Result<FollowerReceipt>>;
 
+    /// Reads the sealed tail starting at the requested sequence.
     fn tail<'a>(
         &'a self,
         member: NodeId,
@@ -120,6 +137,7 @@ pub struct LocalFollowerTransport {
 }
 
 impl LocalFollowerTransport {
+    /// Binds the local transport to one member and follower store.
     #[must_use]
     pub const fn new(member: NodeId, store: FollowerStore) -> Self {
         Self { member, store }

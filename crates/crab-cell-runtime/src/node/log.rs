@@ -28,21 +28,25 @@ pub struct CommitTicket {
 }
 
 impl CommitTicket {
+    /// Returns the leader session that issued the ticket.
     #[must_use]
     pub const fn leader_session(&self) -> SessionId {
         self.leader_session
     }
 
+    /// Returns the node-log epoch the commit was written under.
     #[must_use]
     pub const fn log_epoch(&self) -> u64 {
         self.log_epoch
     }
 
+    /// Returns the first node-log sequence the ticket covers.
     #[must_use]
     pub const fn first_sequence(&self) -> u64 {
         self.first_sequence
     }
 
+    /// Returns the last node-log sequence the ticket covers.
     #[must_use]
     pub const fn last_sequence(&self) -> u64 {
         self.last_sequence
@@ -52,7 +56,9 @@ impl CommitTicket {
 /// Durable path that authorized release of one committed result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DurabilitySource {
+    /// The commit was covered by the enrolled node-log lane.
     Fleet,
+    /// The commit was covered by object storage.
     Object,
 }
 
@@ -74,26 +80,32 @@ pub struct NodeLogRotationBarrier {
 
 /// New authoritative enrollment and inactive durability gate after rotation.
 pub struct RotatedNodeLog {
+    /// Enrollment the rotation installed.
     pub enrollment: VersionedNodeAdvertisement,
+    /// Inactive durability gate the rotated log starts from.
     pub gate: DurabilityGate,
 }
 
 impl NodeLogRotationBarrier {
+    /// Returns the session the barrier was issued for.
     #[must_use]
     pub const fn leader_session(&self) -> SessionId {
         self.leader_session
     }
 
+    /// Returns the sealed log epoch.
     #[must_use]
     pub const fn log_epoch(&self) -> u64 {
         self.log_epoch
     }
 
+    /// Returns the members the rotation enrolled.
     #[must_use]
     pub fn members(&self) -> &[NodeId] {
         &self.members
     }
 
+    /// Returns the highest sequence the sealed log covered.
     #[must_use]
     pub const fn covered_through(&self) -> u64 {
         self.covered_through
@@ -101,11 +113,13 @@ impl NodeLogRotationBarrier {
 }
 
 impl DurabilityProof {
+    /// Returns the ticket this proof covers.
     #[must_use]
     pub const fn ticket(&self) -> CommitTicket {
         self.ticket
     }
 
+    /// Returns which durability path issued the proof.
     #[must_use]
     pub const fn source(&self) -> DurabilitySource {
         self.source
@@ -373,11 +387,13 @@ impl DurabilityGate {
         Ok(tiered_through)
     }
 
+    /// Returns the highest sequence the follower lane has made durable.
     #[must_use]
     pub fn tiered_through(&self) -> u64 {
         self.lock().map_or(0, |state| state.tiered_through)
     }
 
+    /// Returns the highest sequence issued to the follower lane.
     #[must_use]
     pub fn issued_through(&self) -> u64 {
         self.lock()
