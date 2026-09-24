@@ -345,7 +345,9 @@ impl CellRuntimeStats {
 
 /// New capability and publication receipt returned by one schema migration.
 pub struct MigratedCell {
+    /// Handle that owns the migrated Cell.
     pub handle: CellHandle,
+    /// Outcome the migration published.
     pub outcome: MigrationOutcome,
 }
 

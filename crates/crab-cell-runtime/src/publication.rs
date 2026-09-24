@@ -117,6 +117,7 @@ impl CellPublisher {
             .durability_proof(crate::node::log::DurabilitySource::Object, waited);
     }
 
+    /// Returns the control version the publisher last observed.
     #[must_use]
     pub fn control(&self) -> &VersionedControl {
         &self.observed
