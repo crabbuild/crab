@@ -6,9 +6,11 @@ use crate::identity::{ApplicationId, CellId, CellTarget, Digest, NamespaceId, Te
 use crate::peer::wire as peer_wire;
 use crate::primitives::effects::{
     EffectCommandIntent, EffectLeaseOutcome, EffectTokenSource, InboxApplyOutcome, InboxDelivery,
-    effect_ack_delivered, effect_claim, effect_cleanup_terminal, effect_validate_claim,
-    inbox_apply, inbox_cleanup_expired,
+    effect_ack_delivered, effect_claim, effect_cleanup_terminal, effect_extend, effect_retry,
+    effect_validate_claim, inbox_apply, inbox_cleanup_expired,
 };
+
+use super::{EFFECT_LIFETIME_MS, MAX_ATTEMPTS, MAX_CLAIM_ITEMS, MAX_LEASE_MS, MIN_LEASE_MS};
 use prost::Message;
 
 struct Tokens(u8);
@@ -467,4 +469,129 @@ fn manual_retry_preserves_identity_and_never_reopens_terminal_effect() {
             .is_empty()
     );
     transaction.commit().unwrap();
+}
+
+#[test]
+fn effect_expiry_accepts_the_seven_day_boundary() {
+    let source_target = source_target();
+    let destination = CellTarget::new(
+        source_target.tenant(),
+        source_target.application(),
+        NamespaceId::from_bytes([5; 16]),
+        b"destination",
+    )
+    .unwrap();
+    let mut source = source_connection();
+    let transaction = source.transaction().unwrap();
+    let mut effects = EffectBatch::new(&transaction, &source_target, 1, 0).unwrap();
+    assert!(
+        effects
+            .insert_command(
+                &transaction,
+                &command_intent(destination, b"work", EFFECT_LIFETIME_MS),
+            )
+            .is_ok()
+    );
+}
+
+#[test]
+fn effect_expiry_past_seven_days_is_rejected() {
+    let source_target = source_target();
+    let destination = CellTarget::new(
+        source_target.tenant(),
+        source_target.application(),
+        NamespaceId::from_bytes([5; 16]),
+        b"destination",
+    )
+    .unwrap();
+    let mut source = source_connection();
+    let transaction = source.transaction().unwrap();
+    let mut effects = EffectBatch::new(&transaction, &source_target, 1, 0).unwrap();
+    assert!(
+        effects
+            .insert_command(
+                &transaction,
+                &command_intent(destination, b"work", EFFECT_LIFETIME_MS + 1),
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn claim_rejects_limits_outside_one_to_32() {
+    let mut source = source_connection();
+    let transaction = source.transaction().unwrap();
+    let mut tokens = Tokens(0);
+    assert!(effect_claim(&transaction, 0, 0, MIN_LEASE_MS, &mut tokens).is_err());
+    assert!(
+        effect_claim(
+            &transaction,
+            0,
+            MAX_CLAIM_ITEMS + 1,
+            MIN_LEASE_MS,
+            &mut tokens
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn claim_rejects_leases_outside_five_to_three_hundred_seconds() {
+    let mut source = source_connection();
+    let transaction = source.transaction().unwrap();
+    let mut tokens = Tokens(0);
+    assert!(effect_claim(&transaction, 0, 1, MIN_LEASE_MS - 1, &mut tokens).is_err());
+    assert!(effect_claim(&transaction, 0, 1, MAX_LEASE_MS + 1, &mut tokens).is_err());
+}
+
+#[test]
+fn extend_rejects_bounds_outside_five_to_three_hundred_seconds() {
+    let (claim, mut source) = claimed_effect();
+    let transaction = source.transaction().unwrap();
+    assert!(effect_extend(&transaction, 0, &claim, MIN_LEASE_MS - 1).is_err());
+    assert!(effect_extend(&transaction, 0, &claim, MAX_LEASE_MS + 1).is_err());
+}
+
+#[test]
+fn retry_fails_at_the_attempt_cap() {
+    let (claim, mut source) = claimed_effect();
+    let transaction = source.transaction().unwrap();
+    transaction
+        .execute(
+            "UPDATE sys_effects SET attempt = ?1 WHERE effect_id = ?2",
+            (i64::from(MAX_ATTEMPTS), claim.effect_id.as_slice()),
+        )
+        .unwrap();
+    let mut capped = claim;
+    capped.attempt = MAX_ATTEMPTS;
+    assert_eq!(
+        effect_retry(&transaction, 0, &capped).unwrap(),
+        EffectLeaseOutcome::Failed
+    );
+}
+
+fn claimed_effect() -> (
+    crate::primitives::effects::EffectClaim,
+    crab_ltx::rusqlite::Connection,
+) {
+    let source_target = source_target();
+    let destination = CellTarget::new(
+        source_target.tenant(),
+        source_target.application(),
+        NamespaceId::from_bytes([5; 16]),
+        b"destination",
+    )
+    .unwrap();
+    let mut source = source_connection();
+    let transaction = source.transaction().unwrap();
+    EffectBatch::new(&transaction, &source_target, 1, 0)
+        .unwrap()
+        .insert_command(&transaction, &command_intent(destination, b"work", 5_100))
+        .unwrap();
+    let mut tokens = Tokens(0);
+    let claim = effect_claim(&transaction, 0, 1, MIN_LEASE_MS, &mut tokens)
+        .unwrap()
+        .remove(0);
+    transaction.commit().unwrap();
+    (claim, source)
 }
