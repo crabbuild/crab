@@ -523,4 +523,89 @@ mod tests {
     fn checked_in_cron_schema_matches_runtime_schema() {
         assert_eq!(CRON_SCHEMA, include_str!("../../docs/contracts/cron.sql"));
     }
+
+    #[test]
+    fn catch_up_fires_each_missed_occurrence_with_its_own_effect() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let transaction = connection.transaction().unwrap();
+        let source = CellTarget::new(
+            TenantId::from_bytes([7; 16]),
+            ApplicationId::from_bytes([8; 16]),
+            SOURCE_NAMESPACE,
+            b"cron-catch-up",
+        )
+        .unwrap();
+        crate::cell::schema::install_runtime_schema_in(
+            &transaction,
+            source.cell_id(),
+            IncarnationId::from_bytes([9; 16]),
+            1,
+        )
+        .unwrap();
+        install_cron_schema(&transaction).unwrap();
+
+        let upsert = |schedule_id: [u8; 16], next_due_ms: i64| CronMutation::Upsert {
+            schedule_id,
+            target_index: 0,
+            target_partition: b"destination".to_vec(),
+            payload: b"compact".to_vec(),
+            interval_ms: 1_000,
+            next_due_ms,
+        };
+        let overdue = [11; 16];
+        let paused = [12; 16];
+        let future = [13; 16];
+        cron_mutate(&transaction, 200, 10, TARGETS, &upsert(overdue, 1_000)).unwrap();
+        cron_mutate(&transaction, 200, 10, TARGETS, &upsert(paused, 1_000)).unwrap();
+        cron_mutate(&transaction, 200, 10, TARGETS, &upsert(future, 9_000)).unwrap();
+        cron_mutate(
+            &transaction,
+            200,
+            10,
+            TARGETS,
+            &CronMutation::Pause {
+                schedule_id: paused,
+            },
+        )
+        .unwrap();
+
+        let mut effects = EffectBatch::new(&transaction, &source, 1, 4_000).unwrap();
+        assert_eq!(
+            cron_fire_due_bounded(&transaction, &mut effects, &source, 4_000, TARGETS, 8).unwrap(),
+            4,
+            "every occurrence that came due fires once"
+        );
+        let schedule = load_schedule(&transaction, overdue).unwrap().unwrap();
+        assert_eq!(
+            (schedule.next_due_ms, schedule.occurrence),
+            (5_000, 4),
+            "each fire advances the schedule by exactly one interval"
+        );
+        let paused = load_schedule(&transaction, paused).unwrap().unwrap();
+        assert_eq!((paused.next_due_ms, paused.occurrence), (1_000, 0));
+        let future = load_schedule(&transaction, future).unwrap().unwrap();
+        assert_eq!((future.next_due_ms, future.occurrence), (9_000, 0));
+
+        let (effect_rows, distinct): (i64, i64) = transaction
+            .query_row(
+                "SELECT count(*), count(DISTINCT effect_id) FROM sys_effects",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            effect_rows, 4,
+            "each occurrence publishes its own durable effect"
+        );
+        assert_eq!(
+            distinct, 4,
+            "each occurrence keeps a distinct effect identity"
+        );
+
+        assert_eq!(
+            cron_fire_due_bounded(&transaction, &mut effects, &source, 4_000, TARGETS, 8).unwrap(),
+            0,
+            "a settled schedule does not fire the same occurrences twice"
+        );
+    }
 }
