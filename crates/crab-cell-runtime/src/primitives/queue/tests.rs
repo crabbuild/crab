@@ -471,3 +471,115 @@ fn redrive_waits_for_a_terminal_dead_letter_effect() {
         (0, 0)
     );
 }
+
+#[test]
+fn send_accepts_a_payload_at_the_documented_limit() {
+    let mut connection = connection();
+    let transaction = connection.transaction().unwrap();
+    let outcome = queue_send(
+        &transaction,
+        source_target().namespace(),
+        0,
+        &QueueSendRequest {
+            producer_id: [9; 16],
+            payload: vec![b'p'; MAX_PAYLOAD_BYTES],
+            available_at_ms: 0,
+        },
+    )
+    .unwrap();
+    assert!(matches!(outcome, QueueSendOutcome::Sent { .. }));
+}
+
+#[test]
+fn send_rejects_a_payload_past_the_documented_limit() {
+    let mut connection = connection();
+    let transaction = connection.transaction().unwrap();
+    let outcome = queue_send(
+        &transaction,
+        source_target().namespace(),
+        0,
+        &QueueSendRequest {
+            producer_id: [10; 16],
+            payload: vec![b'p'; MAX_PAYLOAD_BYTES + 1],
+            available_at_ms: 0,
+        },
+    );
+    assert!(outcome.is_err());
+}
+
+#[test]
+fn send_retains_a_message_for_thirty_days() {
+    let mut connection = connection();
+    let transaction = connection.transaction().unwrap();
+    let QueueSendOutcome::Sent { message_id } = queue_send(
+        &transaction,
+        source_target().namespace(),
+        0,
+        &QueueSendRequest {
+            producer_id: [11; 16],
+            payload: b"payload".to_vec(),
+            available_at_ms: 0,
+        },
+    )
+    .unwrap() else {
+        panic!("first send must insert");
+    };
+    let expires_at_ms = transaction
+        .query_row(
+            "SELECT expires_at_ms FROM queue_messages WHERE message_id = ?1",
+            [message_id.as_slice()],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(expires_at_ms, RETENTION_MS);
+}
+
+#[test]
+fn extend_rejects_bounds_outside_five_to_three_hundred_seconds() {
+    let mut connection = connection();
+    let message_id = insert_leased_message(&mut connection);
+    let transaction = connection.transaction().unwrap();
+    assert!(
+        queue_apply_lease(
+            &transaction,
+            10,
+            message_id,
+            [8; 16],
+            QueueLeaseAction::Extend {
+                extension_ms: 4_999
+            },
+        )
+        .is_err()
+    );
+    assert!(
+        queue_apply_lease(
+            &transaction,
+            10,
+            message_id,
+            [8; 16],
+            QueueLeaseAction::Extend {
+                extension_ms: 300_001,
+            },
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn retry_rejects_a_delay_past_one_hour() {
+    let mut connection = connection();
+    let message_id = insert_leased_message(&mut connection);
+    let transaction = connection.transaction().unwrap();
+    assert!(
+        queue_apply_lease(
+            &transaction,
+            10,
+            message_id,
+            [8; 16],
+            QueueLeaseAction::Retry {
+                delay_ms: MAX_RETRY_DELAY_MS + 1,
+            },
+        )
+        .is_err()
+    );
+}
