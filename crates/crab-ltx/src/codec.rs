@@ -570,3 +570,49 @@ mod tests {
         ltx::decode_file(&actual).unwrap();
     }
 }
+
+#[test]
+fn uvarint_roundtrips_every_boundary_value() {
+    for value in [0_u64, 1, 127, 128, 16_383, 16_384, u64::MAX - 1, u64::MAX] {
+        let mut bytes = Vec::new();
+        write_uvarint(&mut bytes, value);
+        let mut position = 0;
+        assert_eq!(read_uvarint(&bytes, &mut position).unwrap(), value);
+        assert_eq!(
+            position,
+            bytes.len(),
+            "varint {value} must consume exactly its encoding"
+        );
+    }
+}
+
+#[test]
+fn uvarint_rejects_a_truncated_encoding() {
+    let mut position = 0;
+    assert!(matches!(
+        read_uvarint(&[0x80], &mut position),
+        Err(CrabError::LTXCorrupted)
+    ));
+}
+
+#[test]
+fn uvarint_rejects_encodings_that_overflow_the_value() {
+    let mut position = 0;
+    assert!(matches!(
+        read_uvarint(&[0xff; 10], &mut position),
+        Err(CrabError::LTXCorrupted)
+    ));
+
+    let mut position = 0;
+    let mut overflows = vec![0xff; 9];
+    overflows.push(0x02);
+    assert!(matches!(
+        read_uvarint(&overflows, &mut position),
+        Err(CrabError::LTXCorrupted)
+    ));
+
+    let mut position = 0;
+    let mut maximal = vec![0xff; 9];
+    maximal.push(0x01);
+    assert_eq!(read_uvarint(&maximal, &mut position).unwrap(), u64::MAX);
+}
