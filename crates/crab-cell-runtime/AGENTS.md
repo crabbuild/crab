@@ -12,7 +12,9 @@ construction, and product policy stay in `crab-http-server`.
 ## Read first
 
 1. `src/lib.rs` — module declarations and the frozen root prelude.
-2. `src/cell/actor.rs` — admission, lifecycle, and the actor loop.
+2. `src/cell/actor.rs` — the actor root; `task.rs` and `requests.rs` drive the
+   loop and the request paths, `tasks.rs` and `lifecycle.rs` handle finished
+   tasks and cell scheduling, and `admission.rs` fences both.
 3. `src/cell/executor.rs` and `src/cell/worker.rs` — command execution and the
    bounded SQL worker pool.
 4. `src/publication.rs` and `src/recovery/manifest.rs` — exact-root publication
@@ -27,7 +29,7 @@ construction, and product policy stay in `crab-http-server`.
 | Add a primitive operation | `src/primitives/<name>.rs` | `src/registry/schemas.rs`, `tests/primitives/` |
 | Add primitive maintenance | `src/fleet/scheduler.rs` | that primitive's `TABLE` constant, `tests/runtime/scheduler.rs` |
 | Wire or defer a policy seam | `src/cell/actor.rs` | `crab/scripts/check-policy-entry-points.py` |
-| Change admission or lifecycle | `src/cell/actor.rs` | `src/coordination.rs`, `tests/runtime/lifecycle.rs` |
+| Change admission or lifecycle | `src/cell/actor/admission.rs`, `src/cell/actor/lifecycle.rs` | `src/coordination.rs`, `tests/runtime/lifecycle.rs` |
 | Change publication | `src/publication.rs` | `src/recovery/`, `tests/runtime/publication.rs` |
 | Change node log or durability | `src/node/` | `src/follower.rs`, `tests/fleet/` |
 | Change placement or pressure | `src/fleet/` | `tests/fleet/`, `docs/canonical-ltx-scaling.md` |

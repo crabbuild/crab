@@ -16,9 +16,14 @@ mod handle;
 use state::*;
 use task::*;
 mod admission;
+mod lifecycle;
+mod requests;
 mod state;
 mod task;
 mod tasks;
+
+use lifecycle::*;
+use requests::*;
 
 pub use handle::CellHandle;
 use handle::{CellAdmission, WorkAdmission};
