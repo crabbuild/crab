@@ -11,7 +11,12 @@ client.rs  # declares crate-private test modules
 control.rs  # declares crate-private test modules
 control/tests.rs  # asserts private control transition and codec helpers
 coordination/sim.rs  # deterministic simulator for the pub(crate) kernel
-coordination/tests.rs  # asserts the private kernel state machine
+coordination/tests.rs  # declares crate-private kernel test modules
+coordination/tests/effects.rs  # asserts exact effect completion and deactivation fences
+coordination/tests/lifecycle.rs  # asserts private admission, drain, and fence transitions
+coordination/tests/publication.rs  # asserts private publication outcomes and CAS loss
+coordination/tests/scheduler.rs  # asserts private kernel scheduling decisions
+coordination/tests/transfer.rs  # asserts private transfer and migration transitions
 coordination.rs  # pure pub(crate) kernel; declares its test modules
 fleet/eviction.rs  # asserts private eviction observations and victim selection
 fleet/placement/tests.rs  # uses private observation-age bounds
