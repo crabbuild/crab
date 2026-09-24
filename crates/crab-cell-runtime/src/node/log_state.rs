@@ -9,9 +9,13 @@ pub(crate) const MAX_NODE_LOG_MEMBERS: usize = 2;
 /// Authoritative lifecycle state for one node-session durability log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeLogPhase {
+    /// The log accepts appends from its enrolled leader.
     Open,
+    /// The log is being recovered by a claimed session.
     Recovering,
+    /// The log accepts no further appends and can be recovered.
     Sealed,
+    /// The log's lane was deleted after object coverage.
     Retired,
 }
 
@@ -24,16 +28,19 @@ pub struct NodeRecoveryClaim {
 }
 
 impl NodeRecoveryClaim {
+    /// Returns the session that holds the claim.
     #[must_use]
     pub const fn claimant(&self) -> SessionId {
         self.claimant
     }
 
+    /// Returns the claim generation.
     #[must_use]
     pub const fn generation(&self) -> u64 {
         self.generation
     }
 
+    /// Returns the logical time the claim expires.
     #[must_use]
     pub const fn expires_at_ms(&self) -> i64 {
         self.expires_at_ms
@@ -151,36 +158,44 @@ impl NodeLogStatus {
         Ok(status)
     }
 
+    /// Returns the durable log phase.
     #[must_use]
     pub const fn phase(&self) -> NodeLogPhase {
         self.phase
     }
 
+    /// Returns the node-log epoch.
     #[must_use]
     pub const fn epoch(&self) -> u64 {
         self.epoch
     }
 
+    /// Returns the members the log is enrolled with.
     #[must_use]
     pub fn members(&self) -> &[NodeId] {
         &self.members
     }
 
+    /// Reports whether the log currently accepts appends.
     #[must_use]
     pub const fn active(&self) -> bool {
         self.active
     }
 
+    /// Returns the highest sequence tiered durably.
     #[must_use]
     pub const fn tiered_through(&self) -> u64 {
         self.tiered_through
     }
 
+    /// Returns the recovery claim, while one is held.
     #[must_use]
     pub const fn recovery(&self) -> Option<NodeRecoveryClaim> {
         self.recovery
     }
 
+    /// Returns the published recovery manifest digest, once recovery sealed the
+    /// log.
     #[must_use]
     pub const fn recovery_manifest(&self) -> Option<Digest> {
         self.recovery_manifest

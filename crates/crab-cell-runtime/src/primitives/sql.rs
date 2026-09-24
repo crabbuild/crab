@@ -21,31 +21,42 @@ const MAX_RESULT_BYTES: usize = 1 << 20;
 /// One typed SQLite parameter or result value.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SqlValue {
+    /// SQL NULL.
     Null,
+    /// A 64-bit signed integer.
     Integer(i64),
+    /// A floating-point value.
     Real(f64),
+    /// UTF-8 text.
     Text(String),
+    /// Binary blob.
     Blob(Vec<u8>),
 }
 
 /// One parameterized application SQL statement.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SqlStatement {
+    /// SQL text with `?` placeholders.
     pub sql: String,
+    /// Values bound to the placeholders, in order.
     pub parameters: Vec<SqlValue>,
 }
 
 /// A bounded group of application SQL statements executed in order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SqlBatch {
+    /// Statements executed in order.
     pub statements: Vec<SqlStatement>,
 }
 
 /// Materialized result of one SQL statement.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SqlResultSet {
+    /// Column names in selection order.
     pub columns: Vec<String>,
+    /// Result rows.
     pub rows: Vec<Vec<SqlValue>>,
+    /// Rows the statement changed.
     pub rows_affected: u64,
 }
 
