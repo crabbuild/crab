@@ -12,15 +12,42 @@ construction, and product policy stay in `crab-http-server`.
 ## Read first
 
 1. `src/lib.rs` — module declarations and the frozen root prelude.
-2. `src/cell/actor.rs` — the actor root; `task.rs` and `requests.rs` drive the
-   loop and the request paths, `tasks.rs` and `lifecycle.rs` handle finished
-   tasks and cell scheduling, and `admission.rs` fences both.
-3. `src/cell/executor.rs` and `src/cell/worker.rs` — command execution and the
-   bounded SQL worker pool.
+2. `src/cell/actor.rs` — the actor root. `actor/task.rs` and
+   `actor/requests.rs` drive the loop and the request paths, `actor/tasks.rs`
+   and `actor/lifecycle.rs` handle finished tasks and cell scheduling,
+   `actor/{handle,state,runtime}.rs` own the handle, projections, and runtime
+   administration, and `actor/admission.rs` fences all of them.
+3. `src/cell/executor.rs` and `src/cell/worker.rs` with `src/cell/worker/run.rs`
+   — command execution and the bounded SQL worker pool.
 4. `src/publication.rs` and `src/recovery/manifest.rs` — exact-root publication
    and recovery artifacts.
-5. `src/coordination.rs` — the pure `pub(crate)` coordination kernel.
+5. `src/coordination.rs` — the pure `pub(crate)` coordination kernel, with the
+   deterministic simulator in `src/coordination/sim.rs`.
 6. `docs/runtime.md` and `docs/delivery.md` — request path and evidence map.
+
+## Module map
+
+Subsystem roots keep the shared contract and helpers; the named child modules
+own one concern each. Module files sit beside their root (`foo.rs` + `foo/`).
+
+- Cell: `cell/{actor.rs,catalog.rs,application.rs,executor.rs,schema.rs,worker.rs}`,
+  `cell/actor/{admission,handle,lifecycle,requests,runtime,state,task,tasks}.rs`,
+  `cell/worker/run.rs`.
+- Control and clients: `control.rs` + `control/authority.rs`, `client.rs`,
+  `peer.rs` + `peer/{dispatch,protobuf,transport}.rs`.
+- Durability and followers: `follower.rs` + `follower/records.rs`,
+  `node/{advertisement,capacity,durability,lease,log,log_shipper,log_state,log_transport}.rs`,
+  `node/directory.rs` + `node/directory/{advertisement,log,recovery}.rs`,
+  `node/log_recovery.rs` + `node/log_recovery/witness.rs`.
+- Fleet and recovery: `fleet/{scheduler,placement,pressure,eviction,resource,telemetry}.rs`,
+  `recovery/{manifest,release,release_progress,artifacts}.rs`,
+  `recovery/backup/restore.rs`, `recovery/retention.rs`.
+- Primitives: `primitives/<name>.rs` with the wire codecs in
+  `primitives/<name>/api.rs`; Effects adds `supervisor.rs` and Workflow adds
+  `activity.rs`, `activity_api.rs`, `activity_codec.rs`, and `maintenance.rs`.
+- Registry and qualification: `registry/{builder,descriptor,handlers,schemas}.rs`,
+  `qualification/{profile,receipt,workload,cluster}.rs`,
+  `qualification/receipt/{matrix,runner}.rs`, `qualification/tests/`.
 
 ## Common changes
 
