@@ -34,6 +34,8 @@ pub struct FilesystemCasStore {
 }
 
 impl FilesystemCasStore {
+    /// Wraps a local directory, creating the lock directory conditional updates
+    /// need.
     pub fn new(root: &FilePath) -> Result<Self> {
         let inner = object_store::local::LocalFileSystem::new_with_prefix(root)?;
         std::fs::create_dir_all(root.join(".crab-cas-locks")).map_err(|source| {
@@ -60,6 +62,7 @@ impl FilesystemCasStore {
             .store(true, Ordering::Release);
     }
 
+    /// Reports whether `drop_next_update_response` fired since construction.
     #[must_use]
     #[cfg_attr(test, allow(dead_code))]
     pub fn dropped_update_response(&self) -> bool {
