@@ -11,8 +11,10 @@ Rules:
   4. No `tests/<name>.rs` that shadows `src/<name>.rs`.
   5. Every test suite root has a matching module directory and at least one
      test.
-  6. The runtime root surface equals `api-prelude.txt`.
-  7. The runtime coordination kernel stays sans-I/O: no async, clock, or
+  6. Every module file inside a suite directory is declared by its parent module
+     file, so a split cannot leave a test file that the compiler never builds.
+  7. The runtime root surface equals `api-prelude.txt`.
+  8. The runtime coordination kernel stays sans-I/O: no async, clock, or
      storage, so the simulator and the model can replay the same transitions.
 """
 
@@ -45,7 +47,7 @@ SUITES = {
 TEST_ATTR = re.compile(r"^\s*#\[(?:tokio::)?test", re.M)
 CFG_TEST = re.compile(r"^\s*#\[cfg\(test\)\]", re.M)
 PATH_ATTR = re.compile(r"#\[path\s*=")
-MODULE_DECL = re.compile(r"^\s*(?:pub(?:\([^)]*\))? )?mod [a-z_][a-z_0-9]*\s*;", re.M)
+MODULE_DECL = re.compile(r"^\s*(?:pub(?:\([^)]*\))? )?mod ([a-z_][a-z_0-9]*)\s*;", re.M)
 LINE_COMMENT = re.compile(r"//[^\n]*")
 ROOT_RE_EXPORT = re.compile(r"^pub use ([^;]+);", re.M)
 ROOT_CONST = re.compile(r"^\s*pub (?:const|struct|enum|trait|fn|type) ([A-Za-z_][A-Za-z0-9_]*)", re.M)
@@ -106,12 +108,46 @@ def check_allow_list_entries(crate_path: Path, entries: dict[str, str]) -> list[
     return problems
 
 
+
+def check_suite_module_declarations(crate: str, crate_path: Path) -> list[str]:
+    """Every suite module file must be declared by the module that owns it."""
+    problems: list[str] = []
+    tests = crate_path / "tests"
+    for suite in SUITES.get(crate, ()):
+        suite_dir = tests / suite
+        suite_root = tests / f"{suite}.rs"
+        if not suite_dir.is_dir() or not suite_root.is_file():
+            continue
+        for path in sorted(suite_dir.rglob("*.rs")):
+            if path.name == "mod.rs":
+                continue
+            if path.parent == suite_dir:
+                declaring = suite_root
+            else:
+                declaring = path.parent.with_suffix(".rs")
+                if not declaring.is_file():
+                    declaring = path.parent / "mod.rs"
+            if not declaring.is_file():
+                problems.append(
+                    f"{path.relative_to(ROOT)}: no module file declares it"
+                )
+                continue
+            text = LINE_COMMENT.sub("", declaring.read_text())
+            if path.stem not in MODULE_DECL.findall(text):
+                problems.append(
+                    f"{path.relative_to(ROOT)}: {declaring.relative_to(ROOT)} does "
+                    f"not declare `mod {path.stem};`"
+                )
+    return problems
+
+
 def check(crate: str) -> list[str]:
     crate_path = ROOT / crate
     problems: list[str] = []
     entries = allow_list(crate_path)
     allowed = set(entries)
     problems.extend(check_allow_list_entries(crate_path, entries))
+    problems.extend(check_suite_module_declarations(crate, crate_path))
     search_roots = [crate_path / "src"]
     if (crate_path / "tests").is_dir():
         search_roots.append(crate_path / "tests")
