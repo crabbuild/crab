@@ -32,6 +32,9 @@ pub(super) async fn run(
     let mut hydration_tick = tokio::time::interval(HYDRATION_TICK);
     hydration_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     hydration_tick.tick().await;
+    let mut pressure_tick = tokio::time::interval(PRESSURE_SAMPLE);
+    pressure_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    pressure_tick.tick().await;
     loop {
         if shutdown.as_ref().is_some_and(|state| state.draining) {
             if tasks.is_empty() {
@@ -95,6 +98,17 @@ pub(super) async fn run(
                     start_background_inventory(&pool, &mut cells, &mut tasks, &node_lease);
                     start_background_compaction(&pool, &mut cells, &mut tasks, &node_lease);
                 }
+                _ = pressure_tick.tick() => {
+                    sample_node_pressure(
+                        &pool,
+                        &mut pressure,
+                        &mut cells,
+                        &mut transitioning,
+                        &mut tasks,
+                        &mut movement,
+                        &mut movement_permits,
+                    );
+                }
             }
             continue;
         }
@@ -139,8 +153,82 @@ pub(super) async fn run(
                 start_background_inventory(&pool, &mut cells, &mut tasks, &node_lease);
                 start_background_compaction(&pool, &mut cells, &mut tasks, &node_lease);
             }
+            _ = pressure_tick.tick() => {
+                sample_node_pressure(
+                    &pool,
+                    &mut pressure,
+                    &mut cells,
+                    &mut transitioning,
+                    &mut tasks,
+                    &mut movement,
+                    &mut movement_permits,
+                );
+            }
         }
     }
+}
+
+/// Feeds this node's own reservation ledger into the pressure classifier.
+///
+/// A ledger that cannot be read, or a node without configured limits, yields no
+/// sample: pressure policy must never stop the actor loop.
+fn sample_node_pressure(
+    pool: &SqlWorkerPool,
+    pressure: &mut PressureClassifier,
+    cells: &mut HashMap<CellId, ActiveCell>,
+    transitioning: &mut HashSet<CellId>,
+    tasks: &mut JoinSet<TaskResult>,
+    movement: &mut MovementBudget,
+    movement_permits: &mut HashMap<CellId, MovementPermit>,
+) {
+    let Ok(snapshot) = pool.resource_ledger().snapshot() else {
+        return;
+    };
+    let Ok(sample) = super::runtime::pressure_sample(snapshot, unix_millis()) else {
+        return;
+    };
+    let _ = classify_pressure_sample(
+        sample,
+        pressure,
+        pool,
+        cells,
+        transitioning,
+        tasks,
+        movement,
+        movement_permits,
+    );
+}
+
+/// Classifies one sample and starts bounded shedding when it demands it.
+///
+/// The external observation message and the actor's own ledger sample share
+/// this path, so both keep one hysteresis and one movement budget.
+fn classify_pressure_sample(
+    sample: PressureSample,
+    pressure: &mut PressureClassifier,
+    pool: &SqlWorkerPool,
+    cells: &mut HashMap<CellId, ActiveCell>,
+    transitioning: &mut HashSet<CellId>,
+    tasks: &mut JoinSet<TaskResult>,
+    movement: &mut MovementBudget,
+    movement_permits: &mut HashMap<CellId, MovementPermit>,
+) -> crate::Result<PressureState> {
+    let state = pressure.observe(sample)?;
+    if matches!(state, PressureState::Shedding | PressureState::Critical)
+        && movement_permits.len() < 2
+    {
+        let _ = start_bounded_evictions(
+            1,
+            sample.at_ms,
+            pool,
+            cells,
+            transitioning,
+            tasks,
+            movement,
+            movement_permits,
+        );
+    }
+    Ok(state)
 }
 
 pub(super) fn start_shutdown_drain(
@@ -588,22 +676,16 @@ pub(super) fn handle_message(
             continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
         }
         Message::ObservePressure { sample, reply } => {
-            let result = pressure.observe(sample);
-            if let Ok(state) = result
-                && matches!(state, PressureState::Shedding | PressureState::Critical)
-                && movement_permits.len() < 2
-            {
-                let _ = start_bounded_evictions(
-                    1,
-                    sample.at_ms,
-                    pool,
-                    cells,
-                    transitioning,
-                    tasks,
-                    movement,
-                    movement_permits,
-                );
-            }
+            let result = classify_pressure_sample(
+                sample,
+                pressure,
+                pool,
+                cells,
+                transitioning,
+                tasks,
+                movement,
+                movement_permits,
+            );
             let _ = reply.send(result);
         }
         Message::Shutdown { reply } => {

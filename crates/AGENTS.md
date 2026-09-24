@@ -80,6 +80,28 @@ crab-types
 - Server crates are composition boundaries. Do not move server policy or broad dependency sets into lower libraries.
 - Preserve source errors across crate boundaries. Map errors only where the receiving layer adds a real contract or user-facing decision.
 
+## Cell and LTX Layout
+
+`crab-cell-runtime`, `crab-cell-app`, `crab-cell-host`, and `crab-ltx` are the
+source of the Cellule workspace, so their layout is inherited by a published
+framework rather than being a local style choice:
+
+- `src/` is production code; the test surface is `tests/<suite>.rs` plus its
+  `tests/<suite>/` modules, one binary per capability suite. Never name a suite
+  after a source file it happens to exercise.
+- Shared fixtures live in `tests/support/`; a suite declares `mod support;` and
+  reaches it through the crate root. No `#[path]` attributes.
+- A test that needs private or `pub(crate)` state stays in its module and is
+  listed with a reason in that crate's `tests-allow-list.txt`; everything else
+  belongs in a suite.
+- The runtime and LTX root surfaces are frozen in `api-prelude.txt`; a new root
+  re-export edits `src/lib.rs` and that file in the same commit.
+- These four crates depend only on each other and `crab-storage` (renamed
+  `cellule-store` on extraction), so a new `crab-*` edge blocks the extraction.
+- `crab/scripts/check-cell-ltx-layout.py` checks the layout and
+  `crab/scripts/check-policy-entry-points.py` the actor policy seams; the
+  per-crate `AGENTS.md` guides own the test map and read-first routes.
+
 ## Feature Flags
 
 - Default features stay minimal. Do not enable provider, runtime, network, FUSE/NFS, `gix`, or test features by default for caller convenience.

@@ -49,7 +49,7 @@ async fn node_lease_expiry_hides_an_inflight_committed_command() {
     let command = tokio::spawn(async move {
         handle
             .execute(
-                identity(43),
+                mutation_identity_window(43, 10, 10_000),
                 Digest::from_bytes([44; 32]),
                 20,
                 1,

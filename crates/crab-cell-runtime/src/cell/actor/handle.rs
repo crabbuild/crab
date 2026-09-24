@@ -53,26 +53,31 @@ pub(super) struct WorkAdmission {
 }
 
 impl CellHandle {
+    /// Returns the catalog proof that authorized this activation.
     #[must_use]
     pub const fn catalog(&self) -> &CatalogProof {
         &self.catalog
     }
 
+    /// Returns the Cell this handle addresses.
     #[must_use]
     pub const fn cell_id(&self) -> CellId {
         self.cell
     }
 
+    /// Returns the incarnation the activation belongs to.
     #[must_use]
     pub const fn incarnation(&self) -> IncarnationId {
         self.incarnation
     }
 
+    /// Returns the application code digest the Cell serves.
     #[must_use]
     pub const fn code(&self) -> Digest {
         self.code
     }
 
+    /// Returns the schema version the Cell serves.
     #[must_use]
     pub const fn schema(&self) -> u32 {
         self.schema

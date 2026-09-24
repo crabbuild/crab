@@ -73,10 +73,10 @@ async fn typed_queue_namespace_recovers_after_owner_loss() {
         target.application(),
     )
     .unwrap();
-    let available_at_ms = unix_time_ms() + 100;
+    let available_at_ms = now_ms() + 100;
     let sent = queue
         .send(
-            current_identity(7),
+            mutation_identity(7),
             QueueSendRequest {
                 producer_id: [7; 16],
                 payload: b"job".to_vec(),
@@ -88,7 +88,7 @@ async fn typed_queue_namespace_recovers_after_owner_loss() {
     assert!(matches!(sent.output, QueueSendOutcome::Sent { .. }));
     let conflict = queue
         .send(
-            current_identity(8),
+            mutation_identity(8),
             QueueSendRequest {
                 producer_id: [7; 16],
                 payload: b"different".to_vec(),
@@ -104,7 +104,7 @@ async fn typed_queue_namespace_recovers_after_owner_loss() {
     tokio::time::sleep(std::time::Duration::from_millis(120)).await;
     let claimed = queue
         .claim(
-            current_identity(9),
+            mutation_identity(9),
             0,
             QueueClaimRequest {
                 limit: 1,
@@ -180,7 +180,7 @@ async fn typed_queue_namespace_recovers_after_owner_loss() {
     );
     let acked = restored_queue
         .ack(
-            current_identity(10),
+            mutation_identity(10),
             0,
             claimed.output[0].message_id,
             claimed.output[0].token,

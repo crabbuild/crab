@@ -71,36 +71,43 @@ pub struct QualificationRunSummary {
 }
 
 impl QualificationRunSummary {
+    /// Returns the threshold profile the run was measured against.
     #[must_use]
     pub fn profile(&self) -> &str {
         &self.profile
     }
 
+    /// Returns the digest of that threshold profile.
     #[must_use]
     pub const fn profile_digest(&self) -> Digest {
         self.profile_digest
     }
 
+    /// Returns the seed the schedule was generated with.
     #[must_use]
     pub const fn seed(&self) -> u64 {
         self.seed
     }
 
+    /// Returns how many Cells the run addressed.
     #[must_use]
     pub const fn cells(&self) -> u64 {
         self.cells
     }
 
+    /// Returns how many operations the run executed.
     #[must_use]
     pub const fn operations(&self) -> u64 {
         self.operations
     }
 
+    /// Returns the wall-clock duration the run took.
     #[must_use]
     pub const fn elapsed(&self) -> Duration {
         self.elapsed
     }
 
+    /// Returns the per-primitive operation counts.
     #[must_use]
     pub fn primitive_counts(&self) -> &[QualificationPrimitiveCounts] {
         &self.primitive_counts
@@ -112,6 +119,7 @@ impl QualificationRunSummary {
         &self.case_coverage
     }
 
+    /// Returns the digest of the measured outcome.
     #[must_use]
     pub const fn outcome_digest(&self) -> Digest {
         self.outcome_digest
@@ -166,7 +174,7 @@ impl QualificationRunSummary {
 
     /// Encodes a measured result and the resource observations captured for the same run.
     ///
-    /// Protected profiles require every [`QUALIFICATION_RESOURCE_METRICS`]
+    /// Protected profiles require every [`crate::qualification::QUALIFICATION_RESOURCE_METRICS`]
     /// observation. The receipt verifier compares these values with the signed
     /// execution measurements, so a harness cannot substitute a different
     /// machine's resource envelope after the workload has completed.

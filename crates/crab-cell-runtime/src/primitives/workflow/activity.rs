@@ -23,6 +23,7 @@ const TERMINAL_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
 
 /// Source of unpredictable activity lease tokens.
 pub trait ActivityTokenSource {
+    /// Returns an unpredictable activity lease token.
     fn next_token(&mut self) -> Result<[u8; 16]>;
 }
 
@@ -40,50 +41,84 @@ impl ActivityTokenSource for SystemActivityTokens {
 /// One activity type and pinned workflow definition available on a worker.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActivitySupport {
+    /// Registered activity type.
     pub activity_type: String,
+    /// Workflow definition the type belongs to.
     pub definition_digest: Digest,
 }
 
 /// A published activity lease that may be emitted to native Rust code.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActivityClaim {
+    /// Run the activity belongs to.
     pub run_id: [u8; 16],
+    /// Activity identity within the run.
     pub activity_id: [u8; 16],
+    /// Registered activity type.
     pub activity_type: String,
+    /// Deterministic input for the handler.
     pub input: Vec<u8>,
+    /// Workflow definition digest the claim is pinned to.
     pub definition_digest: Digest,
+    /// Delivery attempt this lease represents.
     pub attempt: u32,
+    /// Lease token required to extend or complete.
     pub token: [u8; 16],
+    /// Logical time the lease expires.
     pub lease_until_ms: i64,
 }
 
 /// Idempotent completion or failure from one exact activity attempt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActivityCompletion {
+    /// Run the activity belongs to.
     pub run_id: [u8; 16],
+    /// Activity identity within the run.
     pub activity_id: [u8; 16],
+    /// Attempt the completion settles.
     pub attempt: u32,
+    /// Lease token the completion must match.
     pub lease_token: [u8; 16],
+    /// Idempotency token for this completion.
     pub completion_token: [u8; 16],
+    /// Result bytes to record.
     pub result: Vec<u8>,
+    /// Whether the attempt failed.
     pub failed: bool,
+    /// Whether a failed attempt may be retried.
     pub retryable: bool,
 }
 
 /// Business outcome of an activity lease extension.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivityLeaseOutcome {
-    Extended { lease_until_ms: i64 },
+    /// The lease was extended to this logical time.
+    Extended {
+        /// New lease expiry.
+        lease_until_ms: i64,
+    },
+    /// The token no longer matches the current lease.
     LeaseLost,
 }
 
 /// Business outcome of applying an activity completion.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActivityCompletionOutcome {
+    /// The completion advanced the workflow run.
     Applied(WorkflowOutcome),
-    Retrying { due_at_ms: i64 },
-    Duplicate { result: Vec<u8> },
+    /// The failed attempt is retried.
+    Retrying {
+        /// Logical time the next attempt is due.
+        due_at_ms: i64,
+    },
+    /// The same completion token was already applied.
+    Duplicate {
+        /// Result recorded for the original completion.
+        result: Vec<u8>,
+    },
+    /// The completion named an activity other than the lease's.
     IdentityConflict,
+    /// The token no longer matches the current lease.
     LeaseLost,
 }
 

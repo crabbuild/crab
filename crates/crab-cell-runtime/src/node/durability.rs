@@ -19,14 +19,17 @@ use crate::{Error, Result};
 /// Implementations must serialize these mutations with heartbeat refreshes and
 /// reconcile an ambiguous CAS only when the exact session and log epoch match.
 pub trait NodeLogAuthority: Send + Sync {
+    /// Activates one log epoch for this session.
     fn activate<'a>(&'a self, log_epoch: u64) -> BoxFuture<'a, Result<()>>;
 
+    /// Advances the tiered coverage watermark for one log epoch.
     fn advance_coverage<'a>(
         &'a self,
         log_epoch: u64,
         tiered_through: u64,
     ) -> BoxFuture<'a, Result<()>>;
 
+    /// Closes one log epoch at its rotation barrier.
     fn close<'a>(&'a self, barrier: &'a NodeLogRotationBarrier) -> BoxFuture<'a, Result<()>>;
 }
 
@@ -121,6 +124,8 @@ pub struct NodeDurability {
 }
 
 impl NodeDurability {
+    /// Creates one node-log durability epoch over its gate, shipper, authority,
+    /// transport, and node lease.
     #[must_use]
     pub fn new(
         gate: DurabilityGate,

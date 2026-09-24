@@ -11,13 +11,21 @@ const HEADER_BYTES: usize = 240;
 /// Immutable routing and ordering fields authenticated by a node-log frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NodeFrameScope {
+    /// Session of the leader that published the frame.
     pub leader_session: [u8; 16],
+    /// Node-log epoch the frame was captured under.
     pub log_epoch: u64,
+    /// Position of the frame in the node log.
     pub node_sequence: u64,
+    /// Application the frame belongs to.
     pub application: [u8; 16],
+    /// Cell the frame belongs to.
     pub cell: [u8; 32],
+    /// Incarnation that captured the frame.
     pub incarnation: [u8; 16],
+    /// Cell epoch the segment was captured under.
     pub cell_epoch: u64,
+    /// Root commit sequence the segment publishes.
     pub commit_sequence: u64,
 }
 
@@ -35,21 +43,25 @@ pub struct VerifiedNodeFrame {
 }
 
 impl VerifiedNodeFrame {
+    /// Returns the routing fields the frame was authenticated with.
     #[must_use]
     pub const fn scope(&self) -> NodeFrameScope {
         self.scope
     }
 
+    /// Returns the manifest expectations of the embedded segment.
     #[must_use]
     pub const fn segment(&self) -> &SegmentInfo {
         &self.segment
     }
 
+    /// Returns the verified LTX body.
     #[must_use]
     pub fn body(&self) -> &Bytes {
         &self.body
     }
 
+    /// Returns the encoded frame bytes as received.
     #[must_use]
     pub fn encoded(&self) -> &Bytes {
         &self.encoded

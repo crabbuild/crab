@@ -1,6 +1,7 @@
 //! Follower directory layout, quarantine, and retired lanes.
 
 use super::*;
+use crate::identity::encode_hex;
 
 pub(super) fn directory_bytes(path: &Path) -> Result<u64> {
     let mut total = 0_u64;
@@ -312,13 +313,13 @@ pub(super) fn settle_disk_reservation(
 
 pub(super) fn lane_directory(root: &Path, lane: Lane) -> PathBuf {
     root.join("followers")
-        .join(hex(lane.leader.as_bytes()))
+        .join(encode_hex(lane.leader.as_bytes()))
         .join(lane.epoch.to_string())
 }
 
 pub(super) fn ensure_lane_directories(root: &Path, lane: Lane) -> Result<()> {
     let followers = ensure_child(root, "followers")?;
-    let leader = ensure_child(&followers, &hex(lane.leader.as_bytes()))?;
+    let leader = ensure_child(&followers, &encode_hex(lane.leader.as_bytes()))?;
     let epoch = ensure_child(&leader, &lane.epoch.to_string())?;
     ensure_child(&epoch, "chunks")?;
     Ok(())
@@ -342,14 +343,4 @@ pub(super) fn validate_lane(lane: Lane) -> Result<()> {
 
 pub(super) fn sync_directory(path: &Path) -> std::io::Result<()> {
     std::fs::File::open(path)?.sync_all()
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(TABLE[(byte >> 4) as usize] as char);
-        encoded.push(TABLE[(byte & 0x0f) as usize] as char);
-    }
-    encoded
 }

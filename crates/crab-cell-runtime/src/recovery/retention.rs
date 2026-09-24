@@ -31,6 +31,8 @@ pub struct GarbageCollectionPolicy {
 }
 
 impl GarbageCollectionPolicy {
+    /// Creates a bounded collection policy: logical time, grace window, and a
+    /// per-run deletion limit.
     pub fn new(now_ms: i64, grace_ms: u64, max_deletes: u64) -> Result<Self> {
         if now_ms < 0 || grace_ms == 0 || !(1..=MAX_DELETES_PER_RUN).contains(&max_deletes) {
             return Err(Error::Retention(
@@ -65,51 +67,61 @@ pub struct GarbageCollectionReport {
 }
 
 impl GarbageCollectionReport {
+    /// Returns the objects listed in the pass.
     #[must_use]
     pub const fn listed_objects(&self) -> u64 {
         self.listed_objects
     }
 
+    /// Returns the listed objects that are immutable candidates.
     #[must_use]
     pub const fn immutable_candidates(&self) -> u64 {
         self.immutable_candidates
     }
 
+    /// Returns the candidates still reachable from a control record or pin.
     #[must_use]
     pub const fn reachable_objects(&self) -> u64 {
         self.reachable_objects
     }
 
+    /// Returns the candidates a backup pin retains.
     #[must_use]
     pub const fn retained_objects(&self) -> u64 {
         self.retained_objects
     }
 
+    /// Returns the candidates inside the grace window.
     #[must_use]
     pub const fn grace_objects(&self) -> u64 {
         self.grace_objects
     }
 
+    /// Returns the candidates eligible for deletion.
     #[must_use]
     pub const fn eligible_objects(&self) -> u64 {
         self.eligible_objects
     }
 
+    /// Returns the objects deleted in this pass.
     #[must_use]
     pub const fn deleted_objects(&self) -> u64 {
         self.deleted_objects
     }
 
+    /// Returns the control records observed as current.
     #[must_use]
     pub const fn current_controls(&self) -> u64 {
         self.current_controls
     }
 
+    /// Returns the backup pins that retained objects.
     #[must_use]
     pub const fn retained_pins(&self) -> u64 {
         self.retained_pins
     }
 
+    /// Reports whether every eligible object was deleted.
     #[must_use]
     pub const fn complete(&self) -> bool {
         self.eligible_objects == self.deleted_objects
@@ -131,6 +143,8 @@ pub struct CellGarbageCollector {
 }
 
 impl CellGarbageCollector {
+    /// Creates the collector after checking that the layout belongs to the same
+    /// application as the identity.
     pub fn new(
         layout: CellStorageLayout,
         identity: ApplicationIdentity,

@@ -10,6 +10,7 @@ pub struct QualificationRunner {
 }
 
 impl QualificationRunner {
+    /// Creates a runner that signs receipts with the given attestation key.
     #[must_use]
     pub fn new(signing_key: SigningKey) -> Self {
         Self { signing_key }
@@ -137,6 +138,7 @@ impl QualificationRunner {
         Ok(receipt)
     }
 
+    /// Builds, signs, and returns one receipt for a verified run artifact.
     #[expect(
         clippy::too_many_arguments,
         reason = "receipt identity is intentionally explicit and fully bound"

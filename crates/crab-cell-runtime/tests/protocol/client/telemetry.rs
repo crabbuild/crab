@@ -54,12 +54,16 @@ async fn primitive_operations_are_reported_for_local_and_peer_execution() {
         telemetry.clone(),
     );
     client
-        .command::<CreateComment>(&fixture.target, mutation(31), b"reported".to_vec())
+        .command::<CreateComment>(&fixture.target, mutation_identity(31), b"reported".to_vec())
         .await
         .unwrap();
     assert!(
         client
-            .command::<RejectComment>(&fixture.target, mutation(32), b"moderated".to_vec())
+            .command::<RejectComment>(
+                &fixture.target,
+                mutation_identity(32),
+                b"moderated".to_vec()
+            )
             .await
             .is_err()
     );
@@ -102,7 +106,7 @@ async fn primitive_operations_are_reported_for_local_and_peer_execution() {
             dispatcher,
         }),
     );
-    peer.command::<CreateComment>(&fixture.target, mutation(33), b"peer".to_vec())
+    peer.command::<CreateComment>(&fixture.target, mutation_identity(33), b"peer".to_vec())
         .await
         .unwrap();
 

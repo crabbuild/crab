@@ -226,11 +226,17 @@ fn exists(connection: &Connection, sql: &str) -> crate::Result<u8> {
 
 /// Compile-time binding for the internal maintenance command of one module.
 pub trait MaintenanceModule: Send + Sync + 'static {
+    /// Module the internal scheduler Tick registers under.
     const MODULE: &'static str;
+    /// Codec version of the Tick command.
     const CODEC_VERSION: u32 = 1;
+    /// Command id of the module's internal Tick.
     const TICK_COMMAND_ID: u32;
+    /// Workflow definitions this module's Tick may advance.
     const WORKFLOW_DEFINITIONS: &'static [&'static dyn WorkflowDefinition] = &[];
+    /// Queue dead-letter target this module's Tick may redrive.
     const QUEUE_DEAD_LETTER: Option<QueueDeadLetterTarget> = None;
+    /// Cron targets this module's Tick may fire.
     const CRON_TARGETS: &'static [CronTarget] = &[];
 }
 
@@ -246,13 +252,19 @@ pub fn register_maintenance<M: MaintenanceModule>(
 /// Published root position from which a due-Cell scan scheduled this Tick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MaintenanceTickRequest {
+    /// Commit sequence the scan expected the Cell to be at.
     pub expected_commit_sequence: u64,
 }
 
 /// Durable result of one scheduled Tick attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaintenanceTickOutcome {
-    Applied { processed: u32 },
+    /// The Tick advanced due maintenance items.
+    Applied {
+        /// Items the Tick processed.
+        processed: u32,
+    },
+    /// The Cell moved past the expected sequence, so the Tick did nothing.
     Stale,
 }
 

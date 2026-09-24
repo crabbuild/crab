@@ -19,32 +19,50 @@ const SUPERVISOR_IDENTITY_LIFETIME_MS: i64 = 60_000;
 /// Outcome of one bounded source claim, destination delivery and source transition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EffectRunOutcome {
+    /// No claimable effect remained.
     Idle {
+        /// Receipt the observation is bound to.
         receipt: Receipt,
     },
+    /// The destination applied the effect and the source recorded it.
     Delivered {
+        /// Destination outcome the source recorded.
         destination: StoredOutcome,
+        /// Receipt the source transition published.
         receipt: Receipt,
     },
+    /// The destination asked for another attempt.
     Retrying {
+        /// Logical time the next attempt is due.
         due_at_ms: i64,
+        /// Receipt the source transition published.
         receipt: Receipt,
     },
+    /// The destination rejected the effect terminally.
     Failed {
+        /// Receipt the source transition published.
         receipt: Receipt,
     },
+    /// The source lease was lost before the transition.
     LeaseLost {
+        /// Receipt the failed resolution is bound to.
         receipt: Receipt,
     },
 }
 
 /// Failure that preserves unresolved source mutation evidence.
 pub enum EffectSupervisorError {
+    /// A source transition is committed but unresolved; resolve it before
+    /// running another cycle.
     Pending(Box<PendingMutation>),
+    /// The published source result could not be decoded.
     InvalidPublishedResult {
+        /// Receipt the published result was observed at.
         receipt: Receipt,
+        /// Decoding failure that produced this error.
         source: Box<Error>,
     },
+    /// The supervisor failed before it could resolve the source transition.
     Runtime(Error),
 }
 

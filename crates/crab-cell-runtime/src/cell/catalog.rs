@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::identity::encode_hex;
 use crate::identity::{ApplicationId, CellId, CellTarget, Digest, NamespaceId, TenantId};
+use crate::retry::{Backoff, retry_hint, retryable_storage_error};
 use crate::{Error, Result};
 
 const MAX_HEAD_BYTES: u64 = 32 * 1024;
@@ -18,12 +19,19 @@ const MAX_ENTRIES: usize = ENTRIES_PER_PAGE * MAX_PAGES;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CatalogRole {
+    /// The namespace serves repository content.
     Repository,
+    /// The namespace serves SQL.
     Sql,
+    /// The namespace serves key-value data.
     Kv,
+    /// The namespace serves queue messages.
     Queue,
+    /// The namespace serves workflow runs.
     Workflow,
+    /// The namespace serves blob objects.
     Blob,
+    /// The namespace serves cron schedules.
     Cron,
 }
 
@@ -59,31 +67,37 @@ impl CatalogEntry {
         })
     }
 
+    /// Returns the Cell this entry pins.
     #[must_use]
     pub const fn cell(&self) -> CellId {
         self.cell
     }
 
+    /// Returns the namespace the Cell serves.
     #[must_use]
     pub const fn namespace(&self) -> NamespaceId {
         self.namespace
     }
 
+    /// Returns the partition key that selected the Cell.
     #[must_use]
     pub fn partition(&self) -> &[u8] {
         &self.partition
     }
 
+    /// Returns the namespace role provisioned for the Cell.
     #[must_use]
     pub const fn role(&self) -> CatalogRole {
         self.role
     }
 
+    /// Returns the code digest provisioned for the Cell.
     #[must_use]
     pub const fn initial_code(&self) -> Digest {
         self.initial_code
     }
 
+    /// Returns the schema version provisioned for the Cell.
     #[must_use]
     pub const fn initial_schema(&self) -> u32 {
         self.initial_schema
@@ -115,11 +129,13 @@ pub struct CatalogScanPage {
 }
 
 impl CatalogScanPage {
+    /// Returns the catalog revision this page belongs to.
     #[must_use]
     pub const fn revision(&self) -> u64 {
         self.revision
     }
 
+    /// Returns the proofs this page carries in key order.
     #[must_use]
     pub fn entries(&self) -> &[CatalogProof] {
         &self.entries
@@ -137,6 +153,7 @@ pub struct CatalogShardScan {
 }
 
 impl CatalogShardScan {
+    /// Returns the pinned catalog revision.
     #[must_use]
     pub const fn revision(&self) -> u64 {
         self.revision
@@ -188,11 +205,13 @@ impl CatalogProof {
         Self { entry, revision: 0 }
     }
 
+    /// Returns the catalog entry this proof carries.
     #[must_use]
     pub const fn entry(&self) -> &CatalogEntry {
         &self.entry
     }
 
+    /// Returns the revision the proof was read at.
     #[must_use]
     pub const fn revision(&self) -> u64 {
         self.revision
@@ -208,6 +227,7 @@ pub struct CellCatalog {
 }
 
 impl CellCatalog {
+    /// Binds the catalog to one Cell layout and tenant.
     #[must_use]
     pub fn new(layout: CellStorageLayout, tenant: TenantId) -> Self {
         let application = ApplicationId::from_bytes(*layout.application_id());
@@ -218,6 +238,7 @@ impl CellCatalog {
         }
     }
 
+    /// Returns the application every entry is scoped to.
     #[must_use]
     pub const fn application(&self) -> ApplicationId {
         self.application
@@ -234,7 +255,7 @@ impl CellCatalog {
     pub async fn provision(&self, entry: CatalogEntry) -> Result<CatalogProof> {
         entry.validate(self.tenant, self.application)?;
         let shard = entry.cell.as_bytes()[0];
-        let mut backoff = CatalogBackoff::default();
+        let mut backoff = Backoff::default();
         loop {
             let observed = self.load_head(shard).await?;
             let mut entries = match &observed {
@@ -509,8 +530,6 @@ impl CellCatalog {
     }
 }
 
-mod backoff;
 mod codec;
 
-use backoff::*;
 use codec::*;

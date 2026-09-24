@@ -23,10 +23,15 @@ const PRECONDITION_FAILED_TAG: u8 = 1;
 
 /// Compile-time operation identifiers for one native KV module.
 pub trait KvModule: Send + Sync + 'static {
+    /// Module the KV surfaces register under.
     const MODULE: &'static str;
+    /// Codec version of the KV operations.
     const CODEC_VERSION: u32 = 1;
+    /// Command id for atomic check-and-mutate.
     const ATOMIC_COMMAND_ID: u32;
+    /// Query id for single-key reads.
     const GET_QUERY_ID: u32;
+    /// Query id for scoped listing.
     const LIST_QUERY_ID: u32;
 }
 
@@ -62,7 +67,9 @@ impl<M: KvModule> Command for KvAtomicCommand<M> {
 /// One typed KV point-read input.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KvGetRequest {
+    /// Scope the key lives in.
     pub scope: Vec<u8>,
+    /// Key to read.
     pub key: Vec<u8>,
 }
 
@@ -89,9 +96,13 @@ impl<M: KvModule> Query for KvGetQuery<M> {
 /// One typed bounded KV list input.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KvListRequest {
+    /// Scope to list.
     pub scope: Vec<u8>,
+    /// Key prefix to match.
     pub prefix: Vec<u8>,
+    /// Key to continue after, from a previous page.
     pub after_key: Option<Vec<u8>>,
+    /// Maximum entries to return.
     pub limit: u32,
 }
 

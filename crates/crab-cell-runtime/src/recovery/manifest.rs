@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::control::{RecoveryOverlayRef, RootRef};
 use crate::identity::IncarnationId;
-use crate::identity::{ApplicationId, CellId, Digest, SessionId};
+use crate::identity::{ApplicationId, CellId, Digest, SessionId, encode_hex};
 use crate::node::log::RecoveredCellTail;
 use crate::{Error, Result};
 
@@ -17,24 +17,34 @@ const MULTIPART_BYTES: usize = 8 << 20;
 
 /// One control-ready pointer returned after bundle and manifest publication.
 pub struct PinnedRecoveryCell {
+    /// Application the recovered Cell belongs to.
     pub application: ApplicationId,
+    /// Cell the pointer addresses.
     pub cell: CellId,
+    /// Incarnation the overlay belongs to.
     pub incarnation: IncarnationId,
+    /// Cell epoch the overlay was published under.
     pub cell_epoch: u64,
+    /// Control-ready overlay reference.
     pub recovery: RecoveryOverlayRef,
 }
 
 /// Bounded object publication counters for one recovery manifest.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RecoveryPublicationSummary {
+    /// Bundle bytes transferred.
     pub bundle_bytes: u64,
+    /// Object-store reads.
     pub object_reads: u64,
+    /// Object-store writes.
     pub object_writes: u64,
 }
 
 /// Control-ready recovery pointers and their publication work summary.
 pub struct PinnedRecoveryCells {
+    /// Control-ready pointers, one per recovered Cell.
     pub cells: Vec<PinnedRecoveryCell>,
+    /// Publication work the pinning performed.
     pub summary: RecoveryPublicationSummary,
 }
 
@@ -100,6 +110,7 @@ impl RecoveryArtifactKey {
         }
     }
 
+    /// Returns the digest of the pinned bundle.
     #[must_use]
     pub const fn bundle_digest(&self) -> [u8; 32] {
         self.bundle_digest
@@ -176,6 +187,8 @@ pub struct RecoveryManifestStore {
 }
 
 impl RecoveryManifestStore {
+    /// Creates a manifest store over one layout, with recovery disk bounded by
+    /// the plan byte limit.
     #[must_use]
     pub fn new(layout: CellStorageLayout, limits: crab_ltx::Limits) -> Self {
         let recovery_disk = crab_ltx::DiskBudget::new(limits.max_plan_bytes);
@@ -234,6 +247,8 @@ impl RecoveryManifestStore {
             .cells)
     }
 
+    /// Publishes bundles and manifests for the recovered tails and returns the
+    /// pointers together with their publication work summary.
     pub async fn pin_with_summary(
         &self,
         leader_session: SessionId,
@@ -572,26 +587,28 @@ impl From<&RecoveryManifest> for RawManifest {
     fn from(manifest: &RecoveryManifest) -> Self {
         Self {
             version: 1,
-            leader_session: hex(manifest.leader_session.as_bytes()),
+            leader_session: encode_hex(manifest.leader_session.as_bytes()),
             log_epoch: manifest.log_epoch.to_string(),
             cells: manifest
                 .cells
                 .iter()
                 .map(|cell| RawManifestCell {
-                    application: hex(&cell.application),
-                    cell: hex(&cell.cell),
-                    incarnation: hex(&cell.incarnation),
+                    application: encode_hex(&cell.application),
+                    cell: encode_hex(&cell.cell),
+                    incarnation: encode_hex(&cell.incarnation),
                     cell_epoch: cell.cell_epoch.to_string(),
                     first_node_sequence: cell.first_node_sequence.to_string(),
                     last_node_sequence: cell.last_node_sequence.to_string(),
-                    predecessor_digest: hex(&cell.predecessor.digest),
+                    predecessor_digest: encode_hex(&cell.predecessor.digest),
                     predecessor_txid: cell.predecessor.position.txid.to_string(),
-                    predecessor_checksum: hex(&cell.predecessor.position.checksum.to_be_bytes()),
+                    predecessor_checksum: encode_hex(
+                        &cell.predecessor.position.checksum.to_be_bytes(),
+                    ),
                     predecessor_commit_sequence: cell.predecessor.commit_sequence.to_string(),
                     final_txid: cell.final_position.txid.to_string(),
-                    final_checksum: hex(&cell.final_position.checksum.to_be_bytes()),
+                    final_checksum: encode_hex(&cell.final_position.checksum.to_be_bytes()),
                     final_commit_sequence: cell.final_commit_sequence.to_string(),
-                    bundle_digest: hex(&cell.bundle_digest),
+                    bundle_digest: encode_hex(&cell.bundle_digest),
                 })
                 .collect(),
         }
@@ -773,16 +790,6 @@ fn decimal(value: &str) -> Result<u64> {
         return Err(Error::Node("noncanonical recovery manifest decimal"));
     }
     Ok(parsed)
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(TABLE[(byte >> 4) as usize] as char);
-        encoded.push(TABLE[(byte & 0x0f) as usize] as char);
-    }
-    encoded
 }
 
 fn unhex<const N: usize>(value: &str) -> Result<[u8; N]> {

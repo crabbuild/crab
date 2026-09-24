@@ -5,17 +5,22 @@ pub(crate) const MAX_WIRE_BYTES: usize = 4 * 1024 * 1024 + 64 * 1024;
 /// Canonical bounded wire-codec failure.
 #[derive(Debug, thiserror::Error)]
 pub enum CodecError {
+    /// The value is not canonical for its declared type.
     #[error("invalid wire value: {0}")]
     Invalid(&'static str),
+    /// A value or buffer exceeds the declared byte limit.
     #[error("wire value exceeds its declared byte limit")]
     Limit,
+    /// Wire text was not UTF-8.
     #[error("wire text is not UTF-8")]
     Utf8(#[from] std::str::Utf8Error),
 }
 
 /// Explicit canonical codec implemented by every registered input and output.
 pub trait WireValue: Sized + Send + 'static {
+    /// Appends the canonical encoding of `self`.
     fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError>;
+    /// Decodes one value, failing on a non-canonical or truncated encoding.
     fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError>;
 }
 
@@ -26,6 +31,8 @@ pub struct BoundedEncoder {
 }
 
 impl BoundedEncoder {
+    /// Creates an encoder for one operation's declared limit, which must be
+    /// non-zero and no larger than the global wire ceiling.
     pub fn new(limit: u32) -> Result<Self, CodecError> {
         let limit = usize::try_from(limit).map_err(|_| CodecError::Limit)?;
         if limit == 0 || limit > MAX_WIRE_BYTES {
@@ -37,26 +44,32 @@ impl BoundedEncoder {
         })
     }
 
+    /// Writes `value` as one canonical boolean tag.
     pub fn write_bool(&mut self, value: bool) -> Result<(), CodecError> {
         self.write_u8(u8::from(value))
     }
 
+    /// Writes one byte.
     pub fn write_u8(&mut self, value: u8) -> Result<(), CodecError> {
         self.extend(&[value])
     }
 
+    /// Writes `value` big-endian.
     pub fn write_u32(&mut self, value: u32) -> Result<(), CodecError> {
         self.extend(&value.to_be_bytes())
     }
 
+    /// Writes `value` big-endian.
     pub fn write_u64(&mut self, value: u64) -> Result<(), CodecError> {
         self.extend(&value.to_be_bytes())
     }
 
+    /// Writes `value` big-endian.
     pub fn write_i64(&mut self, value: i64) -> Result<(), CodecError> {
         self.extend(&value.to_be_bytes())
     }
 
+    /// Writes `value` as its big-endian bits.
     pub fn write_f64(&mut self, value: f64) -> Result<(), CodecError> {
         if !value.is_finite() {
             return Err(CodecError::Invalid("non-finite f64"));
@@ -65,20 +78,24 @@ impl BoundedEncoder {
         self.extend(&normalized.to_bits().to_be_bytes())
     }
 
+    /// Writes a `u32` length followed by the bytes.
     pub fn write_bytes(&mut self, value: &[u8]) -> Result<(), CodecError> {
         let length = u32::try_from(value.len()).map_err(|_| CodecError::Limit)?;
         self.write_u32(length)?;
         self.extend(value)
     }
 
+    /// Writes a `u32` length followed by the UTF-8 bytes.
     pub fn write_text(&mut self, value: &str) -> Result<(), CodecError> {
         self.write_bytes(value.as_bytes())
     }
 
+    /// Writes an element count, rejecting one that does not fit a `u32`.
     pub fn write_count(&mut self, count: usize) -> Result<(), CodecError> {
         self.write_u32(u32::try_from(count).map_err(|_| CodecError::Limit)?)
     }
 
+    /// Returns the encoded bytes.
     pub fn finish(self) -> Vec<u8> {
         self.bytes
     }
@@ -103,6 +120,8 @@ pub struct BoundedDecoder<'a> {
 }
 
 impl<'a> BoundedDecoder<'a> {
+    /// Creates a decoder over `bytes`, which must be non-empty and within one
+    /// operation's declared limit.
     pub fn new(bytes: &'a [u8], limit: u32) -> Result<Self, CodecError> {
         let limit = usize::try_from(limit).map_err(|_| CodecError::Limit)?;
         if limit == 0 || limit > MAX_WIRE_BYTES || bytes.len() > limit {
@@ -111,6 +130,7 @@ impl<'a> BoundedDecoder<'a> {
         Ok(Self { bytes, position: 0 })
     }
 
+    /// Reads a canonical boolean tag.
     pub fn read_bool(&mut self) -> Result<bool, CodecError> {
         match self.read_u8()? {
             0 => Ok(false),
@@ -119,10 +139,12 @@ impl<'a> BoundedDecoder<'a> {
         }
     }
 
+    /// Reads one byte.
     pub fn read_u8(&mut self) -> Result<u8, CodecError> {
         Ok(self.take(1)?[0])
     }
 
+    /// Reads a big-endian `u32`.
     pub fn read_u32(&mut self) -> Result<u32, CodecError> {
         let bytes = self
             .take(4)?
@@ -131,6 +153,7 @@ impl<'a> BoundedDecoder<'a> {
         Ok(u32::from_be_bytes(bytes))
     }
 
+    /// Reads a big-endian `u64`.
     pub fn read_u64(&mut self) -> Result<u64, CodecError> {
         let bytes = self
             .take(8)?
@@ -139,6 +162,7 @@ impl<'a> BoundedDecoder<'a> {
         Ok(u64::from_be_bytes(bytes))
     }
 
+    /// Reads a big-endian `i64`.
     pub fn read_i64(&mut self) -> Result<i64, CodecError> {
         let bytes = self
             .take(8)?
@@ -147,6 +171,8 @@ impl<'a> BoundedDecoder<'a> {
         Ok(i64::from_be_bytes(bytes))
     }
 
+    /// Reads a canonical finite `f64`, rejecting non-finite values and
+    /// negative zero.
     pub fn read_f64(&mut self) -> Result<f64, CodecError> {
         let value = f64::from_bits(self.read_u64()?);
         if !value.is_finite() || value.to_bits() == (-0.0_f64).to_bits() {
@@ -155,20 +181,24 @@ impl<'a> BoundedDecoder<'a> {
         Ok(value)
     }
 
+    /// Reads a `u32` length and the bytes that follow it.
     pub fn read_bytes(&mut self) -> Result<&'a [u8], CodecError> {
         let length = usize::try_from(self.read_u32()?)
             .map_err(|_| CodecError::Invalid("byte length overflow"))?;
         self.take(length)
     }
 
+    /// Reads length-delimited UTF-8 text.
     pub fn read_text(&mut self) -> Result<&'a str, CodecError> {
         Ok(std::str::from_utf8(self.read_bytes()?)?)
     }
 
+    /// Reads an element count.
     pub fn read_count(&mut self) -> Result<usize, CodecError> {
         usize::try_from(self.read_u32()?).map_err(|_| CodecError::Invalid("count overflow"))
     }
 
+    /// Fails when bytes remain unread after the last value.
     pub fn finish(self) -> Result<(), CodecError> {
         if self.position != self.bytes.len() {
             return Err(CodecError::Invalid("trailing wire bytes"));
@@ -264,6 +294,17 @@ pub(crate) fn decode_wire<T: WireValue>(input: &[u8], limit: u32) -> Result<T, C
     let value = T::decode(&mut decoder)?;
     decoder.finish()?;
     Ok(value)
+}
+
+/// Reads a length-delimited value that must be exactly `N` bytes wide.
+pub(crate) fn read_fixed<const N: usize>(
+    decoder: &mut BoundedDecoder<'_>,
+    message: &'static str,
+) -> Result<[u8; N], CodecError> {
+    decoder
+        .read_bytes()?
+        .try_into()
+        .map_err(|_| CodecError::Invalid(message))
 }
 
 pub(crate) fn encode_wire<T: WireValue>(value: &T, limit: u32) -> Result<Vec<u8>, CodecError> {

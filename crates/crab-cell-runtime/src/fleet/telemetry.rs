@@ -6,8 +6,11 @@ use crate::node::log::DurabilitySource;
 /// Outcome of an actor-owned resident route lookup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResidentRouteOutcome {
+    /// The route was resident and usable.
     Hit,
+    /// No resident route exists for the Cell.
     Miss,
+    /// A resident route exists but refused the request.
     Refused,
 }
 
@@ -31,7 +34,9 @@ pub enum DurabilitySubmissionOutcome {
 /// Kind of one registered primitive call observed at the execution boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrimitiveOperationKind {
+    /// A registered command.
     Command,
+    /// A registered query.
     Query,
 }
 

@@ -528,7 +528,7 @@ async fn source_loss_takeover(store: Store, prefix: Path) {
         )
         .await
         .unwrap();
-    let first_identity = identity(47);
+    let first_identity = mutation_identity_window(47, 10, 10_000);
     let first_digest = Digest::from_bytes([48; 32]);
     let first_outcome = first
         .execute(
@@ -606,7 +606,7 @@ async fn source_loss_takeover(store: Store, prefix: Path) {
     assert!(matches!(
         second
             .execute(
-                identity(50),
+                mutation_identity_window(50, 10, 10_000),
                 Digest::from_bytes([51; 32]),
                 21,
                 1_024,

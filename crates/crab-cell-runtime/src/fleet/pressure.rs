@@ -6,20 +6,32 @@ const MAX_PERMILLE: u16 = 1_000;
 /// Node pressure state used by placement and paced drain policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PressureState {
+    /// No pressure: the node accepts new ownership.
     Normal,
+    /// Soft pressure, or a stale sample: the node paces optional work.
     Constrained,
+    /// Hard pressure on one dimension: the node sheds load.
     Shedding,
+    /// Marker the classifier sets while a sample falls below the exit
+    /// threshold; it returns to [`PressureState::Normal`] inside the same
+    /// observation.
     Recovering,
+    /// Critical pressure on both memory and disk: no new ownership.
     Critical,
 }
 
 /// Bounded measured utilization sample. Values are permille, not floats.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PressureSample {
+    /// Logical time the sample was taken.
     pub at_ms: i64,
+    /// Memory utilization in permille.
     pub memory_used_permille: u16,
+    /// Scratch disk utilization in permille.
     pub disk_used_permille: u16,
+    /// Job-slot utilization in permille.
     pub jobs_used_permille: u16,
+    /// Whether the sample missed its freshness window.
     pub stale: bool,
 }
 
@@ -75,6 +87,7 @@ impl PressureClassifier {
         })
     }
 
+    /// Returns the current hysteretic state.
     #[must_use]
     pub const fn state(self) -> PressureState {
         self.state
@@ -139,8 +152,11 @@ impl PressureClassifier {
 /// One bounded movement operation admitted by a node-local drain controller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MovementKind {
+    /// Stop admitting work for one Cell.
     Quiesce,
+    /// Release one Cell's ownership.
     Release,
+    /// Admit one incoming Cell.
     Receive,
 }
 
@@ -155,6 +171,7 @@ pub struct MovementBudget {
 }
 
 impl MovementBudget {
+    /// Creates a budget of `limit` movements per `interval_ms` window.
     pub fn new(limit: u32, interval_ms: i64) -> Result<Self> {
         if limit == 0 || interval_ms <= 0 {
             return Err(Error::Capacity("movement budget"));
@@ -168,6 +185,8 @@ impl MovementBudget {
         })
     }
 
+    /// Reserves one movement, failing when the window is spent or time ran
+    /// backwards.
     pub fn try_start(&mut self, now_ms: i64) -> Result<MovementPermit> {
         if now_ms < self.window_started_ms {
             return Err(Error::Control("movement time regressed"));
@@ -183,6 +202,7 @@ impl MovementBudget {
         Ok(MovementPermit { completed: false })
     }
 
+    /// Finishes a reservation: frees its slot and counts it in the window.
     pub fn complete(&mut self, permit: &mut MovementPermit) {
         if permit.completed {
             return;
@@ -192,12 +212,15 @@ impl MovementBudget {
         self.completed_in_window = self.completed_in_window.saturating_add(1);
     }
 
+    /// Returns the reservations that have not completed yet.
     #[must_use]
     pub const fn in_flight(self) -> u32 {
         self.used
     }
 }
 
+/// Reservation returned by [`MovementBudget::try_start`] and released by
+/// [`MovementBudget::complete`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MovementPermit {
     completed: bool,

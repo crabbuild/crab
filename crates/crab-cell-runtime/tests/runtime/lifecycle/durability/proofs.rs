@@ -82,7 +82,7 @@ async fn command_flows_through_follower_proof_object_coverage_and_clean_close() 
 
     let outcome = handle
         .execute(
-            identity(49),
+            mutation_identity_window(49, 10, 10_000),
             Digest::from_bytes([50; 32]),
             20,
             1_024,
@@ -152,7 +152,7 @@ async fn follower_proofs_advance_logical_head_and_bound_the_object_backlog() {
     let first = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         handle.execute(
-            identity(54),
+            mutation_identity_window(54, 10, 10_000),
             Digest::from_bytes([55; 32]),
             20,
             1_024,
@@ -177,7 +177,7 @@ async fn follower_proofs_advance_logical_head_and_bound_the_object_backlog() {
     let second = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         handle.execute(
-            identity(56),
+            mutation_identity_window(56, 10, 10_000),
             Digest::from_bytes([57; 32]),
             21,
             1_024,
@@ -206,7 +206,7 @@ async fn follower_proofs_advance_logical_head_and_bound_the_object_backlog() {
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             handle.execute(
-                identity(sequence.saturating_add(54)),
+                mutation_identity_window(sequence.saturating_add(54), 10, 10_000),
                 Digest::from_bytes([sequence.saturating_add(55); 32]),
                 20 + i64::from(sequence),
                 1_024,
@@ -223,7 +223,7 @@ async fn follower_proofs_advance_logical_head_and_bound_the_object_backlog() {
         assert_eq!(outcome.commit_sequence(), u64::from(sequence));
     }
     let sixty_fifth = handle.execute(
-        identity(119),
+        mutation_identity_window(119, 10, 10_000),
         Digest::from_bytes([120; 32]),
         85,
         1_024,
@@ -320,7 +320,7 @@ async fn fleet_proof_retains_owner_when_object_publication_fails_first() {
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         handle.execute(
-            identity(124),
+            mutation_identity_window(124, 10, 10_000),
             Digest::from_bytes([125; 32]),
             20,
             1_024,
@@ -389,7 +389,7 @@ async fn post_commit_publication_failure_returns_resolvable_unknown_outcome() {
     let fixture = fixture();
     let handle = activate(&fixture, 16 * 1024 * 1024).await;
     delete_control_root(&fixture).await;
-    let request = identity(14);
+    let request = mutation_identity_window(14, 10, 10_000);
     let digest = Digest::from_bytes([15; 32]);
     assert!(matches!(
         handle

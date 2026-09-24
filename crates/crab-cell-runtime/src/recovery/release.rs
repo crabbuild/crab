@@ -19,10 +19,15 @@ const MAX_DESCRIPTOR_BYTES: u64 = 256 * 1024;
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReleaseState {
+    /// No release is being rolled out.
     Ready,
+    /// A release is published but not yet selected.
     Prepared,
+    /// The application is held for release maintenance.
     Maintenance,
+    /// Cells are migrating to the desired release.
     Activating,
+    /// The rollout failed and needs operator action.
     Failed,
 }
 
@@ -39,31 +44,37 @@ pub struct ReleaseRecord {
 }
 
 impl ReleaseRecord {
+    /// Returns the record revision.
     #[must_use]
     pub const fn revision(&self) -> u64 {
         self.revision
     }
 
+    /// Returns the release currently selected for the application.
     #[must_use]
     pub const fn current(&self) -> Option<Digest> {
         self.current
     }
 
+    /// Returns the release being rolled out, when one is.
     #[must_use]
     pub const fn desired(&self) -> Option<Digest> {
         self.desired
     }
 
+    /// Returns the desired release's image name.
     #[must_use]
     pub fn desired_image(&self) -> &str {
         &self.desired_image
     }
 
+    /// Returns the request that started the rollout.
     #[must_use]
     pub const fn operation(&self) -> RequestId {
         self.operation
     }
 
+    /// Returns the durable rollout phase.
     #[must_use]
     pub const fn state(&self) -> ReleaseState {
         self.state
@@ -163,6 +174,7 @@ pub struct VersionedRelease {
 }
 
 impl VersionedRelease {
+    /// Returns the release record this version carries.
     #[must_use]
     pub const fn record(&self) -> &ReleaseRecord {
         &self.record
@@ -177,6 +189,8 @@ pub struct ReleaseStore {
 }
 
 impl ReleaseStore {
+    /// Creates a release store after checking that the layout belongs to the
+    /// same application as the identity.
     pub fn new(layout: CellStorageLayout, identity: ApplicationIdentity) -> Result<Self> {
         if layout.application_id() != identity.application().as_bytes() {
             return Err(Error::Release("layout and application identity differ"));

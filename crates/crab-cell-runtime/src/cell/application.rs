@@ -19,6 +19,7 @@ pub struct ApplicationIdentity {
 }
 
 impl ApplicationIdentity {
+    /// Binds one tenant to one application identity.
     #[must_use]
     pub const fn new(tenant: TenantId, application: ApplicationId) -> Self {
         Self {
@@ -27,11 +28,13 @@ impl ApplicationIdentity {
         }
     }
 
+    /// Returns the tenant the identity belongs to.
     #[must_use]
     pub const fn tenant(&self) -> TenantId {
         self.tenant
     }
 
+    /// Returns the application the identity names.
     #[must_use]
     pub const fn application(&self) -> ApplicationId {
         self.application
@@ -91,6 +94,7 @@ pub struct ApplicationIdentityStore {
 }
 
 impl ApplicationIdentityStore {
+    /// Binds the identity store to one storage prefix.
     #[must_use]
     pub fn new(store: Store, root: Path) -> Self {
         let path = CellStorageLayout::root_identity_path(&root);

@@ -80,7 +80,7 @@ async fn published_report_survives_a_lost_response_and_completes_on_retry() {
     let mut event = b"publish-report\0".to_vec();
     event.extend_from_slice(report_path.to_str().unwrap().as_bytes());
     workflows
-        .start(identity(55), b"build-report".to_vec(), event)
+        .start(mutation_identity(55), b"build-report".to_vec(), event)
         .await
         .unwrap();
     let pool = BlockingActivityPool::new(1).unwrap();

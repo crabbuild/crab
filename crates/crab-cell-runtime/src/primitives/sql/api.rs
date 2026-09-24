@@ -20,9 +20,13 @@ const MAX_COLUMNS: usize = 2_000;
 
 /// Compile-time operation identifiers for one native SQL module.
 pub trait SqlModule: Send + Sync + 'static {
+    /// Module the SQL surfaces register under.
     const MODULE: &'static str;
+    /// Codec version of the SQL batch surfaces.
     const CODEC_VERSION: u32 = 1;
+    /// Command id that executes a read-write batch.
     const BATCH_COMMAND_ID: u32;
+    /// Query id that runs a read-only batch.
     const BATCH_QUERY_ID: u32;
 }
 

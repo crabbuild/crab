@@ -52,6 +52,7 @@ use crate::fleet::pressure::{
 use crate::fleet::resource::{
     ACTIVE_CELL_NATIVE_BYTES as ACTIVE_CELL_NATIVE_BYTES_USIZE, LedgerDiskAdmission,
     LedgerHostResourceAdmission, ResourceCost, ResourceLedger, ResourceReservation,
+    ResourceSnapshot,
 };
 use crate::identity::{ApplicationId, CellId, CellTarget, Digest, SessionId};
 use crate::node::durability::NodeDurability;
@@ -71,6 +72,9 @@ const RENEWAL_SCAN: std::time::Duration = std::time::Duration::from_millis(100);
 const MAX_RENEWALS_IN_FLIGHT: usize = 32;
 const SQL_WALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 const HYDRATION_TICK: std::time::Duration = std::time::Duration::from_millis(100);
+// Four samples per second. The classifier still needs its 1000 ms dwell, so a
+// brief spike above the soft reserve cannot evict a Cell.
+const PRESSURE_SAMPLE: std::time::Duration = std::time::Duration::from_millis(250);
 const COMPACTION_QUIET: std::time::Duration = std::time::Duration::from_millis(250);
 const COMPACTION_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 const HYDRATION_PAGES_PER_STEP: u32 = 64;
@@ -345,7 +349,9 @@ impl CellRuntimeStats {
 
 /// New capability and publication receipt returned by one schema migration.
 pub struct MigratedCell {
+    /// Handle that owns the migrated Cell.
     pub handle: CellHandle,
+    /// Outcome the migration published.
     pub outcome: MigrationOutcome,
 }
 

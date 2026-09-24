@@ -12,7 +12,7 @@ use crab_cell_runtime::cell::actor::CellRuntime;
 use crab_cell_runtime::cell::catalog::CatalogEntry;
 use crab_cell_runtime::cell::catalog::CatalogRole;
 use crab_cell_runtime::cell::executor::Resolution;
-use crab_cell_runtime::cell::executor::{HandlerOutcome, MutationIdentity, StoredOutcome};
+use crab_cell_runtime::cell::executor::{HandlerOutcome, StoredOutcome};
 use crab_cell_runtime::cell::worker::ACTIVE_CELL_FILE_DESCRIPTORS;
 use crab_cell_runtime::cell::worker::SqlWorkerPool;
 use crab_cell_runtime::control::authority::CellAuthority;
@@ -22,7 +22,7 @@ use crab_cell_runtime::follower::FollowerReceipt;
 use crab_cell_runtime::identity::{
     ApplicationId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
 };
-use crab_cell_runtime::identity::{IncarnationId, NodeId, RequestId};
+use crab_cell_runtime::identity::{IncarnationId, NodeId};
 use crab_cell_runtime::ltx::{DiskBudget, Host as ReplicaHost};
 use crab_cell_runtime::node::durability::{NodeDurability, NodeLogAuthority};
 use crab_cell_runtime::node::lease::NodeLeaseGuard;
@@ -45,6 +45,7 @@ use object_store::{
 use tokio::sync::Notify;
 
 use crate::support::fencing::fence_session;
+use crate::support::fixtures::mutation_identity_window;
 
 // Capability modules keep the suite navigable; shared fixtures and
 // helpers used by more than one capability stay here.
@@ -652,14 +653,6 @@ where
         )
         .await
         .unwrap()
-}
-
-fn identity(byte: u8) -> MutationIdentity {
-    MutationIdentity {
-        request_id: RequestId::from_bytes([byte; 16]),
-        issued_at_ms: 10,
-        expires_at_ms: 10_000,
-    }
 }
 
 async fn delete_control_root(fixture: &Fixture) {

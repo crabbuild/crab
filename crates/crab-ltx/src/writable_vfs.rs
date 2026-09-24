@@ -13,12 +13,16 @@ use std::{
 /// Progress resolving an inherited cut: locally materialized or superseded pages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Hydration {
+    /// Pages already materialized locally.
     pub resolved: u32,
+    /// Pages the inherited cut covers.
     pub total: u32,
+    /// Local page faults taken while hydrating.
     pub faults: u64,
 }
 
 impl Hydration {
+    /// Reports whether every page of the cut is materialized.
     #[must_use]
     pub fn complete(self) -> bool {
         self.resolved == self.total

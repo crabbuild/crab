@@ -8,6 +8,7 @@
 //! authenticated bundles, compaction, and sparse paged SQL. Leases and HTTP
 //! policy remain caller-owned.
 
+#![deny(missing_docs)]
 // A panic in a filter process or FUSE path corrupts a worktree, so production
 // builds deny unwrap, expect, panic, todo, and unimplemented; test builds keep
 // them available.
@@ -31,6 +32,8 @@ mod commit;
 pub mod db;
 pub mod environment;
 pub mod error;
+#[cfg(feature = "replica")]
+mod hex;
 mod host;
 #[cfg(feature = "replica")]
 pub use cell_layout::{CellObjectKind, CellStorageLayout};

@@ -128,6 +128,7 @@ impl QualificationRunArtifact {
         Ok(())
     }
 
+    /// Returns the canonical workload this run measured.
     #[must_use]
     pub fn workload(&self) -> &QualificationWorkload {
         &self.workload
@@ -139,6 +140,7 @@ impl QualificationRunArtifact {
         &self.metrics
     }
 
+    /// Returns the digest of the measured outcome.
     #[must_use]
     pub const fn outcome_digest(&self) -> Digest {
         Digest::from_bytes(self.outcome_digest)
@@ -380,16 +382,19 @@ impl QualificationOwnership {
         }
     }
 
+    /// Returns the Cell ownership epoch observed at the watermark.
     #[must_use]
     pub const fn epoch(&self) -> u64 {
         self.epoch
     }
 
+    /// Returns the highest published sequence at the watermark.
     #[must_use]
     pub const fn published_sequence(&self) -> u64 {
         self.published_sequence
     }
 
+    /// Returns the published root digest at the watermark.
     #[must_use]
     pub const fn root(&self) -> Digest {
         Digest::from_bytes(self.root)
@@ -397,6 +402,7 @@ impl QualificationOwnership {
 }
 
 impl QualificationReceipt {
+    /// Creates an unsigned receipt for one measured run.
     pub fn new(
         source_revision: String,
         image: Digest,
@@ -521,66 +527,79 @@ impl QualificationReceipt {
         Ok(self)
     }
 
+    /// Returns the receipt schema version.
     #[must_use]
     pub const fn schema_version(&self) -> u32 {
         self.schema_version
     }
 
+    /// Returns the source revision the run was built from.
     #[must_use]
     pub fn source_revision(&self) -> &str {
         &self.source_revision
     }
 
+    /// Returns the image digest the run executed.
     #[must_use]
     pub const fn image(&self) -> Digest {
         Digest::from_bytes(self.image)
     }
 
+    /// Returns the provider the run executed against.
     #[must_use]
     pub fn provider(&self) -> &str {
         &self.provider
     }
 
+    /// Returns the workload name.
     #[must_use]
     pub fn workload(&self) -> &str {
         &self.workload
     }
 
+    /// Returns the fault profile the run injected.
     #[must_use]
     pub fn fault(&self) -> &str {
         &self.fault
     }
 
+    /// Returns the bounded metrics recorded for the run.
     #[must_use]
     pub fn metrics(&self) -> &[QualificationMetric] {
         &self.metrics
     }
 
+    /// Returns the digest of the measured artifact.
     #[must_use]
     pub const fn artifact_digest(&self) -> Digest {
         Digest::from_bytes(self.artifact_digest)
     }
 
+    /// Reports whether the run met every threshold.
     #[must_use]
     pub const fn passed(&self) -> bool {
         self.passed
     }
 
+    /// Reports whether the run was built from a dirty tree.
     #[must_use]
     pub const fn dirty(&self) -> bool {
         self.dirty
     }
 
+    /// Returns the toolchain the run used.
     #[must_use]
     pub fn toolchain(&self) -> &str {
         &self.toolchain
     }
 
+    /// Returns the execution profile the harness applied.
     #[must_use]
     pub fn execution_profile(&self) -> &str {
         &self.execution_profile
     }
 
+    /// Returns the threshold profile name.
     #[must_use]
     pub fn profile(&self) -> &str {
         &self.profile
@@ -592,41 +611,49 @@ impl QualificationReceipt {
         Digest::from_bytes(self.profile_digest)
     }
 
+    /// Returns the topology the run used.
     #[must_use]
     pub fn topology(&self) -> &str {
         &self.topology
     }
 
+    /// Returns the seed the workload was generated with.
     #[must_use]
     pub const fn workload_seed(&self) -> u64 {
         self.workload_seed
     }
 
+    /// Returns the object-store bucket calls the run made.
     #[must_use]
     pub const fn bucket_calls(&self) -> u64 {
         self.bucket_calls
     }
 
+    /// Returns the peak resident set size the run observed.
     #[must_use]
     pub const fn peak_rss_bytes(&self) -> u64 {
         self.peak_rss_bytes
     }
 
+    /// Returns the wall-clock start time in milliseconds.
     #[must_use]
     pub const fn started_at_ms(&self) -> u64 {
         self.started_at_ms
     }
 
+    /// Returns the wall-clock finish time in milliseconds.
     #[must_use]
     pub const fn finished_at_ms(&self) -> u64 {
         self.finished_at_ms
     }
 
+    /// Returns the digest of the exact fault schedule.
     #[must_use]
     pub const fn fault_schedule_digest(&self) -> Digest {
         Digest::from_bytes(self.fault_schedule_digest)
     }
 
+    /// Iterates the digests of the raw artifacts the run produced.
     pub fn raw_artifact_digests(&self) -> impl Iterator<Item = Digest> + '_ {
         self.raw_artifact_digests
             .iter()
@@ -634,16 +661,19 @@ impl QualificationReceipt {
             .map(Digest::from_bytes)
     }
 
+    /// Returns the ownership watermarks the run proved.
     #[must_use]
     pub fn ownership(&self) -> &[QualificationOwnership] {
         &self.ownership
     }
 
+    /// Returns the attestation key that signed the receipt.
     #[must_use]
     pub const fn signer(&self) -> [u8; 32] {
         self.signer
     }
 
+    /// Encodes the canonical receipt, refusing one that violates its contract.
     pub fn encode(&self) -> Result<Vec<u8>> {
         self.validate_contract()?;
         let bytes = serde_json::to_vec(self).map_err(Error::from)?;
@@ -653,6 +683,7 @@ impl QualificationReceipt {
         Ok(bytes)
     }
 
+    /// Decodes and validates a canonical receipt.
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         if bytes.len() > MAX_RECEIPT_BYTES {
             return Err(Error::Control("qualification receipt exceeds limit"));

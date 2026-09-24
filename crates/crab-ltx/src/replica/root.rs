@@ -4,6 +4,8 @@ use crate::{CrabError, Limits, Result, SegmentInfo};
 
 use super::{MAX_SEGMENT_PAGES, ROOT_BYTES, SEGMENT_PAGE_BYTES};
 
+use crate::hex::encode_hex;
+
 #[derive(Clone)]
 pub(super) struct RootDocument {
     pub cell: [u8; 32],
@@ -186,16 +188,20 @@ pub(super) fn encode_root(root: &RootDocument) -> Result<Vec<u8>> {
         return Err(CrabError::LTXCorrupted);
     }
     let bytes = serde_json::to_vec(&RootWire {
-        cell: hex(&root.cell),
+        cell: encode_hex(&root.cell),
         checksum: checksum(root.checksum),
         commit_sequence: root.commit_sequence.to_string(),
         database_pages: root.database_pages,
-        directory_digest: hex(&root.directory_digest),
+        directory_digest: encode_hex(&root.directory_digest),
         directory_height: root.directory_height,
-        incarnation: hex(&root.incarnation),
+        incarnation: encode_hex(&root.incarnation),
         page_size: root.page_size,
         schema: root.schema,
-        segment_pages: root.segment_pages.iter().map(|value| hex(value)).collect(),
+        segment_pages: root
+            .segment_pages
+            .iter()
+            .map(|value| encode_hex(value))
+            .collect(),
         txid: root.txid.to_string(),
         version: 1,
     })?;
@@ -240,15 +246,15 @@ pub(super) fn encode_segment_page(segments: &[SegmentDescriptor]) -> Result<Vec<
     let wire = segments
         .iter()
         .map(|segment| SegmentWire {
-            blake3: hex(&segment.info.blake3),
+            blake3: encode_hex(&segment.info.blake3),
             database_pages: segment.info.database_pages,
-            index_digest: hex(&segment.index_digest),
+            index_digest: encode_hex(&segment.index_digest),
             index_length: segment.index_length.to_string(),
             length: segment.length.to_string(),
             level: segment.level,
             max_txid: segment.info.max_txid.to_string(),
             min_txid: segment.info.min_txid.to_string(),
-            object_digest: hex(&segment.object_digest),
+            object_digest: encode_hex(&segment.object_digest),
             offset: segment.offset.to_string(),
             page_size: segment.info.page_size,
             post_checksum: checksum(segment.info.post_checksum),
@@ -319,16 +325,6 @@ fn parse_checksum(value: &str) -> Result<u64> {
         return Err(CrabError::LTXCorrupted);
     }
     u64::from_str_radix(value, 16).map_err(|_| CrabError::LTXCorrupted)
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(TABLE[(byte >> 4) as usize] as char);
-        encoded.push(TABLE[(byte & 0x0f) as usize] as char);
-    }
-    encoded
 }
 
 fn parse_hex<const N: usize>(value: &str) -> Result<[u8; N]> {

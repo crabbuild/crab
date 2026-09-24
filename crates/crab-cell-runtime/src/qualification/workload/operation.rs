@@ -40,31 +40,37 @@ impl QualificationPrimitiveCounts {
         &self.primitive
     }
 
+    /// Operations attempted for this primitive.
     #[must_use]
     pub const fn attempted(&self) -> u64 {
         self.attempted
     }
 
+    /// Attempts the destination acknowledged.
     #[must_use]
     pub const fn acknowledged(&self) -> u64 {
         self.acknowledged
     }
 
+    /// Attempts the destination rejected.
     #[must_use]
     pub const fn rejected(&self) -> u64 {
         self.rejected
     }
 
+    /// Attempts whose outcome stayed unknown.
     #[must_use]
     pub const fn ambiguous(&self) -> u64 {
         self.ambiguous
     }
 
+    /// Attempts that needed a retry.
     #[must_use]
     pub const fn retried(&self) -> u64 {
         self.retried
     }
 
+    /// Attempts whose recorded result was verified.
     #[must_use]
     pub const fn verified(&self) -> u64 {
         self.verified
@@ -171,8 +177,11 @@ impl QualificationOperation {
 /// Actual outcome reported by one application-specific operation executor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QualificationOutcome {
+    /// The destination accepted the operation.
     Acknowledged,
+    /// The destination rejected the operation.
     Rejected,
+    /// The outcome could not be determined.
     Ambiguous,
 }
 
@@ -233,21 +242,25 @@ impl QualificationExecution {
         self
     }
 
+    /// Returns the outcome the executor reported.
     #[must_use]
     pub const fn outcome(self) -> QualificationOutcome {
         self.outcome
     }
 
+    /// Reports whether the result was verified against the record.
     #[must_use]
     pub const fn verified(self) -> bool {
         self.verified
     }
 
+    /// Returns how many retries the operation needed.
     #[must_use]
     pub const fn retries(self) -> u64 {
         self.retries
     }
 
+    /// Returns the matrix case the operation belongs to, when any.
     #[must_use]
     pub const fn case(self) -> Option<QualificationCase> {
         self.case

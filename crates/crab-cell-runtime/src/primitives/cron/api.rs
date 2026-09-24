@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use crate::cell::catalog::CatalogRole;
 use crate::client::{CellClient, Committed, InvocationError, Observed, Receipt};
-use crate::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use crate::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue, read_fixed};
 use crate::identity::{
     ApplicationId, CellTarget, NamespaceId, TenantId, partition_for_shard, shard_for_scope,
 };
@@ -17,8 +17,11 @@ use super::{
 
 /// Compile-time namespace, targets, and operation IDs for one Cron module.
 pub trait CronModule: MaintenanceModule {
+    /// Namespace that owns this Cron module.
     const NAMESPACE: NamespaceId;
+    /// Command id that mutates cron schedules and occurrence state.
     const MUTATE_COMMAND_ID: u32;
+    /// Query id that reads schedules and occurrences.
     const QUERY_ID: u32;
 }
 
@@ -401,16 +404,6 @@ impl WireValue for CronQueryResult {
             _ => Err(CodecError::Invalid("invalid cron query result tag")),
         }
     }
-}
-
-fn read_fixed<const N: usize>(
-    decoder: &mut BoundedDecoder<'_>,
-    message: &'static str,
-) -> Result<[u8; N], CodecError> {
-    decoder
-        .read_bytes()?
-        .try_into()
-        .map_err(|_| CodecError::Invalid(message))
 }
 
 fn encode_optional_id(

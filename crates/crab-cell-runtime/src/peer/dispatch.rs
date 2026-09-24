@@ -23,6 +23,7 @@ const MAX_RESULT_BYTES: usize = 1024 * 1024;
 
 /// Resolves only a currently active owner on the receiving node.
 pub trait PeerCellResolver: Send + Sync + 'static {
+    /// Resolves one target to an active local Cell handle.
     fn resolve(
         &self,
         target: CellTarget,
@@ -31,6 +32,7 @@ pub trait PeerCellResolver: Send + Sync + 'static {
 
 /// Rechecks current product authorization after peer authentication.
 pub trait PeerAuthorizer: Send + Sync + 'static {
+    /// Rechecks product authorization for one verified request.
     fn authorize(&self, request: &VerifiedPeerRequest) -> Result<()>;
 }
 
@@ -43,6 +45,8 @@ pub struct PeerDispatcher {
 }
 
 impl PeerDispatcher {
+    /// Creates a dispatcher over the compiled registry and its resolver and
+    /// authorizer.
     #[must_use]
     pub fn new(
         registry: Arc<Registry>,

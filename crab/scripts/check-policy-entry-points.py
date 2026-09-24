@@ -65,16 +65,19 @@ INVENTORY = {
         "observe_pressure",
     ): (
         "deferred",
-        "no production sampler feeds the classifier, so soft and hard pressure "
-        "never reach the actor; wiring waits on the pressure-seam decision",
+        "the actor samples this node's own reservation ledger on its tick, so "
+        "the classifier and its shedding path are live; this entry point stays "
+        "for a host that measures cgroup or host pressure, which no caller "
+        "supplies yet",
     ),
     (
         "crates/crab-cell-runtime/src/cell/actor/runtime.rs",
         "evict_idle",
     ): (
         "deferred",
-        "the idle sweep has no production caller; shedding waits on the same "
-        "pressure-seam decision",
+        "shedding runs through the pressure classifier, which starts the same "
+        "bounded eviction; this entry point remains the explicit operator sweep "
+        "and has no production caller",
     ),
     (
         "crates/crab-cell-runtime/src/cell/actor/acquire.rs",

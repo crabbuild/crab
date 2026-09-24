@@ -143,22 +143,26 @@ impl QualificationMatrixManifest {
 }
 
 impl QualificationMetric {
+    /// Creates one measured metric, validating its name and unit labels.
     pub fn new(name: String, value: u64, unit: String) -> Result<Self> {
         validate_label(&name, "qualification metric name")?;
         validate_label(&unit, "qualification metric unit")?;
         Ok(Self { name, value, unit })
     }
 
+    /// Returns the metric name.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Returns the measured value.
     #[must_use]
     pub const fn value(&self) -> u64 {
         self.value
     }
 
+    /// Returns the unit the value is expressed in.
     #[must_use]
     pub fn unit(&self) -> &str {
         &self.unit

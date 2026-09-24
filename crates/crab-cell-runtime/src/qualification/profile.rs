@@ -470,12 +470,19 @@ pub const QUALIFICATION_RESOURCE_METRICS: &[(&str, &str)] = &[
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum QualificationCase {
+    /// The ordinary success path.
     Happy = 0,
+    /// A delivery that must be retried before it succeeds.
     Retry = 1,
+    /// A repeated delivery that must not apply twice.
     Duplicate = 2,
+    /// An operation that arrives after its expiry.
     Expiry = 3,
+    /// A caller that cancels an in-flight operation.
     Cancellation = 4,
+    /// An owner that dies while work is outstanding.
     OwnerLoss = 5,
+    /// A Cell recovered from a verified node-log witness.
     Recovery = 6,
 }
 

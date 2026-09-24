@@ -25,6 +25,8 @@ use validation::*;
 const PROTOCOL_VERSION: u32 = 1;
 const MAX_AUTHORIZATION_BYTES: usize = 16 * 1024;
 const MAX_OPERATION_BYTES: usize = crate::codec::MAX_WIRE_BYTES;
+/// Largest peer request the runtime accepts: authorization envelope, operation
+/// bytes, and framing.
 pub const MAX_PEER_REQUEST_BYTES: usize = MAX_AUTHORIZATION_BYTES + MAX_OPERATION_BYTES + 128;
 const MAX_ACTIONS: usize = 128;
 const MAX_PRINCIPAL_BYTES: usize = 512;
@@ -33,7 +35,12 @@ const MAX_CLOCK_SKEW_MS: i64 = 5 * 60_000;
 const MAX_MUTATION_LIFETIME_MS: i64 = 24 * 60 * 60_000;
 const MAX_EFFECT_LIFETIME_MS: i64 = 7 * 24 * 60 * 60_000;
 
-/// Generated private peer messages. They are not a public service or application API.
+/// Generated private peer messages. They are not a public service or
+/// application API.
+///
+/// The schema is documented once in `docs/contracts/peer.proto`; the generated
+/// types and fields deliberately carry no Rust doc comments of their own.
+#[allow(missing_docs)]
 pub mod wire {
     include!(concat!(env!("OUT_DIR"), "/crab.cell.peer.v1.rs"));
 }
@@ -41,11 +48,17 @@ pub mod wire {
 /// One peer operation currently executable by the typed Cell client.
 #[derive(Clone)]
 pub enum PeerOperation {
+    /// Runs one mutation on the target Cell.
     Mutate(wire::MutationRequest),
+    /// Runs one read on the target Cell.
     Read(wire::ReadRequest),
+    /// Resolves one request's outcome.
     Resolve(wire::ResolveRequest),
+    /// Delivers one effect to the target Cell.
     DeliverEffect(wire::EffectRequest),
+    /// Resolves one effect's outcome.
     ResolveEffect(wire::EffectResolveRequest),
+    /// Moves one Cell to this session.
     Migrate(wire::MigrationRequest),
 }
 
@@ -87,8 +100,11 @@ impl PeerOperation {
 /// Original authorized principal delegated across one private peer hop.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeerPrincipal {
+    /// Issuer that vouched for the principal.
     pub issuer: String,
+    /// Authenticated principal name.
     pub subject: String,
+    /// Actions the principal may perform.
     pub actions: Vec<String>,
 }
 
@@ -100,6 +116,7 @@ pub struct PeerSigner {
 }
 
 impl PeerSigner {
+    /// Creates a signer for one session and release.
     #[must_use]
     pub fn new(session: SessionId, release: Digest, key: SigningKey) -> Self {
         Self {
@@ -109,6 +126,7 @@ impl PeerSigner {
         }
     }
 
+    /// Returns the key peers use to verify this signer.
     #[must_use]
     pub fn verifying_key(&self) -> VerifyingKey {
         self.key.verifying_key()
@@ -159,6 +177,7 @@ pub struct PeerVerifier {
 
 impl PeerVerifier {
     #[must_use]
+    /// Creates a verifier for one session and release.
     pub fn new(session: SessionId, release: Digest, key: VerifyingKey) -> Self {
         Self {
             session,
@@ -261,41 +280,49 @@ pub struct VerifiedPeerRequest {
 }
 
 impl VerifiedPeerRequest {
+    /// Returns the Cell the request targets.
     #[must_use]
     pub const fn target(&self) -> &CellTarget {
         &self.target
     }
 
+    /// Returns the authenticated principal.
     #[must_use]
     pub const fn principal(&self) -> &PeerPrincipal {
         &self.principal
     }
 
+    /// Returns the session the request originated from.
     #[must_use]
     pub const fn origin_session(&self) -> SessionId {
         self.origin_session
     }
 
+    /// Returns how many peers forwarded the request.
     #[must_use]
     pub const fn hop_count(&self) -> u32 {
         self.request.hop_count
     }
 
+    /// Returns the deadline remaining for the request.
     #[must_use]
     pub const fn remaining_ms(&self) -> u32 {
         self.request.remaining_ms
     }
 
+    /// Returns the wire tag of the requested operation.
     #[must_use]
     pub const fn operation_tag(&self) -> u32 {
         self.operation_tag
     }
 
+    /// Returns the decoded operation.
     #[must_use]
     pub fn operation(&self) -> Option<&wire::peer_request::Operation> {
         self.request.operation.as_ref()
     }
 
+    /// Reports whether the principal may perform an action.
     #[must_use]
     pub fn permits(&self, action: &str) -> bool {
         self.principal

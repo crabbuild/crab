@@ -5,11 +5,17 @@ use super::*;
 /// Capacity hints published by one node boot session.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NodeCapacity {
+    /// Free memory the node reports.
     pub free_memory_bytes: u64,
+    /// Free scratch disk the node reports.
     pub free_disk_bytes: u64,
+    /// Free space in the node's follower store.
     pub follower_free_bytes: u64,
+    /// Bytes the node's follower store retains.
     pub follower_retained_bytes: u64,
+    /// Job credits the node offers to the fleet.
     pub job_credits: u32,
+    /// Node-log protocol version the node speaks.
     pub log_protocol: u32,
 }
 
@@ -21,14 +27,23 @@ pub struct NodeCapacity {
 /// totals on the receiving side.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NodePlacementCapacity {
+    /// Total memory the node reports.
     pub memory_capacity_bytes: u64,
+    /// Total scratch disk the node reports.
     pub disk_capacity_bytes: u64,
+    /// Cells the node currently owns.
     pub active_cells: u32,
+    /// Cells the node admits.
     pub max_active_cells: u32,
+    /// Jobs the node is running.
     pub running_jobs: u32,
+    /// Jobs the node admits.
     pub job_capacity: u32,
+    /// Publications waiting to be acknowledged.
     pub publication_backlog: u32,
+    /// Hydrations waiting to run.
     pub hydration_backlog: u32,
+    /// Primitive maintenance items waiting.
     pub primitive_backlog: u32,
 }
 
@@ -63,11 +78,13 @@ impl NodeFailureDomain {
         Ok(domain)
     }
 
+    /// Returns the availability zone, when the node declares one.
     #[must_use]
     pub fn zone(&self) -> Option<&str> {
         self.zone.as_deref()
     }
 
+    /// Returns the host, when the node declares one.
     #[must_use]
     pub fn host(&self) -> Option<&str> {
         self.host.as_deref()

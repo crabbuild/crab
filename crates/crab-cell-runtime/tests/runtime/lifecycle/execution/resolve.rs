@@ -13,7 +13,7 @@ async fn query_waits_for_preceding_publication_and_cannot_write() {
         tokio::spawn(async move {
             handle
                 .execute(
-                    identity(52),
+                    mutation_identity_window(52, 10, 10_000),
                     Digest::from_bytes([53; 32]),
                     20,
                     1_024,
@@ -79,7 +79,7 @@ async fn query_waits_for_preceding_publication_and_cannot_write() {
 async fn cancelled_command_waiter_is_resolved_by_original_identity() {
     let fixture = fixture();
     let handle = activate(&fixture, 16 * 1024 * 1024).await;
-    let request = identity(10);
+    let request = mutation_identity_window(10, 10, 10_000);
     let digest = Digest::from_bytes([11; 32]);
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -118,7 +118,7 @@ async fn cancelled_command_waiter_is_resolved_by_original_identity() {
 async fn resolve_distinguishes_committed_absent_conflict_and_expired() {
     let fixture = fixture();
     let handle = activate(&fixture, 16 * 1024 * 1024).await;
-    let request = identity(54);
+    let request = mutation_identity_window(54, 10, 10_000);
     let digest = Digest::from_bytes([55; 32]);
     let outcome = handle
         .execute(request, digest, 20, 1_024, 1_024, |transaction| {
@@ -139,14 +139,24 @@ async fn resolve_distinguishes_committed_absent_conflict_and_expired() {
     ));
     assert_eq!(
         handle
-            .resolve(identity(57), Digest::from_bytes([58; 32]), 21, 1_024)
+            .resolve(
+                mutation_identity_window(57, 10, 10_000),
+                Digest::from_bytes([58; 32]),
+                21,
+                1_024
+            )
             .await
             .unwrap(),
         Resolution::Absent
     );
     assert_eq!(
         handle
-            .resolve(identity(59), Digest::from_bytes([60; 32]), 10_000, 1_024)
+            .resolve(
+                mutation_identity_window(59, 10, 10_000),
+                Digest::from_bytes([60; 32]),
+                10_000,
+                1_024
+            )
             .await
             .unwrap(),
         Resolution::Expired
@@ -158,7 +168,7 @@ async fn resolve_waits_for_inflight_publication_and_returns_unknown_after_fence(
     let fixture = fixture();
     let handle = activate(&fixture, 16 * 1024 * 1024).await;
     delete_control_root(&fixture).await;
-    let request = identity(61);
+    let request = mutation_identity_window(61, 10, 10_000);
     let digest = Digest::from_bytes([62; 32]);
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();

@@ -12,3 +12,7 @@ Scoped rules for `crates/crab-cell-host/`. Root and `crates/` guidance apply.
   on it, and a caller's deadline bounds the releases it starts rather than the
   wait for the lane. Fleet-level pacing stays with the planner's movement
   budget, so do not add a second per-node rate limit here.
+- Layout: the integration suite is `tests/node.rs` (with `tests/node/`). The
+  crate holds no in-src tests, so it has no `tests-allow-list.txt`.
+- Run `python3 crab/scripts/check-cell-ltx-layout.py` after layout changes.
+

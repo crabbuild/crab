@@ -302,7 +302,7 @@ async fn retained_request_outcome_moves_with_exact_root() {
     assert!(matches!(
         handle
             .execute(
-                identity(79),
+                mutation_identity_window(79, 10, 10_000),
                 Digest::from_bytes([79; 32]),
                 20,
                 64,
@@ -376,7 +376,12 @@ async fn retained_request_outcome_moves_with_exact_root() {
         .unwrap();
     assert!(matches!(
         successor
-            .resolve(identity(79), Digest::from_bytes([79; 32]), 20, 64)
+            .resolve(
+                mutation_identity_window(79, 10, 10_000),
+                Digest::from_bytes([79; 32]),
+                20,
+                64
+            )
             .await
             .unwrap(),
         Resolution::Committed(StoredOutcome::Success {

@@ -9,6 +9,7 @@ use std::{
     },
 };
 
+use crate::identity::encode_hex;
 use crate::ltx::{DiskBudget, DiskReservation, Limits as ReplicaLimits};
 use crate::recovery::manifest::{RecoveryArtifact, RecoveryArtifactKey, RecoveryArtifactStore};
 use crate::{Error, Result};
@@ -45,6 +46,8 @@ impl Drop for ArtifactEntry {
 }
 
 impl RecoveryArtifactRegistry {
+    /// Creates the on-disk cache, requiring an absolute root and a non-zero
+    /// disk budget.
     pub fn new(root: PathBuf, limits: ReplicaLimits, budget: DiskBudget) -> Result<Self> {
         if !root.is_absolute() || budget.capacity() == 0 {
             return Err(Error::Node(
@@ -230,16 +233,6 @@ impl RecoveryArtifactStore for RecoveryArtifactRegistry {
         };
         Ok(Some(RecoveryArtifact::new(bundle, entry)))
     }
-}
-
-fn encode_hex(bytes: &[u8; 32]) -> String {
-    const TABLE: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(TABLE[(byte >> 4) as usize] as char);
-        encoded.push(TABLE[(byte & 0x0f) as usize] as char);
-    }
-    encoded
 }
 
 fn sync_file(path: &Path) -> std::io::Result<()> {

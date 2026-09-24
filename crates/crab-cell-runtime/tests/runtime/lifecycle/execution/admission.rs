@@ -13,7 +13,7 @@ async fn per_cell_request_admission_caps_inflight_and_queued_commands() {
         tokio::spawn(async move {
             handle
                 .execute(
-                    identity(29),
+                    mutation_identity_window(29, 10, 10_000),
                     Digest::from_bytes([29; 32]),
                     20,
                     0,
@@ -38,7 +38,7 @@ async fn per_cell_request_admission_caps_inflight_and_queued_commands() {
         tokio::spawn(async move {
             let result = handle
                 .execute(
-                    identity(byte),
+                    mutation_identity_window(byte, 10, 10_000),
                     Digest::from_bytes([byte; 32]),
                     21,
                     0,
