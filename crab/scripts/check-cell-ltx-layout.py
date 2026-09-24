@@ -5,12 +5,22 @@ Rules:
   1. No `#[path]` attributes in the four crates.
   2. Every `#[cfg(test)]`/`#[test]` location under `src/` is listed in the
      crate's `tests-allow-list.txt`.
-  3. No `tests/<name>.rs` that shadows `src/<name>.rs`.
-  4. Every test suite root has a matching module directory and at least one
+  3. Every `tests-allow-list.txt` entry names an existing `src/` file, carries
+     a reason, and still holds tests or test modules, so a moved or emptied
+     test location cannot leave a stale entry behind.
+  4. No `tests/<name>.rs` that shadows `src/<name>.rs`.
+  5. Every test suite root has a matching module directory and at least one
      test.
-  5. The runtime root surface equals `api-prelude.txt`.
-  6. The runtime coordination kernel stays sans-I/O: no async, clock, or
+  6. Every module file inside a suite directory is declared by its parent module
+     file, so a split cannot leave a test file that the compiler never builds.
+  7. Every `src/...` or `tests/...` path named by a crate guide exists, so the
+     guides keep owning the layout rules they describe.
+  8. The runtime root surface equals `api-prelude.txt`.
+  9. The runtime coordination kernel stays sans-I/O: no async, clock, or
      storage, so the simulator and the model can replay the same transitions.
+ 10. The four crates depend only on each other and `crab-storage` (which the
+     Cellule synthesis renames to `cellule-store`), so the extraction cannot
+     acquire a Crab-specific coupling on the way out.
 """
 
 from __future__ import annotations
@@ -42,9 +52,22 @@ SUITES = {
 TEST_ATTR = re.compile(r"^\s*#\[(?:tokio::)?test", re.M)
 CFG_TEST = re.compile(r"^\s*#\[cfg\(test\)\]", re.M)
 PATH_ATTR = re.compile(r"#\[path\s*=")
+MODULE_DECL = re.compile(r"^\s*(?:pub(?:\([^)]*\))? )?mod ([a-z_][a-z_0-9]*)\s*;", re.M)
 LINE_COMMENT = re.compile(r"//[^\n]*")
 ROOT_RE_EXPORT = re.compile(r"^pub use ([^;]+);", re.M)
 ROOT_CONST = re.compile(r"^\s*pub (?:const|struct|enum|trait|fn|type) ([A-Za-z_][A-Za-z0-9_]*)", re.M)
+
+# The four Cellule crates plus the shared store crate they may keep depending on.
+EXTRACTION_DEPENDENCIES = frozenset(
+    {
+        "crab-storage",
+        "crab-ltx",
+        "crab-cell-runtime",
+        "crab-cell-app",
+        "crab-cell-host",
+    }
+)
+CRAB_DEPENDENCY = re.compile(r"^(crab-[a-z0-9-]+)", re.M)
 
 # A pure coordination kernel is what lets `coordination/sim.rs` and the TLA+
 # model replay production transitions; an I/O call here would silently move the
@@ -69,22 +92,116 @@ def sans_io_paths(crate_path: Path) -> list[Path]:
     return paths
 
 
-def allow_list(crate_path: Path) -> set[str]:
+def allow_list(crate_path: Path) -> dict[str, str]:
     path = crate_path / "tests-allow-list.txt"
     if not path.is_file():
-        return set()
-    entries = set()
+        return {}
+    entries: dict[str, str] = {}
     for line in path.read_text().splitlines():
-        line = line.split("#", 1)[0].strip()
-        if line:
-            entries.add(line)
+        entry, _, reason = line.partition("#")
+        entry = entry.strip()
+        if entry:
+            entries[entry] = reason.strip()
     return entries
+
+
+def check_allow_list_entries(crate_path: Path, entries: dict[str, str]) -> list[str]:
+    problems: list[str] = []
+    allow_path = (crate_path / "tests-allow-list.txt").relative_to(ROOT)
+    for entry, reason in sorted(entries.items()):
+        target = crate_path / "src" / entry
+        if not target.is_file():
+            problems.append(f"{allow_path}: {entry} does not name an existing src file")
+            continue
+        if not reason:
+            problems.append(f"{allow_path}: {entry} needs a reason comment")
+        text = LINE_COMMENT.sub("", target.read_text())
+        if (
+            TEST_ATTR.search(text) is None
+            and CFG_TEST.search(text) is None
+            and MODULE_DECL.search(text) is None
+        ):
+            problems.append(f"{allow_path}: {entry} no longer holds tests or test modules")
+    return problems
+
+
+
+def check_suite_module_declarations(crate: str, crate_path: Path) -> list[str]:
+    """Every suite module file must be declared by the module that owns it."""
+    problems: list[str] = []
+    tests = crate_path / "tests"
+    for suite in SUITES.get(crate, ()):
+        suite_dir = tests / suite
+        suite_root = tests / f"{suite}.rs"
+        if not suite_dir.is_dir() or not suite_root.is_file():
+            continue
+        for path in sorted(suite_dir.rglob("*.rs")):
+            if path.name == "mod.rs":
+                continue
+            if path.parent == suite_dir:
+                declaring = suite_root
+            else:
+                declaring = path.parent.with_suffix(".rs")
+                if not declaring.is_file():
+                    declaring = path.parent / "mod.rs"
+            if not declaring.is_file():
+                problems.append(
+                    f"{path.relative_to(ROOT)}: no module file declares it"
+                )
+                continue
+            text = LINE_COMMENT.sub("", declaring.read_text())
+            if path.stem not in MODULE_DECL.findall(text):
+                problems.append(
+                    f"{path.relative_to(ROOT)}: {declaring.relative_to(ROOT)} does "
+                    f"not declare `mod {path.stem};`"
+                )
+    return problems
+
+
+
+GUIDE_PATH = re.compile(r"`((?:src|tests)/[^`]+)`")
+
+
+def check_guide_paths(crate_path: Path) -> list[str]:
+    """Every crate-relative path a crate guide names must exist."""
+    guide = crate_path / "AGENTS.md"
+    if not guide.is_file():
+        return []
+    problems: list[str] = []
+    for token in GUIDE_PATH.findall(guide.read_text()):
+        token = token.strip()
+        if "<" in token or "{" in token:
+            continue
+        if not (crate_path / token).exists():
+            problems.append(
+                f"{guide.relative_to(ROOT)}: {token} is not present in the crate"
+            )
+    return problems
+
+
+def check_extraction_dependencies(crate_path: Path) -> list[str]:
+    """Every `crab-*` dependency stays inside the Cellule extraction set."""
+    manifest = crate_path / "Cargo.toml"
+    if not manifest.is_file():
+        return []
+    problems: list[str] = []
+    for name in sorted(set(CRAB_DEPENDENCY.findall(manifest.read_text()))):
+        if name not in EXTRACTION_DEPENDENCIES:
+            problems.append(
+                f"{manifest.relative_to(ROOT)}: {name} is outside the Cellule dependency set"
+            )
+    return problems
 
 
 def check(crate: str) -> list[str]:
     crate_path = ROOT / crate
     problems: list[str] = []
-    allowed = allow_list(crate_path)
+    entries = allow_list(crate_path)
+    allowed = set(entries)
+    problems.extend(check_allow_list_entries(crate_path, entries))
+    problems.extend(check_suite_module_declarations(crate, crate_path))
+    problems.extend(check_guide_paths(crate_path))
+    problems.extend(check_extraction_dependencies(crate_path))
     search_roots = [crate_path / "src"]
     if (crate_path / "tests").is_dir():
         search_roots.append(crate_path / "tests")
