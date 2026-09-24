@@ -1,6 +1,7 @@
 //! Queue wire codecs for send, claim, lease, control, and info payloads.
 
 use super::*;
+use crate::codec::read_fixed;
 
 const SENT_TAG: u8 = 0;
 const PRODUCER_CONFLICT_TAG: u8 = 1;
@@ -340,16 +341,6 @@ fn validate_lease_outcome(
         return Err(CodecError::Invalid("inconsistent queue lease outcome"));
     }
     Ok(())
-}
-
-fn read_fixed<const N: usize>(
-    decoder: &mut BoundedDecoder<'_>,
-    message: &'static str,
-) -> Result<[u8; N], CodecError> {
-    decoder
-        .read_bytes()?
-        .try_into()
-        .map_err(|_| CodecError::Invalid(message))
 }
 
 #[cfg(test)]

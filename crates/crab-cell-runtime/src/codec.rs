@@ -296,6 +296,17 @@ pub(crate) fn decode_wire<T: WireValue>(input: &[u8], limit: u32) -> Result<T, C
     Ok(value)
 }
 
+/// Reads a length-delimited value that must be exactly `N` bytes wide.
+pub(crate) fn read_fixed<const N: usize>(
+    decoder: &mut BoundedDecoder<'_>,
+    message: &'static str,
+) -> Result<[u8; N], CodecError> {
+    decoder
+        .read_bytes()?
+        .try_into()
+        .map_err(|_| CodecError::Invalid(message))
+}
+
 pub(crate) fn encode_wire<T: WireValue>(value: &T, limit: u32) -> Result<Vec<u8>, CodecError> {
     let mut encoder = BoundedEncoder::new(limit)?;
     value.encode(&mut encoder)?;
