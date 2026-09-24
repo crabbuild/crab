@@ -8,6 +8,19 @@
 //! authenticated bundles, compaction, and sparse paged SQL. Leases and HTTP
 //! policy remain caller-owned.
 
+// A panic in a filter process or FUSE path corrupts a worktree, so production
+// builds deny unwrap, expect, panic, todo, and unimplemented; test builds keep
+// them available.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
 #![doc = include_str!("../README.md")]
 
 pub mod capture;
