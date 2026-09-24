@@ -8,9 +8,13 @@ pub type FacilityResult<T = ()> = std::result::Result<T, Box<dyn std::error::Err
 /// Node-log rotation events emitted by the host supervisor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeDurabilityRotation {
+    /// The supervisor is retiring the current node-log generation.
     Started,
+    /// Shutdown is waiting for pending publications to settle.
     Pending,
+    /// A rotation step failed and this rotation is being abandoned.
     Failed,
+    /// The replacement generation is installed and serving.
     Completed,
 }
 
@@ -20,6 +24,10 @@ pub enum NodeDurabilityRotation {
 /// host consumes the resulting provider-neutral configuration and is the only
 /// owner that constructs and installs [`crab_cell_runtime::node::durability::NodeDurability`].
 pub trait NodeDurabilityProvider: Send + Sync + 'static {
+    /// Recruits one enrollment round for the replacement generation.
+    ///
+    /// `Ok(None)` means the provider is not ready and the supervisor should
+    /// ask again after its recruit interval.
     fn recruit(
         self: Arc<Self>,
         limits: ReplicaLimits,
@@ -27,6 +35,7 @@ pub trait NodeDurabilityProvider: Send + Sync + 'static {
         live_node_limit: usize,
     ) -> Pin<Box<dyn Future<Output = FacilityResult<Option<NodeDurabilityConfig>>> + Send>>;
 
+    /// Reports one rotation event to the provider; the default ignores it.
     fn rotation_event(&self, _event: NodeDurabilityRotation) {}
 }
 

@@ -4,6 +4,7 @@
 //! deterministic topology descriptor. Node lifecycle, storage providers,
 //! authority and HTTP policy remain outside this boundary.
 
+#![deny(missing_docs)]
 // A panic in a filter process or FUSE path corrupts a worktree, so production
 // builds deny unwrap, expect, panic, todo, and unimplemented; test builds keep
 // them available.
@@ -312,8 +313,12 @@ impl CompiledApplication {
 
 /// Trait implemented by a statically linked application root.
 pub trait CellApplication: Send + Sync + 'static {
+    /// Stable application name carried into the compiled release descriptor.
     const NAME: &'static str;
 
+    /// Registers every module, namespace, and relationship this application
+    /// exposes. The builder rejects a registration that does not match the
+    /// compiled function bindings.
     fn register(builder: &mut ApplicationBuilder) -> Result<()>;
 
     /// Compiles this application using deterministic build evidence.
