@@ -418,12 +418,11 @@ impl CellRuntime {
         )?;
         let telemetry = crate::fleet::telemetry::CellTelemetryHandle::default();
         let mut replica_host = replica_host.with_ltx_telemetry(Arc::new(telemetry.clone()));
-        replica_host.install_resource_admission(Arc::new(LedgerHostResourceAdmission {
-            state: resources.weak(),
-        }));
-        replica_host.install_disk_admission(Arc::new(LedgerDiskAdmission {
-            state: resources.weak(),
-        }))?;
+        replica_host.install_resource_admission(Arc::new(LedgerHostResourceAdmission::new(
+            session, &resources,
+        )));
+        replica_host
+            .install_disk_admission(Arc::new(LedgerDiskAdmission::new(session, &resources)))?;
         let runtime = tokio::runtime::Handle::try_current().map_err(Error::RuntimeStart)?;
         let (sender, receiver) = mpsc::channel(INGRESS_REQUESTS);
         let node_lease = Arc::new(node_lease);
