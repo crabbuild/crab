@@ -19,6 +19,10 @@ const MAX_TRANSFER_BYTES_PER_TICK: u64 = 8 * 1024 * 1024 * 1024;
 const BALANCE_DEADBAND_PERCENT: u128 = 2;
 
 /// Pressure class supplied by the signed node observation.
+///
+/// The signed placement block carries measured counters rather than the node's
+/// hysteretic tier, so derivation currently reaches only the critical class;
+/// soft and hard pressure remain local until the tier is signed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PlacementPressure {
     Normal,
@@ -51,7 +55,6 @@ pub struct PlacementObservation {
     pub pressure: PlacementPressure,
     pub draining: bool,
     pub authenticated: bool,
-    pub locality_bonus: u16,
     pub current_owner: bool,
 }
 
@@ -104,6 +107,8 @@ impl PlacementObservation {
             publication_backlog: placement.publication_backlog,
             hydration_backlog: placement.hydration_backlog,
             primitive_backlog: placement.primitive_backlog,
+            // Only an empty ledger is visible to a peer while the hysteretic
+            // tier stays local.
             pressure: if capacity.free_memory_bytes == 0 || capacity.free_disk_bytes == 0 {
                 PlacementPressure::Critical
             } else {
@@ -111,7 +116,6 @@ impl PlacementObservation {
             },
             draining: capacity.free_memory_bytes == 0 || capacity.free_disk_bytes == 0,
             authenticated: true,
-            locality_bonus: 0,
             current_owner,
         }
     }
@@ -537,14 +541,12 @@ impl PlacementPlanner {
                 .saturating_add(observation.hydration_backlog)
                 .saturating_add(observation.primitive_backlog),
         );
-        let locality = u128::from(observation.locality_bonus.min(100));
         let sticky = u128::from(observation.current_owner) * 50;
         let hash_bonus = placement_hash(cell, observation.node, observation.session) % 100;
         let score = (memory * 400
             + disk * 250
             + cells * 200
             + jobs * 100
-            + locality * 10
             + sticky * SCORE_SCALE
             + hash_bonus)
             .saturating_sub(backlog.min(100) * SCORE_SCALE);
@@ -665,7 +667,6 @@ mod tests {
             pressure: PlacementPressure::Normal,
             draining: false,
             authenticated: true,
-            locality_bonus: 0,
             current_owner: false,
         }
     }
