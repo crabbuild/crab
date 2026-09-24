@@ -2,7 +2,8 @@ capture/wal.rs  # asserts private WAL encoding and index handling
 capture.rs  # asserts private capture engine state
 cell_layout.rs  # asserts private cell layout helpers
 codec.rs  # asserts private LTX codec internals
-db.rs  # drives the private managed database and admissions
+db/tests.rs  # drives the private managed database and admissions
+db.rs  # declares crate-private test modules
 environment/directory_cache.rs  # declares crate-private test modules
 environment/tests.rs  # drives the private disk budget, cache, and executor hooks
 environment.rs  # declares crate-private test modules
