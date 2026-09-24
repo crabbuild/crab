@@ -7,9 +7,9 @@ use crate::identity::{ApplicationId, encode_hex};
 use crate::node::durability::NodeDurability;
 use crate::node::log::CommitTicket;
 use crate::node::log_shipper::NodeLogSubmission;
+use crate::retry::{Backoff, retry_hint, retryable_storage_error};
 use crate::{Error, Result};
 
-const MAX_RETRY_DELAY_MS: u64 = 1_000;
 const COMPACTION_CHECK_INTERVAL: u8 = 8;
 const COMPACTION_DEBT_SEGMENTS: usize = 32;
 const MAX_COMPACTION_CASCADE: usize = 9;
@@ -176,7 +176,7 @@ impl CellPublisher {
         self.check_node_lease()?;
         let deadline = std::time::Instant::now() + SELF_FENCE_TIMEOUT;
         let deadline_at = tokio::time::Instant::from_std(deadline);
-        let mut backoff = PublicationBackoff::default();
+        let mut backoff = Backoff::default();
         loop {
             self.check_node_lease()?;
             let successor = self.observed.value().renew()?;
@@ -229,7 +229,7 @@ impl CellPublisher {
     // Reconcile a lost activation CAS before exposing the restored handle.
     pub(crate) async fn activate(&mut self) -> Result<()> {
         self.check_node_lease()?;
-        let mut backoff = PublicationBackoff::default();
+        let mut backoff = Backoff::default();
         loop {
             self.check_node_lease()?;
             let successor = self.observed.value().activate()?;
@@ -411,7 +411,7 @@ impl CellPublisher {
         &mut self,
         base: &crab_ltx::RootRef,
     ) -> Result<Option<crab_ltx::PreparedRoot>> {
-        let mut backoff = PublicationBackoff::default();
+        let mut backoff = Backoff::default();
         loop {
             let replica = self.replica.clone();
             let scratch_directory = self.scratch_directory.clone();
@@ -446,7 +446,7 @@ impl CellPublisher {
             return Ok(None);
         }
         tracing::debug!(segments = segment_count, "Cell LTX full compaction forced");
-        let mut backoff = PublicationBackoff::default();
+        let mut backoff = Backoff::default();
         let prepared = loop {
             let replica = self.replica.clone();
             let scratch_directory = self.scratch_directory.clone();
@@ -481,7 +481,7 @@ impl CellPublisher {
         commit_sequence: u64,
         schema: u32,
     ) -> Result<crab_ltx::PreparedRoot> {
-        let mut backoff = PublicationBackoff::default();
+        let mut backoff = Backoff::default();
         loop {
             let replica = self.replica.clone();
             let attempt = replica.prepare(base, cuts, commit_sequence, schema);
@@ -531,7 +531,7 @@ impl CellPublisher {
         migration: Option<(crate::Digest, u32)>,
     ) -> Result<crab_ltx::RootRef> {
         self.check_node_lease()?;
-        let mut backoff = PublicationBackoff::default();
+        let mut backoff = Backoff::default();
         loop {
             self.check_node_lease()?;
             let (successor, transition) = match migration {
@@ -623,7 +623,7 @@ impl CellPublisher {
     /// Releases ownership after the SQL worker has closed the drained Cell.
     pub(crate) async fn release(&mut self) -> Result<()> {
         self.check_node_lease()?;
-        let mut backoff = PublicationBackoff::default();
+        let mut backoff = Backoff::default();
         loop {
             self.check_node_lease()?;
             let successor = self.observed.value().release()?;
@@ -676,7 +676,7 @@ impl CellPublisher {
         let expected_cell = expected.cell;
         let expected_incarnation = expected.incarnation;
         let expected_epoch = expected.epoch;
-        let mut backoff = PublicationBackoff::default();
+        let mut backoff = Backoff::default();
         let current = loop {
             match self.authority.load(expected_cell).await {
                 Ok(Some(current)) => break current,
@@ -833,67 +833,14 @@ fn runtime_retry_hint(error: &Error) -> Option<std::time::Duration> {
     let Error::Storage(error) = error else {
         return None;
     };
-    storage_retry_hint(error)
+    retry_hint(error)
 }
 
 fn ltx_retry_hint(error: &crab_ltx::CrabError) -> Option<std::time::Duration> {
     let crab_ltx::CrabError::Storage(error) = error else {
         return None;
     };
-    storage_retry_hint(error)
-}
-
-fn storage_retry_hint(error: &crab_storage::StorageError) -> Option<std::time::Duration> {
-    match crab_storage::retry_class(error) {
-        crab_storage::RetryClass::Throttled { retry_after } => retry_after,
-        _ => None,
-    }
-}
-
-fn retryable_storage_error(error: &crab_storage::StorageError) -> bool {
-    matches!(
-        crab_storage::retry_class(error),
-        crab_storage::RetryClass::Transient
-            | crab_storage::RetryClass::Throttled { .. }
-            | crab_storage::RetryClass::StateDependent
-            | crab_storage::RetryClass::InspectErrno
-    )
-}
-
-struct PublicationBackoff {
-    delay_ms: u64,
-}
-
-impl Default for PublicationBackoff {
-    fn default() -> Self {
-        Self { delay_ms: 100 }
-    }
-}
-
-impl PublicationBackoff {
-    async fn wait(&mut self, minimum: Option<std::time::Duration>) {
-        let delay = std::time::Duration::from_millis(self.delay_ms);
-        tokio::time::sleep(minimum.map_or(delay, |minimum| minimum.max(delay))).await;
-        self.delay_ms = self.delay_ms.saturating_mul(2).min(MAX_RETRY_DELAY_MS);
-    }
-
-    async fn wait_until(
-        &mut self,
-        minimum: Option<std::time::Duration>,
-        deadline: std::time::Instant,
-    ) -> Result<()> {
-        let delay = std::time::Duration::from_millis(self.delay_ms);
-        let delay = minimum.map_or(delay, |minimum| minimum.max(delay));
-        let remaining = deadline
-            .checked_duration_since(std::time::Instant::now())
-            .ok_or(Error::Fenced)?;
-        if delay >= remaining {
-            return Err(Error::Fenced);
-        }
-        tokio::time::sleep(delay).await;
-        self.delay_ms = self.delay_ms.saturating_mul(2).min(MAX_RETRY_DELAY_MS);
-        Ok(())
-    }
+    retry_hint(error)
 }
 
 #[cfg(test)]

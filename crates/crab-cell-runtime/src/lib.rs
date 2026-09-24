@@ -21,6 +21,7 @@
 
 mod coordination;
 mod error;
+mod retry;
 
 // Test-only object-store instrumentation. Integration targets and the
 // `cell_movement_probe` binary enable the feature; in-crate unit tests do not

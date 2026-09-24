@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::cell::application::ApplicationIdentity;
 use crate::identity::{CellId, Digest, RequestId, SessionId};
 use crate::identity::{decode_hex, encode_hex};
+use crate::retry::retryable_storage_error;
 use crate::{Error, Result};
 
 const MAX_PROGRESS_BYTES: u64 = 4 * 1024;
@@ -433,16 +434,6 @@ fn same_operation(left: &MigrationProgressAttempt, right: &MigrationProgressAtte
         && left.cell == right.cell
         && left.to_code == right.to_code
         && left.to_schema == right.to_schema
-}
-
-fn retryable_storage_error(error: &StorageError) -> bool {
-    matches!(
-        crab_storage::retry_class(error),
-        crab_storage::RetryClass::Transient
-            | crab_storage::RetryClass::Throttled { .. }
-            | crab_storage::RetryClass::StateDependent
-            | crab_storage::RetryClass::InspectErrno
-    )
 }
 
 fn parse_hex<const N: usize>(value: &str) -> Result<[u8; N]> {
