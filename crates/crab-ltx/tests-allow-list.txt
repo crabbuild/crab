@@ -15,3 +15,4 @@ replica/cache.rs  # asserts the private directory cache
 replica/directory.rs  # asserts private radix directory internals
 replica/root.rs  # asserts private root codec bounds
 replica/upload.rs  # asserts private capture upload sources
+writable_vfs.rs  # asserts private page-range arithmetic
