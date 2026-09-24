@@ -20,10 +20,12 @@ pub use summary::{QualificationLatencyHistogram, QualificationRunSummary};
 
 /// Async application boundary used by [`QualificationWorkload::run`].
 pub trait QualificationOperationExecutor {
+    /// Future returned for one operation.
     type Future<'a>: Future<Output = Result<QualificationExecution>> + Send + 'a
     where
         Self: 'a;
 
+    /// Runs one workload operation.
     fn execute<'a>(&'a mut self, operation: QualificationOperation) -> Self::Future<'a>;
 }
 
@@ -143,36 +145,43 @@ impl QualificationWorkload {
         Ok(bytes)
     }
 
+    /// Returns the threshold profile the workload was built for.
     #[must_use]
     pub fn profile(&self) -> &str {
         &self.profile
     }
 
+    /// Returns the digest of that threshold profile.
     #[must_use]
     pub const fn profile_digest(&self) -> Digest {
         Digest::from_bytes(self.profile_digest)
     }
 
+    /// Returns the seed the operation schedule is derived from.
     #[must_use]
     pub const fn seed(&self) -> u64 {
         self.seed
     }
 
+    /// Returns how many Cells the workload addresses.
     #[must_use]
     pub const fn cells(&self) -> u64 {
         self.cells
     }
 
+    /// Returns how many operations the schedule contains.
     #[must_use]
     pub const fn operations(&self) -> u64 {
         self.operations
     }
 
+    /// Returns the target duration in seconds.
     #[must_use]
     pub const fn duration_secs(&self) -> u64 {
         self.duration_secs
     }
 
+    /// Returns the per-primitive operation counts.
     #[must_use]
     pub fn primitives(&self) -> &[QualificationPrimitiveCounts] {
         &self.primitives
@@ -193,6 +202,7 @@ impl QualificationWorkload {
         Ok(operation_from_state(index, state, self.cells))
     }
 
+    /// Returns the digest of the measured outcome.
     #[must_use]
     pub const fn outcome_digest(&self) -> Digest {
         Digest::from_bytes(self.outcome_digest)

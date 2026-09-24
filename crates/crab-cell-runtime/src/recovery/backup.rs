@@ -38,31 +38,37 @@ pub struct BackupPin {
 }
 
 impl BackupPin {
+    /// Returns the request that created the pin.
     #[must_use]
     pub const fn id(&self) -> RequestId {
         self.id
     }
 
+    /// Returns the logical time the pin was created.
     #[must_use]
     pub const fn created_at_ms(&self) -> i64 {
         self.created_at_ms
     }
 
+    /// Returns how many control records the pin covers.
     #[must_use]
     pub const fn control_count(&self) -> u64 {
         self.control_count
     }
 
+    /// Returns the application the pin belongs to.
     #[must_use]
     pub const fn application(&self) -> crate::ApplicationId {
         self.application
     }
 
+    /// Returns the catalog revision the pin covers for each shard.
     #[must_use]
     pub fn catalog_revisions(&self) -> &[u64] {
         &self.catalog_revisions
     }
 
+    /// Returns the release digest the pin covers.
     #[must_use]
     pub const fn release_digest(&self) -> [u8; 32] {
         self.release
@@ -72,8 +78,11 @@ impl BackupPin {
 /// One revision-pinned catalog shard and its immutable page dependencies.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PinnedCatalogShard {
+    /// Catalog shard the record pins.
     pub shard: u8,
+    /// Revision the shard was pinned at.
     pub revision: u64,
+    /// Immutable page digests the shard referenced.
     pub pages: Vec<crate::Digest>,
 }
 
@@ -142,6 +151,8 @@ pub struct BackupPinStore {
 }
 
 impl BackupPinStore {
+    /// Creates a backup-pin store after checking that the layout belongs to the
+    /// same application as the identity.
     pub fn new(
         layout: CellStorageLayout,
         identity: ApplicationIdentity,
