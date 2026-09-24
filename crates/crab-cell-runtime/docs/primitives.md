@@ -348,6 +348,17 @@ The delivery path preserves these properties:
 
 The design doesn't claim an atomic transaction across source and destination. It provides durable at-least-once delivery with idempotent destination execution.
 
+| Effect contract | Limit or behavior |
+| --- | --- |
+| Encoded input | At most 1 MiB; claim and acknowledgement budgets reserve their fixed overhead inside the same bound |
+| Claim batch | 1 to 32 effects per claim |
+| Lease | 5s to 300s, and an extension stays inside the same bounds |
+| Attempts | 20, after which the effect fails instead of retrying |
+| Effect lifetime | At most 7 days from emission; a longer requested expiry is rejected |
+| Inbox retention | 7 days past the effect's own expiry, then the destination inbox drops the record |
+| Destination | Same tenant and application; a cross-tenant target fails before any write |
+| Delivery | At least once, with idempotent destination execution |
+
 ## Let the scheduler advance time-based state
 
 Each mutating procedure recomputes the earliest due timestamp inside its transaction. The typed Tick advances bounded work from all installed classes.
