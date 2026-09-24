@@ -47,7 +47,8 @@ primitives/workflow/api.rs  # asserts private workflow wire envelopes
 primitives/workflow.rs  # uses the private workflow schema and codec
 publication.rs  # asserts private publisher state
 qualification/cluster.rs  # validates private cluster receipt helpers
-qualification.rs  # uses private qualification bounds and helpers
+qualification/tests.rs  # asserts the private qualification bounds and helpers
+qualification.rs  # declares crate-private test modules
 recovery/artifacts.rs  # asserts the private artifact cache
 recovery/manifest.rs  # uses private manifest bounds and codecs
 recovery/release.rs  # asserts private release record fields
