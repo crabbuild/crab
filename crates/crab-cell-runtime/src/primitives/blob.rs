@@ -48,26 +48,41 @@ struct BlobMutationTimes {
 /// Conditional publication rule captured when an upload begins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlobCondition {
+    /// Publishes regardless of the current object.
     Any,
+    /// Publishes only when no object exists at the key.
     Missing,
+    /// Publishes only while the object's ETag still matches.
     Etag([u8; 32]),
 }
 
 /// One bounded mutation against a blob namespace.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlobMutation {
+    /// Opens a bounded multipart upload.
     Begin {
+        /// Blob key the upload targets.
         key: Vec<u8>,
+        /// Client-chosen upload identity.
         upload_id: [u8; 16],
+        /// Publication rule checked when the upload completes.
         condition: BlobCondition,
+        /// Content type recorded when the object is published.
         content_type: Option<String>,
+        /// Opaque application metadata recorded with the object.
         metadata: Vec<u8>,
+        /// Logical time after which an unfinished upload is abandoned.
         expires_at_ms: i64,
     },
+    /// Stores one part of an open upload.
     PutPart {
+        /// Blob key the upload targets.
         key: Vec<u8>,
+        /// Upload the part belongs to.
         upload_id: [u8; 16],
+        /// One-based part number.
         part_number: u32,
+        /// Part bytes, bounded by `MAX_BLOB_PART_BYTES`.
         payload: Vec<u8>,
     },
     /// Stores a reference to a content-addressed object-store part.
@@ -82,17 +97,27 @@ pub enum BlobMutation {
         digest: [u8; 32],
         size: u32,
     },
+    /// Completes an open upload and publishes the object.
     Complete {
+        /// Blob key the upload targets.
         key: Vec<u8>,
+        /// Upload to complete.
         upload_id: [u8; 16],
+        /// Number of parts the finished object must contain.
         part_count: u32,
     },
+    /// Discards an open upload without publishing.
     Abort {
+        /// Blob key the upload targets.
         key: Vec<u8>,
+        /// Upload to discard.
         upload_id: [u8; 16],
     },
+    /// Removes a published object when its condition matches.
     Delete {
+        /// Blob key to remove.
         key: Vec<u8>,
+        /// Rule checked before the object is removed.
         condition: BlobCondition,
     },
 }
@@ -100,33 +125,59 @@ pub enum BlobMutation {
 /// Business result of a blob mutation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlobMutationOutcome {
+    /// The upload is open and accepts parts.
     Begun,
-    PartStored { digest: [u8; 32] },
-    Committed { etag: [u8; 32], size: u64 },
+    /// The part was stored.
+    PartStored {
+        /// Digest the part is stored under.
+        digest: [u8; 32],
+    },
+    /// The object was published.
+    Committed {
+        /// ETag of the published bytes.
+        etag: [u8; 32],
+        /// Total object size in bytes.
+        size: u64,
+    },
+    /// The open upload was discarded.
     Aborted,
+    /// The object was removed.
     Deleted,
+    /// No object or upload matched the request.
     NotFound,
+    /// The condition did not match the current object.
     Conflict,
 }
 
 /// Immutable metadata for one published blob.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlobMetadata {
+    /// Blob key.
     pub key: Vec<u8>,
+    /// ETag of the published bytes.
     pub etag: [u8; 32],
+    /// Total object size in bytes.
     pub size: u64,
+    /// Number of parts the object was assembled from.
     pub part_count: u32,
+    /// Content type recorded at completion.
     pub content_type: Option<String>,
+    /// Opaque application metadata recorded at completion.
     pub metadata: Vec<u8>,
+    /// Logical time the object was first published.
     pub created_at_ms: i64,
+    /// Logical time the object was last replaced.
     pub updated_at_ms: i64,
 }
 
 /// One bounded blob read result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlobRead {
+    /// Metadata of the object the range was read from.
     pub metadata: BlobMetadata,
+    /// Byte offset the returned range starts at.
     pub offset: u64,
+    /// Bytes of the requested range.
     pub bytes: Vec<u8>,
     pub(crate) parts: Vec<BlobPart>,
     pub(crate) end: u64,
@@ -143,24 +194,36 @@ pub(crate) struct BlobPart {
 /// One lexicographically ordered page of blob metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlobPage {
+    /// Object metadata in lexicographic key order.
     pub objects: Vec<BlobMetadata>,
+    /// Key to continue from when the page filled its limit.
     pub next: Option<Vec<u8>>,
 }
 
 /// One bounded read against a blob namespace.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlobQuery {
+    /// Reads one object's metadata.
     Head {
+        /// Blob key to look up.
         key: Vec<u8>,
     },
+    /// Reads a bounded byte range of one object.
     Read {
+        /// Blob key to read.
         key: Vec<u8>,
+        /// First byte of the range.
         offset: u64,
+        /// Maximum bytes to return.
         limit: u32,
     },
+    /// Lists object metadata in key order.
     List {
+        /// Key prefix to list.
         prefix: Vec<u8>,
+        /// Key to continue after, from a previous page.
         after: Option<Vec<u8>>,
+        /// Maximum objects to return.
         limit: u32,
     },
 }
@@ -168,8 +231,11 @@ pub enum BlobQuery {
 /// Result shape for a blob query.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlobQueryResult {
+    /// Metadata for the key, absent when no object exists.
     Head(Option<BlobMetadata>),
+    /// The bounded range, absent when no object exists.
     Read(Option<BlobRead>),
+    /// One page of object metadata.
     List(BlobPage),
 }
 
