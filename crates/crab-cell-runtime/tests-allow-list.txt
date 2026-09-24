@@ -50,7 +50,7 @@ peer/tests.rs  # uses the private peer wire bound
 peer.rs  # declares crate-private test modules
 primitives/activity_pool/tests.rs  # drives the private activity job type
 primitives/activity_pool.rs  # declares crate-private test modules
-primitives/blob/api.rs  # asserts private blob wire envelopes
+primitives/blob/api/codec.rs  # asserts private blob wire envelopes
 primitives/blob/tests.rs  # uses private schema and digest helpers
 primitives/blob.rs  # declares crate-private test modules
 primitives/cron.rs  # asserts private cron wire envelopes
