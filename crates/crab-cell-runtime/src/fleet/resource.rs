@@ -27,6 +27,7 @@ pub struct ResourceCost {
 }
 
 impl ResourceCost {
+    /// Cost of one active Cell with no work in flight.
     #[must_use]
     pub const fn active_cell() -> Self {
         Self {
@@ -37,6 +38,7 @@ impl ResourceCost {
         }
     }
 
+    /// Empty cost, used as the base for [`ResourceCost::active_cell`].
     #[must_use]
     pub const fn zero() -> Self {
         Self {
@@ -56,143 +58,169 @@ impl ResourceCost {
         }
     }
 
+    /// Returns the Cells this cost covers.
     #[must_use]
     pub const fn active_cells(self) -> usize {
         self.active_cells
     }
 
+    /// Returns the resident memory in bytes.
     #[must_use]
     pub const fn resident_bytes(self) -> usize {
         self.resident_bytes
     }
 
+    /// Returns the open file descriptors.
     #[must_use]
     pub const fn file_descriptors(self) -> usize {
         self.file_descriptors
     }
 
+    /// Returns the bytes retained beyond the active set.
     #[must_use]
     pub const fn retained_bytes(self) -> usize {
         self.retained_bytes
     }
 
+    /// Returns the scratch disk in bytes.
     #[must_use]
     pub const fn disk_bytes(self) -> u64 {
         self.disk_bytes
     }
 
+    /// Returns the SQL worker jobs.
     #[must_use]
     pub const fn worker_jobs(self) -> usize {
         self.worker_jobs
     }
 
+    /// Returns the primitive maintenance jobs.
     #[must_use]
     pub const fn primitive_jobs(self) -> usize {
         self.primitive_jobs
     }
 
+    /// Returns the hydration jobs.
     #[must_use]
     pub const fn hydration_jobs(self) -> usize {
         self.hydration_jobs
     }
 
+    /// Returns the object-store I/O slots.
     #[must_use]
     pub const fn io_slots(self) -> usize {
         self.io_slots
     }
 
+    /// Returns the blocking activity jobs.
     #[must_use]
     pub const fn blocking_jobs(self) -> usize {
         self.blocking_jobs
     }
 
+    /// Returns the recovery jobs.
     #[must_use]
     pub const fn recovery_jobs(self) -> usize {
         self.recovery_jobs
     }
 
+    /// Returns the dirty, not-yet-published jobs.
     #[must_use]
     pub const fn dirty_jobs(self) -> usize {
         self.dirty_jobs
     }
 
+    /// Returns the scratch units.
     #[must_use]
     pub const fn scratch_units(self) -> usize {
         self.scratch_units
     }
 
+    /// Sets the retained bytes.
     #[must_use]
     pub const fn with_retained_bytes(mut self, bytes: usize) -> Self {
         self.retained_bytes = bytes;
         self
     }
 
+    /// Sets the resident bytes.
     #[must_use]
     pub const fn with_resident_bytes(mut self, bytes: usize) -> Self {
         self.resident_bytes = bytes;
         self
     }
 
+    /// Sets the open file descriptors.
     #[must_use]
     pub const fn with_file_descriptors(mut self, descriptors: usize) -> Self {
         self.file_descriptors = descriptors;
         self
     }
 
+    /// Sets the Cell count.
     #[must_use]
     pub const fn with_active_cells(mut self, cells: usize) -> Self {
         self.active_cells = cells;
         self
     }
 
+    /// Sets the scratch disk in bytes.
     #[must_use]
     pub const fn with_disk_bytes(mut self, bytes: u64) -> Self {
         self.disk_bytes = bytes;
         self
     }
 
+    /// Sets the SQL worker jobs.
     #[must_use]
     pub const fn with_worker_jobs(mut self, jobs: usize) -> Self {
         self.worker_jobs = jobs;
         self
     }
 
+    /// Sets the primitive maintenance jobs.
     #[must_use]
     pub const fn with_primitive_jobs(mut self, jobs: usize) -> Self {
         self.primitive_jobs = jobs;
         self
     }
 
+    /// Sets the hydration jobs.
     #[must_use]
     pub const fn with_hydration_jobs(mut self, jobs: usize) -> Self {
         self.hydration_jobs = jobs;
         self
     }
 
+    /// Sets the object-store I/O slots.
     #[must_use]
     pub const fn with_io_slots(mut self, slots: usize) -> Self {
         self.io_slots = slots;
         self
     }
 
+    /// Sets the blocking activity jobs.
     #[must_use]
     pub const fn with_blocking_jobs(mut self, jobs: usize) -> Self {
         self.blocking_jobs = jobs;
         self
     }
 
+    /// Sets the recovery jobs.
     #[must_use]
     pub const fn with_recovery_jobs(mut self, jobs: usize) -> Self {
         self.recovery_jobs = jobs;
         self
     }
 
+    /// Sets the dirty, not-yet-published jobs.
     #[must_use]
     pub const fn with_dirty_jobs(mut self, jobs: usize) -> Self {
         self.dirty_jobs = jobs;
         self
     }
 
+    /// Sets the scratch units.
     #[must_use]
     pub const fn with_scratch_units(mut self, units: usize) -> Self {
         self.scratch_units = units;
@@ -255,7 +283,9 @@ impl ResourceCost {
 /// Point-in-time usage and limits for one resource ledger.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResourceSnapshot {
+    /// Cost currently reserved.
     pub used: ResourceCost,
+    /// Cost the ledger admits.
     pub limit: ResourceCost,
 }
 
