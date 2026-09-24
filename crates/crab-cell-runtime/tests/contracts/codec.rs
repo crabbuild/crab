@@ -63,3 +63,51 @@ fn encoder_and_decoder_enforce_declared_limits_before_allocation() {
         Err(CodecError::Limit)
     ));
 }
+
+#[test]
+fn decoder_rejects_invalid_utf8_text() {
+    let bytes = [0, 0, 0, 2, 0xff, 0xfe];
+    let mut decoder = BoundedDecoder::new(&bytes, 6).unwrap();
+    assert!(matches!(
+        String::decode(&mut decoder),
+        Err(CodecError::Utf8(_))
+    ));
+}
+
+#[test]
+fn length_delimited_values_reject_a_length_past_the_input() {
+    let bytes = [0, 0, 0, 8];
+    let mut decoder = BoundedDecoder::new(&bytes, 4).unwrap();
+    assert!(matches!(
+        Vec::<u8>::decode(&mut decoder),
+        Err(CodecError::Invalid("truncated wire value"))
+    ));
+}
+
+#[test]
+fn zero_limits_are_rejected() {
+    assert!(matches!(BoundedEncoder::new(0), Err(CodecError::Limit)));
+    assert!(matches!(
+        BoundedDecoder::new(&[], 0),
+        Err(CodecError::Limit)
+    ));
+}
+
+#[test]
+fn non_finite_floats_cannot_be_encoded() {
+    let mut encoder = BoundedEncoder::new(8).unwrap();
+    assert!(matches!(
+        f64::NAN.encode(&mut encoder),
+        Err(CodecError::Invalid("non-finite f64"))
+    ));
+    assert!(matches!(
+        f64::INFINITY.encode(&mut encoder),
+        Err(CodecError::Invalid("non-finite f64"))
+    ));
+}
+
+#[test]
+fn negative_zero_encodes_as_canonical_zero() {
+    let decoded = roundtrip(-0.0_f64, 8);
+    assert_eq!(decoded.to_bits(), 0.0_f64.to_bits());
+}
