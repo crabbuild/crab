@@ -5,19 +5,29 @@ use super::*;
 /// Node lifecycle state visible to readiness and shutdown adapters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeState {
+    /// The node is installing its runtime and does not serve yet.
     Starting,
+    /// The node serves Cells and may take new ownership.
     Ready,
+    /// Scale-down started: the node still serves but takes no new ownership.
     ScalingDown,
+    /// The node is releasing its Cells and refuses new work.
     Draining,
+    /// Every Cell is released and the node's facilities are stopped.
     Stopped,
 }
 
 /// Progress while a node serves the Cells that cannot yet move.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScaleDownStatus {
+    /// Cells the node still owns, whether or not they can move yet.
     pub remaining_cells: usize,
+    /// Cells the fleet still lists as transfer candidates for this node.
     pub settled_candidates: usize,
+    /// Cells confirmed released during this planning window.
     pub released_cells: usize,
+    /// Cells that cannot move yet: failed release attempts plus remaining
+    /// Cells with no settled candidate.
     pub blocked_cells: usize,
 }
 

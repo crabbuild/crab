@@ -4,6 +4,7 @@
 //! product server supplies providers, authentication and network transports;
 //! it must not construct another runtime alongside this host.
 
+#![deny(missing_docs)]
 // A panic in a filter process or FUSE path corrupts a worktree, so production
 // builds deny unwrap, expect, panic, todo, and unimplemented; test builds keep
 // them available.
