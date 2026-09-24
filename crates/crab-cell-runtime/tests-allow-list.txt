@@ -1,7 +1,8 @@
 bin/qualification_receipt.rs  # binary target; libtest cannot be imported by tests/
 cell/actor/tests.rs  # asserts private projection helpers
 cell/actor.rs  # declares crate-private test modules
-cell/executor.rs  # asserts private pending-publication state
+cell/executor/tests.rs  # asserts private pending-publication state
+cell/executor.rs  # declares crate-private test modules
 cell/schema.rs  # compares the private RUNTIME_SCHEMA constant
 cell/worker/tests.rs  # exercises private worker admission and bootstrap
 cell/worker.rs  # declares crate-private test modules
