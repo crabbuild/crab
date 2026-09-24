@@ -40,6 +40,7 @@ pub struct RegistryBuilder {
 }
 
 impl RegistryBuilder {
+    /// Starts an empty builder for one build descriptor.
     #[must_use]
     pub fn new(build: BuildDescriptor) -> Self {
         Self {
@@ -561,16 +562,19 @@ pub struct Registry {
 mod run;
 
 impl Registry {
+    /// Returns the canonical release descriptor bytes.
     #[must_use]
     pub fn release_bytes(&self) -> &[u8] {
         &self.release_bytes
     }
 
+    /// Returns the digest of the canonical release descriptor.
     #[must_use]
     pub const fn release_digest(&self) -> Digest {
         self.release_digest
     }
 
+    /// Returns the module code digest registered under `module`.
     #[must_use]
     pub fn module_code(&self, module: &str) -> Option<Digest> {
         self.module_codes.get(module).copied()

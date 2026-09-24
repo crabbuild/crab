@@ -28,6 +28,7 @@ const DEFAULT_TIMEOUT_MS: u32 = 30_000;
 
 /// Sends one authenticated request to the current owner and returns exact reply bytes.
 pub trait PeerRoundTrip: Send + Sync + 'static {
+    /// Sends one authenticated request and returns the exact reply bytes.
     fn send(
         &self,
         target: CellTarget,
@@ -71,6 +72,7 @@ pub struct MigrationPeerClient {
 }
 
 impl MigrationPeerClient {
+    /// Creates a migration peer client over a signer, principal, and round trip.
     #[must_use]
     pub fn new(
         signer: Arc<PeerSigner>,
@@ -144,6 +146,7 @@ impl MigrationPeerClient {
 }
 
 impl EffectPeerClient {
+    /// Creates an effect peer client over a signer, principal, and round trip.
     #[must_use]
     pub fn new(
         signer: Arc<PeerSigner>,
