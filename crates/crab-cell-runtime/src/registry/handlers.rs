@@ -21,6 +21,7 @@ pub struct CommandContext<'borrow, 'connection> {
 }
 
 impl CommandContext<'_, '_> {
+    /// Returns the Cell this command targets.
     #[must_use]
     pub fn cell_id(&self) -> CellId {
         self.target.cell_id()
@@ -32,11 +33,13 @@ impl CommandContext<'_, '_> {
         &self.target
     }
 
+    /// Returns the actor-ordered sequence the command was admitted at.
     #[must_use]
     pub const fn sequence(&self) -> u64 {
         self.sequence
     }
 
+    /// Returns the logical runtime time for the command.
     #[must_use]
     pub const fn now_ms(&self) -> i64 {
         self.now_ms
@@ -116,16 +119,19 @@ pub struct QueryContext<'borrow> {
 }
 
 impl QueryContext<'_> {
+    /// Returns the Cell this query reads.
     #[must_use]
     pub const fn cell_id(&self) -> CellId {
         self.cell
     }
 
+    /// Returns the highest committed sequence the query may observe.
     #[must_use]
     pub const fn commit_sequence(&self) -> u64 {
         self.commit_sequence
     }
 
+    /// Returns the logical runtime time for the query.
     #[must_use]
     pub const fn now_ms(&self) -> i64 {
         self.now_ms
@@ -198,18 +204,26 @@ pub(super) type ActivityRunner = fn(
 
 /// Stored command decision encoded with the command's declared output codec.
 pub enum CommandResult<T> {
+    /// The command committed a result the caller consumes as success.
     Success(T),
+    /// The command committed a rejection the caller consumes as the result.
     Rejected(T),
 }
 
 /// Statically dispatched typed command implemented by compiled Crab code.
 pub trait Command: Send + Sync + 'static {
+    /// Module the command is registered under.
     const MODULE: &'static str;
+    /// Command id within its module.
     const ID: u32;
+    /// Input codec version the command accepts.
     const CODEC_VERSION: u32;
+    /// Declared input type.
     type Input: WireValue;
+    /// Declared output type.
     type Output: WireValue;
 
+    /// Runs the command inside its savepoint and returns its decision.
     fn execute(
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
@@ -218,43 +232,68 @@ pub trait Command: Send + Sync + 'static {
 
 /// Statically dispatched typed query implemented by compiled Crab code.
 pub trait Query: Send + Sync + 'static {
+    /// Module the query is registered under.
     const MODULE: &'static str;
+    /// Query id within its module.
     const ID: u32;
+    /// Input codec version the query accepts.
     const CODEC_VERSION: u32;
+    /// Declared input type.
     type Input: WireValue;
+    /// Declared output type.
     type Output: WireValue;
 
+    /// Runs the read-only query.
     fn execute(context: &mut QueryContext<'_>, input: Self::Input) -> Result<Self::Output>;
 }
 
 /// Validated command selection and bounded input supplied by runtime routing.
 pub struct CommandInvocation<'a> {
+    /// Module the routing selected.
     pub module: &'a str,
+    /// Command id the routing selected.
     pub operation_id: u32,
+    /// Codec version the caller declared.
     pub codec_version: u32,
+    /// Schema version the Cell serves.
     pub schema: u32,
+    /// Validated target the command must own.
     pub target: CellTarget,
+    /// Actor-ordered sequence of the command.
     pub sequence: u64,
+    /// Logical runtime time for the command.
     pub now_ms: i64,
+    /// Bounded encoded input.
     pub input: &'a [u8],
 }
 
 /// Validated query selection and bounded input supplied by runtime routing.
 pub struct QueryInvocation<'a> {
+    /// Module the routing selected.
     pub module: &'a str,
+    /// Query id the routing selected.
     pub operation_id: u32,
+    /// Codec version the caller declared.
     pub codec_version: u32,
+    /// Schema version the Cell serves.
     pub schema: u32,
+    /// Cell the query reads.
     pub cell: CellId,
+    /// Highest committed sequence the query may observe.
     pub commit_sequence: u64,
+    /// Logical runtime time for the query.
     pub now_ms: i64,
+    /// Bounded encoded input.
     pub input: &'a [u8],
 }
 
 /// Source-level module registration contract for statically linked Crab code.
 pub trait CellModule: Send + Sync + 'static {
+    /// Source-level module name, matched against its descriptor.
     const NAME: &'static str;
 
+    /// Returns the static descriptor this module registers.
     fn descriptor(&self) -> &'static ModuleDescriptor;
+    /// Registers this module's typed bindings.
     fn register(self, registry: &mut RegistryBuilder) -> std::result::Result<(), RegistryError>;
 }

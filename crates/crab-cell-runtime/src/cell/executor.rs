@@ -20,8 +20,11 @@ pub(crate) const PENDING_PUBLICATION_HIGH_WATER_BYTES: u64 = 64 << 20;
 /// Stable caller identity retained across retries and outcome resolution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MutationIdentity {
+    /// Caller-supplied request identity.
     pub request_id: RequestId,
+    /// Logical time the caller created the mutation.
     pub issued_at_ms: i64,
+    /// Logical time after which the identity is refused.
     pub expires_at_ms: i64,
 }
 
@@ -54,19 +57,27 @@ impl MutationIdentity {
 
 /// Bounded handler decision made inside the application savepoint.
 pub enum HandlerOutcome {
+    /// The handler committed a successful result.
     Success(Vec<u8>),
+    /// The handler committed a rejection.
     Rejected(Vec<u8>),
 }
 
 /// A durable result stored in `sys_requests`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoredOutcome {
+    /// Committed success with the sequence it was stored at.
     Success {
+        /// Encoded result bytes.
         result: Vec<u8>,
+        /// Commit sequence the outcome was stored at.
         commit_sequence: u64,
     },
+    /// Committed rejection with the sequence it was stored at.
     Rejected {
+        /// Encoded result bytes.
         result: Vec<u8>,
+        /// Commit sequence the outcome was stored at.
         commit_sequence: u64,
     },
 }
@@ -74,13 +85,18 @@ pub enum StoredOutcome {
 /// Authoritative request-ledger observation from the current Cell owner.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Resolution {
+    /// The request has a durable outcome.
     Committed(StoredOutcome),
+    /// No outcome is stored for the request.
     Absent,
+    /// The owning Cell could not be reached, so the outcome is unknown.
     Unknown,
+    /// The request identity expired before an outcome was stored.
     Expired,
 }
 
 impl StoredOutcome {
+    /// Returns the commit sequence the outcome was stored at.
     #[must_use]
     pub fn commit_sequence(&self) -> u64 {
         match self {
@@ -93,6 +109,7 @@ impl StoredOutcome {
         }
     }
 
+    /// Returns the encoded result bytes.
     #[must_use]
     pub fn result(&self) -> &[u8] {
         match self {
@@ -126,36 +143,43 @@ pub struct PendingMigration {
 }
 
 impl PendingMigration {
+    /// Returns the application code digest the migration installs.
     #[must_use]
     pub const fn code(&self) -> Digest {
         self.code
     }
 
+    /// Returns the schema version the migration starts from.
     #[must_use]
     pub const fn from_schema(&self) -> u32 {
         self.from_schema
     }
 
+    /// Returns the schema version the migration installs.
     #[must_use]
     pub const fn to_schema(&self) -> u32 {
         self.to_schema
     }
 
+    /// Returns the migration plan digest, when the plan declares one.
     #[must_use]
     pub const fn digest(&self) -> Option<Digest> {
         self.digest
     }
 
+    /// Returns the commit sequence the migration committed at.
     #[must_use]
     pub const fn commit_sequence(&self) -> u64 {
         self.commit_sequence
     }
 
+    /// Returns the logical time the owner asked to be renewed by.
     #[must_use]
     pub const fn next_due_ms(&self) -> Option<i64> {
         self.next_due_ms
     }
 
+    /// Returns the captured cuts awaiting publication.
     #[must_use]
     pub const fn cuts(&self) -> &CaptureBatch {
         &self.cuts
@@ -174,32 +198,40 @@ impl PendingMigration {
 /// Durably proven identity of one completed schema migration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MigrationOutcome {
+    /// Application code digest the migration installed.
     pub code: Digest,
+    /// Schema version the migration installed.
     pub schema: u32,
+    /// Commit sequence the migration committed at.
     pub commit_sequence: u64,
 }
 
 impl PendingCommit {
+    /// Returns the durable outcome awaiting publication.
     #[must_use]
     pub fn outcome(&self) -> &StoredOutcome {
         &self.outcome
     }
 
+    /// Returns the logical time the commit was made at.
     #[must_use]
     pub fn logical_time_ms(&self) -> i64 {
         self.logical_time_ms
     }
 
+    /// Returns the logical time the owner asked to be renewed by.
     #[must_use]
     pub fn next_due_ms(&self) -> Option<i64> {
         self.next_due_ms
     }
 
+    /// Returns the captured cuts awaiting publication.
     #[must_use]
     pub fn cuts(&self) -> &CaptureBatch {
         &self.cuts
     }
 
+    /// Returns the prepared root, once one has been uploaded.
     #[must_use]
     pub fn prepared(&self) -> Option<crab_ltx::RootRef> {
         self.prepared
@@ -218,7 +250,9 @@ impl PendingCommit {
 /// Immediate executor result; pending output cannot be observed before publication.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandExecution {
+    /// The command has a durable outcome.
     Recorded(StoredOutcome),
+    /// The command committed locally and waits for publication.
     Pending,
 }
 
@@ -245,6 +279,7 @@ impl CellExecutor {
         self.db.interrupt_handle()
     }
 
+    /// Creates the executor for one active Cell at the given schema version.
     #[must_use]
     pub fn new(db: Db, cell: CellId, incarnation: IncarnationId, schema: u32) -> Self {
         Self {
@@ -780,6 +815,7 @@ impl CellExecutor {
         }
     }
 
+    /// Returns the oldest commit awaiting publication.
     #[must_use]
     pub fn pending(&self) -> Option<&PendingCommit> {
         self.pending.front()
@@ -816,6 +852,7 @@ impl CellExecutor {
         Ok(())
     }
 
+    /// Returns the schema migration awaiting publication.
     #[must_use]
     pub fn pending_migration(&self) -> Option<&PendingMigration> {
         self.pending_migration.as_ref()
