@@ -3,4 +3,5 @@
 mod fleet {
     pub mod node_log_transport;
     pub mod pressure;
+    pub mod pressure_properties;
 }
