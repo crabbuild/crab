@@ -206,6 +206,37 @@ mod tests {
     }
 
     #[test]
+    fn cell_target_accepts_a_partition_at_the_1024_byte_limit() {
+        let target = CellTarget::new(
+            TenantId::from_bytes([1; 16]),
+            ApplicationId::from_bytes([2; 16]),
+            NamespaceId::from_bytes([3; 16]),
+            &[0x7f; 1024],
+        )
+        .unwrap();
+        assert_eq!(target.partition().len(), 1024);
+    }
+
+    #[test]
+    fn cell_target_rejects_a_partition_past_the_limit() {
+        assert!(matches!(
+            CellTarget::new(
+                TenantId::from_bytes([1; 16]),
+                ApplicationId::from_bytes([2; 16]),
+                NamespaceId::from_bytes([3; 16]),
+                &[0x7f; 1025],
+            ),
+            Err(Error::Identity("partition exceeds 1024 bytes"))
+        ));
+    }
+
+    #[test]
+    fn shard_mapping_accepts_a_scope_at_the_1024_byte_limit() {
+        let namespace = NamespaceId::from_bytes([4; 16]);
+        assert!(shard_for_scope(namespace, &[0; 1024], 64).is_ok());
+    }
+
+    #[test]
     fn shard_mapping_rejects_unbounded_or_mutable_topology() {
         let namespace = NamespaceId::from_bytes([4; 16]);
         assert_eq!(shard_for_scope(namespace, b"scope", 64).unwrap(), 61);
