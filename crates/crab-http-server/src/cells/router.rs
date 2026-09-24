@@ -1402,6 +1402,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_reuses_restores_idle_and_takes_over_stale_owner() {
+        init_test_tracing();
         let identity = ApplicationIdentity::new(
             TenantId::from_bytes([1; 16]),
             ApplicationId::from_bytes([2; 16]),
@@ -2297,6 +2298,17 @@ mod tests {
             session_dir,
         )
         .unwrap()
+    }
+
+    /// Surfaces Cell runtime warnings in this module's test output.
+    fn init_test_tracing() {
+        static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        INIT.get_or_init(|| {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter("crab_cell_runtime=warn")
+                .with_test_writer()
+                .try_init();
+        });
     }
 
     fn owner(session: SessionId) -> Owner {

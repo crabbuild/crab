@@ -88,7 +88,23 @@ async fn fixture_without_cells() -> Arc<Server> {
     })
 }
 
+/// Surfaces Cell runtime warnings in this crate's test output.
+///
+/// Test binaries install no subscriber, so a fail-closed library warning (for
+/// example a host outliving its Cell runtime) would otherwise be invisible in
+/// the very runs that hit it.
+pub(crate) fn init_test_tracing() {
+    static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INIT.get_or_init(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("crab_cell_runtime=warn")
+            .with_test_writer()
+            .try_init();
+    });
+}
+
 pub(super) async fn fixture() -> Arc<Server> {
+    init_test_tracing();
     static CELL_DIRS: std::sync::OnceLock<std::sync::Mutex<Vec<tempfile::TempDir>>> =
         std::sync::OnceLock::new();
 
