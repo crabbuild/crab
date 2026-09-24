@@ -297,7 +297,11 @@ Cell unpublished, and the retry cannot repair it:
 dead unpublished owner, re-initialize through a caller-supplied closure, and
 publish. It has no production caller and is recorded as deferred until the
 choice is made: give the initializer (or a directory-backed operator path) that
-takeover, or state that an unpublished Cell is abandoned and remove the API.
+takeover, give the initializer a stable per-repository owner session so a retry
+resumes its own unfinished activation, or state that an unpublished Cell is
+abandoned and remove the API. The stable-session option needs the concurrent
+initializer case worked out first: today two runs are separated by their session
+identities, and reusing one would let both attempt the same publication.
 
 Still open, in the order the audit proposed: P0 1 pressure wiring (needs the
 decision to feed the classifier and sign the tier), P0 2 Blob collector,
