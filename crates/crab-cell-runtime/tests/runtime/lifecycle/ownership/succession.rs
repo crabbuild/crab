@@ -1,4 +1,9 @@
 //! Independent-process successor election and acquire races.
+//!
+//! Every test here needs the `test-support` filesystem CAS store, so the whole
+//! module is gated on that feature.
+
+#![cfg(feature = "test-support")]
 
 use super::*;
 
