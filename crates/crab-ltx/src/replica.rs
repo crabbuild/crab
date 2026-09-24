@@ -16,6 +16,7 @@ use crate::{CaptureBatch, CrabError, Host, Limits, Position, Result};
 mod cache;
 mod compaction;
 mod directory;
+mod merge;
 mod prepare;
 mod restore;
 mod root;
