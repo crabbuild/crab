@@ -19,6 +19,7 @@ pub struct VersionedControl {
 }
 
 impl VersionedControl {
+    /// Returns the control record this version carries.
     #[must_use]
     pub const fn value(&self) -> &Control {
         &self.value
@@ -36,6 +37,7 @@ pub struct CellAuthority {
 }
 
 impl CellAuthority {
+    /// Binds the authority to one Cell storage layout.
     #[must_use]
     pub fn new(layout: CellStorageLayout) -> Self {
         Self { layout }

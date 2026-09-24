@@ -45,6 +45,8 @@ impl Drop for ArtifactEntry {
 }
 
 impl RecoveryArtifactRegistry {
+    /// Creates the on-disk cache, requiring an absolute root and a non-zero
+    /// disk budget.
     pub fn new(root: PathBuf, limits: ReplicaLimits, budget: DiskBudget) -> Result<Self> {
         if !root.is_absolute() || budget.capacity() == 0 {
             return Err(Error::Node(

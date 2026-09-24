@@ -33,6 +33,7 @@ pub(super) enum AdvertisementScan {
 }
 
 impl NodeDirectory {
+    /// Binds the directory to one fleet, image, and release scope.
     #[must_use]
     pub fn new(layout: CellStorageLayout, fleet: Digest, image: Digest, release: Digest) -> Self {
         Self {
@@ -44,6 +45,7 @@ impl NodeDirectory {
         }
     }
 
+    /// Returns the fleet this directory is scoped to.
     #[must_use]
     pub const fn fleet(&self) -> Digest {
         self.fleet

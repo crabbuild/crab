@@ -72,7 +72,9 @@ pub(crate) enum WorkerState {
 /// Result returned by one SQL worker without releasing pending command output.
 #[derive(Clone)]
 pub enum WorkerExecution {
+    /// The command has a durable outcome.
     Recorded(StoredOutcome),
+    /// The command committed locally and awaits publication.
     Pending(Box<PendingCommit>),
 }
 

@@ -35,7 +35,12 @@ const MAX_CLOCK_SKEW_MS: i64 = 5 * 60_000;
 const MAX_MUTATION_LIFETIME_MS: i64 = 24 * 60 * 60_000;
 const MAX_EFFECT_LIFETIME_MS: i64 = 7 * 24 * 60 * 60_000;
 
-/// Generated private peer messages. They are not a public service or application API.
+/// Generated private peer messages. They are not a public service or
+/// application API.
+///
+/// The schema is documented once in `docs/contracts/peer.proto`; the generated
+/// types and fields deliberately carry no Rust doc comments of their own.
+#[allow(missing_docs)]
 pub mod wire {
     include!(concat!(env!("OUT_DIR"), "/crab.cell.peer.v1.rs"));
 }
