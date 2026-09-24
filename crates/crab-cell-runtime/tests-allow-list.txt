@@ -20,6 +20,9 @@ fleet/resource.rs  # asserts the private resource ledger
 fleet/scheduler.rs  # asserts the private primitive probe and class budget
 fleet/telemetry.rs  # uses the private telemetry install seam
 follower/tests.rs  # asserts private lane and index constants
+follower/tests/append.rs  # asserts private append, seal, and retire framing
+follower/tests/budget.rs  # asserts private lane budget and collection bounds
+follower/tests/scan.rs  # asserts private tail scan and fail-closed reads
 follower.rs  # declares crate-private test modules
 identity.rs  # asserts private hex codec helpers
 node/durability/tests.rs  # asserts private durability gate state
