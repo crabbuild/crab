@@ -16,10 +16,15 @@ const MAX_WRITE_ATTEMPTS: usize = 4;
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MigrationFailure {
+    /// The destination release was unavailable.
     Unavailable,
+    /// The Cell ran out of local capacity.
     Capacity,
+    /// The migration exceeded its deadline.
     Deadline,
+    /// The migration cannot apply to this Cell.
     Incompatible,
+    /// The migration failed for an internal reason.
     Internal,
 }
 
@@ -27,7 +32,9 @@ pub enum MigrationFailure {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MigrationProgressState {
+    /// The migration finished successfully.
     Completed,
+    /// The migration ended in failure.
     Failed,
 }
 
@@ -68,31 +75,37 @@ impl MigrationProgressAttempt {
         Ok(attempt)
     }
 
+    /// Returns the request that started the attempt.
     #[must_use]
     pub const fn operation(&self) -> RequestId {
         self.operation
     }
 
+    /// Returns the release the Cell migrates to.
     #[must_use]
     pub const fn release(&self) -> Digest {
         self.release
     }
 
+    /// Returns the session that owns the attempt.
     #[must_use]
     pub const fn session(&self) -> SessionId {
         self.session
     }
 
+    /// Returns the Cell the attempt migrates.
     #[must_use]
     pub const fn cell(&self) -> CellId {
         self.cell
     }
 
+    /// Returns the code digest and schema the Cell migrates from.
     #[must_use]
     pub const fn from(&self) -> (Digest, u32) {
         (self.from_code, self.from_schema)
     }
 
+    /// Returns the code digest and schema the Cell migrates to.
     #[must_use]
     pub const fn to(&self) -> (Digest, u32) {
         (self.to_code, self.to_schema)
@@ -128,31 +141,37 @@ pub struct MigrationProgress {
 }
 
 impl MigrationProgress {
+    /// Returns the immutable attempt scope.
     #[must_use]
     pub const fn attempt(&self) -> MigrationProgressAttempt {
         self.attempt
     }
 
+    /// Returns the progress revision.
     #[must_use]
     pub const fn revision(&self) -> u64 {
         self.revision
     }
 
+    /// Returns how many attempts were recorded.
     #[must_use]
     pub const fn attempts(&self) -> u32 {
         self.attempts
     }
 
+    /// Returns the terminal state, once the attempt finished.
     #[must_use]
     pub const fn state(&self) -> MigrationProgressState {
         self.state
     }
 
+    /// Returns the failure class, when the attempt failed.
     #[must_use]
     pub const fn failure(&self) -> Option<MigrationFailure> {
         self.failure
     }
 
+    /// Returns the logical time the progress was last written.
     #[must_use]
     pub const fn updated_at_ms(&self) -> i64 {
         self.updated_at_ms
@@ -265,6 +284,8 @@ pub struct MigrationProgressStore {
 }
 
 impl MigrationProgressStore {
+    /// Creates a progress store after checking that the layout belongs to the
+    /// same application as the identity.
     pub fn new(layout: CellStorageLayout, identity: ApplicationIdentity) -> Result<Self> {
         if layout.application_id() != identity.application().as_bytes() {
             return Err(Error::Release(
