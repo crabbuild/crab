@@ -81,8 +81,9 @@ INVENTORY = {
         "takeover_unpublished",
     ): (
         "deferred",
-        "the router fails closed on a rootless control record instead of "
-        "entering it, so only tests exercise this takeover path",
+        "the unleased initializer refuses to fence an existing unpublished owner "
+        "(it cannot mint a takeover proof) and the router fails closed on a "
+        "rootless control record, so only tests exercise this takeover path",
     ),
     (
         "crates/crab-cell-runtime/src/primitives/blob.rs",
