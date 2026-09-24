@@ -10,17 +10,24 @@ use crate::{CrabError, Result};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "replica", derive(serde::Serialize, serde::Deserialize))]
 pub struct Position {
+    /// Transaction id of the commit this position names.
     pub txid: u64,
+    /// Post-apply checksum that commit published.
     pub checksum: u64,
 }
 
 /// Admission bounds for local capture and recovery, not an RSS quota.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
+    /// Largest database file local capture and recovery admit.
     pub max_database_bytes: u64,
+    /// Largest single capture admitted, across every cut it publishes.
     pub max_capture_bytes: u64,
+    /// Largest immutable LTX file admitted.
     pub max_file_bytes: u64,
+    /// Largest recovery plan admitted.
     pub max_plan_bytes: u64,
+    /// Largest number of segments one plan may reference.
     pub max_segments: usize,
 }
 
@@ -57,17 +64,26 @@ impl Limits {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "replica", derive(serde::Serialize, serde::Deserialize))]
 pub struct SegmentInfo {
+    /// First transaction id the segment contains.
     pub min_txid: u64,
+    /// Last transaction id the segment contains.
     pub max_txid: u64,
+    /// SQLite page size the segment was captured with.
     pub page_size: u32,
+    /// Database page count after the segment's commit.
     pub database_pages: u32,
+    /// Checksum the database carried before the segment was applied.
     pub pre_checksum: u64,
+    /// Checksum the segment published.
     pub post_checksum: u64,
+    /// Exact byte length of the immutable segment file.
     pub size_bytes: u64,
+    /// BLAKE3 digest of the immutable segment file.
     pub blake3: [u8; 32],
 }
 
 impl SegmentInfo {
+    /// Returns the position this segment publishes.
     #[must_use]
     pub fn position(&self) -> Position {
         Position {
@@ -119,6 +135,7 @@ impl std::fmt::Debug for LocalSegment {
 }
 
 impl LocalSegment {
+    /// Binds a caller-selected local file to the expectations it must satisfy.
     #[must_use]
     pub fn new(path: PathBuf, info: SegmentInfo) -> Self {
         Self {
@@ -128,10 +145,12 @@ impl LocalSegment {
             captured_index: None,
         }
     }
+    /// Returns the local path of the segment file.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
+    /// Returns the manifest expectations the file must satisfy.
     #[must_use]
     pub fn info(&self) -> &SegmentInfo {
         &self.info
@@ -152,8 +171,11 @@ impl LocalSegment {
 /// All cuts produced by one capture, including checkpoint-boundary cuts.
 #[derive(Debug, Clone)]
 pub struct CaptureBatch {
+    /// Immutable cuts the capture published, in lineage order.
     pub segments: Vec<LocalSegment>,
+    /// Position the batch's last cut publishes.
     pub position: Position,
+    /// Bounded observations recorded while capturing.
     pub timing: CaptureTiming,
 }
 

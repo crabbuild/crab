@@ -180,6 +180,7 @@ impl VerifiedPlan {
         })
     }
 
+    /// Returns the position the recovered database ends at.
     #[must_use]
     pub fn position(&self) -> Position {
         self.materialized.position
