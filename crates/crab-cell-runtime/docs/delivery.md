@@ -16,7 +16,7 @@ Each layer has one owner and one primary evidence surface.
 
 | Boundary | Primary source | Evidence |
 | --- | --- | --- |
-| Identity and Cell derivation | `src/identity.rs` | `tests/contracts/identity.rs`, `tests/runtime/catalog.rs` |
+| Identity and Cell derivation | `src/identity.rs` | `src/identity.rs` tests, `tests/contracts/application.rs`, `tests/runtime/catalog.rs` |
 | Control CAS and transitions | `src/control.rs`, `src/control/authority.rs` | authority and actor tests |
 | SQLite command ledger | `src/cell/executor.rs`, `src/cell/schema.rs` | `tests/runtime/lifecycle.rs`, `tests/runtime/migration.rs` |
 | Fixed SQL workers | `src/cell/worker.rs` | `tests/runtime/workers.rs` |
@@ -25,7 +25,7 @@ Each layer has one owner and one primary evidence surface.
 | Registry and codecs | `src/registry/`, `src/codec.rs` | `tests/contracts/registry.rs`, `tests/contracts/codec.rs` |
 | Typed client and peer dispatch | `src/client.rs`, `src/peer.rs` | `tests/protocol/client.rs`, peer unit tests |
 | SQL, KV, Blob, Queue, Cron, Workflow | `src/primitives/sql.rs`, `src/primitives/kv.rs`, `src/primitives/blob.rs`, `src/primitives/queue.rs`, `src/primitives/cron.rs`, `src/primitives/workflow.rs` | matching integration tests |
-| Effects and activities | `src/primitives/effects.rs`, `src/primitives/activity_pool.rs` | `tests/primitives/effects.rs`, `tests/primitives/workflow.rs` |
+| Effects and activities | `src/primitives/effects.rs`, `src/primitives/activity_pool.rs` | `src/primitives/effects/tests.rs`, `src/primitives/activity_pool/tests.rs`, `tests/primitives/workflow.rs` |
 | Scheduler | `src/fleet/scheduler.rs`, `src/primitives/maintenance.rs` | `tests/runtime/scheduler.rs` |
 | Release control | `src/recovery/release.rs`, `src/recovery/release_progress.rs` | release unit tests and server command tests |
 | Backup pins | `src/recovery/backup.rs`, `crab-ltx::CellReplica::reachable_objects` | runtime pin tests and server create/verify command tests |
