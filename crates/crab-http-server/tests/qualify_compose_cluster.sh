@@ -699,6 +699,42 @@ if ! $immutable_object_put_rejected; then
   echo "The Cell immutable object deny policy does not reject writes." >&2
   exit 1
 fi
+# The deny stops new immutable uploads, but a publication that started before
+# the policy can still publish its root, and that advance would look like a
+# fleet-only violation. Object coverage is asynchronous here for the same
+# reason the fallback phase waits for it, so wait for the owner to cover every
+# retained byte with a stable root before recording the baseline the
+# fleet-only label is compared against.
+covered=false
+covered_sequence=""
+previous_sequence=""
+for _ in $(seq 1 60); do
+  fleet_only_control="$("${compose[@]}" exec -T "$b_service" crab-http-server \
+    --config /etc/crab/server.toml cells status --owner demo --name hello)"
+  fleet_only_metrics="$("${compose[@]}" exec -T "$b_service" crab-http-server \
+    --config /etc/crab/server.toml cells metrics)"
+  uncovered_before_fleet_only="$(awk \
+    '$1 == "crab_cell_node_log_uncovered_bytes" { print $2 }' \
+    <<<"$fleet_only_metrics")"
+  observed_sequence="$(jq --raw-output '.root.commit_sequence' <<<"$fleet_only_control")"
+  if awk -v value="${uncovered_before_fleet_only:-1}" \
+      'BEGIN { exit !(value + 0 == 0) }' &&
+    [ "$observed_sequence" = "$previous_sequence" ]; then
+    covered=true
+    covered_sequence="$observed_sequence"
+    break
+  fi
+  previous_sequence="$observed_sequence"
+  sleep 1
+done
+if ! $covered; then
+  echo "The owner did not finish publishing before the fleet-only phase." >&2
+  printf '%s\n' "${fleet_only_control:-<unreadable>}" >&2
+  exit 1
+fi
+control_before="$fleet_only_control"
+sequence_before="$covered_sequence"
+root_before_state="$(jq --compact-output '.root' <<<"$control_before")"
 fleet_only_response="$(post_json_eventually \
   "$b_origin" \
   "${repository_path}/labels" \
@@ -710,6 +746,7 @@ control_fleet_only="$("${compose[@]}" exec -T "$b_service" crab-http-server \
 if ! jq --exit-status --argjson sequence_before "$sequence_before" \
   '.root.commit_sequence == $sequence_before' <<<"$control_fleet_only" >/dev/null; then
   echo "The follower-acked label advanced the object root." >&2
+  echo "Expected commit_sequence ${sequence_before}." >&2
   printf '%s\n' "$control_fleet_only" >&2
   "${compose[@]}" exec -T "$c_service" crab-http-server \
     --config /etc/crab/server.toml cells node --session "$session_before" --json >&2 || true
