@@ -18,6 +18,8 @@ mod commit;
 pub mod db;
 pub mod environment;
 pub mod error;
+#[cfg(feature = "replica")]
+mod hex;
 mod host;
 #[cfg(feature = "replica")]
 pub use cell_layout::{CellObjectKind, CellStorageLayout};
