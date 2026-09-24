@@ -30,6 +30,8 @@ pub struct CronTarget {
 }
 
 impl CronTarget {
+    /// Declares one delivery target: its module, namespace, command id, codec
+    /// version, and input limit.
     #[must_use]
     pub const fn new(
         module: &'static str,
@@ -67,32 +69,51 @@ impl CronTarget {
 /// Payload delivered exactly once to a destination inbox for one Cron occurrence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CronInvocation {
+    /// Schedule that produced the occurrence.
     pub schedule_id: [u8; 16],
+    /// Schedule generation the occurrence belongs to.
     pub generation: u64,
+    /// Monotonic occurrence number within the generation.
     pub occurrence: u64,
+    /// Logical time the occurrence was due.
     pub scheduled_at_ms: i64,
+    /// Payload to deliver to the target.
     pub payload: Vec<u8>,
 }
 
 /// Durable Cron schedule mutation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CronMutation {
+    /// Creates or replaces one schedule.
     Upsert {
+        /// Schedule identity.
         schedule_id: [u8; 16],
+        /// Index of the registered target the schedule fires at.
         target_index: u32,
+        /// Partition key of the destination Cell.
         target_partition: Vec<u8>,
+        /// Payload delivered with each occurrence.
         payload: Vec<u8>,
+        /// Fixed interval between occurrences.
         interval_ms: u64,
+        /// Logical time of the first due occurrence.
         next_due_ms: i64,
     },
+    /// Stops one schedule from firing without deleting it.
     Pause {
+        /// Schedule to pause.
         schedule_id: [u8; 16],
     },
+    /// Re-enables one paused schedule.
     Resume {
+        /// Schedule to resume.
         schedule_id: [u8; 16],
+        /// Logical time of the next due occurrence.
         next_due_ms: i64,
     },
+    /// Removes one schedule and its pending occurrences.
     Delete {
+        /// Schedule to delete.
         schedule_id: [u8; 16],
     },
 }
@@ -100,38 +121,67 @@ pub enum CronMutation {
 /// Result of one Cron schedule mutation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CronMutationOutcome {
-    Applied { generation: u64 },
+    /// The mutation was applied at this generation.
+    Applied {
+        /// Schedule generation after the mutation.
+        generation: u64,
+    },
+    /// The schedule was removed.
     Deleted,
+    /// No schedule matched the identity.
     NotFound,
 }
 
 /// Materialized Cron schedule state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CronSchedule {
+    /// Schedule identity.
     pub schedule_id: [u8; 16],
+    /// Index of the registered target the schedule fires at.
     pub target_index: u32,
+    /// Partition key of the destination Cell.
     pub target_partition: Vec<u8>,
+    /// Payload delivered with each occurrence.
     pub payload: Vec<u8>,
+    /// Fixed interval between occurrences.
     pub interval_ms: u64,
+    /// Logical time of the next due occurrence.
     pub next_due_ms: i64,
+    /// Occurrences fired in this generation.
     pub occurrence: u64,
+    /// Whether the schedule currently fires.
     pub enabled: bool,
+    /// Generation raised by the last mutation.
     pub generation: u64,
 }
 
 /// Bounded Cron schedule query.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CronQuery {
-    Get { schedule_id: [u8; 16] },
-    List { after: Option<[u8; 16]>, limit: u32 },
+    /// Reads one schedule.
+    Get {
+        /// Schedule to read.
+        schedule_id: [u8; 16],
+    },
+    /// Lists schedules in identity order.
+    List {
+        /// Schedule identity to continue after, from a previous page.
+        after: Option<[u8; 16]>,
+        /// Maximum schedules to return.
+        limit: u32,
+    },
 }
 
 /// Result of a Cron schedule query.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CronQueryResult {
+    /// The schedule, absent when no schedule matches.
     Get(Option<CronSchedule>),
+    /// One page of schedules in identity order.
     List {
+        /// Schedules in identity order.
         schedules: Vec<CronSchedule>,
+        /// Identity to continue from when the page filled its limit.
         next: Option<[u8; 16]>,
     },
 }
