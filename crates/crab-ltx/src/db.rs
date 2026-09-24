@@ -447,7 +447,7 @@ impl Db {
     /// callers must complete the barrier before acknowledging a locally durable
     /// batch. A higher-level protocol may instead publish the exact bytes to its
     /// own durability boundary, then pass that published batch to
-    /// [`Self::prune_captured`]. A failed local barrier fences the session.
+    /// `prune_captured`. A failed local barrier fences the session.
     pub fn capture_deferred(&mut self) -> Result<CaptureBatch> {
         self.ensure_active()?;
         let (result, timing) = self.capture_inner(true);

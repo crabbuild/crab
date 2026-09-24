@@ -140,12 +140,16 @@ impl fmt::Display for LimitKind {
 /// establishing the WAL cut required for later LTX capture.
 #[derive(Debug, thiserror::Error)]
 pub enum TransactionError<E: std::error::Error + 'static> {
+    /// Resource admission failed before SQLite started; the writer stays usable.
     #[error("transaction resource admission failed")]
     Admission(#[source] CrabError),
+    /// The caller's operation failed after SQLite rolled the transaction back.
     #[error("transaction operation failed")]
     Operation(#[source] E),
+    /// SQLite rejected the transaction; an ambiguous commit fences the writer.
     #[error("SQLite transaction failed")]
     Sqlite(#[source] rusqlite::Error),
+    /// The commit succeeded but its WAL cut could not be established.
     #[error("WAL capture boundary failed")]
     Capture(#[source] CrabError),
 }
@@ -153,10 +157,13 @@ pub enum TransactionError<E: std::error::Error + 'static> {
 /// Failure from a read-only managed-database callback.
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError<E: std::error::Error + 'static> {
+    /// The caller's read-only operation failed.
     #[error("query operation failed")]
     Operation(#[source] E),
+    /// SQLite rejected the read-only boundary.
     #[error("SQLite read-only boundary failed")]
     Sqlite(#[source] rusqlite::Error),
+    /// The database cannot serve the query in its current state.
     #[error("managed database cannot serve the query")]
     State(#[source] CrabError),
 }
@@ -164,36 +171,50 @@ pub enum QueryError<E: std::error::Error + 'static> {
 /// Capture and recovery failures; none imply remote publication succeeded.
 #[derive(Debug, thiserror::Error)]
 pub enum CrabError {
+    /// Object-store transport failed.
     #[cfg(feature = "replica")]
     #[error("object-store replication failure: {0}")]
     Storage(#[from] crab_storage::StorageError),
+    /// Replica metadata was not valid JSON.
     #[cfg(feature = "replica")]
     #[error("invalid replica metadata: {0}")]
     Json(#[from] serde_json::Error),
+    /// A replication task failed to join.
     #[cfg(feature = "replica")]
     #[error("replication task failed: {0}")]
     Task(#[from] tokio::task::JoinError),
+    /// LTX data did not carry the checksum its lineage expects.
     #[error("LTX checksum mismatch")]
     ChecksumMismatch,
+    /// LTX data failed structural validation.
     #[error("LTX file corrupted")]
     LTXCorrupted,
+    /// A referenced LTX file does not exist.
     #[error("LTX file missing")]
     LTXMissing,
+    /// A transaction was requested while none is open.
     #[error("transaction not available")]
     TxNotAvailable,
+    /// Local I/O failed.
     #[error("I/O failure: {0}")]
     Io(#[from] std::io::Error),
+    /// SQLite failed outside a caller-managed transaction.
     #[error("SQLite failure: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// A configured admission bound was exceeded.
     #[error("resource limit exceeded: {0}")]
     Limit(LimitKind),
+    /// Sparse page I/O exceeded its deadline.
     #[cfg(feature = "replica")]
     #[error("sparse page I/O exceeded its deadline")]
     Deadline,
+    /// Local replication state is invalid; the message names the invariant.
     #[error("invalid local replication state: {0}")]
     InvalidState(&'static str),
+    /// Capture was fenced; close the handle and restore an authoritative plan.
     #[error("capture failed; close this handle and restore an authoritative plan")]
     Fenced,
+    /// Any other failure, kept boxed so the source survives.
     #[error("{0}")]
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }

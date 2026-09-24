@@ -21,11 +21,16 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use timing::*;
 
+/// SQLite checkpoint mode a capture requests when its WAL bound is exceeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckpointMode {
+    /// Checkpoints without waiting for readers or writers.
     Passive,
+    /// Waits for readers and writers so every frame can move.
     Full,
+    /// Like `Full`, and restarts readers still reading from the WAL.
     Restart,
+    /// Like `Restart`, and truncates the WAL to zero frames afterwards.
     Truncate,
 }
 

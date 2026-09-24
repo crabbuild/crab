@@ -48,17 +48,24 @@ pub(super) const RESTORE_WINDOW_BYTES: u32 = 1 << 20;
 /// An immutable Cell root identity suitable for publication in control state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RootRef {
+    /// Cell this root belongs to.
     pub cell: [u8; 32],
+    /// Incarnation that produced the root.
     pub incarnation: [u8; 16],
+    /// Digest of the published root record.
     pub digest: [u8; 32],
+    /// Position the root publishes.
     pub position: Position,
+    /// Root commit sequence.
     pub commit_sequence: u64,
 }
 
 /// One immutable object authenticated as part of an exact Cell root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RootObjectRef {
+    /// Digest of the immutable object.
     pub digest: [u8; 32],
+    /// Kind of immutable object.
     pub kind: CellObjectKind,
 }
 
@@ -87,6 +94,8 @@ pub struct RecoveryOverlay {
 }
 
 impl RecoveryOverlay {
+    /// Describes the overlay that supersedes `predecessor`; the caller adds
+    /// the disk reservation and bundle lease that keep it readable.
     #[must_use]
     pub fn new(
         predecessor: RootRef,
@@ -128,21 +137,25 @@ impl RecoveryOverlay {
         Ok(self.bundle)
     }
 
+    /// Returns the root this overlay supersedes.
     #[must_use]
     pub const fn predecessor(&self) -> RootRef {
         self.predecessor
     }
 
+    /// Returns the position the overlay publishes.
     #[must_use]
     pub const fn final_position(&self) -> Position {
         self.final_position
     }
 
+    /// Returns the commit sequence the overlay publishes.
     #[must_use]
     pub const fn final_commit_sequence(&self) -> u64 {
         self.final_commit_sequence
     }
 
+    /// Returns the verified recovery bundle.
     #[must_use]
     pub fn bundle(&self) -> &crate::bundle::Bundle {
         &self.bundle
@@ -150,16 +163,19 @@ impl RecoveryOverlay {
 }
 
 impl PreparedRoot {
+    /// Returns the exact root that was prepared.
     #[must_use]
     pub fn root(&self) -> RootRef {
         self.verified.root
     }
 
+    /// Returns the root this preparation supersedes, if any.
     #[must_use]
     pub fn predecessor(&self) -> Option<RootRef> {
         self.predecessor
     }
 
+    /// Returns the verified metadata for the prepared root.
     #[must_use]
     pub fn verified(&self) -> &VerifiedRoot {
         &self.verified
@@ -179,31 +195,37 @@ pub struct VerifiedRoot {
 }
 
 impl VerifiedRoot {
+    /// Returns the exact immutable root.
     #[must_use]
     pub fn root(&self) -> RootRef {
         self.root
     }
 
+    /// Returns the SQLite page size.
     #[must_use]
     pub fn page_size(&self) -> u32 {
         self.page_size
     }
 
+    /// Returns the database page count.
     #[must_use]
     pub fn database_pages(&self) -> u32 {
         self.database_pages
     }
 
+    /// Returns the schema version.
     #[must_use]
     pub fn schema(&self) -> u32 {
         self.schema
     }
 
+    /// Returns the number of segments the root references.
     #[must_use]
     pub fn segment_count(&self) -> usize {
         self.segment_count
     }
 
+    /// Returns the height of the root's directory tree.
     #[must_use]
     pub fn directory_height(&self) -> u32 {
         self.directory_height
@@ -286,16 +308,19 @@ pub struct CellWritableDatabase {
 }
 
 impl CellPagedDatabase {
+    /// Returns the position this root publishes.
     #[must_use]
     pub fn position(&self) -> Position {
         self.position
     }
 
+    /// Returns the SQLite page size.
     #[must_use]
     pub fn page_size(&self) -> u32 {
         self.page_size
     }
 
+    /// Returns the database page count.
     #[must_use]
     pub fn page_count(&self) -> u32 {
         self.database_pages
@@ -553,16 +578,19 @@ impl CellWritableDatabase {
         self.checksums.clone()
     }
 
+    /// Returns the position this activation reads.
     #[must_use]
     pub fn position(&self) -> Position {
         self.database.position()
     }
 
+    /// Returns the SQLite page size.
     #[must_use]
     pub fn page_size(&self) -> u32 {
         self.database.page_size()
     }
 
+    /// Returns the database page count.
     #[must_use]
     pub fn page_count(&self) -> u32 {
         self.database.page_count()

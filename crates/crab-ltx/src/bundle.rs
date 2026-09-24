@@ -19,9 +19,13 @@ pub trait BundleLease: Send + Sync {}
 
 /// One immutable segment and its repository/epoch identity, before bundling.
 pub struct BundleEntry {
+    /// Canonical repository identity the segment belongs to.
     pub repository: String,
+    /// Canonical epoch identity the segment was captured under.
     pub epoch: String,
+    /// Manifest expectations the segment must satisfy.
     pub info: SegmentInfo,
+    /// Complete immutable segment bytes.
     pub bytes: Vec<u8>,
 }
 
@@ -47,9 +51,13 @@ impl BundleEntry {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BundleRow {
+    /// Canonical repository identity the row was verified against.
     pub repository: String,
+    /// Canonical epoch identity the row was verified against.
     pub epoch: String,
+    /// Manifest expectations the row's segment satisfied.
     pub info: SegmentInfo,
+    /// Byte offset of the segment inside the bundle.
     pub offset: u64,
 }
 
@@ -344,21 +352,25 @@ impl Bundle {
         Ok(std::mem::take(&mut file.path))
     }
 
+    /// Returns the verified segment rows in bundle order.
     #[must_use]
     pub fn rows(&self) -> &[BundleRow] {
         &self.rows
     }
 
+    /// Returns the total verified bundle length in bytes.
     #[must_use]
     pub const fn len(&self) -> u64 {
         self.length
     }
 
+    /// Reports whether the verified bundle holds no bytes.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.length == 0
     }
 
+    /// Returns the BLAKE3 digest of the verified envelope.
     #[must_use]
     pub const fn digest(&self) -> [u8; 32] {
         self.digest
@@ -380,6 +392,7 @@ impl Bundle {
         }
     }
 
+    /// Returns the verified bundle body, re-checking a file-backed digest.
     #[must_use = "use or handle the verified bundle bytes"]
     pub fn bytes(&self) -> Result<Bytes> {
         self.read_all()

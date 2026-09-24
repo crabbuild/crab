@@ -92,16 +92,19 @@ impl DiskBudget {
         })
     }
 
+    /// Returns the bytes this budget may reserve in total.
     #[must_use]
     pub fn capacity(&self) -> u64 {
         self.inner.capacity
     }
 
+    /// Returns the bytes held by live reservations.
     #[must_use]
     pub fn used(&self) -> u64 {
         self.inner.used.load(Ordering::Acquire)
     }
 
+    /// Returns the bytes no reservation holds.
     #[must_use]
     pub fn available(&self) -> u64 {
         self.capacity().saturating_sub(self.used())
@@ -252,6 +255,7 @@ impl DiskReservation {
         let _ = self.budget.reconcile_admissions(self.budget.used());
     }
 
+    /// Returns the bytes this reservation still holds.
     #[must_use]
     pub fn bytes(&self) -> u64 {
         match self.bytes.lock() {

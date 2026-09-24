@@ -13,10 +13,15 @@ pub struct CellStorageLayout {
 /// Immutable object kinds accepted below one Cell incarnation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CellObjectKind {
+    /// Immutable LTX segment.
     Ltx,
+    /// Capture index beside one segment.
     Index,
+    /// Root directory page.
     Directory,
+    /// Published root record.
     Root,
+    /// Recovery bundle.
     Bundle,
 }
 
@@ -43,11 +48,13 @@ impl CellStorageLayout {
         }
     }
 
+    /// Returns the transport every path in this layout writes through.
     #[must_use]
     pub fn store(&self) -> &Store {
         &self.store
     }
 
+    /// Returns the application ID every application-scoped path is bound to.
     #[must_use]
     pub const fn application_id(&self) -> &[u8; 16] {
         &self.application
@@ -59,6 +66,7 @@ impl CellStorageLayout {
         self.store.immutable_cache_identity()
     }
 
+    /// Returns the application identity path.
     #[must_use]
     pub fn identity_path(&self) -> Path {
         Self::root_identity_path(&self.root)
@@ -70,31 +78,37 @@ impl CellStorageLayout {
         Path::from(format!("{root}/cells/v1/identity.json"))
     }
 
+    /// Returns the current release pointer path.
     #[must_use]
     pub fn release_path(&self) -> Path {
         self.application_path("release.json")
     }
 
+    /// Returns the application-scoped prefix every Cell path shares.
     #[must_use]
     pub fn application_prefix(&self) -> Path {
         self.application_path("")
     }
 
+    /// Returns the catalog pin prefix.
     #[must_use]
     pub fn pin_prefix(&self) -> Path {
         self.application_path("pins")
     }
 
+    /// Returns the release descriptor path for one digest.
     #[must_use]
     pub fn release_descriptor_path(&self, digest: &[u8; 32]) -> Path {
         self.application_path(&format!("releases/{}.json", hex(digest)))
     }
 
+    /// Returns the control record path for one Cell.
     #[must_use]
     pub fn control_path(&self, cell: &[u8; 32]) -> Path {
         self.application_path(&format!("cells/{}/control.json", hex(cell)))
     }
 
+    /// Returns the immutable object path for one Cell incarnation.
     #[must_use]
     pub fn incarnation_object_path(
         &self,
@@ -135,26 +149,31 @@ impl CellStorageLayout {
         ))
     }
 
+    /// Returns the catalog head path for one shard.
     #[must_use]
     pub fn catalog_head_path(&self, shard: u8) -> Path {
         self.application_path(&format!("catalog/{shard:02x}/head.json"))
     }
 
+    /// Returns the catalog page object path for one digest.
     #[must_use]
     pub fn catalog_object_path(&self, digest: &[u8; 32]) -> Path {
         self.application_path(&format!("catalog/objects/{}.json", hex(digest)))
     }
 
+    /// Returns the catalog pin record path for one pin.
     #[must_use]
     pub fn pin_path(&self, pin: &[u8; 16]) -> Path {
         self.application_path(&format!("pins/{}.json", hex(pin)))
     }
 
+    /// Returns the catalog pin object path for one digest.
     #[must_use]
     pub fn pin_object_path(&self, digest: &[u8; 32]) -> Path {
         self.application_path(&format!("pins/objects/{}.json", hex(digest)))
     }
 
+    /// Returns the release-migration progress path for one Cell operation.
     #[must_use]
     pub fn migration_path(&self, cell: &[u8; 32], operation: &[u8; 16], suffix: &str) -> Path {
         self.application_path(&format!(
@@ -165,6 +184,7 @@ impl CellStorageLayout {
         ))
     }
 
+    /// Returns the node advertisement path for one session.
     #[must_use]
     pub fn node_path(&self, session: &[u8; 16]) -> Path {
         Path::from(format!(
@@ -174,6 +194,7 @@ impl CellStorageLayout {
         ))
     }
 
+    /// Returns the node directory prefix.
     #[must_use]
     pub fn node_directory_path(&self) -> Path {
         Path::from(format!("{}/cells/v1/nodes", self.root))

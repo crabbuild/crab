@@ -46,11 +46,17 @@ pub trait DiskBudgetAdmission: Send + Sync {
 /// `FileSystem::open_rw` supports both operations. An open handle remains bound
 /// to the selected artifact even if its namespace path is later replaced.
 pub trait FileIo: Send {
+    /// Writes `bytes` at the handle's current offset.
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()>;
+    /// Writes `bytes` at an explicit offset without moving the handle's offset.
     fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()>;
+    /// Reads exactly `len` bytes from an explicit offset.
     fn read_exact_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>>;
+    /// Makes every prior write to this handle durable.
     fn sync_all(&mut self) -> io::Result<()>;
+    /// Returns the current length of the file in bytes.
     fn file_len(&self) -> io::Result<u64>;
+    /// Truncates or extends the file to `len` bytes.
     fn set_len(&mut self, len: u64) -> io::Result<()>;
 }
 
@@ -67,11 +73,17 @@ pub trait FileIo: Send {
 /// already synced same-directory scratch file. An error after installation is
 /// ambiguous.
 pub trait FileSystem: Send + Sync {
+    /// Opens an existing file for reading.
     fn open(&self, path: &Path) -> io::Result<Box<dyn FileIo>>;
+    /// Opens an existing file for reading and writing; never creates it.
     fn open_rw(&self, path: &Path) -> io::Result<Box<dyn FileIo>>;
+    /// Exclusively creates a new file for writing.
     fn create(&self, path: &Path) -> io::Result<Box<dyn FileIo>>;
+    /// Returns the length of an existing file in bytes.
     fn file_len(&self, path: &Path) -> io::Result<u64>;
+    /// Creates the directory and every missing parent.
     fn create_dir_all(&self, path: &Path) -> io::Result<()>;
+    /// Renames within the namespace and syncs the destination parent.
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
 
     /// Atomically renames a file without requiring the destination directory
@@ -81,9 +93,13 @@ pub trait FileSystem: Send + Sync {
         self.rename(from, to)
     }
 
+    /// Removes one file; a missing file is an error.
     fn remove_file(&self, path: &Path) -> io::Result<()>;
+    /// Resolves a path against the filesystem's canonical namespace root.
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
+    /// Reports whether the path exists, including a dangling symlink.
     fn exists(&self, path: &Path) -> io::Result<bool>;
+    /// Exclusively creates one directory.
     fn create_dir(&self, path: &Path) -> io::Result<()>;
 
     /// Syncs every named file before a shared directory barrier.
@@ -97,8 +113,11 @@ pub trait FileSystem: Send + Sync {
         Ok(())
     }
 
+    /// Syncs the parent directory of `path`.
     fn sync_parent(&self, path: &Path) -> io::Result<()>;
+    /// Atomically installs `bytes` as a new file and syncs its parent.
     fn persist_new(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
+    /// Atomically installs an already synced same-directory scratch file.
     fn persist_file_new(&self, source: &Path, destination: &Path) -> io::Result<()>;
 
     /// Removes abandoned private cache temporaries below `root`.
@@ -113,7 +132,9 @@ pub trait FileSystem: Send + Sync {
 
 /// Wall-clock observations used in LTX timestamps and checkpoint eligibility.
 pub trait Clock: Send + Sync {
+    /// Returns wall-clock milliseconds since the Unix epoch.
     fn unix_millis(&self) -> i64;
+    /// Returns how long ago the file was last modified.
     fn file_age(&self, path: &Path) -> io::Result<Duration>;
 
     /// Returns a monotonic instant for observational duration measurements.
@@ -405,16 +426,20 @@ impl Host {
         };
         host.read(path)
     }
+    /// Replaces the host filesystem; it must address the same namespace as
+    /// the selected SQLite VFS.
     #[must_use]
     pub fn with_filesystem(mut self, filesystem: Arc<dyn FileSystem>) -> Self {
         self.filesystem = filesystem;
         self
     }
+    /// Replaces the host clock used for LTX timestamps.
     #[must_use]
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = clock;
         self
     }
+    /// Replaces the blocking executor that drives capture and compaction.
     #[cfg(feature = "replica")]
     #[must_use]
     pub fn with_executor(mut self, executor: Arc<dyn Executor>) -> Self {
