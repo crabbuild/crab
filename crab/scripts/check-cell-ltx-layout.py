@@ -9,6 +9,8 @@ Rules:
   4. Every test suite root has a matching module directory and at least one
      test.
   5. The runtime root surface equals `api-prelude.txt`.
+  6. The runtime coordination kernel stays sans-I/O: no async, clock, or
+     storage, so the simulator and the model can replay the same transitions.
 """
 
 from __future__ import annotations
@@ -43,6 +45,28 @@ PATH_ATTR = re.compile(r"#\[path\s*=")
 LINE_COMMENT = re.compile(r"//[^\n]*")
 ROOT_RE_EXPORT = re.compile(r"^pub use ([^;]+);", re.M)
 ROOT_CONST = re.compile(r"^\s*pub (?:const|struct|enum|trait|fn|type) ([A-Za-z_][A-Za-z0-9_]*)", re.M)
+
+# A pure coordination kernel is what lets `coordination/sim.rs` and the TLA+
+# model replay production transitions; an I/O call here would silently move the
+# decision out of the replayable surface.
+SANS_IO_PATTERNS = (
+    ("async", re.compile(r"\basync\b")),
+    ("await", re.compile(r"\.await\b")),
+    ("tokio", re.compile(r"\btokio::")),
+    ("storage", re.compile(r"\brusqlite\b|\bobject_store\b|\bstd::fs\b")),
+    ("clock", re.compile(r"\bSystemTime\b|\bInstant\b|\bstd::time\b")),
+)
+
+
+def sans_io_paths(crate_path: Path) -> list[Path]:
+    paths = []
+    root = crate_path / "src" / "coordination.rs"
+    if root.is_file():
+        paths.append(root)
+    directory = crate_path / "src" / "coordination"
+    if directory.is_dir():
+        paths.extend(sorted(directory.rglob("*.rs")))
+    return paths
 
 
 def allow_list(crate_path: Path) -> set[str]:
@@ -115,6 +139,18 @@ def check(crate: str) -> list[str]:
                 f"{prelude_path.relative_to(ROOT)}: root surface differs "
                 f"(missing {sorted(expected - actual)}, extra {sorted(actual - expected)})"
             )
+    if crate == "crates/crab-cell-runtime":
+        for path in sans_io_paths(crate_path):
+            text = LINE_COMMENT.sub("", path.read_text())
+            for label, pattern in SANS_IO_PATTERNS:
+                found = pattern.search(text)
+                if found is None:
+                    continue
+                line = text[: found.start()].count("\n") + 1
+                problems.append(
+                    f"{path.relative_to(ROOT)}:{line}: coordination kernel must stay "
+                    f"sans-I/O (found {label})"
+                )
     return problems
 
 
