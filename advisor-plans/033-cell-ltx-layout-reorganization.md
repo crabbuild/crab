@@ -610,3 +610,61 @@ any `#[path]` attribute, unlisted in-src test location, suite/module mismatch,
 or root-surface drift, and the policy gate fails an unwired policy entry point
 whose inventory entry no longer names the file that declares it (that is how
 `evict_idle` and `observe_pressure` were caught after the actor runtime split).
+
+## Follow-on layout work, second pass (2026-09-24)
+
+A second pass applied the same rule to the roots that still mixed a contract
+with its codec, its conversions, or its SQL rows. Every change is its own PR
+against `main` and keeps the first pass's proof rule: the moved range is
+byte-identical apart from the visibility keywords the new module depth needs
+(rustfmt may re-wrap one signature that gained a longer keyword), the crate
+suites report the same counts, and both structural gates stay green.
+
+| Root | Now | Notes |
+| --- | --- | --- |
+| `src/control.rs` | `control/codec.rs` (+ `control/tests.rs`) | canonical JSON wire shape; transitions and authority stay in the root |
+| `src/qualification/workload.rs` | `workload/{operation,summary}.rs` | operation vocabulary plus its deterministic schedule, measured run summary |
+| `src/peer.rs` | `peer/validation.rs` | reply and authorization rules; encoder stays in the root |
+| `src/peer/transport.rs` | `transport/convert.rs` | wire/runtime conversions; time budgets stay in the root |
+| `src/peer/dispatch.rs` | `dispatch/convert.rs` | request validation and reply conversion |
+| `src/primitives/blob.rs` | `blob/{api,store,sql}.rs` | wire envelopes, object-store parts, SQLite rows |
+| `src/primitives/queue/api.rs` | `api/codec.rs` | queue wire codecs and outcome tags |
+| `src/primitives/workflow/api.rs` | `api/codec.rs` | workflow wire codecs and envelope tests |
+| `src/primitives/workflow/activity_api.rs` | `activity_api/supervisor.rs` | supervisor, error type, cancellation guard |
+| `src/follower.rs` | `follower/{records,directory,tests}.rs` | record framing, directory and quarantine helpers |
+| `src/follower/records.rs` | `records/{append,scan}.rs` | write path, tail and chunk scans |
+| `src/node/advertisement.rs` | `advertisement/codec.rs` | strict JSON payloads; signed types stay in the root |
+| `crab-ltx/src/capture.rs` | `capture/timing.rs` | recorder, nanos conversion, and engine telemetry hooks |
+| `crab-ltx/src/replica/compaction.rs` | `compaction/{source,output}.rs` | source spooling and compacted output |
+| `crab-cell-host/src/node.rs` | `node/{components,lifecycle,scale_down,qualification}.rs` | installation, lifecycle, movement, qualification |
+
+The suites moved the same way, one directory per capability, with fixtures
+staying in the module root:
+
+- `crates/crab-cell-host/tests/node.rs` into
+  `tests/node/{builder,components,lifecycle,qualification,tasks}.rs`
+- `crates/crab-cell-runtime/tests/protocol/client.rs` into
+  `client/{typed,effects,telemetry}.rs`
+- `crates/crab-cell-runtime/tests/runtime/{migration,scheduler}.rs` into
+  `migration/{schema,peer}.rs` and
+  `scheduler/{tick,scanner,summary,public_tick}.rs`
+- `crates/crab-cell-runtime/tests/primitives/{workflow,workflow_api,queue}.rs`
+  into `workflow/{control,recovery,decisions,activity}.rs`,
+  `workflow_api/{activity,namespace,retry}.rs`, and
+  `queue/{namespace,lease,send}.rs`
+- the four
+  `crates/crab-cell-runtime/tests/runtime/lifecycle/{ownership,execution,idle,durability}.rs`
+  modules into capability directories
+- `crates/crab-ltx/tests/cell/roots.rs` into
+  `roots/{lifecycle,directory,compaction,sparse}.rs` and `tests/host/hooks.rs`
+  into `hooks/{prepare,capture,compaction,injection,restore}.rs`
+- the crate-private modules `follower/tests.rs`, `coordination/tests.rs`, and
+  `qualification/tests/receipt.rs` into capability directories beside their
+  roots
+
+The layout gate grew two rules in the same pass, both verified by injecting the
+defect: every `tests-allow-list.txt` entry must name an existing `src/` file,
+carry a reason, and still hold tests or test modules, and every file inside a
+suite directory must be declared by the module that owns it. Both crate guides
+also gained a module map so the tree above is readable without a directory
+listing.
