@@ -7,6 +7,8 @@ use crab_cell_runtime::identity::{
     ApplicationId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
 };
 use crab_cell_runtime::node::{NodeAdvertisement, NodeCapacity};
+use crab_cell_runtime::primitives::blob::install_blob_schema;
+use crab_cell_runtime::primitives::cron::install_cron_schema;
 use crab_cell_runtime::primitives::effects::{EffectCommandIntent, effect_id};
 use crab_cell_runtime::primitives::kv::install_kv_schema;
 use crab_cell_runtime::primitives::queue::install_queue_schema;
@@ -559,6 +561,44 @@ fn summary_uses_queue_lease_deadline_not_ready_available_time() {
     transaction
         .execute(
             "INSERT INTO queue_messages VALUES (X'03030303030303030303030303030303', X'04', 1, 1, 10, 1000, zeroblob(16), 80, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+
+    assert_eq!(scheduler_next_due_ms(&transaction, 10).unwrap(), Some(80));
+}
+
+#[test]
+fn tick_cleans_expired_blob_uploads_that_never_completed() {
+    let mut connection = connection();
+    let transaction = connection.transaction().unwrap();
+    install_blob_schema(&transaction).unwrap();
+    transaction
+        .execute(
+            "INSERT INTO blob_uploads VALUES (X'01010101010101010101010101010101', X'02', zeroblob(32), 0, NULL, NULL, X'', 10, 20, 0, NULL, 0, 0)",
+            [],
+        )
+        .unwrap();
+
+    scheduler_tick(&transaction, &source_target(), 25, &[]).unwrap();
+
+    let remaining: usize = transaction
+        .query_row("SELECT count(*) FROM blob_uploads", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        remaining, 0,
+        "an expired upload without an object is garbage"
+    );
+}
+
+#[test]
+fn summary_uses_cron_deadline_when_the_schedule_schema_is_installed() {
+    let mut connection = connection();
+    let transaction = connection.transaction().unwrap();
+    install_cron_schema(&transaction).unwrap();
+    transaction
+        .execute(
+            "INSERT INTO cron_schedules(schedule_id, target_index, target_partition, payload, interval_ms, next_due_ms, occurrence, enabled, generation, updated_at_ms) VALUES (X'02020202020202020202020202020202', 0, X'00', X'', 30000, 80, 0, 1, 1, 10)",
             [],
         )
         .unwrap();
