@@ -181,6 +181,15 @@ enforced by coverage bits in signed receipts.
    `crab_cell_durability_wait_seconds{source}` (histogram) beside
    `crab_cell_durability_proofs_total{source}`, so the remaining work is the
    latency-tail policy, not the observation.
+
+   Observed in CI on 2026-09-24: two independent compose-qualification runs
+   (`#338` and `#349`, the latter failing `qualify_compose_cluster.sh` at "The
+   owner did not finish publishing before the fleet-only phase") show the same
+   shape - a frozen node is fenced, its withdrawal is refused because its node
+   log is not sealed (`node log must be sealed before session withdrawal`), and
+   `crab_cell_node_log_uncovered_bytes` never reaches zero inside the harness's
+   60-second wait. The identical job passed on a sibling PR in the same window,
+   so this reads as the latency-tail gap above rather than a merge regression.
 7. **Per-primitive observability.** The metric inventory is rich for
    durability, LTX, node log, and resident routes, and empty for the
    primitives: no operation counts, error classes, or latency histograms for
