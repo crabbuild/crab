@@ -188,6 +188,14 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
         run: cargo test -p crab-ltx --features replica --locked
+      - name: Deny rustdoc warnings
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
+          RUSTDOCFLAGS: -D warnings
+        run: >-
+          cargo doc
+          -p crab-cell-runtime -p crab-ltx -p crab-cell-app -p crab-cell-host
+          --no-deps --locked
       - name: Smoke-test the complete qualification matrix in a fresh process
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
