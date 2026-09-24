@@ -5,36 +5,56 @@ use super::*;
 /// Outcome of one bounded claim, execute and completion supervisor cycle.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActivityRunOutcome {
+    /// No claimable activity remained.
     Idle {
+        /// Receipt the observation is bound to.
         receipt: Receipt,
     },
+    /// The source lease was lost before the completion.
     LeaseLost {
+        /// Receipt the failed resolution is bound to.
         receipt: Receipt,
     },
+    /// The completion named a different activity than the lease.
     IdentityConflict {
+        /// Receipt the conflict was observed at.
         receipt: Receipt,
     },
+    /// The failed attempt is retried.
     Retrying {
+        /// Logical time the next attempt is due.
         due_at_ms: i64,
+        /// Receipt the source transition published.
         receipt: Receipt,
     },
+    /// The completion advanced the workflow run.
     Completed {
+        /// Workflow outcome the completion produced.
         workflow: WorkflowOutcome,
+        /// Receipt the source transition published.
         receipt: Receipt,
     },
+    /// The same completion token was already applied.
     Duplicate {
+        /// Result recorded for the original completion.
         result: Vec<u8>,
+        /// Receipt the duplicate was observed at.
         receipt: Receipt,
     },
 }
 
 /// Failure that preserves unresolved mutation evidence from supervisor commands.
 pub enum ActivitySupervisorError {
+    /// A source transition is committed but unresolved; resolve it before another cycle.
     Pending(Box<PendingMutation>),
+    /// The published source result could not be decoded.
     InvalidPublishedResult {
+        /// Receipt the published result was observed at.
         receipt: Receipt,
+        /// Decoding failure that produced this error.
         source: Box<Error>,
     },
+    /// The supervisor failed before it could resolve the source transition.
     Runtime(Error),
 }
 

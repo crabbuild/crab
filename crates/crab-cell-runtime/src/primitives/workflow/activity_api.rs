@@ -35,10 +35,15 @@ const HANDLER_IDENTITY_LIFETIME_MS: i64 = 60_000;
 
 /// Compile-time operation IDs for native activity execution in one Workflow module.
 pub trait WorkflowActivityModule: WorkflowModule {
+    /// Registered activity types the module serves.
     const ACTIVITY_TYPES: &'static [&'static str];
+    /// Command id that claims activity leases.
     const ACTIVITY_CLAIM_COMMAND_ID: u32;
+    /// Command id that applies activity completions.
     const ACTIVITY_COMPLETE_COMMAND_ID: u32;
+    /// Command id that extends activity leases.
     const ACTIVITY_EXTEND_COMMAND_ID: u32;
+    /// Query id that revalidates claimed activity leases.
     const ACTIVITY_VALIDATE_QUERY_ID: u32;
 }
 
@@ -99,21 +104,25 @@ impl ActivityContext {
         }
     }
 
+    /// Returns the workflow run the claim belongs to.
     #[must_use]
     pub const fn run_id(&self) -> [u8; 16] {
         self.run_id
     }
 
+    /// Returns the activity identity within the run.
     #[must_use]
     pub const fn activity_id(&self) -> [u8; 16] {
         self.activity_id
     }
 
+    /// Returns the delivery attempt this claim represents.
     #[must_use]
     pub const fn attempt(&self) -> u32 {
         self.attempt
     }
 
+    /// Returns the lease token required to extend or complete.
     #[must_use]
     pub const fn lease_token(&self) -> [u8; 16] {
         self.lease_token
@@ -129,11 +138,13 @@ impl ActivityContext {
         *hasher.finalize().as_bytes()
     }
 
+    /// Returns the logical time the lease expires.
     #[must_use]
     pub fn lease_until_ms(&self) -> i64 {
         self.lease_until_ms.load(Ordering::Acquire)
     }
 
+    /// Returns a handle the handler can poll for cancellation.
     #[must_use]
     pub fn cancellation(&self) -> ActivityCancellation {
         self.cancellation.clone()
@@ -145,6 +156,7 @@ impl ActivityContext {
 pub struct ActivityCancellation(Arc<AtomicBool>);
 
 impl ActivityCancellation {
+    /// Reports whether the activity was cancelled.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
@@ -158,8 +170,15 @@ impl ActivityCancellation {
 /// Native handler result converted to one durable completion transition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActivityExecution {
+    /// The handler completed with this result.
     Completed(Vec<u8>),
-    Failed { details: Vec<u8>, retryable: bool },
+    /// The handler failed.
+    Failed {
+        /// Failure details recorded for the run.
+        details: Vec<u8>,
+        /// Whether the workflow may retry the activity.
+        retryable: bool,
+    },
 }
 
 impl ActivityExecution {
@@ -173,8 +192,10 @@ impl ActivityExecution {
 
 /// Statically linked asynchronous activity implemented by trusted Rust code.
 pub trait ActivityHandler: Send + Sync + 'static {
+    /// Activity type this handler serves.
     const TYPE: &'static str;
 
+    /// Runs the handler for one claim.
     fn execute(
         context: ActivityContext,
         input: Vec<u8>,
@@ -183,15 +204,19 @@ pub trait ActivityHandler: Send + Sync + 'static {
 
 /// Statically linked blocking activity implemented by trusted Rust code.
 pub trait BlockingActivityHandler: Send + Sync + 'static {
+    /// Activity type this handler serves.
     const TYPE: &'static str;
 
+    /// Runs the blocking handler on the dedicated worker.
     fn execute(context: ActivityContext, input: Vec<u8>) -> ActivityExecution;
 }
 
 /// Bounded activity claim parameters supplied by the native supervisor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkflowActivityClaimRequest {
+    /// Maximum activities to claim.
     pub limit: u32,
+    /// Lease duration granted to each claim.
     pub lease_ms: u32,
 }
 
@@ -277,7 +302,9 @@ impl<M: WorkflowActivityModule> Command for WorkflowActivityCompleteCommand<M> {
 /// Exact lease and requested extension for one activity attempt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkflowActivityExtendRequest {
+    /// Claim whose lease is extended.
     pub claim: ActivityClaim,
+    /// Additional lease time to grant.
     pub extension_ms: u32,
 }
 
@@ -311,6 +338,7 @@ impl<M: WorkflowActivityModule> Command for WorkflowActivityExtendCommand<M> {
 /// Exact published claim set revalidated before native execution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkflowActivityValidateRequest {
+    /// Claims to revalidate before native emission.
     pub claimed: Vec<ActivityClaim>,
 }
 
