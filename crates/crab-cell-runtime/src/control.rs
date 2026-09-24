@@ -9,12 +9,15 @@ mod tests;
 
 use serde::{Deserialize, Serialize};
 
+// LTX owns the flag; the runtime only tests it, so validation cannot drift from
+// the encoder that set the bit.
+use crab_ltx::types::CHECKSUM_FLAG;
+
 use crate::identity::IncarnationId;
 use crate::identity::{CellId, Digest, SessionId};
 use crate::{Error, Result};
 
 const MAX_CONTROL_BYTES: usize = 8 * 1024;
-const CHECKSUM_FLAG: u64 = 1 << 63;
 
 /// Exact immutable recovery root published by the current Cell control record.
 #[derive(Clone, Debug, PartialEq, Eq)]

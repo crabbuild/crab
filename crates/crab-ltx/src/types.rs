@@ -292,7 +292,13 @@ impl CaptureTiming {
 
 // Derived from Celld's position types; private to the imported codec/engine.
 pub(crate) type Checksum = u64;
-pub(crate) const CHECKSUM_FLAG: u64 = 1 << 63;
+/// High bit LTX sets on every checksum it publishes.
+///
+/// The flag is part of the wire format: it distinguishes a rolled checksum from
+/// the zero value, so every reader that accepts an LTX checksum (including the
+/// Cell runtime's control validation) must test the same bit. Exported so the
+/// flag has one definition across the crate boundary.
+pub const CHECKSUM_FLAG: u64 = 1 << 63;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub(crate) struct Txid(pub u64);
 impl std::fmt::Display for Txid {
