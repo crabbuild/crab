@@ -54,7 +54,8 @@ construction, and product policy stay in `crab-http-server`.
   (`src/recovery/manifest.rs`).
 - Staged xorbs flush before any bundle publication.
 - Every acquired lock is released on success, error, cancellation, and timeout.
-- `src/coordination.rs` stays sans-I/O: no `async`, no clock, no storage.
+- `src/coordination.rs` stays sans-I/O: no `async`, no clock, no storage
+  (`crab/scripts/check-cell-ltx-layout.py` enforces it).
 
 ## Features and platform
 
