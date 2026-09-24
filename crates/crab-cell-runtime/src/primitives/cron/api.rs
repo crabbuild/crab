@@ -17,8 +17,11 @@ use super::{
 
 /// Compile-time namespace, targets, and operation IDs for one Cron module.
 pub trait CronModule: MaintenanceModule {
+    /// Namespace that owns this Cron module.
     const NAMESPACE: NamespaceId;
+    /// Command id that mutates cron schedules and occurrence state.
     const MUTATE_COMMAND_ID: u32;
+    /// Query id that reads schedules and occurrences.
     const QUERY_ID: u32;
 }
 

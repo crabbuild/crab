@@ -31,6 +31,8 @@ pub struct QueueDeadLetterTarget {
 }
 
 impl QueueDeadLetterTarget {
+    /// Declares one module's dead-letter target: its module name, namespace,
+    /// shard count, send command id, and codec version.
     #[must_use]
     pub const fn new(
         module: &'static str,
@@ -71,12 +73,19 @@ impl QueueDeadLetterTarget {
 
 /// Compile-time namespace and operation identifiers for one native Queue module.
 pub trait QueueModule: MaintenanceModule {
+    /// Namespace that owns this Queue module.
     const NAMESPACE: NamespaceId;
+    /// Command id that sends a message.
     const SEND_COMMAND_ID: u32;
+    /// Command id that claims a delivery lease.
     const CLAIM_COMMAND_ID: u32;
+    /// Command id that acknowledges, retries, or extends a lease.
     const LEASE_COMMAND_ID: u32;
+    /// Query id that revalidates claimed leases.
     const VALIDATE_QUERY_ID: u32;
+    /// Command id that pauses, resumes, purges, or redrives the shard.
     const CONTROL_COMMAND_ID: u32;
+    /// Query id that reads shard state.
     const INFO_QUERY_ID: u32;
 }
 
@@ -169,7 +178,9 @@ impl<M: QueueModule> Command for QueueSendCommand<M> {
 /// Bounded claim parameters for one explicitly selected Queue shard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QueueClaimRequest {
+    /// Maximum messages to claim.
     pub limit: u32,
+    /// Lease duration granted to each claim.
     pub lease_ms: u32,
 }
 
@@ -218,8 +229,11 @@ impl<M: QueueModule> Command for QueueClaimCommand<M> {
 /// Exact lease identity and transition for one Queue message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QueueLeaseRequest {
+    /// Message the lease belongs to.
     pub message_id: [u8; 16],
+    /// Lease token that must match the current lease.
     pub token: [u8; 16],
+    /// Transition to apply.
     pub action: QueueLeaseAction,
 }
 
@@ -268,6 +282,7 @@ impl<M: QueueModule> Command for QueueLeaseCommand<M> {
 /// Exact published claims to revalidate before native task emission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueueValidateRequest {
+    /// Claims to revalidate before native task emission.
     pub claimed: Vec<QueueMessage>,
 }
 
