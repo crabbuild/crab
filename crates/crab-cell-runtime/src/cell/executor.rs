@@ -163,11 +163,7 @@ impl PendingMigration {
 
     #[must_use]
     pub(crate) fn retained_bytes(&self) -> u64 {
-        self.cuts
-            .segments
-            .iter()
-            .map(|segment| segment.info().size_bytes)
-            .sum()
+        retained_bytes(&self.cuts)
     }
 }
 
@@ -207,12 +203,16 @@ impl PendingCommit {
 
     #[must_use]
     pub(crate) fn retained_bytes(&self) -> u64 {
-        self.cuts
-            .segments
-            .iter()
-            .map(|segment| segment.info().size_bytes)
-            .sum()
+        retained_bytes(&self.cuts)
     }
+}
+
+/// Bytes the captured cuts retain until they publish.
+fn retained_bytes(cuts: &CaptureBatch) -> u64 {
+    cuts.segments
+        .iter()
+        .map(|segment| segment.info().size_bytes)
+        .sum()
 }
 
 /// Immediate executor result; pending output cannot be observed before publication.

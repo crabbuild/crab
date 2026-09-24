@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::control::{RecoveryOverlayRef, RootRef};
 use crate::identity::IncarnationId;
-use crate::identity::{ApplicationId, CellId, Digest, SessionId};
+use crate::identity::{ApplicationId, CellId, Digest, SessionId, encode_hex};
 use crate::node::log::RecoveredCellTail;
 use crate::{Error, Result};
 
@@ -572,26 +572,28 @@ impl From<&RecoveryManifest> for RawManifest {
     fn from(manifest: &RecoveryManifest) -> Self {
         Self {
             version: 1,
-            leader_session: hex(manifest.leader_session.as_bytes()),
+            leader_session: encode_hex(manifest.leader_session.as_bytes()),
             log_epoch: manifest.log_epoch.to_string(),
             cells: manifest
                 .cells
                 .iter()
                 .map(|cell| RawManifestCell {
-                    application: hex(&cell.application),
-                    cell: hex(&cell.cell),
-                    incarnation: hex(&cell.incarnation),
+                    application: encode_hex(&cell.application),
+                    cell: encode_hex(&cell.cell),
+                    incarnation: encode_hex(&cell.incarnation),
                     cell_epoch: cell.cell_epoch.to_string(),
                     first_node_sequence: cell.first_node_sequence.to_string(),
                     last_node_sequence: cell.last_node_sequence.to_string(),
-                    predecessor_digest: hex(&cell.predecessor.digest),
+                    predecessor_digest: encode_hex(&cell.predecessor.digest),
                     predecessor_txid: cell.predecessor.position.txid.to_string(),
-                    predecessor_checksum: hex(&cell.predecessor.position.checksum.to_be_bytes()),
+                    predecessor_checksum: encode_hex(
+                        &cell.predecessor.position.checksum.to_be_bytes(),
+                    ),
                     predecessor_commit_sequence: cell.predecessor.commit_sequence.to_string(),
                     final_txid: cell.final_position.txid.to_string(),
-                    final_checksum: hex(&cell.final_position.checksum.to_be_bytes()),
+                    final_checksum: encode_hex(&cell.final_position.checksum.to_be_bytes()),
                     final_commit_sequence: cell.final_commit_sequence.to_string(),
-                    bundle_digest: hex(&cell.bundle_digest),
+                    bundle_digest: encode_hex(&cell.bundle_digest),
                 })
                 .collect(),
         }
@@ -773,16 +775,6 @@ fn decimal(value: &str) -> Result<u64> {
         return Err(Error::Node("noncanonical recovery manifest decimal"));
     }
     Ok(parsed)
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(TABLE[(byte >> 4) as usize] as char);
-        encoded.push(TABLE[(byte & 0x0f) as usize] as char);
-    }
-    encoded
 }
 
 fn unhex<const N: usize>(value: &str) -> Result<[u8; N]> {

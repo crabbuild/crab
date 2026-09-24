@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use crate::client::{CellClient, Committed, InvocationError, Observed, Receipt};
-use crate::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use crate::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue, read_fixed};
 use crate::identity::CellTarget;
 use crate::registry::{Command, Query, RegistryBuilder};
 use crate::registry::{CommandContext, CommandResult, QueryContext};
@@ -529,16 +529,6 @@ fn validate_lease(lease: &EffectLease) -> Result<(), CodecError> {
         return Err(CodecError::Invalid("invalid effect lease"));
     }
     Ok(())
-}
-
-fn read_fixed<const N: usize>(
-    decoder: &mut BoundedDecoder<'_>,
-    message: &'static str,
-) -> Result<[u8; N], CodecError> {
-    decoder
-        .read_bytes()?
-        .try_into()
-        .map_err(|_| CodecError::Invalid(message))
 }
 
 #[cfg(test)]

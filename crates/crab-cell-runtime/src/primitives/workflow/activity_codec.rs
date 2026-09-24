@@ -1,4 +1,4 @@
-use crate::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use crate::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue, read_fixed};
 
 use super::{
     ActivityClaim, ActivityCompletion, ActivityCompletionOutcome, ActivityLeaseOutcome,
@@ -225,14 +225,4 @@ fn validate_claim(claim: &ActivityClaim) -> Result<(), CodecError> {
         return Err(CodecError::Invalid("invalid activity claim"));
     }
     Ok(())
-}
-
-fn read_fixed<const N: usize>(
-    decoder: &mut BoundedDecoder<'_>,
-    message: &'static str,
-) -> Result<[u8; N], CodecError> {
-    decoder
-        .read_bytes()?
-        .try_into()
-        .map_err(|_| CodecError::Invalid(message))
 }

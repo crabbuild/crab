@@ -11,6 +11,8 @@ use std::{
 };
 
 use async_trait::async_trait;
+
+use crate::identity::encode_hex;
 use fs4::fs_std::FileExt;
 use futures_util::stream::BoxStream;
 use object_store::{
@@ -70,7 +72,7 @@ impl FilesystemCasStore {
         let digest = blake3::hash(location.as_ref().as_bytes());
         self.root
             .join(".crab-cas-locks")
-            .join(format!("{}.lock", hex(digest.as_bytes())))
+            .join(format!("{}.lock", encode_hex(digest.as_bytes())))
     }
 
     async fn update(
@@ -197,14 +199,4 @@ impl fmt::Display for FilesystemCasStore {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("filesystem-cas-store")
     }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(TABLE[(byte >> 4) as usize] as char);
-        output.push(TABLE[(byte & 0x0f) as usize] as char);
-    }
-    output
 }
