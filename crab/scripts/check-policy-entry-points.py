@@ -61,7 +61,7 @@ CFG_TEST = "#[cfg(test)]"
 # (crate-relative path, symbol): (status, reason)
 INVENTORY = {
     (
-        "crates/crab-cell-runtime/src/cell/actor.rs",
+        "crates/crab-cell-runtime/src/cell/actor/runtime.rs",
         "observe_pressure",
     ): (
         "deferred",
@@ -69,7 +69,7 @@ INVENTORY = {
         "never reach the actor; wiring waits on the pressure-seam decision",
     ),
     (
-        "crates/crab-cell-runtime/src/cell/actor.rs",
+        "crates/crab-cell-runtime/src/cell/actor/runtime.rs",
         "evict_idle",
     ): (
         "deferred",
