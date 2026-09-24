@@ -6,7 +6,7 @@ use super::*;
 async fn typed_client_publishes_replays_rejections_and_receipted_reads() {
     let fixture = fixture().await;
     let client = CellClient::local(Arc::clone(&fixture.registry), fixture.handle().clone());
-    let identity = mutation(7);
+    let identity = mutation_identity(7);
 
     let committed = client
         .command::<CreateComment>(&fixture.target, identity, b"first".to_vec())
@@ -22,7 +22,7 @@ async fn typed_client_publishes_replays_rejections_and_receipted_reads() {
     assert_eq!(replay, committed);
 
     let rejected = client
-        .command::<RejectComment>(&fixture.target, mutation(8), b"hidden".to_vec())
+        .command::<RejectComment>(&fixture.target, mutation_identity(8), b"hidden".to_vec())
         .await
         .unwrap_err();
     assert!(matches!(
@@ -55,7 +55,7 @@ async fn state_stream_serializes_local_queries_across_a_new_commit() {
     let first = stream.emit(()).await.unwrap();
     assert_eq!(first.output, 0);
     let committed = client
-        .command::<CreateComment>(&fixture.target, mutation(18), b"streamed".to_vec())
+        .command::<CreateComment>(&fixture.target, mutation_identity(18), b"streamed".to_vec())
         .await
         .unwrap();
     let second = stream.emit(()).await.unwrap();
@@ -70,7 +70,7 @@ async fn state_stream_serializes_local_queries_across_a_new_commit() {
 async fn local_and_peer_command_share_digest_dedup_and_query_state() {
     let fixture = fixture().await;
     let client = CellClient::local(Arc::clone(&fixture.registry), fixture.handle().clone());
-    let identity = mutation(14);
+    let identity = mutation_identity(14);
     let committed = client
         .command::<CreateComment>(&fixture.target, identity, b"same".to_vec())
         .await
@@ -126,7 +126,7 @@ async fn local_and_peer_command_share_digest_dedup_and_query_state() {
 async fn typed_client_rejects_conflicting_identity_receipt_and_module_before_execution() {
     let fixture = fixture().await;
     let client = CellClient::local(Arc::clone(&fixture.registry), fixture.handle().clone());
-    let identity = mutation(9);
+    let identity = mutation_identity(9);
     let committed = client
         .command::<CreateComment>(&fixture.target, identity, b"first".to_vec())
         .await
@@ -157,7 +157,7 @@ async fn typed_client_rejects_conflicting_identity_receipt_and_module_before_exe
     ));
     assert!(matches!(
         client
-            .command::<WrongModuleCommand>(&fixture.target, mutation(10), ())
+            .command::<WrongModuleCommand>(&fixture.target, mutation_identity(10), ())
             .await,
         Err(InvocationError::NotStarted(
             crab_cell_runtime::Error::Registry("operation module does not own namespace")
@@ -195,7 +195,11 @@ async fn command_effects_require_declared_same_application_targets() {
     let client = CellClient::local(Arc::clone(&fixture.registry), fixture.handle().clone());
 
     let result = client
-        .command::<EmitUndeclaredEffect>(&fixture.target, mutation(50), b"foreign".to_vec())
+        .command::<EmitUndeclaredEffect>(
+            &fixture.target,
+            mutation_identity(50),
+            b"foreign".to_vec(),
+        )
         .await;
     assert!(matches!(
         result,
@@ -220,7 +224,7 @@ async fn invalid_typed_result_preserves_the_published_receipt() {
     let client = CellClient::local(Arc::clone(&fixture.registry), fixture.handle().clone());
 
     let result = client
-        .command::<InvalidResultComment>(&fixture.target, mutation(12), b"stored".to_vec())
+        .command::<InvalidResultComment>(&fixture.target, mutation_identity(12), b"stored".to_vec())
         .await;
     assert!(matches!(
         result,

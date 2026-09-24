@@ -5,3 +5,4 @@
 //! in that suite's module.
 
 pub mod fencing;
+pub mod fixtures;

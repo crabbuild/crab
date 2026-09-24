@@ -11,7 +11,7 @@ async fn dispatcher_serializes_and_publishes_commands_before_drain() {
         tokio::spawn(async move {
             handle
                 .execute(
-                    identity(6),
+                    mutation_identity_window(6, 10, 10_000),
                     Digest::from_bytes([7; 32]),
                     20,
                     1_024,
@@ -29,7 +29,7 @@ async fn dispatcher_serializes_and_publishes_commands_before_drain() {
         tokio::spawn(async move {
             handle
                 .execute(
-                    identity(8),
+                    mutation_identity_window(8, 10, 10_000),
                     Digest::from_bytes([9; 32]),
                     21,
                     1_024,
@@ -86,7 +86,7 @@ async fn dispatcher_compacts_before_segment_admission_is_exhausted() {
         assert!(matches!(
             handle
                 .execute(
-                    identity(sequence),
+                    mutation_identity_window(sequence, 10, 10_000),
                     Digest::from_bytes([sequence.saturating_add(20); 32]),
                     20,
                     1_024,
@@ -160,7 +160,7 @@ async fn dispatcher_promotes_after_burst_becomes_quiet() {
     for sequence in 1_u8..=8 {
         handle
             .execute(
-                identity(sequence),
+                mutation_identity_window(sequence, 10, 10_000),
                 Digest::from_bytes([sequence.saturating_add(30); 32]),
                 20,
                 1_024,
@@ -268,7 +268,7 @@ async fn command_arriving_during_quiet_compaction_waits_for_publisher() {
     for sequence in 1_u8..=8 {
         handle
             .execute(
-                identity(sequence),
+                mutation_identity_window(sequence, 10, 10_000),
                 Digest::from_bytes([sequence.saturating_add(70); 32]),
                 20,
                 1_024,
@@ -289,7 +289,7 @@ async fn command_arriving_during_quiet_compaction_waits_for_publisher() {
     .await
     .unwrap();
     let ninth = handle.execute(
-        identity(9),
+        mutation_identity_window(9, 10, 10_000),
         Digest::from_bytes([79; 32]),
         20,
         1_024,

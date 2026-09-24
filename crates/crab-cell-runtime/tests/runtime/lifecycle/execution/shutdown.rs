@@ -182,7 +182,7 @@ async fn runtime_shutdown_drains_accepted_work_and_releases_all_owners() {
         tokio::spawn(async move {
             handle
                 .execute(
-                    identity(111),
+                    mutation_identity_window(111, 10, 10_000),
                     Digest::from_bytes([112; 32]),
                     20,
                     1_024,

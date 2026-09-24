@@ -88,7 +88,7 @@ async fn lost_ack_suffix_recovers_an_ambiguous_command_without_reexecution() {
     let handle = bootstrap_on(&runtime, &fixture, leader).await;
     let first = handle
         .execute(
-            identity(126),
+            mutation_identity_window(126, 10, 10_000),
             Digest::from_bytes([126; 32]),
             20,
             1_024,
@@ -120,7 +120,7 @@ async fn lost_ack_suffix_recovers_an_ambiguous_command_without_reexecution() {
     .await
     .unwrap();
 
-    let request_identity = identity(127);
+    let request_identity = mutation_identity_window(127, 10, 10_000);
     let operation_digest = Digest::from_bytes([127; 32]);
     store.fail_puts();
     let result = tokio::time::timeout(

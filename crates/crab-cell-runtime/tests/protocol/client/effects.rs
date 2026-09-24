@@ -113,7 +113,7 @@ async fn typed_effect_source_publishes_claim_validation_ack_and_lost_lease() {
     let source_incarnation = fixture.incarnation;
     let source_sequence = 1;
     let ordinal = 0;
-    let identity = mutation(30);
+    let identity = mutation_identity(30);
     let expected_effect_id = effect_id(source_cell, source_incarnation, source_sequence, ordinal);
     let expires_at_ms = identity.issued_at_ms + 60_000;
     let mut encoder = BoundedEncoder::new(64).unwrap();
@@ -168,7 +168,7 @@ async fn typed_effect_source_publishes_claim_validation_ack_and_lost_lease() {
     );
     let claimed = source
         .claim(
-            mutation(32),
+            mutation_identity(32),
             EffectClaimRequest {
                 limit: 1,
                 lease_ms: 5_000,
@@ -189,13 +189,20 @@ async fn typed_effect_source_publishes_claim_validation_ack_and_lost_lease() {
     assert_eq!(validated.receipt.commit_sequence, 2);
 
     let acknowledged = source
-        .ack(mutation(33), claim.clone(), b"destination result".to_vec())
+        .ack(
+            mutation_identity(33),
+            claim.clone(),
+            b"destination result".to_vec(),
+        )
         .await
         .unwrap();
     assert_eq!(acknowledged.output, EffectLeaseOutcome::Delivered);
     assert_eq!(acknowledged.receipt.commit_sequence, 3);
 
-    let lost = source.retry(mutation(34), claim).await.unwrap_err();
+    let lost = source
+        .retry(mutation_identity(34), claim)
+        .await
+        .unwrap_err();
     assert!(matches!(
         lost,
         InvocationError::Rejected(ref outcome)
@@ -210,7 +217,7 @@ async fn typed_effect_source_publishes_claim_validation_ack_and_lost_lease() {
 async fn effect_supervisor_delivers_to_inbox_and_acknowledges_source() {
     let fixture = fixture().await;
     let source_sequence = 1;
-    let identity = mutation(40);
+    let identity = mutation_identity(40);
     let mut encoder = BoundedEncoder::new(64).unwrap();
     b"supervised".to_vec().encode(&mut encoder).unwrap();
     let input = encoder.finish();

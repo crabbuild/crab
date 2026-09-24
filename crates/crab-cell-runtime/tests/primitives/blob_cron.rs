@@ -1,17 +1,16 @@
-use std::{sync::Arc, time::UNIX_EPOCH};
+use std::sync::Arc;
 
 use crab_cell_runtime::cell::actor::CellRuntime;
 use crab_cell_runtime::cell::catalog::CatalogRole;
 use crab_cell_runtime::cell::catalog::{CatalogEntry, CellCatalog};
-use crab_cell_runtime::cell::executor::MutationIdentity;
 use crab_cell_runtime::cell::worker::SqlWorkerPool;
 use crab_cell_runtime::client::CellClient;
 use crab_cell_runtime::control::Owner;
 use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::identity::IncarnationId;
 use crab_cell_runtime::identity::{
     ApplicationId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
 };
-use crab_cell_runtime::identity::{IncarnationId, RequestId};
 use crab_cell_runtime::primitives::blob::{
     BlobCondition, BlobMutation, BlobMutationOutcome, BlobQuery, BlobQueryResult, register_blob,
 };
@@ -33,6 +32,8 @@ use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path};
+
+use crate::support::fixtures::{mutation_identity_window, now_ms};
 
 const BLOB_MODULE: &str = "blob-test";
 const BLOB_NAMESPACE: NamespaceId = NamespaceId::from_bytes([1; 16]);
@@ -257,7 +258,7 @@ async fn typed_blob_and_cron_recover_after_owner_loss() {
     let start_now_ms = now_ms();
     blobs
         .mutate(
-            identity(26, start_now_ms),
+            mutation_identity_window(26, start_now_ms, start_now_ms + 60_000),
             BlobMutation::Begin {
                 key: key.clone(),
                 upload_id,
@@ -271,7 +272,7 @@ async fn typed_blob_and_cron_recover_after_owner_loss() {
         .unwrap();
     blobs
         .mutate(
-            identity(27, start_now_ms),
+            mutation_identity_window(27, start_now_ms, start_now_ms + 60_000),
             BlobMutation::PutPart {
                 key: key.clone(),
                 upload_id,
@@ -283,7 +284,7 @@ async fn typed_blob_and_cron_recover_after_owner_loss() {
         .unwrap();
     let committed = blobs
         .mutate(
-            identity(28, start_now_ms),
+            mutation_identity_window(28, start_now_ms, start_now_ms + 60_000),
             BlobMutation::Complete {
                 key: key.clone(),
                 upload_id,
@@ -440,7 +441,7 @@ async fn typed_blob_and_cron_recover_after_owner_loss() {
     let cron_start_now_ms = now_ms();
     let scheduled = cron
         .mutate(
-            identity(32, cron_start_now_ms),
+            mutation_identity_window(32, cron_start_now_ms, cron_start_now_ms + 60_000),
             CronMutation::Upsert {
                 schedule_id,
                 target_index: 0,
@@ -458,7 +459,7 @@ async fn typed_blob_and_cron_recover_after_owner_loss() {
         .run_maintenance_once(
             cron_client,
             cron_target.clone(),
-            identity(33, tick_now_ms),
+            mutation_identity_window(33, tick_now_ms, tick_now_ms + 60_000),
             MaintenanceTickRequest {
                 expected_commit_sequence: scheduled.receipt.commit_sequence,
             },
@@ -544,24 +545,6 @@ fn registry() -> Arc<crab_cell_runtime::Registry> {
     registry.register(TestBlob).unwrap();
     registry.register(TestCron).unwrap();
     Arc::new(registry.finish().unwrap())
-}
-
-fn now_ms() -> i64 {
-    i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap()
-}
-
-fn identity(byte: u8, now_ms: i64) -> MutationIdentity {
-    MutationIdentity {
-        request_id: RequestId::from_bytes([byte; 16]),
-        issued_at_ms: now_ms,
-        expires_at_ms: now_ms + 60_000,
-    }
 }
 
 fn descriptor(

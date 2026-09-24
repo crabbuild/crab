@@ -6,23 +6,22 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::{Duration, UNIX_EPOCH},
+    time::Duration,
 };
 
 use crab_cell_runtime::Error;
 use crab_cell_runtime::cell::actor::CellRuntime;
 use crab_cell_runtime::cell::catalog::CatalogRole;
 use crab_cell_runtime::cell::catalog::{CatalogEntry, CellCatalog};
-use crab_cell_runtime::cell::executor::MutationIdentity;
 use crab_cell_runtime::cell::worker::SqlWorkerPool;
 use crab_cell_runtime::client::{CellClient, InvocationError};
 use crab_cell_runtime::control::Owner;
 use crab_cell_runtime::control::authority::CellAuthority;
 use crab_cell_runtime::fleet::scheduler::DueCellScan;
+use crab_cell_runtime::identity::IncarnationId;
 use crab_cell_runtime::identity::{
     ApplicationId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
 };
-use crab_cell_runtime::identity::{IncarnationId, RequestId};
 use crab_cell_runtime::primitives::activity_pool::BlockingActivityPool;
 use crab_cell_runtime::primitives::maintenance::{
     MaintenanceModule, MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest,
@@ -50,6 +49,7 @@ use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path};
 
 use crate::support::fencing::fence_session;
+use crate::support::fixtures::mutation_identity;
 
 const WORKFLOW_MODULE: &str = "workflow-api-test";
 const WORKFLOW_NAMESPACE: NamespaceId = NamespaceId::from_bytes([8; 16]);
@@ -475,21 +475,6 @@ fn registry() -> Arc<crab_cell_runtime::Registry> {
     });
     builder.register(TestWorkflow).unwrap();
     Arc::new(builder.finish().unwrap())
-}
-
-fn identity(byte: u8) -> MutationIdentity {
-    let now_ms = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap();
-    MutationIdentity {
-        request_id: RequestId::from_bytes([byte; 16]),
-        issued_at_ms: now_ms,
-        expires_at_ms: now_ms + 60_000,
-    }
 }
 
 #[test]

@@ -1,19 +1,11 @@
-use crab_cell_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use crab_cell_runtime::codec::{BoundedEncoder, CodecError, WireValue};
 use crab_cell_runtime::primitives::workflow::{
     ActivityClaim, ActivityCompletion, WorkflowActivityClaimRequest, WorkflowActivityExtendRequest,
     WorkflowActivityValidateRequest,
 };
 use crab_cell_runtime::primitives::workflow::{ActivityCompletionOutcome, ActivityLeaseOutcome};
-use std::fmt;
 
-fn roundtrip<T: WireValue + PartialEq + fmt::Debug>(value: T) {
-    let mut encoder = BoundedEncoder::new(1024 * 1024).unwrap();
-    value.encode(&mut encoder).unwrap();
-    let bytes = encoder.finish();
-    let mut decoder = BoundedDecoder::new(&bytes, 1024 * 1024).unwrap();
-    assert_eq!(T::decode(&mut decoder).unwrap(), value);
-    decoder.finish().unwrap();
-}
+use crate::support::fixtures::codec_roundtrip;
 
 #[test]
 fn activity_codecs_roundtrip_claim_lease_completion_and_validation() {
@@ -27,19 +19,19 @@ fn activity_codecs_roundtrip_claim_lease_completion_and_validation() {
         token: [4; 16],
         lease_until_ms: 10_000,
     };
-    roundtrip(WorkflowActivityClaimRequest {
+    codec_roundtrip(WorkflowActivityClaimRequest {
         limit: 1,
         lease_ms: 5_000,
     });
-    roundtrip(vec![claim.clone()]);
-    roundtrip(WorkflowActivityExtendRequest {
+    codec_roundtrip(vec![claim.clone()]);
+    codec_roundtrip(WorkflowActivityExtendRequest {
         claim: claim.clone(),
         extension_ms: 5_000,
     });
-    roundtrip(ActivityLeaseOutcome::Extended {
+    codec_roundtrip(ActivityLeaseOutcome::Extended {
         lease_until_ms: 15_000,
     });
-    roundtrip(ActivityCompletion {
+    codec_roundtrip(ActivityCompletion {
         run_id: claim.run_id,
         activity_id: claim.activity_id,
         attempt: claim.attempt,
@@ -49,8 +41,8 @@ fn activity_codecs_roundtrip_claim_lease_completion_and_validation() {
         failed: false,
         retryable: false,
     });
-    roundtrip(ActivityCompletionOutcome::Retrying { due_at_ms: 20_000 });
-    roundtrip(WorkflowActivityValidateRequest {
+    codec_roundtrip(ActivityCompletionOutcome::Retrying { due_at_ms: 20_000 });
+    codec_roundtrip(WorkflowActivityValidateRequest {
         claimed: vec![claim],
     });
 }

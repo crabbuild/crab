@@ -46,6 +46,8 @@ use crab_ltx::{CellReplica, Limits};
 use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path};
 
+use crate::support::fixtures::mutation_identity;
+
 const MODULE: &str = "repository";
 const NAMESPACE: NamespaceId = NamespaceId::from_bytes([6; 16]);
 const MIGRATION: &str =
@@ -490,21 +492,6 @@ async fn fixture() -> Fixture {
         target,
         handle: Some(handle),
         registry,
-    }
-}
-
-fn mutation(byte: u8) -> MutationIdentity {
-    let now_ms = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap();
-    MutationIdentity {
-        request_id: RequestId::from_bytes([byte; 16]),
-        issued_at_ms: now_ms,
-        expires_at_ms: now_ms + 60_000,
     }
 }
 

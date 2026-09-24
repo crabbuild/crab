@@ -1,18 +1,18 @@
 use std::sync::{Arc, mpsc};
 
 use crab_cell_runtime::Error;
-use crab_cell_runtime::cell::executor::{
-    CellExecutor, HandlerOutcome, MutationIdentity, StoredOutcome,
-};
+use crab_cell_runtime::cell::executor::{CellExecutor, HandlerOutcome, StoredOutcome};
 use crab_cell_runtime::cell::schema::install_runtime_schema;
 use crab_cell_runtime::cell::worker::SqlWorkerPool;
 use crab_cell_runtime::cell::worker::WorkerExecution;
+use crab_cell_runtime::identity::IncarnationId;
 use crab_cell_runtime::identity::{CellId, Digest};
-use crab_cell_runtime::identity::{IncarnationId, RequestId};
 use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Db, Limits};
 use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path};
+
+use crate::support::fixtures::mutation_identity_window;
 
 const RESULT_LIMIT: usize = 1 << 20;
 
@@ -54,14 +54,6 @@ fn fixture(cell_byte: u8) -> Fixture {
     }
 }
 
-fn identity(byte: u8) -> MutationIdentity {
-    MutationIdentity {
-        request_id: RequestId::from_bytes([byte; 16]),
-        issued_at_ms: 10,
-        expires_at_ms: 10_000,
-    }
-}
-
 #[tokio::test]
 async fn fixed_workers_own_execute_prepare_confirm_and_dedup() {
     let Fixture {
@@ -72,7 +64,7 @@ async fn fixed_workers_own_execute_prepare_confirm_and_dedup() {
     } = fixture(1);
     let pool = SqlWorkerPool::new(2, 10).unwrap();
     pool.activate(cell, executor).await.unwrap();
-    let request = identity(4);
+    let request = mutation_identity_window(4, 10, 10_000);
     let digest = Digest::from_bytes([5; 32]);
     let pending = match pool
         .execute(cell, request, digest, 20, RESULT_LIMIT, |transaction| {
@@ -123,7 +115,7 @@ async fn cancelled_waiter_does_not_cancel_an_accepted_sql_command() {
         tokio::spawn(async move {
             pool.execute(
                 cell,
-                identity(7),
+                mutation_identity_window(7, 10, 10_000),
                 Digest::from_bytes([8; 32]),
                 20,
                 RESULT_LIMIT,
@@ -145,7 +137,7 @@ async fn cancelled_waiter_does_not_cancel_an_accepted_sql_command() {
         tokio::spawn(async move {
             pool.execute(
                 cell,
-                identity(9),
+                mutation_identity_window(9, 10, 10_000),
                 Digest::from_bytes([10; 32]),
                 20,
                 RESULT_LIMIT,
@@ -189,7 +181,7 @@ async fn panicking_handler_fences_only_its_cell_and_worker_continues() {
     let panic = pool
         .execute(
             first.cell,
-            identity(21),
+            mutation_identity_window(21, 10, 10_000),
             Digest::from_bytes([21; 32]),
             20,
             RESULT_LIMIT,
@@ -203,7 +195,7 @@ async fn panicking_handler_fences_only_its_cell_and_worker_continues() {
     assert!(matches!(
         pool.execute(
             first.cell,
-            identity(22),
+            mutation_identity_window(22, 10, 10_000),
             Digest::from_bytes([22; 32]),
             21,
             RESULT_LIMIT,
@@ -216,7 +208,7 @@ async fn panicking_handler_fences_only_its_cell_and_worker_continues() {
     assert!(matches!(
         pool.execute(
             second.cell,
-            identity(23),
+            mutation_identity_window(23, 10, 10_000),
             Digest::from_bytes([23; 32]),
             22,
             RESULT_LIMIT,
