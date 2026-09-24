@@ -17,3 +17,4 @@ replica/directory/tests.rs  # asserts private radix directory internals
 replica/directory.rs  # declares crate-private test modules
 replica/root.rs  # asserts private root codec bounds
 replica/upload.rs  # asserts private capture upload sources
+writable_vfs.rs  # asserts private page-range arithmetic

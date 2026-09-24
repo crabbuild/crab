@@ -615,3 +615,59 @@ fn register(base_name: Option<&CStr>, name: &CStr) -> c_int {
         rc
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::page_range;
+    use crate::CrabError;
+
+    #[test]
+    fn page_range_rejects_non_positive_amounts() {
+        assert!(matches!(
+            page_range(0, 0, 4096),
+            Err(CrabError::LTXCorrupted)
+        ));
+        assert!(matches!(
+            page_range(-1, 0, 4096),
+            Err(CrabError::LTXCorrupted)
+        ));
+    }
+
+    #[test]
+    fn page_range_rejects_negative_offsets() {
+        assert!(matches!(
+            page_range(1, -1, 4096),
+            Err(CrabError::LTXCorrupted)
+        ));
+    }
+
+    #[test]
+    fn page_range_keeps_a_partial_range_inside_one_page() {
+        assert_eq!(page_range(1, 0, 4096).unwrap(), (1, 1));
+        assert_eq!(page_range(4096, 0, 4096).unwrap(), (1, 1));
+    }
+
+    #[test]
+    fn page_range_includes_both_ends_of_a_crossing_range() {
+        assert_eq!(page_range(1, 4096, 4096).unwrap(), (2, 2));
+        assert_eq!(page_range(2, 4095, 4096).unwrap(), (1, 2));
+        assert_eq!(page_range(4096, 4096, 4096).unwrap(), (2, 2));
+    }
+
+    #[test]
+    fn page_range_rejects_a_range_that_overflows_the_offset() {
+        assert!(matches!(
+            page_range(2, i64::MAX, 4096),
+            Err(CrabError::LTXCorrupted)
+        ));
+    }
+
+    #[test]
+    fn page_range_rejects_a_page_number_past_the_cartesian_ceiling() {
+        let offset = 4096 * i64::from(u32::MAX);
+        assert!(matches!(
+            page_range(1, offset, 4096),
+            Err(CrabError::LTXCorrupted)
+        ));
+    }
+}
