@@ -16,7 +16,8 @@ outside this crate.
 2. `src/db.rs` — managed connections, transactions, and capture boundary.
 3. `src/capture/` and `src/ltx.rs` — WAL capture and LTX encoding.
 4. `src/recovery.rs` — verified plans and exact restore.
-5. `src/replica.rs` and `src/replica/` — Cell roots, directories, compaction.
+5. `src/replica.rs` and `src/replica/` — Cell roots, directories, uploads,
+   compaction.
 6. `UPSTREAM.md` — Celld lineage, licenses, and review rules for imports.
 
 ## Common changes
