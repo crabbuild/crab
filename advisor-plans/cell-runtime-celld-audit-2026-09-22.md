@@ -177,6 +177,10 @@ enforced by coverage bits in signed receipts.
    default release races object proof against fleet proof, but the fleet-only
    path has no latency-tail eviction or hard backstop. Celld's `log_evict.rs`
    is the reference; crab additionally needs a metric for blocked-proof time.
+   Blocked-proof time is already recorded per source as
+   `crab_cell_durability_wait_seconds{source}` (histogram) beside
+   `crab_cell_durability_proofs_total{source}`, so the remaining work is the
+   latency-tail policy, not the observation.
 7. **Per-primitive observability.** The metric inventory is rich for
    durability, LTX, node log, and resident routes, and empty for the
    primitives: no operation counts, error classes, or latency histograms for
@@ -306,6 +310,7 @@ identities, and reusing one would let both attempt the same publication.
 Still open, in the order the audit proposed: P0 1 pressure wiring (needs the
 decision to feed the classifier and sign the tier), P0 2 Blob collector,
 P0 3 protected provider proof, P1 5 fleet-wide drain serialization, P1 6
-slow-member backstop, P1 8 queue batch send (no production sender exists yet,
-so this waits for a caller), P2 10 measured per-Cell cost, and P2 11 primitive
-simulation parity.
+slow-member backstop (the `crab_cell_durability_wait_seconds` histogram landed
+with the durability telemetry, so only the latency-tail policy is pending),
+P1 8 queue batch send (no production sender exists yet, so this waits for a
+caller), P2 10 measured per-Cell cost, and P2 11 primitive simulation parity.
