@@ -273,3 +273,285 @@ fn upload_lifetime_uses_request_issue_time_but_rejects_expired_acceptance() {
         Err(Error::Command("blob upload has already expired"))
     ));
 }
+
+fn begin(key: &[u8], metadata: &[u8], expires_at_ms: i64, upload_id: [u8; 16]) -> BlobMutation {
+    BlobMutation::Begin {
+        key: key.to_vec(),
+        upload_id,
+        condition: BlobCondition::Missing,
+        content_type: None,
+        metadata: metadata.to_vec(),
+        expires_at_ms,
+    }
+}
+
+fn blob_connection() -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    let transaction = connection.unchecked_transaction().unwrap();
+    install_blob_schema(&transaction).unwrap();
+    transaction.commit().unwrap();
+    connection
+}
+
+#[test]
+fn key_bounds_accept_the_documented_range() {
+    let mut connection = blob_connection();
+    let transaction = connection.transaction().unwrap();
+    assert_eq!(
+        blob_mutate(&transaction, 1, 1, &begin(b"k", &[], 60_001, [10; 16])).unwrap(),
+        BlobMutationOutcome::Begun
+    );
+    assert_eq!(
+        blob_mutate(
+            &transaction,
+            1,
+            1,
+            &begin(&[b'k'; 1_024], &[], 60_001, [11; 16])
+        )
+        .unwrap(),
+        BlobMutationOutcome::Begun
+    );
+}
+
+#[test]
+fn key_bounds_reject_empty_and_oversized_keys() {
+    let mut connection = blob_connection();
+    let transaction = connection.transaction().unwrap();
+    assert!(blob_mutate(&transaction, 1, 1, &begin(b"", &[], 60_001, [12; 16])).is_err());
+    assert!(
+        blob_mutate(
+            &transaction,
+            1,
+            1,
+            &begin(&[b'k'; 1_025], &[], 60_001, [13; 16])
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn metadata_bounds_accept_exactly_eight_kib() {
+    let mut connection = blob_connection();
+    let transaction = connection.transaction().unwrap();
+    assert_eq!(
+        blob_mutate(
+            &transaction,
+            1,
+            1,
+            &begin(b"k", &vec![b'm'; 8 * 1_024], 60_001, [14; 16]),
+        )
+        .unwrap(),
+        BlobMutationOutcome::Begun
+    );
+}
+
+#[test]
+fn metadata_bounds_reject_more_than_eight_kib() {
+    let mut connection = blob_connection();
+    let transaction = connection.transaction().unwrap();
+    assert!(
+        blob_mutate(
+            &transaction,
+            1,
+            1,
+            &begin(b"k", &vec![b'm'; 8 * 1_024 + 1], 60_001, [15; 16]),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn part_size_bounds_reject_more_than_256_kib() {
+    let mut connection = blob_connection();
+    let transaction = connection.transaction().unwrap();
+    blob_mutate(&transaction, 1, 1, &begin(b"k", &[], 60_001, [16; 16])).unwrap();
+    assert!(
+        blob_mutate(
+            &transaction,
+            1,
+            1,
+            &BlobMutation::PutPartRef {
+                key: b"k".to_vec(),
+                upload_id: [16; 16],
+                part_number: 1,
+                digest: [17; 32],
+                size: MAX_BLOB_PART_BYTES as u32 + 1,
+            },
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn upload_lifetime_accepts_the_one_minute_and_seven_day_bounds() {
+    let mut connection = blob_connection();
+    let transaction = connection.transaction().unwrap();
+    assert_eq!(
+        blob_mutate(&transaction, 1, 1, &begin(b"k", &[], 60_001, [18; 16])).unwrap(),
+        BlobMutationOutcome::Begun
+    );
+    assert_eq!(
+        blob_mutate(
+            &transaction,
+            1,
+            1,
+            &begin(b"k", &[], 7 * 24 * 60 * 60_000 + 1, [19; 16]),
+        )
+        .unwrap(),
+        BlobMutationOutcome::Begun
+    );
+}
+
+#[test]
+fn upload_lifetime_rejects_below_one_minute_and_past_seven_days() {
+    let mut connection = blob_connection();
+    let transaction = connection.transaction().unwrap();
+    assert!(blob_mutate(&transaction, 1, 1, &begin(b"k", &[], 60_000, [20; 16])).is_err());
+    assert!(
+        blob_mutate(
+            &transaction,
+            1,
+            1,
+            &begin(b"k", &[], 7 * 24 * 60 * 60_000 + 2, [21; 16]),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn list_rejects_limits_outside_one_to_128() {
+    let mut connection = blob_connection();
+    let transaction = connection.transaction().unwrap();
+    assert!(
+        blob_query(
+            &transaction,
+            &BlobQuery::List {
+                prefix: b"logs/".to_vec(),
+                after: None,
+                limit: 0,
+            },
+        )
+        .is_err()
+    );
+    assert!(
+        blob_query(
+            &transaction,
+            &BlobQuery::List {
+                prefix: b"logs/".to_vec(),
+                after: None,
+                limit: 129,
+            },
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn list_accepts_the_full_page_limit() {
+    let mut connection = blob_connection();
+    let transaction = connection.transaction().unwrap();
+    let result = blob_query(
+        &transaction,
+        &BlobQuery::List {
+            prefix: b"logs/".to_vec(),
+            after: None,
+            limit: 128,
+        },
+    )
+    .unwrap();
+    let BlobQueryResult::List(page) = result else {
+        panic!("list query must return a page");
+    };
+    assert!(page.objects.is_empty());
+}
+
+#[test]
+fn part_number_bounds_reject_outside_one_to_4096() {
+    let mut connection = blob_connection();
+    let transaction = connection.transaction().unwrap();
+    blob_mutate(&transaction, 1, 1, &begin(b"k", &[], 60_001, [22; 16])).unwrap();
+    for part_number in [0_u32, MAX_BLOB_PARTS + 1] {
+        assert!(
+            blob_mutate(
+                &transaction,
+                1,
+                1,
+                &BlobMutation::PutPartRef {
+                    key: b"k".to_vec(),
+                    upload_id: [22; 16],
+                    part_number,
+                    digest: [23; 32],
+                    size: 1,
+                },
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn completion_part_count_bounds_reject_outside_one_to_4096() {
+    let mut connection = blob_connection();
+    let transaction = connection.transaction().unwrap();
+    blob_mutate(&transaction, 1, 1, &begin(b"k", &[], 60_001, [24; 16])).unwrap();
+    for part_count in [0_u32, MAX_BLOB_PARTS + 1] {
+        assert!(
+            blob_mutate(
+                &transaction,
+                1,
+                1,
+                &BlobMutation::Complete {
+                    key: b"k".to_vec(),
+                    upload_id: [24; 16],
+                    part_count,
+                },
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn range_read_rejects_more_than_512_kib() {
+    let mut connection = blob_connection();
+    let transaction = connection.transaction().unwrap();
+    blob_mutate(&transaction, 1, 1, &begin(b"k", &[], 60_001, [25; 16])).unwrap();
+    blob_mutate(
+        &transaction,
+        1,
+        1,
+        &BlobMutation::PutPartRef {
+            key: b"k".to_vec(),
+            upload_id: [25; 16],
+            part_number: 1,
+            digest: [26; 32],
+            size: 4,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        blob_mutate(
+            &transaction,
+            1,
+            1,
+            &BlobMutation::Complete {
+                key: b"k".to_vec(),
+                upload_id: [25; 16],
+                part_count: 1,
+            },
+        )
+        .unwrap(),
+        BlobMutationOutcome::Committed { .. }
+    ));
+    assert!(
+        blob_query(
+            &transaction,
+            &BlobQuery::Read {
+                key: b"k".to_vec(),
+                offset: 0,
+                limit: MAX_BLOB_READ_BYTES + 1,
+            },
+        )
+        .is_err()
+    );
+}
