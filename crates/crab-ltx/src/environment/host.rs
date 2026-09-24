@@ -439,6 +439,7 @@ impl Host {
         self.clock = clock;
         self
     }
+    /// Replaces the blocking executor that drives capture and compaction.
     #[cfg(feature = "replica")]
     #[must_use]
     pub fn with_executor(mut self, executor: Arc<dyn Executor>) -> Self {

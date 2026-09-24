@@ -6,23 +6,41 @@ use std::{io, time::Duration};
 #[cfg(feature = "replica")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LtxPhase {
+    /// Local WAL capture.
     Capture,
+    /// Managed-database preparation before capture.
     Preparation,
+    /// Managed control-table schema validation.
     SchemaCheck,
+    /// Confirming the WAL holds a readable frame.
     WalExistence,
+    /// Resolving the checksum-linked WAL position.
     PositionResolution,
+    /// Reading and parsing the WAL image.
     WalRead,
+    /// Collecting the committed page map.
     PageCollection,
+    /// Validating WAL or produced LTX data.
     Verification,
+    /// Encoding LTX bytes and page records.
     Encode,
+    /// Writing LTX and index bytes locally.
     LocalWrite,
+    /// Syncing completed LTX contents.
     Fsync,
+    /// Syncing the published name's parent directory.
     ParentSync,
+    /// Checkpoint maintenance for the capture.
     Checkpoint,
+    /// Opening an exact root.
     RootOpen,
+    /// Reading root directory pages.
     Directory,
+    /// Fetching segment frames from the provider.
     FrameFetch,
+    /// Writing restored pages locally.
     RestoreWrite,
+    /// Compacting segments.
     Compaction,
 }
 
@@ -30,9 +48,13 @@ pub enum LtxPhase {
 #[cfg(feature = "replica")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LtxReadOrigin {
+    /// A read that had to reach the provider.
     Cold,
+    /// A read served by the sparse local activation.
     Sparse,
+    /// A read that triggered hydration.
     Hydrating,
+    /// A read served by a fully resident local database.
     Resident,
 }
 
@@ -40,7 +62,9 @@ pub enum LtxReadOrigin {
 #[cfg(feature = "replica")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LtxRequestOutcome {
+    /// The provider attempt returned bytes.
     Succeeded,
+    /// The provider attempt failed.
     Failed,
 }
 
@@ -67,6 +91,8 @@ pub trait LtxTelemetry: Send + Sync {
 /// reservations and an operator reserve before allowing remote downloads.
 #[cfg(feature = "replica")]
 pub trait ScratchMonitor: Send + Sync {
+    /// Rechecks host disk pressure, failing when the reservation cannot be
+    /// admitted alongside the process-wide scratch a job needs.
     fn ensure_available(&self, reserved_bytes: u64) -> io::Result<()>;
 }
 

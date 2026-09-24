@@ -8,6 +8,7 @@ use std::io;
 /// become errors to the awaiting operation; cancellation does not undo side effects.
 #[cfg(feature = "replica")]
 pub trait Executor: Send + Sync {
+    /// Accepts one blocking job; a dropped job becomes an error to its waiter.
     fn dispatch(&self, job: Box<dyn FnOnce() + Send>) -> io::Result<()>;
     /// Starts a long-lived worker independently of the caller and dispatch pool.
     ///
@@ -19,6 +20,8 @@ pub trait Executor: Send + Sync {
 /// An independently progressing worker joined after its input queue closes.
 #[cfg(feature = "replica")]
 pub trait Worker: Send + Sync {
+    /// Waits for the worker after its input queue closed; a panic on the
+    /// worker thread becomes an error here.
     fn join(self: Box<Self>) -> io::Result<()>;
 }
 
