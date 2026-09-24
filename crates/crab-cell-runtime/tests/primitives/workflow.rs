@@ -16,11 +16,12 @@ use crab_cell_runtime::peer::wire as peer_wire;
 use crab_cell_runtime::primitives::effects::EffectCommandIntent;
 use crab_cell_runtime::primitives::workflow::{
     ActivityCompletion, ActivityCompletionOutcome, ActivityLeaseOutcome, ActivitySupport,
-    ActivityTokenSource, WorkflowAction, WorkflowContext, WorkflowDecision, WorkflowDefinition,
-    WorkflowOutcome, WorkflowSignal, WorkflowStart, WorkflowStatus, install_workflow_schema,
-    workflow_cancel, workflow_claim_activities, workflow_cleanup_terminal,
-    workflow_complete_activity, workflow_extend_activity, workflow_fire_timer, workflow_signal,
-    workflow_start, workflow_validate_activity_claim,
+    ActivityTokenSource, WorkflowAction, WorkflowContext, WorkflowControl, WorkflowControlAction,
+    WorkflowDecision, WorkflowDefinition, WorkflowOutcome, WorkflowSignal, WorkflowStart,
+    WorkflowStatus, install_workflow_schema, workflow_cancel, workflow_claim_activities,
+    workflow_cleanup_terminal, workflow_complete_activity, workflow_control,
+    workflow_extend_activity, workflow_fire_timer, workflow_signal, workflow_start,
+    workflow_validate_activity_claim,
 };
 use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
@@ -521,6 +522,163 @@ fn due_timer_fires_once_and_terminal_transition_cancels_sibling_activity() {
         })
         .unwrap();
     assert_eq!(activity_state, 4);
+    transaction.commit().unwrap();
+}
+
+#[test]
+fn operator_pause_waits_for_a_live_lease_and_freezes_scheduled_work() {
+    let mut connection = connection();
+    let definition = Definition {
+        digest: Digest::from_bytes([4; 32]),
+    };
+    let support = ActivitySupport {
+        activity_type: "email".into(),
+        definition_digest: definition.digest(),
+    };
+    let transaction = connection.transaction().unwrap();
+    let (run_id, status, _) = applied(
+        workflow_start(&transaction, &source_target(), 10, &start(5), &definition).unwrap(),
+    );
+    assert_eq!(status, WorkflowStatus::Running);
+    let timer_id: [u8; 16] = transaction
+        .query_row("SELECT timer_id FROM workflow_timers", [], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let control = |now_ms: i64, action: WorkflowControlAction| {
+        workflow_control(
+            &transaction,
+            &source_target(),
+            now_ms,
+            &WorkflowControl {
+                workflow_id: b"build-42".to_vec(),
+                run_id,
+                action,
+            },
+            &definition,
+        )
+        .unwrap()
+    };
+
+    // A live activity lease blocks the operator pause.
+    let mut tokens = Tokens(0);
+    let claimed = workflow_claim_activities(
+        &transaction,
+        10,
+        1,
+        5_000,
+        std::slice::from_ref(&support),
+        &mut tokens,
+    )
+    .unwrap();
+    assert_eq!(
+        claimed.len(),
+        1,
+        "the start decision schedules one claimable activity"
+    );
+    assert_eq!(
+        control(20, WorkflowControlAction::Pause),
+        WorkflowOutcome::Busy
+    );
+
+    let completion = ActivityCompletion {
+        run_id,
+        activity_id: claimed[0].activity_id,
+        attempt: claimed[0].attempt,
+        lease_token: claimed[0].token,
+        completion_token: [8; 16],
+        result: b"sent".to_vec(),
+        failed: false,
+        retryable: false,
+    };
+    assert!(matches!(
+        workflow_complete_activity(&transaction, &source_target(), 30, &completion, &definition)
+            .unwrap(),
+        ActivityCompletionOutcome::Applied(WorkflowOutcome::Applied { .. })
+    ));
+    // The completion is an event of its own, so the pause must preserve the
+    // sequence the run has now, not the one it started with.
+    let sequence_before_pause: u64 = transaction
+        .query_row("SELECT event_sequence FROM workflow_runs", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(
+        control(40, WorkflowControlAction::Pause),
+        WorkflowOutcome::Applied {
+            run_id,
+            status: WorkflowStatus::Paused,
+            event_sequence: sequence_before_pause,
+        },
+        "pause keeps the history boundary"
+    );
+
+    // Durable work stays queued while paused, but neither class may run it.
+    assert_eq!(
+        workflow_fire_timer(
+            &transaction,
+            &source_target(),
+            41,
+            run_id,
+            timer_id,
+            &definition
+        )
+        .unwrap(),
+        WorkflowOutcome::NotRunning
+    );
+    assert!(
+        workflow_claim_activities(
+            &transaction,
+            41,
+            1,
+            5_000,
+            std::slice::from_ref(&support),
+            &mut tokens,
+        )
+        .unwrap()
+        .is_empty()
+    );
+    let state_while_paused: (i64, i64) = transaction
+        .query_row(
+            "SELECT (SELECT state FROM workflow_activities), (SELECT state FROM workflow_timers)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        state_while_paused,
+        (2, 0),
+        "the completed activity stays completed and the due timer stays unstarted while paused"
+    );
+
+    assert_eq!(
+        control(42, WorkflowControlAction::Resume),
+        WorkflowOutcome::Applied {
+            run_id,
+            status: WorkflowStatus::Running,
+            event_sequence: sequence_before_pause,
+        },
+        "resume returns the same run without synthesizing an event"
+    );
+    assert_eq!(
+        applied(
+            workflow_fire_timer(
+                &transaction,
+                &source_target(),
+                43,
+                run_id,
+                timer_id,
+                &definition
+            )
+            .unwrap()
+        ),
+        (run_id, WorkflowStatus::Completed, sequence_before_pause + 1),
+        "the timer that came due while paused fires after resume"
+    );
     transaction.commit().unwrap();
 }
 
