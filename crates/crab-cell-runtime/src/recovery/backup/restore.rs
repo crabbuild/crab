@@ -27,26 +27,31 @@ pub struct BackupRestore {
 }
 
 impl BackupRestore {
+    /// Returns the application the restore belongs to.
     #[must_use]
     pub const fn application(&self) -> crate::ApplicationId {
         self.application
     }
 
+    /// Returns the backup pin the restore verified.
     #[must_use]
     pub const fn pin(&self) -> crate::identity::RequestId {
         self.pin
     }
 
+    /// Returns how many control records the restore verified.
     #[must_use]
     pub const fn control_count(&self) -> u64 {
         self.control_count
     }
 
+    /// Returns how many immutable objects the restore verified.
     #[must_use]
     pub const fn immutable_object_count(&self) -> u64 {
         self.immutable_object_count
     }
 
+    /// Returns how many catalog shards held entries.
     #[must_use]
     pub const fn nonempty_catalog_shards(&self) -> u16 {
         self.nonempty_catalog_shards

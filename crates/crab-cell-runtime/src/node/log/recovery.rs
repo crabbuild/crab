@@ -9,17 +9,25 @@ use super::*;
 /// Exact published Cell state used to validate a recovered node-log witness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecoveryBase {
+    /// Application the recovered Cell belongs to.
     pub application: [u8; 16],
+    /// Cell epoch the recovered root was published under.
     pub cell_epoch: u64,
+    /// Published root the witness is validated against.
     pub root: crab_ltx::RootRef,
 }
 
 /// One Cell's verified tail selected from a complete node-log witness.
 pub struct RecoveredCellTail {
+    /// Application the tail belongs to.
     pub application: [u8; 16],
+    /// Cell epoch the tail extends.
     pub cell_epoch: u64,
+    /// First node-log sequence the tail covers.
     pub first_node_sequence: u64,
+    /// Last node-log sequence the tail covers.
     pub last_node_sequence: u64,
+    /// Verified overlay the tail publishes.
     pub overlay: crab_ltx::RecoveryOverlay,
 }
 

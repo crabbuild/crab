@@ -74,13 +74,17 @@ type LaneMap = Arc<Mutex<HashMap<Lane, LaneState>>>;
 /// Durable contiguous range retained by one follower lane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FollowerReceipt {
+    /// First sequence the lane retained before the append.
     pub base_sequence: u64,
+    /// Highest sequence the lane has made durable.
     pub durable_through: u64,
 }
 
 /// One bounded page from a sealed follower lane.
 pub struct FollowerTailPage {
+    /// Frames in sequence order.
     pub frames: Vec<Bytes>,
+    /// Sequence to continue from when the page filled its bound.
     pub next_sequence: Option<u64>,
 }
 
@@ -94,21 +98,25 @@ pub struct RetiredFollowerLane {
 }
 
 impl RetiredFollowerLane {
+    /// Returns the leader whose lane was retired.
     #[must_use]
     pub const fn leader(&self) -> SessionId {
         self.leader
     }
 
+    /// Returns the node-log epoch the lane belonged to.
     #[must_use]
     pub const fn epoch(&self) -> u64 {
         self.epoch
     }
 
+    /// Returns the highest sequence object storage covered.
     #[must_use]
     pub const fn covered_through(&self) -> u64 {
         self.covered_through
     }
 
+    /// Returns the logical time the lane was retired.
     #[must_use]
     pub const fn retired_at_ms(&self) -> i64 {
         self.retired_at_ms
@@ -167,6 +175,7 @@ impl FollowerStore {
         self.scan_counter.load(Ordering::Relaxed)
     }
 
+    /// Returns the bytes the store currently retains.
     #[must_use]
     pub fn retained_bytes(&self) -> u64 {
         match self.retained.lock() {
@@ -175,6 +184,7 @@ impl FollowerStore {
         }
     }
 
+    /// Returns the bytes the store may still write.
     #[must_use]
     pub fn available_bytes(&self) -> u64 {
         self.disk.available()
