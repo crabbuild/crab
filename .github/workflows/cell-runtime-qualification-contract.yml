@@ -176,6 +176,8 @@ jobs:
         run: python3 crab/scripts/check-cell-ltx-layout.py
       - name: Verify the Cell runtime policy entry points
         run: python3 crab/scripts/check-policy-entry-points.py
+      - name: Verify documented Rust snippets parse
+        run: python3 crab/scripts/check-doc-rust-fences.py
       - name: Verify the process-test-support suites
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
