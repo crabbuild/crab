@@ -1,3 +1,4 @@
+//! Shipping verified frames to follower lanes and retiring them.
 use std::{collections::VecDeque, io::Read as _, sync::Arc, time::Duration};
 
 use bytes::Bytes;

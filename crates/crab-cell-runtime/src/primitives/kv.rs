@@ -1,3 +1,4 @@
+//! KV primitive: keyed values with compare-and-swap.
 use std::collections::HashSet;
 
 use rusqlite::{Connection, OptionalExtension, Transaction, types::Value};

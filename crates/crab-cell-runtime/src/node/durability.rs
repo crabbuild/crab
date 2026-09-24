@@ -1,3 +1,4 @@
+//! Durability gate: commit tickets and fleet or object proofs.
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;

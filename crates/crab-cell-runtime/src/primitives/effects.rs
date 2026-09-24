@@ -1,3 +1,4 @@
+//! Effect primitive: delivery intents, leases, and acknowledgements.
 use prost::Message;
 use rand::RngCore;
 use rusqlite::{Connection, OptionalExtension, Transaction};

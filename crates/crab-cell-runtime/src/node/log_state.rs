@@ -1,3 +1,4 @@
+//! Node-log lifecycle state and recovery claims.
 use crate::identity::NodeId;
 use crate::identity::{Digest, SessionId};
 use crate::{Error, Result};

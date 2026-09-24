@@ -1,3 +1,4 @@
+//! Node resource ledger: memory, disk, and job admission.
 use std::sync::{Arc, Mutex, Weak};
 
 use crate::{Error, Result};

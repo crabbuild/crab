@@ -1,3 +1,4 @@
+//! Runtime schema installation and version.
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::identity::CellId;

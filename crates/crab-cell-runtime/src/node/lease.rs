@@ -1,3 +1,4 @@
+//! Node lease guard and its renewal window.
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::Notify;

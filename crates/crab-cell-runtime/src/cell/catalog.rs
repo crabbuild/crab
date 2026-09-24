@@ -1,3 +1,4 @@
+//! Sharded catalog of Cell entries, roles, and proofs.
 use bytes::Bytes;
 use crab_ltx::CellStorageLayout;
 use crab_storage::{ETag, StorageError};

@@ -1,3 +1,4 @@
+//! Workflow primitive: runs, timers, activities, signals, and controls.
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use crate::identity::RequestId;

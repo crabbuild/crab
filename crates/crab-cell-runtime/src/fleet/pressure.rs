@@ -1,3 +1,4 @@
+//! Pressure classification with hysteresis.
 use crate::{Error, Result};
 
 const MAX_PERMILLE: u16 = 1_000;

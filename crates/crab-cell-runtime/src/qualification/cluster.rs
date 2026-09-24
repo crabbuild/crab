@@ -1,3 +1,4 @@
+//! Cluster qualification receipt validation.
 use serde::Deserialize;
 use serde_json::{Map, Value};
 

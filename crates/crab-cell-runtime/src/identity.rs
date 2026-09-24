@@ -1,3 +1,4 @@
+//! Cell, tenant, application, namespace, session, node, and request identities.
 use std::fmt;
 
 use crate::{Error, Result};

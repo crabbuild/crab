@@ -1,3 +1,4 @@
+//! Per-operation release progress and migration failure records.
 use bytes::Bytes;
 use crab_ltx::CellStorageLayout;
 use crab_storage::{ETag, StorageError};

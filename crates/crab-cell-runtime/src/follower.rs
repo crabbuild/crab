@@ -1,3 +1,4 @@
+//! Follower lanes: per-leader record streams that back fleet durability proofs.
 use std::collections::{BTreeMap, HashMap, btree_map::Entry};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};

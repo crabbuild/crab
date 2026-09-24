@@ -1,3 +1,4 @@
+//! Bounded blocking pool for Activity work.
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex, mpsc},

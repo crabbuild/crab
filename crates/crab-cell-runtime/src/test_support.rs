@@ -1,3 +1,4 @@
+//! Test-only object-store instrumentation, gated behind the `test-support` feature.
 use std::{
     fmt,
     fs::OpenOptions,

@@ -1,3 +1,4 @@
+//! Signed-capacity placement planning and scoring.
 use std::cmp::Ordering;
 use std::collections::HashSet;
 

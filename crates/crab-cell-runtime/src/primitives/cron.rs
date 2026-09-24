@@ -1,3 +1,4 @@
+//! Cron primitive: fixed-interval schedules with an explicit first due time.
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use crate::codec::{BoundedEncoder, WireValue};

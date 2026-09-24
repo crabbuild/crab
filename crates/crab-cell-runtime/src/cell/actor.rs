@@ -1,3 +1,4 @@
+//! One Cell's actor: dispatcher, admission, lifecycle, requests, and runtime administration.
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},

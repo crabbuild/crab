@@ -1,3 +1,4 @@
+//! Idle Cell eviction: observations, state, and victim selection.
 use crate::fleet::resource::ResourceCost;
 use crate::identity::CellId;
 

@@ -1,3 +1,4 @@
+//! Bounded operational telemetry emitted by the runtime.
 use std::{sync::Arc, time::Duration};
 
 use crate::node::log::DurabilitySource;

@@ -1,3 +1,4 @@
+//! Compiled primitive registry: descriptors, schemas, handlers, and builder.
 mod descriptor;
 pub use builder::{Registry, RegistryBuilder};
 pub use handlers::{

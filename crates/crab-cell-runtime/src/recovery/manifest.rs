@@ -1,3 +1,4 @@
+//! Recovery manifests and the exact-root stores that serve them.
 use std::sync::Arc;
 
 use bytes::Bytes;

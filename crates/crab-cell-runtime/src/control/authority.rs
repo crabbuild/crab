@@ -1,3 +1,4 @@
+//! Versioned control records and the ETag CAS that owns them.
 use bytes::Bytes;
 use crab_ltx::CellStorageLayout;
 use crab_storage::{ETag, StorageError};

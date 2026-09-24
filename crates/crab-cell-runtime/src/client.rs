@@ -1,3 +1,4 @@
+//! Client-side Cell envelopes and the connection that carries them to the owner.
 use std::{
     collections::HashMap,
     fmt,

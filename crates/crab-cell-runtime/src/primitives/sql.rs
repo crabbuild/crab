@@ -1,3 +1,4 @@
+//! SQL primitive: typed statement batches over the Cell database.
 use rusqlite::{
     Connection, Transaction,
     hooks::{AuthAction, AuthContext, Authorization},

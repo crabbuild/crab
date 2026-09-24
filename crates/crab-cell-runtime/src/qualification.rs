@@ -1,3 +1,4 @@
+//! Qualification profiles, receipts, matrix manifests, and cluster validation.
 pub mod cluster;
 
 pub use profile::{

@@ -1,3 +1,4 @@
+//! Peer operation envelopes, signing, and transport authorization.
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use prost::Message;
 

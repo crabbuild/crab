@@ -1,3 +1,4 @@
+//! Offline retention of immutable Cell objects.
 use std::path::Path as FilePath;
 use std::sync::{Arc, Mutex};
 
