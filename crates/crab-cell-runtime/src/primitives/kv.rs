@@ -30,26 +30,36 @@ type RawEntry = (Vec<u8>, Vec<u8>, Vec<u8>, Option<i64>);
 /// One condition checked against the logical live value before any KV write.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KvCondition {
+    /// Applies only while the key has no live value.
     Absent,
+    /// Applies only while the live version matches.
     Version([u8; VERSION_BYTES]),
 }
 
 /// One key precondition in a scoped atomic operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KvCheck {
+    /// Key the condition applies to.
     pub key: Vec<u8>,
+    /// Condition the live value must satisfy.
     pub condition: KvCondition,
 }
 
 /// One ordered mutation in a scoped atomic operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KvMutation {
+    /// Writes one value.
     Put {
+        /// Key to write.
         key: Vec<u8>,
+        /// Value bytes to store.
         value: Vec<u8>,
+        /// Logical time the value expires, when it should.
         expires_at_ms: Option<i64>,
     },
+    /// Removes one key.
     Delete {
+        /// Key to remove.
         key: Vec<u8>,
     },
 }
@@ -65,39 +75,56 @@ impl KvMutation {
 /// All checks and ordered writes applied by one runtime command transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KvAtomicRequest {
+    /// Scope the checks and mutations apply to.
     pub scope: Vec<u8>,
+    /// Conditions checked before any write.
     pub checks: Vec<KvCheck>,
+    /// Ordered writes applied when every check passes.
     pub mutations: Vec<KvMutation>,
 }
 
 /// Result for one applied mutation, preserving request order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KvMutationResult {
+    /// Key the mutation wrote.
     pub key: Vec<u8>,
+    /// Version after the write, absent for a delete.
     pub version: Option<[u8; VERSION_BYTES]>,
+    /// Whether the mutation removed the key.
     pub deleted: bool,
 }
 
 /// Business outcome produced inside the runtime's application savepoint.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KvAtomicOutcome {
+    /// Every check passed and the writes were applied in order.
     Applied(Vec<KvMutationResult>),
-    PreconditionFailed { key: Vec<u8> },
+    /// A check failed; no write was applied.
+    PreconditionFailed {
+        /// Key whose condition failed.
+        key: Vec<u8>,
+    },
 }
 
 /// One live KV entry returned by get or list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KvEntry {
+    /// Entry key.
     pub key: Vec<u8>,
+    /// Live value bytes.
     pub value: Vec<u8>,
+    /// Current version.
     pub version: [u8; VERSION_BYTES],
+    /// Logical time the entry expires, when it does.
     pub expires_at_ms: Option<i64>,
 }
 
 /// One bounded, current-read page within a single scope.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KvPage {
+    /// Entries in key order.
     pub entries: Vec<KvEntry>,
+    /// Key to continue after when the page filled its limit.
     pub next_after: Option<Vec<u8>>,
 }
 
