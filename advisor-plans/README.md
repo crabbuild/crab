@@ -653,12 +653,10 @@ move into a single shared harness, and oversized files split at existing seams.
 
 | Plan | Outcome | Priority | Effort | Depends on | Status |
 | --- | --- | --- | --- | --- | --- |
-| [033](033-cell-ltx-layout-reorganization.md) | Canonical src/tests layout, `test-support` module, capability-named suites, shared harness, allow-listed in-src tests, and the layout checker for `crab-cell-runtime`/`app`/`host`/`ltx` | P1 | L | None | TODO |
+| [033](033-cell-ltx-layout-reorganization.md) | Canonical src/tests layout, `test-support` module, capability-named suites, shared harness, allow-listed in-src tests, and the layout checker for `crab-cell-runtime`/`app`/`host`/`ltx` | P1 | L | None | DONE |
 
-Stages 1–5 are behavior-free and contract-free; they may land as one PR
-independent of other Cell-runtime work. Stage 6 is decided as Option A: PR 2
-introduces the subsystem module tree, migrates `crab-http-server`,
-`crab-cell-app`, and `crab-cell-host` to module paths, then freezes the root
-prelude in `crates/crab-cell-runtime/api-prelude.txt`. The Cellule-side rename,
-hardening merge, and release work are separate and are described in the plan's
-handoff section.
+All six stages landed (option A for the module tree): the subsystem modules,
+the capability suites with their shared harness, the documented public APIs,
+the deduplicated helpers, and the layout gate now on `main`. The Cellule-side
+rename, hardening merge, and release work are separate and are described in the
+plan's handoff section.

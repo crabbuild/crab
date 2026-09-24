@@ -19,7 +19,10 @@
   Cell-runtime work. Stage 6 reshapes the public module tree and needs the
   consumer migration described there.
 - Planned at: `3ab2526492b` (`#291`), 2026-09-22.
-- Status: TODO.
+- Status: DONE — all six stages landed, and
+  `crab/scripts/check-cell-ltx-layout.py` enforces the layout, the allow-list,
+  the guide paths, the frozen root surfaces, the extraction dependency set, and
+  the documented test paths. See "Status 2026-09-23" below for what shipped.
 - Decision recorded 2026-09-22: stage 6 uses **Option A**, the subsystem module
   tree in "Target module tree".
 - Delivery: PR 1 = stages 1–5 (layout, no API change); PR 2 = stage 6 (module
