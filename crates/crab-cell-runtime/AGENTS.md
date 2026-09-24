@@ -60,6 +60,7 @@ own one concern each. Module files sit beside their root (`foo.rs` + `foo/`).
 | Change publication | `src/publication.rs` | `src/recovery/`, `tests/runtime/publication.rs` |
 | Change node log or durability | `src/node/` | `src/follower.rs`, `tests/fleet/` |
 | Change placement or pressure | `src/fleet/` | `tests/fleet/`, `docs/canonical-ltx-scaling.md` |
+| Change pressure sampling or shedding | `src/cell/actor/task.rs` | `src/cell/actor/runtime.rs`, `src/fleet/pressure.rs`, `src/fleet/telemetry.rs`, `tests/fleet/pressure.rs` |
 
 ## Layout and tests
 
@@ -85,6 +86,12 @@ own one concern each. Module files sit beside their root (`foo.rs` + `foo/`).
   (`src/recovery/manifest.rs`).
 - Staged xorbs flush before any bundle publication.
 - Every acquired lock is released on success, error, cancellation, and timeout.
+- A node sheds settled Cells only on sustained evidence: the actor samples its own
+  reservation ledger on its tick, the classifier hands a tier to the bounded
+  eviction path only after a full dwell window above the enter threshold, and
+  that tier is what the node reports through
+  `CellTelemetry::pressure_state` (`src/cell/actor/task.rs`,
+  `src/fleet/pressure.rs`).
 - `src/coordination.rs` stays sans-I/O: no `async`, no clock, no storage
   (`crab/scripts/check-cell-ltx-layout.py` enforces it).
 
