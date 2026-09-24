@@ -4,7 +4,8 @@ cell_layout.rs  # asserts private cell layout helpers
 codec.rs  # asserts private LTX codec internals
 db.rs  # drives the private managed database and admissions
 environment/directory_cache.rs  # declares crate-private test modules
-environment.rs  # drives the private disk budget, cache, and executor hooks
+environment/tests.rs  # drives the private disk budget, cache, and executor hooks
+environment.rs  # declares crate-private test modules
 error.rs  # asserts private error classification
 format_tests.rs  # independent literal LTX vectors over private encoders
 host.rs  # asserts private host file helpers
