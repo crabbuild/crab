@@ -11,10 +11,9 @@ use std::sync::{
 
 const IN_MEMORY_INDEX_PAGE_LIMIT: usize = 64 << 10;
 
-#[cfg(feature = "replica")]
+// The captured index only carries bytes when the replica feature is on; keeping
+// the type uniform lets the cut path stay single-sourced without binding unit.
 type CapturedIndex = Option<Vec<u8>>;
-#[cfg(not(feature = "replica"))]
-type CapturedIndex = ();
 
 struct TimedWriter<W> {
     inner: W,
@@ -537,7 +536,7 @@ impl CaptureEngine {
             }
             encoder.close(checksums.checksum())?;
             #[cfg(not(feature = "replica"))]
-            let captured_index = ();
+            let captured_index = None;
             let output = encoder
                 .into_writer()
                 .into_inner()
