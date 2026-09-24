@@ -22,11 +22,17 @@ const LEASE_LOST_TAG: u8 = 4;
 
 /// Compile-time operation identifiers for source effect supervision.
 pub trait EffectModule: Send + Sync + 'static {
+    /// Module the effect surfaces register under.
     const MODULE: &'static str;
+    /// Codec version of the claim and lease commands.
     const CODEC_VERSION: u32 = 1;
+    /// Command id that claims source effects.
     const CLAIM_COMMAND_ID: u32;
+    /// Command id that applies lease transitions.
     const LEASE_COMMAND_ID: u32;
+    /// Query id that revalidates published claims.
     const VALIDATE_QUERY_ID: u32;
+    /// Query id that reads one effect's status.
     const STATUS_QUERY_ID: u32;
 }
 
@@ -44,7 +50,9 @@ pub fn register_effect_delivery<M: EffectModule>(
 /// Bounded claim parameters for one source Cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EffectClaimRequest {
+    /// Maximum effects to claim.
     pub limit: u32,
+    /// Lease duration granted to each claim.
     pub lease_ms: u32,
 }
 
@@ -78,6 +86,7 @@ impl<M: EffectModule> Command for EffectClaimCommand<M> {
 /// Published claims to revalidate before network emission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EffectValidateRequest {
+    /// Claims to revalidate against the source ledger.
     pub claimed: Vec<EffectClaim>,
 }
 
@@ -103,6 +112,7 @@ impl<M: EffectModule> Query for EffectValidateClaimQuery<M> {
 /// Selects one exact source effect by its stable ID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EffectStatusRequest {
+    /// Effect to read.
     pub effect_id: [u8; 32],
 }
 
@@ -124,14 +134,18 @@ impl<M: EffectModule> Query for EffectStatusQuery<M> {
 /// Acknowledges one target result for an exact source lease.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EffectAckRequest {
+    /// Exact source lease to acknowledge.
     pub lease: EffectLease,
+    /// Target result bytes to record.
     pub result: Vec<u8>,
 }
 
 /// Selects one idempotent source lease transition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EffectLeaseRequest {
+    /// Records a target result for the lease.
     Ack(EffectAckRequest),
+    /// Returns the effect for another delivery attempt.
     Retry(EffectLease),
 }
 
@@ -176,6 +190,7 @@ pub struct EffectSource<M> {
 }
 
 impl<M: EffectModule> EffectSource<M> {
+    /// Binds one source Cell client to this module's effect surfaces.
     #[must_use]
     pub fn new(client: CellClient, target: CellTarget) -> Self {
         Self {
@@ -185,11 +200,13 @@ impl<M: EffectModule> EffectSource<M> {
         }
     }
 
+    /// Returns the source Cell this handle targets.
     #[must_use]
     pub const fn target(&self) -> &CellTarget {
         &self.target
     }
 
+    /// Claims a bounded batch of source effects through ordinary publication.
     pub async fn claim(
         &self,
         identity: crate::cell::executor::MutationIdentity,
@@ -200,6 +217,7 @@ impl<M: EffectModule> EffectSource<M> {
             .await
     }
 
+    /// Revalidates exact leases at or after the given receipt.
     pub async fn validate(
         &self,
         claimed: Vec<EffectClaim>,
@@ -226,6 +244,7 @@ impl<M: EffectModule> EffectSource<M> {
             .await
     }
 
+    /// Acknowledges one target result for a published claim.
     pub async fn ack(
         &self,
         identity: crate::cell::executor::MutationIdentity,
@@ -245,6 +264,7 @@ impl<M: EffectModule> EffectSource<M> {
             .await
     }
 
+    /// Returns a published claim for another delivery attempt.
     pub async fn retry(
         &self,
         identity: crate::cell::executor::MutationIdentity,
