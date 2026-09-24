@@ -26,11 +26,15 @@ use crate::primitives::workflow::{
     workflow_cleanup_terminal_bounded, workflow_fail_one_expired_activity,
     workflow_fire_one_due_timer, workflow_reclaim_expired_bounded,
 };
+use crate::primitives::{blob, cron, kv, queue, workflow};
 use crate::{Error, Result};
 
 const WORKFLOW_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const MAX_TICK_ITEMS: usize = 128;
 const CONTROL_BATCH: usize = 32;
+/// Unconditional classes: expired requests, inbox, terminal effects, due
+/// effects, and expired effect leases.
+const BASE_MAINTENANCE_CLASSES: usize = 5;
 
 #[derive(Clone, Copy)]
 struct ProgressObservation {
@@ -252,13 +256,7 @@ pub(crate) fn scheduler_tick_at(
     }
     let tables = installed_tables(transaction)?;
     let mut effects = EffectBatch::new(transaction, source, command_sequence, logical_time_ms)?;
-    let classes = 5
-        + usize::from(tables.contains("kv_entries"))
-        + usize::from(tables.contains("blob_uploads"))
-        + usize::from(tables.contains("cron_schedules"))
-        + 3 * usize::from(tables.contains("queue_messages"))
-        + 4 * usize::from(tables.contains("workflow_activities"));
-    let mut budget = MaintenanceBudget::new(classes)?;
+    let mut budget = MaintenanceBudget::new(reserved_classes(&tables))?;
 
     budget.run(|limit| {
         transaction
@@ -273,13 +271,13 @@ pub(crate) fn scheduler_tick_at(
     budget.run(|limit| effect_expire_ready_bounded(transaction, logical_time_ms, limit))?;
     budget.run(|limit| effect_reclaim_expired_bounded(transaction, logical_time_ms, limit))?;
 
-    if tables.contains("kv_entries") {
+    if tables.contains(kv::KV_TABLE) {
         budget.run(|limit| kv_cleanup_expired_bounded(transaction, logical_time_ms, limit))?;
     }
-    if tables.contains("blob_uploads") {
+    if tables.contains(blob::BLOB_TABLE) {
         budget.run(|limit| blob_cleanup_expired(transaction, logical_time_ms, limit))?;
     }
-    if tables.contains("cron_schedules") {
+    if tables.contains(cron::CRON_TABLE) {
         budget.run(|limit| {
             cron_fire_due_bounded(
                 transaction,
@@ -291,7 +289,7 @@ pub(crate) fn scheduler_tick_at(
             )
         })?;
     }
-    if tables.contains("queue_messages") {
+    if tables.contains(queue::QUEUE_TABLE) {
         budget.run(|limit| queue_cleanup_expired_bounded(transaction, logical_time_ms, limit))?;
         budget.run(|limit| {
             if let Some(target) = queue_dead_letter {
@@ -320,7 +318,7 @@ pub(crate) fn scheduler_tick_at(
             }
         })?;
     }
-    if tables.contains("workflow_activities") {
+    if tables.contains(workflow::WORKFLOW_TABLE) {
         budget
             .run(|limit| workflow_cleanup_terminal_bounded(transaction, logical_time_ms, limit))?;
         budget.run(|limit| {
@@ -362,13 +360,13 @@ pub(crate) fn scheduler_tick_at(
     budget.fill(|limit| inbox_cleanup_expired_bounded(transaction, logical_time_ms, limit))?;
     budget.fill(|limit| effect_expire_ready_bounded(transaction, logical_time_ms, limit))?;
     budget.fill(|limit| effect_reclaim_expired_bounded(transaction, logical_time_ms, limit))?;
-    if tables.contains("kv_entries") {
+    if tables.contains(kv::KV_TABLE) {
         budget.fill(|limit| kv_cleanup_expired_bounded(transaction, logical_time_ms, limit))?;
     }
-    if tables.contains("blob_uploads") {
+    if tables.contains(blob::BLOB_TABLE) {
         budget.fill(|limit| blob_cleanup_expired(transaction, logical_time_ms, limit))?;
     }
-    if tables.contains("cron_schedules") {
+    if tables.contains(cron::CRON_TABLE) {
         budget.fill(|limit| {
             cron_fire_due_bounded(
                 transaction,
@@ -380,7 +378,7 @@ pub(crate) fn scheduler_tick_at(
             )
         })?;
     }
-    if tables.contains("queue_messages") {
+    if tables.contains(queue::QUEUE_TABLE) {
         budget.fill(|limit| {
             if let Some(target) = queue_dead_letter {
                 let mut dead_letter = QueueDeadLetterWriter::new(target, &mut effects);
@@ -408,7 +406,7 @@ pub(crate) fn scheduler_tick_at(
             }
         })?;
     }
-    if tables.contains("workflow_activities") {
+    if tables.contains(workflow::WORKFLOW_TABLE) {
         budget.fill(|limit| {
             repeat(limit, || {
                 workflow_fail_one_expired_activity(
@@ -434,6 +432,7 @@ pub(crate) fn scheduler_tick_at(
             })
         })?;
     }
+    budget.finish()?;
     Ok(SchedulerTickOutcome {
         processed: u32::try_from(budget.processed())
             .map_err(|_| Error::Command("scheduler Tick count overflow"))?,
@@ -500,6 +499,17 @@ impl MaintenanceBudget {
     fn processed(&self) -> usize {
         MAX_TICK_ITEMS - self.remaining
     }
+
+    /// Confirms every reserved class ran.
+    ///
+    /// A section that stops running would otherwise keep its reserved share and
+    /// silently lower the Tick's usable work, hiding the missing maintenance.
+    fn finish(&self) -> Result<()> {
+        if self.remaining_classes != 0 {
+            return Err(Error::Command("scheduler maintenance class mismatch"));
+        }
+        Ok(())
+    }
 }
 
 fn repeat(limit: usize, mut operation: impl FnMut() -> Result<bool>) -> Result<usize> {
@@ -555,7 +565,7 @@ pub fn scheduler_next_due_ms(
         &mut next,
     )?;
 
-    if tables.contains("kv_entries") {
+    if tables.contains(kv::KV_TABLE) {
         include_minimum(
             transaction,
             "SELECT min(expires_at_ms) FROM kv_entries INDEXED BY kv_expiry WHERE expires_at_ms IS NOT NULL",
@@ -563,7 +573,7 @@ pub fn scheduler_next_due_ms(
             &mut next,
         )?;
     }
-    if tables.contains("queue_messages") {
+    if tables.contains(queue::QUEUE_TABLE) {
         let exhausted_ready: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM queue_messages INDEXED BY queue_attempts WHERE state = 0 AND attempt >= ?1)",
             [i64::from(MAX_ATTEMPTS)],
@@ -591,7 +601,7 @@ pub fn scheduler_next_due_ms(
             &mut next,
         )?;
     }
-    if tables.contains("workflow_activities") {
+    if tables.contains(workflow::WORKFLOW_TABLE) {
         include_minimum(
             transaction,
             "SELECT min(due_at_ms) FROM workflow_activities INDEXED BY activities_due WHERE state = 0",
@@ -627,7 +637,7 @@ pub fn scheduler_next_due_ms(
             merge_due(retention, logical_time_ms, &mut next)?;
         }
     }
-    if tables.contains("blob_uploads") {
+    if tables.contains(blob::BLOB_TABLE) {
         include_minimum(
             transaction,
             "SELECT min(expires_at_ms) FROM blob_uploads INDEXED BY blob_upload_expiry WHERE NOT EXISTS (SELECT 1 FROM blob_objects WHERE blob_objects.upload_id = blob_uploads.upload_id)",
@@ -635,7 +645,7 @@ pub fn scheduler_next_due_ms(
             &mut next,
         )?;
     }
-    if tables.contains("cron_schedules") {
+    if tables.contains(cron::CRON_TABLE) {
         include_minimum(
             transaction,
             "SELECT min(next_due_ms) FROM cron_schedules INDEXED BY cron_due WHERE enabled = 1",
@@ -646,14 +656,44 @@ pub fn scheduler_next_due_ms(
     Ok(next)
 }
 
-fn installed_tables(transaction: &Transaction<'_>) -> Result<HashSet<String>> {
-    let mut statement = transaction.prepare(
-        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('kv_entries', 'queue_messages', 'workflow_activities', 'blob_uploads', 'cron_schedules')",
-    )?;
-    let tables = statement
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<std::result::Result<HashSet<_>, _>>()?;
-    Ok(tables)
+/// Optional primitive tables the scheduler maintains, with the Tick classes
+/// each one consumes.
+///
+/// The capability probe, the class budget, and the maintenance guards all read
+/// this list, so a renamed table cannot silently drop a primitive's
+/// maintenance. A class count must equal the number of `MaintenanceBudget::run`
+/// calls its section performs, which `MaintenanceBudget::finish` enforces.
+const PRIMITIVE_TABLES: [(&str, usize); 5] = [
+    (kv::KV_TABLE, 1),
+    (queue::QUEUE_TABLE, 3),
+    (workflow::WORKFLOW_TABLE, 4),
+    (blob::BLOB_TABLE, 1),
+    (cron::CRON_TABLE, 1),
+];
+
+/// Probes the optional primitive tables the Cell schema currently installs.
+fn installed_tables(transaction: &Transaction<'_>) -> Result<HashSet<&'static str>> {
+    let mut statement =
+        transaction.prepare("SELECT name FROM sqlite_schema WHERE type = 'table'")?;
+    let mut rows = statement.query([])?;
+    let mut installed = HashSet::new();
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(0)?;
+        if let Some((table, _)) = PRIMITIVE_TABLES.iter().find(|(table, _)| *table == name) {
+            installed.insert(*table);
+        }
+    }
+    Ok(installed)
+}
+
+/// Classes one Tick reserves for the installed primitives.
+fn reserved_classes(tables: &HashSet<&'static str>) -> usize {
+    BASE_MAINTENANCE_CLASSES
+        + PRIMITIVE_TABLES
+            .iter()
+            .filter(|(table, _)| tables.contains(table))
+            .map(|(_, classes)| classes)
+            .sum::<usize>()
 }
 
 fn include_minimum(
@@ -679,4 +719,84 @@ fn merge_due(value: i64, logical_time_ms: i64, next: &mut Option<i64>) -> Result
     let value = value.max(logical_time_ms);
     *next = Some(next.map_or(value, |current| current.min(value)));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crab_ltx::rusqlite::Connection;
+
+    use super::*;
+
+    fn connection() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/runtime.sql"))
+            .unwrap();
+        connection
+    }
+
+    const PRIMITIVE_SCHEMAS: [&str; 5] = [
+        include_str!("../migrations/kv.sql"),
+        include_str!("../migrations/queue.sql"),
+        include_str!("../migrations/workflow.sql"),
+        include_str!("../migrations/blob.sql"),
+        include_str!("../migrations/cron.sql"),
+    ];
+
+    #[test]
+    fn declared_primitive_tables_are_installed_by_their_migrations() {
+        let mut seen = HashSet::new();
+        for (table, _) in PRIMITIVE_TABLES {
+            let declaration = format!("CREATE TABLE {table}");
+            assert!(
+                seen.insert(table),
+                "primitive table {table} is declared twice"
+            );
+            assert!(
+                PRIMITIVE_SCHEMAS
+                    .iter()
+                    .any(|migration| migration.contains(&declaration)),
+                "no migration declares {declaration}"
+            );
+        }
+    }
+
+    #[test]
+    fn probe_tracks_every_installed_primitive_schema() {
+        let mut partial_connection = connection();
+        partial_connection
+            .execute_batch(include_str!("../migrations/kv.sql"))
+            .unwrap();
+        let transaction = partial_connection.transaction().unwrap();
+        let partial = installed_tables(&transaction).unwrap();
+        drop(transaction);
+        assert!(partial.contains(kv::KV_TABLE));
+        assert!(!partial.contains(queue::QUEUE_TABLE));
+        assert_eq!(reserved_classes(&partial), BASE_MAINTENANCE_CLASSES + 1);
+
+        let mut complete_connection = connection();
+        for schema in PRIMITIVE_SCHEMAS {
+            complete_connection
+                .execute_batch(schema)
+                .expect("primitive schema installs");
+        }
+        let transaction = complete_connection.transaction().unwrap();
+        let complete = installed_tables(&transaction).unwrap();
+        assert_eq!(complete.len(), PRIMITIVE_TABLES.len());
+        for (table, _) in PRIMITIVE_TABLES {
+            assert!(complete.contains(table), "{table} is not reported");
+        }
+        assert_eq!(reserved_classes(&complete), BASE_MAINTENANCE_CLASSES + 10);
+    }
+
+    #[test]
+    fn budget_finish_rejects_a_reserved_class_that_never_ran() {
+        let mut unused = MaintenanceBudget::new(2).unwrap();
+        unused.run(|_| Ok(0)).unwrap();
+        assert!(unused.finish().is_err());
+
+        let mut exhausted = MaintenanceBudget::new(1).unwrap();
+        exhausted.run(|_| Ok(0)).unwrap();
+        exhausted.finish().unwrap();
+    }
 }
