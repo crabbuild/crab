@@ -2369,6 +2369,12 @@ mod tests {
         );
         assert!(rendered.contains("crab_cell_durability_proofs_total{source=\"fleet\"} 1"));
         assert!(rendered.contains("crab_cell_durability_proofs_total{source=\"object\"} 1"));
+        // The proof counters alone cannot show a slow member: the wait
+        // histogram is what proves how long each source blocked the commit.
+        assert!(rendered.contains("crab_cell_durability_wait_seconds_count{source=\"fleet\"} 1"));
+        assert!(rendered.contains("crab_cell_durability_wait_seconds_count{source=\"object\"} 1"));
+        assert!(rendered.contains("crab_cell_durability_wait_seconds_sum{source=\"fleet\"} 0.025"));
+        assert!(rendered.contains("crab_cell_durability_wait_seconds_sum{source=\"object\"} 0.05"));
         assert!(rendered.contains("crab_cell_node_log_append_bytes_total{result=\"acked\"} 512"));
         assert!(rendered.contains("crab_cell_durability_submissions_total{outcome=\"fleet\"} 1"));
         assert!(
