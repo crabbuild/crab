@@ -254,3 +254,58 @@ Remaining work on this surface, in order: measured per-Cell cost
 (`resource.rs` reservations plus recent demand instead of constants), a
 shared fleet-wide movement budget, and the pressure wiring in P0 item 1 so
 shedding and balancing cannot both fire from the same skew.
+
+## Status after the first implementation pass
+
+Landed, with the merged PR that carries the evidence:
+
+| Item | Landing | Evidence |
+| --- | --- | --- |
+| P1 7 per-primitive observability | #303 | `CellTelemetry::primitive_operation` reported from `LocalCellTransport` and `PeerDispatcher`; `crab_cell_primitive_operations_total{module,kind,outcome}` and `crab_cell_primitive_operation_seconds{module,kind}` registered from `Registry::module_names()` |
+| P2 9 dead placement inputs | #302 | `locality_bonus` and its score weight removed; `PlacementPressure` documents why peers reach only the critical class |
+| P2 12 twin-gate check | #304 | `crab/scripts/check-policy-entry-points.py` runs beside the crate layout gate in the cell runtime workflow |
+| Scheduler capability drift | #301 | `PRIMITIVE_TABLES` single-sources the probe, the guards, and the class budget; `MaintenanceBudget::finish` fails a Tick whose reserved class never ran |
+| Scheduler gate coverage | #299 | Blob and Cron capability-gate tests |
+| Durability submission outcomes | #296 | `DurabilitySubmissionOutcome` plus `crab_cell_durability_submissions_total{outcome}` |
+| LTX admission race | #298 | `reconcile_admissions_locked` drops a budget hook that died during the call |
+| Closed-ledger attribution | #297 | Ledger admission hooks carry the session that installed them |
+| P1 4 Cron contract | this branch | `docs/primitives.md` states that schedules are fixed intervals with an explicit first due time, and that expressions and time zones stay above the primitive |
+
+Deferred seams are now recorded in the policy inventory instead of living only
+in review memory: `observe_pressure` and `evict_idle` (P0 1), the Blob
+`sweep_unreferenced` helper (P0 2), and `takeover_unpublished`, which the router
+never reaches because it fails closed on a rootless control record.
+
+### Unpublished repository initialization needs a decision
+
+`initialize_repository` writes `Control::initial` — `Recovering`, `root: None`,
+owner is the job's freshly minted session — and only then bootstraps and
+publishes (`crates/crab-http-server/src/cells/initializer.rs`,
+`crates/crab-cell-runtime/src/control.rs`). A crash inside that window leaves the
+Cell unpublished, and the retry cannot repair it:
+
+- the retry runs with a new session, so it refuses with "offline repository
+  initialization cannot fence an existing Cell owner"; it cannot mint a
+  `NodeTakeoverProof` because it runs unleased and has no directory;
+- catalog `provision` is idempotent for an identical entry
+  (`src/cell/catalog.rs`), so the retry reaches that refusal instead of
+  re-provisioning;
+- the router fails closed on a rootless control record
+  (`src/cells/router.rs`), so the Cell stays inactive.
+
+`CellRuntime::takeover_unpublished` implements exactly this recovery: fence the
+dead unpublished owner, re-initialize through a caller-supplied closure, and
+publish. It has no production caller and is recorded as deferred until the
+choice is made: give the initializer (or a directory-backed operator path) that
+takeover, give the initializer a stable per-repository owner session so a retry
+resumes its own unfinished activation, or state that an unpublished Cell is
+abandoned and remove the API. The stable-session option needs the concurrent
+initializer case worked out first: today two runs are separated by their session
+identities, and reusing one would let both attempt the same publication.
+
+Still open, in the order the audit proposed: P0 1 pressure wiring (needs the
+decision to feed the classifier and sign the tier), P0 2 Blob collector,
+P0 3 protected provider proof, P1 5 fleet-wide drain serialization, P1 6
+slow-member backstop, P1 8 queue batch send (no production sender exists yet,
+so this waits for a caller), P2 10 measured per-Cell cost, and P2 11 primitive
+simulation parity.

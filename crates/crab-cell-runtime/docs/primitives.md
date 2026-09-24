@@ -237,6 +237,14 @@ The destination receives `CronInvocation`, which includes schedule ID, generatio
 | Delivery | Durable effect with destination inbox deduplication |
 | Controls | Upsert, pause, resume at an explicit time, delete |
 
+A schedule is a fixed interval plus an explicit first due time. Cron
+expressions and time zones are not part of this contract: `Upsert` takes
+`interval_ms` inside the interval bounds above and every fire advances the
+schedule by exactly one interval. An application that needs calendar semantics
+computes the next due time itself and resumes the schedule at that instant with
+the documented controls, so the expression dialect and zone database stay above
+the primitive.
+
 Blob upload lifetime and Cron's first-due window are evaluated from the
 mutation's issued timestamp. The serialized Cell still rejects a Blob upload
 whose expiry has passed before acceptance. A Cron schedule whose due time
