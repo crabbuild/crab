@@ -6,8 +6,19 @@ use super::*;
 async fn actor_pressure_observation_uses_hysteresis_and_shared_eviction_path() {
     let session = SessionId::from_bytes([41; 16]);
     let runtime = CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 1_024, session).unwrap();
+    // The actor samples its own ledger on the wall clock, so keep both
+    // observations ahead of any tick that could run while this test is
+    // scheduled.
+    let base_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+        + 5_000;
     let high = PressureSample {
-        at_ms: 0,
+        at_ms: base_ms,
         memory_used_permille: 900,
         disk_used_permille: 100,
         jobs_used_permille: 100,
@@ -20,7 +31,7 @@ async fn actor_pressure_observation_uses_hysteresis_and_shared_eviction_path() {
     assert_eq!(
         runtime
             .observe_pressure(PressureSample {
-                at_ms: 1_000,
+                at_ms: base_ms + 1_000,
                 ..high
             })
             .await
@@ -30,6 +41,78 @@ async fn actor_pressure_observation_uses_hysteresis_and_shared_eviction_path() {
     assert_eq!(runtime.evict_idle(1).await.unwrap(), 0);
     runtime.shutdown().await.unwrap();
 }
+
+/// Reserves retained bytes until the memory ledger reaches `target_permille`.
+fn press_memory_ledger(
+    runtime: &CellRuntime,
+    target_permille: u64,
+) -> crab_cell_runtime::cell::actor::NodeByteReservation {
+    let stats = runtime.stats();
+    let limit =
+        u64::try_from(stats.resident_capacity_bytes() + stats.retained_capacity_bytes()).unwrap();
+    let used = u64::try_from(stats.resident_bytes() + stats.retained_bytes()).unwrap();
+    let target = limit * target_permille / 1_000;
+    assert!(target > used, "the reservation already exceeds the target");
+    runtime
+        .try_reserve_node_bytes(usize::try_from(target - used).unwrap())
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn node_ledger_pressure_sheds_a_settled_cell_without_an_external_sample() {
+    let fixture = fixture_for(b"ledger-pressure-shed");
+    let session = SessionId::from_bytes([121; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 * 1024 * 1024, session).unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, session).await;
+    // Hold the reservation across the samples the classifier needs to see.
+    let reservation = press_memory_ledger(&runtime, 850);
+
+    let authority = CellAuthority::new(fixture.layout.clone());
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            if runtime.unreleased_cell_count().await.unwrap() == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("sustained ledger pressure must shed the settled Cell");
+
+    let idle = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(idle.value().state, ControlState::Idle);
+    assert!(idle.value().owner.is_none());
+    assert_eq!(runtime.stats().active_cells(), 0);
+
+    drop(reservation);
+    drop(handle);
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn node_ledger_below_the_soft_reserve_keeps_the_settled_cell() {
+    let fixture = fixture_for(b"ledger-pressure-hold");
+    let session = SessionId::from_bytes([122; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 * 1024 * 1024, session).unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, session).await;
+    let reservation = press_memory_ledger(&runtime, 500);
+
+    // Longer than the classifier's dwell and the actor's sample interval.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert_eq!(runtime.unreleased_cell_count().await.unwrap(), 1);
+    assert_eq!(runtime.stats().active_cells(), 1);
+
+    drop(reservation);
+    handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn churn_evicts_idle_cells_and_restores_exact_roots() {
     let first = fixture_for(b"churn-first");
