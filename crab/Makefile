@@ -358,6 +358,9 @@ crate-behavior-check:
 cell-ltx-layout-check:
 	@$(PYTHON) scripts/check-cell-ltx-layout.py
 
+policy-entry-point-check:
+	@$(PYTHON) scripts/check-policy-entry-points.py
+
 shipped-binary-version-check:
 	@$(PYTHON) scripts/release/check-shipped-binary-versions.py --cargo "$(CARGO)"
 
