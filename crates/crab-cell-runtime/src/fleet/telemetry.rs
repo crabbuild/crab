@@ -10,12 +10,32 @@ pub enum ResidentRouteOutcome {
     Refused,
 }
 
+/// Outcome of one commit's attempt to use the node's enrolled follower lane.
+///
+/// A commit that cannot use its lane still succeeds through object coverage, so
+/// `Unavailable` and `Rejected` are the only signals that a node intended fleet
+/// durability and silently fell back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DurabilitySubmissionOutcome {
+    /// An enrolled lane accepted the captured commit for shipping.
+    Fleet,
+    /// This host installs no node-log durability provider at all.
+    Unsupported,
+    /// A provider exists, but no lane is enrolled yet.
+    Unavailable,
+    /// The enrolled lane refused or fenced the submission.
+    Rejected,
+}
+
 /// Bounded operational events emitted by the Cell durability runtime.
 ///
 /// Implementations must keep labels finite and must not block the Cell actor.
 pub trait CellTelemetry: Send + Sync {
     /// Records one completed fleet or object durability proof.
     fn durability_proof(&self, _source: DurabilitySource, _waited: Duration) {}
+
+    /// Records how one commit's node-log submission resolved.
+    fn durability_submission(&self, _outcome: DurabilitySubmissionOutcome) {}
 
     /// Records bytes sent to follower append lanes and whether every lane acknowledged them.
     fn node_log_append(&self, _acknowledged: bool, _bytes: u64) {}
@@ -58,6 +78,12 @@ impl CellTelemetryHandle {
     pub(crate) fn durability_proof(&self, source: DurabilitySource, waited: Duration) {
         if let Some(telemetry) = self.inner.get() {
             telemetry.durability_proof(source, waited);
+        }
+    }
+
+    pub(crate) fn durability_submission(&self, outcome: DurabilitySubmissionOutcome) {
+        if let Some(telemetry) = self.inner.get() {
+            telemetry.durability_submission(outcome);
         }
     }
 
@@ -139,9 +165,14 @@ mod tests {
         phases: Mutex<Vec<(crab_ltx::LtxPhase, bool)>>,
         logical_reads: Mutex<Vec<crab_ltx::LtxReadOrigin>>,
         requests: Mutex<Vec<(crab_ltx::LtxReadOrigin, crab_ltx::LtxRequestOutcome, u64)>>,
+        submissions: Mutex<Vec<DurabilitySubmissionOutcome>>,
     }
 
     impl CellTelemetry for RecordingTelemetry {
+        fn durability_submission(&self, outcome: DurabilitySubmissionOutcome) {
+            self.submissions.lock().unwrap().push(outcome);
+        }
+
         fn ltx_phase(&self, phase: crab_ltx::LtxPhase, _: Duration, succeeded: bool) {
             self.phases.lock().unwrap().push((phase, succeeded));
         }
@@ -179,6 +210,8 @@ mod tests {
             4_096,
         );
         handle.resident_route(ResidentRouteOutcome::Hit);
+        handle.durability_submission(DurabilitySubmissionOutcome::Unavailable);
+        handle.durability_submission(DurabilitySubmissionOutcome::Fleet);
 
         assert_eq!(
             *recording.phases.lock().unwrap(),
@@ -195,6 +228,13 @@ mod tests {
                 crab_ltx::LtxRequestOutcome::Failed,
                 4_096,
             )]
+        );
+        assert_eq!(
+            *recording.submissions.lock().unwrap(),
+            vec![
+                DurabilitySubmissionOutcome::Unavailable,
+                DurabilitySubmissionOutcome::Fleet,
+            ]
         );
     }
 }
