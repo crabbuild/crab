@@ -24,7 +24,12 @@ node/log.rs  # asserts private proof state
 node/log_recovery/tests.rs  # uses private recovery page bounds and witness records
 node/log_recovery.rs  # declares crate-private test modules
 node/log_shipper.rs  # asserts private shipping queue internals
-node/tests.rs  # asserts private node-directory cache and record handling
+node/tests/candidates.rs  # asserts private recovery-candidate windows and snapshots
+node/tests/log.rs  # asserts private node-log enrollment and takeover authority
+node/tests/placement.rs  # asserts private signed-capacity placement
+node/tests/records.rs  # asserts private advertisement records
+node/tests/sessions.rs  # asserts private session listing, claims, and collection
+node/tests.rs  # declares crate-private test modules; holds the shared fixtures
 node.rs  # declares crate-private test modules
 peer/tests.rs  # uses the private peer wire bound
 peer.rs  # declares crate-private test modules
