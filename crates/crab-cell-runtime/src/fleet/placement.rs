@@ -26,9 +26,13 @@ const BALANCE_DEADBAND_PERCENT: u128 = 2;
 /// soft and hard pressure remain local until the tier is signed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PlacementPressure {
+    /// No pressure: the node accepts placements.
     Normal,
+    /// Soft pressure: the node paces optional work.
     Constrained,
+    /// Hard pressure on one dimension: the node sheds load.
     Shedding,
+    /// Critical pressure on both dimensions: the node takes no new ownership.
     Critical,
 }
 
@@ -39,23 +43,41 @@ pub enum PlacementPressure {
 /// ineligible rather than interpreting it as zero load.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlacementObservation {
+    /// Node that produced the observation.
     pub node: NodeId,
+    /// Boot session that signed it.
     pub session: SessionId,
+    /// Logical time the sample was taken.
     pub observed_at_ms: i64,
+    /// Total memory the node reports.
     pub memory_capacity_bytes: u64,
+    /// Free memory at sample time.
     pub free_memory_bytes: u64,
+    /// Total scratch disk the node reports.
     pub disk_capacity_bytes: u64,
+    /// Free scratch disk at sample time.
     pub free_disk_bytes: u64,
+    /// Cells the node currently owns.
     pub active_cells: u32,
+    /// Cells the node admits.
     pub max_active_cells: u32,
+    /// Jobs the node is running.
     pub running_jobs: u32,
+    /// Jobs the node admits.
     pub job_capacity: u32,
+    /// Publications waiting to be acknowledged.
     pub publication_backlog: u32,
+    /// Hydrations waiting to run.
     pub hydration_backlog: u32,
+    /// Primitive maintenance items waiting.
     pub primitive_backlog: u32,
+    /// Pressure class carried by the signed observation.
     pub pressure: PlacementPressure,
+    /// Whether the node is shedding ownership.
     pub draining: bool,
+    /// Whether the signature and identity checks passed.
     pub authenticated: bool,
+    /// Whether the node currently owns the Cell being placed.
     pub current_owner: bool,
 }
 
@@ -125,23 +147,36 @@ impl PlacementObservation {
 /// Stable reason for accepting or rejecting one placement candidate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PlacementEligibility {
+    /// The node may receive the Cell.
     Eligible,
+    /// The observation failed signature or identity checks.
     Unauthenticated,
+    /// The observation is older than the planner's freshness window.
     Stale,
+    /// The node is draining.
     Draining,
+    /// The node reports critical pressure.
     CriticalPressure,
+    /// Free memory is below the placement reserve.
     NoMemoryHeadroom,
+    /// Free disk is below the placement reserve.
     NoDiskHeadroom,
+    /// The node has no room for another Cell.
     NoCellCapacity,
+    /// The node has no room for another job.
     NoJobCapacity,
 }
 
 /// Score and eligibility explanation for one candidate node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlacementScore {
+    /// Candidate node.
     pub node: NodeId,
+    /// Boot session the score applies to.
     pub session: SessionId,
+    /// Weighted headroom score; larger is better.
     pub score: u128,
+    /// Why the node was accepted or rejected.
     pub eligibility: PlacementEligibility,
 }
 
@@ -149,28 +184,46 @@ pub struct PlacementScore {
 /// sample cannot be used as a transfer hint; the actor must recheck on release.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CellTransferDemand {
+    /// Cell the sample describes.
     pub cell: CellId,
+    /// Session that currently owns the Cell.
     pub source: SessionId,
+    /// Ownership generation the sample was taken under.
     pub generation: u64,
+    /// Resident memory the Cell uses.
     pub memory_bytes: u64,
+    /// Scratch disk the Cell uses.
     pub disk_bytes: u64,
+    /// Job credits the Cell holds.
     pub job_credits: u32,
+    /// Logical time the Cell became resident.
     pub resident_since_ms: i64,
+    /// Logical time the Cell last moved, when it has.
     pub last_moved_at_ms: Option<i64>,
+    /// Consecutive settled samples observed for this Cell.
     pub stable_observations: u8,
+    /// Whether the sample is settled enough to act on.
     pub settled: bool,
 }
 
 /// Advisory transfer proposal. It conveys neither release nor receiver admission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CellTransferIntent {
+    /// Cell proposed for movement.
     pub cell: CellId,
+    /// Session that currently owns it.
     pub source: SessionId,
+    /// Ownership generation the proposal was made under.
     pub generation: u64,
+    /// Session proposed to receive it.
     pub destination: SessionId,
+    /// Logical time the proposal was derived from.
     pub observed_at_ms: i64,
+    /// Resident memory the receiver must admit.
     pub memory_bytes: u64,
+    /// Scratch disk the receiver must admit.
     pub disk_bytes: u64,
+    /// Job credits the receiver must admit.
     pub job_credits: u32,
 }
 

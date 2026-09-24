@@ -105,11 +105,13 @@ pub struct DueCell {
 }
 
 impl DueCell {
+    /// Returns the catalog proof the scan pinned for this Cell.
     #[must_use]
     pub const fn catalog(&self) -> &CatalogProof {
         &self.catalog
     }
 
+    /// Returns the control record and token the scan observed.
     #[must_use]
     pub const fn control(&self) -> &VersionedControl {
         &self.control
@@ -133,6 +135,7 @@ impl DueCellScan {
         })
     }
 
+    /// Returns the catalog revision this scan is pinned to.
     #[must_use]
     pub const fn revision(&self) -> u64 {
         self.catalog.revision()
@@ -217,6 +220,7 @@ pub fn preferred_scanner(shard: u8, nodes: &[SessionId]) -> Result<Option<Sessio
 /// Bounded durable work performed by one serialized scheduler Tick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SchedulerTickOutcome {
+    /// Due maintenance items the tick advanced.
     pub processed: u32,
 }
 
