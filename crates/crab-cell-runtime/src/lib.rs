@@ -5,6 +5,7 @@
 //! executor. HTTP, authentication and provider construction remain product
 //! concerns of `crab-http-server`.
 
+#![deny(missing_docs)]
 // A panic in a filter process or FUSE path corrupts a worktree, so production
 // builds deny unwrap, expect, panic, todo, and unimplemented; test builds keep
 // them available.
