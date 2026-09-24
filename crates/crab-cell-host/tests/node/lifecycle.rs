@@ -170,6 +170,48 @@ async fn scale_down_stops_acquisition_without_stopping_the_host() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_scale_downs_share_one_bounded_drain_lane() {
+    let node = CellNodeBuilder::new(application())
+        .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+        .with_replica_host(ReplicaHost::default())
+        .with_session(SessionId::from_bytes([98; 16]))
+        .build()
+        .unwrap();
+    node.install_task_group(CancellationToken::new(), CancellationToken::new())
+        .unwrap();
+    node.install_node_lease_for_startup(NodeLeaseGuard::new(0, 60_000).unwrap())
+        .unwrap();
+    node.start().unwrap();
+
+    // A fleet reconciler and a node shutdown hook can both drive scale down for
+    // the same node. They share one drain lane, so running them at once must
+    // stay bounded instead of interleaving releases or waiting on each other
+    // forever.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (first, second) = tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(
+            node.drain_for_scale_down(deadline),
+            node.drain_for_scale_down(deadline)
+        )
+    })
+    .await
+    .expect("concurrent scale downs must not block each other");
+
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert!(first.ready_to_stop());
+    assert!(second.ready_to_stop());
+    assert_eq!(first.remaining_cells, 0);
+    assert_eq!(second.remaining_cells, 0);
+    assert_eq!(first.blocked_cells, 0);
+    assert_eq!(second.blocked_cells, 0);
+    assert_eq!(node.state(), NodeState::Stopped);
+    assert!(!node.is_ready());
+    assert!(!node.runtime().is_acquiring());
+    node.drain().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_shutdown_waits_for_the_single_runtime_drain() {
     let node = CellNodeBuilder::new(application())
         .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
