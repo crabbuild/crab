@@ -569,3 +569,78 @@ async fn typed_kv_namespace_recovers_after_owner_loss() {
     restored.drain().await.unwrap();
     runtime.shutdown().await.unwrap();
 }
+
+#[test]
+fn atomic_accepts_the_full_item_budget() {
+    let mut connection = connection();
+    let mutations = (0..128)
+        .map(|index| put(format!("key-{index}").as_bytes(), b"v", None))
+        .collect::<Vec<_>>();
+    let request = KvAtomicRequest {
+        scope: b"repo".to_vec(),
+        checks: Vec::new(),
+        mutations,
+    };
+    let transaction = connection.transaction().unwrap();
+    let KvAtomicOutcome::Applied(results) = kv_atomic(&transaction, 10, &request).unwrap() else {
+        panic!("128 items are the documented atomic budget");
+    };
+    assert_eq!(results.len(), 128);
+}
+
+#[test]
+fn atomic_rejects_one_item_past_the_budget() {
+    let mut connection = connection();
+    let mutations = (0..129)
+        .map(|index| put(format!("key-{index}").as_bytes(), b"v", None))
+        .collect::<Vec<_>>();
+    let request = KvAtomicRequest {
+        scope: b"repo".to_vec(),
+        checks: Vec::new(),
+        mutations,
+    };
+    let transaction = connection.transaction().unwrap();
+    assert!(kv_atomic(&transaction, 10, &request).is_err());
+}
+
+#[test]
+fn entry_expiring_at_the_logical_time_satisfies_an_absent_check() {
+    let mut connection = connection();
+    let transaction = connection.transaction().unwrap();
+    let seeded = KvAtomicRequest {
+        scope: b"repo".to_vec(),
+        checks: Vec::new(),
+        mutations: vec![put(b"key", b"one", Some(20))],
+    };
+    kv_atomic(&transaction, 10, &seeded).unwrap();
+    transaction.commit().unwrap();
+
+    let after_expiry = KvAtomicRequest {
+        scope: b"repo".to_vec(),
+        checks: vec![KvCheck {
+            key: b"key".to_vec(),
+            condition: KvCondition::Absent,
+        }],
+        mutations: vec![put(b"key", b"two", None)],
+    };
+    let transaction = connection.transaction().unwrap();
+    assert!(matches!(
+        kv_atomic(&transaction, 20, &after_expiry).unwrap(),
+        KvAtomicOutcome::Applied(_)
+    ));
+}
+
+#[test]
+fn entry_expiring_at_the_logical_time_is_not_readable() {
+    let mut connection = connection();
+    let transaction = connection.transaction().unwrap();
+    let seeded = KvAtomicRequest {
+        scope: b"repo".to_vec(),
+        checks: Vec::new(),
+        mutations: vec![put(b"key", b"one", Some(20))],
+    };
+    kv_atomic(&transaction, 10, &seeded).unwrap();
+    transaction.commit().unwrap();
+
+    assert!(kv_get(&connection, b"repo", b"key", 20).unwrap().is_none());
+}
