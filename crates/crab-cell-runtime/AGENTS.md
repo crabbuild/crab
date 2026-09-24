@@ -26,6 +26,7 @@ construction, and product policy stay in `crab-http-server`.
 | --- | --- | --- |
 | Add a primitive operation | `src/primitives/<name>.rs` | `src/registry/schemas.rs`, `tests/primitives/` |
 | Add primitive maintenance | `src/fleet/scheduler.rs` | that primitive's `TABLE` constant, `tests/runtime/scheduler.rs` |
+| Wire or defer a policy seam | `src/cell/actor.rs` | `crab/scripts/check-policy-entry-points.py` |
 | Change admission or lifecycle | `src/cell/actor.rs` | `src/coordination.rs`, `tests/runtime/lifecycle.rs` |
 | Change publication | `src/publication.rs` | `src/recovery/`, `tests/runtime/publication.rs` |
 | Change node log or durability | `src/node/` | `src/follower.rs`, `tests/fleet/` |

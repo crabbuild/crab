@@ -12,6 +12,8 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "crab/scripts/check-architecture-gates.py"
+      - "crab/scripts/check-cell-ltx-layout.py"
+      - "crab/scripts/check-policy-entry-points.py"
       - "crates/crab-http-server/tests/qualify_compose_cluster.sh"
       - ".github/workflows/http-server-container.yml"
       - ".github/workflows/http-server-release.yml"
@@ -29,6 +31,8 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "crab/scripts/check-architecture-gates.py"
+      - "crab/scripts/check-cell-ltx-layout.py"
+      - "crab/scripts/check-policy-entry-points.py"
       - "crates/crab-http-server/tests/qualify_compose_cluster.sh"
       - ".github/workflows/http-server-container.yml"
       - ".github/workflows/http-server-release.yml"
@@ -170,6 +174,8 @@ jobs:
           cargo test -p crab-cell-runtime --bin qualification_receipt --locked
       - name: Verify the Cell and LTX crate layout
         run: python3 crab/scripts/check-cell-ltx-layout.py
+      - name: Verify the Cell runtime policy entry points
+        run: python3 crab/scripts/check-policy-entry-points.py
       - name: Verify the process-test-support suites
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
