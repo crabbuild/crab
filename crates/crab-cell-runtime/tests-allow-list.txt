@@ -12,6 +12,7 @@ coordination.rs  # pure pub(crate) kernel; simulator and state machine are crate
 fleet/eviction.rs  # asserts private eviction observations and victim selection
 fleet/placement.rs  # uses private observation-age bounds
 fleet/resource.rs  # asserts the private resource ledger
+fleet/scheduler.rs  # asserts the private primitive probe and class budget
 fleet/telemetry.rs  # uses the private telemetry install seam
 follower/tests.rs  # asserts private lane and index constants
 follower.rs  # declares crate-private test modules

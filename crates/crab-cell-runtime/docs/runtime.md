@@ -230,7 +230,7 @@ The node scheduler:
 5. Acquires an idle or stale Cell only when no valid owner can execute the Tick
 6. Runs registered activity and effect supervisors outside SQLite
 
-A Tick advances at most 128 ledger, expiry, lease, timer, or retention items. Protected shares prevent one maintenance class from starving another.
+A Tick advances at most 128 ledger, expiry, lease, timer, or retention items. Protected shares prevent one maintenance class from starving another, and a Tick that reserves a share for a class it does not run fails instead of silently shrinking its usable work.
 
 ## Drain in ownership order
 

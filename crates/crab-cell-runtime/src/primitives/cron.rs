@@ -11,6 +11,7 @@ mod api;
 pub use api::{CronCommand, CronModule, CronNamespace, CronQueryCommand, register_cron};
 
 const CRON_SCHEMA: &str = include_str!("../migrations/cron.sql");
+pub(crate) const CRON_TABLE: &str = "cron_schedules";
 const MIN_INTERVAL_MS: u64 = 1_000;
 const MAX_INTERVAL_MS: u64 = 365 * 24 * 60 * 60 * 1_000;
 const MAX_PAYLOAD_BYTES: usize = 256 * 1_024;
