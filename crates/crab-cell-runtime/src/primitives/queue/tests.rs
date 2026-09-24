@@ -80,6 +80,88 @@ fn message_identity_binds_namespace_and_producer() {
 }
 
 #[test]
+fn extend_never_shortens_a_live_lease() {
+    let mut connection = connection();
+    let message_id = insert_leased_message(&mut connection);
+    let transaction = connection.transaction().unwrap();
+    transaction
+        .execute(
+            "UPDATE queue_messages SET lease_until_ms = 50000, expires_at_ms = 60000 WHERE message_id = ?1",
+            [message_id.as_slice()],
+        )
+        .unwrap();
+    assert_eq!(
+        queue_apply_lease(
+            &transaction,
+            10_000,
+            message_id,
+            [8; 16],
+            QueueLeaseAction::Extend {
+                extension_ms: 5_000
+            },
+        )
+        .unwrap(),
+        QueueLeaseOutcome::Applied {
+            state: QueueState::Leased,
+            lease_until_ms: Some(50_000),
+        }
+    );
+    transaction.commit().unwrap();
+}
+
+#[test]
+fn extend_stops_at_the_message_expiry() {
+    let mut connection = connection();
+    let message_id = insert_leased_message(&mut connection);
+    let transaction = connection.transaction().unwrap();
+    transaction
+        .execute(
+            "UPDATE queue_messages SET lease_until_ms = 50000, expires_at_ms = 60000 WHERE message_id = ?1",
+            [message_id.as_slice()],
+        )
+        .unwrap();
+    assert_eq!(
+        queue_apply_lease(
+            &transaction,
+            10_000,
+            message_id,
+            [8; 16],
+            QueueLeaseAction::Extend {
+                extension_ms: 300_000,
+            },
+        )
+        .unwrap(),
+        QueueLeaseOutcome::Applied {
+            state: QueueState::Leased,
+            lease_until_ms: Some(60_000),
+        }
+    );
+    transaction.commit().unwrap();
+}
+
+#[test]
+fn claim_validation_rejects_a_lease_inside_the_delivery_margin() {
+    let mut connection = connection();
+    let message_id = insert_leased_message(&mut connection);
+    let transaction = connection.transaction().unwrap();
+    transaction
+        .execute(
+            "UPDATE queue_messages SET lease_until_ms = 10500 WHERE message_id = ?1",
+            [message_id.as_slice()],
+        )
+        .unwrap();
+    transaction.commit().unwrap();
+    let claimed = QueueMessage {
+        message_id,
+        payload: b"original".to_vec(),
+        token: [8; 16],
+        attempt: 20,
+        lease_until_ms: 10_500,
+    };
+    assert!(!queue_validate_claim(&connection, 10_000, &[claimed]).unwrap());
+}
+
+#[test]
 fn dead_transition_atomically_links_one_canonical_queue_effect() {
     let mut connection = connection();
     let message_id = insert_leased_message(&mut connection);
@@ -387,5 +469,117 @@ fn redrive_waits_for_a_terminal_dead_letter_effect() {
             )
             .unwrap(),
         (0, 0)
+    );
+}
+
+#[test]
+fn send_accepts_a_payload_at_the_documented_limit() {
+    let mut connection = connection();
+    let transaction = connection.transaction().unwrap();
+    let outcome = queue_send(
+        &transaction,
+        source_target().namespace(),
+        0,
+        &QueueSendRequest {
+            producer_id: [9; 16],
+            payload: vec![b'p'; MAX_PAYLOAD_BYTES],
+            available_at_ms: 0,
+        },
+    )
+    .unwrap();
+    assert!(matches!(outcome, QueueSendOutcome::Sent { .. }));
+}
+
+#[test]
+fn send_rejects_a_payload_past_the_documented_limit() {
+    let mut connection = connection();
+    let transaction = connection.transaction().unwrap();
+    let outcome = queue_send(
+        &transaction,
+        source_target().namespace(),
+        0,
+        &QueueSendRequest {
+            producer_id: [10; 16],
+            payload: vec![b'p'; MAX_PAYLOAD_BYTES + 1],
+            available_at_ms: 0,
+        },
+    );
+    assert!(outcome.is_err());
+}
+
+#[test]
+fn send_retains_a_message_for_thirty_days() {
+    let mut connection = connection();
+    let transaction = connection.transaction().unwrap();
+    let QueueSendOutcome::Sent { message_id } = queue_send(
+        &transaction,
+        source_target().namespace(),
+        0,
+        &QueueSendRequest {
+            producer_id: [11; 16],
+            payload: b"payload".to_vec(),
+            available_at_ms: 0,
+        },
+    )
+    .unwrap() else {
+        panic!("first send must insert");
+    };
+    let expires_at_ms = transaction
+        .query_row(
+            "SELECT expires_at_ms FROM queue_messages WHERE message_id = ?1",
+            [message_id.as_slice()],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(expires_at_ms, RETENTION_MS);
+}
+
+#[test]
+fn extend_rejects_bounds_outside_five_to_three_hundred_seconds() {
+    let mut connection = connection();
+    let message_id = insert_leased_message(&mut connection);
+    let transaction = connection.transaction().unwrap();
+    assert!(
+        queue_apply_lease(
+            &transaction,
+            10,
+            message_id,
+            [8; 16],
+            QueueLeaseAction::Extend {
+                extension_ms: 4_999
+            },
+        )
+        .is_err()
+    );
+    assert!(
+        queue_apply_lease(
+            &transaction,
+            10,
+            message_id,
+            [8; 16],
+            QueueLeaseAction::Extend {
+                extension_ms: 300_001,
+            },
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn retry_rejects_a_delay_past_one_hour() {
+    let mut connection = connection();
+    let message_id = insert_leased_message(&mut connection);
+    let transaction = connection.transaction().unwrap();
+    assert!(
+        queue_apply_lease(
+            &transaction,
+            10,
+            message_id,
+            [8; 16],
+            QueueLeaseAction::Retry {
+                delay_ms: MAX_RETRY_DELAY_MS + 1,
+            },
+        )
+        .is_err()
     );
 }
