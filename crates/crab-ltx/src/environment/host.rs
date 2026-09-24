@@ -176,8 +176,18 @@ impl DiskBudget {
         admissions: &mut DiskAdmissions,
         bytes: u64,
     ) -> crate::Result<()> {
-        for admission in admissions {
-            admission.reconcile(bytes)?;
+        let mut index = 0;
+        while index < admissions.len() {
+            match admissions[index].reconcile(bytes) {
+                Ok(()) => index += 1,
+                // The owner can drop between the liveness prune and this call.
+                // Its reservations died with it, and a closed hook must never
+                // fail a reservation that the live runtimes still own.
+                Err(_) if !admissions[index].is_live() => {
+                    admissions.remove(index);
+                }
+                Err(error) => return Err(error),
+            }
         }
         Ok(())
     }
