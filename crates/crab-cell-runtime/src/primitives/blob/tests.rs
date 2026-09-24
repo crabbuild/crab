@@ -273,3 +273,147 @@ fn upload_lifetime_uses_request_issue_time_but_rejects_expired_acceptance() {
         Err(Error::Command("blob upload has already expired"))
     ));
 }
+
+fn begin(key: &[u8], metadata: &[u8], expires_at_ms: i64, upload_id: [u8; 16]) -> BlobMutation {
+    BlobMutation::Begin {
+        key: key.to_vec(),
+        upload_id,
+        condition: BlobCondition::Missing,
+        content_type: None,
+        metadata: metadata.to_vec(),
+        expires_at_ms,
+    }
+}
+
+fn blob_connection() -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    let transaction = connection.unchecked_transaction().unwrap();
+    install_blob_schema(&transaction).unwrap();
+    transaction.commit().unwrap();
+    connection
+}
+
+#[test]
+fn key_bounds_accept_the_documented_range() {
+    let mut connection = blob_connection();
+    let transaction = connection.transaction().unwrap();
+    assert_eq!(
+        blob_mutate(&transaction, 1, 1, &begin(b"k", &[], 60_001, [10; 16])).unwrap(),
+        BlobMutationOutcome::Begun
+    );
+    assert_eq!(
+        blob_mutate(
+            &transaction,
+            1,
+            1,
+            &begin(&[b'k'; 1_024], &[], 60_001, [11; 16])
+        )
+        .unwrap(),
+        BlobMutationOutcome::Begun
+    );
+}
+
+#[test]
+fn key_bounds_reject_empty_and_oversized_keys() {
+    let mut connection = blob_connection();
+    let transaction = connection.transaction().unwrap();
+    assert!(blob_mutate(&transaction, 1, 1, &begin(b"", &[], 60_001, [12; 16])).is_err());
+    assert!(
+        blob_mutate(
+            &transaction,
+            1,
+            1,
+            &begin(&[b'k'; 1_025], &[], 60_001, [13; 16])
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn metadata_bounds_accept_exactly_eight_kib() {
+    let mut connection = blob_connection();
+    let transaction = connection.transaction().unwrap();
+    assert_eq!(
+        blob_mutate(
+            &transaction,
+            1,
+            1,
+            &begin(b"k", &vec![b'm'; 8 * 1_024], 60_001, [14; 16]),
+        )
+        .unwrap(),
+        BlobMutationOutcome::Begun
+    );
+}
+
+#[test]
+fn metadata_bounds_reject_more_than_eight_kib() {
+    let mut connection = blob_connection();
+    let transaction = connection.transaction().unwrap();
+    assert!(
+        blob_mutate(
+            &transaction,
+            1,
+            1,
+            &begin(b"k", &vec![b'm'; 8 * 1_024 + 1], 60_001, [15; 16]),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn part_size_bounds_reject_more_than_256_kib() {
+    let mut connection = blob_connection();
+    let transaction = connection.transaction().unwrap();
+    blob_mutate(&transaction, 1, 1, &begin(b"k", &[], 60_001, [16; 16])).unwrap();
+    assert!(
+        blob_mutate(
+            &transaction,
+            1,
+            1,
+            &BlobMutation::PutPartRef {
+                key: b"k".to_vec(),
+                upload_id: [16; 16],
+                part_number: 1,
+                digest: [17; 32],
+                size: MAX_BLOB_PART_BYTES as u32 + 1,
+            },
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn upload_lifetime_accepts_the_one_minute_and_seven_day_bounds() {
+    let mut connection = blob_connection();
+    let transaction = connection.transaction().unwrap();
+    assert_eq!(
+        blob_mutate(&transaction, 1, 1, &begin(b"k", &[], 60_001, [18; 16])).unwrap(),
+        BlobMutationOutcome::Begun
+    );
+    assert_eq!(
+        blob_mutate(
+            &transaction,
+            1,
+            1,
+            &begin(b"k", &[], 7 * 24 * 60 * 60_000 + 1, [19; 16]),
+        )
+        .unwrap(),
+        BlobMutationOutcome::Begun
+    );
+}
+
+#[test]
+fn upload_lifetime_rejects_below_one_minute_and_past_seven_days() {
+    let mut connection = blob_connection();
+    let transaction = connection.transaction().unwrap();
+    assert!(blob_mutate(&transaction, 1, 1, &begin(b"k", &[], 60_000, [20; 16])).is_err());
+    assert!(
+        blob_mutate(
+            &transaction,
+            1,
+            1,
+            &begin(b"k", &[], 7 * 24 * 60 * 60_000 + 2, [21; 16]),
+        )
+        .is_err()
+    );
+}
