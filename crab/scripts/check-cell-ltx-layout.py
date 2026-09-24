@@ -18,6 +18,9 @@ Rules:
   8. The runtime root surface equals `api-prelude.txt`.
   9. The runtime coordination kernel stays sans-I/O: no async, clock, or
      storage, so the simulator and the model can replay the same transitions.
+ 10. The four crates depend only on each other and `crab-storage` (which the
+     Cellule synthesis renames to `cellule-store`), so the extraction cannot
+     acquire a Crab-specific coupling on the way out.
 """
 
 from __future__ import annotations
@@ -53,6 +56,18 @@ MODULE_DECL = re.compile(r"^\s*(?:pub(?:\([^)]*\))? )?mod ([a-z_][a-z_0-9]*)\s*;
 LINE_COMMENT = re.compile(r"//[^\n]*")
 ROOT_RE_EXPORT = re.compile(r"^pub use ([^;]+);", re.M)
 ROOT_CONST = re.compile(r"^\s*pub (?:const|struct|enum|trait|fn|type) ([A-Za-z_][A-Za-z0-9_]*)", re.M)
+
+# The four Cellule crates plus the shared store crate they may keep depending on.
+EXTRACTION_DEPENDENCIES = frozenset(
+    {
+        "crab-storage",
+        "crab-ltx",
+        "crab-cell-runtime",
+        "crab-cell-app",
+        "crab-cell-host",
+    }
+)
+CRAB_DEPENDENCY = re.compile(r"^(crab-[a-z0-9-]+)", re.M)
 
 # A pure coordination kernel is what lets `coordination/sim.rs` and the TLA+
 # model replay production transitions; an I/O call here would silently move the
@@ -164,6 +179,20 @@ def check_guide_paths(crate_path: Path) -> list[str]:
     return problems
 
 
+def check_extraction_dependencies(crate_path: Path) -> list[str]:
+    """Every `crab-*` dependency stays inside the Cellule extraction set."""
+    manifest = crate_path / "Cargo.toml"
+    if not manifest.is_file():
+        return []
+    problems: list[str] = []
+    for name in sorted(set(CRAB_DEPENDENCY.findall(manifest.read_text()))):
+        if name not in EXTRACTION_DEPENDENCIES:
+            problems.append(
+                f"{manifest.relative_to(ROOT)}: {name} is outside the Cellule dependency set"
+            )
+    return problems
+
+
 def check(crate: str) -> list[str]:
     crate_path = ROOT / crate
     problems: list[str] = []
@@ -172,6 +201,7 @@ def check(crate: str) -> list[str]:
     problems.extend(check_allow_list_entries(crate_path, entries))
     problems.extend(check_suite_module_declarations(crate, crate_path))
     problems.extend(check_guide_paths(crate_path))
+    problems.extend(check_extraction_dependencies(crate_path))
     search_roots = [crate_path / "src"]
     if (crate_path / "tests").is_dir():
         search_roots.append(crate_path / "tests")
