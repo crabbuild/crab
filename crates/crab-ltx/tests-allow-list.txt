@@ -12,6 +12,7 @@ host.rs  # asserts private host file helpers
 paged_io.rs  # drives private sparse page I/O
 pages.rs  # asserts private page checksum handling
 replica/cache.rs  # asserts the private directory cache
-replica/directory.rs  # asserts private radix directory internals
+replica/directory/tests.rs  # asserts private radix directory internals
+replica/directory.rs  # declares crate-private test modules
 replica/root.rs  # asserts private root codec bounds
 replica/upload.rs  # asserts private capture upload sources
