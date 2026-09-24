@@ -71,6 +71,17 @@ The registry rejects:
 - Queue dead-letter cycles
 - Missing workflow definitions or activity bindings
 
+The bounds are part of the contract:
+
+| Field | Bound |
+| --- | --- |
+| Build source revision | 1-128 characters, with a nonzero lock digest |
+| Modules per build | 1-128 |
+| Namespaces per build | At most 128, each with a 1-128 character name and 1-4096 shards that are a power of two |
+| Module schema range | `schema_min` at least 1, `schema_max` at least `schema_min`, nonzero source digest |
+| Migration SQL | Nonempty, at most 1 MiB, contiguous from `schema_min`, digest-bound |
+| Operation input and output limits | 1 byte to the wire bound (4 MiB + 64 KiB) |
+
 Registration order does not change canonical release bytes.
 
 ## Register typed commands and queries
