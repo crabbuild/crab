@@ -86,7 +86,7 @@ INVENTORY = {
         "rootless control record, so only tests exercise this takeover path",
     ),
     (
-        "crates/crab-cell-runtime/src/primitives/blob.rs",
+        "crates/crab-cell-runtime/src/primitives/blob/store.rs",
         "sweep_unreferenced",
     ): (
         "deferred",
