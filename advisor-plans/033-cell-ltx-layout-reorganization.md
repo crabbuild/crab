@@ -576,3 +576,37 @@ Deviations from the plan text, all deliberate:
   `src/cell/actor.rs` is 1530 lines plus `actor/{state,admission,task}.rs`, and
   `src/qualification.rs` is 2127 lines plus
   `qualification/{profile,workload,receipt}.rs`.
+
+## Follow-on layout work (2026-09-24)
+
+After the stages above landed, the remaining module roots were split so the
+largest unit in each subsystem is a named concern rather than a file that mixes
+several. Every move was byte-identical (visibility keywords excepted) and was
+verified with the crate suites, clippy 1.98 `--all-targets -- -D warnings` on
+the applicable feature sets, `cargo fmt --all --check`, both structural gates
+(`crab/scripts/check-cell-ltx-layout.py` and
+`crab/scripts/check-policy-entry-points.py`), and
+`cargo check --workspace --all-targets`.
+
+| Root | Now | Notes |
+| --- | --- | --- |
+| `src/cell/actor.rs` | `actor/{task,tasks,requests,lifecycle,runtime,tests}.rs` | loop/dispatch, finished-task handlers, request paths, lifecycle scheduling, runtime administration |
+| `src/cell/worker.rs` | `worker/run.rs` | worker thread loop and native-callback fencing |
+| `src/cell/executor.rs` | `executor/tests.rs` | pending-publication tests |
+| `src/node/directory.rs` | `directory/{advertisement,log,recovery}.rs` | scans/liveness/refresh, log authorization and lifecycle, pre-move claims |
+| `src/node/log_recovery.rs` | `log_recovery/{witness,tests}.rs` | durable witness records |
+| `src/follower.rs` | `follower/{records,tests}.rs` | lane record framing, appends, tails, scans |
+| `src/qualification/receipt.rs` | `receipt/{matrix,runner,evidence}.rs` | metrics/matrix, harness runner, provider evidence |
+| `src/qualification/tests.rs` | `tests/{profile,workload,evidence,receipt,matrix}.rs` | capability-grouped suite |
+| `src/primitives/workflow.rs` | `workflow/{maintenance,tests}.rs` | timer and activity-expiry maintenance |
+| `tests/runtime/lifecycle.rs` | `lifecycle/{ownership,durability,idle,residency,execution}.rs` | fixtures stay in the module root |
+| `crab-ltx/src/replica.rs` | `replica/{upload,verify,prepare}.rs` | write path, verification, preparation |
+| `crab-ltx/src/db.rs` | `db/tests.rs` | managed-database tests |
+| `crab-ltx/src/replica/directory.rs` | `directory/tests.rs` | radix directory tests |
+| `crab-ltx/src/environment/host.rs` | `host/budget.rs` | disk admission budget and reservations |
+
+Two gates keep the shape honest as further splits land: the layout gate fails
+any `#[path]` attribute, unlisted in-src test location, suite/module mismatch,
+or root-surface drift, and the policy gate fails an unwired policy entry point
+whose inventory entry no longer names the file that declares it (that is how
+`evict_idle` and `observe_pressure` were caught after the actor runtime split).
