@@ -52,10 +52,15 @@ const MAX_ACTIVITY_LIFETIME_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 /// Durable workflow run state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkflowStatus {
+    /// The run accepts events and schedules actions.
     Running,
+    /// The run finished with a result.
     Completed,
+    /// The run ended in failure.
     Failed,
+    /// The run was cancelled.
     Cancelled,
+    /// The run holds its state and accepts no events until resumed.
     Paused,
 }
 
@@ -85,16 +90,25 @@ impl WorkflowStatus {
 /// One deterministic scheduling intention returned by a workflow definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkflowAction {
+    /// Schedules one activity for the run.
     Activity {
+        /// Registered activity type to schedule.
         activity_type: String,
+        /// Deterministic input handed to the activity handler.
         input: Vec<u8>,
+        /// Logical time the activity becomes claimable.
         due_at_ms: i64,
+        /// Logical time after which the activity is abandoned.
         expires_at_ms: i64,
     },
+    /// Wakes the run at a logical time.
     Timer {
+        /// Logical time the run is woken.
         due_at_ms: i64,
     },
+    /// Emits one effect for this transition.
     Effect {
+        /// Effect intent the runtime submits.
         intent: EffectCommandIntent,
     },
 }
@@ -102,9 +116,13 @@ pub enum WorkflowAction {
 /// Complete result of one pure workflow transition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkflowDecision {
+    /// Run status after the transition.
     pub status: WorkflowStatus,
+    /// Replacement definition-owned state.
     pub state: Vec<u8>,
+    /// Terminal result, once the transition completed the run.
     pub result: Option<Vec<u8>>,
+    /// Actions the transition scheduled, in ordinal order.
     pub actions: Vec<WorkflowAction>,
 }
 
@@ -124,16 +142,19 @@ impl WorkflowContext {
         &self.source
     }
 
+    /// Returns the run this context belongs to.
     #[must_use]
     pub const fn run_id(&self) -> [u8; 16] {
         self.run_id
     }
 
+    /// Returns the sequence of the event being applied.
     #[must_use]
     pub const fn event_sequence(&self) -> u64 {
         self.event_sequence
     }
 
+    /// Returns the logical time the transition runs at.
     #[must_use]
     pub const fn now_ms(&self) -> i64 {
         self.now_ms
@@ -148,6 +169,7 @@ impl WorkflowContext {
 
 /// A statically registered, deterministic workflow state machine.
 pub trait WorkflowDefinition: Send + Sync + 'static {
+    /// Returns the digest that pins this definition's transition logic.
     fn digest(&self) -> Digest;
 
     /// Declares every namespace this definition may target with an effect.
@@ -155,6 +177,7 @@ pub trait WorkflowDefinition: Send + Sync + 'static {
         &[]
     }
 
+    /// Applies one event to `state` and returns the next decision.
     fn transition(
         &self,
         state: &[u8],
@@ -166,56 +189,85 @@ pub trait WorkflowDefinition: Send + Sync + 'static {
 /// Inputs that create one new workflow run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkflowStart {
+    /// Caller-chosen workflow identity.
     pub workflow_id: Vec<u8>,
+    /// Request identity that makes the start idempotent.
     pub request_id: RequestId,
+    /// First event handed to the definition.
     pub event: Vec<u8>,
 }
 
 /// Idempotent external signal for one exact run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkflowSignal {
+    /// Workflow the signal targets.
     pub workflow_id: Vec<u8>,
+    /// Exact run the signal must match.
     pub run_id: [u8; 16],
+    /// Signal identity that makes delivery idempotent.
     pub signal_id: [u8; 16],
+    /// Event handed to the definition.
     pub event: Vec<u8>,
 }
 
 /// Business outcome of a workflow operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkflowOutcome {
+    /// The event advanced the run.
     Applied {
+        /// Run the event was applied to.
         run_id: [u8; 16],
+        /// Run status after the event.
         status: WorkflowStatus,
+        /// Sequence the applied event received.
         event_sequence: u64,
     },
+    /// The same idempotency key was delivered before.
     Duplicate {
+        /// Run the duplicate delivery belongs to.
         run_id: [u8; 16],
+        /// Status the run holds now.
         status: WorkflowStatus,
+        /// Sequence recorded for the original delivery.
         event_sequence: u64,
     },
+    /// A workflow with this ID was started with different bytes.
     AlreadyExists,
+    /// A workflow or run ID is already pinned to different identity bytes.
     IdentityConflict,
+    /// The request targets a different run than the workflow's current one.
     RunMismatch,
+    /// The run does not accept this operation in its current status.
     NotRunning,
+    /// The requested action is not due yet.
     NotDue,
+    /// Another transition currently holds this run.
     Busy,
 }
 
 /// Administrative transition for one exact workflow run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkflowControl {
+    /// Workflow the control targets.
     pub workflow_id: Vec<u8>,
+    /// Exact run the control must match.
     pub run_id: [u8; 16],
+    /// Operator action to apply.
     pub action: WorkflowControlAction,
 }
 
 /// Durable workflow operator action.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkflowControlAction {
+    /// Stops accepting events until the run is resumed.
     Pause,
+    /// Returns a paused run to running.
     Resume,
+    /// Starts a fresh run sequence for the workflow.
     Restart {
+        /// Request identity that makes the restart idempotent.
         request_id: RequestId,
+        /// Event handed to the restarted run.
         event: Vec<u8>,
     },
 }
@@ -223,12 +275,19 @@ pub enum WorkflowControlAction {
 /// Materialized current state of one workflow run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkflowRun {
+    /// Caller-chosen workflow identity.
     pub workflow_id: Vec<u8>,
+    /// Current run identity.
     pub run_id: [u8; 16],
+    /// Definition digest the run is pinned to.
     pub definition_digest: Digest,
+    /// Current run status.
     pub status: WorkflowStatus,
+    /// Definition-owned state bytes.
     pub state: Vec<u8>,
+    /// Highest applied event sequence.
     pub event_sequence: u64,
+    /// Terminal result, once the run completed.
     pub result: Option<Vec<u8>>,
 }
 
