@@ -283,17 +283,20 @@ flowchart LR
 
 Required cases are:
 
-| Case | Expected proof |
-| --- | --- |
-| Replay | Same request ID and digest returns stored outcome without rerunning handler |
-| Identity conflict | Same request ID with different digest is a durable rejection |
-| Caller cancellation | Accepted command still publishes and later resolves |
-| Lost CAS response | Exact successor is adopted; a different winner fences |
-| Source loss | Successor restores exact database and outcome from object storage |
-| Recovery state | Exact-root activation CASes `Recovering` to `Serving` before returning a handle |
-| Timeout | Admission closes; tentative local state never publishes |
-| Panic | Affected Cell fences; worker thread remains usable |
-| Drain | Accepted commands publish before SQLite close and authority release |
+| Case | Expected proof | Proven by |
+| --- | --- | --- |
+| Replay | Same request ID and digest returns stored outcome without rerunning handler | `runtime::publication::lost_publication_response_reconciles_without_replaying_sql` |
+| Identity conflict | Same request ID with different digest is a durable rejection | `runtime::lifecycle::execution::resolve_distinguishes_committed_absent_conflict_and_expired` |
+| Caller cancellation | Accepted command still publishes and later resolves | `runtime::workers::cancelled_waiter_does_not_cancel_an_accepted_sql_command` |
+| Lost CAS response | Exact successor is adopted; a different winner fences | `runtime::lifecycle::ownership::lost_release_response_is_reconciled_before_successor_acquire` |
+| Source loss | Successor restores exact database and outcome from object storage | `runtime::lifecycle::ownership::crashed_process_is_fenced_before_successor_restore` |
+| Recovery state | Exact-root activation CASes `Recovering` to `Serving` before returning a handle | `runtime::lifecycle::ownership::takeover_resumes_pinned_recovery_before_serving` |
+| Timeout | Admission closes; tentative local state never publishes | `runtime::lifecycle::execution::native_handler_deadline_discards_late_commit_and_reopens_authoritative_root`, `runtime::lifecycle::execution::sqlite_query_is_interrupted_at_wall_deadline` |
+| Panic | Affected Cell fences; worker thread remains usable | `runtime::workers::panicking_handler_fences_only_its_cell_and_worker_continues` |
+| Drain | Accepted commands publish before SQLite close and authority release | `runtime::lifecycle::execution::runtime_shutdown_drains_accepted_work_and_releases_all_owners` |
+
+Every filter above selects exactly one case in the `runtime` suite; run it with
+`cargo test -p crab-cell-runtime --features test-support --test runtime <filter> --locked`.
 
 Mock-only tests do not satisfy source-loss or publication proof.
 
