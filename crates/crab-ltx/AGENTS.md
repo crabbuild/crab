@@ -25,7 +25,7 @@ outside this crate.
 | --- | --- | --- |
 | Change WAL capture | `src/capture/wal.rs` | `src/db.rs`, `tests/ltx/crash.rs` |
 | Change LTX encoding | `src/ltx.rs`, `src/codec.rs` | `src/format_tests.rs`, `tests/cell/` |
-| Change restore or compaction | `src/recovery.rs`, `src/replica/compaction.rs` | `tests/cell/restore.rs` |
+| Change restore or compaction | `src/recovery.rs`, `src/replica/compaction.rs` | `tests/cell/restore.rs`, `tests/ltx/properties.rs` |
 | Change the paged VFS | `src/writable_vfs.rs`, `src/paged_io.rs` | `tests/cell/roots.rs` |
 | Change host hooks | `src/environment/` | `tests/host/hooks.rs` |
 

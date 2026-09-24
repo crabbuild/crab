@@ -3,4 +3,5 @@
 mod ltx {
     pub mod crash;
     pub mod node_frame;
+    pub mod properties;
 }

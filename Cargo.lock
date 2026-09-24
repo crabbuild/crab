@@ -2407,6 +2407,7 @@ dependencies = [
  "futures-util",
  "lz4_flex 0.11.6",
  "object_store",
+ "proptest",
  "rusqlite",
  "serde",
  "serde_json",
