@@ -2225,6 +2225,7 @@ dependencies = [
  "fs4",
  "futures-util",
  "object_store",
+ "proptest",
  "prost",
  "prost-build",
  "protoc-bin-vendored",

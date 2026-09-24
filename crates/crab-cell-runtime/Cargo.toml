@@ -44,4 +44,5 @@ protoc-bin-vendored = "3"
 
 [dev-dependencies]
 async-trait.workspace = true
+proptest = "1"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

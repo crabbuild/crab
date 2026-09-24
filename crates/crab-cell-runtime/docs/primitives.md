@@ -152,14 +152,19 @@ stateDiagram-v2
     Leased --> Done: ack with token
     Leased --> Ready: retry or lease expiry
     Leased --> Leased: extend with token
-    Ready --> DeadLetter: attempt limit
-    Ready --> Expired: retention limit
+    Ready --> DeadLetter: attempt limit or retention limit
     DeadLetter --> [*]: effect acknowledged
     Done --> [*]: retention cleanup
-    Expired --> [*]: retention cleanup
 ```
 
 The claim command publishes its lease before returning payloads. Consumers validate the exact token at the claim receipt before starting external work.
+
+A ready message past its retention limit is dead-lettered rather than dropped:
+the expire class moves it to `DeadLetter` with its payload, and the configured
+dead-letter target receives a typed effect when one is registered. The retention
+class runs before that transition inside one Tick, so a dead-lettered message is
+removed by the cleanup on a later Tick once its effect has settled — terminal
+rows therefore stay observable for at least one Tick.
 
 | Queue contract | Limit or behavior |
 | --- | --- |
@@ -350,6 +355,17 @@ The delivery path preserves these properties:
 - `Resolve` recovers an ambiguous destination result
 
 The design doesn't claim an atomic transaction across source and destination. It provides durable at-least-once delivery with idempotent destination execution.
+
+| Effect contract | Limit or behavior |
+| --- | --- |
+| Encoded input | At most 1 MiB; claim and acknowledgement budgets reserve their fixed overhead inside the same bound |
+| Claim batch | 1 to 32 effects per claim |
+| Lease | 5s to 300s, and an extension stays inside the same bounds |
+| Attempts | 20, after which the effect fails instead of retrying |
+| Effect lifetime | At most 7 days from emission; a longer requested expiry is rejected |
+| Inbox retention | 7 days past the effect's own expiry, then the destination inbox drops the record |
+| Destination | Same tenant and application; a cross-tenant target fails before any write |
+| Delivery | At least once, with idempotent destination execution |
 
 ## Let the scheduler advance time-based state
 

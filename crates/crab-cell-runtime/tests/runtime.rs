@@ -14,5 +14,6 @@ mod runtime {
     pub mod publication;
     pub mod release_progress;
     pub mod scheduler;
+    pub mod scheduler_properties;
     pub mod workers;
 }
