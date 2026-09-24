@@ -20,15 +20,25 @@ use super::{
 
 /// Compile-time namespace, definition and operation IDs for one Workflow module.
 pub trait WorkflowModule: Send + Sync + 'static {
+    /// Module the Workflow surfaces register under.
     const MODULE: &'static str;
+    /// Namespace that owns this Workflow module.
     const NAMESPACE: NamespaceId;
+    /// Definition the module currently serves.
     const CURRENT_DEFINITION: &'static dyn WorkflowDefinition;
+    /// Definitions registered in this compiled image.
     const DEFINITIONS: &'static [&'static dyn WorkflowDefinition];
+    /// Codec version of the Workflow surfaces.
     const CODEC_VERSION: u32 = 1;
+    /// Command id that starts a run.
     const START_COMMAND_ID: u32;
+    /// Command id that delivers a signal.
     const SIGNAL_COMMAND_ID: u32;
+    /// Command id that cancels a run.
     const CANCEL_COMMAND_ID: u32;
+    /// Command id that pauses, resumes, or restarts a run.
     const CONTROL_COMMAND_ID: u32;
+    /// Query id that reads a run.
     const GET_QUERY_ID: u32;
 }
 
@@ -184,6 +194,7 @@ impl<M: WorkflowModule> Command for WorkflowCancelCommand<M> {
 /// Bounded current-state query for one workflow identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkflowGetRequest {
+    /// Workflow identity to read.
     pub workflow_id: Vec<u8>,
 }
 
