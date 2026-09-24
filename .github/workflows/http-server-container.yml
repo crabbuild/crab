@@ -692,8 +692,7 @@ jobs:
                 "${terraform_image}" test
             fi
           done
-      - name: Sign in to GitHub Container Registry for an imported image
-        if: ${{ inputs.image_ref != '' }}
+      - name: Sign in to GitHub Container Registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -787,6 +786,32 @@ jobs:
             exit "$result"
           }
           trap cleanup EXIT
+
+          # The stack pins every image by digest, but the registries rate-limit
+          # anonymous pulls of the shared RustFS image ("toomanyrequests: Rate
+          # exceeded"), which previously surfaced as a Compose qualification
+          # failure. Pull the pinned stack images with bounded backoff first so
+          # a registry hiccup is reported as a registry hiccup.
+          pull_stack_image() {
+            local image="$1" attempt
+            for attempt in 1 2 3 4 5; do
+              if docker pull --quiet "$image"; then
+                return 0
+              fi
+              sleep "$((attempt * 20))"
+            done
+            echo "Registry pull failed after five attempts: ${image}" >&2
+            return 1
+          }
+          while IFS= read -r image; do
+            if [ "$image" = "${CRAB_HTTP_SERVER_IMAGE}" ]; then
+              continue
+            fi
+            pull_stack_image "$image"
+          done < <(docker compose \
+            --file crates/crab-http-server/deploy/compose.yaml \
+            --file crates/crab-http-server/deploy/compose.cluster.yaml \
+            --profile qualification config --images | sort --unique)
 
           docker compose --file crates/crab-http-server/deploy/compose.yaml \
             up --detach --no-build --wait --wait-timeout 120
