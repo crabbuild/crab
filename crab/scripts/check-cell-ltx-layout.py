@@ -21,6 +21,8 @@ Rules:
  10. The four crates depend only on each other and `crab-storage` (which the
      Cellule synthesis renames to `cellule-store`), so the extraction cannot
      acquire a Crab-specific coupling on the way out.
+ 11. Every `tests/...` path named in a crate's documentation exists, so the
+     delivery evidence map cannot point a reader at a file that never existed.
 """
 
 from __future__ import annotations
@@ -160,6 +162,7 @@ def check_suite_module_declarations(crate: str, crate_path: Path) -> list[str]:
 
 
 GUIDE_PATH = re.compile(r"`((?:src|tests)/[^`]+)`")
+DOCUMENTED_TEST_PATH = re.compile(r"`(tests/[^`\s]+?\.rs)`")
 
 
 def check_guide_paths(crate_path: Path) -> list[str]:
@@ -193,6 +196,27 @@ def check_extraction_dependencies(crate_path: Path) -> list[str]:
     return problems
 
 
+def check_documented_test_paths(crate_path: Path) -> list[str]:
+    """Every crate-relative test path a crate's docs name must exist.
+
+    `src/...` paths are deliberately not checked: a crate's docs may describe
+    another crate's sources, while `tests/...` paths are always crate-relative.
+    """
+    problems: list[str] = []
+    for path in sorted(crate_path.rglob("*.md")):
+        if "target" in path.parts:
+            continue
+        for token in DOCUMENTED_TEST_PATH.findall(path.read_text()):
+            token = token.strip()
+            if "<" in token or "{" in token:
+                continue
+            if not (crate_path / token).exists():
+                problems.append(
+                    f"{path.relative_to(ROOT)}: {token} is not present in the crate"
+                )
+    return problems
+
+
 def check(crate: str) -> list[str]:
     crate_path = ROOT / crate
     problems: list[str] = []
@@ -201,6 +225,7 @@ def check(crate: str) -> list[str]:
     problems.extend(check_allow_list_entries(crate_path, entries))
     problems.extend(check_suite_module_declarations(crate, crate_path))
     problems.extend(check_guide_paths(crate_path))
+    problems.extend(check_documented_test_paths(crate_path))
     problems.extend(check_extraction_dependencies(crate_path))
     search_roots = [crate_path / "src"]
     if (crate_path / "tests").is_dir():
