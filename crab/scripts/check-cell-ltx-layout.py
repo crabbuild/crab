@@ -5,11 +5,14 @@ Rules:
   1. No `#[path]` attributes in the four crates.
   2. Every `#[cfg(test)]`/`#[test]` location under `src/` is listed in the
      crate's `tests-allow-list.txt`.
-  3. No `tests/<name>.rs` that shadows `src/<name>.rs`.
-  4. Every test suite root has a matching module directory and at least one
+  3. Every `tests-allow-list.txt` entry names an existing `src/` file, carries
+     a reason, and still holds tests or test modules, so a moved or emptied
+     test location cannot leave a stale entry behind.
+  4. No `tests/<name>.rs` that shadows `src/<name>.rs`.
+  5. Every test suite root has a matching module directory and at least one
      test.
-  5. The runtime root surface equals `api-prelude.txt`.
-  6. The runtime coordination kernel stays sans-I/O: no async, clock, or
+  6. The runtime root surface equals `api-prelude.txt`.
+  7. The runtime coordination kernel stays sans-I/O: no async, clock, or
      storage, so the simulator and the model can replay the same transitions.
 """
 
@@ -42,6 +45,7 @@ SUITES = {
 TEST_ATTR = re.compile(r"^\s*#\[(?:tokio::)?test", re.M)
 CFG_TEST = re.compile(r"^\s*#\[cfg\(test\)\]", re.M)
 PATH_ATTR = re.compile(r"#\[path\s*=")
+MODULE_DECL = re.compile(r"^\s*(?:pub(?:\([^)]*\))? )?mod [a-z_][a-z_0-9]*\s*;", re.M)
 LINE_COMMENT = re.compile(r"//[^\n]*")
 ROOT_RE_EXPORT = re.compile(r"^pub use ([^;]+);", re.M)
 ROOT_CONST = re.compile(r"^\s*pub (?:const|struct|enum|trait|fn|type) ([A-Za-z_][A-Za-z0-9_]*)", re.M)
@@ -69,22 +73,45 @@ def sans_io_paths(crate_path: Path) -> list[Path]:
     return paths
 
 
-def allow_list(crate_path: Path) -> set[str]:
+def allow_list(crate_path: Path) -> dict[str, str]:
     path = crate_path / "tests-allow-list.txt"
     if not path.is_file():
-        return set()
-    entries = set()
+        return {}
+    entries: dict[str, str] = {}
     for line in path.read_text().splitlines():
-        line = line.split("#", 1)[0].strip()
-        if line:
-            entries.add(line)
+        entry, _, reason = line.partition("#")
+        entry = entry.strip()
+        if entry:
+            entries[entry] = reason.strip()
     return entries
+
+
+def check_allow_list_entries(crate_path: Path, entries: dict[str, str]) -> list[str]:
+    problems: list[str] = []
+    allow_path = (crate_path / "tests-allow-list.txt").relative_to(ROOT)
+    for entry, reason in sorted(entries.items()):
+        target = crate_path / "src" / entry
+        if not target.is_file():
+            problems.append(f"{allow_path}: {entry} does not name an existing src file")
+            continue
+        if not reason:
+            problems.append(f"{allow_path}: {entry} needs a reason comment")
+        text = LINE_COMMENT.sub("", target.read_text())
+        if (
+            TEST_ATTR.search(text) is None
+            and CFG_TEST.search(text) is None
+            and MODULE_DECL.search(text) is None
+        ):
+            problems.append(f"{allow_path}: {entry} no longer holds tests or test modules")
+    return problems
 
 
 def check(crate: str) -> list[str]:
     crate_path = ROOT / crate
     problems: list[str] = []
-    allowed = allow_list(crate_path)
+    entries = allow_list(crate_path)
+    allowed = set(entries)
+    problems.extend(check_allow_list_entries(crate_path, entries))
     search_roots = [crate_path / "src"]
     if (crate_path / "tests").is_dir():
         search_roots.append(crate_path / "tests")

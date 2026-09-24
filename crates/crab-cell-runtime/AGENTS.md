@@ -44,6 +44,8 @@ construction, and product policy stay in `crab-http-server`.
 - Tests that assert crate-private behavior stay in their module and are listed
   in `tests-allow-list.txt` with a reason. New in-src tests must be added there;
   prefer moving the behavior behind the public API when that is honest.
+  Each entry must name a file that still holds tests or test modules, so a moved
+  or emptied test location cannot leave a stale entry behind.
 - `api-prelude.txt` is the frozen root surface. Adding a root re-export means
   editing both `src/lib.rs` and that file in the same commit.
 - Run `python3 crab/scripts/check-cell-ltx-layout.py` after layout changes.
