@@ -426,7 +426,7 @@ impl Harness {
             )
             .unwrap(),
             cell_capacity: super::test_cell_capacity_report(),
-            metrics: crate::metrics::Metrics::new().unwrap(),
+            metrics: crate::metrics::Metrics::new(&[]).unwrap(),
         });
         let app = router(Arc::clone(&server));
         let task = tokio::spawn(async move {

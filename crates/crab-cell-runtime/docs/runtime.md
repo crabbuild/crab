@@ -81,7 +81,7 @@ The worker transaction applies this procedure:
 7. Advance `sys_meta.sequence` and derive `next_due_ms`
 8. Commit SQLite and capture every unpublished cut
 
-Handler errors roll back the application savepoint. Runtime ledger updates still commit when the error is a durable business rejection.
+Handler errors roll back the application savepoint. Runtime ledger updates still commit when the error is a durable business rejection. Every registered call reports its owning module, kind, outcome, and duration to the installed `CellTelemetry` sink from the thread that executed the handler, so the server can chart one primitive module without knowing its operations.
 
 ## Publish before replying
 

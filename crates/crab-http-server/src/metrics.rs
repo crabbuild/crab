@@ -53,6 +53,10 @@ const APPEND_RESULT_LABELS: [&str; APPEND_RESULT_COUNT] = ["acked", "nacked"];
 const DURABILITY_SUBMISSION_LABELS: [&str; DURABILITY_SUBMISSION_COUNT] =
     ["fleet", "unsupported", "unavailable", "rejected"];
 const RESIDENT_ROUTE_LABELS: [&str; 3] = ["hit", "miss", "refused"];
+const PRIMITIVE_KIND_COUNT: usize = 2;
+const PRIMITIVE_OUTCOME_COUNT: usize = 3;
+const PRIMITIVE_KIND_LABELS: [&str; PRIMITIVE_KIND_COUNT] = ["command", "query"];
+const PRIMITIVE_OUTCOME_LABELS: [&str; PRIMITIVE_OUTCOME_COUNT] = ["success", "rejected", "failed"];
 const LTX_PHASE_LABELS: [&str; LTX_PHASE_COUNT] = [
     "capture",
     "preparation",
@@ -198,6 +202,7 @@ struct MetricsInner {
     node_log_rotations: [Counter; NODE_LOG_ROTATION_RESULT_COUNT],
     catalog_refresh_failures: Counter,
     transfer_admission_rejections: [Counter; TRANSFER_REJECTION_COUNT],
+    primitive_modules: Vec<PrimitiveModuleMetrics>,
     projection_probes: [Counter; PROJECTION_PROBE_RESULT_COUNT],
     projection_probe_seconds: [Histogram; PROJECTION_PROBE_RESULT_COUNT],
     projection_build_seconds: [[Histogram; PROJECTION_BUILD_RESULT_COUNT]; PROJECTION_PHASE_COUNT],
@@ -222,6 +227,40 @@ struct MethodMetrics {
 struct AdmissionMetrics {
     available: Gauge,
     capacity: Gauge,
+}
+
+struct PrimitiveModuleMetrics {
+    module: &'static str,
+    operations: [[Counter; PRIMITIVE_OUTCOME_COUNT]; PRIMITIVE_KIND_COUNT],
+    duration: [Histogram; PRIMITIVE_KIND_COUNT],
+}
+
+impl PrimitiveModuleMetrics {
+    fn new(recorder: &impl Recorder, module: &'static str) -> Self {
+        Self {
+            module,
+            operations: PRIMITIVE_KIND_LABELS.map(|kind| {
+                PRIMITIVE_OUTCOME_LABELS.map(|outcome| {
+                    recorder.register_counter(
+                        &key(
+                            "crab_cell_primitive_operations_total",
+                            &[("module", module), ("kind", kind), ("outcome", outcome)],
+                        ),
+                        &METADATA,
+                    )
+                })
+            }),
+            duration: PRIMITIVE_KIND_LABELS.map(|kind| {
+                recorder.register_histogram(
+                    &key(
+                        "crab_cell_primitive_operation_seconds",
+                        &[("module", module), ("kind", kind)],
+                    ),
+                    &METADATA,
+                )
+            }),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -302,18 +341,25 @@ impl RuntimeSnapshot {
 }
 
 impl Metrics {
-    pub(crate) fn new() -> Result<Self, metrics_exporter_prometheus::BuildError> {
+    pub(crate) fn new(
+        primitive_modules: &[&'static str],
+    ) -> Result<Self, metrics_exporter_prometheus::BuildError> {
         let recorder = PrometheusBuilder::new()
             .set_buckets(&DURATION_BUCKETS_SECONDS)?
             .build_recorder();
         describe_metrics(&recorder);
         let methods = METHOD_LABELS.map(|method| MethodMetrics::new(&recorder, method));
         let admission = ADMISSION_LABELS.map(|class| AdmissionMetrics::new(&recorder, class));
+        let primitive_modules = primitive_modules
+            .iter()
+            .map(|module| PrimitiveModuleMetrics::new(&recorder, module))
+            .collect();
         Ok(Self {
             inner: Arc::new(MetricsInner {
                 handle: recorder.handle(),
                 methods,
                 admission,
+                primitive_modules,
                 repositories: recorder.register_gauge(
                     &Key::from_static_name("crab_http_server_repositories"),
                     &METADATA,
@@ -922,6 +968,40 @@ impl Metrics {
 }
 
 impl crab_cell_runtime::fleet::telemetry::CellTelemetry for Metrics {
+    fn primitive_operation(
+        &self,
+        module: &'static str,
+        kind: crab_cell_runtime::fleet::telemetry::PrimitiveOperationKind,
+        outcome: crab_cell_runtime::fleet::telemetry::PrimitiveOperationOutcome,
+        elapsed: Duration,
+    ) {
+        use crab_cell_runtime::fleet::telemetry::{
+            PrimitiveOperationKind, PrimitiveOperationOutcome,
+        };
+
+        let Some(entry) = self
+            .inner
+            .primitive_modules
+            .iter()
+            .find(|entry| entry.module == module)
+        else {
+            // Only compiled modules reach this seam, so a miss means the metric
+            // inventory was built from a different registry.
+            return;
+        };
+        let kind = match kind {
+            PrimitiveOperationKind::Command => 0,
+            PrimitiveOperationKind::Query => 1,
+        };
+        let outcome = match outcome {
+            PrimitiveOperationOutcome::Success => 0,
+            PrimitiveOperationOutcome::Rejected => 1,
+            PrimitiveOperationOutcome::Failed => 2,
+        };
+        entry.operations[kind][outcome].increment(1);
+        entry.duration[kind].record(elapsed.as_secs_f64());
+    }
+
     fn durability_proof(
         &self,
         source: crab_cell_runtime::node::log::DurabilitySource,
@@ -1487,6 +1567,16 @@ impl Drop for ObservedBody {
 fn describe_metrics(recorder: &impl Recorder) {
     describe_counter(
         recorder,
+        "crab_cell_primitive_operations_total",
+        "Registered primitive operations by bounded module, kind, and outcome.",
+    );
+    recorder.describe_histogram(
+        KeyName::from_const_str("crab_cell_primitive_operation_seconds"),
+        Some(Unit::Seconds),
+        "Registered primitive operation duration by bounded module and kind.".into(),
+    );
+    describe_counter(
+        recorder,
         "crab_http_server_requests_total",
         "Public HTTP requests by bounded method and response class.",
     );
@@ -2028,7 +2118,7 @@ mod tests {
         let reservation = runtime.try_reserve_worker_job().unwrap().unwrap();
         let disk = disk_budget.try_reserve(128).unwrap();
         let stats = runtime.stats();
-        let metrics = Metrics::new().unwrap();
+        let metrics = Metrics::new(&[]).unwrap();
         let rendered = metrics.render(RuntimeSnapshot::default().with_cell_runtime(stats));
 
         assert!(rendered.contains(&format!(
@@ -2059,7 +2149,7 @@ mod tests {
 
     #[tokio::test]
     async fn completed_request_exports_bounded_full_body_metrics() {
-        let metrics = Metrics::new().unwrap();
+        let metrics = Metrics::new(&[]).unwrap();
         metrics.record_transfer_admission_rejection(false);
         metrics.record_transfer_admission_rejection(true);
         <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::durability_proof(
@@ -2296,8 +2386,40 @@ mod tests {
     }
 
     #[test]
+    fn primitive_operations_render_by_module_kind_and_outcome() {
+        use crab_cell_runtime::fleet::telemetry::{
+            CellTelemetry, PrimitiveOperationKind, PrimitiveOperationOutcome,
+        };
+
+        let metrics = Metrics::new(&["repository"]).unwrap();
+        <Metrics as CellTelemetry>::primitive_operation(
+            &metrics,
+            "repository",
+            PrimitiveOperationKind::Command,
+            PrimitiveOperationOutcome::Rejected,
+            Duration::from_millis(2),
+        );
+        <Metrics as CellTelemetry>::primitive_operation(
+            &metrics,
+            "unregistered",
+            PrimitiveOperationKind::Query,
+            PrimitiveOperationOutcome::Success,
+            Duration::from_millis(1),
+        );
+
+        let rendered = metrics.render(snapshot());
+        assert!(rendered.contains(
+            "crab_cell_primitive_operations_total{module=\"repository\",kind=\"command\",outcome=\"rejected\"} 1"
+        ));
+        assert!(rendered.contains(
+            "crab_cell_primitive_operation_seconds_count{module=\"repository\",kind=\"command\"} 1"
+        ));
+        assert!(!rendered.contains("module=\"unregistered\""));
+    }
+
+    #[test]
     fn dropped_response_body_records_abort_and_releases_in_flight_gauge() {
-        let metrics = Metrics::new().unwrap();
+        let metrics = Metrics::new(&[]).unwrap();
         let observation = metrics.start_request(&Method::GET).response(StatusCode::OK);
         drop(ObservedBody::new(Body::from("response"), observation));
 
@@ -2308,7 +2430,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_response_body_records_stream_error() {
-        let metrics = Metrics::new().unwrap();
+        let metrics = Metrics::new(&[]).unwrap();
         let observation = metrics.start_request(&Method::GET).response(StatusCode::OK);
         let stream =
             futures_util::stream::iter([Err::<Bytes, _>(std::io::Error::other("stream failed"))]);
@@ -2322,7 +2444,7 @@ mod tests {
 
     #[test]
     fn request_cancelled_before_response_is_counted_and_released() {
-        let metrics = Metrics::new().unwrap();
+        let metrics = Metrics::new(&[]).unwrap();
         drop(metrics.start_request(&Method::PUT));
 
         let rendered = metrics.render(snapshot());

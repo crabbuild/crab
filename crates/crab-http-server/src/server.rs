@@ -1077,7 +1077,7 @@ pub async fn serve(config: Config) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let public_address = listener.local_addr()?;
     let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
-    let metrics = crate::metrics::Metrics::new()?;
+    let metrics = crate::metrics::Metrics::new(registry.module_names())?;
     let node_shutdown = CancellationToken::new();
     let cell_node = Arc::new(
         CellNodeBuilder::new(crate::cells::compiled_application()?)
@@ -2689,7 +2689,7 @@ mod tests {
             )
             .unwrap(),
             cell_capacity: test_cell_capacity_report(),
-            metrics: crate::metrics::Metrics::new().unwrap(),
+            metrics: crate::metrics::Metrics::new(&[]).unwrap(),
         });
         let app = router(Arc::clone(&server));
         for (path, host, expected, cache) in [

@@ -18,6 +18,9 @@ use crate::cell::actor::CellHandle;
 use crate::cell::catalog::CatalogRole;
 use crate::cell::executor::{MutationIdentity, Resolution, StoredOutcome};
 use crate::codec::{decode_wire, encode_wire};
+use crate::fleet::telemetry::{
+    CellTelemetryHandle, PrimitiveOperationKind, PrimitiveOperationOutcome,
+};
 use crate::identity::{CellId, CellTarget, Digest, IncarnationId, RequestId};
 use crate::primitives::workflow::{ActivityContext, ActivityExecution, ActivitySupport};
 use crate::registry::{
@@ -466,11 +469,23 @@ impl CellClient {
     /// Builds the canonical single-owner transport used by embedded routes.
     #[must_use]
     pub fn local(registry: Arc<Registry>, handle: CellHandle) -> Self {
+        Self::local_with_telemetry(registry, handle, CellTelemetryHandle::default())
+    }
+
+    /// Builds the canonical single-owner transport with primitive-operation
+    /// telemetry reported from the executing thread.
+    #[must_use]
+    pub fn local_with_telemetry(
+        registry: Arc<Registry>,
+        handle: CellHandle,
+        telemetry: CellTelemetryHandle,
+    ) -> Self {
         let primary = handle.clone();
         let transport = Arc::new(LocalCellTransport {
             registry: registry.clone(),
             handles: Arc::new(HashMap::from([(handle.cell_id(), handle)])),
             handle: primary,
+            telemetry,
         });
         Self::new(registry, transport)
     }
@@ -483,6 +498,16 @@ impl CellClient {
     pub fn local_many(
         registry: Arc<Registry>,
         handles: impl IntoIterator<Item = CellHandle>,
+    ) -> Result<Self> {
+        Self::local_many_with_telemetry(registry, handles, CellTelemetryHandle::default())
+    }
+
+    /// Builds a bounded in-process transport with primitive-operation telemetry
+    /// reported from the executing thread.
+    pub fn local_many_with_telemetry(
+        registry: Arc<Registry>,
+        handles: impl IntoIterator<Item = CellHandle>,
+        telemetry: CellTelemetryHandle,
     ) -> Result<Self> {
         let mut local = HashMap::new();
         for handle in handles {
@@ -504,6 +529,7 @@ impl CellClient {
                 registry,
                 handles: Arc::new(local),
                 handle: primary,
+                telemetry,
             }),
         ))
     }
@@ -786,6 +812,7 @@ pub(super) struct LocalCellTransport {
     pub(super) registry: Arc<Registry>,
     pub(super) handles: Arc<HashMap<CellId, CellHandle>>,
     pub(super) handle: CellHandle,
+    pub(super) telemetry: CellTelemetryHandle,
 }
 
 impl CellTransport for LocalCellTransport {
@@ -807,6 +834,7 @@ impl CellTransport for LocalCellTransport {
     ) -> Pin<Box<dyn Future<Output = Result<StoredOutcome>> + Send + 'static>> {
         let registry = self.registry.clone();
         let handles = Arc::clone(&self.handles);
+        let telemetry = self.telemetry.clone();
         Box::pin(async move {
             let handle = local_handle(&handles, &command.target)?;
             validate_local_target(&handle, &command.target)?;
@@ -826,7 +854,8 @@ impl CellTransport for LocalCellTransport {
                     output_limit,
                     move |transaction| {
                         let sequence = next_sequence(transaction)?;
-                        registry.execute_command_with_issue_time(
+                        let started = Instant::now();
+                        let result = registry.execute_command_with_issue_time(
                             transaction,
                             CommandInvocation {
                                 module: command.module,
@@ -839,7 +868,14 @@ impl CellTransport for LocalCellTransport {
                                 input: &command.input,
                             },
                             command.identity.issued_at_ms,
-                        )
+                        );
+                        telemetry.primitive_operation(
+                            command.module,
+                            PrimitiveOperationKind::Command,
+                            PrimitiveOperationOutcome::from(&result),
+                            started.elapsed(),
+                        );
+                        result
                     },
                 )
                 .await
@@ -852,6 +888,7 @@ impl CellTransport for LocalCellTransport {
     ) -> Pin<Box<dyn Future<Output = Result<EncodedObservation>> + Send + 'static>> {
         let registry = self.registry.clone();
         let handles = Arc::clone(&self.handles);
+        let telemetry = self.telemetry.clone();
         Box::pin(async move {
             let handle = local_handle(&handles, &query.target)?;
             validate_local_target(&handle, &query.target)?;
@@ -870,7 +907,8 @@ impl CellTransport for LocalCellTransport {
                 .query(input_bytes, output_limit, move |connection| {
                     let commit_sequence = current_sequence(connection)?;
                     observed_sequence.store(commit_sequence, Ordering::Release);
-                    registry.execute_query(
+                    let started = Instant::now();
+                    let result = registry.execute_query(
                         connection,
                         QueryInvocation {
                             module: query.module,
@@ -882,7 +920,17 @@ impl CellTransport for LocalCellTransport {
                             now_ms: query.now_ms,
                             input: &query.input,
                         },
-                    )
+                    );
+                    telemetry.primitive_operation(
+                        query.module,
+                        PrimitiveOperationKind::Query,
+                        match &result {
+                            Ok(_) => PrimitiveOperationOutcome::Success,
+                            Err(_) => PrimitiveOperationOutcome::Failed,
+                        },
+                        started.elapsed(),
+                    );
+                    result
                 })
                 .await?;
             let commit_sequence = sequence.load(Ordering::Acquire);
