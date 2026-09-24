@@ -276,6 +276,29 @@ in review memory: `observe_pressure` and `evict_idle` (P0 1), the Blob
 `sweep_unreferenced` helper (P0 2), and `takeover_unpublished`, which the router
 never reaches because it fails closed on a rootless control record.
 
+### Unpublished repository initialization needs a decision
+
+`initialize_repository` writes `Control::initial` — `Recovering`, `root: None`,
+owner is the job's freshly minted session — and only then bootstraps and
+publishes (`crates/crab-http-server/src/cells/initializer.rs`,
+`crates/crab-cell-runtime/src/control.rs`). A crash inside that window leaves the
+Cell unpublished, and the retry cannot repair it:
+
+- the retry runs with a new session, so it refuses with "offline repository
+  initialization cannot fence an existing Cell owner"; it cannot mint a
+  `NodeTakeoverProof` because it runs unleased and has no directory;
+- catalog `provision` is idempotent for an identical entry
+  (`src/cell/catalog.rs`), so the retry reaches that refusal instead of
+  re-provisioning;
+- the router fails closed on a rootless control record
+  (`src/cells/router.rs`), so the Cell stays inactive.
+
+`CellRuntime::takeover_unpublished` implements exactly this recovery: fence the
+dead unpublished owner, re-initialize through a caller-supplied closure, and
+publish. It has no production caller and is recorded as deferred until the
+choice is made: give the initializer (or a directory-backed operator path) that
+takeover, or state that an unpublished Cell is abandoned and remove the API.
+
 Still open, in the order the audit proposed: P0 1 pressure wiring (needs the
 decision to feed the classifier and sign the tier), P0 2 Blob collector,
 P0 3 protected provider proof, P1 5 fleet-wide drain serialization, P1 6
