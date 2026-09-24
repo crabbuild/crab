@@ -13,8 +13,10 @@ Rules:
      test.
   6. Every module file inside a suite directory is declared by its parent module
      file, so a split cannot leave a test file that the compiler never builds.
-  7. The runtime root surface equals `api-prelude.txt`.
-  8. The runtime coordination kernel stays sans-I/O: no async, clock, or
+  7. Every `src/...` or `tests/...` path named by a crate guide exists, so the
+     guides keep owning the layout rules they describe.
+  8. The runtime root surface equals `api-prelude.txt`.
+  9. The runtime coordination kernel stays sans-I/O: no async, clock, or
      storage, so the simulator and the model can replay the same transitions.
 """
 
@@ -141,6 +143,27 @@ def check_suite_module_declarations(crate: str, crate_path: Path) -> list[str]:
     return problems
 
 
+
+GUIDE_PATH = re.compile(r"`((?:src|tests)/[^`]+)`")
+
+
+def check_guide_paths(crate_path: Path) -> list[str]:
+    """Every crate-relative path a crate guide names must exist."""
+    guide = crate_path / "AGENTS.md"
+    if not guide.is_file():
+        return []
+    problems: list[str] = []
+    for token in GUIDE_PATH.findall(guide.read_text()):
+        token = token.strip()
+        if "<" in token or "{" in token:
+            continue
+        if not (crate_path / token).exists():
+            problems.append(
+                f"{guide.relative_to(ROOT)}: {token} is not present in the crate"
+            )
+    return problems
+
+
 def check(crate: str) -> list[str]:
     crate_path = ROOT / crate
     problems: list[str] = []
@@ -148,6 +171,7 @@ def check(crate: str) -> list[str]:
     allowed = set(entries)
     problems.extend(check_allow_list_entries(crate_path, entries))
     problems.extend(check_suite_module_declarations(crate, crate_path))
+    problems.extend(check_guide_paths(crate_path))
     search_roots = [crate_path / "src"]
     if (crate_path / "tests").is_dir():
         search_roots.append(crate_path / "tests")
