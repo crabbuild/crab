@@ -683,6 +683,135 @@ fn operator_pause_waits_for_a_live_lease_and_freezes_scheduled_work() {
 }
 
 #[test]
+fn operator_restart_clears_terminal_history_and_uses_the_current_definition() {
+    let mut connection = connection();
+    let original = Definition {
+        digest: Digest::from_bytes([4; 32]),
+    };
+    let current = Definition {
+        digest: Digest::from_bytes([7; 32]),
+    };
+    let transaction = connection.transaction().unwrap();
+    let (run_id, _, _) =
+        applied(workflow_start(&transaction, &source_target(), 10, &start(5), &original).unwrap());
+    let restart = |now_ms: i64, run_id: [u8; 16], definition: &Definition| {
+        workflow_control(
+            &transaction,
+            &source_target(),
+            now_ms,
+            &WorkflowControl {
+                workflow_id: b"build-42".to_vec(),
+                run_id,
+                action: WorkflowControlAction::Restart {
+                    request_id: RequestId::from_bytes([9; 16]),
+                    event: b"start".to_vec(),
+                },
+            },
+            definition,
+        )
+        .unwrap()
+    };
+
+    // A live or paused run is not restartable.
+    assert_eq!(restart(10, run_id, &current), WorkflowOutcome::Busy);
+    assert!(matches!(
+        workflow_control(
+            &transaction,
+            &source_target(),
+            12,
+            &WorkflowControl {
+                workflow_id: b"build-42".to_vec(),
+                run_id,
+                action: WorkflowControlAction::Pause,
+            },
+            &original,
+        )
+        .unwrap(),
+        WorkflowOutcome::Applied {
+            status: WorkflowStatus::Paused,
+            ..
+        }
+    ));
+    assert_eq!(restart(10, run_id, &current), WorkflowOutcome::Busy);
+
+    assert!(matches!(
+        workflow_cancel(
+            &transaction,
+            14,
+            &WorkflowSignal {
+                workflow_id: b"build-42".to_vec(),
+                run_id,
+                signal_id: [8; 16],
+                event: b"cancel".to_vec(),
+            },
+        )
+        .unwrap(),
+        WorkflowOutcome::Applied {
+            status: WorkflowStatus::Cancelled,
+            ..
+        }
+    ));
+
+    let (restarted, status, sequence) = applied(restart(10, run_id, &current));
+    assert_ne!(restarted, run_id, "restart starts a new run identity");
+    assert_eq!(
+        (status, sequence),
+        (WorkflowStatus::Running, 1),
+        "the restarted run starts from its first event"
+    );
+    let rows: (i64, i64, i64, i64) = transaction
+        .query_row(
+            "SELECT (SELECT count(*) FROM workflow_runs), \
+             (SELECT count(*) FROM workflow_events), \
+             (SELECT count(*) FROM workflow_activities), \
+             (SELECT count(*) FROM workflow_timers)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        rows,
+        (1, 1, 1, 1),
+        "terminal history is deleted and the start decision schedules fresh work"
+    );
+    let digest: Vec<u8> = transaction
+        .query_row("SELECT definition_digest FROM workflow_runs", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        digest,
+        current.digest().as_bytes().to_vec(),
+        "the restarted run pins the definition the operator passed"
+    );
+    // The same request may not own two runs: cancel the restarted run first so
+    // the identity rule, not the busy rule, decides the answer.
+    let cancelled = workflow_cancel(
+        &transaction,
+        10,
+        &WorkflowSignal {
+            workflow_id: b"build-42".to_vec(),
+            run_id: restarted,
+            // The restart's request id may not double as a signal id: the two
+            // identity spaces derive from the same run identity.
+            signal_id: [10; 16],
+            event: b"cancel".to_vec(),
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(cancelled, WorkflowOutcome::Applied { .. }),
+        "cancelling the restarted run returned {cancelled:?}"
+    );
+    assert_eq!(
+        restart(10, restarted, &current),
+        WorkflowOutcome::IdentityConflict,
+        "the same request cannot restart the run it already started"
+    );
+    transaction.commit().unwrap();
+}
+
+#[test]
 fn activity_claim_retry_extension_and_completion_bind_exact_attempt() {
     let mut connection = connection();
     let definition = Definition {
