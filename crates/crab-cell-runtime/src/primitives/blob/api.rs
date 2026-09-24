@@ -18,8 +18,11 @@ mod codec;
 
 /// Compile-time namespace and operation identifiers for one Blob module.
 pub trait BlobModule: MaintenanceModule {
+    /// Namespace that owns this Blob module.
     const NAMESPACE: NamespaceId;
+    /// Command id that mutates blobs and uploads.
     const MUTATE_COMMAND_ID: u32;
+    /// Query id that reads objects and uploads.
     const QUERY_ID: u32;
 }
 
