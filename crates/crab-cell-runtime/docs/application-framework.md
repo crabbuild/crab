@@ -16,6 +16,11 @@ distributed relational database.
 
 [Back to the Cell runtime index](README.md)
 
+[`crates/crab-cell-app/examples/authoring.rs`](../../crab-cell-app/examples/authoring.rs)
+is the minimal compile-checked version of the flow below: one module with its
+migration, one namespace, one cell type, and a finished `CompiledApplication`.
+The prose snippets stay illustrative; the example is what CI compiles.
+
 The [complete Commerce example](application-framework-example.md) remains the
 target qualification shape for custom SQL Cells, KV, Blob, Queue, Cron,
 Workflow, effects, activities, generated clients, node composition, HTTP
