@@ -321,7 +321,9 @@ existing `crab_storage::Store`, then bind `CellReplica` to exactly one Cell and
 incarnation. Provider credentials, leases, and authority stay outside this
 crate.
 
-```rust,ignore
+```rust,no_run
+# #[cfg(feature = "replica")]
+# fn example() {
 use crab_ltx::{CellReplica, CellStorageLayout, Limits};
 use crab_storage::Store;
 use object_store::path::Path;
@@ -339,9 +341,13 @@ fn bind_replica(store: Store) -> crab_ltx::Result<CellReplica> {
         Limits::default(),
     )
 }
+# }
+# fn main() {}
 ```
 
-```rust,ignore
+```rust,no_run
+# #[cfg(feature = "replica")]
+# fn example() {
 use crab_ltx::{CaptureBatch, CellReplica, Db, PreparedRoot, RootRef};
 
 async fn prepare_root(
@@ -361,6 +367,8 @@ async fn prepare_root(
     // `captured`.
     Ok((prepared, captured))
 }
+# }
+# fn main() {}
 ```
 
 `CellReplica::prepare` writes only immutable, content-addressed objects. The
@@ -411,7 +419,9 @@ does not list storage or choose “latest”; it verifies the named root and its
 complete metadata graph. `restore` then authenticates every page while writing
 a fresh destination.
 
-```rust,ignore
+```rust,no_run
+# #[cfg(feature = "replica")]
+# fn example() {
 use std::path::Path;
 
 use crab_ltx::{CellReplica, RootRef};
@@ -426,13 +436,17 @@ async fn restore_published_root(
     assert_eq!(restored, published.position);
     Ok(())
 }
+# }
+# fn main() {}
 ```
 
 For backup pinning or garbage-collection marking, traverse the same verified
 graph instead of reconstructing object names. The result uses `RootObjectRef`
 because each entry is authenticated as a dependency of that exact root.
 
-```rust,ignore
+```rust,no_run
+# #[cfg(feature = "replica")]
+# fn example() {
 use crab_ltx::{CellReplica, RootObjectRef, RootRef};
 
 async fn objects_to_pin(
@@ -441,6 +455,8 @@ async fn objects_to_pin(
 ) -> crab_ltx::Result<Vec<RootObjectRef>> {
     replica.reachable_objects(published).await
 }
+# }
+# fn main() {}
 ```
 
 ## Activate sparse writable SQL
@@ -451,7 +467,9 @@ A verified root can become writable without first downloading every page.
 fetch and verify missing pages, while `hydrate_step` resolves a bounded amount
 of remaining work proactively.
 
-```rust,ignore
+```rust,no_run
+# #[cfg(feature = "replica")]
+# fn example() {
 use std::path::Path;
 
 use crab_ltx::{CellReplica, Hydration, Db, RootRef};
@@ -469,6 +487,8 @@ async fn activate_sparse(
     assert!(resolved <= total);
     Ok(database)
 }
+# }
+# fn main() {}
 ```
 
 The sparse database remains pinned to the selected root. New writes still use
