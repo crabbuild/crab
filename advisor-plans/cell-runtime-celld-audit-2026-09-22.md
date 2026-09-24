@@ -269,6 +269,7 @@ Landed, with the merged PR that carries the evidence:
 | Durability submission outcomes | #296 | `DurabilitySubmissionOutcome` plus `crab_cell_durability_submissions_total{outcome}` |
 | LTX admission race | #298 | `reconcile_admissions_locked` drops a budget hook that died during the call |
 | Closed-ledger attribution | #297 | Ledger admission hooks carry the session that installed them |
+| P1 4 Cron contract | this branch | `docs/primitives.md` states that schedules are fixed intervals with an explicit first due time, and that expressions and time zones stay above the primitive |
 
 Deferred seams are now recorded in the policy inventory instead of living only
 in review memory: `observe_pressure` and `evict_idle` (P0 1), the Blob
@@ -277,7 +278,7 @@ never reaches because it fails closed on a rootless control record.
 
 Still open, in the order the audit proposed: P0 1 pressure wiring (needs the
 decision to feed the classifier and sign the tier), P0 2 Blob collector,
-P0 3 protected provider proof, P1 4 Cron expressions, P1 5 fleet-wide drain
-serialization, P1 6 slow-member backstop, P1 8 queue batch send (no production
-sender exists yet, so this waits for a caller), P2 10 measured per-Cell cost,
-and P2 11 primitive simulation parity.
+P0 3 protected provider proof, P1 5 fleet-wide drain serialization, P1 6
+slow-member backstop, P1 8 queue batch send (no production sender exists yet,
+so this waits for a caller), P2 10 measured per-Cell cost, and P2 11 primitive
+simulation parity.
