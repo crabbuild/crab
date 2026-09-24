@@ -220,11 +220,18 @@ pub struct SchedulerTickOutcome {
 }
 
 /// Rechecks and advances at most 128 due maintenance items in one transaction.
+///
+/// This runs the same maintenance classes as the module Tick command, including
+/// cron firing and queue dead-lettering: an embedding caller that omits the two
+/// targets changes what the Tick does, so they stay explicit here instead of
+/// defaulting to "no cron, no dead letter".
 pub fn scheduler_tick(
     transaction: &Transaction<'_>,
     source: &CellTarget,
     logical_time_ms: i64,
     workflow_definitions: &[&'static dyn WorkflowDefinition],
+    queue_dead_letter: Option<QueueDeadLetterTarget>,
+    cron_targets: &[CronTarget],
 ) -> Result<SchedulerTickOutcome> {
     let command_sequence = transaction.query_row(
         "SELECT commit_sequence + 1 FROM sys_meta WHERE singleton = 1 AND commit_sequence < 9223372036854775807",
@@ -237,8 +244,8 @@ pub fn scheduler_tick(
         command_sequence,
         logical_time_ms,
         workflow_definitions,
-        None,
-        &[],
+        queue_dead_letter,
+        cron_targets,
     )
 }
 
