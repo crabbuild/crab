@@ -354,28 +354,10 @@ impl WireValue for BlobPage {
     }
 }
 
-fn read_fixed<const N: usize>(
-    decoder: &mut BoundedDecoder<'_>,
-    message: &'static str,
-) -> Result<[u8; N], CodecError> {
-    decoder
-        .read_bytes()?
-        .try_into()
-        .map_err(|_| CodecError::Invalid(message))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn roundtrip<T: WireValue + PartialEq + std::fmt::Debug>(value: T) {
-        let mut encoder = BoundedEncoder::new(1024 * 1024).unwrap();
-        value.encode(&mut encoder).unwrap();
-        let bytes = encoder.finish();
-        let mut decoder = BoundedDecoder::new(&bytes, 1024 * 1024).unwrap();
-        assert_eq!(T::decode(&mut decoder).unwrap(), value);
-        decoder.finish().unwrap();
-    }
+    use crate::codec::roundtrip;
 
     #[test]
     fn blob_codecs_roundtrip_mutations_and_queries() {

@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use crate::cell::catalog::CatalogRole;
 use crate::client::{CellClient, Committed, InvocationError, Observed, Receipt};
-use crate::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use crate::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue, read_fixed};
 use crate::identity::RequestId;
 use crate::identity::{
     ApplicationId, CellTarget, Digest, NamespaceId, TenantId, partition_for_shard, shard_for_scope,

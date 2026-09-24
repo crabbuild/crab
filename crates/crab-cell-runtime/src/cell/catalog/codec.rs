@@ -1,6 +1,7 @@
 //! Catalog head and page wire shapes with their hex codecs.
 
 use super::*;
+use crate::identity::nibble;
 
 pub(super) struct ObservedHead {
     pub(super) head: CatalogHead,
@@ -185,12 +186,4 @@ pub(super) fn decode_hex(value: &str) -> Result<Vec<u8>> {
             Ok((high << 4) | low)
         })
         .collect()
-}
-
-pub(super) fn nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
-    }
 }

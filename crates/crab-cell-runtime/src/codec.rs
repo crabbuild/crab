@@ -307,6 +307,20 @@ pub(crate) fn read_fixed<const N: usize>(
         .map_err(|_| CodecError::Invalid(message))
 }
 
+/// Encodes and decodes one bounded wire value, asserting an exact round trip.
+///
+/// Each primitive's in-src codec tests use this, so they all assert the same
+/// contract instead of keeping a private copy of the assertion.
+#[cfg(test)]
+pub(crate) fn roundtrip<T: WireValue + PartialEq + std::fmt::Debug>(value: T) {
+    let mut encoder = BoundedEncoder::new(1024 * 1024).unwrap();
+    value.encode(&mut encoder).unwrap();
+    let bytes = encoder.finish();
+    let mut decoder = BoundedDecoder::new(&bytes, 1024 * 1024).unwrap();
+    assert_eq!(T::decode(&mut decoder).unwrap(), value);
+    decoder.finish().unwrap();
+}
+
 pub(crate) fn encode_wire<T: WireValue>(value: &T, limit: u32) -> Result<Vec<u8>, CodecError> {
     let mut encoder = BoundedEncoder::new(limit)?;
     value.encode(&mut encoder)?;

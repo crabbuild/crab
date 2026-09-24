@@ -39,8 +39,8 @@ impl BundleEntry {
         bytes: Vec<u8>,
     ) -> Self {
         Self {
-            repository: encode_identity(&cell),
-            epoch: encode_identity(&incarnation),
+            repository: crate::hex::encode_hex(&cell),
+            epoch: crate::hex::encode_hex(&incarnation),
             info,
             bytes,
         }
@@ -595,17 +595,10 @@ fn read_exact_at(file: &mut File, offset: u64, bytes: &mut [u8]) -> std::io::Res
 }
 
 pub(crate) fn cell_identity(cell: &[u8; 32], incarnation: &[u8; 16]) -> (String, String) {
-    (encode_identity(cell), encode_identity(incarnation))
-}
-
-fn encode_identity(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(TABLE[(byte >> 4) as usize] as char);
-        encoded.push(TABLE[(byte & 0x0f) as usize] as char);
-    }
-    encoded
+    (
+        crate::hex::encode_hex(cell),
+        crate::hex::encode_hex(incarnation),
+    )
 }
 
 fn valid_epoch(epoch: &str) -> bool {
