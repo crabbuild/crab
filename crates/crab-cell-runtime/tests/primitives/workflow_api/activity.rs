@@ -99,7 +99,7 @@ async fn native_activity_heartbeats_and_recovers_after_node_loss() {
     .unwrap();
     workflows
         .start(
-            identity(26),
+            mutation_identity(26),
             b"activity-build".to_vec(),
             b"activity".to_vec(),
         )
@@ -143,7 +143,7 @@ async fn native_activity_heartbeats_and_recovers_after_node_loss() {
     assert!(state.result.unwrap().ends_with(b"payload-complete"));
     workflows
         .start(
-            identity(28),
+            mutation_identity(28),
             b"retry-build".to_vec(),
             b"activity-retry".to_vec(),
         )
@@ -163,7 +163,7 @@ async fn native_activity_heartbeats_and_recovers_after_node_loss() {
     ));
     workflows
         .start(
-            identity(29),
+            mutation_identity(29),
             b"blocking-build".to_vec(),
             b"activity-blocking".to_vec(),
         )
@@ -195,7 +195,7 @@ async fn native_activity_heartbeats_and_recovers_after_node_loss() {
     );
     workflows
         .start(
-            identity(30),
+            mutation_identity(30),
             b"failover-build".to_vec(),
             b"activity-failover".to_vec(),
         )
@@ -330,7 +330,7 @@ async fn native_activity_heartbeats_and_recovers_after_node_loss() {
         .run_maintenance_once(
             restored_client.clone(),
             target.clone(),
-            identity(31),
+            mutation_identity(31),
             MaintenanceTickRequest {
                 expected_commit_sequence: current_sequence,
             },

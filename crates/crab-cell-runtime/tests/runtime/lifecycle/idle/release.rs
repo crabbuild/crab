@@ -92,7 +92,7 @@ async fn exact_idle_release_blocks_new_work_while_inventory_is_pending() {
 
     let result = target
         .execute(
-            identity(97),
+            mutation_identity_window(97, 10, 10_000),
             Digest::from_bytes([97; 32]),
             20,
             64,

@@ -55,7 +55,7 @@ async fn node_byte_admission_rejects_before_sql_execution() {
     assert!(matches!(
         handle
             .execute(
-                identity(12),
+                mutation_identity_window(12, 10, 10_000),
                 Digest::from_bytes([13; 32]),
                 20,
                 1_025,

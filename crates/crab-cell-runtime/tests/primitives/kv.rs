@@ -1,18 +1,17 @@
-use std::{sync::Arc, time::UNIX_EPOCH};
+use std::sync::Arc;
 
 use crab_cell_runtime::cell::actor::CellRuntime;
 use crab_cell_runtime::cell::catalog::CatalogRole;
 use crab_cell_runtime::cell::catalog::{CatalogEntry, CellCatalog};
-use crab_cell_runtime::cell::executor::MutationIdentity;
 use crab_cell_runtime::cell::schema::install_runtime_schema;
 use crab_cell_runtime::cell::worker::SqlWorkerPool;
 use crab_cell_runtime::client::{CellClient, InvocationError};
 use crab_cell_runtime::control::Owner;
 use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::identity::IncarnationId;
 use crab_cell_runtime::identity::{
     ApplicationId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
 };
-use crab_cell_runtime::identity::{IncarnationId, RequestId};
 use crab_cell_runtime::primitives::kv::{
     KvAtomicOutcome, KvAtomicRequest, KvCheck, KvCondition, KvListRequest, KvMutation,
     install_kv_schema, kv_atomic, kv_cleanup_expired, kv_get, kv_list, register_kv,
@@ -26,6 +25,8 @@ use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path};
+
+use crate::support::fixtures::mutation_identity;
 
 const KV_MODULE: &str = "kv-test";
 const KV_NAMESPACE: NamespaceId = NamespaceId::from_bytes([6; 16]);
@@ -107,21 +108,6 @@ fn kv_registry() -> Arc<crab_cell_runtime::Registry> {
     });
     builder.register(TestKv).unwrap();
     Arc::new(builder.finish().unwrap())
-}
-
-fn current_identity(byte: u8) -> MutationIdentity {
-    let now_ms = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap();
-    MutationIdentity {
-        request_id: RequestId::from_bytes([byte; 16]),
-        issued_at_ms: now_ms,
-        expires_at_ms: now_ms + 60_000,
-    }
 }
 
 fn connection() -> crab_ltx::rusqlite::Connection {
@@ -460,7 +446,7 @@ async fn typed_kv_namespace_recovers_after_owner_loss() {
         mutations: vec![put(b"branch", &large_value, None)],
     };
     let committed = namespace
-        .atomic(current_identity(7), request)
+        .atomic(mutation_identity(7), request)
         .await
         .unwrap();
     assert!(matches!(committed.output, KvAtomicOutcome::Applied(_)));
@@ -494,7 +480,7 @@ async fn typed_kv_namespace_recovers_after_owner_loss() {
     );
     let rejected = namespace
         .atomic(
-            current_identity(8),
+            mutation_identity(8),
             KvAtomicRequest {
                 scope: b"repository".to_vec(),
                 checks: vec![KvCheck {

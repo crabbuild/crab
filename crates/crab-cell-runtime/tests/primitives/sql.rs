@@ -1,18 +1,17 @@
-use std::{sync::Arc, time::UNIX_EPOCH};
+use std::sync::Arc;
 
 use crab_cell_runtime::cell::actor::CellRuntime;
 use crab_cell_runtime::cell::catalog::CatalogRole;
 use crab_cell_runtime::cell::catalog::{CatalogEntry, CellCatalog};
-use crab_cell_runtime::cell::executor::MutationIdentity;
 use crab_cell_runtime::cell::schema::install_runtime_schema;
 use crab_cell_runtime::cell::worker::SqlWorkerPool;
 use crab_cell_runtime::client::{CellClient, InvocationError};
 use crab_cell_runtime::control::Owner;
 use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::identity::IncarnationId;
 use crab_cell_runtime::identity::{
     ApplicationId, CellId, CellTarget, Digest, NamespaceId, SessionId, TenantId,
 };
-use crab_cell_runtime::identity::{IncarnationId, RequestId};
 use crab_cell_runtime::primitives::blob::install_blob_schema;
 use crab_cell_runtime::primitives::cron::install_cron_schema;
 use crab_cell_runtime::primitives::sql::{
@@ -27,6 +26,8 @@ use crab_ltx::CellStorageLayout;
 use crab_ltx::{CellReplica, Limits, rusqlite::Connection};
 use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path};
+
+use crate::support::fixtures::mutation_identity;
 
 const SQL_MODULE: &str = "sql-test";
 const SQL_NAMESPACE: NamespaceId = NamespaceId::from_bytes([7; 16]);
@@ -98,21 +99,6 @@ fn sql_registry() -> Arc<crab_cell_runtime::Registry> {
     });
     builder.register(TestSql).unwrap();
     Arc::new(builder.finish().unwrap())
-}
-
-fn current_identity(byte: u8) -> MutationIdentity {
-    let now_ms = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap();
-    MutationIdentity {
-        request_id: RequestId::from_bytes([byte; 16]),
-        issued_at_ms: now_ms,
-        expires_at_ms: now_ms + 60_000,
-    }
 }
 
 fn install_sql_schema(
@@ -401,7 +387,7 @@ async fn typed_sql_cell_publishes_enforces_read_only_queries_and_survives_restor
     .unwrap();
     let committed = sql
         .batch(
-            current_identity(7),
+            mutation_identity(7),
             SqlBatch {
                 statements: vec![
                     statement(

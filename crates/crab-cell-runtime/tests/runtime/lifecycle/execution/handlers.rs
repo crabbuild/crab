@@ -22,7 +22,7 @@ async fn native_handler_deadline_discards_late_commit_and_reopens_authoritative_
         tokio::spawn(async move {
             handle
                 .execute(
-                    identity(42),
+                    mutation_identity_window(42, 10, 10_000),
                     Digest::from_bytes([43; 32]),
                     20,
                     1_024,
@@ -127,7 +127,7 @@ async fn native_handler_panic_discards_transaction_and_reopens_authoritative_roo
 
     let outcome = handle
         .execute(
-            identity(44),
+            mutation_identity_window(44, 10, 10_000),
             Digest::from_bytes([45; 32]),
             20,
             1_024,
@@ -233,7 +233,7 @@ async fn proven_handler_rollback_keeps_the_cell_servable() {
     assert!(matches!(
         handle
             .execute(
-                identity(16),
+                mutation_identity_window(16, 10, 10_000),
                 Digest::from_bytes([17; 32]),
                 20,
                 1_024,
@@ -249,7 +249,7 @@ async fn proven_handler_rollback_keeps_the_cell_servable() {
     assert!(matches!(
         handle
             .execute(
-                identity(24),
+                mutation_identity_window(24, 10, 10_000),
                 Digest::from_bytes([25; 32]),
                 20,
                 1_024,
@@ -267,7 +267,7 @@ async fn proven_handler_rollback_keeps_the_cell_servable() {
     assert!(matches!(
         handle
             .execute(
-                identity(18),
+                mutation_identity_window(18, 10, 10_000),
                 Digest::from_bytes([19; 32]),
                 21,
                 1_024,

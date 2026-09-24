@@ -75,7 +75,11 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
     )
     .unwrap();
     let started = workflows
-        .start(identity(7), b"build-42".to_vec(), b"start".to_vec())
+        .start(
+            mutation_identity(7),
+            b"build-42".to_vec(),
+            b"start".to_vec(),
+        )
         .await
         .unwrap();
     let WorkflowOutcome::Applied { run_id, .. } = started.output else {
@@ -87,7 +91,10 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
         signal_id: [8; 16],
         event: b"continue".to_vec(),
     };
-    let signalled = workflows.signal(identity(9), signal.clone()).await.unwrap();
+    let signalled = workflows
+        .signal(mutation_identity(9), signal.clone())
+        .await
+        .unwrap();
     assert!(matches!(
         signalled.output,
         WorkflowOutcome::Applied {
@@ -97,7 +104,7 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
     ));
     assert!(matches!(
         workflows
-            .signal(identity(10), signal.clone())
+            .signal(mutation_identity(10), signal.clone())
             .await
             .unwrap()
             .output,
@@ -108,7 +115,7 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
     ));
     let mut conflicting = signal;
     conflicting.event = b"different".to_vec();
-    let conflict = workflows.signal(identity(11), conflicting).await;
+    let conflict = workflows.signal(mutation_identity(11), conflicting).await;
     assert!(matches!(
         conflict,
         Err(InvocationError::Rejected(outcome))
@@ -123,7 +130,11 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
     assert_eq!(state.state, b"continue");
     assert_eq!(state.event_sequence, 2);
     let timer = workflows
-        .start(identity(16), b"timer-build".to_vec(), b"timer".to_vec())
+        .start(
+            mutation_identity(16),
+            b"timer-build".to_vec(),
+            b"timer".to_vec(),
+        )
         .await
         .unwrap();
     let mut due = DueCellScan::new(&catalog, authority.clone(), target.cell_id().as_bytes()[0])
@@ -151,7 +162,7 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
         .run_maintenance_once(
             scheduler_client.clone(),
             target.clone(),
-            identity(17),
+            mutation_identity(17),
             MaintenanceTickRequest {
                 expected_commit_sequence: timer.receipt.commit_sequence,
             },
@@ -176,7 +187,7 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
         .run_maintenance_once(
             scheduler_client,
             target.clone(),
-            identity(18),
+            mutation_identity(18),
             MaintenanceTickRequest {
                 expected_commit_sequence: timer.receipt.commit_sequence,
             },
@@ -226,7 +237,7 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
     );
     let cancelled = restored_workflows
         .cancel(
-            identity(13),
+            mutation_identity(13),
             WorkflowSignal {
                 workflow_id: b"build-42".to_vec(),
                 run_id,
