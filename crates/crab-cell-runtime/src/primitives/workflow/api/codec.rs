@@ -248,19 +248,10 @@ fn validate_run(run: &WorkflowRun) -> Result<(), CodecError> {
     Ok(())
 }
 
-fn read_fixed<const N: usize>(
-    decoder: &mut BoundedDecoder<'_>,
-    message: &'static str,
-) -> Result<[u8; N], CodecError> {
-    decoder
-        .read_bytes()?
-        .try_into()
-        .map_err(|_| CodecError::Invalid(message))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::roundtrip;
     use crab_ltx::rusqlite::Connection;
 
     struct TestDefinition {
@@ -312,15 +303,6 @@ mod tests {
         const CANCEL_COMMAND_ID: u32 = 3;
         const CONTROL_COMMAND_ID: u32 = 4;
         const GET_QUERY_ID: u32 = 1;
-    }
-
-    fn roundtrip<T: WireValue + PartialEq + std::fmt::Debug>(value: T) {
-        let mut encoder = BoundedEncoder::new(1024 * 1024).unwrap();
-        value.encode(&mut encoder).unwrap();
-        let bytes = encoder.finish();
-        let mut decoder = BoundedDecoder::new(&bytes, 1024 * 1024).unwrap();
-        assert_eq!(T::decode(&mut decoder).unwrap(), value);
-        decoder.finish().unwrap();
     }
 
     #[test]

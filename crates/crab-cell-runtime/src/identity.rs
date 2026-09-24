@@ -180,7 +180,8 @@ pub(crate) fn decode_hex<const N: usize>(value: &str) -> Result<[u8; N]> {
     Ok(decoded)
 }
 
-fn nibble(byte: u8) -> Option<u8> {
+/// Decodes one lowercase hex digit, rejecting everything else.
+pub(crate) fn nibble(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
         b'a'..=b'f' => Some(byte - b'a' + 10),

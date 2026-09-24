@@ -8,6 +8,7 @@ cell/worker/tests.rs  # exercises private worker admission and bootstrap
 cell/worker.rs  # declares crate-private test modules
 client/tests.rs  # exercises the private transport/encoding seam
 client.rs  # declares crate-private test modules
+codec.rs  # declares the shared bounded wire round trip for in-src codec tests
 control.rs  # declares crate-private test modules
 control/tests.rs  # asserts private control transition and codec helpers
 coordination/sim.rs  # deterministic simulator for the pub(crate) kernel

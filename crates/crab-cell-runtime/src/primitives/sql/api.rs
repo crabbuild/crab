@@ -273,15 +273,7 @@ fn bounded_count(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn roundtrip<T: WireValue + PartialEq + std::fmt::Debug>(value: T) {
-        let mut encoder = BoundedEncoder::new(1024 * 1024).unwrap();
-        value.encode(&mut encoder).unwrap();
-        let bytes = encoder.finish();
-        let mut decoder = BoundedDecoder::new(&bytes, 1024 * 1024).unwrap();
-        assert_eq!(T::decode(&mut decoder).unwrap(), value);
-        decoder.finish().unwrap();
-    }
+    use crate::codec::roundtrip;
 
     #[test]
     fn sql_batch_and_results_roundtrip_every_value_kind() {
