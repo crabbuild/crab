@@ -152,14 +152,19 @@ stateDiagram-v2
     Leased --> Done: ack with token
     Leased --> Ready: retry or lease expiry
     Leased --> Leased: extend with token
-    Ready --> DeadLetter: attempt limit
-    Ready --> Expired: retention limit
+    Ready --> DeadLetter: attempt limit or retention limit
     DeadLetter --> [*]: effect acknowledged
     Done --> [*]: retention cleanup
-    Expired --> [*]: retention cleanup
 ```
 
 The claim command publishes its lease before returning payloads. Consumers validate the exact token at the claim receipt before starting external work.
+
+A ready message past its retention limit is dead-lettered rather than dropped:
+the expire class moves it to `DeadLetter` with its payload, and the configured
+dead-letter target receives a typed effect when one is registered. The retention
+class runs before that transition inside one Tick, so a dead-lettered message is
+removed by the cleanup on a later Tick once its effect has settled — terminal
+rows therefore stay observable for at least one Tick.
 
 | Queue contract | Limit or behavior |
 | --- | --- |

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 29d468f98608e0be6ec875319f36575c261b651faa2b9605d9ec22bccce04744 # shrinks to kv_expiry = [], blob_rows = [], queue_expiry = [0]
