@@ -18,6 +18,7 @@ pub use api::{
 };
 
 const QUEUE_SCHEMA: &str = include_str!("../migrations/queue.sql");
+pub(crate) const QUEUE_TABLE: &str = "queue_messages";
 const MAX_PAYLOAD_BYTES: usize = 256 * 1024;
 pub(crate) const QUEUE_SEND_MAX_INPUT_BYTES: u32 = MAX_PAYLOAD_BYTES as u32 + 32;
 const MAX_CLAIM_BYTES: usize = 512 * 1024;

@@ -34,6 +34,7 @@ pub use api::{
 };
 
 const WORKFLOW_SCHEMA: &str = include_str!("../migrations/workflow.sql");
+pub(crate) const WORKFLOW_TABLE: &str = "workflow_activities";
 const MAX_WORKFLOW_BYTES: usize = 1 << 20;
 const MAX_ACTIONS: usize = 128;
 const MAX_EVENTS_PER_CELL: u64 = 100_000;

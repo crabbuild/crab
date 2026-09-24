@@ -12,6 +12,7 @@ pub use api::{
 };
 
 const KV_SCHEMA: &str = include_str!("../migrations/kv.sql");
+pub(crate) const KV_TABLE: &str = "kv_entries";
 const MAX_SCOPE_BYTES: usize = 1_024;
 const MAX_KEY_BYTES: usize = 1_024;
 const MAX_VALUE_BYTES: usize = 4 * 1024 * 1024;
