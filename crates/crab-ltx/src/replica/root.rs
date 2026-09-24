@@ -375,6 +375,41 @@ mod tests {
     }
 
     #[test]
+    fn encode_root_accepts_the_segment_page_ceiling() {
+        let mut document = root();
+        document.segment_pages = vec![[4; 32]; super::super::MAX_SEGMENT_PAGES];
+        assert!(encode_root(&document).is_ok());
+    }
+
+    #[test]
+    fn encode_root_rejects_more_than_the_segment_page_ceiling() {
+        let mut document = root();
+        document.segment_pages = vec![[4; 32]; super::super::MAX_SEGMENT_PAGES + 1];
+        assert!(matches!(
+            encode_root(&document),
+            Err(CrabError::LTXCorrupted)
+        ));
+    }
+
+    #[test]
+    fn decode_root_rejects_a_body_past_the_root_bound() {
+        let oversized = vec![b' '; super::super::ROOT_BYTES as usize + 1];
+        assert!(matches!(
+            decode_root(&oversized),
+            Err(CrabError::Limit(crate::LimitKind::CellRootBytes))
+        ));
+    }
+
+    #[test]
+    fn decode_segment_page_rejects_a_body_past_the_page_bound() {
+        let oversized = vec![b' '; super::super::SEGMENT_PAGE_BYTES as usize + 1];
+        assert!(matches!(
+            decode_segment_page(&oversized),
+            Err(CrabError::Limit(crate::LimitKind::CellSegmentPageBytes))
+        ));
+    }
+
+    #[test]
     fn root_codec_rejects_noncanonical_and_duplicate_fields() {
         let bytes = encode_root(&root()).unwrap();
         assert_eq!(decode_root(&bytes).unwrap().txid, 2);
