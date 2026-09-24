@@ -5,15 +5,18 @@ use crate::{Error, Result};
 
 macro_rules! fixed_id {
     ($name:ident, $len:literal) => {
+        #[doc = concat!("Opaque fixed-width ", stringify!($name), " identity bytes.")]
         #[derive(Clone, Copy, PartialEq, Eq, Hash)]
         pub struct $name([u8; $len]);
 
         impl $name {
+            /// Wraps the fixed-width identity bytes without validation.
             #[must_use]
             pub const fn from_bytes(bytes: [u8; $len]) -> Self {
                 Self(bytes)
             }
 
+            /// Returns the raw identity bytes.
             #[must_use]
             pub const fn as_bytes(&self) -> &[u8; $len] {
                 &self.0
@@ -80,6 +83,8 @@ impl CellTarget {
         })
     }
 
+    /// Derives the Cell ID from the target's tenant, application, namespace,
+    /// and partition.
     #[must_use]
     pub fn cell_id(&self) -> CellId {
         let mut hasher = blake3::Hasher::new();
@@ -92,21 +97,25 @@ impl CellTarget {
         CellId::from_bytes(*hasher.finalize().as_bytes())
     }
 
+    /// Returns the tenant this target belongs to.
     #[must_use]
     pub const fn tenant(&self) -> TenantId {
         self.tenant
     }
 
+    /// Returns the application this target belongs to.
     #[must_use]
     pub const fn application(&self) -> ApplicationId {
         self.application
     }
 
+    /// Returns the namespace that owns this target's Cell.
     #[must_use]
     pub const fn namespace(&self) -> NamespaceId {
         self.namespace
     }
 
+    /// Returns the partition key that selected the Cell within the namespace.
     #[must_use]
     pub fn partition(&self) -> &[u8] {
         &self.partition

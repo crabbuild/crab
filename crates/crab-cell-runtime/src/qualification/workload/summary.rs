@@ -166,7 +166,7 @@ impl QualificationRunSummary {
 
     /// Encodes a measured result and the resource observations captured for the same run.
     ///
-    /// Protected profiles require every [`QUALIFICATION_RESOURCE_METRICS`]
+    /// Protected profiles require every [`crate::qualification::QUALIFICATION_RESOURCE_METRICS`]
     /// observation. The receipt verifier compares these values with the signed
     /// execution measurements, so a harness cannot substitute a different
     /// machine's resource envelope after the workload has completed.
