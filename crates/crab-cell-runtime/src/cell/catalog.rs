@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::identity::encode_hex;
 use crate::identity::{ApplicationId, CellId, CellTarget, Digest, NamespaceId, TenantId};
+use crate::retry::{Backoff, retry_hint, retryable_storage_error};
 use crate::{Error, Result};
 
 const MAX_HEAD_BYTES: u64 = 32 * 1024;
@@ -234,7 +235,7 @@ impl CellCatalog {
     pub async fn provision(&self, entry: CatalogEntry) -> Result<CatalogProof> {
         entry.validate(self.tenant, self.application)?;
         let shard = entry.cell.as_bytes()[0];
-        let mut backoff = CatalogBackoff::default();
+        let mut backoff = Backoff::default();
         loop {
             let observed = self.load_head(shard).await?;
             let mut entries = match &observed {
@@ -509,8 +510,6 @@ impl CellCatalog {
     }
 }
 
-mod backoff;
 mod codec;
 
-use backoff::*;
 use codec::*;
