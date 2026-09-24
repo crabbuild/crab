@@ -64,6 +64,28 @@ fn queue_state_count(transaction: &crab_ltx::rusqlite::Transaction<'_>, state: i
         .unwrap()
 }
 
+fn state_count(
+    transaction: &crab_ltx::rusqlite::Transaction<'_>,
+    table: &str,
+    state: i64,
+) -> usize {
+    transaction
+        .query_row(
+            &format!("SELECT count(*) FROM {table} WHERE state = ?1"),
+            [state],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+        .try_into()
+        .unwrap()
+}
+
+/// Effect expiries are either already past (including the deadline itself) or
+/// far enough ahead that the reclaim retry delay cannot consume them.
+fn effect_expiry() -> impl Strategy<Value = i32> {
+    prop_oneof![-64i32..=0, 60_000i32..=120_000]
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 16, ..ProptestConfig::default() })]
 
@@ -181,6 +203,112 @@ proptest! {
             count(&transaction, "queue_messages"),
             live_queue,
             "the retention cleanup must remove dead-lettered messages"
+        );
+    }
+
+    #[test]
+    fn tick_settles_effect_expiry_and_reclaims_only_expired_leases(
+        ready_expiry in prop::collection::vec(effect_expiry(), 0..=4),
+        leases in prop::collection::vec((any::<bool>(), effect_expiry()), 0..=4),
+        terminal in prop::collection::vec((any::<bool>(), effect_expiry()), 0..=4),
+    ) {
+        let mut connection = connection();
+        let transaction = connection.transaction().unwrap();
+
+        let mut next = 0_u8;
+        let mut insert = |state: i64, expiry_offset: i32, lease_expired: bool| {
+            next += 1;
+            let (token, lease_until_ms) = if state == 1 {
+                let lease = if lease_expired { -10 } else { 10 };
+                (Some(vec![next; 16]), Some(NOW_MS + lease))
+            } else {
+                (None, None)
+            };
+            transaction
+                .execute(
+                    "INSERT INTO sys_effects(effect_id, destination, operation, state, attempt, \
+                     due_at_ms, expires_at_ms, token, lease_until_ms, created_sequence, result) \
+                     VALUES (?1, zeroblob(32), X'', ?2, 0, ?3, ?4, ?5, ?6, 1, NULL)",
+                    params![
+                        vec![next; 32],
+                        state,
+                        NOW_MS - 100,
+                        NOW_MS + i64::from(expiry_offset),
+                        token,
+                        lease_until_ms
+                    ],
+                )
+                .unwrap();
+        };
+
+        for offset in &ready_expiry {
+            insert(0, *offset, false);
+        }
+        for (lease_expired, offset) in &leases {
+            insert(1, *offset, *lease_expired);
+        }
+        for (failed, offset) in &terminal {
+            insert(if *failed { 3 } else { 2 }, *offset, false);
+        }
+
+        let live = |offset: &i32| NOW_MS + i64::from(*offset) > NOW_MS;
+        let live_ready = ready_expiry.iter().filter(|offset| live(offset)).count();
+        let expired_ready = ready_expiry.len() - live_ready;
+        // A live lease keeps its row regardless of the effect's own expiry: only
+        // the expired lease returns the row to ready (or fails an expired one).
+        let live_leases = leases
+            .iter()
+            .filter(|(lease_expired, _)| !*lease_expired)
+            .count();
+        let reclaimed =
+            leases.iter().filter(|(lease_expired, offset)| *lease_expired && live(offset)).count();
+        let failed_reclaims =
+            leases.iter().filter(|(lease_expired, offset)| *lease_expired && !live(offset)).count();
+        let live_done = terminal.iter().filter(|(failed, offset)| !*failed && live(offset)).count();
+        let live_failed = terminal.iter().filter(|(failed, offset)| *failed && live(offset)).count();
+        let expired_terminal =
+            terminal.iter().filter(|(_, offset)| !live(offset)).count();
+        let survives = ready_expiry.len()
+            + leases.len()
+            + terminal.len()
+            - expired_terminal;
+
+        // First Tick: expired ready rows fail, a live lease is never reclaimed,
+        // and only terminal rows past retention are removed immediately.
+        scheduler_tick(&transaction, &target(), NOW_MS, &[]).unwrap();
+        prop_assert_eq!(
+            state_count(&transaction, "sys_effects", 0),
+            live_ready + reclaimed,
+            "ready rows inside retention stay ready and expired leases return to ready"
+        );
+        prop_assert_eq!(
+            state_count(&transaction, "sys_effects", 1),
+            live_leases,
+            "a live lease must never be reclaimed"
+        );
+        prop_assert_eq!(
+            state_count(&transaction, "sys_effects", 2),
+            live_done,
+            "a completed effect inside retention must survive"
+        );
+        prop_assert_eq!(
+            state_count(&transaction, "sys_effects", 3),
+            live_failed + expired_ready + failed_reclaims,
+            "expired ready rows and exhausted leases fail before cleanup sees them"
+        );
+        prop_assert_eq!(
+            count(&transaction, "sys_effects"),
+            survives,
+            "terminal rows past retention are removed by the first Tick"
+        );
+
+        // Second Tick: the failures from the first Tick are now terminal and past
+        // retention, so exactly the rows inside retention remain.
+        scheduler_tick(&transaction, &target(), NOW_MS, &[]).unwrap();
+        prop_assert_eq!(
+            count(&transaction, "sys_effects"),
+            live_ready + live_leases + reclaimed + live_done + live_failed,
+            "only rows inside retention survive the sweep"
         );
     }
 }
