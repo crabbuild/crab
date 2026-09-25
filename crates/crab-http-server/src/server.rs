@@ -64,7 +64,9 @@ const MAINTENANCE_ADMISSION_CAPACITY: usize = 2;
 const MAX_ACTIVE_CELLS: usize = 10_000;
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
-const MIN_CELL_MEMORY_BYTES: u64 = 2 * GIB;
+// The derived budget below reserves 512 MiB for the process and still requires
+// positive Cell, capture, and recovery slots at this floor.
+const MIN_CELL_MEMORY_BYTES: u64 = GIB;
 const MIN_USABLE_CELL_DISK_BYTES: u64 = 20 * GIB;
 const FILE_DESCRIPTOR_RESERVE_MINIMUM: usize = 128;
 const DIRTY_JOB_MEMORY_BYTES: u64 = 64 * MIB;
@@ -143,7 +145,7 @@ impl CellRuntimeBudget {
     pub(crate) fn from_resources(resources: crate::peer::LocalResources) -> Result<Self> {
         if resources.memory_bytes < MIN_CELL_MEMORY_BYTES {
             return Err(crate::Error::Config(
-                "Cell runtime requires at least 2 GiB effective memory",
+                "Cell runtime requires at least 1 GiB effective memory",
             ));
         }
         let disk_reserve = (resources.free_disk_bytes / 5).max(10 * GIB);
@@ -2544,9 +2546,20 @@ mod tests {
     #[test]
     fn cell_runtime_budget_rejects_insufficient_memory() {
         assert!(
-            CellRuntimeBudget::from_resources(local_resources(2 * GIB - 1, 30 * GIB, 10_000))
-                .is_err()
+            CellRuntimeBudget::from_resources(local_resources(GIB - 1, 30 * GIB, 10_000)).is_err()
         );
+    }
+
+    #[test]
+    fn cell_runtime_budget_admits_one_cpu_one_gib_node() {
+        let mut resources = local_resources(GIB, 30 * GIB, 10_000);
+        resources.job_credits = 1;
+        let budget = CellRuntimeBudget::from_resources(resources).unwrap();
+        assert_eq!(budget.blocking_jobs, 1);
+        assert_eq!(budget.dirty_jobs, 1);
+        assert_eq!(budget.recovery_jobs, 1);
+        assert!(budget.max_active_cells > 0);
+        assert!(budget.local_disk_mebibytes > 0);
     }
 
     #[test]
