@@ -249,6 +249,46 @@ the local `FileSystem`; it does not include SQLite VFS syncs. The fresh mode
 retains its original immediate-capture workload. Neither mode measures runtime
 response proof latency or grants authority merely by preparing a root.
 
+The runner also emits per-command `capture_*_us` fields for all phases in
+`CaptureTiming`. They distinguish WAL transfer, page collection, cut encoding,
+checkpoint maintenance, and LTX reinspection during batch collection.
+
+### Large sparse checkpoint capture (2026-09-25)
+
+With `--sparse --payload-bytes 4194304 --max-capture-bytes 1048576
+--commands 3 --warmup 1`, seven independent release processes measured two
+commands each. Each row below is the p50 / nearest-rank p95 of the seven
+per-process medians, in microseconds. The before and after binaries ran on the
+same macOS/APFS host; run-to-run variation makes this local evidence rather
+than a response-latency SLO.
+
+| Phase | Before | After retaining every sealed cut |
+| --- | ---: | ---: |
+| SQLite commit | 4,327 / 4,550 | 4,482 / 5,258 |
+| LTX capture | 48,935 / 50,122 | 38,801 / 47,617 |
+| LTX reinspection during collection | 10,321 / 10,588 | 0 / 0 |
+| LTX encode | 21,376 / 21,984 | 21,632 / 22,089 |
+| In-memory root preparation | 2,860 / 2,926 | 2,881 / 2,967 |
+
+Checkpointing can seal a second cut before the command receives its batch.
+The prior implementation cached the newest cut's metadata and re-read the
+earlier LTX file to obtain its size, digest, and checksums. The writer already
+computed those values while sealing that same cut. The new cache holds each
+sealed result until collection, removing that reinspection. `VerifiedPlan`
+still reads and verifies every cut before exact restore. Raw per-process JSON
+is under `$HOME/Workspace/crabbuild-target/crab-1bab/ltx-slice4-profile-20260925/`
+(`sparse-*.json` and `metadata-cache-*.json`). The production response phase
+profile and provider durability receipt remain open.
+
+For a small-cut regression check, 21 independent processes per mode used
+`--payload-bytes 4096` or `16384`, `--commands 12 --warmup 5`. Sparse deferred
+capture measured 280 / 329 µs at 4 KiB and 301 / 351 µs at 16 KiB (p50 /
+p95), compared with the earlier seven-process 285 / 335 and 314 / 374 µs.
+Fresh immediate capture measured 4,278 / 5,578 µs and 4,572 / 5,509 µs,
+compared with 4,255 / 5,362 and 4,465 / 5,565 µs. These are different
+process counts and non-interleaved host runs, so small differences are not
+attributable to this change; none shows a greater than 5% p95 regression.
+
 Seven independent release-process rounds per row on macOS 25.5, APFS on a USB
 SSD, Apple silicon, Rust 1.97.0, bundled SQLite 3.49.1, and `object_store`
 0.14.2 in-memory. Each small-payload round measured seven commands after five

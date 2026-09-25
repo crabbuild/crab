@@ -440,16 +440,21 @@ impl CaptureEngine {
                 final_page,
             },
         ));
-        self.last_l0_segment = Some(crate::SegmentInfo {
-            min_txid: tx_id.0,
-            max_txid: tx_id.0,
-            page_size: self.page_size,
-            database_pages: commit,
-            pre_checksum: pos.post_apply_checksum,
-            post_checksum,
-            size_bytes,
-            blake3: digest,
-        });
+        // Checkpointing can seal another cut before Db collects this one.
+        // Retain each writer-produced digest so collection need not reread it.
+        self.sealed_l0_segments.insert(
+            tx_id.0,
+            crate::SegmentInfo {
+                min_txid: tx_id.0,
+                max_txid: tx_id.0,
+                page_size: self.page_size,
+                database_pages: commit,
+                pre_checksum: pos.post_apply_checksum,
+                post_checksum,
+                size_bytes,
+                blake3: digest,
+            },
+        );
         #[cfg(feature = "replica")]
         if let Some(index) = captured_index {
             self.sealed_l0_captured_indexes.insert(tx_id.0, index);

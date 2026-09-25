@@ -1,6 +1,6 @@
 # Plan 035: Harden crab-ltx as the Cell durability foundation
 
-Status: IN PROGRESS — local Slices 1–3 pass; physical power-cut and protected proof gates remain; Slice 4 no-go pending production profile
+Status: IN PROGRESS — local Slices 1–3 pass; Slice 4 local capture optimization measured; physical power-cut and protected proof gates remain
 Priority: P0 correctness; P1 measured performance
 Effort: L, split into four reviewable changes
 Risk: High at the filesystem and recovery boundaries
@@ -335,6 +335,18 @@ status of this plan in `advisor-plans/README.md` after each slice.
   is actually on the production acknowledgement path. A bounded full-WAL
   rewrite or additional object path now would be speculative; choose and
   benchmark one only after that receipt identifies the dominant term.
+- Slice 4 follow-up: phase timing of the large sparse case showed whole-WAL
+  reading at about 0.55 ms of a 48.9 ms median capture, so bounded WAL reading
+  was not the latency fix. A duplicate per-page checksum experiment also had
+  no measurable win and was reverted. The checkpoint path then showed about
+  10.3 ms re-reading an earlier cut because capture retained only the newest
+  cut's writer-produced metadata. Capture now retains each sealed cut until
+  `Db::collect_cuts` consumes it. Seven independent local release processes
+  measured 48.9 / 50.1 ms before and 38.8 / 47.6 ms after for capture p50 /
+  p95; the selected verification phase fell from 10.3 / 10.6 ms to zero.
+  Exact restore, fault, vector, both feature suites, Clippy, and layout checks
+  passed. This is local capture evidence; the protected response-phase receipt
+  remains open.
 - The production `crab_cell_ltx_phase_seconds{phase="root_preparation"}`
   histogram now times one `CellReplica::prepare` attempt, including admission,
   immutable uploads, and verification. The existing capture phase and

@@ -568,7 +568,7 @@ impl Db {
         if after.txid.0 > before.txid.0 {
             for txid in before.txid.0 + 1..=after.txid.0 {
                 let path = PathBuf::from(self.capture.ltx_path(0, Txid(txid), Txid(txid)));
-                let info = if let Some(info) = self.capture.sealed_l0_segment(Txid(txid)) {
+                let info = if let Some(info) = self.capture.take_sealed_l0_segment(Txid(txid)) {
                     info
                 } else {
                     // The inspection limit is the full-file bound: a captured

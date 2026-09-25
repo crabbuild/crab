@@ -113,7 +113,7 @@ pub(crate) struct CaptureEngine {
     checkpointed_wal_offset: i64,
     verified_schema_version: Option<i64>,
     last_l0_header: Option<(Txid, LastL0Header)>,
-    last_l0_segment: Option<crate::SegmentInfo>,
+    sealed_l0_segments: HashMap<u64, crate::SegmentInfo>,
     /// Largest one incremental LTX cut may be.
     ///
     /// A commit whose delta cannot fit this bound is captured as a full
@@ -214,7 +214,7 @@ impl CaptureEngine {
             checkpointed_wal_offset: 0,
             verified_schema_version: None,
             last_l0_header: None,
-            last_l0_segment: None,
+            sealed_l0_segments: HashMap::new(),
             max_incremental_bytes,
             #[cfg(feature = "replica")]
             sealed_l0_captured_indexes: HashMap::new(),
@@ -451,11 +451,8 @@ impl CaptureEngine {
         &self.checksums
     }
 
-    pub(crate) fn sealed_l0_segment(&self, txid: Txid) -> Option<crate::SegmentInfo> {
-        self.last_l0_segment
-            .as_ref()
-            .filter(|info| info.max_txid == txid.0)
-            .cloned()
+    pub(crate) fn take_sealed_l0_segment(&mut self, txid: Txid) -> Option<crate::SegmentInfo> {
+        self.sealed_l0_segments.remove(&txid.0)
     }
 
     #[cfg(feature = "replica")]
@@ -478,7 +475,7 @@ impl CaptureEngine {
             return Err(CrabError::ChecksumMismatch);
         }
         let wal = self.wal_header_bytes()?;
-        self.last_l0_segment = None;
+        self.sealed_l0_segments.clear();
         #[cfg(feature = "replica")]
         {
             self.sealed_l0_captured_indexes.clear();
