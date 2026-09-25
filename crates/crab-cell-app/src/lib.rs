@@ -343,6 +343,15 @@ pub trait CellApplication: Send + Sync + 'static {
     }
 }
 
+/// Stable key encoding for one generated Cell accessor.
+///
+/// Implementations must return the same bounded bytes for the same logical key
+/// across compatible releases; changing them moves the key to another Cell.
+pub trait CellKey {
+    /// Returns the stored canonical bytes used by the declared shard function.
+    fn canonical_bytes(&self) -> &[u8];
+}
+
 /// Tenant/application-bound typed capability over an already-started client.
 pub struct ApplicationHandle<A> {
     client: CellClient,
@@ -364,22 +373,34 @@ impl<A> Clone for ApplicationHandle<A> {
     }
 }
 
-impl<A> ApplicationHandle<A> {
-    /// Binds a compiled application to one tenant and application identity.
-    #[must_use]
+impl<A: CellApplication> ApplicationHandle<A> {
+    /// Binds a compiled application and matching client to one tenant and application identity.
+    ///
+    /// Returns an error before any invocation when the author type or client
+    /// registry does not match the hosted application artifact.
     pub fn new(
         client: CellClient,
         compiled: Arc<CompiledApplication>,
         tenant: TenantId,
         application: ApplicationId,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        if compiled.name() != A::NAME {
+            return Err(Error::Registry(
+                "application type differs from compiled application",
+            ));
+        }
+        if client.registry_digest() != compiled.registry.release_digest() {
+            return Err(Error::Registry(
+                "client registry differs from compiled application",
+            ));
+        }
+        Ok(Self {
             client,
             tenant,
             application,
             compiled,
             marker: PhantomData,
-        }
+        })
     }
 
     /// Returns a handle whose Blob capability uses the configured object store.
@@ -394,6 +415,18 @@ impl<A> ApplicationHandle<A> {
     #[must_use]
     pub fn compiled(&self) -> &CompiledApplication {
         &self.compiled
+    }
+
+    /// Derives a scoped target from a declared stable namespace and shard key.
+    pub fn target_for_scope(&self, namespace: NamespaceId, scope: &[u8]) -> Result<CellTarget> {
+        let cell_type = self
+            .compiled
+            .cell_types
+            .iter()
+            .find(|cell_type| cell_type.namespace == namespace)
+            .ok_or(Error::Registry("namespace is not declared by application"))?;
+        let partition = cell_type.partition_for_scope(scope)?;
+        CellTarget::new(self.tenant, self.application, namespace, &partition)
     }
 
     /// Executes one statically typed command after enforcing application scope.
@@ -632,6 +665,8 @@ fn role_code(role: CatalogRole) -> u8 {
         CatalogRole::Cron => 6,
     }
 }
+
+mod client_macro;
 
 #[cfg(test)]
 mod tests;

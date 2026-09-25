@@ -18,7 +18,13 @@ where
         samples.push(operation_started.elapsed());
     }
     let elapsed = started.elapsed();
+    report_samples(name, &mut samples, elapsed);
+    samples
+}
+
+pub(super) fn report_samples(name: &str, samples: &mut [Duration], elapsed: Duration) {
     samples.sort_unstable();
+    let iterations = samples.len();
     let percentile = |percent: usize| {
         samples[(iterations * percent).div_ceil(100).saturating_sub(1)].as_secs_f64() * 1_000.0
     };
@@ -31,7 +37,6 @@ where
         percentile(99),
         percentile(100),
     );
-    samples
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

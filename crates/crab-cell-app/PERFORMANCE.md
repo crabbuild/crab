@@ -1,5 +1,35 @@
 # Cell primitive end-to-end performance
 
+## Generated client action and recovery slices
+
+The ignored `reference_public_host_action_performance` test runs the generated
+reference SQL client on three `CellNode` hosts. Each local or forwarded action
+prepares one typed command, waits for its published receipt, and verifies the
+row count through a typed query at that receipt. The forwarded lane crosses a
+signed peer gateway and then the owner over loopback TCP. The test reports
+separate full-action and `execute()`-to-durable-ack distributions. The latter
+includes handler execution, transport on the forwarded lane, and publication;
+it does not isolate object-store waiting from those costs. The runtime's
+`durability_proof` telemetry separately records post-commit submission through
+object durability proof, including publication queue time. Recovery timing runs
+from owner fencing through authority takeover, exact-root restore, and the
+first verified read. It is one recovery sample, so no percentile is reported.
+
+```bash
+CRAB_CELL_PERF_ITERATIONS=100 \
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-my-worktree \
+  cargo test -p crab-cell-app --test reference_application \
+  public_host::reference_public_host_action_performance \
+  --release --locked -- --ignored --nocapture
+```
+
+The local store is in memory, routing is static, requests are serial within
+each lane, and one process hosts all three nodes. These results measure the
+reference action path and do not establish a supported Cell count, aggregate
+throughput, cloud durability latency, or takeover SLO.
+The two local release runs are recorded in
+[`performance/2026-09-25-public-host-action.md`](performance/2026-09-25-public-host-action.md).
+
 The ignored `reference_primitive_end_to_end_performance` test measures complete,
 serial user actions through a compiled `crab-cell-app` handle, the local Cell
 router, SQLite actors, LTX publication, and read-back verification. Each result

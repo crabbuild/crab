@@ -1,6 +1,101 @@
 //! The typed-handle commit path through the reference application.
 
+use super::performance_fixture::PerfFixture;
 use crate::*;
+
+mod wrong_generated_ids {
+    use super::*;
+
+    crab_cell_app::cell_client! {
+        pub(super) struct WrongClient (ReferenceApplication) {
+            pub(super) fn orders(scope: &OrderId) -> WrongOrderCell {
+                namespace: SQL_NAMESPACE,
+                module: SQL_MODULE,
+                commands: { pub(super) fn receive, prepare_receive: ReferenceCronReceiver = 99; },
+                queries: { }
+            }
+        }
+    }
+}
+
+struct WrongApplication;
+
+impl CellApplication for WrongApplication {
+    const NAME: &'static str = "wrong-application";
+
+    fn register(_builder: &mut ApplicationBuilder) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn application_handle_rejects_mismatched_author_and_client_registry() {
+    let fixture = PerfFixture::start(1).await;
+    let tenant = fixture.sql_target.tenant();
+    let application_id = fixture.sql_target.application();
+    let compiled = Arc::new(compiled());
+    assert!(
+        ApplicationHandle::<WrongApplication>::new(
+            fixture.client.clone(),
+            Arc::clone(&compiled),
+            tenant,
+            application_id,
+        )
+        .is_err()
+    );
+    let other_release = ReferenceApplication::compile(BuildDescriptor {
+        source_revision: "different-source".into(),
+        cargo_lock_digest: Digest::from_bytes([42; 32]),
+    })
+    .unwrap();
+    assert!(
+        ApplicationHandle::<ReferenceApplication>::new(
+            fixture.client.clone(),
+            Arc::new(other_release),
+            tenant,
+            application_id,
+        )
+        .is_err()
+    );
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generated_client_rejects_command_id_outside_descriptor() {
+    let fixture = PerfFixture::start(1).await;
+    assert!(matches!(
+        wrong_generated_ids::WrongClient::new(fixture.typed.clone()),
+        Err(Error::Registry("generated command differs from stable ID"))
+    ));
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generated_client_derives_target_and_commits_bound_operation() {
+    let fixture = PerfFixture::start(1).await;
+    let client = ReferenceClient::new(fixture.typed.clone()).unwrap();
+    let order = client.orders(&OrderId(b"order-42".to_vec())).unwrap();
+    assert_eq!(order.target(), &fixture.sql_target);
+    let committed = order
+        .receive_cron(
+            reference_identity(31, super::performance_fixture::now_ms()),
+            CronInvocation {
+                schedule_id: [32; 16],
+                generation: 1,
+                occurrence: 1,
+                scheduled_at_ms: super::performance_fixture::now_ms(),
+                payload: b"generated-client".to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+    let observed = order
+        .receipt_count(Some(committed.receipt), ())
+        .await
+        .unwrap();
+    assert_eq!(observed.output, 1);
+    fixture.shutdown().await;
+}
 
 #[allow(dead_code)]
 fn typed_capability_surface<A: CellApplication>(
@@ -91,6 +186,7 @@ async fn reference_application_uses_typed_handle_for_a_real_commit() {
     let client = CellClient::local(application.registry(), handle);
     let typed =
         ApplicationHandle::<ReferenceApplication>::new(client, application, tenant, application_id)
+            .unwrap()
             .with_blob_artifact_store(BlobArtifactStore::new(store));
     typed_capability_surface(&typed, target.clone()).unwrap();
     let now_ms = i64::try_from(

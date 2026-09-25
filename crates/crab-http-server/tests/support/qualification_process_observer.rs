@@ -47,6 +47,7 @@ pub(super) async fn run() {
         CellClient::local_many(application.registry(), restored).expect("observer direct client");
     let typed = observer
         .application_handle::<fixture::ReferenceApplication>(client, tenant, application_id)
+        .unwrap()
         .with_blob_artifact_store(BlobArtifactStore::new(store));
     let sql = typed
         .sql::<fixture::ReferenceSql>(

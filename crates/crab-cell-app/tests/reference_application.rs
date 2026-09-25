@@ -74,6 +74,7 @@ mod reference_application {
     pub mod performance_fixture;
     pub mod primitives;
     pub mod process_performance;
+    pub mod public_host;
 }
 
 pub(crate) use reference_application::application::*;
@@ -85,6 +86,54 @@ fn application_descriptor_is_stable_when_modules_register_in_reverse_order() {
     let reverse = compile_reference_in_order(true);
     assert_eq!(forward.descriptor_bytes(), reverse.descriptor_bytes());
     assert_eq!(forward.descriptor_digest(), reverse.descriptor_digest());
+}
+
+#[test]
+fn generated_client_release_descriptor_matches_independent_stable_ids() {
+    fn push_name(bytes: &mut Vec<u8>, value: &str) {
+        bytes.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(value.as_bytes());
+    }
+
+    let application = compiled();
+    let mut registry = RegistryBuilder::new(BuildDescriptor {
+        source_revision: "reference-source".into(),
+        cargo_lock_digest: Digest::from_bytes([42; 32]),
+    });
+    registry.register(ReferenceSql).unwrap();
+    registry.register(ReferenceKv).unwrap();
+    registry.register(ReferenceBlob).unwrap();
+    registry.register(ReferenceQueue).unwrap();
+    registry.register(ReferenceDeadLetter).unwrap();
+    registry.register(ReferenceCron).unwrap();
+    registry.register(ReferenceWorkflow).unwrap();
+    let registry = registry.finish().unwrap();
+
+    let mut expected = b"crab.application.v1\0".to_vec();
+    push_name(&mut expected, "reference-application");
+    expected.extend_from_slice(registry.release_digest().as_bytes());
+    expected.extend_from_slice(&7_u16.to_be_bytes());
+    for (module, cell_name, namespace, role) in [
+        (SQL_MODULE, "sql", SQL_NAMESPACE, 1_u8),
+        (KV_MODULE, "kv", KV_NAMESPACE, 2),
+        (BLOB_MODULE, "blob", BLOB_NAMESPACE, 5),
+        (QUEUE_MODULE, "queue", QUEUE_NAMESPACE, 3),
+        (DEAD_LETTER_MODULE, "dead-letter", DEAD_LETTER_NAMESPACE, 3),
+        (CRON_MODULE, "cron", CRON_NAMESPACE, 6),
+        (WORKFLOW_MODULE, "workflow", WORKFLOW_NAMESPACE, 4),
+    ] {
+        push_name(&mut expected, module);
+        push_name(&mut expected, cell_name);
+        expected.extend_from_slice(namespace.as_bytes());
+        expected.push(role);
+        expected.extend_from_slice(&1_u32.to_be_bytes());
+        expected.extend_from_slice(&1_u32.to_be_bytes());
+        expected.extend_from_slice(&1_u32.to_be_bytes());
+        expected.extend_from_slice(&1_u32.to_be_bytes());
+        expected.extend_from_slice(&(64_u64 * 1024 * 1024).to_be_bytes());
+        expected.extend_from_slice(&(16_u64 * 1024 * 1024).to_be_bytes());
+    }
+    assert_eq!(application.descriptor_bytes(), expected);
 }
 
 #[test]

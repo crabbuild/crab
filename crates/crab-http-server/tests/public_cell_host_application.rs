@@ -231,7 +231,9 @@ async fn node_public_application_handle_executes_typed_sql() {
         .await
         .unwrap();
     let client = CellClient::local(application.registry(), handle.clone());
-    let typed = node.application_handle::<PublicApplication>(client, tenant, application_id);
+    let typed = node
+        .application_handle::<PublicApplication>(client, tenant, application_id)
+        .unwrap();
     let now_ms = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)

@@ -54,11 +54,14 @@ async fn rustfs_expired_effect_delivery_never_reaches_destination() {
 async fn run_expired_delivery(
     (node, writer, tenant, application, _directory, registry, handles, _store): PublicHostFixture,
 ) {
-    let observer = node.application_handle::<fixture::ReferenceApplication>(
-        CellClient::local_many(registry.clone(), handles.clone()).expect("separate typed observer"),
-        tenant,
-        application,
-    );
+    let observer = node
+        .application_handle::<fixture::ReferenceApplication>(
+            CellClient::local_many(registry.clone(), handles.clone())
+                .expect("separate typed observer"),
+            tenant,
+            application,
+        )
+        .unwrap();
     let (peer, entered, release, dispatched) =
         peer_effect_client_with_delayed_receive(registry, handles);
     let workflow_target = CellTarget::new(

@@ -64,11 +64,13 @@ async fn rustfs_public_queue_expired_lease_reclaims_one_message() {
 async fn run_queue_expiry(
     (node, writer, tenant, application, _directory, registry, handles, _store): PublicHostFixture,
 ) {
-    let observer = node.application_handle::<fixture::ReferenceApplication>(
-        CellClient::local_many(registry, handles).expect("separate typed observer"),
-        tenant,
-        application,
-    );
+    let observer = node
+        .application_handle::<fixture::ReferenceApplication>(
+            CellClient::local_many(registry, handles).expect("separate typed observer"),
+            tenant,
+            application,
+        )
+        .unwrap();
     let queue = writer
         .queue::<fixture::ReferenceQueue>()
         .expect("writer Queue");
@@ -178,11 +180,13 @@ async fn rustfs_public_effect_expired_lease_reclaims_one_delivery() {
 async fn run_effect_expiry(
     (node, writer, tenant, application, _directory, registry, handles, _store): PublicHostFixture,
 ) {
-    let observer = node.application_handle::<fixture::ReferenceApplication>(
-        CellClient::local_many(registry, handles).expect("separate typed observer"),
-        tenant,
-        application,
-    );
+    let observer = node
+        .application_handle::<fixture::ReferenceApplication>(
+            CellClient::local_many(registry, handles).expect("separate typed observer"),
+            tenant,
+            application,
+        )
+        .unwrap();
     let target = CellTarget::new(
         tenant,
         application,
@@ -337,11 +341,13 @@ async fn run_activity_expiry(
 ) {
     let claimant = CellClient::local_many(registry.clone(), handles.clone())
         .expect("independent Activity claimant");
-    let observer = node.application_handle::<fixture::ReferenceApplication>(
-        CellClient::local_many(registry, handles).expect("separate typed observer"),
-        tenant,
-        application,
-    );
+    let observer = node
+        .application_handle::<fixture::ReferenceApplication>(
+            CellClient::local_many(registry, handles).expect("separate typed observer"),
+            tenant,
+            application,
+        )
+        .unwrap();
     let target = CellTarget::new(
         tenant,
         application,
@@ -538,6 +544,7 @@ async fn run_blob_expiry(
             tenant,
             application,
         )
+        .unwrap()
         .with_blob_artifact_store(BlobArtifactStore::new(store));
     let blob = writer
         .blob::<fixture::ReferenceBlob>()

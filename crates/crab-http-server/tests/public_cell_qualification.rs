@@ -91,6 +91,7 @@ fn independent_observer(
     let client = CellClient::local_many(Arc::clone(registry), handles.to_vec())
         .expect("independent qualification client");
     node.application_handle::<fixture::ReferenceApplication>(client, tenant, application)
+        .unwrap()
         .with_blob_artifact_store(BlobArtifactStore::new(store.clone()))
 }
 
@@ -152,11 +153,13 @@ impl QualificationOperationExecutor for PublicHostSmokeExecutor<'_> {
             {
                 let (client, entered, dispatched) =
                     peer_client_with_paused_mutation(Arc::clone(registry), handles.to_vec(), true);
-                let peer = node.application_handle::<fixture::ReferenceApplication>(
-                    client,
-                    tenant,
-                    application,
-                );
+                let peer = node
+                    .application_handle::<fixture::ReferenceApplication>(
+                        client,
+                        tenant,
+                        application,
+                    )
+                    .unwrap();
                 let cancellation = qualification_scheduled_cancellation::CancellationCase::new(
                     &peer,
                     &observer,

@@ -60,8 +60,9 @@ async fn run_activity_claim_fault(
 ) {
     let (peer_client, dropped, dispatched) =
         peer_client_with_one_lost_mutation(registry, handles, drop_before_dispatch, 1);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let peer_activity = ActivitySupervisor::new(
         peer.activities::<fixture::ReferenceWorkflow>()
             .expect("peer Activity"),
@@ -189,8 +190,9 @@ async fn run_activity_completion_fault(
 ) {
     let (peer_client, dropped, dispatched) =
         peer_client_with_one_lost_mutation(registry, handles, drop_before_dispatch, 3);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let peer_activity = ActivitySupervisor::new(
         peer.activities::<fixture::ReferenceWorkflow>()
             .expect("peer Activity"),

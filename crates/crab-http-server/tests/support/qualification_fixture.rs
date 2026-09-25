@@ -191,6 +191,7 @@ pub async fn public_host_fixture_with_store(store: Store, root: Path) -> PublicH
         .expect("qualification client");
     let typed = node
         .application_handle::<fixture::ReferenceApplication>(client, tenant, application_id)
+        .unwrap()
         .with_blob_artifact_store(BlobArtifactStore::new(store.clone()));
     (
         node,

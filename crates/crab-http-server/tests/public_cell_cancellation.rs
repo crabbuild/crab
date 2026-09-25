@@ -65,8 +65,9 @@ async fn run_sql_cancellation(
 ) {
     let (peer_client, entered, dispatched) =
         peer_client_with_paused_mutation(registry, handles, after_dispatch);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let target = CellTarget::new(
         tenant,
         application,
@@ -164,8 +165,9 @@ async fn run_kv_cancellation(
 ) {
     let (peer_client, entered, dispatched) =
         peer_client_with_paused_mutation(registry, handles, after_dispatch);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let target = CellTarget::new(
         tenant,
         application,
@@ -278,8 +280,9 @@ async fn run_cron_cancellation(
 ) {
     let (peer_client, entered, dispatched) =
         peer_client_with_paused_mutation(registry, handles, after_dispatch);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let target = CellTarget::new(
         tenant,
         application,
@@ -390,8 +393,9 @@ async fn run_workflow_cancellation(
 ) {
     let (peer_client, entered, dispatched) =
         peer_client_with_paused_mutation(registry, handles, after_dispatch);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let target = CellTarget::new(
         tenant,
         application,
