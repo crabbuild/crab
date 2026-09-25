@@ -56,6 +56,7 @@ def caddyfile() -> str:
         "\t\thealth_uri /livez",
         "\t\thealth_interval 1s",
         "\t\thealth_timeout 1s",
+        "\t\theader_down X-Crab-Fleet-Entry {rp.upstream.hostport}",
         "\t\tflush_interval -1",
         "\t}",
         "}",
@@ -98,6 +99,7 @@ def compose(
                 "RUSTFS_OBS_LOG_DIRECTORY": "/data/logs",
             },
             "volumes": ["rustfs-data:/data"],
+            "ulimits": {"nofile": {"soft": 65535, "hard": 65535}},
             "healthcheck": {
                 "test": ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:9000/health/ready"],
                 "interval": "2s",
