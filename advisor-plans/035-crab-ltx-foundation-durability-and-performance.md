@@ -311,3 +311,9 @@ status of this plan in `advisor-plans/README.md` after each slice.
   That fixture does not run runtime authority or follower proof, so the
   combined process-kill plus runtime-proof gate and a dedicated physical
   power-cut/block-device run remain open.
+- The existing `crab-http-server` filesystem process-fault smoke passed after
+  building its UI prerequisite: it killed an owner after three acknowledged
+  settlements, recovered through a successor, and checked an independent
+  observer. It exercises runtime acknowledgement proof, but its killed owner
+  is a bootstrap owner rather than the sparse activation above. The combined
+  sparse-owner plus runtime-proof case remains open.
