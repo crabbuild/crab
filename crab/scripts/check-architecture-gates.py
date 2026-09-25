@@ -1748,8 +1748,10 @@ DELETED_WORKFLOW_REEXPORT_ADAPTER_FORBIDDEN_PATTERNS = {
     "pub use yaml::",
 }
 PRIVATE_INTERNAL_PACKAGES = {
+    "beyonddb",
     "crab-cell-app",
     "crab-cell-host",
+    "crab-cell-peer-http",
     "crab-cell-runtime",
     "crab-http-server",
     "crab-ltx",
@@ -1876,11 +1878,16 @@ WORKSPACE_DEPENDENCY_POLICY = {
         "normal": {"crab-cell-runtime"},
         # crab-cell-runtime is a dev edge so integration tests can enable its
         # test-support feature without borrowing source files.
-        "dev": {"crab-cell-runtime", "crab-ltx", "crab-storage"},
+        "dev": {"crab-cell-host", "crab-cell-runtime", "crab-ltx", "crab-storage"},
     },
     "crab-cell-host": {"normal": {"crab-cell-app", "crab-cell-runtime"}},
+    "crab-cell-peer-http": {"normal": {"crab-cell-runtime"}},
     "crab-cell-runtime": {"normal": {"crab-ltx", "crab-storage"}},
     "crab-ltx": {"normal": {"crab-storage"}},
+    "beyonddb": {
+        "normal": {"crab-cell-app", "crab-cell-host", "crab-cell-peer-http", "crab-cell-runtime", "crab-ltx"},
+        "dev": {"crab-storage"},
+    },
     "crab-remote": {
         "normal": {"crab-auth", "crab-coordination", "crab-git", "crab-metadata", "crab-read", "crab-remote-git", "crab-storage", "crab-write", "crab-xet"},
     },
@@ -1895,6 +1902,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
         "normal": {
             "crab-cell-app",
             "crab-cell-host",
+            "crab-cell-peer-http",
             "crab-coordination",
             "crab-cell-runtime",
             "crab-git",
@@ -2025,8 +2033,10 @@ WORKSPACE_DEPENDENCY_POLICY = {
     "crab-xet": {},
 }
 WORKSPACE_DEPENDENCY_PATHS = {
+    "beyonddb": "crates/beyonddb",
     "crab-cell-app": "crates/crab-cell-app",
     "crab-cell-host": "crates/crab-cell-host",
+    "crab-cell-peer-http": "crates/crab-cell-peer-http",
     "crab-cell-runtime": "crates/crab-cell-runtime",
     "crab-ltx": "crates/crab-ltx",
     "crab-write": "crates/crab-write",
