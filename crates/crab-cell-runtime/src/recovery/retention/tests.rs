@@ -183,14 +183,57 @@ async fn collection_preserves_live_and_pinned_graphs(store: Store, prefix: Path)
     let orphan_incarnation = IncarnationId::from_bytes([7; 16]);
     let (current_root, current_paths) =
         root(&layout, &current_target, current_incarnation, 128_000).await;
+    let current_replica = crab_ltx::CellReplica::new(
+        layout.clone(),
+        *current_target.cell_id().as_bytes(),
+        *current_incarnation.as_bytes(),
+        ReplicaLimits::default(),
+    )
+    .unwrap();
+    let compaction_scratch = tempfile::TempDir::new().unwrap();
+    let compacted_root = current_replica
+        .prepare_compaction(&current_root, 0..1, 9, compaction_scratch.path())
+        .await
+        .unwrap()
+        .root();
+    assert_eq!(compacted_root.position, current_root.position);
+    assert_eq!(compacted_root.commit_sequence, current_root.commit_sequence);
+    assert_ne!(compacted_root.digest, current_root.digest);
+    let compacted_paths = current_replica
+        .reachable_objects(&compacted_root)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|object| {
+            layout.incarnation_object_path(
+                current_target.cell_id().as_bytes(),
+                current_incarnation.as_bytes(),
+                &object.digest,
+                object.kind,
+            )
+        })
+        .collect::<Vec<_>>();
     let (pinned_root, pinned_paths) =
         root(&layout, &pinned_target, pinned_incarnation, 96_000).await;
+    let (_, unpublished_paths) = root(
+        &layout,
+        &current_target,
+        IncarnationId::from_bytes([13; 16]),
+        48_000,
+    )
+    .await;
     let orphan_target = target(identity, b"orphan");
     let (_, orphan_paths) = root(&layout, &orphan_target, orphan_incarnation, 64_000).await;
     let current = idle_control(
         current_target.cell_id(),
         current_incarnation,
         current_root,
+        code,
+    );
+    let compacted_current = idle_control(
+        current_target.cell_id(),
+        current_incarnation,
+        compacted_root,
         code,
     );
     let pinned = idle_control(
@@ -243,7 +286,7 @@ async fn collection_preserves_live_and_pinned_graphs(store: Store, prefix: Path)
         .store()
         .create_strict(
             &layout.control_path(current.cell.as_bytes()),
-            Bytes::from(current.encode().unwrap()),
+            Bytes::from(compacted_current.encode().unwrap()),
         )
         .await
         .unwrap();
@@ -339,7 +382,7 @@ async fn collection_preserves_live_and_pinned_graphs(store: Store, prefix: Path)
         .await
         .unwrap();
     assert_eq!(grace.deleted_objects(), 0);
-    assert!(grace.grace_objects() >= orphan_paths.len() as u64 + 3);
+    assert!(grace.grace_objects() >= (orphan_paths.len() + unpublished_paths.len()) as u64 + 3);
 
     let now_ms = i64::try_from(
         std::time::SystemTime::now()
@@ -371,16 +414,67 @@ async fn collection_preserves_live_and_pinned_graphs(store: Store, prefix: Path)
     assert!(report.complete());
     assert_eq!(report.current_controls(), 2);
     assert_eq!(report.retained_pins(), 1);
-    assert!(limited.deleted_objects() + report.deleted_objects() >= orphan_paths.len() as u64 + 3);
+    assert!(
+        limited.deleted_objects() + report.deleted_objects()
+            >= (orphan_paths.len() + unpublished_paths.len()) as u64 + 3
+    );
     assert!(report.reachable_objects() >= current_paths.len() as u64 + pinned_paths.len() as u64);
 
-    for path in current_paths.into_iter().chain(pinned_paths) {
+    for (target, incarnation, root, payload, name) in [
+        (
+            &current_target,
+            current_incarnation,
+            compacted_root,
+            128_000,
+            "compacted-current",
+        ),
+        (
+            &current_target,
+            current_incarnation,
+            current_root,
+            128_000,
+            "pinned-previous-representation",
+        ),
+        (
+            &pinned_target,
+            pinned_incarnation,
+            pinned_root,
+            96_000,
+            "pinned",
+        ),
+    ] {
+        let replica = crab_ltx::CellReplica::new(
+            layout.clone(),
+            *target.cell_id().as_bytes(),
+            *incarnation.as_bytes(),
+            ReplicaLimits::default(),
+        )
+        .unwrap();
+        let verified = replica.open_root(&root).await.unwrap();
+        let restored = scratch.path().join(format!("{name}-reopened.sqlite"));
+        assert_eq!(verified.restore(&restored).await.unwrap(), root.position);
+        let connection = rusqlite::Connection::open(restored).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT length(value) FROM values_", [], |row| row
+                    .get::<_, usize>(0))
+                .unwrap(),
+            payload
+        );
+    }
+
+    for path in current_paths
+        .into_iter()
+        .chain(compacted_paths)
+        .chain(pinned_paths)
+    {
         layout.store().head(&path).await.unwrap();
     }
-    for path in orphan_paths
-        .into_iter()
-        .chain([orphan_release, orphan_catalog, orphan_pin])
-    {
+    for path in orphan_paths.into_iter().chain(unpublished_paths).chain([
+        orphan_release,
+        orphan_catalog,
+        orphan_pin,
+    ]) {
         assert!(matches!(
             layout.store().head(&path).await,
             Err(StorageError::NotFound { .. })

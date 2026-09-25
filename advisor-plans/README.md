@@ -807,3 +807,16 @@ hole rather than data. Both `crab-ltx` and runtime tests cover the refusals.
 Still open on this slice: charging the dormant window to the disk ledger,
 dormant residency (holding ownership across the shed), and the product-level
 adoption step that would let the slot survive a process restart.
+
+## Continuous Cell runtime hardening
+
+[035](035-cell-runtime-continuous-hardening.md) is the executable program for
+durability seam proof, measured resource admission, hot-Cell cost, hydration and
+offline retention, framework reuse, and continuing release gates. It consumes
+the unfinished work in plans 009, 012, 015, 024, 025, 032, and 034 instead of
+reimplementing their owners. Execute each slice as a separate reviewable change
+and update its ledger in the plan after its named evidence passes.
+
+| Plan | Priority | Depends on | Status |
+| --- | --- | --- | --- |
+| [035](035-cell-runtime-continuous-hardening.md) | P0 safety/capacity; P1 optimization | Plans 009, 012, 015, 024, 032, 034 as named by slice | IN PROGRESS — local durability, hydration/retention, resource-accounting, seven-Cell/two-shard reuse, and CI proof expanded; protected qualification still required |

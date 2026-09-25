@@ -326,10 +326,13 @@ pub(super) fn start_publication(
         return;
     };
     let node_logged = publication.durability.is_some();
+    let root_sequence_lag = i128::from(publication.pending.outcome().commit_sequence())
+        - i128::from(active.published_sequence);
     tracing::debug!(
         queue_wait_ms = publication.submitted_at.elapsed().as_millis(),
         pending_publications = active.coordination.publication_count(),
         publication_bytes = active.publication_bytes,
+        root_sequence_lag = %root_sequence_lag,
         "Cell LTX publication started"
     );
     let generation = active.generation;

@@ -9,6 +9,7 @@ mod support;
 mod runtime {
     pub mod backup;
     pub mod catalog;
+    pub mod fault_fs;
     pub mod lifecycle;
     pub mod migration;
     pub mod publication;

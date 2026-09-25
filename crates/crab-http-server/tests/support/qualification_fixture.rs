@@ -84,6 +84,7 @@ pub async fn public_host_fixture_with_store(store: Store, root: Path) -> PublicH
             fixture::SQL_NAMESPACE,
             CatalogRole::Sql,
             fixture::SQL_MODULE,
+            0,
             40,
             fixture::install_reference_sql_schema,
         )
@@ -99,6 +100,7 @@ pub async fn public_host_fixture_with_store(store: Store, root: Path) -> PublicH
             fixture::KV_NAMESPACE,
             CatalogRole::Kv,
             fixture::KV_MODULE,
+            0,
             41,
             install_kv_schema,
         )
@@ -114,6 +116,7 @@ pub async fn public_host_fixture_with_store(store: Store, root: Path) -> PublicH
             fixture::BLOB_NAMESPACE,
             CatalogRole::Blob,
             fixture::BLOB_MODULE,
+            0,
             42,
             install_blob_schema,
         )
@@ -129,6 +132,7 @@ pub async fn public_host_fixture_with_store(store: Store, root: Path) -> PublicH
             fixture::QUEUE_NAMESPACE,
             CatalogRole::Queue,
             fixture::QUEUE_MODULE,
+            0,
             43,
             install_queue_schema,
         )
@@ -144,6 +148,7 @@ pub async fn public_host_fixture_with_store(store: Store, root: Path) -> PublicH
             fixture::DEAD_LETTER_NAMESPACE,
             CatalogRole::Queue,
             fixture::DEAD_LETTER_MODULE,
+            0,
             44,
             install_queue_schema,
         )
@@ -159,6 +164,7 @@ pub async fn public_host_fixture_with_store(store: Store, root: Path) -> PublicH
             fixture::CRON_NAMESPACE,
             CatalogRole::Cron,
             fixture::CRON_MODULE,
+            0,
             45,
             install_cron_schema,
         )
@@ -174,6 +180,7 @@ pub async fn public_host_fixture_with_store(store: Store, root: Path) -> PublicH
             fixture::WORKFLOW_NAMESPACE,
             CatalogRole::Workflow,
             fixture::WORKFLOW_MODULE,
+            0,
             46,
             install_workflow_schema,
         )

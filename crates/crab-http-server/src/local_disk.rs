@@ -36,19 +36,19 @@ pub(crate) struct LocalStaging {
 #[derive(Debug)]
 struct RestartDiskInventory {
     _reservation: crab_cell_runtime::ltx::DiskReservation,
-    _bytes: u64,
-    _sessions: usize,
+    bytes: u64,
+    sessions: usize,
 }
 
 impl RestartDiskInventory {
     #[cfg(test)]
     fn bytes(&self) -> u64 {
-        self._bytes
+        self.bytes
     }
 
     #[cfg(test)]
     fn sessions(&self) -> usize {
-        self._sessions
+        self.sessions
     }
 }
 
@@ -170,6 +170,12 @@ impl LocalStaging {
         self.budget.available()
     }
 
+    pub(crate) fn restart_inventory_usage(&self) -> Option<(u64, usize)> {
+        self.restart_inventory
+            .as_ref()
+            .map(|inventory| (inventory.bytes, inventory.sessions))
+    }
+
     #[cfg(test)]
     pub(crate) fn available_mebibytes(&self) -> u64 {
         self.available_bytes() / MIB
@@ -196,8 +202,8 @@ fn reserve_restart_inventory(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(RestartDiskInventory {
                 _reservation: budget.try_reserve(0).map_err(|_| Error::Busy)?,
-                _bytes: 0,
-                _sessions: 0,
+                bytes: 0,
+                sessions: 0,
             });
         }
         Err(error) => return Err(error.into()),
@@ -227,8 +233,8 @@ fn reserve_restart_inventory(
     let reservation = budget.try_reserve(bytes).map_err(|_| Error::Busy)?;
     Ok(RestartDiskInventory {
         _reservation: reservation,
-        _bytes: bytes,
-        _sessions: session_count,
+        bytes,
+        sessions: session_count,
     })
 }
 
@@ -354,6 +360,57 @@ mod tests {
         )
         .unwrap();
         assert_eq!(budget.used(), 7);
+        assert_eq!(staging.restart_inventory_usage(), Some((7, 1)));
+        drop(staging);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn repeated_restarts_charge_every_unreclaimed_session_until_capacity_is_exhausted() {
+        let data = tempfile::TempDir::new().unwrap();
+        let sessions = data.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+
+        for restart in 0..3 {
+            let current = sessions.join(format!("session-{restart}"));
+            std::fs::create_dir_all(&current).unwrap();
+            let budget = crab_cell_runtime::ltx::DiskBudget::new(50);
+            let staging = LocalStaging::new_with_restart_inventory(
+                current.join("transfers"),
+                budget.clone(),
+                0,
+                data.path(),
+                &current,
+            )
+            .unwrap();
+            assert_eq!(
+                staging.restart_inventory_usage(),
+                Some((17 * restart, restart as usize))
+            );
+            assert_eq!(staging.available_bytes(), 50 - 17 * restart);
+            let file_bytes = if restart == 2 { 16 } else { 17 };
+            std::fs::write(current.join("cell.sqlite"), vec![0_u8; file_bytes]).unwrap();
+            drop(staging);
+            assert_eq!(budget.used(), 0);
+        }
+
+        let current = sessions.join("session-3");
+        std::fs::create_dir_all(&current).unwrap();
+        let budget = crab_cell_runtime::ltx::DiskBudget::new(50);
+        let staging = LocalStaging::new_with_restart_inventory(
+            current.join("transfers"),
+            budget.clone(),
+            0,
+            data.path(),
+            &current,
+        )
+        .unwrap();
+        assert_eq!(staging.restart_inventory_usage(), Some((50, 3)));
+        assert_eq!(staging.available_bytes(), 0);
+        assert!(matches!(
+            staging.create(1, &CancellationToken::new()).await,
+            Err(Error::Busy)
+        ));
         drop(staging);
         assert_eq!(budget.used(), 0);
     }

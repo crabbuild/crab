@@ -101,6 +101,7 @@ impl QualificationRunner {
             return Err(Error::Control("qualification run workload identity"));
         }
         verify_provider_evidence(profile, run, artifacts)?;
+        verify_scale_evidence(profile, run, artifacts)?;
         let bucket_calls = run.threshold_metric("bucket_calls", "count")?;
         let peak_rss_bytes = run.threshold_metric("peak_rss_bytes", "bytes")?;
         let artifact_digests = artifacts

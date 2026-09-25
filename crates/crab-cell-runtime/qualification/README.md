@@ -91,6 +91,35 @@ successful conditional, range, and multipart checks. Missing, duplicated,
 partial, or mismatched provider semantics are rejected by both the binder and
 the fresh-process matrix verifier.
 
+The protected `scale-v1` primitives row also requires one canonical raw JSON
+artifact with `schema_version: 1`, `profile`, the 32-byte `profile_digest`,
+`workload_seed`, and `cell_samples`. It has exactly fifteen samples, in this
+order: `empty`, `sparse`, `resident`, `pending-publication`, and `churned`, each
+at 1,000, 5,000, and 10,000 open Cells. Every sample records `state`,
+`target_cells`, and `before`, `after`, and `peak` snapshots. Each snapshot
+contains `active_cells`, `rss_bytes`, `allocator_bytes`, `threads`,
+`file_descriptors`, `sqlite_cache_bytes`, `admitted_resident_bytes`,
+`admitted_file_descriptors`, `retained_bytes`, `local_disk_reserved_bytes`,
+and `local_disk_bytes`. The protected harness must capture OS process counters
+and runtime admission counters from the same isolated sample, starting with
+zero active Cells and observing the requested count after opening them.
+`peak` records each field's high-water mark over that sample; its fields need
+not come from one instant. The
+verifier rejects missing, duplicate, partial, or false-open samples, requires
+the peak snapshot to cover before and after, checks the admission ledger's
+minimum active-Cell charges, and requires the measured run's RSS, disk, and
+descriptor peaks to cover every sample. This artifact makes the per-Cell
+slopes calculable from raw before/after counters; signing a scheduled
+10,000-Cell workload alone is insufficient evidence that those Cells opened.
+Each sample's ledger increase must cover its open Cells. Within each workload
+state, the verifier compares the net `after` minus `before` growth at 1,000,
+5,000, and 10,000 Cells. Growth between those points in RSS and allocator
+bytes must fit the additional native and SQLite page-cache reservations plus
+retained-byte charges. SQLite cache and descriptor growth must fit their own
+per-Cell reservations. This comparison cancels fixed process overhead rather
+than charging it repeatedly to every Cell. The protected report must still
+compare that measured fixed overhead with the node's separate process reserve.
+
 The default workload contains a deterministic, seed-bound case schedule for each
 primitive: `happy`, `retry`, `duplicate`, `expiry`, `cancellation`, `owner-loss`,
 and `recovery`. Adapters inspect `QualificationOperation::case()` (or its
@@ -132,10 +161,40 @@ receipt.
 
 ## Release handoff
 
-The HTTP server release workflow consumes protected evidence from a separate
-manual workflow run. `.github/workflows/cell-runtime-protected-qualification.yml`
-is the canonical handoff: dispatch it from the same exact source commit passed
-as `source_ref` (the workflow rejects a different `GITHUB_SHA`), and use a
+The HTTP server release uses three runs so the protected receipt and the
+promoted image share one immutable digest:
+
+1. Push an annotated `crab-http-server-v*` tag reachable from `origin/main`.
+   `.github/workflows/http-server-release.yml` builds and Compose-qualifies a
+   candidate, records its source, image reference, and digest in the
+   `http-server-candidate-<run-id>-<attempt>` artifact, and stops before
+   promotion. Keep this candidate run ID.
+2. Dispatch `.github/workflows/cell-runtime-protected-qualification.yml` from
+   that exact tag/commit with the candidate artifact's source as `source_ref`
+   and digest as `image_digest`. Wait for its successful protected evidence run
+   and keep that run ID.
+3. Manually dispatch `.github/workflows/http-server-release.yml` **from that
+   exact tag ref** with `tag`, `candidate_run_id`, and
+   `cell_runtime_evidence_run_id`. The workflow rejects a dispatch SHA/ref
+   different from the tag so its provenance cannot bind to another commit.
+   The release reloads
+   the original candidate instead of rebuilding it, repeats Compose
+   qualification on that digest, verifies the complete protected bundle, and
+   only then promotes the image and chart. An optional
+   `cell_runtime_evidence_artifact` selects a non-default artifact name.
+
+Use the same tag ref for both manual dispatches (with values read from the
+candidate and protected run artifacts):
+
+```sh
+gh workflow run cell-runtime-protected-qualification.yml --ref "$tag" \
+  -f source_ref="$source_sha" -f image_digest="$candidate_digest"
+gh workflow run http-server-release.yml --ref "$tag" \
+  -f tag="$tag" -f candidate_run_id="$candidate_run_id" \
+  -f cell_runtime_evidence_run_id="$protected_run_id"
+```
+
+The protected workflow rejects a dispatch ref different from `source_ref` and uses a
 protected self-hosted runner labelled `crab-cell-runtime-protected`, an exact
 source commit and image digest, and the
 operator-installed executable
@@ -170,12 +229,11 @@ resource sampling, and writing the signed matrices. The workflow verifies the
 result in a fresh Cargo process; it does not turn a command that merely claims
 to have run a workload into release evidence.
 
-For tag-triggered releases, set repository variables
-`CRAB_CELL_RUNTIME_PROTECTED_EVIDENCE_RUN_ID` and, when the default artifact
-name is not used, `CRAB_CELL_RUNTIME_PROTECTED_EVIDENCE_ARTIFACT`. A manually
-dispatched release can provide the same values as inputs. Missing, failed,
-stale, wrong-workflow, wrong-commit, symlinked, or malformed evidence fails
-closed; no synthetic receipt is accepted as a substitute.
+The manual release verifies that the candidate artifact came from a successful
+candidate job in this workflow on the exact source commit and tag-push run.
+Missing, failed, stale, wrong-workflow, wrong-commit, symlinked, or malformed
+candidate or protected evidence fails closed. No synthetic receipt is accepted
+as a substitute.
 
 The public host's local process-fault smoke can be run without credentials:
 

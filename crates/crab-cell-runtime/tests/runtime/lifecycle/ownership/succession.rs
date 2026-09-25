@@ -148,6 +148,16 @@ async fn crashed_process_is_fenced_before_successor_restore() {
     let runtime =
         CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 * 1024 * 1024, session).unwrap();
     let handle = bootstrap_on(&runtime, &fixture, session).await;
+    let request = mutation_identity_window(139, 10, 10_000);
+    let digest = Digest::from_bytes([140; 32]);
+    let outcome = handle
+        .execute(request, digest, 20, 1_024, 1_024, |transaction| {
+            transaction.execute("UPDATE counter SET value = value + 1", [])?;
+            Ok(HandlerOutcome::Success(b"before-crash".to_vec()))
+        })
+        .await
+        .unwrap();
+    assert_eq!(outcome.commit_sequence(), 1);
     handle.drain().await.unwrap();
     runtime.shutdown().await.unwrap();
 
@@ -181,6 +191,12 @@ async fn crashed_process_is_fenced_before_successor_restore() {
         .await
         .unwrap()
         .unwrap();
+    eprintln!(
+        "fault_seed=139 schedule=owner_process_crash_before_successor_restore request={request:?} operation={digest:?} committed_sequence={} selected_follower_tickets=[] root={:?} observed_control={:?}",
+        outcome.commit_sequence(),
+        stale.value().ltx_root(),
+        stale.value(),
+    );
     assert_eq!(
         stale.value().owner.as_ref().map(|owner| owner.session),
         Some(SessionId::from_bytes([85; 16]))
@@ -230,7 +246,11 @@ async fn crashed_process_is_fenced_before_successor_restore() {
             })
             .await
             .unwrap(),
-        0_i64.to_be_bytes()
+        1_i64.to_be_bytes()
+    );
+    assert_eq!(
+        restored.resolve(request, digest, 21, 1_024).await.unwrap(),
+        Resolution::Committed(outcome)
     );
     restored.drain().await.unwrap();
     runtime.shutdown().await.unwrap();

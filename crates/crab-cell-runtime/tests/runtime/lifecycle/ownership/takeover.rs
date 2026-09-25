@@ -1,6 +1,7 @@
 //! Fenced takeover of idle, dead, and unpublished owners.
 
 use super::*;
+use object_store::ObjectStoreExt;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn released_cell_is_acquired_by_one_successor_runtime() {
@@ -74,6 +75,100 @@ async fn released_cell_is_acquired_by_one_successor_runtime() {
     second_runtime.shutdown().await.unwrap();
     first_runtime.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn missing_authoritative_root_cannot_become_a_serving_cell() {
+    unavailable_authoritative_root_cannot_serve(false).await;
+}
+
+#[tokio::test]
+async fn torn_authoritative_root_cannot_become_a_serving_cell() {
+    unavailable_authoritative_root_cannot_serve(true).await;
+}
+
+async fn unavailable_authoritative_root_cannot_serve(corrupt: bool) {
+    let backend = Arc::new(InMemory::new());
+    let fixture = fixture_with_limits_and_store(
+        b"unavailable-authoritative-root",
+        Limits::default(),
+        Store::new(backend.clone()),
+    );
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    handle.drain().await.unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let idle = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(idle.value().state, ControlState::Idle);
+    let root = idle.value().ltx_root().unwrap();
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let root_path = fixture.layout.incarnation_object_path(
+        fixture.target.cell_id().as_bytes(),
+        idle.value().incarnation.as_bytes(),
+        &root.digest,
+        CellObjectKind::Root,
+    );
+    if corrupt {
+        backend
+            .put(&root_path, Bytes::from_static(b"torn-root").into())
+            .await
+            .unwrap();
+    } else {
+        backend.delete(&root_path).await.unwrap();
+    }
+
+    let session = SessionId::from_bytes([138; 16]);
+    let receiver = tempfile::TempDir::new().unwrap();
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024, session).unwrap();
+    let error = runtime
+        .acquire_idle_restored(
+            proof,
+            fixture.replica.clone(),
+            authority.clone(),
+            idle,
+            receiver.path().join("missing-root-restored.sqlite"),
+            Owner {
+                session,
+                endpoint: "https://missing-root.internal:8081".into(),
+            },
+        )
+        .await
+        .err()
+        .expect("unavailable root must not activate");
+    let current = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    eprintln!(
+        "fault_seed={} schedule={} request=none committed_sequence={} selected_follower_tickets=[] root={root:?} observed_control={:?} error={error:?}",
+        if corrupt { 139 } else { 138 },
+        if corrupt {
+            "torn_authoritative_root"
+        } else {
+            "missing_authoritative_root"
+        },
+        root.commit_sequence,
+        current.value(),
+    );
+    assert_eq!(current.value().state, ControlState::Idle);
+    assert!(current.value().owner.is_none());
+    assert_eq!(current.value().ltx_root(), Some(root));
+    assert_eq!(runtime.stats().active_cells(), 0);
+    runtime.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn observed_takeover_fences_the_old_cell_before_more_work() {
     let fixture = fixture();

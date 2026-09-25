@@ -227,6 +227,13 @@ inside it. Production builds hint paths through
 `CellStorageLayout::due_hint_path`, which is unaffected; only a test built the
 path by hand.
 
+The reader now requires the entire canonical hint path, so a nested key with
+a valid Cell filename cannot become a candidate or delete a canonical key.
+It also counts the remaining batch capacity separately for each bucket;
+otherwise one hint in the current bucket could prevent an older bucket from
+being visited. `due_hint_listing_rejects_nested_cell_keys` and
+`due_hint_listing_uses_remaining_capacity_across_buckets` pin both cases.
+
 Release-path coverage is now pinned end to end, because the thirty-cycle
 backstop makes hint coverage load-bearing. Every clean ownership release goes
 through `start_deactivate` — a drain, an idle eviction, and a prepared transfer
@@ -780,7 +787,7 @@ What is true now, with the test that proves each claim:
 | --- | --- | --- |
 | 1 | Routing reads one catalog page; a page that disagrees with its locator is a hard error | `catalog_lookup_reads_only_the_page_that_can_hold_the_entry`, `catalog_rejects_an_unordered_page_locator`, `catalog_lookup_rejects_a_head_whose_locator_disagrees_with_its_page`, `catalog_lookup_reports_one_head_and_one_page_read` |
 | 2 stage 1 | A resident Cell ticks from memory, fenced by its published sequence; the cycle budget cannot be overspent | `resident_due_list_mirrors_the_published_head`, `resident_due_cell_ticks_without_a_shard_scan`, `resident_ticks_do_not_overspend_the_cycle_budget` |
-| 2 stage 2 | A clean release writes one hint; every cycle consumes hints and ticks resident Cells; the shard scan is a thirty-cycle backstop; foreign keys under a bucket are cleared | `clean_drain_publishes_and_consumes_one_due_hint`, `due_hint_listing_clears_foreign_keys`, `hinted_due_cell_ticks_without_a_shard_scan`, `foreground_cycle_ticks_hints_without_the_backstop`, `backstop_scan_runs_on_its_period` |
+| 2 stage 2 | A clean release writes one hint; every cycle consumes hints and ticks resident Cells; the shard scan is a thirty-cycle backstop; only canonical keys are accepted and remaining capacity reaches older buckets | `clean_drain_publishes_and_consumes_one_due_hint`, `due_hint_listing_clears_foreign_keys`, `due_hint_listing_rejects_nested_cell_keys`, `due_hint_listing_uses_remaining_capacity_across_buckets`, `hinted_due_cell_ticks_without_a_shard_scan`, `foreground_cycle_ticks_hints_without_the_backstop`, `backstop_scan_runs_on_its_period` |
 | 4 | A clean release leaves a resume record beside a checkpointed, fully materialized database; a matching same-node wake moves it onto the fresh activation path and reads no origin object, and every mismatch discards it | `a_recorded_continuation_continues_the_chain_after_a_move`, `a_resume_refuses_a_continuation_that_does_not_match_the_file`, `a_resume_refuses_a_database_that_is_not_checkpointed`, `a_dense_checksum_copy_refuses_a_base_that_no_longer_folds_to_it`, `a_warm_wake_continues_the_local_database_without_the_origin`, `a_resume_record_that_names_another_root_is_discarded` |
 | 5 instrument | Catalog, control, and activation-phase costs are visible in production; a cold route measures two catalog reads, two control reads, three origin requests, and four phases | `cold_activation_reports_metadata_and_origin_reads`, `due_scan_reads_one_control_record_per_cell`, `hinted_tick_spends_a_bounded_metadata_budget` |
 

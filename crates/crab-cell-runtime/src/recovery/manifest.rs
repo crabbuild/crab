@@ -201,6 +201,10 @@ impl RecoveryManifestStore {
         }
     }
 
+    pub(crate) const fn limits(&self) -> crab_ltx::Limits {
+        self.limits
+    }
+
     /// Shares byte admission with node-wide follower-tail recovery work.
     #[must_use]
     pub fn with_recovery_disk(mut self, recovery_disk: crab_ltx::DiskBudget) -> Self {

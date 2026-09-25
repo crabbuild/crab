@@ -10,6 +10,7 @@ pub(super) struct RuntimeInner {
     pub(super) session: SessionId,
     pub(super) pool: SqlWorkerPool,
     pub(super) replica_host: crab_ltx::Host,
+    pub(super) application_limits: OnceLock<HashMap<crate::identity::NamespaceId, (u64, u64)>>,
     pub(super) node_lease: Arc<RuntimeNodeLease>,
     pub(super) node_durability: NodeDurabilitySlot,
     pub(super) telemetry: crate::fleet::telemetry::CellTelemetryHandle,

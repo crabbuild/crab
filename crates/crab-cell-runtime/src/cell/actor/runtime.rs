@@ -164,12 +164,40 @@ impl CellRuntime {
                 session,
                 pool,
                 replica_host,
+                application_limits: OnceLock::new(),
                 node_lease,
                 node_durability: Arc::new(std::sync::RwLock::new(None)),
                 telemetry,
                 unpublished_node_log_bytes,
             }),
         })
+    }
+
+    /// Binds declared per-namespace LTX limits before a compiled application starts Cell work.
+    ///
+    /// Every later activation must use matching database and capture bounds.
+    pub fn install_application_limits(
+        &self,
+        limits: impl IntoIterator<Item = (crate::identity::NamespaceId, u64, u64)>,
+    ) -> crate::Result<()> {
+        let mut by_namespace = HashMap::new();
+        for (namespace, database, capture) in limits {
+            if database < 512
+                || capture < 128
+                || by_namespace
+                    .insert(namespace, (database, capture))
+                    .is_some()
+            {
+                return Err(Error::Control("invalid application Cell limits"));
+            }
+        }
+        if by_namespace.is_empty() {
+            return Err(Error::Control("application has no Cell types"));
+        }
+        self.inner
+            .application_limits
+            .set(by_namespace)
+            .map_err(|_| Error::Control("application Cell limits already installed"))
     }
 
     /// Installs the process telemetry sink before Cell work begins.

@@ -14,7 +14,6 @@ use crab_cell_runtime::identity::IncarnationId;
 use crab_cell_runtime::identity::{
     ApplicationId, CellTarget, SessionId, TenantId, partition_for_shard,
 };
-use crab_cell_runtime::ltx::Limits as ReplicaLimits;
 use crab_cell_runtime::ltx::{CellReplica, CellStorageLayout};
 use crab_cell_runtime::node::lease::NodeLeaseGuard;
 use crab_cell_runtime::primitives::blob::BlobArtifactStore;
@@ -84,6 +83,7 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
             fixture::SQL_NAMESPACE,
             CatalogRole::Sql,
             fixture::SQL_MODULE,
+            0,
             40,
             fixture::install_reference_sql_schema,
         )
@@ -96,9 +96,26 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
             &source_dir,
             tenant,
             application_id,
+            fixture::SQL_NAMESPACE,
+            CatalogRole::Sql,
+            fixture::SQL_MODULE,
+            1,
+            47,
+            fixture::install_reference_sql_schema,
+        )
+        .await
+        .expect("source second SQL shard"),
+        fixture::bootstrap_reference_cell(
+            &source.runtime(),
+            &application.registry(),
+            &layout,
+            &source_dir,
+            tenant,
+            application_id,
             fixture::KV_NAMESPACE,
             CatalogRole::Kv,
             fixture::KV_MODULE,
+            0,
             41,
             install_kv_schema,
         )
@@ -114,6 +131,7 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
             fixture::BLOB_NAMESPACE,
             CatalogRole::Blob,
             fixture::BLOB_MODULE,
+            0,
             42,
             install_blob_schema,
         )
@@ -129,6 +147,7 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
             fixture::QUEUE_NAMESPACE,
             CatalogRole::Queue,
             fixture::QUEUE_MODULE,
+            0,
             43,
             install_queue_schema,
         )
@@ -144,6 +163,7 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
             fixture::CRON_NAMESPACE,
             CatalogRole::Cron,
             fixture::CRON_MODULE,
+            0,
             45,
             install_cron_schema,
         )
@@ -159,6 +179,7 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
             fixture::WORKFLOW_NAMESPACE,
             CatalogRole::Workflow,
             fixture::WORKFLOW_MODULE,
+            0,
             46,
             install_workflow_schema,
         )
@@ -196,6 +217,16 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
     let source_sql = source_handle
         .sql::<fixture::ReferenceSql>(sql_target.clone())
         .expect("source typed SQL");
+    let second_sql_target = CellTarget::new(
+        tenant,
+        application_id,
+        fixture::SQL_NAMESPACE,
+        &partition_for_shard(1),
+    )
+    .expect("second SQL target");
+    let source_second_sql = source_handle
+        .sql::<fixture::ReferenceSql>(second_sql_target.clone())
+        .expect("source second SQL shard");
     let inserted = source_sql
         .batch(
             identity(900_000, now_ms),
@@ -209,6 +240,19 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
         .await
         .expect("acknowledged source SQL write");
     assert_eq!(inserted.output[0].rows_affected, 1);
+    let inserted_second = source_second_sql
+        .batch(
+            identity(900_021, now_ms),
+            SqlBatch {
+                statements: vec![SqlStatement {
+                    sql: "INSERT INTO qualification_rows (id, payload) VALUES (2, ?1)".into(),
+                    parameters: vec![SqlValue::Blob(b"published-second-shard".to_vec())],
+                }],
+            },
+        )
+        .await
+        .expect("acknowledged second SQL shard write");
+    assert_eq!(inserted_second.output[0].rows_affected, 1);
     let written = source_kv
         .atomic(
             identity(900_001, now_ms),
@@ -391,16 +435,27 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
         "successor did not start from empty local storage"
     );
     let mut restored_cells = Vec::new();
-    for (namespace, module, incarnation_byte) in [
-        (fixture::SQL_NAMESPACE, fixture::SQL_MODULE, 40_u8),
-        (fixture::KV_NAMESPACE, fixture::KV_MODULE, 41_u8),
-        (fixture::BLOB_NAMESPACE, fixture::BLOB_MODULE, 42_u8),
-        (fixture::QUEUE_NAMESPACE, fixture::QUEUE_MODULE, 43_u8),
-        (fixture::CRON_NAMESPACE, fixture::CRON_MODULE, 45_u8),
-        (fixture::WORKFLOW_NAMESPACE, fixture::WORKFLOW_MODULE, 46_u8),
+    for (namespace, module, shard, incarnation_byte) in [
+        (fixture::SQL_NAMESPACE, fixture::SQL_MODULE, 0, 40_u8),
+        (fixture::SQL_NAMESPACE, fixture::SQL_MODULE, 1, 47_u8),
+        (fixture::KV_NAMESPACE, fixture::KV_MODULE, 0, 41_u8),
+        (fixture::BLOB_NAMESPACE, fixture::BLOB_MODULE, 0, 42_u8),
+        (fixture::QUEUE_NAMESPACE, fixture::QUEUE_MODULE, 0, 43_u8),
+        (fixture::CRON_NAMESPACE, fixture::CRON_MODULE, 0, 45_u8),
+        (
+            fixture::WORKFLOW_NAMESPACE,
+            fixture::WORKFLOW_MODULE,
+            0,
+            46_u8,
+        ),
     ] {
-        let target = CellTarget::new(tenant, application_id, namespace, &partition_for_shard(0))
-            .expect("restored target");
+        let target = CellTarget::new(
+            tenant,
+            application_id,
+            namespace,
+            &partition_for_shard(shard),
+        )
+        .expect("restored target");
         let observed = authority
             .load(target.cell_id())
             .await
@@ -413,28 +468,63 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
             .await
             .expect("source catalog")
             .expect("source provisioned");
+        let replica = CellReplica::new(
+            layout.clone(),
+            *target.cell_id().as_bytes(),
+            *IncarnationId::from_bytes([incarnation_byte; 16]).as_bytes(),
+            fixture::reference_replica_limits(),
+        )
+        .expect("successor replica");
+        let owner = Owner {
+            session: successor_session,
+            endpoint: "https://public-successor.internal:8081".into(),
+        };
+        if namespace == fixture::SQL_NAMESPACE && shard == 0 {
+            let rejected = successor
+                .runtime()
+                .takeover_restored(
+                    proof.clone(),
+                    replica.clone(),
+                    authority.clone(),
+                    observed.clone(),
+                    fenced.direct_takeover().expect("direct takeover proof"),
+                    RecoveryManifestStore::new(
+                        layout.clone(),
+                        crab_cell_runtime::ltx::Limits::default(),
+                    ),
+                    successor_dir.path().join("rejected-recovery.sqlite"),
+                    owner.clone(),
+                )
+                .await
+                .err()
+                .expect("recovery limits must match the application descriptor");
+            assert!(matches!(
+                rejected,
+                crab_cell_runtime::Error::Control("Cell storage limits differ from application")
+            ));
+            assert_eq!(
+                authority
+                    .load(target.cell_id())
+                    .await
+                    .expect("authority after rejection")
+                    .expect("Cell after rejection")
+                    .value(),
+                observed.value()
+            );
+        }
         let restored = successor
             .runtime()
             .takeover_restored(
                 proof,
-                CellReplica::new(
-                    layout.clone(),
-                    *target.cell_id().as_bytes(),
-                    *IncarnationId::from_bytes([incarnation_byte; 16]).as_bytes(),
-                    ReplicaLimits::default(),
-                )
-                .expect("successor replica"),
+                replica,
                 authority.clone(),
                 observed,
                 fenced.direct_takeover().expect("direct takeover proof"),
-                RecoveryManifestStore::new(layout.clone(), ReplicaLimits::default()),
+                RecoveryManifestStore::new(layout.clone(), fixture::reference_replica_limits()),
                 successor_dir
                     .path()
-                    .join(format!("{module}-successor.sqlite")),
-                Owner {
-                    session: successor_session,
-                    endpoint: "https://public-successor.internal:8081".into(),
-                },
+                    .join(format!("{module}-{shard}-successor.sqlite")),
+                owner,
             )
             .await
             .expect("exact-root takeover");
@@ -477,6 +567,25 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
     assert_eq!(
         sql_read.output[0].rows,
         vec![vec![SqlValue::Blob(b"published-sql-value".to_vec())]]
+    );
+    let successor_second_sql = successor_handle
+        .sql::<fixture::ReferenceSql>(second_sql_target)
+        .expect("successor second SQL shard");
+    let second_sql_read = successor_second_sql
+        .query(
+            None,
+            SqlBatch {
+                statements: vec![SqlStatement {
+                    sql: "SELECT payload FROM qualification_rows WHERE id = 2".into(),
+                    parameters: Vec::new(),
+                }],
+            },
+        )
+        .await
+        .expect("successor second SQL shard read");
+    assert_eq!(
+        second_sql_read.output[0].rows,
+        vec![vec![SqlValue::Blob(b"published-second-shard".to_vec())]]
     );
     let successor_blob = successor_handle
         .blob::<fixture::ReferenceBlob>()
@@ -710,6 +819,21 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
         )
         .await;
     assert!(stale_sql.is_err(), "fenced owner accepted a SQL write");
+    let stale_second_sql = source_second_sql
+        .batch(
+            identity(900_022, now_ms),
+            SqlBatch {
+                statements: vec![SqlStatement {
+                    sql: "INSERT INTO qualification_rows (id, payload) VALUES (3, X'00')".into(),
+                    parameters: Vec::new(),
+                }],
+            },
+        )
+        .await;
+    assert!(
+        stale_second_sql.is_err(),
+        "fenced second SQL shard accepted a write"
+    );
     let sql_after_fence = successor_sql
         .query(
             None,
@@ -724,6 +848,22 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
         .expect("successor SQL recheck");
     assert_eq!(
         sql_after_fence.output[0].rows,
+        vec![vec![SqlValue::Integer(1)]]
+    );
+    let second_sql_after_fence = successor_second_sql
+        .query(
+            None,
+            SqlBatch {
+                statements: vec![SqlStatement {
+                    sql: "SELECT COUNT(*) FROM qualification_rows".into(),
+                    parameters: Vec::new(),
+                }],
+            },
+        )
+        .await
+        .expect("successor second SQL shard recheck");
+    assert_eq!(
+        second_sql_after_fence.output[0].rows,
         vec![vec![SqlValue::Integer(1)]]
     );
     let stale_blob = source_blob

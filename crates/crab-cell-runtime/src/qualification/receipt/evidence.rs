@@ -156,3 +156,248 @@ fn provider_evidence_candidate(bytes: &[u8]) -> Result<Option<QualificationProvi
     }
     QualificationProviderEvidence::decode(bytes).map(Some)
 }
+
+const SCALE_EVIDENCE_SCHEMA_VERSION: u32 = 1;
+const SCALE_STATES: [&str; 5] = [
+    "empty",
+    "sparse",
+    "resident",
+    "pending-publication",
+    "churned",
+];
+const SCALE_CELL_COUNTS: [u64; 3] = [1_000, 5_000, 10_000];
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::qualification) struct ScaleEvidence {
+    schema_version: u32,
+    profile: String,
+    profile_digest: [u8; 32],
+    workload_seed: u64,
+    cell_samples: Vec<ScaleSample>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ScaleSample {
+    state: String,
+    target_cells: u64,
+    before: ScaleSnapshot,
+    after: ScaleSnapshot,
+    peak: ScaleSnapshot,
+}
+
+impl ScaleSample {
+    fn charges_open_cells(&self) -> bool {
+        self.after
+            .admitted_resident_bytes
+            .checked_sub(self.before.admitted_resident_bytes)
+            .is_some_and(|bytes| {
+                bytes >= self.target_cells * crate::fleet::resource::ACTIVE_CELL_NATIVE_BYTES as u64
+            })
+            && self
+                .after
+                .admitted_file_descriptors
+                .checked_sub(self.before.admitted_file_descriptors)
+                .is_some_and(|descriptors| {
+                    descriptors
+                        >= self.target_cells
+                            * crate::fleet::resource::ACTIVE_CELL_FILE_DESCRIPTORS as u64
+                })
+    }
+
+    fn slope_fits_admission(&self, smaller: &Self) -> bool {
+        let Some(extra_cells) = self.target_cells.checked_sub(smaller.target_cells) else {
+            return false;
+        };
+        let increment = |sample: &Self, field: fn(&ScaleSnapshot) -> u64| {
+            i128::from(field(&sample.after)) - i128::from(field(&sample.before))
+        };
+        let slope =
+            |field: fn(&ScaleSnapshot) -> u64| increment(self, field) - increment(smaller, field);
+        let cache_charge =
+            i128::from(extra_cells) * i128::from(crate::cell::worker::ACTIVE_CELL_PAGE_CACHE_BYTES);
+        let memory_charge = i128::from(extra_cells)
+            * crate::fleet::resource::ACTIVE_CELL_NATIVE_BYTES as i128
+            + cache_charge
+            + slope(|snapshot| snapshot.retained_bytes);
+        // Comparing two sample sizes cancels fixed process overhead, which
+        // has its own node reserve and cannot be charged to each Cell.
+        slope(|snapshot| snapshot.rss_bytes) <= memory_charge
+            && slope(|snapshot| snapshot.allocator_bytes) <= memory_charge
+            && slope(|snapshot| snapshot.sqlite_cache_bytes) <= cache_charge
+            && slope(|snapshot| snapshot.file_descriptors)
+                <= i128::from(extra_cells)
+                    * crate::fleet::resource::ACTIVE_CELL_FILE_DESCRIPTORS as i128
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ScaleSnapshot {
+    active_cells: u64,
+    rss_bytes: u64,
+    allocator_bytes: u64,
+    threads: u64,
+    file_descriptors: u64,
+    sqlite_cache_bytes: u64,
+    admitted_resident_bytes: u64,
+    admitted_file_descriptors: u64,
+    retained_bytes: u64,
+    local_disk_reserved_bytes: u64,
+    local_disk_bytes: u64,
+}
+
+impl ScaleSnapshot {
+    fn values(&self) -> [u64; 11] {
+        [
+            self.active_cells,
+            self.rss_bytes,
+            self.allocator_bytes,
+            self.threads,
+            self.file_descriptors,
+            self.sqlite_cache_bytes,
+            self.admitted_resident_bytes,
+            self.admitted_file_descriptors,
+            self.retained_bytes,
+            self.local_disk_reserved_bytes,
+            self.local_disk_bytes,
+        ]
+    }
+
+    fn covers(&self, other: &Self) -> bool {
+        self.values()
+            .into_iter()
+            .zip(other.values())
+            .all(|(peak, observed)| peak >= observed)
+    }
+}
+
+impl ScaleEvidence {
+    fn decode(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() > MAX_RECEIPT_BYTES {
+            return Err(Error::Control("qualification scale evidence exceeds limit"));
+        }
+        let evidence: Self = serde_json::from_slice(bytes)?;
+        if serde_json::to_vec(&evidence).map_err(Error::from)? != bytes {
+            return Err(Error::Control(
+                "qualification scale evidence is not canonical",
+            ));
+        }
+        Ok(evidence)
+    }
+
+    fn verify_for(
+        &self,
+        profile: &QualificationProfile,
+        run: &QualificationRunArtifact,
+    ) -> Result<()> {
+        if self.schema_version != SCALE_EVIDENCE_SCHEMA_VERSION
+            || self.profile != profile.name()
+            || self.profile_digest != *profile.digest()?.as_bytes()
+            || self.workload_seed != run.workload().seed()
+            || run.workload().cells() < 10_000
+            || self.cell_samples.len() != SCALE_STATES.len() * SCALE_CELL_COUNTS.len()
+        {
+            return Err(Error::Control(
+                "qualification scale evidence identity or samples",
+            ));
+        }
+        for ((state, count), sample) in SCALE_STATES
+            .into_iter()
+            .flat_map(|state| {
+                SCALE_CELL_COUNTS
+                    .into_iter()
+                    .map(move |count| (state, count))
+            })
+            .zip(&self.cell_samples)
+        {
+            if sample.state != state
+                || sample.target_cells != count
+                || sample.before.active_cells != 0
+                || sample.after.active_cells != count
+                || sample.peak.active_cells < count
+                || sample.before.rss_bytes == 0
+                || sample.before.threads == 0
+                || sample.before.file_descriptors == 0
+                || sample.after.rss_bytes == 0
+                || sample.after.allocator_bytes == 0
+                || sample.after.sqlite_cache_bytes == 0
+                || sample.after.local_disk_bytes == 0
+                || !sample.charges_open_cells()
+                || !sample.peak.covers(&sample.before)
+                || !sample.peak.covers(&sample.after)
+            {
+                return Err(Error::Control("qualification scale sample is incomplete"));
+            }
+        }
+        for samples in self.cell_samples.chunks_exact(SCALE_CELL_COUNTS.len()) {
+            for pair in samples.windows(2) {
+                if !pair[1].slope_fits_admission(&pair[0]) {
+                    return Err(Error::Control(
+                        "qualification scale slope exceeds admission",
+                    ));
+                }
+            }
+        }
+        for (name, unit, observed) in [
+            (
+                "peak_rss_bytes",
+                "bytes",
+                self.cell_samples
+                    .iter()
+                    .map(|sample| sample.peak.rss_bytes)
+                    .max(),
+            ),
+            (
+                "peak_local_disk_bytes",
+                "bytes",
+                self.cell_samples
+                    .iter()
+                    .map(|sample| sample.peak.local_disk_bytes)
+                    .max(),
+            ),
+            (
+                "peak_file_descriptors",
+                "count",
+                self.cell_samples
+                    .iter()
+                    .map(|sample| sample.peak.file_descriptors)
+                    .max(),
+            ),
+        ] {
+            if run.threshold_metric(name, unit)? < observed.unwrap_or(0) {
+                return Err(Error::Control(
+                    "qualification scale peaks exceed measured run",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn verify_scale_evidence(
+    profile: &QualificationProfile,
+    run: &QualificationRunArtifact,
+    artifacts: &[&[u8]],
+) -> Result<()> {
+    if profile.name() != "scale-v1" {
+        return Ok(());
+    }
+    let mut matches = artifacts.iter().filter_map(|artifact| {
+        let value = serde_json::from_slice::<serde_json::Value>(artifact).ok()?;
+        value
+            .as_object()?
+            .contains_key("cell_samples")
+            .then_some(*artifact)
+    });
+    let evidence = matches.next().ok_or(Error::Control(
+        "protected scale evidence is missing its Cell samples",
+    ))?;
+    if matches.next().is_some() {
+        return Err(Error::Control(
+            "protected scale evidence has multiple sample artifacts",
+        ));
+    }
+    ScaleEvidence::decode(evidence)?.verify_for(profile, run)
+}

@@ -290,6 +290,8 @@ fn cell_type_limits_and_partition_bounds_fail_closed() {
     .unwrap();
     assert!(cell_type.with_limits(0, 1).is_err());
     assert!(cell_type.with_limits(1, 0).is_err());
+    assert!(cell_type.with_limits(511, 128).is_err());
+    assert!(cell_type.with_limits(512, 127).is_err());
     assert!(cell_type.with_schema_range(0, 1).is_err());
     assert!(cell_type.with_schema_range(2, 1).is_err());
 }

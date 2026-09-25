@@ -1074,6 +1074,18 @@ pub async fn serve(config: Config) -> Result<()> {
     .map_err(|source| crate::Error::LocalStaging {
         source: Box::new(source),
     })?;
+    if let Some((bytes, sessions)) = local_staging
+        .restart_inventory_usage()
+        .filter(|(_, sessions)| *sessions != 0)
+    {
+        tracing::warn!(
+            bytes,
+            sessions,
+            available_bytes = local_staging.available_bytes(),
+            capacity_bytes = local_disk.capacity(),
+            "prior session files remain charged to the local Cell disk budget"
+        );
+    }
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let public_address = listener.local_addr()?;
     let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;

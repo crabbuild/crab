@@ -610,6 +610,18 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
         )
         .await
         .unwrap();
+    assert_eq!(
+        restored
+            .kv::<ReferenceKv>(KV_NAMESPACE)
+            .unwrap()
+            .get(b"qualification".to_vec(), b"key".to_vec(), None)
+            .await
+            .unwrap()
+            .output
+            .unwrap()
+            .value,
+        b"value"
+    );
     restored
         .kv::<ReferenceKv>(KV_NAMESPACE)
         .unwrap()
@@ -627,23 +639,23 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
         )
         .await
         .unwrap();
-    assert!(matches!(
-        restored
-            .blob::<ReferenceBlob>()
-            .unwrap()
-            .query(
-                BlobQuery::Read {
-                    key: b"qualification/blob".to_vec(),
-                    offset: 0,
-                    limit: 128,
-                },
-                None,
-            )
-            .await
-            .unwrap()
-            .output,
-        BlobQueryResult::Read(Some(_))
-    ));
+    let recovered_blob = restored
+        .blob::<ReferenceBlob>()
+        .unwrap()
+        .query(
+            BlobQuery::Read {
+                key: b"qualification/blob".to_vec(),
+                offset: 0,
+                limit: 128,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    match recovered_blob.output {
+        BlobQueryResult::Read(Some(read)) => assert_eq!(read.bytes, b"blob-value"),
+        other => panic!("unexpected recovered blob: {other:?}"),
+    }
     let restored_queue = restored.queue::<ReferenceQueue>().unwrap();
     restored_queue
         .send(
@@ -664,6 +676,16 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
         .await
         .unwrap();
     let restored_workflow = restored.workflow::<ReferenceWorkflow>().unwrap();
+    assert_eq!(
+        restored_workflow
+            .state(b"activity-run".to_vec(), None)
+            .await
+            .unwrap()
+            .output
+            .unwrap()
+            .status,
+        WorkflowStatus::Completed
+    );
     let activity_workflow_id = b"activity-after-recovery".to_vec();
     restored_workflow
         .start(

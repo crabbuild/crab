@@ -19,7 +19,6 @@ use crab_cell_runtime::identity::IncarnationId;
 use crab_cell_runtime::identity::{
     ApplicationId, CellTarget, SessionId, TenantId, partition_for_shard,
 };
-use crab_cell_runtime::ltx::Limits as ReplicaLimits;
 use crab_cell_runtime::ltx::{CellReplica, CellStorageLayout};
 use crab_cell_runtime::node::lease::NodeLeaseGuard;
 use crab_cell_runtime::primitives::blob::BlobArtifactStore;
