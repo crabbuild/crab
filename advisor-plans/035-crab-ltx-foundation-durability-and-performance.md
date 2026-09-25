@@ -1,6 +1,6 @@
 # Plan 035: Harden crab-ltx as the Cell durability foundation
 
-Status: IN PROGRESS — local Slices 1–2 implemented; Slice 3 modeled and sparse process-kill tested; physical power-cut and next bottleneck gates remain
+Status: IN PROGRESS — local Slices 1–2 implemented; Slice 3 modeled and sparse process-kill tested; physical power-cut and protected proof gates remain; Slice 4 no-go pending production profile
 Priority: P0 correctness; P1 measured performance
 Effort: L, split into four reviewable changes
 Risk: High at the filesystem and recovery boundaries
@@ -317,3 +317,12 @@ status of this plan in `advisor-plans/README.md` after each slice.
   observer. It exercises runtime acknowledgement proof, but its killed owner
   is a bootstrap owner rather than the sparse activation above. The combined
   sparse-owner plus runtime-proof case remains open.
+- Slice 4 no-go for now: after the sidecar sync change, sparse 4 KiB and 16 KiB
+  local captures are about 0.3 ms p50, while the 4 MiB full-WAL case is about
+  41 ms p50 and reads about 24 MiB of WAL per measured round. Existing RustFS
+  loopback root preparation was about 95–146 ms p95 depending on payload, but
+  the runtime races object publication with follower proof. There is no
+  protected response-phase receipt on this source revision to show which term
+  is actually on the production acknowledgement path. A bounded full-WAL
+  rewrite or additional object path now would be speculative; choose and
+  benchmark one only after that receipt identifies the dominant term.
