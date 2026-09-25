@@ -35,6 +35,47 @@ not independently durable per-capture latency. These small local samples
 confirm the durability-cost explanation; they are not production SLOs or
 evidence of a universal Crab win.
 
+### Current PR comparison (2026-09-25)
+
+The current `crab-ltx` release runner and Celld pinned at
+`10cb1303dac710dcb3b557e318e08c855261f68b` ran on the same macOS 25.5
+external APFS SSD. Each mode ran seven alternating independent processes;
+each process warmed one 128-transaction round and measured three more. The
+table shows the median of each process's median, followed by the nearest-rank
+p95 across the seven process medians. Times are for the whole 128-transaction
+round, in milliseconds.
+
+| Payload | Mode | Capture p50 | Recovery p50 | Full round p50 / p95 |
+| --- | --- | ---: | ---: | ---: |
+| 4 KiB | Crab immediate | 744 | 25 | 813 / 965 |
+| 4 KiB | Celld default | 403 | 13 | 461 / 773 |
+| 4 KiB | Celld with diagnostic directory syncs | 727 | 26 | 786 / 937 |
+| 16 KiB | Crab immediate | 805 | 28 | 919 / 946 |
+| 16 KiB | Celld default | 420 | 24 | 503 / 542 |
+| 16 KiB | Celld with diagnostic directory syncs | 784 | 29 | 875 / 939 |
+
+Celld's default syncs completed LTX file bytes but does not sync each renamed
+file's directory entry. The runner-only diagnostic syncs L0 after every cut,
+the new L0 ancestor names after the first cut, the new L1 name after
+compaction, and the restored file's parent. With that diagnostic, Crab's full
+round median is 3% slower at 4 KiB and 5% slower at 16 KiB. Against Celld's
+unchanged default it is 76% and 82% slower, respectively. The 4 KiB p95 has
+substantial run-to-run variance. The full-round comparison also includes
+different SQLite versions and different recovery verification work, so it is
+not an isolated capture-algorithm comparison.
+
+Crab `--durability-batch 8` measured 325 / 337 ms p50 / p95 at 4 KiB and
+309 / 328 ms at 16 KiB for the same round. Those medians are 29% and 39%
+below Celld's default full-round medians, but each group of eight cuts waits
+for one shared barrier before local durability can be acknowledged. They do
+not represent independent per-transaction durable latency. Raw JSON for all
+five modes is at
+`$HOME/Workspace/crabbuild-target/crab-1bab/ltx-celld-current-20260925/`.
+Reproduce each mode with `--transactions 128 --rounds 3 --warmup 1` and
+`--payload-bytes 4096` or `16384`, repeating in seven alternating processes;
+add `--sync-parent` for the Celld diagnostic or `--durability-batch 8` for
+Crab's grouped mode.
+
 ## Run it
 
 The script uses release builds, one warmup round, and five measured rounds by
@@ -160,10 +201,11 @@ Reproduce each process with the release binary and
 
 The Celld runner accepts `--sync-parent` as a diagnostic contract-normalization
 mode. After each upstream `Db::sync()`, it syncs Celld's L0 directory before
-recording capture completion. It also syncs the destination directory after
-compaction and restore installation. This is not pinned Celld behavior and
-must be reported separately; it answers what the local comparison looks like
-when both runners pay parent-directory barriers for installed artifacts.
+recording capture completion. On the first cut it also syncs the newly created
+`0`, `ltx`, and session-directory names; after compaction it syncs the new L1
+directory name. It syncs the destination directory after restore installation.
+This is runner-only behavior, not pinned Celld behavior. The September 21
+`--sync-parent` ratios above predate these additional directory-chain syncs.
 
 The grouped Crab mode measures batch completion: all captures remain
 unacknowledged until the final file-and-directory barrier succeeds. It is a
