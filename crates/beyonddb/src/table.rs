@@ -1,4 +1,5 @@
 use super::*;
+use extenddb_core::types::Tag;
 
 /// An ExtendDB table's key contract stored in the account Cell.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -15,6 +16,10 @@ pub struct TableSpec {
     pub provisioned_throughput: Option<ProvisionedThroughput>,
     /// Whether DeleteTable must be refused.
     pub deletion_protection_enabled: bool,
+    /// Initial resource tags committed with table creation.
+    pub initial_tags: Vec<Tag>,
+    /// Canonical table ARN required when initial tags are supplied.
+    pub resource_arn: Option<String>,
 }
 
 impl TableSpec {
@@ -93,6 +98,23 @@ impl Command for CreateTable {
             )));
         }
         let table_id = table_id(context, &input.table_name);
+        if !input.initial_tags.is_empty() {
+            let Some(arn) = input.resource_arn.as_deref() else {
+                return Ok(CommandResult::Rejected(Json(
+                    CreateTableOutcome::InvalidSchema,
+                )));
+            };
+            let Some((_, account_id, table_name)) = crate::tags::parse_table_arn(arn) else {
+                return Ok(CommandResult::Rejected(Json(
+                    CreateTableOutcome::InvalidSchema,
+                )));
+            };
+            if table_name != input.table_name || account_target(account_id)? != *context.target() {
+                return Ok(CommandResult::Rejected(Json(
+                    CreateTableOutcome::InvalidSchema,
+                )));
+            }
+        }
         let record = TableRecord {
             id: table_id.clone(),
             created_at_ms: context.now_ms(),
@@ -113,6 +135,20 @@ impl Command for CreateTable {
                 SqlValue::Blob(serde_json::to_vec(&record)?),
             ],
         ))?;
+        if let Some(arn) = input.resource_arn {
+            for tag in input.initial_tags {
+                context.sql(&statement(
+                    "INSERT INTO ddb_table_tags (table_id, resource_arn, tag_key, tag_value) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    vec![
+                        SqlValue::Text(record.id.clone()),
+                        SqlValue::Text(arn.clone()),
+                        SqlValue::Text(tag.key),
+                        SqlValue::Text(tag.value),
+                    ],
+                ))?;
+            }
+        }
         Ok(CommandResult::Success(Json(CreateTableOutcome::Created(
             record,
         ))))
@@ -170,6 +206,10 @@ impl Command for DeleteTable {
                 },
                 SqlStatement {
                     sql: "DELETE FROM ddb_items WHERE table_id = ?1".into(),
+                    parameters: vec![SqlValue::Text(table.id.clone())],
+                },
+                SqlStatement {
+                    sql: "DELETE FROM ddb_table_tags WHERE table_id = ?1".into(),
                     parameters: vec![SqlValue::Text(table.id.clone())],
                 },
                 SqlStatement {
@@ -250,6 +290,8 @@ impl Command for UpdateTable {
             billing_mode: table.billing_mode,
             provisioned_throughput: table.provisioned_throughput.clone(),
             deletion_protection_enabled: table.deletion_protection_enabled,
+            initial_tags: Vec::new(),
+            resource_arn: None,
         };
         if !valid_table_spec(&spec) {
             return Ok(CommandResult::Rejected(Json(
@@ -460,6 +502,7 @@ fn valid_table_spec(spec: &TableSpec) -> bool {
         billing_mode: Some(spec.billing_mode),
         provisioned_throughput: spec.provisioned_throughput.clone(),
         deletion_protection_enabled: Some(spec.deletion_protection_enabled),
+        tags: Some(spec.initial_tags.clone()),
         ..CreateTableInput::default()
     };
     validation::validate_create_table(&input, &LimitsConfig::default()).is_ok()

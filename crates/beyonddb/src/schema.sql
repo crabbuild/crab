@@ -40,3 +40,11 @@ CREATE TABLE ddb_iam_user_policies (
     document TEXT NOT NULL,
     PRIMARY KEY (user_name, policy_name)
 );
+
+CREATE TABLE ddb_table_tags (
+    table_id TEXT NOT NULL REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
+    resource_arn TEXT NOT NULL,
+    tag_key TEXT NOT NULL,
+    tag_value TEXT NOT NULL,
+    PRIMARY KEY (table_id, resource_arn, tag_key)
+);

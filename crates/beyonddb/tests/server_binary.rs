@@ -219,7 +219,10 @@ async fn bootstrap_sdk_write_survives_server_process_restart() {
             "Statement": [{
                 "Effect": "Allow",
                 "Action": "dynamodb:*",
-                "Resource": "arn:aws:dynamodb:us-east-1:123456789012:table/ProcessData"
+                "Resource": [
+                    "arn:aws:dynamodb:us-east-1:123456789012:table/ProcessData",
+                    "arn:aws:dynamodb:us-east-1:123456789012:table/*"
+                ]
             }]
         })
         .to_string(),
@@ -274,7 +277,8 @@ async fn bootstrap_sdk_write_survives_server_process_restart() {
         .load()
         .await;
     let sdk = aws_sdk_dynamodb::Client::new(&sdk_config);
-    sdk.create_table()
+    let created = sdk
+        .create_table()
         .table_name("ProcessData")
         .key_schema(
             aws_sdk_dynamodb::types::KeySchemaElement::builder()
@@ -291,6 +295,69 @@ async fn bootstrap_sdk_write_survives_server_process_restart() {
                 .unwrap(),
         )
         .billing_mode(aws_sdk_dynamodb::types::BillingMode::PayPerRequest)
+        .tags(
+            aws_sdk_dynamodb::types::Tag::builder()
+                .key("created")
+                .value("yes")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let arn = created
+        .table_description()
+        .and_then(|description| description.table_arn())
+        .unwrap();
+    let initial_tags = sdk
+        .list_tags_of_resource()
+        .resource_arn(arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(initial_tags.tags().len(), 1);
+    assert_eq!(initial_tags.tags()[0].key(), "created");
+    sdk.tag_resource()
+        .resource_arn(arn)
+        .tags(
+            aws_sdk_dynamodb::types::Tag::builder()
+                .key("team")
+                .value("crab")
+                .build()
+                .unwrap(),
+        )
+        .tags(
+            aws_sdk_dynamodb::types::Tag::builder()
+                .key("env")
+                .value("test")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let tagged = sdk
+        .list_tags_of_resource()
+        .resource_arn(arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tagged.tags().len(), 3);
+    sdk.tag_resource()
+        .resource_arn(arn)
+        .tags(
+            aws_sdk_dynamodb::types::Tag::builder()
+                .key("team")
+                .value("elastic")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    sdk.untag_resource()
+        .resource_arn(arn)
+        .tag_keys("env")
         .send()
         .await
         .unwrap();
@@ -315,6 +382,49 @@ async fn bootstrap_sdk_write_survives_server_process_restart() {
         .await
         .unwrap();
     assert_eq!(read.item(), Some(&item));
+    let recovered_tags = sdk
+        .list_tags_of_resource()
+        .resource_arn(arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(recovered_tags.tags().len(), 2);
+    assert_eq!(recovered_tags.tags()[0].key(), "created");
+    assert_eq!(recovered_tags.tags()[0].value(), "yes");
+    assert_eq!(recovered_tags.tags()[1].key(), "team");
+    assert_eq!(recovered_tags.tags()[1].value(), "elastic");
+    sdk.delete_table()
+        .table_name("ProcessData")
+        .send()
+        .await
+        .unwrap();
+    sdk.create_table()
+        .table_name("ProcessData")
+        .key_schema(
+            aws_sdk_dynamodb::types::KeySchemaElement::builder()
+                .attribute_name("id")
+                .key_type(aws_sdk_dynamodb::types::KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            aws_sdk_dynamodb::types::AttributeDefinition::builder()
+                .attribute_name("id")
+                .attribute_type(aws_sdk_dynamodb::types::ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(aws_sdk_dynamodb::types::BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+    let recreated_tags = sdk
+        .list_tags_of_resource()
+        .resource_arn(arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(recreated_tags.tags().is_empty());
     stop(&mut restarted, &log);
     rustfs.kill().unwrap();
     rustfs.wait().unwrap();

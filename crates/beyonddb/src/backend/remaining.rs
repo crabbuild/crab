@@ -2,8 +2,9 @@
 //!
 //! Each unimplemented operation fails explicitly. This allows the completed
 //! table and item paths to run through ExtendDB's real dispatch contract
-//! without claiming Streams, TTL, tags, or backups work yet.
+//! without claiming Streams, TTL, or backups work yet.
 
+use crab_cell_runtime::client::InvocationError;
 use extenddb_core::types::{
     BackupDescription, BackupDetails, BackupSummary, ContinuousBackupsDescription,
     DescribeStreamInput, Item, StreamDescription, StreamRecord, TableDescription, Tag,
@@ -15,7 +16,48 @@ use extenddb_storage::{
     TableEngine, TtlTableInfo, WorkerStore,
 };
 
-use super::{CellStorage, unsupported};
+use crate::Json;
+use crate::tags::{ReadTags, TagChange, TagRequest, UpdateTags, UpdateTagsInput, parse_table_arn};
+
+use super::{CellStorage, cell_error, mutation_identity, target, unsupported};
+
+impl CellStorage {
+    fn tag_request(&self, arn: &str) -> Result<TagRequest, StorageError> {
+        let (region, account_id, table_name) = parse_table_arn(arn)
+            .ok_or_else(|| StorageError::Validation("invalid table resource ARN".into()))?;
+        if region != self.region {
+            return Err(StorageError::Validation(
+                "table ARN region does not match server".into(),
+            ));
+        }
+        Ok(TagRequest {
+            account_id: account_id.to_owned(),
+            table_name: table_name.to_owned(),
+            resource_arn: arn.to_owned(),
+        })
+    }
+
+    async fn update_tags(&self, arn: &str, changes: Vec<TagChange>) -> Result<(), StorageError> {
+        let request = self.tag_request(arn)?;
+        let account = target(&request.account_id)?;
+        match self
+            .client
+            .command::<UpdateTags>(
+                &account,
+                mutation_identity()?,
+                Json(UpdateTagsInput { request, changes }),
+            )
+            .await
+        {
+            Ok(committed) if committed.output.0 => Ok(()),
+            Ok(_) => Err(StorageError::Internal(
+                "unexpected tag update result".into(),
+            )),
+            Err(InvocationError::Rejected(_)) => Err(StorageError::TableNotFound(arn.to_owned())),
+            Err(error) => Err(cell_error(error)),
+        }
+    }
+}
 
 impl MetadataEngine for CellStorage {
     fn describe_ttl(
@@ -44,20 +86,35 @@ impl MetadataEngine for CellStorage {
         Box::pin(async { Err(unsupported("TTL")) })
     }
 
-    fn tag_resource(&self, _arn: &str, _tags: &[Tag]) -> BoxedFuture<'_, Result<(), StorageError>> {
-        Box::pin(async { Err(unsupported("resource tags")) })
+    fn tag_resource(&self, arn: &str, tags: &[Tag]) -> BoxedFuture<'_, Result<(), StorageError>> {
+        let arn = arn.to_owned();
+        let changes = tags.iter().cloned().map(TagChange::Put).collect();
+        Box::pin(async move { self.update_tags(&arn, changes).await })
     }
 
     fn untag_resource(
         &self,
-        _arn: &str,
-        _tag_keys: &[String],
+        arn: &str,
+        tag_keys: &[String],
     ) -> BoxedFuture<'_, Result<(), StorageError>> {
-        Box::pin(async { Err(unsupported("resource tags")) })
+        let arn = arn.to_owned();
+        let changes = tag_keys.iter().cloned().map(TagChange::Remove).collect();
+        Box::pin(async move { self.update_tags(&arn, changes).await })
     }
 
-    fn list_tags(&self, _arn: &str) -> BoxedFuture<'_, Result<Vec<Tag>, StorageError>> {
-        Box::pin(async { Err(unsupported("resource tags")) })
+    fn list_tags(&self, arn: &str) -> BoxedFuture<'_, Result<Vec<Tag>, StorageError>> {
+        let arn = arn.to_owned();
+        Box::pin(async move {
+            let request = self.tag_request(&arn)?;
+            let account = target(&request.account_id)?;
+            self.client
+                .query::<ReadTags>(&account, None, Json(request))
+                .await
+                .map_err(cell_error)?
+                .output
+                .0
+                .ok_or(StorageError::TableNotFound(arn))
+        })
     }
 
     fn tables_with_ttl(

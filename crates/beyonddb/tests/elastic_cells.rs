@@ -429,6 +429,8 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
                 billing_mode: BillingMode::PayPerRequest,
                 provisioned_throughput: None,
                 deletion_protection_enabled: false,
+                initial_tags: Vec::new(),
+                resource_arn: None,
             }),
         )
         .await
@@ -652,6 +654,8 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
                 billing_mode: BillingMode::PayPerRequest,
                 provisioned_throughput: None,
                 deletion_protection_enabled: false,
+                initial_tags: Vec::new(),
+                resource_arn: None,
             }),
         )
         .await
@@ -2082,6 +2086,8 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
                 billing_mode: BillingMode::PayPerRequest,
                 provisioned_throughput: None,
                 deletion_protection_enabled: false,
+                initial_tags: Vec::new(),
+                resource_arn: None,
             }),
         )
         .await

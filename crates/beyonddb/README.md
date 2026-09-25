@@ -82,9 +82,14 @@ or credential Cells can forward signed requests to live owners through mTLS.
 
 The account Cell, independently owned data-range Cells, and a partial ExtendDB
 `StorageEngine` adapter are implemented today. Table and item operations have
-Cell paths; the remaining traits return explicit unsupported errors except for
-the disabled TTL description and synchronous table-transition worker. Once a table's initial
-route is published, keyed CRUD and Scan use its data Cells; unactivated tables
+Cell paths; most remaining traits return explicit unsupported errors. The
+exceptions are the disabled TTL description and synchronous table-transition
+worker. Table resource tags now have Cell-backed CreateTable, TagResource, UntagResource,
+and ListTagsOfResource paths; DeleteTable removes their rows. The RustFS
+process test verifies these requests through the AWS SDK across a server
+restart and verifies that a recreated table starts without the old tags.
+Once a table's initial route is published, keyed CRUD and Scan use its data
+Cells; unactivated tables
 still use the account Cell unless a provisioner is configured. The host-backed
 provisioner installs 1–256 initial data Cells per table during CreateTable and
 resumes after an interrupted setup. The initial count must stay fixed across
