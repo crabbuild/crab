@@ -12,8 +12,10 @@ The current implementation does **not** meet that target. Unactivated tables
 still store items in one account SQL Cell (`src/lib.rs`, `src/schema.sql`). Once
 an empty table's initial route is published, the ExtendDB adapter uses
 independently owned data-range Cells for keyed CRUD and Scan. Account item
-commands are then fenced. Transactions confined to one routed data Cell use
-one Cell command or snapshot; transactions across Cells remain rejected until
+commands are then fenced. Transactions confined to one routed data Cell
+commit their item writes in one Cell command or read one snapshot. Client
+request tokens first claim an account Cell record and then commit an applied
+receipt with the data mutation. Transactions across Cells remain rejected until
 a durable coordinator exists. A host-backed provisioner can create 1–256
 independent, evenly spaced initial data Cells during CreateTable and retry
 interrupted setup. This raises initial aggregate capacity and write parallelism.

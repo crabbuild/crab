@@ -26,7 +26,7 @@ use extenddb_core::types::{
     TableStatus, UpdateTableInput,
 };
 use extenddb_storage::{
-    DataEngine, TableEngine, TransactGetOp, TransactWriteOp, error::StorageError,
+    DataEngine, IdempotencyKey, TableEngine, TransactGetOp, TransactWriteOp, error::StorageError,
 };
 use object_store::memory::InMemory;
 
@@ -430,6 +430,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
                         condition: None,
                     }),
                 ],
+                idempotency: None,
             }),
         )
         .await;
@@ -472,6 +473,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
                         condition: None,
                     }),
                 ],
+                idempotency: None,
             }),
         )
         .await
@@ -604,6 +606,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             identity(11),
             Json(TransactWriteInput {
                 operations: bulk_writes,
+                idempotency: None,
             }),
         )
         .await
@@ -679,6 +682,97 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .await
         .unwrap();
     assert_eq!(removed.table_status, TableStatus::Deleting);
+    let present_condition = Expr::Function {
+        name: "attribute_exists".into(),
+        args: vec![Expr::Path(vec![PathElement::Attribute("id".into())])],
+    };
+    storage
+        .transact_write_items(
+            &[
+                TransactWriteOp::Update {
+                    key_info: &books,
+                    key: &book_key,
+                    actions: &actions,
+                    condition: None,
+                    maps: &update_maps,
+                    return_values_on_ccf: Default::default(),
+                    stream: None,
+                },
+                TransactWriteOp::ConditionCheck {
+                    key_info: &books,
+                    key: &conditional_key,
+                    condition: &present_condition,
+                    maps: &maps,
+                    return_values_on_ccf: Default::default(),
+                },
+            ],
+            None,
+        )
+        .await
+        .unwrap();
+    let mut updated_book = book_key.clone();
+    updated_book.insert("title".into(), AttributeValue::S("Updated".into()));
+    let rollback_maps = ExpressionMaps::new(
+        HashMap::new(),
+        HashMap::from([("title".into(), AttributeValue::S("Rolled back".into()))]),
+    );
+    let failed_update = storage
+        .transact_write_items(
+            &[
+                TransactWriteOp::Update {
+                    key_info: &books,
+                    key: &book_key,
+                    actions: &actions,
+                    condition: None,
+                    maps: &rollback_maps,
+                    return_values_on_ccf: Default::default(),
+                    stream: None,
+                },
+                TransactWriteOp::ConditionCheck {
+                    key_info: &books,
+                    key: &rolled_back,
+                    condition: &present_condition,
+                    maps: &maps,
+                    return_values_on_ccf: Default::default(),
+                },
+            ],
+            None,
+        )
+        .await;
+    assert!(matches!(
+        failed_update,
+        Err(StorageError::TransactionCanceled(_))
+    ));
+    let token_item = Item::from([("id".into(), AttributeValue::S("token-item".into()))]);
+    let token_write = [TransactWriteOp::Put {
+        key_info: &books,
+        item: &token_item,
+        condition: None,
+        maps: &maps,
+        return_values_on_ccf: Default::default(),
+        stream: None,
+    }];
+    let token_key = |fingerprint| IdempotencyKey {
+        account_id: "123456789012",
+        token: "account-token",
+        fingerprint,
+    };
+    storage
+        .transact_write_items(&token_write, Some(token_key("original")))
+        .await
+        .unwrap();
+    assert!(matches!(
+        storage
+            .transact_write_items(&token_write, Some(token_key("original")))
+            .await,
+        Err(StorageError::IdempotentReplay)
+    ));
+    assert!(matches!(
+        storage
+            .transact_write_items(&token_write, Some(token_key("different")))
+            .await,
+        Err(StorageError::IdempotentMismatch)
+    ));
     handle.drain().await.unwrap();
     host.shutdown().await.unwrap();
 
@@ -733,7 +827,26 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         )
         .await
         .unwrap();
-    assert_eq!(persisted.output.0, GetItemOutcome::Found(Some(book_key)));
+    assert_eq!(
+        persisted.output.0,
+        GetItemOutcome::Found(Some(updated_book))
+    );
+    let persisted_token = restored_client
+        .query::<GetItem>(
+            &target,
+            None,
+            Json(GetItemInput {
+                table_name: "Books".into(),
+                table_id: book_table_id.clone(),
+                key: token_item.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        persisted_token.output.0,
+        GetItemOutcome::Found(Some(token_item))
+    );
     let persisted_update = restored_client
         .query::<GetItem>(
             &target,

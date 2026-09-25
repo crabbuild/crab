@@ -20,8 +20,10 @@ pub struct PartitionTransactWriteInput {
     pub table_id: String,
     /// Data Cell epoch observed at routing time.
     pub epoch: u64,
-    /// Put and Delete operations in request order.
+    /// Item writes and condition checks in request order.
     pub operations: Vec<TransactionWrite>,
+    /// Client request token committed with the item mutations.
+    pub idempotency: Option<crate::transaction_token::TransactionToken>,
 }
 
 /// Result of one partition-local transactional write.
@@ -29,6 +31,10 @@ pub struct PartitionTransactWriteInput {
 pub enum PartitionTransactWriteOutcome {
     /// Every write and its query index entry committed.
     Applied,
+    /// This token and payload already committed in this Cell.
+    Replay,
+    /// This token belongs to another request payload.
+    Mismatch,
     /// No operation committed.
     Rejected {
         /// Position of the failing operation.
@@ -69,7 +75,26 @@ impl Command for PartitionTransactWrite {
         let Some(spec) = decode_spec(&rows[0])? else {
             return Ok(rejected(PartitionTransactWriteOutcome::NotInstalled));
         };
-        if spec.table.id != input.table_id || spec.epoch != input.epoch {
+        if spec.table.id != input.table_id {
+            return Ok(rejected(PartitionTransactWriteOutcome::StaleRoute));
+        }
+        if let Some(token) = input.idempotency.as_ref() {
+            if crate::account_target(&token.account_id)?.tenant() != context.target().tenant() {
+                return Err(crate::Error::Identity(
+                    "transaction token reached the wrong tenant",
+                ));
+            }
+            match crate::transaction_token::applied_token(context, token)? {
+                crate::transaction_token::AppliedToken::Fresh => {}
+                crate::transaction_token::AppliedToken::Replay => {
+                    return Ok(rejected(PartitionTransactWriteOutcome::Replay));
+                }
+                crate::transaction_token::AppliedToken::Mismatch => {
+                    return Ok(rejected(PartitionTransactWriteOutcome::Mismatch));
+                }
+            }
+        }
+        if spec.epoch != input.epoch {
             return Ok(rejected(PartitionTransactWriteOutcome::StaleRoute));
         }
         match command_access(context)? {
@@ -86,30 +111,32 @@ impl Command for PartitionTransactWrite {
 
         let mut touched = HashSet::with_capacity(input.operations.len());
         for (index, operation) in input.operations.into_iter().enumerate() {
-            let (table_id, item, condition, delete) = match operation {
+            let (table_id, item, condition) = match &operation {
                 TransactionWrite::Put(input) => {
-                    (input.table_id, input.item, input.condition, false)
+                    (&input.table_id, &input.item, input.condition.as_ref())
                 }
                 TransactionWrite::Delete(input) => {
-                    (input.table_id, input.key, input.condition, true)
+                    (&input.table_id, &input.key, input.condition.as_ref())
+                }
+                TransactionWrite::Update(input) => {
+                    (&input.table_id, &input.key, input.condition.as_ref())
+                }
+                TransactionWrite::ConditionCheck(input) => {
+                    (&input.table_id, &input.key, Some(&input.condition))
                 }
             };
-            if table_id != spec.table.id {
+            if *table_id != spec.table.id {
                 return Ok(rejected(PartitionTransactWriteOutcome::StaleRoute));
             }
-            if !(if delete {
-                valid_key(&item, &spec.table)
-            } else {
-                valid_item(&item, &spec.table)
-            }) {
+            let valid = match operation {
+                TransactionWrite::Put(_) => valid_item(item, &spec.table),
+                _ => valid_key(item, &spec.table),
+            };
+            if !valid {
                 return Ok(validation(index, "item violates table schema"));
             }
-            let key = item_key(&item, &spec.table.key_schema)?;
-            if !spec.contains(data_key_hash(
-                &spec.table.id,
-                &item,
-                &spec.table.key_schema,
-            )?) {
+            let key = item_key(item, &spec.table.key_schema)?;
+            if !spec.contains(data_key_hash(&spec.table.id, item, &spec.table.key_schema)?) {
                 return Ok(rejected(PartitionTransactWriteOutcome::WrongPartition));
             }
             if !touched.insert(key.clone()) {
@@ -132,14 +159,37 @@ impl Command for PartitionTransactWrite {
                     Err(reason) => return Ok(validation(index, &reason)),
                 }
             }
-            if delete {
-                context.sql(&statement(
-                    "DELETE FROM ddb_partition_items WHERE item_key = ?1",
-                    vec![SqlValue::Blob(key)],
-                ))?;
-            } else {
-                write_item(context, key, &item, &spec.table.key_schema)?;
+            match operation {
+                TransactionWrite::Put(input) => {
+                    write_item(context, key, &input.item, &spec.table.key_schema)?;
+                }
+                TransactionWrite::Delete(_) => {
+                    context.sql(&statement(
+                        "DELETE FROM ddb_partition_items WHERE item_key = ?1",
+                        vec![SqlValue::Blob(key)],
+                    ))?;
+                }
+                TransactionWrite::Update(input) => {
+                    let old = command_item(context, &key)?;
+                    let mut new = old.unwrap_or(input.key);
+                    if let Err(reason) = input
+                        .update
+                        .apply(&mut new, &spec.table.attribute_definitions)
+                    {
+                        return Ok(validation(index, &reason));
+                    }
+                    if !valid_item(&new, &spec.table)
+                        || item_key(&new, &spec.table.key_schema)? != key
+                    {
+                        return Ok(validation(index, "item violates table schema"));
+                    }
+                    write_item(context, key, &new, &spec.table.key_schema)?;
+                }
+                TransactionWrite::ConditionCheck(_) => {}
             }
+        }
+        if let Some(token) = input.idempotency.as_ref() {
+            crate::transaction_token::record_applied_token(context, token)?;
         }
         Ok(CommandResult::Success(Json(
             PartitionTransactWriteOutcome::Applied,

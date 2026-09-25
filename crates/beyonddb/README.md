@@ -88,6 +88,12 @@ worker. Table resource tags now have Cell-backed CreateTable, TagResource, Untag
 and ListTagsOfResource paths; DeleteTable removes their rows. The RustFS
 process test verifies these requests through the AWS SDK across a server
 restart and verifies that a recreated table starts without the old tags.
+Single-Cell TransactWriteItems accepts Put, Delete, Update, and ConditionCheck.
+Its account Cell claims client request tokens across data Cells, and the
+selected Cell commits an applied-token receipt with the item writes. The SDK
+process test verifies replay, token mismatch, rollback, and recovery.
+Transactions spanning data Cells still need a coordinator. A retry after a
+route split can fail transiently while its original Cell is sealed or retired.
 Once a table's initial route is published, keyed CRUD and Scan use its data
 Cells; unactivated tables
 still use the account Cell unless a provisioner is configured. The host-backed

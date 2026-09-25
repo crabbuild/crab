@@ -64,7 +64,8 @@ use extenddb_engine::OperationContext;
 use extenddb_storage::authorization_store::AuthorizationStore;
 use extenddb_storage::management_store::OpError;
 use extenddb_storage::{
-    BoxedFuture, DataEngine, TableEngine, TransactGetOp, TransactWriteOp, error::StorageError,
+    BoxedFuture, DataEngine, IdempotencyKey, TableEngine, TransactGetOp, TransactWriteOp,
+    error::StorageError,
 };
 use object_store::memory::InMemory;
 use tokio_util::sync::CancellationToken;
@@ -2595,6 +2596,54 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         )
         .await
         .unwrap();
+    let token = IdempotencyKey {
+        account_id: "123456789012",
+        token: "same-account-token",
+        fingerprint: "left-write",
+    };
+    let left_write = [TransactWriteOp::Put {
+        key_info: &key_info,
+        item: &left_key,
+        condition: None,
+        maps: &tx_maps,
+        return_values_on_ccf: Default::default(),
+        stream: None,
+    }];
+    storage
+        .transact_write_items(&left_write, Some(token))
+        .await
+        .unwrap();
+    let replay = storage
+        .transact_write_items(
+            &left_write,
+            Some(IdempotencyKey {
+                account_id: "123456789012",
+                token: "same-account-token",
+                fingerprint: "left-write",
+            }),
+        )
+        .await;
+    assert!(matches!(replay, Err(StorageError::IdempotentReplay)));
+    let right_new = key_in_range(&table.id, &table.key_schema, false, 600);
+    let reused = storage
+        .transact_write_items(
+            &[TransactWriteOp::Put {
+                key_info: &key_info,
+                item: &right_new,
+                condition: None,
+                maps: &tx_maps,
+                return_values_on_ccf: Default::default(),
+                stream: None,
+            }],
+            Some(IdempotencyKey {
+                account_id: "123456789012",
+                token: "same-account-token",
+                fingerprint: "right-write",
+            }),
+        )
+        .await;
+    assert!(matches!(reused, Err(StorageError::IdempotentMismatch)));
+    assert_eq!(storage.get_item(&key_info, &right_new).await.unwrap(), None);
     let cross_write = storage
         .transact_write_items(
             &[
