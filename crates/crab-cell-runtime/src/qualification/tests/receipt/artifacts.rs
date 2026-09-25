@@ -479,3 +479,257 @@ fn protected_run_artifacts_require_complete_lifecycle_case_coverage() {
     partial_verification.encode().unwrap();
     assert!(partial_verification.verify_for_profile(&profile).is_err());
 }
+
+#[tokio::test]
+async fn scale_receipt_requires_observed_open_cells_and_binds_their_resource_peaks() {
+    use crate::qualification::receipt::evidence::ScaleEvidence;
+
+    let mut profile = QualificationProfile::new("scale-v1".into(), 10_000, 8, 1, 5_000).unwrap();
+    profile.maximum_peak_rss_bytes = 5_000_000_000;
+    profile.maximum_local_disk_bytes = 100_000_000;
+    profile.maximum_file_descriptors = 100_000;
+    profile.maximum_bucket_calls = 10;
+    let workload = QualificationWorkload::generate_with_size(&profile, 73, 10_000, 8, 1).unwrap();
+    let summary = workload
+        .run(&mut ContractExecutor {
+            calls: 0,
+            case_coverage: false,
+        })
+        .await
+        .unwrap();
+    let resources = [
+        QualificationMetric::new("peak_rss_bytes".into(), 3_000_000_000, "bytes".into()).unwrap(),
+        QualificationMetric::new("peak_local_disk_bytes".into(), 50_000_000, "bytes".into())
+            .unwrap(),
+        QualificationMetric::new("peak_file_descriptors".into(), 90_000, "count".into()).unwrap(),
+        QualificationMetric::new("bucket_calls".into(), 1, "count".into()).unwrap(),
+    ];
+    let mut run = summary
+        .artifact_with_resource_metrics(&workload, &resources)
+        .unwrap();
+    run.elapsed_ms = 1_000;
+    for (name, value) in [("duration_secs", 1), ("throughput_ops_per_sec", 8)] {
+        run.metrics
+            .iter_mut()
+            .find(|metric| metric.name() == name)
+            .unwrap()
+            .value = value;
+    }
+    run.verify_for_profile(&profile).unwrap();
+    let run_bytes = run.encode().unwrap();
+    let workload_bytes = workload.encode().unwrap();
+    let samples = [
+        "empty",
+        "sparse",
+        "resident",
+        "pending-publication",
+        "churned",
+    ]
+    .into_iter()
+    .flat_map(|state| {
+        [1_000, 5_000, 10_000].into_iter().map(move |count| {
+            let after = scale_snapshot(count);
+            serde_json::json!({
+                "state": state,
+                "target_cells": count,
+                "before": scale_snapshot(0),
+                "after": after,
+                "peak": after,
+            })
+        })
+    })
+    .collect::<Vec<_>>();
+    let mut artifact = serde_json::json!({
+        "schema_version": 1,
+        "profile": profile.name(),
+        "profile_digest": profile.digest().unwrap().as_bytes(),
+        "workload_seed": workload.seed(),
+        "cell_samples": samples,
+    });
+    // Fixed process setup can exceed the 1,000-Cell marginal charge.
+    artifact["cell_samples"][0]["after"]["rss_bytes"] = serde_json::json!(400_000_000);
+    artifact["cell_samples"][0]["peak"]["rss_bytes"] = serde_json::json!(400_000_000);
+    let canonical = |value| {
+        serde_json::to_vec(&serde_json::from_value::<ScaleEvidence>(value).unwrap()).unwrap()
+    };
+    let scale_bytes = canonical(artifact.clone());
+    let key = SigningKey::from_bytes(&[74; 32]);
+    let runner = QualificationRunner::new(key.clone());
+    let evidence = QualificationExecutionEvidence {
+        provider: "rustfs".into(),
+        workload: "primitives".into(),
+        fault: "none".into(),
+        toolchain: "rustc".into(),
+        execution_profile: "release".into(),
+        topology: "dedicated-hosts".into(),
+        started_at_ms: 1,
+        finished_at_ms: 1_001,
+        fault_schedule: b"none".to_vec(),
+        ownership: vec![QualificationOwnership::new(
+            1,
+            1,
+            Digest::from_bytes([75; 32]),
+        )],
+        dirty: false,
+    };
+    assert!(
+        runner
+            .emit_protected_run(
+                &profile,
+                "scale-source".into(),
+                Digest::from_bytes([76; 32]),
+                evidence.clone(),
+                &run,
+                &[&run_bytes, &workload_bytes],
+            )
+            .is_err()
+    );
+    let mut false_open = artifact;
+    false_open["cell_samples"][0]["after"]["active_cells"] = serde_json::json!(999);
+    let false_open_bytes = canonical(false_open);
+    assert!(
+        runner
+            .emit_protected_run(
+                &profile,
+                "scale-source".into(),
+                Digest::from_bytes([76; 32]),
+                evidence.clone(),
+                &run,
+                &[&run_bytes, &workload_bytes, &false_open_bytes],
+            )
+            .is_err()
+    );
+    let mut undercharged_descriptors =
+        serde_json::from_slice::<serde_json::Value>(&scale_bytes).unwrap();
+    undercharged_descriptors["cell_samples"][1]["after"]["file_descriptors"] =
+        serde_json::json!(60_001);
+    undercharged_descriptors["cell_samples"][1]["peak"]["file_descriptors"] =
+        serde_json::json!(60_001);
+    let undercharged_descriptors_bytes = canonical(undercharged_descriptors);
+    assert!(
+        runner
+            .emit_protected_run(
+                &profile,
+                "scale-source".into(),
+                Digest::from_bytes([76; 32]),
+                evidence.clone(),
+                &run,
+                &[&run_bytes, &workload_bytes, &undercharged_descriptors_bytes],
+            )
+            .is_err()
+    );
+    let mut undercharged_memory =
+        serde_json::from_slice::<serde_json::Value>(&scale_bytes).unwrap();
+    undercharged_memory["cell_samples"][1]["after"]["rss_bytes"] = serde_json::json!(2_000_000_000);
+    undercharged_memory["cell_samples"][1]["peak"]["rss_bytes"] = serde_json::json!(2_000_000_000);
+    let undercharged_memory_bytes = canonical(undercharged_memory);
+    assert!(
+        runner
+            .emit_protected_run(
+                &profile,
+                "scale-source".into(),
+                Digest::from_bytes([76; 32]),
+                evidence.clone(),
+                &run,
+                &[&run_bytes, &workload_bytes, &undercharged_memory_bytes],
+            )
+            .is_err()
+    );
+    let mut undercharged_cache = serde_json::from_slice::<serde_json::Value>(&scale_bytes).unwrap();
+    undercharged_cache["cell_samples"][1]["after"]["sqlite_cache_bytes"] =
+        serde_json::json!(1_000_000_000);
+    undercharged_cache["cell_samples"][1]["peak"]["sqlite_cache_bytes"] =
+        serde_json::json!(1_000_000_000);
+    let undercharged_cache_bytes = canonical(undercharged_cache);
+    assert!(
+        runner
+            .emit_protected_run(
+                &profile,
+                "scale-source".into(),
+                Digest::from_bytes([76; 32]),
+                evidence.clone(),
+                &run,
+                &[&run_bytes, &workload_bytes, &undercharged_cache_bytes],
+            )
+            .is_err()
+    );
+    let mut underreported_peak = serde_json::from_slice::<serde_json::Value>(&scale_bytes).unwrap();
+    underreported_peak["cell_samples"][14]["peak"]["rss_bytes"] =
+        serde_json::json!(3_000_000_001_u64);
+    let underreported_peak_bytes = canonical(underreported_peak);
+    assert!(
+        runner
+            .emit_protected_run(
+                &profile,
+                "scale-source".into(),
+                Digest::from_bytes([76; 32]),
+                evidence.clone(),
+                &run,
+                &[&run_bytes, &workload_bytes, &underreported_peak_bytes],
+            )
+            .is_err()
+    );
+    assert!(
+        runner
+            .emit_protected_run(
+                &profile,
+                "scale-source".into(),
+                Digest::from_bytes([76; 32]),
+                evidence.clone(),
+                &run,
+                &[&run_bytes, &workload_bytes, &scale_bytes, &scale_bytes],
+            )
+            .is_err()
+    );
+    let receipt = runner
+        .emit_protected_run(
+            &profile,
+            "scale-source".into(),
+            Digest::from_bytes([76; 32]),
+            evidence,
+            &run,
+            &[&run_bytes, &workload_bytes, &scale_bytes],
+        )
+        .unwrap();
+    receipt
+        .verify_for_profile_with_signer(
+            "scale-source",
+            Digest::from_bytes([76; 32]),
+            &profile,
+            &[&run_bytes, &workload_bytes, &scale_bytes],
+            key.verifying_key().to_bytes(),
+        )
+        .unwrap();
+    assert!(
+        receipt
+            .verify_primitive_run_artifact(
+                &profile,
+                &[&run_bytes, &workload_bytes, &false_open_bytes],
+            )
+            .is_err()
+    );
+    assert!(
+        receipt
+            .verify_primitive_run_artifact(
+                &profile,
+                &[&run_bytes, &workload_bytes, &undercharged_memory_bytes],
+            )
+            .is_err()
+    );
+}
+
+fn scale_snapshot(cells: u64) -> serde_json::Value {
+    serde_json::json!({
+        "active_cells": cells,
+        "rss_bytes": 100 + cells * 100,
+        "allocator_bytes": 100 + cells * 50,
+        "threads": 1,
+        "file_descriptors": 1 + cells * 8,
+        "sqlite_cache_bytes": cells * 1_024,
+        "admitted_resident_bytes": cells * 65_536,
+        "admitted_file_descriptors": cells * 8,
+        "retained_bytes": 0,
+        "local_disk_reserved_bytes": cells * 4_096,
+        "local_disk_bytes": cells * 4_096,
+    })
+}

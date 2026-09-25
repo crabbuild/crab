@@ -328,18 +328,29 @@ impl CaptureEngine {
         // keeps the current TXID, pre-apply checksum, and chain position, so it
         // stays a valid successor cut of the same lineage.
         let encoded_pages = if full_image {
-            u64::from(commit)
+            commit as usize
         } else {
-            page_map
-                .len()
-                .saturating_add(commit.saturating_sub(info.prev_commit) as usize) as u64
+            let lock = lock_pgno(self.page_size);
+            let growth = commit.saturating_sub(info.prev_commit) as usize;
+            let written_new_pages = page_map
+                .keys()
+                .filter(|&&pgno| pgno > info.prev_commit && pgno <= commit)
+                .count();
+            let missing_lock_page = usize::from(
+                lock > info.prev_commit && lock <= commit && !page_map.contains_key(&lock),
+            );
+            // WAL pages in the growth range are already in the map.
+            let missing_new_pages = growth
+                .saturating_sub(written_new_pages)
+                .saturating_sub(missing_lock_page);
+            page_map.len().saturating_add(missing_new_pages)
         };
         let cut_limit = if full_image {
             self.host.max_file_bytes
         } else {
             self.max_incremental_bytes
         };
-        if ltx::cut_upper_bound(self.page_size, encoded_pages)? > cut_limit {
+        if ltx::cut_upper_bound(self.page_size, encoded_pages as u64)? > cut_limit {
             return Err(CrabError::Limit(crate::LimitKind::LtxFileBytes));
         }
         let header = ltx::Header {
@@ -381,6 +392,7 @@ impl CaptureEngine {
             &page_map,
             full_image,
             cut_limit,
+            encoded_pages,
             info.prev_commit,
             commit,
             !self.defer_durability,
@@ -400,6 +412,7 @@ impl CaptureEngine {
                     &page_map,
                     full_image,
                     cut_limit,
+                    encoded_pages,
                     info.prev_commit,
                     commit,
                     !self.defer_durability,
@@ -489,6 +502,7 @@ impl CaptureEngine {
         page_map: &HashMap<u32, i64>,
         full_image: bool,
         limit: u64,
+        estimated_pages: usize,
         prev_commit: u32,
         commit: u32,
         durable: bool,
@@ -509,13 +523,6 @@ impl CaptureEngine {
                 max_file_bytes: limit,
             };
             let output = output_host.create(Path::new(tmp_filename))?;
-            let estimated_pages = if full_image {
-                commit as usize
-            } else {
-                page_map
-                    .len()
-                    .saturating_add(commit.saturating_sub(prev_commit) as usize)
-            };
             let spool_index = estimated_pages > IN_MEMORY_INDEX_PAGE_LIMIT;
             let index = if spool_index {
                 let index = self

@@ -292,6 +292,14 @@ class StandaloneLtxHardCutTests(unittest.TestCase):
             )
         )
 
+    def test_retired_names_in_rust_comments_are_not_callable_surfaces(self):
+        self.assertTrue(
+            self.check_source(
+                "/// Replica metadata was not valid JSON.\n"
+                "    // The old head.json path is no longer used.\n"
+            )
+        )
+
     def test_canonical_replica_module_is_admitted_but_storage_markers_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

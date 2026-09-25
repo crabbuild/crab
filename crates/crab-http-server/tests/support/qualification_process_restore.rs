@@ -60,7 +60,7 @@ pub(super) async fn restore_cells(
             layout.clone(),
             *target.cell_id().as_bytes(),
             *IncarnationId::from_bytes([incarnation_byte; 16]).as_bytes(),
-            ReplicaLimits::default(),
+            fixture::reference_replica_limits(),
         )
         .expect("restored replica");
         let destination = directory.join(format!("{module}-{role}.sqlite"));
@@ -76,7 +76,7 @@ pub(super) async fn restore_cells(
                     authority.clone(),
                     observed,
                     fenced.direct_takeover().expect("direct takeover proof"),
-                    RecoveryManifestStore::new(layout.clone(), ReplicaLimits::default()),
+                    RecoveryManifestStore::new(layout.clone(), fixture::reference_replica_limits()),
                     destination,
                     owner,
                 )

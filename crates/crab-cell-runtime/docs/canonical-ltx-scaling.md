@@ -793,7 +793,11 @@ verification on a blocking worker. The reservation travels with the returned
 overlay until its temporary file is dropped. The node restart inventory counts
 regular files left in stale session directories—including compaction and
 recovery scratch—before admitting new work; it rejects symlinked or special
-entries. Newly encoded node-log overlays still begin in memory and remain a
+entries. Server startup warns with the stale-session count, charged bytes,
+remaining shared disk budget, and budget capacity when earlier session
+directories remain. That reservation is conservative accounting, not cleanup;
+the files stay charged until an exclusive reclaim protocol is proved. Newly
+encoded node-log overlays still begin in memory and remain a
 separate peak-residency qualification item. A 5 GiB Cell is built from bounded
 cuts; its size must not increase the memory used by any later incremental
 append.

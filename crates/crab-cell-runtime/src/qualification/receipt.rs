@@ -6,12 +6,12 @@ use super::profile::{
 use super::workload::{qualification_run_outcome_digest, valid_primitive_counts};
 use super::*;
 
-mod evidence;
+pub(in crate::qualification) mod evidence;
 mod matrix;
 mod runner;
 
 pub use evidence::QualificationProviderEvidence;
-use evidence::verify_provider_evidence;
+use evidence::{verify_provider_evidence, verify_scale_evidence};
 pub use matrix::{QualificationMatrixEntry, QualificationMatrixManifest, QualificationMetric};
 pub(super) use matrix::{
     validate_metrics, validate_resource_metric_list, validate_resource_metric_units,
@@ -1127,6 +1127,7 @@ impl QualificationReceipt {
             ));
         }
         verify_provider_evidence(profile, &run, artifacts)?;
+        verify_scale_evidence(profile, &run, artifacts)?;
         for (name, unit) in [
             ("cells", "cells"),
             ("operations", "operations"),

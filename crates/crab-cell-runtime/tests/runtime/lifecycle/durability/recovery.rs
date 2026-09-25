@@ -62,13 +62,15 @@ async fn lost_ack_suffix_recovers_an_ambiguous_command_without_reexecution() {
         DiskBudget::new(1 << 30),
     )
     .unwrap();
-    let transport: Arc<dyn NodeLogTransport> = Arc::new(LostAckFollowerTransport {
+    let lost_ack_transport = Arc::new(LostAckFollowerTransport {
         inner: crab_cell_runtime::node::log_transport::LocalFollowerTransport::new(
             member,
             follower_store.clone(),
         ),
         acknowledged_once: AtomicBool::new(false),
+        lost_ticket: Mutex::new(None),
     });
+    let transport: Arc<dyn NodeLogTransport> = lost_ack_transport.clone();
     let gate =
         DurabilityGate::new(leader, NodeId::from_bytes(*leader.as_bytes()), 1, [member]).unwrap();
     let shipper =
@@ -176,6 +178,22 @@ async fn lost_ack_suffix_recovers_an_ambiguous_command_without_reexecution() {
         .unwrap()
         .unwrap();
     assert_eq!(stale.value().root.as_ref().unwrap().commit_sequence, 1);
+    let (selected_member, first_frame, last_frame, fsynced_receipt) =
+        lost_ack_transport.lost_ticket.lock().unwrap().unwrap();
+    assert_eq!(selected_member, member);
+    assert_eq!(first_frame.leader_session, *leader.as_bytes());
+    assert_eq!(first_frame.log_epoch, 1);
+    assert_eq!(first_frame.node_sequence, 2);
+    assert_eq!(last_frame.node_sequence, 2);
+    assert_eq!(first_frame.commit_sequence, 2);
+    assert_eq!(fsynced_receipt.durable_through, 2);
+    eprintln!(
+        "fault_seed=126 schedule=lost_follower_ack_and_object_failure request={request_identity:?} operation={operation_digest:?} committed_sequence=2 selected_follower_ticket=({selected_member:?},epoch={},{}..={}) fsynced_receipt={fsynced_receipt:?} observed_control={:?}",
+        first_frame.log_epoch,
+        first_frame.node_sequence,
+        last_frame.node_sequence,
+        stale.value(),
+    );
     let fenced = fence_log_session(&fixture.layout, leader, successor, follower, 1).await;
     let recovery = crab_cell_runtime::node::log_recovery::NodeLogRecovery::from_fenced(
         Arc::clone(&transport),

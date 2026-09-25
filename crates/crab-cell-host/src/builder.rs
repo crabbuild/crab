@@ -98,6 +98,7 @@ impl CellNodeBuilder {
             session,
             replica_host,
         )?;
+        install_application_limits(&runtime, &application)?;
         let node = CellNode {
             application,
             runtime,
@@ -129,6 +130,7 @@ impl CellNodeBuilder {
         } = self.required_parts()?;
         let runtime =
             CellRuntime::new_with_replica_host(pool, node_retained_bytes, session, replica_host)?;
+        install_application_limits(&runtime, &application)?;
         let node = CellNode {
             application,
             runtime,
@@ -171,6 +173,19 @@ impl CellNodeBuilder {
             follower_store: self.follower_store,
         })
     }
+}
+
+fn install_application_limits(
+    runtime: &CellRuntime,
+    application: &CompiledApplication,
+) -> crab_cell_runtime::Result<()> {
+    runtime.install_application_limits(application.cell_types().iter().map(|cell_type| {
+        (
+            cell_type.namespace(),
+            cell_type.database_limit_bytes(),
+            cell_type.capture_limit_bytes(),
+        )
+    }))
 }
 
 pub(crate) fn append_required_components(

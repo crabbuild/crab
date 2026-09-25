@@ -17,13 +17,15 @@ use crab_cell_runtime::identity::{CellId, Digest, SessionId};
 use crab_cell_runtime::identity::{IncarnationId, RequestId};
 use crab_cell_runtime::publication::CellPublisher;
 use crab_ltx::CellStorageLayout;
-use crab_ltx::{CellReplica, Db, Limits};
+use crab_ltx::{CellReplica, Db, Host, Limits};
 use crab_storage::Store;
 use futures_util::stream::BoxStream;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
     PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult, memory::InMemory, path::Path,
 };
+
+use crate::runtime::fault_fs::FaultFileSystem;
 
 const RESULT_LIMIT: usize = 1 << 20;
 
@@ -42,6 +44,10 @@ fn fixture() -> Fixture {
 }
 
 fn fixture_with_store(store: Store) -> Fixture {
+    fixture_with_store_and_host(store, Host::default())
+}
+
+fn fixture_with_store_and_host(store: Store, host: Host) -> Fixture {
     let cell = CellId::from_bytes([1; 32]);
     let incarnation = IncarnationId::from_bytes([2; 16]);
     let layout = CellStorageLayout::new(store, Path::from("runtime"), [3; 16]);
@@ -62,7 +68,7 @@ fn fixture_with_store(store: Store) -> Fixture {
         )
         .unwrap();
     drop(connection);
-    let writer = Db::open(&database, Limits::default()).unwrap();
+    let writer = Db::open_with_host(&database, Limits::default(), host).unwrap();
     Fixture {
         _directory: directory,
         database,
@@ -473,6 +479,93 @@ async fn lost_publication_response_reconciles_without_replaying_sql() {
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     executor.close().unwrap();
+}
+
+#[tokio::test]
+async fn published_root_survives_local_prune_failure_without_replaying_sql() {
+    let filesystem = Arc::new(FaultFileSystem::new());
+    let host = Host::default().with_filesystem(filesystem.clone());
+    let Fixture {
+        _directory,
+        database: _,
+        cell,
+        incarnation,
+        layout,
+        replica,
+        mut executor,
+    } = fixture_with_store_and_host(Store::new(Arc::new(InMemory::new())), host);
+    let (_, authority, observed) = initialized_authority(&layout, cell, incarnation).await;
+    let recovery_replica = replica.clone();
+    let identity = MutationIdentity {
+        request_id: RequestId::from_bytes([21; 16]),
+        issued_at_ms: 100,
+        expires_at_ms: 20_000,
+    };
+    let digest = Digest::from_bytes([22; 32]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed_calls = calls.clone();
+    assert_eq!(
+        executor
+            .execute(identity, digest, 110, RESULT_LIMIT, move |transaction| {
+                observed_calls.fetch_add(1, Ordering::SeqCst);
+                transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                Ok(HandlerOutcome::Success(b"committed".to_vec()))
+            })
+            .unwrap(),
+        CommandExecution::Pending
+    );
+
+    filesystem.fail_next_prune();
+    let mut publisher =
+        CellPublisher::new(replica, authority, observed, _directory.path().to_owned());
+    assert!(matches!(
+        publisher.publish_pending(&mut executor).await,
+        Err(crab_cell_runtime::Error::Ltx(_))
+    ));
+    assert!(filesystem.prune_failure_consumed());
+    assert!(executor.pending().is_some());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let root = publisher.control().value().ltx_root().unwrap();
+    let observed_control = CellAuthority::new(layout)
+        .load(cell)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(observed_control.value().ltx_root(), Some(root));
+    assert_eq!(root.commit_sequence, 1);
+    assert_eq!(root.position.txid, 1);
+    assert!(matches!(
+        executor.execute(identity, digest, 111, RESULT_LIMIT, |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(HandlerOutcome::Success(b"duplicate".to_vec()))
+        }),
+        Err(crab_cell_runtime::Error::PendingPublication)
+    ));
+    drop(executor);
+
+    let restored = _directory.path().join("restored.sqlite");
+    let verified = recovery_replica.open_root(&root).await.unwrap();
+    assert_eq!(verified.root(), root);
+    assert_eq!(verified.restore(&restored).await.unwrap(), root.position);
+    let mut recovered = CellExecutor::new(
+        Db::open(&restored, Limits::default()).unwrap(),
+        cell,
+        incarnation,
+        1,
+    );
+    assert!(matches!(
+        recovered
+            .execute(identity, digest, 112, RESULT_LIMIT, |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(HandlerOutcome::Success(b"duplicate".to_vec()))
+            })
+            .unwrap(),
+        CommandExecution::Recorded(StoredOutcome::Success { ref result, commit_sequence: 1 })
+            if result == b"committed"
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    recovered.close().unwrap();
 }
 
 #[tokio::test]

@@ -40,7 +40,7 @@ use crab_storage::{ObjectStoreCredentials, RetryPolicy, Store, build_explicit_st
 use futures_util::stream::BoxStream;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    PutMultipartOptions, PutOptions, PutPayload, PutResult, memory::InMemory, path::Path,
+    PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult, memory::InMemory, path::Path,
 };
 use tokio::sync::Notify;
 
@@ -59,12 +59,15 @@ pub mod residency;
 struct PausingStore {
     inner: Arc<InMemory>,
     armed: AtomicBool,
+    update_armed: AtomicBool,
     failing: AtomicBool,
     transient_put_failures: AtomicUsize,
+    lost_update_response: AtomicBool,
     failed: AtomicBool,
     blocked: AtomicBool,
     released: AtomicBool,
     get_armed: AtomicBool,
+    fail_next_get: AtomicBool,
     get_blocked: AtomicBool,
     get_released: AtomicBool,
     entered: Notify,
@@ -80,12 +83,15 @@ impl PausingStore {
         Self {
             inner,
             armed: AtomicBool::new(false),
+            update_armed: AtomicBool::new(false),
             failing: AtomicBool::new(false),
             transient_put_failures: AtomicUsize::new(0),
+            lost_update_response: AtomicBool::new(false),
             failed: AtomicBool::new(false),
             blocked: AtomicBool::new(false),
             released: AtomicBool::new(false),
             get_armed: AtomicBool::new(false),
+            fail_next_get: AtomicBool::new(false),
             get_blocked: AtomicBool::new(false),
             get_released: AtomicBool::new(false),
             entered: Notify::new(),
@@ -105,12 +111,24 @@ impl PausingStore {
         self.armed.store(true, Ordering::Release);
     }
 
+    fn arm_next_update(&self) {
+        self.update_armed.store(true, Ordering::Release);
+    }
+
     fn fail_puts(&self) {
         self.failing.store(true, Ordering::Release);
     }
 
     fn fail_next_put_transiently(&self) {
         self.transient_put_failures.store(1, Ordering::Release);
+    }
+
+    fn lose_next_update_response(&self) {
+        self.lost_update_response.store(true, Ordering::Release);
+    }
+
+    fn lost_update_response_consumed(&self) -> bool {
+        !self.lost_update_response.load(Ordering::Acquire)
     }
 
     fn allow_puts(&self) {
@@ -136,6 +154,10 @@ impl PausingStore {
 
     fn arm_gets(&self) {
         self.get_armed.store(true, Ordering::Release);
+    }
+
+    fn fail_next_get(&self) {
+        self.fail_next_get.store(true, Ordering::Release);
     }
 
     async fn wait_until_get_blocked(&self) {
@@ -192,13 +214,27 @@ impl ObjectStore for PausingStore {
                 )),
             });
         }
-        if self.armed.load(Ordering::Acquire) && !self.blocked.swap(true, Ordering::AcqRel) {
+        let update = matches!(&options.mode, PutMode::Update(_));
+        if (self.armed.load(Ordering::Acquire)
+            || (update && self.update_armed.load(Ordering::Acquire)))
+            && !self.blocked.swap(true, Ordering::AcqRel)
+        {
             self.entered.notify_waiters();
             while !self.released.load(Ordering::Acquire) {
                 self.release.notified().await;
             }
         }
-        self.inner.put_opts(location, payload, options).await
+        let result = self.inner.put_opts(location, payload, options).await?;
+        if update && self.lost_update_response.swap(false, Ordering::AcqRel) {
+            return Err(object_store::Error::Generic {
+                store: "pausing-store",
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "control CAS response lost after commit",
+                )),
+            });
+        }
+        Ok(result)
     }
 
     async fn put_multipart_opts(
@@ -225,6 +261,15 @@ impl ObjectStore for PausingStore {
             && location.as_ref().ends_with("/head.json")
         {
             self.catalog_head_barrier.wait().await;
+        }
+        if self.fail_next_get.swap(false, Ordering::AcqRel) {
+            return Err(object_store::Error::PermissionDenied {
+                path: location.to_string(),
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected origin read failure during hydration",
+                )),
+            });
         }
         self.inner.get_opts(location, options).await
     }
@@ -355,6 +400,14 @@ impl NodeLogTransport for TestNodeTransport {
 struct LostAckFollowerTransport {
     inner: crab_cell_runtime::node::log_transport::LocalFollowerTransport,
     acknowledged_once: AtomicBool,
+    lost_ticket: Mutex<
+        Option<(
+            NodeId,
+            crab_ltx::NodeFrameScope,
+            crab_ltx::NodeFrameScope,
+            FollowerReceipt,
+        )>,
+    >,
 }
 
 impl NodeLogTransport for LostAckFollowerTransport {
@@ -364,10 +417,20 @@ impl NodeLogTransport for LostAckFollowerTransport {
         request: AppendRequest,
     ) -> futures_util::future::BoxFuture<'a, crab_cell_runtime::Result<FollowerReceipt>> {
         Box::pin(async move {
+            let first = crab_ltx::inspect_node_frame(
+                request.frames.first().unwrap().clone(),
+                Limits::default(),
+            )?;
+            let last = crab_ltx::inspect_node_frame(
+                request.frames.last().unwrap().clone(),
+                Limits::default(),
+            )?;
             let receipt = self.inner.append(member, request).await?;
             if !self.acknowledged_once.swap(true, Ordering::AcqRel) {
                 return Ok(receipt);
             }
+            *self.lost_ticket.lock().unwrap() =
+                Some((member, first.scope(), last.scope(), receipt));
             Err(crab_cell_runtime::Error::Node(
                 "injected follower acknowledgement loss",
             ))

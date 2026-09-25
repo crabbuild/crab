@@ -623,6 +623,79 @@ async fn due_hint_listing_clears_foreign_keys() {
 }
 
 #[tokio::test]
+async fn due_hint_listing_rejects_nested_cell_keys() {
+    let fixture = fixture_for(b"due-hint-nested");
+    let due_ms = 1_000;
+    let bucket = crab_cell_runtime::cell::due::bucket_for(due_ms).unwrap();
+    let canonical = fixture
+        .layout
+        .due_hint_path(bucket, fixture.target.cell_id().as_bytes());
+    let nested = object_store::path::Path::from(format!(
+        "{}/nested/{}",
+        fixture.layout.due_hint_prefix(bucket),
+        canonical.filename().unwrap()
+    ));
+    fixture
+        .layout
+        .store()
+        .put(&nested, bytes::Bytes::new())
+        .await
+        .unwrap();
+
+    assert!(
+        crab_cell_runtime::cell::due::take(&fixture.layout, due_ms, 8)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a valid Cell filename outside its canonical path is not a due hint"
+    );
+    assert!(
+        fixture
+            .layout
+            .store()
+            .get_with_etag_bounded(&nested, 8)
+            .await
+            .is_err()
+    );
+
+    crab_cell_runtime::cell::due::publish(
+        &fixture.layout,
+        fixture.target.cell_id(),
+        due_ms,
+        due_ms,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        crab_cell_runtime::cell::due::take(&fixture.layout, due_ms, 8)
+            .await
+            .unwrap(),
+        vec![fixture.target.cell_id()]
+    );
+}
+
+#[tokio::test]
+async fn due_hint_listing_uses_remaining_capacity_across_buckets() {
+    let fixture = fixture_for(b"due-hint-multiple-buckets");
+    let previous = fixture.target.cell_id();
+    let current = crab_cell_runtime::identity::CellId::from_bytes([17; 32]);
+    let now_ms = crab_cell_runtime::cell::due::HINT_BUCKET_MS * 10;
+    crab_cell_runtime::cell::due::publish(&fixture.layout, previous, now_ms - 1, now_ms)
+        .await
+        .unwrap();
+    crab_cell_runtime::cell::due::publish(&fixture.layout, current, now_ms, now_ms)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        crab_cell_runtime::cell::due::take(&fixture.layout, now_ms, 2)
+            .await
+            .unwrap(),
+        vec![current, previous]
+    );
+}
+
+#[tokio::test]
 async fn resident_due_list_mirrors_the_published_head() {
     let fixture = fixture_for(b"resident-due-list");
     let (runtime, handle, _pool) = activate_runtime(&fixture, 2 * 1024 * 1024).await;
@@ -859,25 +932,19 @@ async fn restored_sparse_route_promotes_before_zero_origin_reads() {
     runtime.shutdown().await.unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn shutdown_releases_a_hydration_reservation_after_an_origin_wait() {
+async fn released_large_cell_with_store(
+    seed: &'static [u8],
+    session: SessionId,
+) -> (Arc<PausingStore>, Fixture) {
     let pausing = Arc::new(PausingStore::new(Arc::new(InMemory::new())));
-    let fixture = fixture_with_limits_and_store(
-        b"hydration-shutdown-cancellation",
-        Limits::default(),
-        Store::new(pausing.clone()),
-    );
-    let first_session = SessionId::from_bytes([113; 16]);
-    let first_runtime = CellRuntime::new(
-        SqlWorkerPool::new(1, 1).unwrap(),
-        64 * 1024 * 1024,
-        first_session,
-    )
-    .unwrap();
+    let fixture =
+        fixture_with_limits_and_store(seed, Limits::default(), Store::new(pausing.clone()));
+    let first_runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 64 * 1024 * 1024, session).unwrap();
     let handle = bootstrap_role_on(
         &first_runtime,
         &fixture,
-        first_session,
+        session,
         CatalogRole::Repository,
         |transaction| {
             transaction.execute_batch(
@@ -893,6 +960,16 @@ async fn shutdown_releases_a_hydration_reservation_after_an_origin_wait() {
     .await;
     handle.drain().await.unwrap();
     first_runtime.shutdown().await.unwrap();
+    (pausing, fixture)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_releases_a_hydration_reservation_after_an_origin_wait() {
+    let (pausing, fixture) = released_large_cell_with_store(
+        b"hydration-shutdown-cancellation",
+        SessionId::from_bytes([113; 16]),
+    )
+    .await;
 
     let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
         fixture.layout.clone(),
@@ -947,6 +1024,456 @@ async fn shutdown_releases_a_hydration_reservation_after_an_origin_wait() {
     shutdown.await.unwrap().unwrap();
     assert_eq!(runtime.stats().hydration_jobs(), 0);
     drop(restored);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn origin_failure_during_hydration_fences_without_serving_unverified_pages() {
+    let (pausing, fixture) = released_large_cell_with_store(
+        b"hydration-origin-failure",
+        SessionId::from_bytes([145; 16]),
+    )
+    .await;
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let observed = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let root = observed.value().ltx_root().unwrap();
+    let session = SessionId::from_bytes([146; 16]);
+    // The default host's disk budget is process-wide; isolate this Cell's
+    // reservation so concurrent tests cannot change its zero-use assertion.
+    let runtime = CellRuntime::new_with_replica_host(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        64 * 1024 * 1024,
+        session,
+        ReplicaHost::default().with_local_disk_budget(DiskBudget::new(1 << 30)),
+    )
+    .unwrap();
+    let restored = runtime
+        .acquire_idle_restored(
+            proof,
+            fixture.replica.clone(),
+            authority.clone(),
+            observed,
+            cold_node_directory(&fixture).join("hydration-origin-failure.sqlite"),
+            Owner {
+                session,
+                endpoint: "https://hydration-origin-failure.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    pausing.arm_gets();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        pausing.wait_until_get_blocked(),
+    )
+    .await
+    .expect("seed=145: hydration did not reach the origin");
+    assert_eq!(runtime.stats().hydration_jobs(), 1);
+    pausing.fail_next_get();
+    pausing.release_gets();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if runtime.stats().active_cells() == 0 && runtime.stats().hydration_jobs() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("seed=145: failed hydration did not fence and release its reservation");
+    assert!(!pausing.fail_next_get.load(Ordering::Acquire));
+    assert!(
+        runtime
+            .resident_handle(&fixture.target, CatalogRole::Repository)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        restored.query(64, 64, |_| Ok(Vec::new())).await,
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
+    assert_eq!(
+        authority
+            .load(fixture.target.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .ltx_root(),
+        Some(root)
+    );
+    let verified = fixture.replica.open_root(&root).await.unwrap();
+    let recovered = fixture
+        ._directory
+        .path()
+        .join("origin-failure-recovered.sqlite");
+    assert_eq!(verified.restore(&recovered).await.unwrap(), root.position);
+    drop(restored);
+    runtime.shutdown().await.unwrap();
+    assert_eq!(runtime.local_disk_budget().used(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn disk_exhaustion_during_hydration_fences_and_releases_capacity() {
+    const DISK_CAPACITY: u64 = 4 << 20;
+    let (_, fixture) = released_large_cell_with_store(
+        b"hydration-disk-exhaustion",
+        SessionId::from_bytes([147; 16]),
+    )
+    .await;
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let observed = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let root = observed.value().ltx_root().unwrap();
+    let session = SessionId::from_bytes([148; 16]);
+    let runtime = CellRuntime::new_with_replica_host(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        64 * 1024 * 1024,
+        session,
+        ReplicaHost::default().with_local_disk_budget(DiskBudget::new(DISK_CAPACITY)),
+    )
+    .unwrap();
+    let restored = runtime
+        .acquire_idle_restored(
+            proof,
+            fixture.replica.clone(),
+            authority.clone(),
+            observed,
+            cold_node_directory(&fixture).join("hydration-disk-exhaustion.sqlite"),
+            Owner {
+                session,
+                endpoint: "https://hydration-disk-exhaustion.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if runtime.stats().active_cells() == 0 && runtime.stats().hydration_jobs() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("seed=147: disk-limited hydration did not fence");
+    assert!(
+        runtime
+            .resident_handle(&fixture.target, CatalogRole::Repository)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        restored.query(64, 64, |_| Ok(Vec::new())).await,
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
+    assert_eq!(
+        authority
+            .load(fixture.target.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .ltx_root(),
+        Some(root)
+    );
+    let verified = fixture.replica.open_root(&root).await.unwrap();
+    let recovered = fixture
+        ._directory
+        .path()
+        .join("disk-exhaustion-recovered.sqlite");
+    assert_eq!(verified.restore(&recovered).await.unwrap(), root.position);
+    assert!(std::fs::metadata(&recovered).unwrap().len() > DISK_CAPACITY);
+    drop(restored);
+    runtime.shutdown().await.unwrap();
+    assert_eq!(runtime.local_disk_budget().used(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn node_lease_loss_during_hydration_cannot_promote_a_stale_owner() {
+    let (pausing, fixture) = released_large_cell_with_store(
+        b"hydration-node-lease-loss",
+        SessionId::from_bytes([149; 16]),
+    )
+    .await;
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let observed = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let root = observed.value().ltx_root().unwrap();
+    let session = SessionId::from_bytes([150; 16]);
+    let runtime = CellRuntime::new_with_replica_host_requiring_node_lease(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        64 * 1024 * 1024,
+        session,
+        ReplicaHost::default().with_local_disk_budget(DiskBudget::new(1 << 30)),
+    )
+    .unwrap();
+    let lease = NodeLeaseGuard::new(0, 60_000).unwrap();
+    runtime.install_node_lease(lease.clone()).unwrap();
+    let restored = runtime
+        .acquire_idle_restored(
+            proof,
+            fixture.replica.clone(),
+            authority.clone(),
+            observed,
+            cold_node_directory(&fixture).join("hydration-lease-loss.sqlite"),
+            Owner {
+                session,
+                endpoint: "https://hydration-lease-loss.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    pausing.arm_gets();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        pausing.wait_until_get_blocked(),
+    )
+    .await
+    .expect("seed=149: hydration did not reach the origin");
+    assert_eq!(runtime.stats().hydration_jobs(), 1);
+    lease.fence();
+    pausing.release_gets();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if runtime.stats().active_cells() == 0 && runtime.stats().hydration_jobs() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("seed=149: lost node lease did not stop hydration and release the Cell");
+    assert!(matches!(
+        runtime
+            .resident_handle(&fixture.target, CatalogRole::Repository)
+            .await,
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
+    assert!(matches!(
+        restored.query(64, 64, |_| Ok(Vec::new())).await,
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
+    assert_eq!(
+        authority
+            .load(fixture.target.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .ltx_root(),
+        Some(root)
+    );
+    let verified = fixture.replica.open_root(&root).await.unwrap();
+    let recovered = fixture
+        ._directory
+        .path()
+        .join("lease-loss-recovered.sqlite");
+    assert_eq!(verified.restore(&recovered).await.unwrap(), root.position);
+    drop(restored);
+    runtime.shutdown().await.unwrap();
+    assert_eq!(runtime.local_disk_budget().used(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn successor_takeover_while_hydration_waits_keeps_the_old_owner_fenced() {
+    let (pausing, fixture) = released_large_cell_with_store(
+        b"hydration-concurrent-takeover",
+        SessionId::from_bytes([151; 16]),
+    )
+    .await;
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let idle = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let old_session = SessionId::from_bytes([152; 16]);
+    let old_runtime = CellRuntime::new_with_replica_host_requiring_node_lease(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        64 * 1024 * 1024,
+        old_session,
+        ReplicaHost::default().with_local_disk_budget(DiskBudget::new(1 << 30)),
+    )
+    .unwrap();
+    let old_lease = NodeLeaseGuard::new(0, 60_000).unwrap();
+    old_runtime.install_node_lease(old_lease.clone()).unwrap();
+    let old_handle = old_runtime
+        .acquire_idle_restored(
+            proof.clone(),
+            fixture.replica.clone(),
+            authority.clone(),
+            idle,
+            cold_node_directory(&fixture).join("hydrating-owner.sqlite"),
+            Owner {
+                session: old_session,
+                endpoint: "https://hydrating-owner.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    pausing.arm_gets();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        pausing.wait_until_get_blocked(),
+    )
+    .await
+    .expect("seed=151: old owner hydration did not reach the origin");
+    assert_eq!(old_runtime.stats().hydration_jobs(), 1);
+
+    let old_control = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let root = old_control.value().ltx_root().unwrap();
+    let successor_session = SessionId::from_bytes([153; 16]);
+    let fenced = fence_session(&fixture.layout, old_session, successor_session).await;
+    old_lease.fence();
+    let successor_runtime = CellRuntime::new_with_replica_host_requiring_node_lease(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        64 * 1024 * 1024,
+        successor_session,
+        ReplicaHost::default().with_local_disk_budget(DiskBudget::new(1 << 30)),
+    )
+    .unwrap();
+    successor_runtime
+        .install_node_lease(NodeLeaseGuard::new(0, 60_000).unwrap())
+        .unwrap();
+    let successor_directory = fixture._directory.path().join("takeover-node");
+    std::fs::create_dir_all(&successor_directory).unwrap();
+    let successor = successor_runtime
+        .takeover_restored(
+            proof,
+            fixture.replica.clone(),
+            authority.clone(),
+            old_control.clone(),
+            fenced.direct_takeover().unwrap(),
+            crab_cell_runtime::recovery::manifest::RecoveryManifestStore::new(
+                fixture.layout.clone(),
+                Limits::default(),
+            ),
+            successor_directory.join("successor.sqlite"),
+            Owner {
+                session: successor_session,
+                endpoint: "https://hydration-successor.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let current = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.value().ltx_root(), Some(root));
+    assert!(current.value().epoch > old_control.value().epoch);
+    assert_eq!(
+        current.value().owner.as_ref().unwrap().session,
+        successor_session
+    );
+    let payload = successor
+        .query(64, 64, |connection| {
+            let (rows, exact) = connection.query_row(
+                "SELECT COUNT(*), SUM(value = zeroblob(16384)) FROM payload",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )?;
+            Ok([rows.to_be_bytes(), exact.to_be_bytes()].concat())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        payload,
+        [512_i64.to_be_bytes(), 512_i64.to_be_bytes()].concat()
+    );
+    assert!(!pausing.get_released.load(Ordering::Acquire));
+
+    pausing.release_gets();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if old_runtime.stats().active_cells() == 0 && old_runtime.stats().hydration_jobs() == 0
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("seed=151: old hydration did not release after successor takeover");
+    assert!(matches!(
+        old_handle.query(64, 64, |_| Ok(Vec::new())).await,
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
+    assert_eq!(
+        authority
+            .load(fixture.target.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .owner
+            .as_ref()
+            .unwrap()
+            .session,
+        successor_session
+    );
+    drop(old_handle);
+    old_runtime.shutdown().await.unwrap();
+    assert_eq!(old_runtime.local_disk_budget().used(), 0);
+    successor.drain().await.unwrap();
+    successor_runtime.shutdown().await.unwrap();
+    assert_eq!(successor_runtime.local_disk_budget().used(), 0);
 }
 
 #[tokio::test]

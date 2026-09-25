@@ -217,7 +217,7 @@ impl CellModule for ReferenceSql {
             id: SQL_NAMESPACE,
             name: "reference-sql",
             role: CatalogRole::Sql,
-            shards: 1,
+            shards: 2,
             effect_targets: &[],
             dead_letter: None,
         }];
@@ -591,26 +591,34 @@ impl CellApplication for ReferenceApplication {
         builder.register(ReferenceDeadLetter)?;
         builder.register(ReferenceCron)?;
         builder.register(ReferenceWorkflow)?;
-        for (module, name, namespace, role) in [
-            (SQL_MODULE, "sql", SQL_NAMESPACE, CatalogRole::Sql),
-            (KV_MODULE, "kv", KV_NAMESPACE, CatalogRole::Kv),
-            (BLOB_MODULE, "blob", BLOB_NAMESPACE, CatalogRole::Blob),
-            (QUEUE_MODULE, "queue", QUEUE_NAMESPACE, CatalogRole::Queue),
+        for (module, name, namespace, role, shards) in [
+            (SQL_MODULE, "sql", SQL_NAMESPACE, CatalogRole::Sql, 2),
+            (KV_MODULE, "kv", KV_NAMESPACE, CatalogRole::Kv, 1),
+            (BLOB_MODULE, "blob", BLOB_NAMESPACE, CatalogRole::Blob, 1),
+            (
+                QUEUE_MODULE,
+                "queue",
+                QUEUE_NAMESPACE,
+                CatalogRole::Queue,
+                1,
+            ),
             (
                 DEAD_LETTER_MODULE,
                 "dead-letter",
                 DEAD_LETTER_NAMESPACE,
                 CatalogRole::Queue,
+                1,
             ),
-            (CRON_MODULE, "cron", CRON_NAMESPACE, CatalogRole::Cron),
+            (CRON_MODULE, "cron", CRON_NAMESPACE, CatalogRole::Cron, 1),
             (
                 WORKFLOW_MODULE,
                 "workflow",
                 WORKFLOW_NAMESPACE,
                 CatalogRole::Workflow,
+                1,
             ),
         ] {
-            builder.cell_type(CellType::new(module, name, namespace, role, 1)?)?;
+            builder.cell_type(CellType::new(module, name, namespace, role, shards)?)?;
         }
         Ok(())
     }
@@ -637,6 +645,7 @@ pub async fn bootstrap_reference_cell<F>(
     namespace: NamespaceId,
     role: CatalogRole,
     module: &'static str,
+    shard: u32,
     incarnation_byte: u8,
     initialize: F,
 ) -> crab_cell_runtime::Result<CellHandle>
@@ -647,7 +656,7 @@ where
         + Send
         + 'static,
 {
-    let target = CellTarget::new(tenant, application, namespace, &partition_for_shard(0))?;
+    let target = CellTarget::new(tenant, application, namespace, &partition_for_shard(shard))?;
     let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(layout.clone(), tenant);
     let proof = catalog
         .provision(CatalogEntry::new(
@@ -679,14 +688,22 @@ where
                 layout.clone(),
                 *target.cell_id().as_bytes(),
                 *incarnation.as_bytes(),
-                Limits::default(),
+                reference_replica_limits(),
             )?,
             authority,
             observed,
-            directory.path().join(format!("{module}.sqlite")),
+            directory.path().join(format!("{module}-{shard}.sqlite")),
             initialize,
         )
         .await
+}
+
+pub fn reference_replica_limits() -> Limits {
+    Limits {
+        max_database_bytes: 64 * 1024 * 1024,
+        max_capture_bytes: 16 * 1024 * 1024,
+        ..Limits::default()
+    }
 }
 
 pub fn reference_host() -> Host {

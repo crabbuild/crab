@@ -5,7 +5,7 @@ on:
     paths:
       - "crates/crab-cell-runtime/model/**"
       - "crates/crab-cell-runtime/src/coordination.rs"
-      - "crates/crab-cell-runtime/src/coordination_sim.rs"
+      - "crates/crab-cell-runtime/src/coordination/sim.rs"
       - ".github/workflows/cell-coordination-model.yml"
   schedule:
     - cron: "17 3 * * 1"
@@ -48,6 +48,7 @@ jobs:
           java-version: "17"
       - name: Run TLC broad check
         run: |
+          set -euo pipefail
           chmod +x crates/crab-cell-runtime/model/check.sh
           mkdir -p "$RUNNER_TEMP/cell-coordination-broad"
           {
@@ -80,12 +81,15 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-coordination-simulation-target
         run: |
+          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/cell-coordination-simulation"
           {
             printf 'source_revision=%s\n' "$(git rev-parse HEAD)"
             printf 'seed_range=0..511\nsteps_per_seed=256\n'
-            cargo test -p crab-cell-runtime coordination_sim::broad_seed_corpus_is_replayable --locked -- --exact --nocapture
+            cargo test -p crab-cell-runtime --lib coordination::sim::broad_seed_corpus_is_replayable --locked -- --exact --nocapture
           } 2>&1 | tee "$RUNNER_TEMP/cell-coordination-simulation/simulator.log"
+          grep -F 'test coordination::sim::broad_seed_corpus_is_replayable ... ok' \
+            "$RUNNER_TEMP/cell-coordination-simulation/simulator.log"
       - name: Upload simulator evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

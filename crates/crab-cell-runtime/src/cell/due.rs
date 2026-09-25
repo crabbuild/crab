@@ -83,35 +83,26 @@ async fn list_bucket(
 ) -> Result<()> {
     let prefix = layout.due_hint_prefix(bucket);
     let mut stream = layout.store().list_stream(&prefix);
-    while cells.len() < limit.min(MAX_HINT_BATCH) {
+    let max_cells = cells.len().saturating_add(limit.min(MAX_HINT_BATCH));
+    while cells.len() < max_cells {
         let Some(item) = futures_util::StreamExt::next(&mut stream).await else {
             break;
         };
         let meta = item?;
-        let Some(cell) = hint_cell(&meta.location)? else {
+        let Some(cell) = hint_cell(layout, bucket, &meta.location) else {
             // A key this module did not write must not be listed forever.
             let _ = layout.store().delete(&meta.location).await;
             continue;
         };
-        let _ = layout
-            .store()
-            .delete(&layout.due_hint_path(bucket, cell.as_bytes()))
-            .await;
+        let _ = layout.store().delete(&meta.location).await;
         cells.push(cell);
     }
     Ok(())
 }
 
-/// Parses one hint key into the Cell it names.
-fn hint_cell(location: &Path) -> Result<Option<CellId>> {
-    let Some(file) = location.filename() else {
-        return Ok(None);
-    };
-    let Some(stem) = file.strip_suffix(".json") else {
-        return Ok(None);
-    };
-    let Ok(bytes) = decode_hex::<32>(stem) else {
-        return Ok(None);
-    };
-    Ok(Some(CellId::from_bytes(bytes)))
+/// Accepts only the canonical key for a Cell in this bucket.
+fn hint_cell(layout: &CellStorageLayout, bucket: u64, location: &Path) -> Option<CellId> {
+    let stem = location.filename()?.strip_suffix(".json")?;
+    let bytes = decode_hex::<32>(stem).ok()?;
+    (layout.due_hint_path(bucket, &bytes) == *location).then_some(CellId::from_bytes(bytes))
 }

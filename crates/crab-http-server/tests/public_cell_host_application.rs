@@ -175,6 +175,39 @@ async fn node_public_application_handle_executes_typed_sql() {
     assert!(node.is_ready());
 
     let directory = tempfile::tempdir().unwrap();
+    let rejected = node
+        .runtime()
+        .bootstrap(
+            proof.clone(),
+            CellReplica::new(
+                layout.clone(),
+                *target.cell_id().as_bytes(),
+                *incarnation.as_bytes(),
+                ReplicaLimits::default(),
+            )
+            .unwrap(),
+            authority.clone(),
+            observed.clone(),
+            directory.path().join("rejected.sqlite"),
+            |_| Ok(()),
+        )
+        .await
+        .err()
+        .expect("descriptor limits must reject a larger replica ceiling");
+    assert!(matches!(
+        rejected,
+        crab_cell_runtime::Error::Control("Cell storage limits differ from application")
+    ));
+    assert!(
+        authority
+            .load(target.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .root
+            .is_none()
+    );
     let handle = node
         .runtime()
         .bootstrap(
@@ -183,7 +216,11 @@ async fn node_public_application_handle_executes_typed_sql() {
                 layout,
                 *target.cell_id().as_bytes(),
                 *incarnation.as_bytes(),
-                ReplicaLimits::default(),
+                ReplicaLimits {
+                    max_database_bytes: 64 * 1024 * 1024,
+                    max_capture_bytes: 16 * 1024 * 1024,
+                    ..ReplicaLimits::default()
+                },
             )
             .unwrap(),
             authority,

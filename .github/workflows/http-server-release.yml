@@ -8,10 +8,12 @@ on:
       tag:
         description: "Annotated server release tag to qualify (for example crab-http-server-v0.1.0)"
         required: true
+      candidate_run_id:
+        description: "Tag-triggered candidate build run ID whose exact image was protected-qualified"
+        required: true
       cell_runtime_evidence_run_id:
         description: "Completed protected Cell runtime qualification workflow run ID"
-        required: false
-        default: ""
+        required: true
       cell_runtime_evidence_artifact:
         description: "Protected Cell runtime evidence artifact; defaults to cell-runtime-protected-<run-id>-<attempt>"
         required: false
@@ -30,8 +32,8 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/crab-http-server
   CHART_REGISTRY: ghcr.io/${{ github.repository_owner }}/charts
-  CELL_RUNTIME_EVIDENCE_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.cell_runtime_evidence_run_id || vars.CRAB_CELL_RUNTIME_PROTECTED_EVIDENCE_RUN_ID }}
-  CELL_RUNTIME_EVIDENCE_ARTIFACT: ${{ github.event_name == 'workflow_dispatch' && inputs.cell_runtime_evidence_artifact || vars.CRAB_CELL_RUNTIME_PROTECTED_EVIDENCE_ARTIFACT }}
+  CELL_RUNTIME_EVIDENCE_RUN_ID: ${{ inputs.cell_runtime_evidence_run_id }}
+  CELL_RUNTIME_EVIDENCE_ARTIFACT: ${{ inputs.cell_runtime_evidence_artifact }}
 
 jobs:
   prepare:
@@ -87,6 +89,10 @@ jobs:
             echo "::error::Checked-out source does not match $tag."
             exit 1
           fi
+          if [ "$GITHUB_SHA" != "$source_sha" ] || [ "$GITHUB_REF" != "refs/tags/$tag" ]; then
+            echo "::error::Dispatch this workflow from the exact release tag so provenance binds to $source_sha." >&2
+            exit 1
+          fi
 
           git fetch --no-tags origin main
           if ! git merge-base --is-ancestor "$source_sha" origin/main; then
@@ -105,12 +111,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
+      actions: read
       contents: read
       id-token: write
       packages: write
     outputs:
-      image_digest: ${{ steps.build.outputs.digest }}
-      image_ref: ${{ steps.candidate_ref.outputs.image_ref }}
+      image_digest: ${{ steps.build.outputs.digest || steps.reuse.outputs.digest }}
+      image_ref: ${{ steps.candidate_ref.outputs.image_ref || steps.reuse.outputs.image_ref }}
     steps:
       - name: Check out the release source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -133,6 +140,7 @@ jobs:
 
       - name: Compute unique candidate reference
         id: candidate_ref
+        if: github.event_name == 'push'
         env:
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
@@ -142,6 +150,7 @@ jobs:
 
       - name: Build and publish the candidate image
         id: build
+        if: github.event_name == 'push'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -161,12 +170,67 @@ jobs:
           provenance: mode=max
           sbom: true
 
-      - name: Verify candidate platform coverage
+      - name: Reuse the protected-qualified candidate
+        id: reuse
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
         env:
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
-          IMAGE_REF: ${{ steps.candidate_ref.outputs.image_ref }}
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
           set -euo pipefail
+          if [[ ! "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::A tag-triggered candidate run ID is required for promotion." >&2
+            exit 1
+          fi
+          metadata="${RUNNER_TEMP}/candidate-run.json"
+          gh run view "$CANDIDATE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --json workflowName,event,headSha,databaseId,attempt,jobs > "$metadata"
+          jq --exit-status --arg source "$SOURCE_SHA" --argjson run "$CANDIDATE_RUN_ID" '
+            .workflowName == "HTTP server release image"
+            and .event == "push"
+            and .headSha == $source
+            and .databaseId == $run
+            and ([.jobs[] | select(.name == "Build immutable qualification candidate" and .conclusion == "success")] | length) == 1
+          ' "$metadata"
+          attempt="$(jq --raw-output '.attempt' "$metadata")"
+          if [[ ! "$attempt" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Candidate run did not expose a valid attempt." >&2
+            exit 1
+          fi
+          candidate_dir="${RUNNER_TEMP}/candidate-reuse"
+          mkdir -p "$candidate_dir"
+          gh run download "$CANDIDATE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "http-server-candidate-${CANDIDATE_RUN_ID}-${attempt}" \
+            --dir "$candidate_dir"
+          if find "$candidate_dir" -type l -print -quit | grep --quiet .; then
+            echo "::error::Candidate metadata must not contain symlinks." >&2
+            exit 1
+          fi
+          test "$(find "$candidate_dir" -type f | wc -l | tr -d ' ')" = 3
+          test "$(cat "$candidate_dir/source-revision")" = "$SOURCE_SHA"
+          digest="$(cat "$candidate_dir/image-digest")"
+          image_ref="$(cat "$candidate_dir/image-ref")"
+          expected_ref="${REGISTRY}/${IMAGE_NAME}:candidate-${CANDIDATE_RUN_ID}-${attempt}-${SOURCE_SHA:0:12}"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || [ "$image_ref" != "$expected_ref" ]; then
+            echo "::error::Candidate metadata does not bind the exact source, run, attempt, and image." >&2
+            exit 1
+          fi
+          printf 'digest=%s\nimage_ref=%s\n' "$digest" "$image_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Verify candidate platform coverage
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest || steps.reuse.outputs.digest }}
+          IMAGE_REF: ${{ steps.candidate_ref.outputs.image_ref || steps.reuse.outputs.image_ref }}
+        run: |
+          set -euo pipefail
+          actual="$(docker buildx imagetools inspect "$IMAGE_REF" \
+            --format '{{json .Manifest.Digest}}' | jq --raw-output .)"
+          if [ "$actual" != "$IMAGE_DIGEST" ]; then
+            echo "::error::Candidate tag moved from $IMAGE_DIGEST to $actual." >&2
+            exit 1
+          fi
           docker buildx imagetools inspect "${IMAGE_REF}@${IMAGE_DIGEST}" \
             --format '{{json .Manifest}}' > "${RUNNER_TEMP}/candidate-manifest.json"
           jq --exit-status '
@@ -176,6 +240,30 @@ jobs:
               | .architecture]
             | sort == ["amd64", "arm64"]
           ' "${RUNNER_TEMP}/candidate-manifest.json"
+
+      - name: Retain the candidate identity for protected qualification
+        if: github.event_name == 'push'
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_REF: ${{ steps.candidate_ref.outputs.image_ref }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          candidate_dir="${RUNNER_TEMP}/candidate-identity"
+          mkdir -p "$candidate_dir"
+          printf '%s\n' "$SOURCE_SHA" > "$candidate_dir/source-revision"
+          printf '%s\n' "$IMAGE_DIGEST" > "$candidate_dir/image-digest"
+          printf '%s\n' "$IMAGE_REF" > "$candidate_dir/image-ref"
+          printf 'Candidate digest for protected qualification: %s\n' "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload candidate identity
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: http-server-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate-identity/
+          if-no-files-found: error
+          retention-days: 90
 
   qualification:
     name: Qualify exact tagged source
@@ -188,6 +276,7 @@ jobs:
 
   image:
     name: Publish qualified release artifacts
+    if: github.event_name == 'workflow_dispatch'
     needs: [prepare, candidate, qualification]
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -226,7 +315,7 @@ jobs:
           if [[ ! "$run_id" =~ ^[1-9][0-9]*$ ]]; then
             {
               echo "::error::Protected Cell runtime evidence is required for server releases."
-              echo "Run the protected Cell runtime qualification workflow on the exact release commit and pass its run ID, or set CRAB_CELL_RUNTIME_PROTECTED_EVIDENCE_RUN_ID."
+              echo "Run the protected Cell runtime qualification workflow on the exact release commit and pass its run ID to the manual release dispatch."
             } >&2
             exit 1
           fi
@@ -361,76 +450,10 @@ jobs:
             exit 1
           fi
 
-      - name: Promote the qualified candidate image
-        id: promote
-        env:
-          CANDIDATE_DIGEST: ${{ needs.candidate.outputs.image_digest }}
-          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          set -euo pipefail
-
-          if [[ ! "$CANDIDATE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "Candidate image did not report an immutable digest." >&2
-            exit 1
-          fi
-          source="${REGISTRY}/${IMAGE_NAME}@${CANDIDATE_DIGEST}"
-          docker buildx imagetools create \
-            --tag "${REGISTRY}/${IMAGE_NAME}:${VERSION}" \
-            --tag "${REGISTRY}/${IMAGE_NAME}:sha-${SOURCE_SHA}" \
-            "$source"
-          for reference in \
-            "${REGISTRY}/${IMAGE_NAME}:${VERSION}" \
-            "${REGISTRY}/${IMAGE_NAME}:sha-${SOURCE_SHA}"; do
-            actual="$(docker buildx imagetools inspect "$reference" \
-              --format '{{json .Manifest.Digest}}' | jq --raw-output .)"
-            if [ "$actual" != "$CANDIDATE_DIGEST" ]; then
-              echo "::error::$reference was promoted as $actual, expected $CANDIDATE_DIGEST."
-              exit 1
-            fi
-          done
-          printf 'digest=%s\n' "$CANDIDATE_DIGEST" >> "$GITHUB_OUTPUT"
-
-      - name: Attest the registry image
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.promote.outputs.digest }}
-          push-to-registry: true
-
-      - name: Verify the published manifest
-        shell: bash
-        env:
-          DIGEST: ${{ steps.promote.outputs.digest }}
-          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          set -euo pipefail
-
-          image="${REGISTRY}/${IMAGE_NAME}"
-          for reference in "${image}:${VERSION}" "${image}:sha-${SOURCE_SHA}"; do
-            actual="$(docker buildx imagetools inspect "$reference" \
-              --format '{{json .Manifest.Digest}}' | jq --raw-output .)"
-            if [ "$actual" != "$DIGEST" ]; then
-              echo "::error::$reference resolves to $actual, expected $DIGEST."
-              exit 1
-            fi
-          done
-
-          docker buildx imagetools inspect "${image}@${DIGEST}" \
-            --format '{{json .Manifest}}' > "${RUNNER_TEMP}/crab-http-server-manifest.json"
-          jq --exit-status '
-            [.manifests[]?.platform
-              | select(.os == "linux")
-              | select(.architecture == "amd64" or .architecture == "arm64")
-              | .architecture]
-            | sort == ["amd64", "arm64"]
-          ' "${RUNNER_TEMP}/crab-http-server-manifest.json"
-
       - name: Bind and verify the release qualification receipt
         shell: bash
         env:
-          IMAGE_DIGEST: ${{ steps.promote.outputs.digest }}
+          IMAGE_DIGEST: ${{ needs.candidate.outputs.image_digest }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
           set -euo pipefail
@@ -459,7 +482,7 @@ jobs:
       - name: Require protected Cell runtime qualification matrix
         shell: bash
         env:
-          IMAGE_DIGEST: ${{ steps.promote.outputs.digest }}
+          IMAGE_DIGEST: ${{ needs.candidate.outputs.image_digest }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           QUALIFICATION_SIGNER: ${{ vars.CRAB_CELL_RUNTIME_QUALIFICATION_SIGNER }}
         run: |
@@ -534,6 +557,72 @@ jobs:
             sha256sum "$(basename "$bundle")" > "$(basename "$bundle").sha256"
           )
 
+      - name: Promote the qualified candidate image
+        id: promote
+        env:
+          CANDIDATE_DIGEST: ${{ needs.candidate.outputs.image_digest }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$CANDIDATE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Candidate image did not report an immutable digest." >&2
+            exit 1
+          fi
+          source="${REGISTRY}/${IMAGE_NAME}@${CANDIDATE_DIGEST}"
+          docker buildx imagetools create \
+            --tag "${REGISTRY}/${IMAGE_NAME}:${VERSION}" \
+            --tag "${REGISTRY}/${IMAGE_NAME}:sha-${SOURCE_SHA}" \
+            "$source"
+          for reference in \
+            "${REGISTRY}/${IMAGE_NAME}:${VERSION}" \
+            "${REGISTRY}/${IMAGE_NAME}:sha-${SOURCE_SHA}"; do
+            actual="$(docker buildx imagetools inspect "$reference" \
+              --format '{{json .Manifest.Digest}}' | jq --raw-output .)"
+            if [ "$actual" != "$CANDIDATE_DIGEST" ]; then
+              echo "::error::$reference was promoted as $actual, expected $CANDIDATE_DIGEST."
+              exit 1
+            fi
+          done
+          printf 'digest=%s\n' "$CANDIDATE_DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Attest the registry image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.promote.outputs.digest }}
+          push-to-registry: true
+
+      - name: Verify the published manifest
+        shell: bash
+        env:
+          DIGEST: ${{ steps.promote.outputs.digest }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          image="${REGISTRY}/${IMAGE_NAME}"
+          for reference in "${image}:${VERSION}" "${image}:sha-${SOURCE_SHA}"; do
+            actual="$(docker buildx imagetools inspect "$reference" \
+              --format '{{json .Manifest.Digest}}' | jq --raw-output .)"
+            if [ "$actual" != "$DIGEST" ]; then
+              echo "::error::$reference resolves to $actual, expected $DIGEST."
+              exit 1
+            fi
+          done
+
+          docker buildx imagetools inspect "${image}@${DIGEST}" \
+            --format '{{json .Manifest}}' > "${RUNNER_TEMP}/crab-http-server-manifest.json"
+          jq --exit-status '
+            [.manifests[]?.platform
+              | select(.os == "linux")
+              | select(.architecture == "amd64" or .architecture == "arm64")
+              | .architecture]
+            | sort == ["amd64", "arm64"]
+          ' "${RUNNER_TEMP}/crab-http-server-manifest.json"
+
       - name: Publish and verify the Helm chart
         id: chart
         shell: bash
@@ -581,7 +670,7 @@ jobs:
           CHART_DIGEST: ${{ steps.chart.outputs.digest }}
           IMAGE_DIGEST: ${{ steps.promote.outputs.digest }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
@@ -610,7 +699,7 @@ jobs:
           BUNDLE_PATH: ${{ steps.release-manifest-attestation.outputs.bundle-path }}
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
 
@@ -633,7 +722,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           IMAGE_DIGEST: ${{ steps.promote.outputs.digest }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail

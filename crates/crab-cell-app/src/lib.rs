@@ -90,6 +90,8 @@ impl CellType {
     }
 
     /// Replaces the declared application limits without changing stable identity.
+    ///
+    /// Database limits must be at least 512 bytes and capture limits at least 128 bytes.
     pub fn with_limits(
         mut self,
         database_limit_bytes: u64,
@@ -139,6 +141,18 @@ impl CellType {
         self.shards
     }
 
+    /// Returns the database ceiling declared for each Cell of this type.
+    #[must_use]
+    pub const fn database_limit_bytes(&self) -> u64 {
+        self.database_limit_bytes
+    }
+
+    /// Returns the capture ceiling declared for each Cell of this type.
+    #[must_use]
+    pub const fn capture_limit_bytes(&self) -> u64 {
+        self.capture_limit_bytes
+    }
+
     /// Maps one bounded application scope to its stable shard number.
     pub fn shard_for_scope(&self, scope: &[u8]) -> Result<u32> {
         crab_cell_runtime::shard_for_scope(self.namespace, scope, self.shards)
@@ -161,8 +175,8 @@ impl CellType {
             || self.partition_version > MAX_PARTITION_VERSION
             || self.schema_min == 0
             || self.schema_min > self.schema_max
-            || self.database_limit_bytes == 0
-            || self.capture_limit_bytes == 0
+            || self.database_limit_bytes < 512
+            || self.capture_limit_bytes < 128
         {
             return Err(Error::Registry("invalid Cell type declaration"));
         }

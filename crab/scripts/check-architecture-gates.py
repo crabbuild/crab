@@ -2564,6 +2564,8 @@ def check_standalone_ltx_hard_cut(root: Path) -> bool:
                 violations.append(f"{rel(root, candidate)}: retired standalone LTX module")
             text = candidate.read_text(encoding="utf-8")
             for number, line in enumerate(text.splitlines(), start=1):
+                if line.lstrip().startswith("//"):
+                    continue
                 if candidate.name == "cell_layout.rs" and "catalog/{shard:02x}/head.json" in line:
                     continue
                 if RETIRED_STANDALONE_LTX_SYMBOLS.search(line) or RETIRED_STANDALONE_LTX_MARKERS.search(

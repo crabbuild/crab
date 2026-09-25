@@ -271,6 +271,34 @@ fn oversized_commit_captures_as_a_full_image_instead_of_fencing() {
 }
 
 #[test]
+fn newly_written_pages_are_counted_once_for_incremental_admission() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let limits = Limits {
+        max_capture_bytes: 40 * 1024,
+        ..Limits::default()
+    };
+    let mut db = Db::open(&temp.path().join("growth.sqlite"), limits).unwrap();
+    db.transaction(|tx| tx.execute_batch("CREATE TABLE payload(value BLOB)"))
+        .unwrap();
+    let schema = db.capture().unwrap();
+    db.transaction(|tx| tx.execute_batch("INSERT INTO payload VALUES(randomblob(24576))"))
+        .unwrap();
+    let growth = db.capture().unwrap();
+    assert!(growth.segments[0].info().size_bytes <= limits.max_capture_bytes);
+
+    let mut segments = schema.segments;
+    segments.extend(growth.segments);
+    let plan = VerifiedPlan::new(&segments, growth.position, limits).unwrap();
+    let restored = temp.path().join("growth-restored.sqlite");
+    restore_exact(&plan, &restored).unwrap();
+    let connection = Connection::open(restored).unwrap();
+    let size: i64 = connection
+        .query_row("SELECT length(value) FROM payload", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(size, 24576);
+}
+
+#[test]
 fn truncate_boundary_image_may_exceed_the_incremental_bound() {
     let temp = tempfile::TempDir::new().unwrap();
     let limits = Limits {

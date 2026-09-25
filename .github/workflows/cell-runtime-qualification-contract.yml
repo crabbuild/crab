@@ -17,6 +17,7 @@ on:
       - "crates/crab-http-server/tests/qualify_compose_cluster.sh"
       - ".github/workflows/http-server-container.yml"
       - ".github/workflows/http-server-release.yml"
+      - ".github/workflows/cell-coordination-model.yml"
       - ".github/workflows/cell-runtime-qualification-contract.yml"
       - ".github/workflows/cell-runtime-protected-qualification.yml"
   push:
@@ -36,6 +37,7 @@ on:
       - "crates/crab-http-server/tests/qualify_compose_cluster.sh"
       - ".github/workflows/http-server-container.yml"
       - ".github/workflows/http-server-release.yml"
+      - ".github/workflows/cell-coordination-model.yml"
       - ".github/workflows/cell-runtime-qualification-contract.yml"
       - ".github/workflows/cell-runtime-protected-qualification.yml"
 
@@ -94,7 +96,22 @@ jobs:
       - name: Verify public CellNode typed primitive workload
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target
-        run: cargo test -p crab-http-server --test public_cell_host_application --test public_cell_qualification --test public_cell_response_loss --test public_cell_retry --test public_cell_activity_retry --test public_cell_cancellation --test public_cell_data_cancellation --test public_cell_activity_cancellation --test public_cell_effect_delivery_cancellation --test public_cell_lease_expiry --locked
+        run: >-
+          cargo test -p crab-http-server
+          --test public_cell_host_application
+          --test public_cell_qualification
+          --test public_cell_takeover
+          --test public_cell_process_fault
+          --test public_cell_response_loss
+          --test public_cell_retry
+          --test public_cell_activity_retry
+          --test public_cell_cancellation
+          --test public_cell_data_cancellation
+          --test public_cell_activity_cancellation
+          --test public_cell_effect_delivery_cancellation
+          --test public_cell_effect_delivery_expiry
+          --test public_cell_lease_expiry
+          --locked
       - name: Keep Compose receipt schema gate synchronized
         shell: bash
         run: |
@@ -127,6 +144,28 @@ jobs:
             echo "release workflow must not rebuild after qualification" >&2
             exit 1
           fi
+      - name: Keep candidate reuse bound to the original tag run
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow=.github/workflows/http-server-release.yml
+          grep -F 'candidate_run_id:' "$workflow"
+          grep -F 'steps.build.outputs.digest || steps.reuse.outputs.digest' "$workflow"
+          grep -F 'name: http-server-candidate-' "$workflow"
+          grep -F 'github.run_id' "$workflow"
+          grep -F 'github.run_attempt' "$workflow"
+          grep -F 'gh run download "$CANDIDATE_RUN_ID"' "$workflow"
+          grep -F '.event == "push"' "$workflow"
+          grep -F '.headSha == $source' "$workflow"
+          grep -F '.databaseId == $run' "$workflow"
+          grep -F 'test "$(cat "$candidate_dir/source-revision")" = "$SOURCE_SHA"' "$workflow"
+          grep -F '"$image_ref" != "$expected_ref"' "$workflow"
+          grep -F 'Candidate tag moved from $IMAGE_DIGEST to $actual.' "$workflow"
+          grep -F '"$GITHUB_SHA" != "$source_sha"' "$workflow"
+          grep -F '"$GITHUB_REF" != "refs/tags/$tag"' "$workflow"
+          grep -A2 '^  image:' "$workflow" | grep -F "if: github.event_name == 'workflow_dispatch'"
+          test "$(grep -cF '          TAG: ' "$workflow")" -eq 3
+          grep -F 'inputs.tag || github.ref_name' "$workflow"
       - name: Keep protected evidence handoff explicit and exact-source bound
         shell: bash
         run: |
@@ -161,6 +200,22 @@ jobs:
           grep -F "cell-runtime-protected-\${run_id}-\${attempt}" .github/workflows/http-server-release.yml
           grep -F "verify-protected-bundle \"\$protected_dir\"" .github/workflows/http-server-release.yml
           grep -F 'exactly one protected/' .github/workflows/http-server-release.yml
+          release_workflow=.github/workflows/http-server-release.yml
+          protected_line="$(grep -nF '      - name: Require protected Cell runtime qualification matrix' "$release_workflow" | cut -d: -f1)"
+          promote_line="$(grep -nF '      - name: Promote the qualified candidate image' "$release_workflow" | cut -d: -f1)"
+          if [ -z "$protected_line" ] || [ -z "$promote_line" ] || [ "$protected_line" -ge "$promote_line" ]; then
+            echo "protected Cell evidence must verify before immutable image promotion" >&2
+            exit 1
+          fi
+      - name: Keep scheduled coordination replay nonempty and failure-sensitive
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow=.github/workflows/cell-coordination-model.yml
+          grep -F 'crates/crab-cell-runtime/src/coordination/sim.rs' "$workflow"
+          grep -F 'cargo test -p crab-cell-runtime --lib coordination::sim::broad_seed_corpus_is_replayable --locked -- --exact --nocapture' "$workflow"
+          grep -F 'test coordination::sim::broad_seed_corpus_is_replayable ... ok' "$workflow"
+          test "$(grep -cF 'set -euo pipefail' "$workflow")" -ge 2
       - name: Verify receipt, placement, pressure, and resource contracts
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-cell-runtime-qualification-target

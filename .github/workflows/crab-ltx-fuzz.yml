@@ -59,17 +59,24 @@ jobs:
         working-directory: crates/crab-ltx
         run: |
           set -euo pipefail
+          {
+            printf 'source_revision=%s\n' "$(git rev-parse HEAD)"
+            printf 'fuzz_seconds_per_target=%s\n' "$FUZZ_SECONDS"
+            printf 'targets=ltx root directory bundle node_frame\n'
+          } > "${RUNNER_TEMP}/artifacts/run-context.txt"
           for target in ltx root directory bundle node_frame; do
             cargo +nightly fuzz run "${target}" -- \
               -artifact_prefix="${RUNNER_TEMP}/artifacts/${target}-" \
               -max_total_time="${FUZZ_SECONDS}" \
-              "${RUNNER_TEMP}/corpus"
+              "${RUNNER_TEMP}/corpus" \
+              2>&1 | tee "${RUNNER_TEMP}/artifacts/${target}.log"
           done
 
-      - name: Upload crash artifacts
-        if: failure()
+      - name: Upload fuzz replay evidence
+        if: ${{ always() && (github.event_name != 'pull_request' || failure()) }}
         uses: actions/upload-artifact@v4
         with:
-          name: crab-ltx-fuzz-artifacts
+          name: crab-ltx-fuzz-evidence-${{ github.run_id }}
           path: ${{ runner.temp }}/artifacts
           if-no-files-found: ignore
+          retention-days: 30

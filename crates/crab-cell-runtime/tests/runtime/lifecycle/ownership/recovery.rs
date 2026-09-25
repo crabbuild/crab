@@ -556,6 +556,12 @@ async fn source_loss_takeover(store: Store, prefix: Path) {
     first_local.close().unwrap();
 
     let current = authority.load(cell).await.unwrap().unwrap();
+    eprintln!(
+        "fault_seed=47 schedule=source_loss_before_owner_takeover request={first_identity:?} operation={first_digest:?} committed_sequence={} selected_follower_tickets=[] root={:?} observed_control={:?}",
+        first_outcome.commit_sequence(),
+        current.value().ltx_root(),
+        current.value(),
+    );
     let second_session = SessionId::from_bytes([49; 16]);
     let mut takeover = current.value().clone();
     takeover.epoch += 1;

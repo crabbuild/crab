@@ -5,7 +5,7 @@ use crate::coordination::{
 use std::env;
 
 const COMMANDS: usize = 2;
-const EVENT_COUNT: usize = 41;
+const EVENT_COUNT: usize = 42;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Event {
@@ -30,6 +30,7 @@ enum Event {
     LostResponse,
     FollowerProof { accepted: bool },
     ExactCasAfterLostResponse,
+    RootAcceptedPruneFailed,
     DuplicatePublicationCompletion,
     DelayedEffect,
     OwnerCrash,
@@ -81,6 +82,7 @@ struct Simulation {
     durable_publications: u64,
     accepted: [bool; COMMANDS],
     acknowledged: [bool; COMMANDS],
+    unknown: [bool; COMMANDS],
     terminal_outcomes: [u8; COMMANDS],
     cancelled: [bool; COMMANDS],
     owner_live: bool,
@@ -112,6 +114,7 @@ impl Simulation {
             durable_publications: 0,
             accepted: [false; COMMANDS],
             acknowledged: [false; COMMANDS],
+            unknown: [false; COMMANDS],
             terminal_outcomes: [0; COMMANDS],
             cancelled: [false; COMMANDS],
             owner_live: true,
@@ -360,6 +363,33 @@ impl Simulation {
                     CoordinationDecision::Ignored
                 }
             }
+            Event::RootAcceptedPruneFailed => {
+                if self.retained == 0 {
+                    CoordinationDecision::Ignored
+                } else {
+                    let before_publications = self.state.publication_count();
+                    let effect_id = self.publication_effects.pop();
+                    self.complete_effect(effect_id, CoordinationEffect::Publication);
+                    let decision = self.state.step(CoordinationInput::FinishPublication {
+                        fenced: true,
+                        succeeded: false,
+                    });
+                    let completed =
+                        before_publications.saturating_sub(self.state.publication_count());
+                    self.retained = self.retained.saturating_sub(completed);
+                    if completed != 0 {
+                        // The accepted root survives cleanup failure, but the actor
+                        // fences before it can return a committed result.
+                        self.published_sequence = self.published_sequence.saturating_add(1);
+                        self.durable_publications = self.durable_publications.saturating_add(1);
+                        if self.accepted[0] && !self.acknowledged[0] {
+                            self.unknown[0] = true;
+                            self.terminal_outcomes[0] = self.terminal_outcomes[0].saturating_add(1);
+                        }
+                    }
+                    decision
+                }
+            }
             Event::DuplicatePublicationCompletion => {
                 let before_publications = self.state.publication_count();
                 self.complete_effect(None, CoordinationEffect::Publication);
@@ -527,7 +557,11 @@ impl Simulation {
             self.owner = None;
             self.owner_live = false;
         }
-        if self.durable_publications != 0 && self.accepted[0] && !self.acknowledged[0] {
+        if self.durable_publications != 0
+            && self.accepted[0]
+            && !self.acknowledged[0]
+            && !self.unknown[0]
+        {
             self.acknowledged[0] = true;
             self.terminal_outcomes[0] = self.terminal_outcomes[0].saturating_add(1);
         }
@@ -561,6 +595,7 @@ impl Simulation {
         for (index, accepted) in self.accepted.iter().enumerate() {
             value ^= u64::from(*accepted).rotate_left(index as u32 + 1);
             value ^= u64::from(self.acknowledged[index]).rotate_left(index as u32 + 9);
+            value ^= u64::from(self.unknown[index]).rotate_left(index as u32 + 25);
             value ^= u64::from(self.terminal_outcomes[index]).rotate_left(index as u32 + 17);
         }
         value
@@ -572,6 +607,13 @@ impl Simulation {
         assert!(self.published_sequence >= self.last_published_sequence);
         assert!(self.published_sequence <= self.durable_publications);
         assert!(self.terminal_outcomes.iter().all(|outcomes| *outcomes <= 1));
+        assert!(self.unknown.iter().enumerate().all(|(index, unknown)| {
+            !*unknown
+                || (self.accepted[index]
+                    && !self.acknowledged[index]
+                    && self.durable_publications != 0
+                    && self.terminal_outcomes[index] == 1)
+        }));
         assert!(
             self.acknowledged
                 .iter()
@@ -707,9 +749,10 @@ fn event(seed: u64) -> Event {
         37 => Event::ReceiverCrash,
         38 => Event::MembershipLoss,
         39 => Event::BeginCompaction,
-        _ => Event::FinishCompaction {
+        40 => Event::FinishCompaction {
             fenced: seed & 1 == 0,
         },
+        _ => Event::RootAcceptedPruneFailed,
     }
 }
 
@@ -743,6 +786,7 @@ fn seeded_schedules_replay_byte_identically() {
 #[test]
 fn broad_seed_corpus_is_replayable() {
     for seed in 0..512 {
+        println!("coordination_seed={seed};steps=256");
         let first = replay(seed, 256);
         let second = replay(seed, 256);
         assert_eq!(first.trace_bytes(), second.trace_bytes(), "seed {seed}");
@@ -833,6 +877,45 @@ fn duplicate_publication_completion_cannot_underflow_publication_state() {
     simulation.apply(Event::DuplicatePublicationCompletion);
     simulation.assert_invariants();
     assert_eq!(simulation.state.publication_count(), 0);
+}
+
+#[test]
+fn accepted_root_with_failed_prune_fences_before_success_reply() {
+    let mut simulation = Simulation::new();
+    simulation.apply(Event::Admit);
+    simulation.apply(Event::BeginWork);
+    simulation.apply(Event::BeginPublication);
+    simulation.apply(Event::RootAcceptedPruneFailed);
+
+    assert_eq!(simulation.published_sequence, 1);
+    assert_eq!(simulation.durable_publications, 1);
+    assert_eq!(simulation.retained, 0);
+    assert!(simulation.state.is_fenced());
+    assert!(simulation.unknown[0]);
+    assert!(!simulation.acknowledged[0]);
+    assert_eq!(simulation.terminal_outcomes[0], 1);
+    simulation.apply(Event::OwnerRestart);
+    simulation.assert_invariants();
+    assert_eq!(simulation.published_sequence, 1);
+    assert_eq!(simulation.terminal_outcomes[0], 1);
+}
+
+#[test]
+fn prune_failure_preserves_a_prior_follower_acknowledgement() {
+    let mut simulation = Simulation::new();
+    simulation.apply(Event::Admit);
+    simulation.apply(Event::BeginWork);
+    simulation.apply(Event::BeginPublication);
+    simulation.apply(Event::FollowerProof { accepted: true });
+    assert!(simulation.acknowledged[0]);
+    simulation.apply(Event::RootAcceptedPruneFailed);
+
+    simulation.assert_invariants();
+    assert!(simulation.state.is_fenced());
+    assert_eq!(simulation.published_sequence, 1);
+    assert!(simulation.acknowledged[0]);
+    assert!(!simulation.unknown[0]);
+    assert_eq!(simulation.terminal_outcomes[0], 1);
 }
 
 #[test]

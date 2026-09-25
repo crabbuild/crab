@@ -123,12 +123,14 @@ async fn churn_evicts_idle_cells_and_restores_exact_roots() {
         SqlWorkerPool::new(1, 2).unwrap(),
         16 * 1024 * 1024,
         session,
-        ReplicaHost::default().with_local_disk_budget(DiskBudget::new(64 * 1024 * 1024)),
+        ReplicaHost::default()
+            .with_local_disk_budget(DiskBudget::new(4 * Limits::default().max_capture_bytes)),
     )
     .unwrap();
 
     let first_handle = bootstrap_on(&runtime, &first, session).await;
     let second_handle = bootstrap_on(&runtime, &second, session).await;
+    assert!(runtime.local_disk_budget().used() > 0);
 
     let authority_first = CellAuthority::new(first.layout.clone());
     let authority_second = CellAuthority::new(second.layout.clone());
@@ -235,6 +237,7 @@ async fn churn_evicts_idle_cells_and_restores_exact_roots() {
         first_handle.drain().await.unwrap();
     }
     assert_eq!(runtime.stats().active_cells(), 0);
+    assert_eq!(runtime.local_disk_budget().used(), 0);
     runtime.shutdown().await.unwrap();
 }
 #[tokio::test(flavor = "multi_thread")]

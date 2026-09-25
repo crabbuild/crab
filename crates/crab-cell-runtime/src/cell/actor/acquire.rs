@@ -74,6 +74,7 @@ impl CellRuntime {
             + 'static,
     {
         self.ensure_acquiring()?;
+        self.check_application_limits(&catalog, replica.limits())?;
         self.activation_cell(&catalog, &observed)?;
         if observed.value().state != crate::control::ControlState::Recovering
             || observed.value().root.is_some()
@@ -124,6 +125,7 @@ impl CellRuntime {
             + 'static,
     {
         self.ensure_acquiring()?;
+        self.check_application_limits(&catalog, replica.limits())?;
         let cell = self.claiming_cell(&catalog, &observed, &owner)?;
         if owner.session != takeover.claimant() {
             return Err(Error::Fenced);
@@ -203,6 +205,8 @@ impl CellRuntime {
         destination: PathBuf,
     ) -> crate::Result<CellHandle> {
         self.ensure_acquiring()?;
+        self.check_application_limits(&catalog, replica.limits())?;
+        self.check_application_limits(&catalog, recovery_store.limits())?;
         self.activation_cell(&catalog, &observed)?;
         let replica = self.replica_with_directory_cache(replica, &destination)?;
         let observed = self
@@ -231,6 +235,7 @@ impl CellRuntime {
         owner: Owner,
     ) -> crate::Result<CellHandle> {
         self.ensure_acquiring()?;
+        self.check_application_limits(&catalog, replica.limits())?;
         let rollback_node_lease = self.inner.node_lease.guard()?;
         self.claiming_cell(&catalog, &observed, &owner)?;
         if observed.value().state != crate::control::ControlState::Idle
@@ -312,6 +317,8 @@ impl CellRuntime {
         owner: Owner,
     ) -> crate::Result<CellHandle> {
         self.ensure_acquiring()?;
+        self.check_application_limits(&catalog, replica.limits())?;
+        self.check_application_limits(&catalog, recovery_store.limits())?;
         let replica = self.replica_with_directory_cache(replica, &destination)?;
         let rollback_node_lease = self.inner.node_lease.guard()?;
         let rollback_authority = authority.clone();
@@ -587,6 +594,28 @@ impl CellRuntime {
         Ok(cell)
     }
 
+    fn check_application_limits(
+        &self,
+        catalog: &CatalogProof,
+        limits: crab_ltx::Limits,
+    ) -> crate::Result<()> {
+        let Some(application_limits) = self.inner.application_limits.get() else {
+            return Ok(());
+        };
+        let Some(&(database, capture)) = application_limits.get(&catalog.entry().namespace())
+        else {
+            return Err(Error::Control(
+                "Cell namespace is not declared by application",
+            ));
+        };
+        if limits.max_database_bytes != database || limits.max_capture_bytes != capture {
+            return Err(Error::Control(
+                "Cell storage limits differ from application",
+            ));
+        }
+        Ok(())
+    }
+
     fn activation_cell(
         &self,
         catalog: &CatalogProof,
@@ -641,6 +670,15 @@ impl CellRuntime {
         .ok_or(Error::Control("Cell activation destination has no parent"))?
         .to_owned();
         let replica = self.replica_with_directory_cache(replica, &scratch_directory)?;
+        let activation = match activation {
+            Activation::Bootstrap(mut bootstrap) => {
+                // The worker's new Db must use the same host admission and
+                // filesystem as the publisher that confirms its captured cuts.
+                bootstrap.replica = replica.clone();
+                Activation::Bootstrap(bootstrap)
+            }
+            restored => restored,
+        };
         let (reply, response) = oneshot::channel();
         let mut publisher = CellPublisher::new(replica, authority, observed, scratch_directory);
         if let Some(node_lease) = self.inner.node_lease.guard()? {
