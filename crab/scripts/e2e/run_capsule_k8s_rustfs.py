@@ -607,7 +607,9 @@ class Qualification:
         packs_before = git_pack_inventory(self.incremental)
         name = f"incremental-fetch-{ordinal:05}"
         elapsed, requests, resources, _ = self.run(
-            [self.args.git_bin, "fetch", "origin"],
+            # Git runs auto maintenance after fetch by default; the harness owns
+            # repack timing so that background local work cannot skew the measurement.
+            [self.args.git_bin, "fetch", "--no-auto-maintenance", "origin"],
             self.incremental,
             meter=True,
             sample_resources=True,
