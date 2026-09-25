@@ -28,7 +28,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && printf 'crab:x:10001:\n' >> /etc/group \
     && printf 'crab:x:10001:10001:Crab server:/var/lib/crab:/bin/false\n' >> /etc/passwd \
-    && install -d -o 10001 -g 10001 /etc/crab /var/lib/crab/tmp
+    && install -d -o 10001 -g 10001 /etc/crab /var/lib/crab/tmp /var/lib/crab/cells
 
 COPY --from=builder /build/target/release/crab-http-server /usr/local/bin/crab-http-server
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
