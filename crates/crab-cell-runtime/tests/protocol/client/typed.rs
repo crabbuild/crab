@@ -122,6 +122,88 @@ async fn local_and_peer_command_share_digest_dedup_and_query_state() {
 
     fixture.handle().drain().await.unwrap();
 }
+
+#[tokio::test]
+async fn runtime_client_forwards_to_the_remote_owner() {
+    let fixture = fixture().await;
+    let caller = CellRuntime::new(
+        SqlWorkerPool::new(1, 4).unwrap(),
+        4 * 1024 * 1024,
+        SessionId::from_bytes([6; 16]),
+    )
+    .unwrap();
+    let signer = PeerSigner::new(
+        SessionId::from_bytes([12; 16]),
+        fixture.registry.release_digest(),
+        ed25519_dalek::SigningKey::from_bytes(&[13; 32]),
+    );
+    let verifier = Arc::new(PeerVerifier::new(
+        SessionId::from_bytes([12; 16]),
+        fixture.registry.release_digest(),
+        signer.verifying_key(),
+    ));
+    let dispatcher = Arc::new(PeerDispatcher::new(
+        Arc::clone(&fixture.registry),
+        Arc::new(LocalResolver {
+            target: fixture.target.clone(),
+            handle: fixture.handle().clone(),
+        }),
+        Arc::new(RepositoryAuthorizer),
+    ));
+    let round_trip: Arc<dyn PeerRoundTrip> = Arc::new(LoopbackRoundTrip {
+        verifier,
+        dispatcher,
+    });
+    let client = CellClient::runtime_with_peer(
+        Arc::clone(&fixture.registry),
+        caller.clone(),
+        fixture.layout.clone(),
+        Arc::new(signer),
+        PeerPrincipal {
+            issuer: "https://identity.example".into(),
+            subject: "alice".into(),
+            actions: vec!["repository.issue.create".into()],
+        },
+        Arc::clone(&round_trip),
+    );
+    let committed = client
+        .command::<CreateComment>(&fixture.target, mutation_identity(70), b"remote".to_vec())
+        .await
+        .unwrap();
+    let observed = client
+        .query::<CountComments>(&fixture.target, Some(committed.receipt), ())
+        .await
+        .unwrap();
+    assert_eq!(observed.output, 1);
+    let local = CellClient::runtime_with_peer(
+        Arc::clone(&fixture.registry),
+        fixture.runtime.as_ref().unwrap().clone(),
+        fixture.layout.clone(),
+        Arc::new(PeerSigner::new(
+            SessionId::from_bytes([22; 16]),
+            fixture.registry.release_digest(),
+            ed25519_dalek::SigningKey::from_bytes(&[23; 32]),
+        )),
+        PeerPrincipal {
+            issuer: "https://identity.example".into(),
+            subject: "alice".into(),
+            actions: vec!["repository.issue.create".into()],
+        },
+        round_trip,
+    );
+    // The signer is not enrolled in the loopback verifier; this succeeds only
+    // when the current local owner is selected before the peer transport.
+    assert_eq!(
+        local
+            .query::<CountComments>(&fixture.target, None, ())
+            .await
+            .unwrap()
+            .output,
+        1
+    );
+    caller.shutdown().await.unwrap();
+    fixture.handle().drain().await.unwrap();
+}
 #[tokio::test]
 async fn typed_client_rejects_conflicting_identity_receipt_and_module_before_execution() {
     let fixture = fixture().await;

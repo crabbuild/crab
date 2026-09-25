@@ -41,9 +41,10 @@ use uuid::Uuid;
 
 use crate::{RepositoryAccess, RepositoryConfig, peer_tls::PeerTlsIdentity, server::Server};
 
-mod client;
 mod node_log_client;
-pub(crate) use client::PeerHttpRoundTrip;
+pub(crate) use crab_cell_peer_http::PeerHttpRoundTrip;
+#[cfg(test)]
+mod client_tests;
 pub(crate) use node_log_client::NodeLogHttpTransport;
 
 const PROTOBUF_MEDIA_TYPE: &str = "application/x-protobuf";

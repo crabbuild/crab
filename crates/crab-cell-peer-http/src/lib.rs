@@ -1,12 +1,17 @@
+//! Owner-resolving HTTP transport for authenticated Cell peer requests.
+
+mod tls;
+
+pub use tls::{LoadedPeerTls, PeerTlsClient, PeerTlsIdentity, PeerTlsListener, TlsError};
+
 use std::{
     collections::VecDeque,
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use axum::http::{StatusCode, header};
 use crab_cell_runtime::Error as CellError;
 use crab_cell_runtime::cell::application::ApplicationIdentity;
 use crab_cell_runtime::control::authority::CellAuthority;
@@ -14,33 +19,62 @@ use crab_cell_runtime::identity::{CellTarget, Digest, SessionId};
 use crab_cell_runtime::node::{NodeAdvertisement, NodeDirectory};
 use crab_cell_runtime::peer::{PeerRoundTrip, wire as peer_wire};
 use futures_util::StreamExt;
-
-use super::{now_ms, remaining_timeout};
-use crate::peer_tls::PeerTlsClient;
+use http::{StatusCode, header};
 
 const PEER_FORWARD_PATH: &str = "internal/cells/v1/forward";
 const MAX_PEER_CLIENTS: usize = 1_024;
-const PROTOBUF_MEDIA_TYPE: &str = "application/x-protobuf";
+/// Content type accepted by the private peer forwarding endpoint.
+pub const PROTOBUF_MEDIA_TYPE: &str = "application/x-protobuf";
 
-pub(crate) struct PeerHttpRoundTrip {
-    identity: ApplicationIdentity,
+/// Builds an mTLS HTTP client pinned to one enrolled peer certificate and key.
+pub trait PeerHttpClientFactory: Send + Sync + 'static {
+    /// Builds a client that rejects any peer other than the pinned identity.
+    fn client(
+        &self,
+        certificate: Digest,
+        public_key: [u8; 32],
+    ) -> crab_cell_runtime::Result<reqwest::Client>;
+}
+
+/// Restricts which Cell targets this node may forward through a peer.
+pub trait PeerTargetScope: Send + Sync + 'static {
+    /// Rejects a target outside the product's routing scope.
+    fn check_target(&self, target: &CellTarget) -> crab_cell_runtime::Result<()>;
+}
+
+impl PeerTargetScope for ApplicationIdentity {
+    fn check_target(&self, target: &CellTarget) -> crab_cell_runtime::Result<()> {
+        if target.tenant() != self.tenant() || target.application() != self.application() {
+            return Err(CellError::PeerAuthorization(
+                "Cell target is outside the routed application",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Sends signed Cell requests to the current enrolled owner over HTTP.
+pub struct PeerHttpRoundTrip {
+    scope: Arc<dyn PeerTargetScope>,
     authority: CellAuthority,
     directory: NodeDirectory,
-    tls: PeerTlsClient,
+    tls: Arc<dyn PeerHttpClientFactory>,
     session: SessionId,
     clients: Arc<Mutex<VecDeque<CachedPeerClient>>>,
 }
 
 impl PeerHttpRoundTrip {
-    pub(crate) fn new(
-        identity: ApplicationIdentity,
+    /// Binds one application, authority, fleet directory, and local session.
+    #[must_use]
+    pub fn new(
+        scope: Arc<dyn PeerTargetScope>,
         authority: CellAuthority,
         directory: NodeDirectory,
-        tls: PeerTlsClient,
+        tls: Arc<dyn PeerHttpClientFactory>,
         session: SessionId,
     ) -> Self {
         Self {
-            identity,
+            scope,
             authority,
             directory,
             tls,
@@ -91,17 +125,11 @@ impl PeerHttpRoundTrip {
         request: Vec<u8>,
         timeout_ms: u32,
     ) -> crab_cell_runtime::Result<Vec<u8>> {
-        if target.tenant() != self.identity.tenant()
-            || target.application() != self.identity.application()
-        {
-            return Err(CellError::PeerAuthorization(
-                "Cell target is outside the routed application",
-            ));
-        }
+        self.scope.check_target(&target)?;
         if node.session() == self.session {
             return Err(CellError::CellNotActive);
         }
-        let now_ms = now_ms().map_err(peer_transport)?;
+        let now_ms = now_ms()?;
         if node.expires_at_ms() <= now_ms || node.endpoint().is_empty() {
             return Err(CellError::CellNotActive);
         }
@@ -122,13 +150,7 @@ impl PeerHttpRoundTrip {
     }
 
     async fn owner(&self, target: &CellTarget) -> crab_cell_runtime::Result<RemotePeer> {
-        if target.tenant() != self.identity.tenant()
-            || target.application() != self.identity.application()
-        {
-            return Err(CellError::PeerAuthorization(
-                "Cell target is outside the routed application",
-            ));
-        }
+        self.scope.check_target(target)?;
         let control = self
             .authority
             .load(target.cell_id())
@@ -142,7 +164,7 @@ impl PeerHttpRoundTrip {
         if owner.session == self.session {
             return Err(CellError::CellNotActive);
         }
-        let now_ms = now_ms().map_err(peer_transport)?;
+        let now_ms = now_ms()?;
         let enrolled = self
             .directory
             .load(owner.session, now_ms)
@@ -173,10 +195,7 @@ impl PeerHttpRoundTrip {
             }
         }
 
-        let client = self
-            .tls
-            .client(owner.certificate, owner.public_key)
-            .map_err(peer_transport)?;
+        let client = self.tls.client(owner.certificate, owner.public_key)?;
         let mut clients = self
             .clients
             .lock()
@@ -319,10 +338,10 @@ impl PeerRoundTrip for PeerHttpRoundTrip {
 impl Clone for PeerHttpRoundTrip {
     fn clone(&self) -> Self {
         Self {
-            identity: self.identity,
+            scope: Arc::clone(&self.scope),
             authority: self.authority.clone(),
             directory: self.directory.clone(),
-            tls: self.tls.clone(),
+            tls: Arc::clone(&self.tls),
             session: self.session,
             clients: Arc::clone(&self.clients),
         }
@@ -366,5 +385,18 @@ fn peer_transport(
     }
 }
 
-#[cfg(test)]
-mod tests;
+fn now_ms() -> crab_cell_runtime::Result<i64> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| CellError::Peer("system clock precedes Unix epoch"))?;
+    i64::try_from(elapsed.as_millis())
+        .map_err(|_| CellError::Peer("system clock exceeds peer time range"))
+}
+
+fn remaining_timeout(started: Instant, original_ms: u32) -> crab_cell_runtime::Result<u32> {
+    let elapsed_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+    original_ms
+        .checked_sub(elapsed_ms)
+        .filter(|remaining| *remaining > 0)
+        .ok_or(CellError::Deadline)
+}

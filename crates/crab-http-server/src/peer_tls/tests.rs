@@ -3,6 +3,7 @@
 use std::process::Command;
 
 use axum::{Router, extract::ConnectInfo, routing::get};
+use crab_cell_runtime::Digest as CellDigest;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 use url::Url;
@@ -100,15 +101,11 @@ impl IdentityFiles {
 fn identity_requires_one_ca_trusted_matching_ed25519_key() {
     let files = IdentityFiles::generate();
     let mut config = files.config(Url::parse("https://localhost:8789").unwrap());
-    let loaded = LoadedPeerTls::load(&config).unwrap();
-    assert_eq!(
-        loaded.signing_key().verifying_key().to_bytes(),
-        certificate_public_key(&load_certificates(&files.certificate).unwrap()[0]).unwrap()
-    );
+    load_peer_tls(&config).unwrap();
     config.peer_private_key = files.other_key.clone();
     assert!(matches!(
-        LoadedPeerTls::load(&config),
-        Err(Error::Config(_))
+        load_peer_tls(&config),
+        Err(Error::PeerTls(crab_cell_peer_http::TlsError::Config(_)))
     ));
 }
 
@@ -116,22 +113,9 @@ fn identity_requires_one_ca_trusted_matching_ed25519_key() {
 fn stable_tls_name_allows_a_node_specific_advertised_ip() {
     let files = IdentityFiles::generate();
     let mut config = files.config(Url::parse("https://10.42.3.17:8789").unwrap());
-    assert!(LoadedPeerTls::load(&config).is_err());
+    assert!(load_peer_tls(&config).is_err());
     config.peer_tls_server_name = Some("localhost".into());
-    LoadedPeerTls::load(&config).unwrap();
-}
-
-#[test]
-fn fleet_digest_is_independent_of_ca_order_and_duplicates() {
-    let first = IdentityFiles::generate();
-    let second = IdentityFiles::generate();
-    let first_ca = load_certificates(&first.ca).unwrap().remove(0);
-    let second_ca = load_certificates(&second.ca).unwrap().remove(0);
-
-    let ordered = fleet_digest(&[first_ca.clone(), second_ca.clone()]);
-    let reordered = fleet_digest(&[second_ca, first_ca.clone(), first_ca]);
-
-    assert_eq!(ordered, reordered);
+    load_peer_tls(&config).unwrap();
 }
 
 #[tokio::test]
@@ -142,7 +126,7 @@ async fn listener_requires_mtls_and_exposes_the_verified_leaf_identity() {
     let mut config =
         files.config(Url::parse(&format!("https://127.0.0.1:{}", address.port())).unwrap());
     config.peer_tls_server_name = Some("localhost".into());
-    let loaded = LoadedPeerTls::load(&config).unwrap();
+    let loaded = load_peer_tls(&config).unwrap();
     let certificate = loaded.certificate();
     let public_key = loaded.signing_key().verifying_key().to_bytes();
     let peer_client = loaded.client_identity();
@@ -176,11 +160,17 @@ async fn listener_requires_mtls_and_exposes_the_verified_leaf_identity() {
     let anonymous = client_builder(roots.clone()).build().unwrap();
     assert!(anonymous.get(&url).send().await.is_err());
 
+    let idle = tokio::net::TcpStream::connect(address).await.unwrap();
     let client = peer_client.client(certificate, public_key).unwrap();
     assert_eq!(
-        client.get(&url).send().await.unwrap().text().await.unwrap(),
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            client.get(&url).send().await.unwrap().text().await.unwrap()
+        })
+        .await
+        .unwrap(),
         expected
     );
+    drop(idle);
     let wrong_pin = peer_client
         .client(CellDigest::from_bytes([9; 32]), public_key)
         .unwrap();

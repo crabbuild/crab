@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::{
     auth::Identity,
     peer::{LocalCellResolver, NodePublisher, PeerHttpRoundTrip, PeerReceiver},
-    peer_tls::{LoadedPeerTls, PeerTlsIdentity, tests::IdentityFiles},
+    peer_tls::{PeerTlsIdentity, load_peer_tls, tests::IdentityFiles},
 };
 
 struct UnavailablePeer;
@@ -136,7 +136,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     );
     let identity_files = IdentityFiles::generate();
     let peer_tls = Arc::new(
-        LoadedPeerTls::load(&identity_files.config(url::Url::parse(&management_endpoint).unwrap()))
+        load_peer_tls(&identity_files.config(url::Url::parse(&management_endpoint).unwrap()))
             .unwrap(),
     );
     let image = Digest::from_bytes([6; 32]);
@@ -284,10 +284,10 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
 
     let ingress_runtime = runtime(ingress_session);
     let round_trip: Arc<dyn PeerRoundTrip> = Arc::new(PeerHttpRoundTrip::new(
-        identity,
+        Arc::new(identity),
         authority.clone(),
         directory.clone(),
-        peer_tls.client_identity(),
+        Arc::new(peer_tls.client_identity()),
         ingress_session,
     ));
     let ingress_router = crate::cells::RepositoryCellRouter::new(

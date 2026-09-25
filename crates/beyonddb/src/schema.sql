@@ -1,0 +1,42 @@
+CREATE TABLE ddb_tables (
+    table_name TEXT PRIMARY KEY,
+    table_id TEXT NOT NULL UNIQUE,
+    record BLOB NOT NULL
+);
+
+CREATE TABLE ddb_items (
+    table_id TEXT NOT NULL REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
+    item_key BLOB NOT NULL,
+    item BLOB NOT NULL,
+    PRIMARY KEY (table_id, item_key)
+);
+
+CREATE TABLE ddb_routes (
+    table_id TEXT PRIMARY KEY REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
+    route_epoch TEXT NOT NULL,
+    route_table BLOB NOT NULL
+);
+
+CREATE TABLE ddb_route_partitions (
+    table_id TEXT NOT NULL REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
+    partition_id BLOB NOT NULL,
+    lower_bound BLOB NOT NULL,
+    upper_bound BLOB NOT NULL,
+    epoch TEXT NOT NULL,
+    PRIMARY KEY (table_id, partition_id)
+);
+
+CREATE UNIQUE INDEX ddb_route_partition_lookup
+    ON ddb_route_partitions (table_id, lower_bound);
+
+CREATE TABLE ddb_split_plans (
+    table_id TEXT PRIMARY KEY REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
+    plan BLOB NOT NULL
+);
+
+CREATE TABLE ddb_iam_user_policies (
+    user_name TEXT NOT NULL,
+    policy_name TEXT NOT NULL,
+    document TEXT NOT NULL,
+    PRIMARY KEY (user_name, policy_name)
+);

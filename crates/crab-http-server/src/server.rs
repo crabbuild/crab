@@ -1022,7 +1022,7 @@ pub async fn serve(config: Config) -> Result<()> {
     let startup = crate::cells::verify_startup_release(&config).await?;
     crate::cells::verify_repository_cells(&startup.layout, startup.identity, repository_cells)
         .await?;
-    let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
+    let peer_tls = crate::peer_tls::load_peer_tls(&config.cells)?;
     let session = SessionId::from_bytes(Uuid::now_v7().into_bytes());
     let registry = Arc::new(startup.registry);
     // Keep node-directory CAS traffic on a separate HTTP client from bulk Git
@@ -1145,10 +1145,10 @@ pub async fn serve(config: Config) -> Result<()> {
         cell_runtime.clone(),
     );
     let peer_round_trip: Arc<dyn PeerRoundTrip> = Arc::new(crate::peer::PeerHttpRoundTrip::new(
-        startup.identity,
+        Arc::new(startup.identity),
         crab_cell_runtime::control::authority::CellAuthority::new(startup.layout.clone()),
         directory.clone(),
-        peer_tls.client_identity(),
+        Arc::new(peer_tls.client_identity()),
         session,
     ));
     let node_log_transport: Arc<dyn crab_cell_runtime::node::log_transport::NodeLogTransport> =
