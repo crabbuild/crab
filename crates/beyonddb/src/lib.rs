@@ -55,6 +55,8 @@ const NAMESPACE: NamespaceId = NamespaceId::from_bytes([0x42; 16]);
 const DATA_MODULE: &str = "beyonddb-data";
 const DATA_NAMESPACE: NamespaceId = NamespaceId::from_bytes([0x43; 16]);
 const APPLICATION: ApplicationId = ApplicationId::from_bytes([0x42; 16]);
+/// Stable Cell application identity for BeyondDB storage layouts.
+pub const APPLICATION_ID: ApplicationId = APPLICATION;
 const SCHEMA: &str = include_str!("schema.sql");
 const OPERATION_BYTES: u32 = 4 * 1024 * 1024 + 64 * 1024;
 
