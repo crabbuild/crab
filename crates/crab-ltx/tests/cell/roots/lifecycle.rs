@@ -3,6 +3,91 @@
 use super::*;
 
 #[tokio::test]
+async fn read_only_roots_keep_exact_snapshots_and_release_local_disk() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let mut writer = Db::open(&directory.path().join("source.sqlite"), Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction
+                .execute_batch("CREATE TABLE counter(value INTEGER); INSERT INTO counter VALUES(1)")
+        })
+        .unwrap();
+    let first = writer.capture().unwrap();
+    let disk = DiskBudget::new(8 << 20);
+    let replica = replica(Store::new(Arc::new(InMemory::new())), [41; 32], [42; 16])
+        .with_host(Host::default().with_local_disk_budget(disk.clone()));
+    let first_root = replica.prepare(None, &first, 1, 1).await.unwrap().root();
+    let first_path = directory.path().join("first.sqlite");
+    let first_view = replica
+        .open_root(&first_root)
+        .await
+        .unwrap()
+        .open_read_only(&first_path)
+        .await
+        .unwrap();
+    assert_eq!(first_view.root(), first_root);
+    assert!(disk.used() > 0);
+    assert!(
+        replica
+            .open_root(&first_root)
+            .await
+            .unwrap()
+            .open_read_only(&first_path)
+            .await
+            .is_err()
+    );
+    assert!(first_path.exists());
+    {
+        let connection = first_view.connection().unwrap();
+        let value: i64 = connection
+            .query_row("SELECT value FROM counter", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, 1);
+        assert!(
+            connection
+                .execute("UPDATE counter SET value=99", [])
+                .is_err()
+        );
+    }
+
+    writer
+        .transaction(|transaction| transaction.execute_batch("UPDATE counter SET value=2"))
+        .unwrap();
+    let second = writer.capture().unwrap();
+    let second_root = replica
+        .prepare(Some(&first_root), &second, 2, 1)
+        .await
+        .unwrap()
+        .root();
+    let second_path = directory.path().join("second.sqlite");
+    let second_view = replica
+        .open_root(&second_root)
+        .await
+        .unwrap()
+        .open_read_only(&second_path)
+        .await
+        .unwrap();
+    let old: i64 = first_view
+        .connection()
+        .unwrap()
+        .query_row("SELECT value FROM counter", [], |row| row.get(0))
+        .unwrap();
+    let current: i64 = second_view
+        .connection()
+        .unwrap()
+        .query_row("SELECT value FROM counter", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!((old, current), (1, 2));
+
+    drop(first_view);
+    drop(second_view);
+    assert!(!first_path.exists());
+    assert!(!second_path.exists());
+    assert_eq!(disk.used(), 0);
+    writer.close().unwrap();
+}
+
+#[tokio::test]
 async fn small_appends_report_a_bounded_publication_cost() {
     let directory = tempfile::TempDir::new().unwrap();
     let mut writer = Db::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();

@@ -36,6 +36,9 @@ const MAX_STATE_STREAM_CHUNKS: usize = 1_024;
 mod tests;
 
 mod local;
+mod replica;
+
+pub use replica::CellReadReplica;
 
 pub use local::command_operation_digest;
 pub(crate) use local::{

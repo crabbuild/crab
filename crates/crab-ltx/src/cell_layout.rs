@@ -110,6 +110,12 @@ impl CellStorageLayout {
         self.application_path(&format!("cells/{}/control.json", encode_hex(cell)))
     }
 
+    /// Returns the advisory desired read-replica count for one Cell.
+    #[must_use]
+    pub fn read_policy_path(&self, cell: &[u8; 32]) -> Path {
+        self.application_path(&format!("cells/{}/read-policy.json", encode_hex(cell)))
+    }
+
     /// Returns the immutable object path for one Cell incarnation.
     #[must_use]
     pub fn incarnation_object_path(

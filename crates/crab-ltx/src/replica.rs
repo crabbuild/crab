@@ -18,12 +18,14 @@ mod compaction;
 pub(crate) mod directory;
 mod merge;
 mod prepare;
+mod read_only;
 mod restore;
 pub(crate) mod root;
 mod upload;
 mod verify;
 
 use directory::{DirectoryEntry, DirectorySpan, DirectoryTree, ObjectExtent};
+pub use read_only::ReadOnlyRoot;
 use root::{
     RootDocument, SegmentDescriptor, decode_root, decode_segment_page, encode_root,
     encode_segment_page,
@@ -293,6 +295,14 @@ impl VerifiedRoot {
             .host
             .observe_ltx_logical_read(crate::LtxReadOrigin::Cold);
         restore::run(&self.pages, destination).await
+    }
+
+    /// Restores this exact root into a fresh, owned read-only SQLite view.
+    ///
+    /// The destination and its sidecars must not exist. The view removes its
+    /// local file and releases its disk reservation when the last owner drops.
+    pub async fn open_read_only(&self, destination: &Path) -> Result<ReadOnlyRoot> {
+        ReadOnlyRoot::open(self, destination).await
     }
 }
 

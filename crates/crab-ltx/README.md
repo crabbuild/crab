@@ -83,6 +83,12 @@ The safe write path is:
 Recovery reverses the boundary: load the authority-pinned `RootRef`, verify its
 complete immutable object graph, then restore it or activate sparse SQL.
 
+`VerifiedRoot::open_read_only` restores an exact root to a fresh, private
+SQLite file and opens it with SQLite read-only and query-only guards. Its owned
+view releases the file and disk reservation on drop. This is a full restore;
+it does not yet provide the sparse read-replica view or Cell-authority response
+gate required by the proposed read-replica design.
+
 ### What Cell authority does
 
 Cell authority is the publication boundary implemented by `crab-cell-runtime`,

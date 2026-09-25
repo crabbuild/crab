@@ -322,7 +322,7 @@ fn next_sequence(transaction: &crab_ltx::rusqlite::Transaction<'_>) -> Result<u6
         .ok_or(Error::Command("commit sequence overflow"))
 }
 
-fn current_sequence(connection: &crab_ltx::rusqlite::Connection) -> Result<u64> {
+pub(crate) fn current_sequence(connection: &crab_ltx::rusqlite::Connection) -> Result<u64> {
     let sequence = connection
         .query_row(
             "SELECT commit_sequence FROM sys_meta WHERE singleton = 1",

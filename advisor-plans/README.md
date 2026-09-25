@@ -835,3 +835,19 @@ and update its ledger in the plan after its named evidence passes.
 | Plan | Priority | Depends on | Status |
 | --- | --- | --- | --- |
 | [035](035-cell-runtime-continuous-hardening.md) | P0 safety/capacity; P1 optimization | Plans 009, 012, 015, 024, 032, 034 as named by slice | IN PROGRESS — local durability, hydration/retention, resource-accounting, seven-Cell/two-shard reuse, and CI proof expanded; protected qualification still required |
+
+## Cell read replicas and promotion
+
+[036](036-cell-read-replicas-and-fenced-promotion.md) proposes a variable
+number of S3-rooted read replicas on live nodes. An acknowledged write in this
+profile must reach the exact S3 control root, so loss of every reader does not
+discard acknowledged state. A replacement reader restores from S3, and a
+successor becomes the only writer through the existing new-epoch takeover CAS.
+The current server still routes reads only to owners. The library now has a
+full-restore read-only snapshot opener, a gated typed query path, and an S3
+desired-count record. Placement, routing, an S3-only acknowledgement profile,
+and production qualification remain open.
+
+| Plan | Priority | Effort | Depends on | Status |
+| --- | --- | --- | --- | --- |
+| [036](036-cell-read-replicas-and-fenced-promotion.md) | P1 read scaling / P0 safety | XL | 032 and 035 recovery implementation; their protected gates before production enablement | PARTIAL — local snapshot query and desired-count store; product wiring and qualification TODO |

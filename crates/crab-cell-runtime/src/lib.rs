@@ -43,6 +43,7 @@ pub mod peer;
 pub mod primitives;
 pub mod publication;
 pub mod qualification;
+pub mod read_policy;
 pub mod recovery;
 pub mod registry;
 
@@ -53,7 +54,8 @@ pub use cell::executor::{MutationIdentity, Resolution};
 
 pub use cell::worker::SqlWorkerPool;
 pub use client::{
-    CellClient, Committed, InvocationError, Observed, PendingMutation, PreparedCommand, Receipt,
+    CellClient, CellReadReplica, Committed, InvocationError, Observed, PendingMutation,
+    PreparedCommand, Receipt,
 };
 
 pub use error::{Error, Result};

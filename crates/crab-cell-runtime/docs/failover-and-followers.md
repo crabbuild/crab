@@ -29,6 +29,10 @@ The follower tier is a **durability log**, not a second SQLite owner.
 This distinction preserves one writer while removing object-store upload
 latency from the common response path. It does not create read replicas, allow
 follower reads, or permit a secondary to accept writes.
+The separate read-only exact-root query capability in
+[Plan 036](../../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md)
+is not wired to product routing or follower durability. A durability-log
+follower still cannot answer SQL queries or promote without the Cell control CAS.
 
 ```mermaid
 flowchart LR
