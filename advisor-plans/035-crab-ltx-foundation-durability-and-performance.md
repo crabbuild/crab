@@ -353,3 +353,11 @@ status of this plan in `advisor-plans/README.md` after each slice.
   those ancestors leaf-to-root once per session; failure fences the writer.
   The model failed before this fix and passes with it. This remains modeled
   evidence until the dedicated-host fault run confirms the actual filesystem.
+- After that fix, the ignored
+  `rustfs_process_killed_sparse_owner_restores_published_root_and_continues`
+  runtime test passed on `588b653510d` against a disposable, isolated RustFS
+  1.0.0-rc.1 bucket and prefix on Darwin 25.5.0 arm64. The sparse owner
+  published the exact root, was killed, lost its local files, and a successor
+  read the acknowledged value and published the next commit. This is local
+  provider/process-loss evidence, not a physical power-cut or protected
+  qualification receipt.
