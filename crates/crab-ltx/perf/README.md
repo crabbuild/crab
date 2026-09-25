@@ -100,9 +100,9 @@ important fields are:
 - `workload_write_us`: SQLite commit time for schema plus the `N` inserts.
 - `capture_us`: local WAL-to-LTX capture time, including local file syncs.
 - `capture_*_us`: Crab's capture phase ledger. `capture_fsync_us` is the LTX
-  file sync; `capture_parent_sync_us` is the directory-entry sync that makes
-  the atomic rename durable. The other fields split position resolution, WAL
-  reads, page collection, encoding, and local writes.
+  file sync; `capture_parent_sync_us` includes the rename's parent sync and,
+  on the first cut, the new directory-chain syncs. The other fields split
+  position resolution, WAL reads, page collection, encoding, and local writes.
 - `capture_barrier_us`: only populated for the Crab deferred mode; it includes
   the grouped file flush and final parent-directory barrier and is included in
   `capture_us`.
@@ -139,10 +139,24 @@ Celld path fsyncs the file but uses a plain rename without a parent-directory
 sync. Do not treat the capture-only gap as a portable performance win without
 making that durability choice explicit.
 
-The September 21 comparison predates the fix that syncs the newly created
-`ltx/0`, `ltx`, and session-directory names on the first locally durable cut.
+The September 21 comparison and the sidecar before/after matrix below predate
+the fix that syncs the newly created `ltx/0`, `ltx`, and session-directory names
+on the first locally durable cut.
 Its numbers are historical rather than a current-build timing claim. Later
 cuts in the same session reuse that directory-chain proof.
+
+The `replica-cost` JSON now separates the schema bootstrap's first immediate
+capture (`bootstrap_capture_us`) and its complete parent-sync phase
+(`bootstrap_parent_sync_us`) from measured commands. On the current build,
+seven independent release processes with 4 KiB commands measured first-cut
+capture at 6,665 / 9,591 µs p50 / p95 and parent sync at 3,003 / 6,024 µs.
+This was macOS 25.5 on the same external APFS SSD, Rust 1.97.0, bundled
+SQLite 3.49.1, and the in-memory object store. The phase includes the final
+LTX rename's direct-parent sync and the three one-time ancestor syncs; it
+does not isolate those four calls individually. Raw per-process JSON is at
+`$HOME/Workspace/crabbuild-target/crab-1bab/ltx-firstcut-20260925/`.
+Reproduce each process with the release binary and
+`--payload-bytes 4096 --commands 12 --warmup 5`; repeat seven times.
 
 The Celld runner accepts `--sync-parent` as a diagnostic contract-normalization
 mode. After each upstream `Db::sync()`, it syncs Celld's L0 directory before

@@ -361,3 +361,9 @@ status of this plan in `advisor-plans/README.md` after each slice.
   read the acknowledged value and published the next commit. This is local
   provider/process-loss evidence, not a physical power-cut or protected
   qualification receipt.
+- The local `replica-cost` runner now reports first-cut capture and parent-sync
+  separately. Seven release-process 4 KiB runs on the current build measured
+  first-cut capture at 6,665 / 9,591 µs p50 / p95 and parent sync at
+  3,003 / 6,024 µs. Raw JSON and reproduction details are in `perf/README.md`.
+  These figures quantify the one-time local barrier cost, not Cell response
+  latency or an end-to-end performance win.

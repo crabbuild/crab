@@ -56,6 +56,8 @@ struct Report {
     sqlite_version: &'static str,
     payload_bytes: usize,
     measured_commands: usize,
+    bootstrap_capture_us: u64,
+    bootstrap_parent_sync_us: u64,
     objects_per_command: u64,
     bytes_per_command: u64,
     objects_p95: u64,
@@ -105,7 +107,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         transaction
             .execute_batch("CREATE TABLE payload(id INTEGER PRIMARY KEY, value BLOB NOT NULL)")
     })?;
+    let bootstrap_started = Instant::now();
     let first = database.capture()?;
+    let bootstrap_capture_us = bootstrap_started.elapsed().as_micros() as u64;
+    let bootstrap_parent_sync_us = first.timing.parent_sync_nanos / 1_000;
     let mut root = Some(replica.prepare(None, &first, 1, 1).await?.root());
     let _bootstrap = replica.take_publication_cost();
 
@@ -176,7 +181,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if samples.is_empty() {
         return Err("at least one measured command is required".into());
     }
-    let report = summarize(config, store_label, &samples);
+    let report = summarize(
+        config,
+        store_label,
+        &samples,
+        bootstrap_capture_us,
+        bootstrap_parent_sync_us,
+    );
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
@@ -231,7 +242,13 @@ fn percentile(values: &[u64], percent: usize) -> u64 {
     sorted[(sorted.len() * percent).div_ceil(100).saturating_sub(1)]
 }
 
-fn summarize(config: Config, store: &'static str, samples: &[Sample]) -> Report {
+fn summarize(
+    config: Config,
+    store: &'static str,
+    samples: &[Sample],
+    bootstrap_capture_us: u64,
+    bootstrap_parent_sync_us: u64,
+) -> Report {
     let objects: Vec<u64> = samples.iter().map(|sample| sample.objects).collect();
     let bytes: Vec<u64> = samples.iter().map(|sample| sample.bytes).collect();
     let elapsed: Vec<u64> = samples.iter().map(|sample| sample.elapsed_us).collect();
@@ -254,6 +271,8 @@ fn summarize(config: Config, store: &'static str, samples: &[Sample]) -> Report 
         },
         payload_bytes: config.payload_bytes,
         measured_commands: samples.len(),
+        bootstrap_capture_us,
+        bootstrap_parent_sync_us,
         objects_per_command: total_objects / samples.len() as u64,
         bytes_per_command: total_bytes / samples.len() as u64,
         objects_p95: percentile(&objects, 95),
