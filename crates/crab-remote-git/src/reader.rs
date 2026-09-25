@@ -97,6 +97,11 @@ pub(crate) type GitObject = RemoteGitObject;
 const MAX_COALESCED_RANGE_BYTES: u64 = 8 * 1024 * 1024;
 // Include small gaps to avoid a separate object-store request for each entry.
 const MAX_COALESCED_GAP_BYTES: u64 = 32 * 1024;
+// Capsule-run members share immutable objects with larger, authenticated gaps
+// than standalone packs. Bound each source-backed request and its overread.
+const MAX_COALESCED_SOURCE_RANGE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_COALESCED_SOURCE_GAP_BYTES: u64 = 64 * 1024;
+const MAX_COALESCED_SOURCE_EXTRA_BYTES: u64 = 4 * 1024 * 1024;
 const DELTA_PREFETCH_BATCH_SIZE: usize = 50_000;
 const MATERIALIZE_CHUNK_SIZE: usize = 256;
 // Large object batches are cheaper to resolve from the immutable pack indexes
@@ -121,6 +126,7 @@ struct CoalescedRange {
     source: CoalescedRangeSource,
     start: u64,
     end: u64,
+    extra_bytes: u64,
     entries: Vec<CoalescedRangeEntry>,
 }
 
@@ -3009,6 +3015,9 @@ fn coalesce_ranges(
                 let range = current.as_mut().ok_or(Error::InternalInvariant {
                     invariant: "coalesced range disappeared while extending",
                 })?;
+                range.extra_bytes = range
+                    .extra_bytes
+                    .saturating_add(start.saturating_sub(range.end));
                 range.end = range.end.max(end);
                 range.entries.push(CoalescedRangeEntry {
                     oid,
@@ -3024,6 +3033,7 @@ fn coalesce_ranges(
                 source: CoalescedRangeSource::Pack(locator.pack_id),
                 start,
                 end,
+                extra_bytes: 0,
                 entries: vec![CoalescedRangeEntry {
                     oid,
                     locator,
@@ -3104,13 +3114,20 @@ impl RemoteGitReader {
                             stage: CorruptionStage::PackEntry,
                         })?;
                 let can_extend = current.as_ref().is_some_and(|range| {
-                    start <= range.end.saturating_add(MAX_COALESCED_GAP_BYTES)
-                        && end.saturating_sub(range.start) <= MAX_COALESCED_RANGE_BYTES
+                    let extra_bytes = range
+                        .extra_bytes
+                        .saturating_add(start.saturating_sub(range.end));
+                    start <= range.end.saturating_add(MAX_COALESCED_SOURCE_GAP_BYTES)
+                        && end.saturating_sub(range.start) <= MAX_COALESCED_SOURCE_RANGE_BYTES
+                        && extra_bytes <= MAX_COALESCED_SOURCE_EXTRA_BYTES
                 });
                 if can_extend {
                     let range = current.as_mut().ok_or(Error::InternalInvariant {
                         invariant: "source coalesced range disappeared while extending",
                     })?;
+                    range.extra_bytes = range
+                        .extra_bytes
+                        .saturating_add(start.saturating_sub(range.end));
                     range.end = range.end.max(end);
                     range.entries.push(entry);
                 } else {
@@ -3121,6 +3138,7 @@ impl RemoteGitReader {
                         source: CoalescedRangeSource::Object(path.clone()),
                         start,
                         end,
+                        extra_bytes: 0,
                         entries: vec![entry],
                     });
                 }
@@ -3945,6 +3963,7 @@ mod tests {
             source: CoalescedRangeSource::Pack(MerkleHash::from_hex(&"11".repeat(32)).unwrap()),
             start: 0,
             end: 64,
+            extra_bytes: 0,
             entries: Vec::new(),
         };
         assert!(
@@ -4258,82 +4277,82 @@ mod tests {
         );
     }
 
-    #[test]
-    fn coalesces_entries_from_pack_members_sharing_one_source() {
-        let first_pack = MerkleHash::from_hex(&"11".repeat(32)).expect("first pack hash");
-        let second_pack = MerkleHash::from_hex(&"22".repeat(32)).expect("second pack hash");
+    fn reader_with_embedded_pack_sources(
+        sources: &[(MerkleHash, u64, u64, u64)],
+    ) -> RemoteGitReader {
         let path = ObjectPath::from("v2/capsules/run");
         let sidecar = |offset| RemoteGitSidecarRange {
             offset,
             length: 1,
             blake3: blake3::hash(b"x").to_hex().to_string(),
         };
-        let source = |object_offset, pack_size| {
-            RemoteGitPackSource::embedded_lazy(
-                path.clone(),
-                object_offset,
-                pack_size,
-                512,
-                sidecar(object_offset + 100),
-                sidecar(object_offset + 101),
-                sidecar(object_offset + 102),
-            )
-            .expect("valid lazy source")
-        };
         let mut pack_sources = HashMap::new();
-        pack_sources.insert(first_pack, source(0, 100));
-        pack_sources.insert(second_pack, source(200, 100));
-        let reader = RemoteGitReader::from_pinned_with_preferred_pack_indexes(
+        let mut inventory = Vec::with_capacity(sources.len());
+        for (pack_id, object_count, object_offset, pack_size) in sources.iter().copied() {
+            inventory.push(GitPackInventoryEntry {
+                pack_id,
+                object_count,
+                pack_size,
+            });
+            pack_sources.insert(
+                pack_id,
+                RemoteGitPackSource::embedded_lazy(
+                    path.clone(),
+                    object_offset,
+                    pack_size,
+                    object_offset + pack_size + 3,
+                    sidecar(object_offset + pack_size),
+                    sidecar(object_offset + pack_size + 1),
+                    sidecar(object_offset + pack_size + 2),
+                )
+                .expect("valid lazy source"),
+            );
+        }
+        RemoteGitReader::from_pinned_with_preferred_pack_indexes(
             Store::new(Arc::new(InMemory::new())),
             "repository",
-            [
-                GitPackInventoryEntry {
-                    pack_id: first_pack,
-                    object_count: 1,
-                    pack_size: 100,
-                },
-                GitPackInventoryEntry {
-                    pack_id: second_pack,
-                    object_count: 1,
-                    pack_size: 100,
-                },
-            ],
+            inventory,
             ReaderLookupSources::default().with_pack_sources(pack_sources),
             ReaderLimits::default(),
             Arc::new(RemoteGitRuntime::default()),
             RepositoryIdentity::new("provider", "repository", 1).expect("identity"),
             1,
         )
-        .expect("reader");
+        .expect("reader")
+    }
+
+    fn source_locator(
+        pack_id: MerkleHash,
+        ordinal: u32,
+        pack_offset: u64,
+        entry_len: u64,
+    ) -> GitObjectLocator {
+        GitObjectLocator {
+            ordinal,
+            pack_id,
+            location: GitObjectLocation {
+                pack_offset,
+                entry_len,
+                crc32: 0,
+            },
+            metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn coalesces_entries_from_pack_members_sharing_one_source() {
+        let first_pack = MerkleHash::from_hex(&"11".repeat(32)).expect("first pack hash");
+        let second_pack = MerkleHash::from_hex(&"22".repeat(32)).expect("second pack hash");
+        let reader = reader_with_embedded_pack_sources(&[
+            (first_pack, 1, 0, 100),
+            (second_pack, 1, 50_000, 100),
+        ]);
+        let path = ObjectPath::from("v2/capsules/run");
         let oid = gix_hash::ObjectId::empty_blob(gix_hash::Kind::Sha1);
         let ranges = reader
             .coalesce_reader_ranges(vec![
-                (
-                    oid,
-                    GitObjectLocator {
-                        ordinal: 0,
-                        pack_id: first_pack,
-                        location: GitObjectLocation {
-                            pack_offset: 10,
-                            entry_len: 5,
-                            crc32: 0,
-                        },
-                        metadata: Default::default(),
-                    },
-                ),
-                (
-                    oid,
-                    GitObjectLocator {
-                        ordinal: 0,
-                        pack_id: second_pack,
-                        location: GitObjectLocation {
-                            pack_offset: 10,
-                            entry_len: 5,
-                            crc32: 0,
-                        },
-                        metadata: Default::default(),
-                    },
-                ),
+                (oid, source_locator(first_pack, 0, 10, 5)),
+                (oid, source_locator(second_pack, 0, 10, 5)),
             ])
             .expect("coalesced ranges");
         assert_eq!(ranges.len(), 1);
@@ -4342,8 +4361,96 @@ mod tests {
             CoalescedRangeSource::Object(actual) if actual == &path
         ));
         assert_eq!(ranges[0].start, 10);
-        assert_eq!(ranges[0].end, 215);
+        assert_eq!(ranges[0].end, 50_015);
         assert_eq!(ranges[0].entries.len(), 2);
+    }
+
+    #[test]
+    fn source_coalescing_keeps_gaps_over_the_bound_in_separate_ranges() {
+        let first_pack = MerkleHash::from_hex(&"11".repeat(32)).expect("first pack hash");
+        let second_pack = MerkleHash::from_hex(&"22".repeat(32)).expect("second pack hash");
+        let reader = reader_with_embedded_pack_sources(&[
+            (first_pack, 1, 0, 100),
+            (second_pack, 1, 70_000, 100),
+        ]);
+        let oid = gix_hash::ObjectId::empty_blob(gix_hash::Kind::Sha1);
+        let ranges = reader
+            .coalesce_reader_ranges(vec![
+                (oid, source_locator(first_pack, 0, 10, 5)),
+                (oid, source_locator(second_pack, 0, 10, 5)),
+            ])
+            .expect("coalesced ranges");
+
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(
+            ranges
+                .iter()
+                .map(|range| range.entries.len())
+                .sum::<usize>(),
+            2
+        );
+    }
+
+    #[test]
+    fn source_coalescing_bounds_extra_bytes_and_preserves_large_entries() {
+        let pack_id = MerkleHash::from_hex(&"11".repeat(32)).expect("pack hash");
+        let oid = gix_hash::ObjectId::empty_blob(gix_hash::Kind::Sha1);
+        let gap = 60 * 1024;
+        let entry_count = 70_u64;
+        let pack_size = (entry_count - 1) * (gap + 5) + 15;
+        let reader = reader_with_embedded_pack_sources(&[(pack_id, entry_count, 0, pack_size)]);
+        let entries = (0..entry_count)
+            .map(|ordinal| {
+                (
+                    oid,
+                    source_locator(
+                        pack_id,
+                        u32::try_from(ordinal).expect("ordinal fits u32"),
+                        10 + ordinal * (gap + 5),
+                        5,
+                    ),
+                )
+            })
+            .collect();
+        let ranges = reader
+            .coalesce_reader_ranges(entries)
+            .expect("coalesced ranges");
+
+        assert_eq!(ranges.len(), 2);
+        assert!(
+            ranges
+                .iter()
+                .all(|range| range.extra_bytes <= MAX_COALESCED_SOURCE_EXTRA_BYTES)
+        );
+        assert_eq!(
+            ranges
+                .iter()
+                .map(|range| range.entries.len())
+                .sum::<usize>(),
+            70
+        );
+
+        let large_entry_len = MAX_COALESCED_SOURCE_RANGE_BYTES + 1;
+        let pack_size = large_entry_len + 15;
+        let reader = reader_with_embedded_pack_sources(&[(pack_id, 2, 0, pack_size)]);
+        let first_start = 10;
+        let second_start = first_start + large_entry_len;
+        let ranges = reader
+            .coalesce_reader_ranges(vec![
+                (
+                    oid,
+                    source_locator(pack_id, 0, first_start, large_entry_len),
+                ),
+                (oid, source_locator(pack_id, 1, second_start, 5)),
+            ])
+            .expect("large entries remain admitted");
+
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].start, first_start);
+        assert_eq!(ranges[0].end, second_start);
+        assert_eq!(ranges[0].entries.len(), 1);
+        assert_eq!(ranges[1].start, second_start);
+        assert_eq!(ranges[1].end, second_start + 5);
     }
 
     #[test]

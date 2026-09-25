@@ -104,6 +104,46 @@ def git_auto_maintenance_events(trace_path: Path) -> list[list[str]]:
     return events
 
 
+def git_pack_inventory(repository: Path) -> set[str]:
+    pack_directory = repository / ".git" / "objects" / "pack"
+    return {
+        path.stem.removeprefix("pack-")
+        for path in pack_directory.glob("pack-*.pack")
+    }
+
+
+def new_pack_ids(before: set[str], after: set[str]) -> list[str]:
+    return sorted(after - before)
+
+
+def require_at_most_one_new_pack(
+    ordinal: int, before: set[str], after: set[str]
+) -> list[str]:
+    installed = new_pack_ids(before, after)
+    if len(installed) > 1:
+        raise RuntimeError(
+            f"incremental fetch at {ordinal} installed {len(installed)} local packs"
+        )
+    return installed
+
+
+def parse_repack_summary(stdout: str) -> dict[str, int]:
+    envelope = json.loads(stdout)
+    data = envelope.get("data")
+    fields = (
+        "packs_before",
+        "packs_after",
+        "bytes_before",
+        "bytes_after",
+        "bytes_read",
+        "bytes_written",
+        "elapsed_ms",
+    )
+    if not isinstance(data, dict) or any(field not in data for field in fields):
+        raise RuntimeError("repack output is missing its structured summary")
+    return {field: int(data[field]) for field in fields}
+
+
 def sampled_blob_digests(
     git_bin: str, repository: Path, tip: str, *, limit: int = 32
 ) -> dict[str, dict[str, Any]]:
@@ -216,7 +256,7 @@ class Qualification:
         sample_resources: bool = False,
         operation: str | None = None,
         extra_env: dict[str, str] | None = None,
-    ) -> tuple[int, dict[str, Any], dict[str, int] | None]:
+    ) -> tuple[int, dict[str, Any], dict[str, int] | None, str]:
         before = self.proxy.snapshot(include_paths=False)
         started = time.monotonic()
         env = self.env()
@@ -255,7 +295,7 @@ class Qualification:
                         timed_out = True
                         break
                     try:
-                        process.wait(timeout=min(0.2, remaining))
+                        process.wait(timeout=min(0.05, remaining))
                     except subprocess.TimeoutExpired:
                         pass
                 exit_code = process.wait()
@@ -302,7 +342,11 @@ class Qualification:
             if sample_resources
             else None
         )
-        return elapsed_ms, requests if meter else {}, resources
+        return elapsed_ms, requests if meter else {}, resources, stdout_text
+
+    def trace_path(self, operation: str) -> Path:
+        self.trace2_root.mkdir(parents=True, exist_ok=True)
+        return self.trace2_root / f"{operation}.jsonl"
 
     def process_tree_resources(self, root_pid: int) -> tuple[int, int, int]:
         try:
@@ -481,8 +525,8 @@ class Qualification:
     def push(self, ordinal: int, oid: str) -> None:
         self.git(["update-ref", "refs/heads/main", oid], self.replay)
         self.trace2_root.mkdir(parents=True, exist_ok=True)
-        trace_path = self.trace2_root / f"push-{ordinal:05}.jsonl"
-        elapsed, requests, resources = self.run(
+        trace_path = self.trace_path(f"push-{ordinal:05}")
+        elapsed, requests, resources, _ = self.run(
             [str(self.crab), "push", "--json", "origin", "main:refs/heads/main"],
             self.replay,
             meter=True,
@@ -503,34 +547,50 @@ class Qualification:
             self.save()
 
     def repack(self, ordinal: int, phase: str) -> None:
-        elapsed, requests, _ = self.run(
+        name = f"repack-{phase}-{ordinal:05}"
+        elapsed, requests, resources, stdout = self.run(
             [str(self.crab), "repack", "--json"],
             self.replay,
             meter=True,
+            sample_resources=True,
             timeout=7200,
-            operation=f"repack-{phase}-{ordinal:05}",
+            operation=name,
+            extra_env={"GIT_TRACE2_EVENT": str(self.trace_path(name))},
         )
+        summary = parse_repack_summary(stdout)
         self.report["maintenance"].append(
             {
                 "ordinal": ordinal,
                 "operation": f"repack-{phase}",
                 "elapsed_ms": elapsed,
                 "object_store": requests,
+                "repack": summary,
+                "resources": resources,
             }
         )
         self.save()
 
-    def clone(self, target: Path, name: str, ordinal: int) -> None:
-        cache = self.root / "cache" / name
-        cache.mkdir(parents=True)
-        elapsed, requests, resources = self.run(
+    def clone(
+        self,
+        target: Path,
+        name: str,
+        ordinal: int,
+        *,
+        cache_name: str | None = None,
+    ) -> None:
+        cache = self.root / "cache" / (cache_name or name)
+        cache.mkdir(parents=True, exist_ok=True)
+        elapsed, requests, resources, _ = self.run(
             [str(self.crab), "clone", "--lazy", self.remote_url, str(target)],
             self.root,
             meter=True,
             sample_resources=True,
             timeout=7200,
             operation=name,
-            extra_env={"CRAB_CACHE_DIR": str(cache)},
+            extra_env={
+                "CRAB_CACHE_DIR": str(cache),
+                "GIT_TRACE2_EVENT": str(self.trace_path(name)),
+            },
         )
         self.report["maintenance"].append(
             {
@@ -544,13 +604,19 @@ class Qualification:
         self.save()
 
     def fetch(self, ordinal: int, expected: str) -> None:
-        elapsed, requests, _ = self.run(
+        packs_before = git_pack_inventory(self.incremental)
+        name = f"incremental-fetch-{ordinal:05}"
+        elapsed, requests, resources, _ = self.run(
             [self.args.git_bin, "fetch", "origin"],
             self.incremental,
             meter=True,
+            sample_resources=True,
             timeout=7200,
-            operation=f"incremental-fetch-{ordinal:05}",
+            operation=name,
+            extra_env={"GIT_TRACE2_EVENT": str(self.trace_path(name))},
         )
+        packs_after = git_pack_inventory(self.incremental)
+        installed_packs = require_at_most_one_new_pack(ordinal, packs_before, packs_after)
         actual = self.git(["rev-parse", "refs/remotes/origin/main"], self.incremental)
         if actual != expected:
             raise RuntimeError(f"fetch at {ordinal} returned {actual}, expected {expected}")
@@ -562,6 +628,9 @@ class Qualification:
                 "elapsed_ms": elapsed,
                 "object_store": requests,
                 "tip": actual,
+                "new_local_packs": installed_packs,
+                "local_pack_count": len(packs_after),
+                "resources": resources,
             }
         )
         self.save()
@@ -569,8 +638,23 @@ class Qualification:
     def summarize(self) -> None:
         seed = self.report["pushes"][0]
         pushes = self.report["pushes"][1:]
+        if len(pushes) != self.args.commits:
+            raise RuntimeError(f"expected {self.args.commits} incremental pushes, got {len(pushes)}")
+        fetches = [
+            item for item in self.report["maintenance"] if item["operation"] == "incremental-fetch"
+        ]
+        expected_fetches = self.args.commits // self.args.interval
+        if len(fetches) != expected_fetches:
+            raise RuntimeError(f"expected {expected_fetches} incremental fetches, got {len(fetches)}")
         latencies = [item["elapsed_ms"] for item in pushes]
         requests = [item["object_store"]["requests"] for item in pushes]
+        auto_events = [
+            event
+            for path in sorted(self.trace2_root.glob("*.jsonl"))
+            for event in git_auto_maintenance_events(path)
+        ]
+        if auto_events:
+            raise RuntimeError(f"Git ran automatic maintenance during qualification: {auto_events}")
         self.report["metrics"] = {
             "seed": {
                 "elapsed_ms": seed["elapsed_ms"],
@@ -594,11 +678,7 @@ class Qualification:
                 "under_10_average": sum(requests) / len(requests) < 10,
             },
             "push_windows": push_window_summaries(pushes, self.args.interval),
-            "git_auto_maintenance_events": [
-                event
-                for path in sorted(self.trace2_root.glob("*.jsonl"))
-                for event in git_auto_maintenance_events(path)
-            ],
+            "git_auto_maintenance_events": auto_events,
         }
         self.report["status"] = "passed"
         self.report["finished_at"] = now()
@@ -626,19 +706,39 @@ class Qualification:
                     self.fetch(ordinal, oid)
                     self.repack(ordinal, "interval")
 
-            self.clone(self.final_clone, "final-clone", len(commits))
+            self.clone(
+                self.final_clone,
+                "cold-final-clone",
+                len(commits),
+                cache_name="final-clones",
+            )
             expected = self.report["source"]["head"]
             actual = self.git(["rev-parse", "refs/remotes/origin/main"], self.final_clone)
             if actual != expected:
-                raise RuntimeError(f"final clone tip {actual} does not match {expected}")
+                raise RuntimeError(f"cold clone tip {actual} does not match {expected}")
             self.git(["fsck", "--strict", "--full"], self.final_clone, timeout=7200)
             source_samples = sampled_blob_digests(
                 self.args.git_bin, Path(self.args.source).resolve(), expected
             )
-            clone_samples = sampled_blob_digests(self.args.git_bin, self.final_clone, expected)
-            if clone_samples != source_samples:
-                raise RuntimeError("final clone sampled Git blob bytes differ from source")
-            fsck_ms, fsck_requests, _ = self.run(
+            cold_samples = sampled_blob_digests(self.args.git_bin, self.final_clone, expected)
+            if cold_samples != source_samples:
+                raise RuntimeError("cold clone sampled Git blob bytes differ from source")
+            self.clone(
+                self.warm_clone,
+                "warm-final-clone",
+                len(commits),
+                cache_name="final-clones",
+            )
+            warm_tip = self.git(
+                ["rev-parse", "refs/remotes/origin/main"], self.warm_clone
+            )
+            if warm_tip != expected:
+                raise RuntimeError(f"warm clone tip {warm_tip} does not match {expected}")
+            self.git(["fsck", "--strict", "--full"], self.warm_clone, timeout=7200)
+            warm_samples = sampled_blob_digests(self.args.git_bin, self.warm_clone, expected)
+            if warm_samples != source_samples:
+                raise RuntimeError("warm clone sampled Git blob bytes differ from source")
+            fsck_ms, fsck_requests, _, _ = self.run(
                 [str(self.crab), "fsck", "--jsonl"],
                 self.replay,
                 meter=True,
@@ -656,11 +756,14 @@ class Qualification:
             self.save()
             self.report["correctness"] = {
                 "final_tip": actual,
+                "warm_clone_tip": warm_tip,
                 "expected_tip": expected,
-                "strict_full_git_fsck": "passed",
+                "cold_clone_strict_full_git_fsck": "passed",
+                "warm_clone_strict_full_git_fsck": "passed",
                 "remote_crab_fsck": "passed",
                 "sampled_blob_count": len(source_samples),
-                "sampled_blob_bytes": "matched source",
+                "cold_clone_sampled_blob_bytes": "matched source",
+                "warm_clone_sampled_blob_bytes": "matched source",
                 "incremental_fetches": self.args.commits // self.args.interval,
             }
             self.summarize()

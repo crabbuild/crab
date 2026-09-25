@@ -97,6 +97,47 @@ class CapsuleKubernetesQualificationTests(unittest.TestCase):
                 [["git", "gc", "--auto"]],
             )
 
+    def test_pack_inventory_reports_only_new_complete_pack_bodies(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repository"
+            pack_directory = repository / ".git" / "objects" / "pack"
+            pack_directory.mkdir(parents=True)
+            (pack_directory / "pack-old.pack").write_bytes(b"old")
+            (pack_directory / "pack-new.pack").write_bytes(b"new")
+            (pack_directory / "pack-incomplete.idx").write_bytes(b"index only")
+
+            before = {"old"}
+            after = QUALIFICATION.git_pack_inventory(repository)
+
+        self.assertEqual(after, {"old", "new"})
+        self.assertEqual(QUALIFICATION.new_pack_ids(before, after), ["new"])
+        self.assertEqual(QUALIFICATION.require_at_most_one_new_pack(500, before, after), ["new"])
+
+    def test_fetch_pack_gate_rejects_multiple_new_packs(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "installed 2 local packs"):
+            QUALIFICATION.require_at_most_one_new_pack(500, set(), {"one", "two"})
+
+    def test_repack_summary_reads_the_structured_payload(self) -> None:
+        summary = {
+            "packs_before": 12,
+            "packs_after": 8,
+            "bytes_before": 1000,
+            "bytes_after": 900,
+            "bytes_read": 200,
+            "bytes_written": 100,
+            "elapsed_ms": 25,
+        }
+
+        parsed = QUALIFICATION.parse_repack_summary(
+            json.dumps({"schema": "repack", "version": "1.0", "data": summary})
+        )
+
+        self.assertEqual(parsed, summary)
+
+    def test_repack_summary_rejects_missing_fields(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "missing its structured summary"):
+            QUALIFICATION.parse_repack_summary(json.dumps({"data": {"packs_before": 1}}))
+
     @unittest.skipUnless(shutil.which("git"), "Git is required")
     def test_sampled_blob_digests_match_between_repository_and_clone(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
