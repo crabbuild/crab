@@ -60,6 +60,7 @@ def caddyfile() -> str:
         "\t\thealth_uri /livez",
         "\t\thealth_interval 1s",
         "\t\thealth_timeout 1s",
+        "\t\theader_down X-Crab-Fleet-Entry {rp.upstream.hostport}",
         "\t\tflush_interval -1",
         "\t}",
         "}",
