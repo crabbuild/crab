@@ -1,20 +1,20 @@
 # Cell issue fleet local qualification — 2026-09-25
 
 The reference issue and label service completed a staged Docker Compose run
-against one RustFS container. The run used source commit `ef59293a644` plus
-the uncommitted Cell issue fleet and 1 GiB budget changes in this worktree.
+against one RustFS container. The run used source commit `02715671102`,
+based on `origin/main` at `6626a726df2`.
 The locally built server image ID was
-`sha256:74164276da67dc349f75650f9fe1fd6109c19beb12322621fc541e267842d551`.
+`sha256:4ecf6e3e6e83263dbc521fc759c4a877c7f6f5e75fd9c555d25a89ebc7e2555e`.
 The host was an Apple M2 Max with 32 GiB RAM. Colima had 8 CPUs, 16 GiB RAM,
 and an 80 GiB virtual disk. RustFS used the pinned
 `1.0.0-beta.8-glibc` image and a private Compose volume.
 
 | Stage | Healthy nodes | Cell-backed repositories | Distinct owners | Stage time* | Largest node memory sample |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 3 | 3 | 3 | 3 | 40.026 s | 8.602 MiB |
-| 5 | 5 | 5 | 5 | 23.503 s | 10.07 MiB |
-| 10 | 10 | 10 | 10 | 49.833 s | 13.12 MiB |
-| 20 | 20 | 20 | 20 | 88.910 s | 19.89 MiB |
+| 3 | 3 | 3 | 3 | 33.216 s | 9.496 MiB |
+| 5 | 5 | 5 | 5 | 23.373 s | 10.01 MiB |
+| 10 | 10 | 10 | 9 | 45.858 s | 13.09 MiB |
+| 20 | 20 | 20 | 19 | 78.279 s | 22.18 MiB |
 
 *Stage time includes Compose startup, repository creation, serial issue and
 label writes, cross-node issue reads, Cell status inspection, and evidence capture.
@@ -33,12 +33,12 @@ An explicit RustFS object listing found Cell objects.
 After the 20-node stage, a `SIGKILL` of the owner of `work-20` caused another
 node to serve the acknowledged issue. The one-command run observed the exact
 same digest, transaction ID, checksum, and commit sequence after takeover in
-10.676 seconds. The killed node was restarted;
+11.033 seconds. The killed node was restarted;
 all 20 nodes were healthy and the issue remained readable afterward. These are
 individual recovery observations, not a recovery percentile or SLO.
 
 The raw machine report is retained outside the checkout at
-`$HOME/.codex/cell-issue-fleet/final-20260925/report.json`. The test project
+`$HOME/.codex/cell-issue-fleet/main-20260925/report.json`. The test project
 and its RustFS and Cell volumes remain available for inspection. This
 single-host run does not establish a supported Cell capacity, cloud durability,
 multi-host fault tolerance, concurrent throughput, or peak memory use.
