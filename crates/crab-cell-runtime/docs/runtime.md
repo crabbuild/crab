@@ -223,12 +223,30 @@ Bootstrap and every command transaction derive the earliest durable deadline fro
 
 The node scheduler:
 
-1. Reads revision-pinned catalog pages
-2. Assigns 256 catalog shards through rendezvous hashing
-3. Scans at most 128 due Cells per cycle
-4. Sends the typed maintenance Tick locally or to the authenticated owner
-5. Acquires an idle or stale Cell only when no valid owner can execute the Tick
-6. Runs registered activity and effect supervisors outside SQLite
+1. Ticks resident Cells whose published due time has passed, from memory
+2. Consumes due hints: one key per released deadline, listed from the current
+   minute bucket and the five behind it, each confirmed against its control
+3. Reads revision-pinned catalog pages and assigns 256 catalog shards through
+   rendezvous hashing
+4. Runs the shard scan as a backstop every thirtieth cycle, visiting at most
+   128 due Cells per scan
+5. Sends the typed maintenance Tick locally or to the authenticated owner
+6. Acquires an idle or stale Cell only when no valid owner can execute the Tick
+7. Runs registered activity and effect supervisors outside SQLite
+
+Steps 1 and 2 run every cycle, so a Cell this node owns and a Cell whose owner
+released it with a deadline are both ticked without a population scan. Step 4
+is what covers a missing hint — a failed write, a hint older than its window,
+or a Cell released before hints existed — and bounds that case at one backstop
+period instead of a full shard pass.
+
+A hint names one released Cell's deadline in the minute bucket that deadline
+falls in, and a listing walks the current bucket and the five behind it. A
+release whose deadline is already further behind than that window publishes
+nothing: no listing would see the key, so the backstop covers it instead of
+leaving behind an object nothing consumes. A key a listing meets but cannot
+parse is deleted, so a foreign object under the prefix cannot be re-listed
+forever.
 
 A Tick advances at most 128 ledger, expiry, lease, timer, or retention items. Protected shares prevent one maintenance class from starving another, and a Tick that reserves a share for a class it does not run fails instead of silently shrinking its usable work.
 

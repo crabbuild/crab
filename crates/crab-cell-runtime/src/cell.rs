@@ -3,6 +3,7 @@
 pub mod actor;
 pub mod application;
 pub mod catalog;
+pub mod due;
 pub mod executor;
 pub mod schema;
 pub mod worker;

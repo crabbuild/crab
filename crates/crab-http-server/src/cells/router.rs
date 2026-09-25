@@ -126,8 +126,12 @@ impl RepositoryCellRouter {
         }
         Ok(Self {
             identity,
-            catalog: CellCatalog::new(layout.clone(), identity.tenant()),
-            authority: CellAuthority::new(layout.clone()),
+            catalog: CellCatalog::with_telemetry(
+                layout.clone(),
+                identity.tenant(),
+                runtime.telemetry_handle(),
+            ),
+            authority: CellAuthority::with_telemetry(layout.clone(), runtime.telemetry_handle()),
             layout,
             registry,
             runtime,
@@ -429,6 +433,37 @@ impl RepositoryCellRouter {
         Arc::clone(&self.registry)
     }
 
+    /// Returns the node runtime this router dispatches through.
+    pub(crate) fn runtime(&self) -> &CellRuntime {
+        &self.runtime
+    }
+
+    /// Builds a scheduler Cell for a resident handle without metadata reads.
+    ///
+    /// The duplicate-Tick guard is the publish sequence the runtime reported:
+    /// if the Cell committed again, the Tick resolves `Stale` instead of
+    /// advancing a deadline twice.
+    pub(crate) async fn resident_scheduler_cell(
+        &self,
+        handle: CellHandle,
+    ) -> crate::Result<RepositoryCell> {
+        let entry = handle.catalog().entry();
+        let target = CellTarget::new(
+            self.identity.tenant(),
+            self.identity.application(),
+            entry.namespace(),
+            entry.partition(),
+        )?;
+        let shard = activation_shard(&target);
+        let operation = Arc::clone(&self.operation[shard]).read_owned().await;
+        Ok(RepositoryCell {
+            client: CellClient::local(Arc::clone(&self.registry), handle.clone()),
+            target,
+            handle: Some(handle),
+            _operation: Some(operation),
+        })
+    }
+
     pub(crate) fn recovery_scratch_directory(&self) -> PathBuf {
         self.session_dir.clone()
     }
@@ -666,7 +701,11 @@ impl RepositoryCellRouter {
         drop(operation);
         let _activation = self.activation[shard].lock().await;
         let operation = Arc::clone(&self.operation[shard]).read_owned().await;
-        if let Some(routed) = self.route_existing(&target, &principal).await? {
+        let mut idle = None;
+        if let Some(routed) = self
+            .route_existing_observed(&target, &principal, &mut idle)
+            .await?
+        {
             return Ok(ScheduledRepositoryCell {
                 cell: RepositoryCell {
                     _operation: Some(operation),
@@ -676,16 +715,24 @@ impl RepositoryCellRouter {
             });
         }
 
-        let proof = self
-            .catalog
-            .lookup(target.cell_id())
-            .await?
-            .ok_or(crab_cell_runtime::Error::CellNotActive)?;
-        let observed = self
-            .authority
-            .load(target.cell_id())
-            .await?
-            .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+        // An unowned observation from inside the activation window is the
+        // branch the activation would take anyway; anything else re-reads.
+        let (proof, observed) = match idle {
+            Some(resolved) => resolved,
+            None => {
+                let proof = self
+                    .catalog
+                    .lookup(target.cell_id())
+                    .await?
+                    .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+                let observed = self
+                    .authority
+                    .load(target.cell_id())
+                    .await?
+                    .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+                (proof, observed)
+            }
+        };
         if observed.value().root.is_none() {
             return Err(crab_cell_runtime::Error::CellNotActive.into());
         }
@@ -705,9 +752,11 @@ impl RepositoryCellRouter {
             }
             return Err(crab_cell_runtime::Error::CellNotActive.into());
         }
-        let mut routed = self
-            .activate_or_route(target, proof, observed, &principal)
-            .await?;
+        // The activation chain is the deepest stack user on a cold route, and
+        // this process runs with the default worker stack: keep it on the heap
+        // so routing keeps headroom instead of growing the caller's frame.
+        let mut routed =
+            Box::pin(self.activate_or_route(target, proof, observed, &principal)).await?;
         routed.cell._operation = Some(operation);
         Ok(routed)
     }
@@ -792,6 +841,21 @@ impl RepositoryCellRouter {
         target: &CellTarget,
         principal: &PeerPrincipal,
     ) -> crate::Result<Option<RepositoryCell>> {
+        self.route_existing_observed(target, principal, &mut None)
+            .await
+    }
+
+    /// Routes one target and reports the unowned observation it read.
+    ///
+    /// A caller that may activate the Cell uses `idle` instead of reading the
+    /// catalog proof and control a second time; the activation's ownership CAS
+    /// still authorizes, so an observation that went stale in between loses.
+    async fn route_existing_observed(
+        &self,
+        target: &CellTarget,
+        principal: &PeerPrincipal,
+        idle: &mut Option<(CatalogProof, VersionedControl)>,
+    ) -> crate::Result<Option<RepositoryCell>> {
         if let Some(handle) = self
             .runtime
             .resident_handle(target, CatalogRole::Repository)
@@ -821,6 +885,7 @@ impl RepositoryCellRouter {
             return Err(crab_cell_runtime::Error::CellNotActive.into());
         }
         let Some(owner) = control.value().owner.as_ref() else {
+            *idle = Some((proof, control));
             return Ok(None);
         };
         if owner.session != self.peer.owner.session {

@@ -53,6 +53,10 @@ const APPEND_RESULT_LABELS: [&str; APPEND_RESULT_COUNT] = ["acked", "nacked"];
 const DURABILITY_SUBMISSION_LABELS: [&str; DURABILITY_SUBMISSION_COUNT] =
     ["fleet", "unsupported", "unavailable", "rejected"];
 const RESIDENT_ROUTE_LABELS: [&str; 3] = ["hit", "miss", "refused"];
+const CATALOG_READ_LABELS: [&str; 2] = ["head", "page"];
+const CATALOG_READ_RESULT_LABELS: [&str; 2] = ["ok", "failed"];
+const CONTROL_READ_RESULT_LABELS: [&str; 2] = ["ok", "failed"];
+const ACTIVATION_PHASE_LABELS: [&str; 4] = ["ownership", "root_open", "restore", "activate"];
 const PRESSURE_TIER_COUNT: usize = 4;
 const PRESSURE_TIER_LABELS: [&str; PRESSURE_TIER_COUNT] =
     ["normal", "constrained", "shedding", "critical"];
@@ -176,6 +180,11 @@ struct MetricsInner {
     node_log_append_bytes: [Counter; APPEND_RESULT_COUNT],
     durability_submissions: [Counter; DURABILITY_SUBMISSION_COUNT],
     resident_routes: [Counter; 3],
+    catalog_reads: [[Counter; 2]; 2],
+    catalog_read_duration: [Histogram; 2],
+    control_reads: [Counter; 2],
+    control_read_duration: Histogram,
+    activation_phase_duration: [Histogram; 4],
     pressure_tiers: [Gauge; PRESSURE_TIER_COUNT],
     ltx_phase_runs: [[Counter; 2]; LTX_PHASE_COUNT],
     ltx_phase_duration: [Histogram; LTX_PHASE_COUNT],
@@ -573,6 +582,39 @@ impl Metrics {
                 resident_routes: RESIDENT_ROUTE_LABELS.map(|outcome| {
                     recorder.register_counter(
                         &key("crab_cell_resident_route_total", &[("outcome", outcome)]),
+                        &METADATA,
+                    )
+                }),
+                catalog_reads: CATALOG_READ_LABELS.map(|kind| {
+                    CATALOG_READ_RESULT_LABELS.map(|result| {
+                        recorder.register_counter(
+                            &key(
+                                "crab_cell_catalog_reads_total",
+                                &[("kind", kind), ("result", result)],
+                            ),
+                            &METADATA,
+                        )
+                    })
+                }),
+                catalog_read_duration: CATALOG_READ_LABELS.map(|kind| {
+                    recorder.register_histogram(
+                        &key("crab_cell_catalog_read_seconds", &[("kind", kind)]),
+                        &METADATA,
+                    )
+                }),
+                control_reads: CONTROL_READ_RESULT_LABELS.map(|result| {
+                    recorder.register_counter(
+                        &key("crab_cell_control_reads_total", &[("result", result)]),
+                        &METADATA,
+                    )
+                }),
+                control_read_duration: recorder.register_histogram(
+                    &Key::from_static_name("crab_cell_control_read_seconds"),
+                    &METADATA,
+                ),
+                activation_phase_duration: ACTIVATION_PHASE_LABELS.map(|phase| {
+                    recorder.register_histogram(
+                        &key("crab_cell_activation_phase_seconds", &[("phase", phase)]),
                         &METADATA,
                     )
                 }),
@@ -1138,6 +1180,41 @@ impl crab_cell_runtime::fleet::telemetry::CellTelemetry for Metrics {
         };
         self.inner.ltx_phase_runs[index][usize::from(!succeeded)].increment(1);
         self.inner.ltx_phase_duration[index].record(elapsed.as_secs_f64());
+    }
+
+    fn catalog_read(
+        &self,
+        kind: crab_cell_runtime::fleet::telemetry::CatalogReadKind,
+        elapsed: Duration,
+        succeeded: bool,
+    ) {
+        let index = match kind {
+            crab_cell_runtime::fleet::telemetry::CatalogReadKind::Head => 0,
+            crab_cell_runtime::fleet::telemetry::CatalogReadKind::Page => 1,
+        };
+        self.inner.catalog_reads[index][usize::from(!succeeded)].increment(1);
+        self.inner.catalog_read_duration[index].record(elapsed.as_secs_f64());
+    }
+
+    fn control_read(&self, elapsed: Duration, succeeded: bool) {
+        self.inner.control_reads[usize::from(!succeeded)].increment(1);
+        self.inner
+            .control_read_duration
+            .record(elapsed.as_secs_f64());
+    }
+
+    fn activation_phase(
+        &self,
+        phase: crab_cell_runtime::fleet::telemetry::ActivationPhase,
+        elapsed: Duration,
+    ) {
+        let index = match phase {
+            crab_cell_runtime::fleet::telemetry::ActivationPhase::Ownership => 0,
+            crab_cell_runtime::fleet::telemetry::ActivationPhase::RootOpen => 1,
+            crab_cell_runtime::fleet::telemetry::ActivationPhase::Restore => 2,
+            crab_cell_runtime::fleet::telemetry::ActivationPhase::Activate => 3,
+        };
+        self.inner.activation_phase_duration[index].record(elapsed.as_secs_f64());
     }
 
     fn ltx_logical_read(&self, origin: crab_cell_runtime::ltx::LtxReadOrigin) {
@@ -2284,6 +2361,28 @@ mod tests {
         <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::node_log_append(
             &metrics, false, 128,
         );
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::catalog_read(
+            &metrics,
+            crab_cell_runtime::fleet::telemetry::CatalogReadKind::Head,
+            Duration::from_millis(3),
+            true,
+        );
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::catalog_read(
+            &metrics,
+            crab_cell_runtime::fleet::telemetry::CatalogReadKind::Page,
+            Duration::from_millis(7),
+            false,
+        );
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::control_read(
+            &metrics,
+            Duration::from_millis(11),
+            true,
+        );
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::activation_phase(
+            &metrics,
+            crab_cell_runtime::fleet::telemetry::ActivationPhase::Restore,
+            Duration::from_millis(13),
+        );
         <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::resident_route(
             &metrics,
             crab_cell_runtime::fleet::telemetry::ResidentRouteOutcome::Hit,
@@ -2438,6 +2537,17 @@ mod tests {
         assert!(rendered.contains("crab_cell_node_log_append_bytes_total{result=\"nacked\"} 128"));
         assert!(rendered.contains("crab_cell_resident_route_total{outcome=\"hit\"} 1"));
         assert!(rendered.contains("crab_cell_resident_route_total{outcome=\"miss\"} 1"));
+        // The metadata plane has its own counter: a page read that failed must
+        // be visible even though no LTX phase ran for it.
+        assert!(rendered.contains("crab_cell_catalog_reads_total{kind=\"head\",result=\"ok\"} 1"));
+        assert!(
+            rendered.contains("crab_cell_catalog_reads_total{kind=\"page\",result=\"failed\"} 1")
+        );
+        assert!(rendered.contains("crab_cell_catalog_read_seconds_count{kind=\"head\"} 1"));
+        assert!(rendered.contains("crab_cell_catalog_read_seconds_count{kind=\"page\"} 1"));
+        assert!(rendered.contains("crab_cell_control_reads_total{result=\"ok\"} 1"));
+        assert!(rendered.contains("crab_cell_control_read_seconds_count 1"));
+        assert!(rendered.contains("crab_cell_activation_phase_seconds_count{phase=\"restore\"} 1"));
         assert!(
             rendered
                 .contains("crab_cell_ltx_phase_total{phase=\"root_open\",result=\"succeeded\"} 1")

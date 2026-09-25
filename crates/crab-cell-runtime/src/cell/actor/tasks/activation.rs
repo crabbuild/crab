@@ -12,6 +12,7 @@ pub(super) fn handle_activated(
     cell: CellId,
     generation: u64,
     role: CatalogRole,
+    catalog: CatalogProof,
     publisher: Box<CellPublisher>,
     admission: Arc<CellAdmission>,
     reply: oneshot::Sender<crate::Result<Arc<CellAdmission>>>,
@@ -79,6 +80,8 @@ pub(super) fn handle_activated(
             let incarnation = control.incarnation;
             let code = control.code;
             let schema = control.schema;
+            let next_due_ms = control.next_due_ms;
+            let published_sequence = control.root.as_ref().map_or(0, |root| root.commit_sequence);
             let durability_submitter = publisher.durability_submitter();
             let residency = hydration.map_or(Residency::Resident, |progress| {
                 if progress.complete() {
@@ -104,6 +107,7 @@ pub(super) fn handle_activated(
                     code,
                     schema,
                     role,
+                    catalog,
                     interrupt,
                     publisher: Some(*publisher),
                     durability_submitter,
@@ -119,6 +123,8 @@ pub(super) fn handle_activated(
                     last_used_ms: unix_millis(),
                     last_work_at: std::time::Instant::now(),
                     compaction_retry_at: std::time::Instant::now(),
+                    next_due_ms,
+                    published_sequence,
                 },
             );
         }

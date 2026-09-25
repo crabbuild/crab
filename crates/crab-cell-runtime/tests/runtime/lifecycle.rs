@@ -45,7 +45,7 @@ use object_store::{
 use tokio::sync::Notify;
 
 use crate::support::fencing::fence_session;
-use crate::support::fixtures::mutation_identity_window;
+use crate::support::fixtures::{mutation_identity_window, now_ms};
 
 // Capability modules keep the suite navigable; shared fixtures and
 // helpers used by more than one capability stay here.

@@ -123,6 +123,12 @@ impl CellPublisher {
         &self.observed
     }
 
+    /// Returns the Cell storage layout this publisher writes through.
+    #[must_use]
+    pub(crate) fn layout(&self) -> &crab_ltx::CellStorageLayout {
+        self.authority.layout()
+    }
+
     pub(crate) fn renewal_due(&self, now: std::time::Instant) -> bool {
         now >= self.renew_at
     }

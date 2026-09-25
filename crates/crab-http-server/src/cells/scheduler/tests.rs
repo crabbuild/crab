@@ -650,6 +650,29 @@ async fn bootstrap_due_repository(
     repository: Uuid,
     inbox: u8,
 ) -> (CellTarget, CellAuthority) {
+    let (target, authority, handle) = bootstrap_resident_due_repository(
+        identity, layout, registry, runtime, owner, directory, repository, inbox,
+    )
+    .await;
+    handle.drain().await.unwrap();
+    (target, authority)
+}
+
+/// Bootstraps one due repository Cell and keeps it resident on this node.
+async fn bootstrap_resident_due_repository(
+    identity: ApplicationIdentity,
+    layout: &CellStorageLayout,
+    registry: &Arc<Registry>,
+    runtime: &CellRuntime,
+    owner: Owner,
+    directory: &std::path::Path,
+    repository: Uuid,
+    inbox: u8,
+) -> (
+    CellTarget,
+    CellAuthority,
+    crab_cell_runtime::cell::actor::CellHandle,
+) {
     let target = CellTarget::new(
         identity.tenant(),
         identity.application(),
@@ -697,8 +720,7 @@ async fn bootstrap_due_repository(
         )
         .await
         .unwrap();
-    handle.drain().await.unwrap();
-    (target, authority)
+    (target, authority, handle)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1440,6 +1462,441 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
             .is_ok()
     );
     runtime.shutdown().await.unwrap();
+}
+
+async fn due_scheduler_fixture(
+    seed: u8,
+    repositories: usize,
+    resident: bool,
+) -> ResidentDueFixture {
+    let identity = ApplicationIdentity::new(
+        TenantId::from_bytes([seed; 16]),
+        ApplicationId::from_bytes([seed.wrapping_add(1); 16]),
+    );
+    let layout = CellStorageLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        Path::from("resident-due-scheduler"),
+        *identity.application().as_bytes(),
+    );
+    let registry = Arc::new(crate::cells::compiled_registry().unwrap());
+    bootstrap_release_at(
+        &layout,
+        identity,
+        &registry,
+        &format!("sha256:{}", format!("{seed:02x}").repeat(32)),
+    )
+    .await
+    .unwrap();
+    let session = SessionId::from_bytes([seed.wrapping_add(2); 16]);
+    let endpoint = "https://resident-due.internal:8789".to_owned();
+    let owner = Owner {
+        session,
+        endpoint: endpoint.clone(),
+    };
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 4).unwrap(), 16 * 1024 * 1024, session).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let mut targets = Vec::new();
+    let mut handles = Vec::new();
+    for index in 0..repositories {
+        let repository = Uuid::from_bytes([seed.wrapping_add(3).wrapping_add(index as u8); 16]);
+        let (target, _, handle) = bootstrap_resident_due_repository(
+            identity,
+            &layout,
+            &registry,
+            &runtime,
+            owner.clone(),
+            directory.path(),
+            repository,
+            seed.wrapping_add(5).wrapping_add(index as u8),
+        )
+        .await;
+        targets.push(target);
+        if resident {
+            handles.push(handle);
+        } else {
+            handle.drain().await.unwrap();
+        }
+    }
+    let fleet = Digest::from_bytes([seed.wrapping_add(7); 32]);
+    let image = Digest::from_bytes([seed.wrapping_add(8); 32]);
+    let certificate = Digest::from_bytes([seed.wrapping_add(9); 32]);
+    let node_directory =
+        NodeDirectory::new(layout.clone(), fleet, image, registry.release_digest());
+    let key = SigningKey::from_bytes(&[seed.wrapping_add(10); 32]);
+    let now_ms = super::super::unix_now_ms().unwrap();
+    node_directory
+        .create(
+            NodeAdvertisement::sign(
+                crab_cell_runtime::identity::NodeId::from_bytes(*session.as_bytes()),
+                session,
+                endpoint,
+                fleet,
+                certificate,
+                image,
+                registry.release_digest(),
+                &key,
+                1,
+                now_ms,
+                now_ms + 15_000,
+                registry.module_digests(),
+                vec![1],
+                crab_cell_runtime::node::NodeFailureDomain::default(),
+                NodeCapacity {
+                    free_memory_bytes: 1024 * 1024 * 1024,
+                    free_disk_bytes: 1024 * 1024 * 1024,
+                    job_credits: 1,
+                    ..NodeCapacity::default()
+                },
+            )
+            .unwrap(),
+            now_ms,
+        )
+        .await
+        .unwrap();
+    let authority = CellAuthority::new(layout.clone());
+    let router = RepositoryCellRouter::new(
+        identity,
+        layout.clone(),
+        Arc::clone(&registry),
+        runtime.clone(),
+        super::super::RepositoryCellPeer::new(
+            node_directory.clone(),
+            Arc::new(PeerSigner::new(session, registry.release_digest(), key)),
+            Arc::new(UnavailablePeer),
+            owner,
+        ),
+        directory.path().join("session"),
+    )
+    .unwrap();
+    let status = SchedulerStatus::new(now_ms).unwrap();
+    let scheduler =
+        RepositoryCellScheduler::new(identity, layout, node_directory, router, session, status)
+            .unwrap();
+    ResidentDueFixture {
+        runtime,
+        scheduler,
+        authority,
+        targets,
+        _directory: directory,
+        _handles: handles,
+    }
+}
+
+/// One started scheduler over a node that either owns its due Cells or has
+/// released them.
+struct ResidentDueFixture {
+    runtime: CellRuntime,
+    scheduler: RepositoryCellScheduler,
+    authority: CellAuthority,
+    targets: Vec<CellTarget>,
+    _directory: tempfile::TempDir,
+    _handles: Vec<crab_cell_runtime::cell::actor::CellHandle>,
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hinted_due_cell_ticks_without_a_shard_scan() {
+    let mut fixture = due_scheduler_fixture(101, 1, false).await;
+    let target = fixture.targets[0].clone();
+    let now_ms = super::super::unix_now_ms().unwrap();
+    // Publish the hint an owner writes when it releases a Cell with a deadline
+    // this minute; the runtime suite proves the release path writes that key.
+    crab_cell_runtime::cell::due::publish(
+        fixture.authority.layout(),
+        target.cell_id(),
+        now_ms,
+        now_ms,
+    )
+    .await
+    .unwrap();
+    // The scheduler ticks from the hint alone: no shard scan, no node
+    // advertisement for this Cell.
+    assert_eq!(
+        fixture.scheduler.tick_due_hints(now_ms, 4).await.unwrap(),
+        1
+    );
+    let after = fixture
+        .authority
+        .load(target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.value().root.as_ref().unwrap().commit_sequence, 1);
+    assert!(after.value().next_due_ms.is_some_and(|due| due > now_ms));
+    fixture.runtime.shutdown().await.unwrap();
+}
+
+/// Counts the metadata reads a scheduler cycle performs.
+#[derive(Default)]
+struct MetadataRecorder {
+    catalog: std::sync::atomic::AtomicUsize,
+    control: std::sync::atomic::AtomicUsize,
+}
+
+impl MetadataRecorder {
+    fn catalog(&self) -> usize {
+        self.catalog.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn control(&self) -> usize {
+        self.control.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+impl crab_cell_runtime::fleet::telemetry::CellTelemetry for MetadataRecorder {
+    fn catalog_read(
+        &self,
+        _kind: crab_cell_runtime::fleet::telemetry::CatalogReadKind,
+        _elapsed: std::time::Duration,
+        _succeeded: bool,
+    ) {
+        self.catalog
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    fn control_read(&self, _elapsed: std::time::Duration, _succeeded: bool) {
+        self.control
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hinted_tick_spends_a_bounded_metadata_budget() {
+    let mut fixture = due_scheduler_fixture(131, 1, false).await;
+    let recorder = Arc::new(MetadataRecorder::default());
+    fixture.runtime.install_telemetry(recorder.clone()).unwrap();
+    let target = fixture.targets[0].clone();
+    let now_ms = super::super::unix_now_ms().unwrap();
+    crab_cell_runtime::cell::due::publish(
+        fixture.authority.layout(),
+        target.cell_id(),
+        now_ms,
+        now_ms,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fixture.scheduler.tick_due_hints(now_ms, 4).await.unwrap(),
+        1
+    );
+    // One hinted candidate costs a fixed handful of reads — its catalog proof
+    // and its control through the scheduler, the router, and the activation.
+    // The router reuses the unowned observation it read inside the activation
+    // window instead of reading the same proof and control a third time, which
+    // is why this is eight and five rather than ten and six: hints win while
+    // due candidates stay far rarer than Cells, where the backstop pass spends
+    // one control read per Cell in the shard.
+    assert_eq!(recorder.control(), 5, "hinted candidate control reads");
+    assert_eq!(recorder.catalog(), 8, "hinted candidate catalog reads");
+    fixture.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn foreground_cycle_ticks_hints_without_the_backstop() {
+    let mut fixture = due_scheduler_fixture(121, 1, false).await;
+    let target = fixture.targets[0].clone();
+    let now_ms = super::super::unix_now_ms().unwrap();
+    crab_cell_runtime::cell::due::publish(
+        fixture.authority.layout(),
+        target.cell_id(),
+        now_ms,
+        now_ms,
+    )
+    .await
+    .unwrap();
+    // The cycles between backstops still tick: the foreground path is hints,
+    // resident Cells, recovery, and migration, and only the shard scan is off.
+    fixture
+        .scheduler
+        .scan_cycle(super::MAX_DUE_PER_CYCLE, false)
+        .await
+        .unwrap();
+    let after = fixture
+        .authority
+        .load(target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.value().root.as_ref().unwrap().commit_sequence, 1);
+    fixture.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn backstop_scan_runs_on_its_period() {
+    let mut fixture = due_scheduler_fixture(111, 0, true).await;
+    assert!(
+        fixture.scheduler.backstop_due(),
+        "a fresh scheduler scans on its first cycle"
+    );
+    for _ in 1..super::BACKSTOP_CYCLES {
+        assert!(!fixture.scheduler.backstop_due());
+    }
+    assert!(
+        fixture.scheduler.backstop_due(),
+        "the shard scan returns on its period"
+    );
+    fixture.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn foreground_discovery_scales_with_hints_not_with_population() {
+    // Sixteen released Cells, but only two carry a hint. A foreground cycle
+    // must pay for the two candidates and nothing for the other fourteen; the
+    // backstop pass is what pays per Cell.
+    let mut fixture = due_scheduler_fixture(141, 16, false).await;
+    let recorder = Arc::new(MetadataRecorder::default());
+    fixture.runtime.install_telemetry(recorder.clone()).unwrap();
+    let now_ms = super::super::unix_now_ms().unwrap();
+    for target in fixture.targets.iter().take(2) {
+        crab_cell_runtime::cell::due::publish(
+            fixture.authority.layout(),
+            target.cell_id(),
+            now_ms,
+            now_ms,
+        )
+        .await
+        .unwrap();
+    }
+
+    fixture
+        .scheduler
+        .scan_cycle(super::MAX_DUE_PER_CYCLE, false)
+        .await
+        .unwrap();
+    let hinted_reads = (recorder.catalog(), recorder.control());
+    let advanced = {
+        let mut advanced = 0;
+        for target in fixture.targets.iter().take(2) {
+            let control = fixture
+                .authority
+                .load(target.cell_id())
+                .await
+                .unwrap()
+                .unwrap();
+            advanced += usize::from(
+                control
+                    .value()
+                    .root
+                    .as_ref()
+                    .is_some_and(|root| root.commit_sequence == 1),
+            );
+        }
+        advanced
+    };
+    assert_eq!(advanced, 2, "both hinted Cells are ticked");
+    // Two candidates, six times their number in untouched Cells, and the
+    // foreground cycle pays exactly the per-candidate cost measured above.
+    assert_eq!(hinted_reads, (16, 10), "hinted foreground reads");
+
+    let before_backstop = (recorder.catalog(), recorder.control());
+    fixture
+        .scheduler
+        .scan_cycle(super::MAX_DUE_PER_CYCLE, true)
+        .await
+        .unwrap();
+    let backstop_reads = (
+        recorder.catalog() - before_backstop.0,
+        recorder.control() - before_backstop.1,
+    );
+    // The backstop pays per Cell in the shard, and each due Cell it finds also
+    // routes: 355 catalog + 72 control reads for sixteen Cells on 2026-09-24.
+    // The assertion keeps a floor well above the foreground cost so a change
+    // that quietly reintroduced a population scan would fail here.
+    assert!(
+        backstop_reads.0 >= 16 * 8,
+        "backstop catalog reads grow with the shard: {backstop_reads:?}"
+    );
+    assert!(
+        backstop_reads.1 >= 16 * 4,
+        "backstop control reads grow with the shard: {backstop_reads:?}"
+    );
+    fixture.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resident_due_cell_ticks_without_a_shard_scan() {
+    let mut fixture = due_scheduler_fixture(81, 1, true).await;
+    let target = fixture.targets[0].clone();
+    let now_ms = super::super::unix_now_ms().unwrap();
+    let before = fixture
+        .authority
+        .load(target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.value().next_due_ms, Some(1));
+    assert_eq!(
+        before.value().state,
+        crab_cell_runtime::control::ControlState::Serving
+    );
+
+    // Only the resident fast path runs; the shard scan is never entered.
+    assert_eq!(
+        fixture
+            .scheduler
+            .tick_resident_due(now_ms, 4)
+            .await
+            .unwrap(),
+        1
+    );
+    let after = fixture
+        .authority
+        .load(target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.value().root.as_ref().unwrap().commit_sequence, 1);
+    assert!(after.value().next_due_ms.is_some_and(|due| due > now_ms));
+    // A resident Cell stays owned: the fast path never releases it.
+    assert_eq!(
+        after.value().state,
+        crab_cell_runtime::control::ControlState::Serving
+    );
+    fixture.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resident_ticks_do_not_overspend_the_cycle_budget() {
+    let mut fixture = due_scheduler_fixture(91, 2, true).await;
+    // The fast path ticks the lowest Cell id first, so point the shard scan at
+    // the other Cell: a scan that ran with no budget left would find it due and
+    // spend a second slot.
+    let last = fixture
+        .targets
+        .iter()
+        .max_by_key(|target| *target.cell_id().as_bytes())
+        .unwrap();
+    fixture.scheduler.next_shard = last.cell_id().as_bytes()[0];
+    // One slot: the resident fast path consumes it, and the shard scan must not
+    // start.
+    fixture.scheduler.scan_once_bounded(1).await.unwrap();
+    let sequences = [
+        fixture
+            .authority
+            .load(fixture.targets[0].cell_id())
+            .await
+            .unwrap()
+            .unwrap(),
+        fixture
+            .authority
+            .load(fixture.targets[1].cell_id())
+            .await
+            .unwrap()
+            .unwrap(),
+    ]
+    .map(|control| {
+        control
+            .value()
+            .root
+            .as_ref()
+            .map_or(0, |root| root.commit_sequence)
+    });
+    assert_eq!(
+        sequences.iter().filter(|sequence| **sequence == 1).count(),
+        1,
+        "one budget slot ticks exactly one resident Cell"
+    );
+    fixture.runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

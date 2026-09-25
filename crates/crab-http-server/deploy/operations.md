@@ -250,6 +250,9 @@ Monitor these platform and application signals:
 | `crab_http_server_cell_runtime_local_disk_reserved_bytes` | Replica reservations approach the shared local-disk capacity |
 | `crab_cell_scheduler_ticks_total` | `stale`, `rejected`, or `unresolved` grows without applied Ticks |
 | `crab_cell_scheduler_items_total` | Maintenance advances plateau while Cells keep committing |
+| `crab_cell_catalog_reads_total` and `crab_cell_catalog_read_seconds` | One routing decision costs more than one `head` and one `page` read, or the metadata tail grows with the Cell population |
+| `crab_cell_control_reads_total` and `crab_cell_control_read_seconds` | Control reads per cycle grow with the Cell population rather than with due work, or a cold route needs more than the expected pair of reads |
+| `crab_cell_activation_phase_seconds` | A cold route's `root_open`, `restore`, or `activate` phase grows while `ownership` stays flat, which points at the object store or local disk rather than at ownership contention |
 | `crab_cell_primitive_operations_total` | A primitive module's `failed` or `rejected` rate rises above its baseline |
 | `crab_cell_primitive_operation_seconds` | One primitive module's command or query tail grows |
 | `crab_cell_pressure_tier` | A node reports `constrained`, `shedding`, or `critical`; `shedding` means it is releasing settled Cells |
