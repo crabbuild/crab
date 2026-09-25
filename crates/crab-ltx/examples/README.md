@@ -70,7 +70,10 @@ request or changes mutable Cell control.
 `power_cut_probe` has a writer stage and a verifier stage for each local
 durability contract. Run it on a dedicated fault host with the probe directory
 on a disposable test filesystem. Keep the controller and its captured stdout
-on a separate, unaffected device. The writer emits `READY_CAPTURE` immediately
+on a separate, unaffected device. Before starting each writer, create its fresh
+test directory and sync that directory's parent; otherwise losing the test
+directory's own unsynced name can masquerade as an LTX failure. The writer
+emits `READY_CAPTURE` immediately
 after a successful standalone `capture()` and parks with SQLite still open;
 `READY_RESUME` follows a successful `persist_continuation()` and `close()`.
 The controller must cut host power or inject the planned block-device fault
