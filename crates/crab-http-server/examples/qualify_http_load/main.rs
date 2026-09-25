@@ -24,7 +24,6 @@ const REPORT_SCHEMA: u32 = 2;
 const MAX_LATENCY_MS: u64 = 60_000;
 const MINIMUM_TARGET_PERCENT: u64 = 95;
 
-#[path = "qualify_http_load/config.rs"]
 mod config;
 
 use config::{
@@ -708,5 +707,4 @@ fn duration_millis(duration: Duration) -> u64 {
 }
 
 #[cfg(test)]
-#[path = "qualify_http_load/tests.rs"]
 mod tests;
