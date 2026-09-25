@@ -17,11 +17,11 @@ REPO_ROOT = COMPOSE_FILE.resolve().parents[4]
 SOURCE_FILES = (
     "Cargo.lock",
     "crates/crab-http-server/Cargo.toml",
-    "crates/crab-http-server/examples/compose_kv_service.rs",
-    "crates/crab-http-server/examples/compose/compose.yaml",
-    "crates/crab-http-server/examples/compose/Dockerfile",
-    "crates/crab-http-server/examples/compose/build-image.sh",
-    "crates/crab-http-server/examples/compose/run.py",
+    "crates/crab-http-server/examples/compose_kv_service/main.rs",
+    "crates/crab-http-server/examples/compose_kv_service/compose.yaml",
+    "crates/crab-http-server/examples/compose_kv_service/Dockerfile",
+    "crates/crab-http-server/examples/compose_kv_service/build-image.sh",
+    "crates/crab-http-server/examples/compose_kv_service/run.py",
 )
 STAGES = (3, 5, 10, 20)
 CPU_NANOSECONDS = 1_000_000_000

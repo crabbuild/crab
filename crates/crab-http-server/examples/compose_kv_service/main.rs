@@ -76,7 +76,7 @@ impl CellModule for ReferenceKv {
             ModuleDescriptor {
                 name: ReferenceKv::MODULE,
                 source_digest: Digest::from_bytes(
-                    *blake3::hash(include_bytes!("compose_kv_service.rs")).as_bytes(),
+                    *blake3::hash(include_bytes!("main.rs")).as_bytes(),
                 ),
                 retained_codes: &[],
                 schema_min: 1,
@@ -180,7 +180,7 @@ async fn main() -> Result<()> {
             .unwrap_or("compose-reference")
             .into(),
         cargo_lock_digest: Digest::from_bytes(
-            *blake3::hash(include_bytes!("../../../Cargo.lock")).as_bytes(),
+            *blake3::hash(include_bytes!("../../../../Cargo.lock")).as_bytes(),
         ),
     })?);
     let node = Arc::new(

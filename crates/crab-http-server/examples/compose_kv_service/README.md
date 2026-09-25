@@ -34,8 +34,8 @@ install the matching Linux GNU cross linker first.
 export CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-my-worktree"
 export RUSTFS_ACCESS_KEY='<local RustFS access key>'
 export RUSTFS_SECRET_KEY='<local RustFS secret key>'
-crates/crab-http-server/examples/compose/build-image.sh
-python3 crates/crab-http-server/examples/compose/run.py
+crates/crab-http-server/examples/compose_kv_service/build-image.sh
+python3 crates/crab-http-server/examples/compose_kv_service/run.py
 ```
 
 The driver refuses to reuse an existing Compose project, creates an isolated

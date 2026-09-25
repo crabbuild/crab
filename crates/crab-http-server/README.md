@@ -163,7 +163,7 @@ behavior and acceptance gates separately from the current implementation.
 | --- | --- |
 | Configure catalog, storage root, temporary space, and credentials | [Development setup](REFERENCE.md#run-the-current-development-build) |
 | Start locally with Docker Compose | [Local Compose stack](deploy/README.md#start-locally-with-docker-compose) |
-| Simulate 3 → 5 → 10 → 20 one-GiB Cell service nodes | [Compose KV reference service](examples/compose/README.md) |
+| Simulate 3 → 5 → 10 → 20 one-GiB Cell service nodes | [Compose KV reference service](examples/compose_kv_service/README.md) |
 | Deploy on EKS, GKE, AKS, or ECS | [Deployment profiles](deploy/README.md) |
 | Probe readiness and drain the service | [Container operation](REFERENCE.md#run-the-container) |
 | Scrape metrics and define alerts | [Operations runbook](deploy/operations.md#observe-requests-and-capacity) |
