@@ -229,7 +229,7 @@ impl PageChecksums {
         self.count
     }
 
-    /// Verifies that a clean local database still holds the recorded image.
+    /// Verifies the checksum-bearing pages of a clean local database.
     #[cfg(feature = "replica")]
     pub(crate) fn verify_database(
         &self,

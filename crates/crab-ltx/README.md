@@ -327,10 +327,10 @@ The record is structural, never authoritative. It refuses a database whose WAL
 is not checkpointed (the file may sit behind the continuation) and a sparse
 activation that is not fully materialized (an unfaulted page is a hole, not
 data), and the writing side proves the dense copy still folds to the aggregate
-it seeds. The resumed open also checks every local database page against the
-recorded dense checksums before SQLite can reuse the image. Ownership and root
-identity stay with the caller: only open a resumed
-database that a resume record has already matched against the authoritative
+it seeds. The resumed open also checks every checksum-bearing database page
+against the recorded dense checksums before SQLite can reuse the image.
+Ownership and root identity stay with the caller: only open a resumed database
+that a resume record has already matched against the authoritative
 control, and discard it (`CellReplica::discard_resumed`) on any mismatch.
 
 ## Local durability boundaries
