@@ -12,6 +12,7 @@ DirectoryCacheStats
 DiskBudget
 DiskBudgetAdmission
 DiskReservation
+FailureClass
 Host
 HostResourceAdmission
 HostResourceKind
@@ -29,6 +30,7 @@ MANAGED_SQLITE_CONNECTIONS
 NodeFrameScope
 Position
 PreparedRoot
+PublicationCost
 QueryError
 RecoveryOverlay
 Result

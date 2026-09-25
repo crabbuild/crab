@@ -1,0 +1,16 @@
+# Regenerates the external LTX vectors under `tests/vectors/`.
+#
+# The generator depends on the upstream snapshot `crab-ltx` was imported from
+# (see UPSTREAM.md), so the bytes come from an independent implementation. It is
+# its own workspace on purpose: `cargo test -p crab-ltx` must not build a second
+# SQLite or fetch upstream sources.
+[package]
+name = "crab-ltx-vector-generator"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+celld-ltx = { git = "https://github.com/denoland/celld.git", rev = "10cb1303dac710dcb3b557e318e08c855261f68b", default-features = false }

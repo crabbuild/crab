@@ -1,0 +1,55 @@
+# Decoder fuzzing for `crab-ltx`.
+#
+# Its own workspace on purpose: fuzzing needs a nightly toolchain and
+# `cargo-fuzz`, which the normal `cargo test` path must not depend on. The
+# stable-toolchain replay of the same entry points lives in
+# `tests/ltx/vectors.rs`.
+[package]
+name = "crab-ltx-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+crab-ltx = { path = "..", features = ["replica"] }
+
+[[bin]]
+name = "ltx"
+path = "fuzz_targets/ltx.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "root"
+path = "fuzz_targets/root.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "directory"
+path = "fuzz_targets/directory.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bundle"
+path = "fuzz_targets/bundle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "node_frame"
+path = "fuzz_targets/node_frame.rs"
+test = false
+doc = false
+bench = false

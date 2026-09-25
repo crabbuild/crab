@@ -3,6 +3,129 @@
 use super::*;
 
 #[tokio::test]
+async fn small_appends_report_a_bounded_publication_cost() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let mut writer = Db::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES(randomblob(4096))")
+        })
+        .unwrap();
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            Path::from("runtime"),
+            [3; 16],
+        ),
+        [211; 32],
+        [212; 16],
+        Limits::default(),
+    )
+    .unwrap();
+
+    // A bootstrap root uploads one body, one index, the changed directory
+    // nodes, and the root document. The bound documents the per-command
+    // object-store amplification the runtime budgets against.
+    let first = writer.capture().unwrap();
+    let root = replica.prepare(None, &first, 1, 1).await.unwrap().root();
+    let initial = replica.take_publication_cost();
+    assert!(
+        (4..=12).contains(&initial.objects),
+        "bootstrap objects: {initial:?}"
+    );
+    assert!(
+        initial.bytes >= first.segments[0].info().size_bytes,
+        "{initial:?}"
+    );
+
+    // One appended command pays at least a body and index, and no more than the
+    // same bounded set of metadata objects.
+    writer
+        .transaction(|transaction| {
+            transaction.execute_batch("INSERT INTO t VALUES(randomblob(4096))")
+        })
+        .unwrap();
+    let second = writer.capture().unwrap();
+    replica.prepare(Some(&root), &second, 2, 1).await.unwrap();
+    let append = replica.take_publication_cost();
+    assert!(
+        (3..=12).contains(&append.objects),
+        "append objects: {append:?}"
+    );
+    assert!(
+        append.bytes >= second.segments[0].info().size_bytes,
+        "{append:?}"
+    );
+    assert_eq!(replica.publication_cost().objects, 0);
+}
+
+#[tokio::test]
+async fn oversized_commit_publishes_as_a_full_image_root() {
+    let directory = tempfile::TempDir::new().unwrap();
+    // The incremental bound is far below the commit and the database, so the
+    // capture escalates and the publication must admit the full image.
+    let limits = Limits {
+        max_capture_bytes: 8 * 1024,
+        ..Limits::default()
+    };
+    let mut writer = Db::open(&directory.path().join("cell.sqlite"), limits).unwrap();
+    writer
+        .transaction(|transaction| transaction.execute_batch("CREATE TABLE payload(value BLOB)"))
+        .unwrap();
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            Path::from("runtime"),
+            [3; 16],
+        ),
+        [201; 32],
+        [202; 16],
+        limits,
+    )
+    .unwrap();
+    let first = writer.capture().unwrap();
+    let first_root = replica.prepare(None, &first, 1, 1).await.unwrap().root();
+
+    writer
+        .transaction(|transaction| {
+            transaction.execute_batch("INSERT INTO payload VALUES(randomblob(65536))")
+        })
+        .unwrap();
+    let second = writer.capture().unwrap();
+    assert!(
+        second.segments[0].info().size_bytes > limits.max_capture_bytes,
+        "the escalated cut must exceed the incremental bound"
+    );
+
+    let prepared = replica
+        .prepare(Some(&first_root), &second, 2, 1)
+        .await
+        .unwrap();
+    let root = prepared.root();
+    assert_eq!(prepared.verified().segment_count(), 2);
+    assert_eq!(root.position, second.position);
+
+    // The published root restores the escalated commit exactly.
+    let restored = directory.path().join("restored.sqlite");
+    replica
+        .open_root(&root)
+        .await
+        .unwrap()
+        .restore(&restored)
+        .await
+        .unwrap();
+    let connection = crab_ltx::rusqlite::Connection::open(&restored).unwrap();
+    let rows: i64 = connection
+        .query_row("SELECT count(*) FROM payload", [], |row| row.get(0))
+        .unwrap();
+    let bytes: i64 = connection
+        .query_row("SELECT length(value) FROM payload", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!((rows, bytes), (1, 65536));
+    writer.close().unwrap();
+}
+
+#[tokio::test]
 async fn prepared_cell_handles_release_dirty_admission() {
     let directory = tempfile::TempDir::new().unwrap();
     let mut writer = Db::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();

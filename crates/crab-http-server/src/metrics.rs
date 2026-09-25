@@ -191,6 +191,8 @@ struct MetricsInner {
     ltx_capture_database_bytes: Counter,
     ltx_capture_ltx_bytes: Counter,
     ltx_capture_segments: Counter,
+    ltx_publication_objects: Counter,
+    ltx_publication_bytes: Counter,
     ltx_checkpoint_runs: Counter,
     ltx_checkpoint_busy: Counter,
     ltx_checkpoint_busy_errors: Counter,
@@ -658,6 +660,14 @@ impl Metrics {
                     &Key::from_static_name("crab_cell_ltx_capture_segments_total"),
                     &METADATA,
                 ),
+                ltx_publication_objects: recorder.register_counter(
+                    &Key::from_static_name("crab_cell_ltx_publication_objects_total"),
+                    &METADATA,
+                ),
+                ltx_publication_bytes: recorder.register_counter(
+                    &Key::from_static_name("crab_cell_ltx_publication_bytes_total"),
+                    &METADATA,
+                ),
                 ltx_checkpoint_runs: recorder.register_counter(
                     &Key::from_static_name("crab_cell_ltx_checkpoint_runs_total"),
                     &METADATA,
@@ -1064,6 +1074,11 @@ impl crab_cell_runtime::fleet::telemetry::CellTelemetry for Metrics {
             crab_cell_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Rejected => 3,
         };
         self.inner.durability_submissions[index].increment(1);
+    }
+
+    fn publication_cost(&self, objects: u64, bytes: u64) {
+        self.inner.ltx_publication_objects.increment(objects);
+        self.inner.ltx_publication_bytes.increment(bytes);
     }
 
     fn node_log_append(&self, acknowledged: bool, bytes: u64) {
@@ -1956,6 +1971,14 @@ fn describe_metrics(recorder: &impl Recorder) {
             "LTX segments produced by completed Cell captures.",
         ),
         (
+            "crab_cell_ltx_publication_objects_total",
+            "Immutable objects uploaded by Cell root preparation attempts.",
+        ),
+        (
+            "crab_cell_ltx_publication_bytes_total",
+            "Immutable object bytes uploaded by Cell root preparation attempts.",
+        ),
+        (
             "crab_cell_ltx_checkpoint_runs_total",
             "SQLite checkpoint pragmas executed by Cell captures.",
         ),
@@ -2252,6 +2275,9 @@ mod tests {
             &metrics,
             crab_cell_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Rejected,
         );
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::publication_cost(
+            &metrics, 5, 7_168,
+        );
         <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::node_log_append(
             &metrics, true, 512,
         );
@@ -2441,6 +2467,8 @@ mod tests {
         assert!(rendered.contains("crab_cell_ltx_wal_read_bytes_total 4160"));
         assert!(rendered.contains("crab_cell_ltx_wal_snapshot_reads_total 1"));
         assert!(rendered.contains("crab_cell_ltx_capture_wal_bytes_total 4096"));
+        assert!(rendered.contains("crab_cell_ltx_publication_objects_total 5"));
+        assert!(rendered.contains("crab_cell_ltx_publication_bytes_total 7168"));
         assert!(rendered.contains("crab_cell_ltx_checkpoint_runs_total 1"));
         assert!(rendered.contains("crab_cell_ltx_checkpoint_frames_total 4"));
         assert!(rendered.contains("crab_cell_ltx_checkpoint_backfilled_total 3"));

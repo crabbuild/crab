@@ -1,6 +1,7 @@
 //! Errors retain their local I/O, SQLite, or codec cause.
 
 use std::fmt;
+use std::time::Duration;
 
 /// Result of a local replication operation.
 pub type Result<T> = std::result::Result<T, CrabError>;
@@ -228,11 +229,136 @@ impl CrabError {
             Self::Limit(LimitKind::CellRootSegments | LimitKind::CellRootBytes)
         )
     }
+
+    /// Classifies what a caller may do after this failure.
+    ///
+    /// The class is the contract: a caller decides between retrying, refusing
+    /// the request, reconciling an ambiguous outcome, and fencing its handle
+    /// from this value alone. No caller may dispatch on error messages.
+    #[must_use]
+    pub fn classify(&self) -> FailureClass {
+        match self {
+            #[cfg(feature = "replica")]
+            Self::Storage(error) => storage_failure_class(crab_storage::retry_class(error)),
+            #[cfg(feature = "replica")]
+            Self::Json(_) => FailureClass::Permanent,
+            #[cfg(feature = "replica")]
+            Self::Task(_) => FailureClass::Ambiguous,
+            Self::ChecksumMismatch
+            | Self::LTXCorrupted
+            | Self::LTXMissing
+            | Self::TxNotAvailable => FailureClass::Permanent,
+            Self::Io(error) => io_failure_class(error),
+            Self::Sqlite(error) => sqlite_failure_class(error),
+            Self::Limit(_) => FailureClass::Capacity,
+            #[cfg(feature = "replica")]
+            Self::Deadline => FailureClass::Retryable { after: None },
+            Self::InvalidState(_) | Self::Fenced => FailureClass::Fenced,
+            Self::Other(_) => FailureClass::Ambiguous,
+        }
+    }
+}
+
+/// What a caller may do after a [`CrabError`].
+///
+/// The class never depends on the failure text, so a caller can branch on it
+/// across versions without matching strings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureClass {
+    /// No acknowledged side effect exists, so the same request may be attempted
+    /// again, no earlier than `after` when a provider named a delay.
+    Retryable {
+        /// Provider-requested minimum delay before the next attempt.
+        after: Option<Duration>,
+    },
+    /// The request cannot succeed while its inputs or selected state stay the
+    /// same; the caller must choose different inputs, artifacts, or state.
+    Permanent,
+    /// A declared bound or the environment refused the work before it could
+    /// produce an acknowledged side effect. Freeing the resource or raising the
+    /// bound is required: an identical retry fails the same way.
+    Capacity,
+    /// Work that may already have taken effect has an unknown outcome; the
+    /// caller must reconcile before retrying.
+    Ambiguous,
+    /// The managed handle or session is fenced; close it and restore
+    /// authoritative state before serving the Cell again.
+    Fenced,
+}
+
+impl FailureClass {
+    /// Reports whether a caller holding its own attempt budget may retry.
+    #[must_use]
+    pub fn is_retryable(self) -> bool {
+        matches!(self, Self::Retryable { .. })
+    }
+
+    /// Returns the provider's retry delay, when it named one.
+    #[must_use]
+    pub fn retry_after(self) -> Option<Duration> {
+        match self {
+            Self::Retryable { after } => after,
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "replica")]
+fn storage_failure_class(class: crab_storage::RetryClass) -> FailureClass {
+    use crab_storage::RetryClass;
+    match class {
+        RetryClass::Transient | RetryClass::StateDependent | RetryClass::InspectErrno => {
+            FailureClass::Retryable { after: None }
+        }
+        RetryClass::Throttled { retry_after } => FailureClass::Retryable { after: retry_after },
+        // The storage layer already spent its one bounded retry for these
+        // classes, so a caller that retried again could loop on a corrupt read.
+        RetryClass::FatalAfterOneRetry | RetryClass::Fatal => FailureClass::Permanent,
+    }
+}
+
+fn io_failure_class(error: &std::io::Error) -> FailureClass {
+    use std::io::ErrorKind;
+    match error.kind() {
+        ErrorKind::Interrupted | ErrorKind::WouldBlock | ErrorKind::TimedOut => {
+            FailureClass::Retryable { after: None }
+        }
+        ErrorKind::StorageFull | ErrorKind::QuotaExceeded | ErrorKind::OutOfMemory => {
+            FailureClass::Capacity
+        }
+        ErrorKind::NotFound
+        | ErrorKind::PermissionDenied
+        | ErrorKind::AlreadyExists
+        | ErrorKind::InvalidInput
+        | ErrorKind::InvalidData
+        | ErrorKind::Unsupported => FailureClass::Permanent,
+        // Any other I/O failure can leave a partially written artifact, so the
+        // caller reconciles instead of assuming the operation did nothing.
+        _ => FailureClass::Ambiguous,
+    }
+}
+
+fn sqlite_failure_class(error: &rusqlite::Error) -> FailureClass {
+    use rusqlite::ErrorCode;
+    match error.sqlite_error_code() {
+        Some(
+            ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked | ErrorCode::OperationInterrupted,
+        ) => FailureClass::Retryable { after: None },
+        Some(ErrorCode::DiskFull | ErrorCode::OutOfMemory) => FailureClass::Capacity,
+        // SQLite rolls a failed statement back, but the underlying file I/O
+        // failure may have written a partial page.
+        Some(ErrorCode::SystemIoFailure) => FailureClass::Ambiguous,
+        // Every remaining SQLite failure is statement-atomic and repeatable with
+        // the same inputs, so a caller must change the request or fence.
+        Some(_) | None => FailureClass::Permanent,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CrabError, LimitKind};
+    use super::{CrabError, FailureClass, LimitKind};
+    use std::io::ErrorKind;
+    use std::time::Duration;
 
     #[test]
     fn only_cell_graph_admission_limits_are_compaction_retryable() {
@@ -249,5 +375,132 @@ mod tests {
             "resource limit exceeded: local disk bytes"
         );
         assert_eq!(LimitKind::CellRootBytes.as_str(), "Cell root bytes");
+    }
+
+    #[test]
+    fn state_selection_failures_are_permanent() {
+        for error in [
+            CrabError::ChecksumMismatch,
+            CrabError::LTXCorrupted,
+            CrabError::LTXMissing,
+            CrabError::TxNotAvailable,
+        ] {
+            assert_eq!(error.classify(), FailureClass::Permanent, "{error}");
+        }
+    }
+
+    #[test]
+    fn declared_limits_are_capacity_refusals() {
+        for kind in [
+            LimitKind::LtxFileBytes,
+            LimitKind::LocalDiskBytes,
+            LimitKind::CapturedLtxBytes,
+            LimitKind::HostResourceUnits,
+        ] {
+            assert_eq!(
+                CrabError::Limit(kind).classify(),
+                FailureClass::Capacity,
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn fenced_states_require_restoring_authoritative_state() {
+        assert_eq!(CrabError::Fenced.classify(), FailureClass::Fenced);
+        assert_eq!(
+            CrabError::InvalidState("sessions cannot be reused").classify(),
+            FailureClass::Fenced
+        );
+    }
+
+    #[test]
+    fn io_failures_separate_retryable_capacity_and_ambiguous_outcomes() {
+        let cases = [
+            (
+                ErrorKind::Interrupted,
+                FailureClass::Retryable { after: None },
+            ),
+            (
+                ErrorKind::WouldBlock,
+                FailureClass::Retryable { after: None },
+            ),
+            (ErrorKind::TimedOut, FailureClass::Retryable { after: None }),
+            (ErrorKind::StorageFull, FailureClass::Capacity),
+            (ErrorKind::QuotaExceeded, FailureClass::Capacity),
+            (ErrorKind::OutOfMemory, FailureClass::Capacity),
+            (ErrorKind::NotFound, FailureClass::Permanent),
+            (ErrorKind::PermissionDenied, FailureClass::Permanent),
+            (ErrorKind::AlreadyExists, FailureClass::Permanent),
+            (ErrorKind::InvalidInput, FailureClass::Permanent),
+            (ErrorKind::InvalidData, FailureClass::Permanent),
+            (ErrorKind::Unsupported, FailureClass::Permanent),
+            // A failed page write can leave a partial artifact behind.
+            (ErrorKind::Other, FailureClass::Ambiguous),
+        ];
+        for (kind, expected) in cases {
+            let error = CrabError::Io(std::io::Error::from(kind));
+            assert_eq!(error.classify(), expected, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn sqlite_failures_classify_by_code_not_message() {
+        use rusqlite::ffi;
+        // Raw SQLite result codes, one of them extended, so the classification
+        // is pinned to the wire code. `rusqlite::ErrorCode::DatabaseBusy as i32`
+        // is the Rust enum discriminant (3 = SQLITE_PERM), never the result
+        // code, so a caller must not use it to build a failure.
+        let busy_snapshot = ffi::SQLITE_BUSY | (4 << 8);
+        let cases = [
+            (ffi::SQLITE_BUSY, FailureClass::Retryable { after: None }),
+            (ffi::SQLITE_LOCKED, FailureClass::Retryable { after: None }),
+            (
+                ffi::SQLITE_INTERRUPT,
+                FailureClass::Retryable { after: None },
+            ),
+            (ffi::SQLITE_FULL, FailureClass::Capacity),
+            (ffi::SQLITE_NOMEM, FailureClass::Capacity),
+            (ffi::SQLITE_IOERR, FailureClass::Ambiguous),
+            (ffi::SQLITE_CORRUPT, FailureClass::Permanent),
+            (ffi::SQLITE_READONLY, FailureClass::Permanent),
+            (ffi::SQLITE_NOTADB, FailureClass::Permanent),
+            (
+                rusqlite::ErrorCode::DatabaseBusy as i32,
+                FailureClass::Permanent,
+            ),
+        ];
+        for (code, expected) in cases {
+            let error =
+                CrabError::Sqlite(rusqlite::Error::SqliteFailure(ffi::Error::new(code), None));
+            assert_eq!(error.classify(), expected, "{code}");
+        }
+
+        let extended = CrabError::Sqlite(rusqlite::Error::SqliteFailure(
+            ffi::Error::new(busy_snapshot),
+            None,
+        ));
+        assert_eq!(
+            extended.classify(),
+            FailureClass::Retryable { after: None },
+            "extended codes keep their primary code"
+        );
+    }
+
+    #[test]
+    fn unknown_failures_stay_ambiguous() {
+        let error = CrabError::Other(Box::new(std::io::Error::other("unclassified")));
+        assert_eq!(error.classify(), FailureClass::Ambiguous);
+    }
+
+    #[test]
+    fn retry_classes_carry_their_provider_hint() {
+        let hinted = FailureClass::Retryable {
+            after: Some(Duration::from_millis(250)),
+        };
+        assert!(hinted.is_retryable());
+        assert_eq!(hinted.retry_after(), Some(Duration::from_millis(250)));
+        assert!(!FailureClass::Capacity.is_retryable());
+        assert_eq!(FailureClass::Capacity.retry_after(), None);
     }
 }

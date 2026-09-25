@@ -277,7 +277,7 @@ impl Db {
         facilities
             .filesystem
             .create_dir(&CaptureEngine::meta_path_for(path))?;
-        let capture = CaptureEngine::open_with_host(path, host, vfs)?;
+        let capture = CaptureEngine::open_with_host(path, host, vfs, limits.max_capture_bytes)?;
         let writer = open_connection(path, vfs)?;
         writer.busy_timeout(std::time::Duration::from_secs(1))?;
         writer.pragma_update(None, "wal_autocheckpoint", 0)?;
@@ -334,6 +334,11 @@ impl Db {
     /// writer remains reusable. SQLite commit/rollback ambiguity fences the
     /// writer. A successful return is still local-only until capture and remote
     /// publication complete.
+    ///
+    /// A commit larger than `Limits::max_capture_bytes` is not refused: the
+    /// later capture represents it as a full database image, which is bounded
+    /// by `Limits::max_file_bytes`, so a large write can never leave a local
+    /// commit that the session cannot capture.
     pub fn transaction_with<T, E>(
         &mut self,
         operation: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, E>,
@@ -344,7 +349,7 @@ impl Db {
         self.ensure_active()
             .map_err(crate::TransactionError::Capture)?;
         self.ensure_capacity()
-            .map_err(crate::TransactionError::Capture)?;
+            .map_err(crate::TransactionError::Admission)?;
         let disk_before = self.local_disk.bytes();
         let write_bytes = self.limits.max_capture_bytes.checked_mul(2).ok_or(
             crate::TransactionError::Admission(CrabError::Limit(crate::LimitKind::LocalDiskBytes)),
@@ -420,20 +425,27 @@ impl Db {
 
     /// Captures committed WAL pages and all cuts made by checkpoint maintenance.
     ///
-    /// Any failure fences further use, since some local cuts may already exist.
-    /// Retain returned files until the canonical Cell root publishes;
-    /// `prune_captured` can then release one exact acknowledged batch.
+    /// A failure that can leave partial local state fences further use. A
+    /// declared capacity refusal happens before the cut is written, so the
+    /// session stays active with [`Self::has_pending_capture`] reporting the
+    /// uncaptured commit; the host may clear the obstruction and retry, or
+    /// discard the session and restore authoritative state. Retain returned
+    /// files until the canonical Cell root publishes; `prune_captured` can then
+    /// release one exact acknowledged batch.
     pub fn capture(&mut self) -> Result<CaptureBatch> {
         self.ensure_active()?;
         self.flush_pending_durability()?;
-        let (result, timing) = self.capture_inner(false);
+        let (result, timing, wrote_cut) = self.capture_inner(false);
         #[cfg(feature = "replica")]
         self.host.observe_ltx_capture(&timing, result.is_ok());
         let result = result.map(|mut batch| {
             batch.timing = timing;
             batch
         });
-        if result.is_err() {
+        // A failure after the cut writer started can leave partial local state,
+        // so the session fences. A refusal raised before the writer starts only
+        // declined work, and the pending WAL cut stays recoverable.
+        if result.is_err() && wrote_cut {
             self.fenced = true;
         }
         result
@@ -448,9 +460,13 @@ impl Db {
     /// batch. A higher-level protocol may instead publish the exact bytes to its
     /// own durability boundary, then pass that published batch to
     /// `prune_captured`. A failed local barrier fences the session.
+    ///
+    /// As with [`Self::capture`], a declared capacity refusal that happens
+    /// before any cut is written leaves the session active with
+    /// [`Self::has_pending_capture`] set.
     pub fn capture_deferred(&mut self) -> Result<CaptureBatch> {
         self.ensure_active()?;
-        let (result, timing) = self.capture_inner(true);
+        let (result, timing, wrote_cut) = self.capture_inner(true);
         #[cfg(feature = "replica")]
         self.host.observe_ltx_capture(&timing, result.is_ok());
         let result = result.map(|mut batch| {
@@ -463,7 +479,7 @@ impl Db {
             );
             batch
         });
-        if result.is_err() {
+        if result.is_err() && wrote_cut {
             self.fenced = true;
         }
         result
@@ -508,15 +524,25 @@ impl Db {
         result
     }
 
+    /// Runs one capture attempt.
+    ///
+    /// The returned flag reports whether the attempt could have written local
+    /// cut state: a refusal raised before the writer starts leaves the session
+    /// intact, while any later failure requires fencing.
     fn capture_inner(
         &mut self,
         defer_durability: bool,
-    ) -> (Result<CaptureBatch>, crate::CaptureTiming) {
+    ) -> (Result<CaptureBatch>, crate::CaptureTiming, bool) {
         self.capture.start_timing(self.host.now_monotonic());
         self.capture
             .timing_begin(crate::capture::TimingPhase::Preparation);
+        if let Err(error) = self.ensure_capacity() {
+            self.capture
+                .timing_end(crate::capture::TimingPhase::Preparation);
+            let timing = self.capture.finish_timing(self.host.now_monotonic());
+            return (Err(error), timing, false);
+        }
         let result = (|| {
-            self.ensure_capacity()?;
             self.capture
                 .timing_end(crate::capture::TimingPhase::Preparation);
             let before = self.capture.pos();
@@ -531,7 +557,7 @@ impl Db {
             Ok(batch)
         })();
         let timing = self.capture.finish_timing(self.host.now_monotonic());
-        (result, timing)
+        (result, timing, true)
     }
 
     fn collect_cuts(&mut self, before: crate::Pos) -> Result<CaptureBatch> {
@@ -543,10 +569,13 @@ impl Db {
                 let info = if let Some(info) = self.capture.sealed_l0_segment(Txid(txid)) {
                     info
                 } else {
+                    // The inspection limit is the full-file bound: a captured
+                    // cut may be a full database image, which the writer already
+                    // bounded by `max_file_bytes`.
                     let file = crate::LtxHost {
                         facilities: self.host.clone(),
                         max_database_bytes: self.limits.max_database_bytes,
-                        max_file_bytes: self.limits.max_capture_bytes,
+                        max_file_bytes: self.limits.max_file_bytes,
                     }
                     .open(&path)?;
                     self.capture
@@ -559,7 +588,10 @@ impl Db {
                 };
                 self.capture.timing_add_ltx_bytes(info.size_bytes);
                 self.capture.timing_add_segment();
-                self.account_capture(&info)?;
+                // The capture writer already enforced the tighter incremental
+                // bound for delta cuts, so retention accounting only has to
+                // honor the file bound shared by every cut.
+                self.account(&info)?;
                 let segment = LocalSegment::new(path, info);
                 #[cfg(feature = "replica")]
                 let segment = match self.capture.take_sealed_l0_captured_index(Txid(txid)) {
@@ -585,7 +617,7 @@ impl Db {
     pub fn checkpoint(&mut self, mode: crate::CheckpointMode) -> Result<CaptureBatch> {
         self.ensure_active()?;
         self.flush_pending_durability()?;
-        let (initial, mut timing) = self.capture_inner(false);
+        let (initial, mut timing, _) = self.capture_inner(false);
         let result = (|| {
             let mut batch = initial?;
             self.local_disk.try_grow(
@@ -637,7 +669,7 @@ impl Db {
 
     fn snapshot_inner(&mut self, destination: &Path) -> Result<(LocalSegment, CaptureBatch)> {
         self.flush_pending_durability()?;
-        let (batch, timing) = self.capture_inner(false);
+        let (batch, timing, _) = self.capture_inner(false);
         #[cfg(feature = "replica")]
         self.host.observe_ltx_capture(&timing, batch.is_ok());
         let mut batch = batch?;
@@ -700,6 +732,17 @@ impl Db {
         Ok(())
     }
 
+    /// Reports whether a committed WAL cut is waiting for capture.
+    ///
+    /// While this is true the local database holds a commit that no LTX file
+    /// covers, so the host must not acknowledge it, serve it, or reuse the
+    /// session's local state. Retry [`Db::capture`] after clearing the
+    /// obstruction, or discard the session and restore authoritative state.
+    #[must_use]
+    pub fn has_pending_capture(&self) -> bool {
+        self.required_cut.is_some()
+    }
+
     fn account(&mut self, info: &SegmentInfo) -> Result<()> {
         if info.size_bytes > self.limits.max_file_bytes {
             return Err(CrabError::Limit(crate::LimitKind::LtxFileBytes));
@@ -715,13 +758,6 @@ impl Db {
             return Err(CrabError::Limit(crate::LimitKind::RetainedCaptureArtifacts));
         }
         Ok(())
-    }
-
-    fn account_capture(&mut self, info: &SegmentInfo) -> Result<()> {
-        if info.size_bytes > self.limits.max_capture_bytes {
-            return Err(CrabError::Limit(crate::LimitKind::CapturedLtxBytes));
-        }
-        self.account(info)
     }
 
     fn reconcile_local_disk(&self) -> Result<()> {

@@ -61,6 +61,65 @@ fn code_only_registry() -> crate::Registry {
 }
 
 #[test]
+fn full_pending_publication_budget_refuses_new_commands() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let path = directory.path().join("cell.sqlite");
+    let cell = CellId::from_bytes([61; 32]);
+    let incarnation = IncarnationId::from_bytes([62; 16]);
+    let mut connection = crab_ltx::rusqlite::Connection::open(&path).unwrap();
+    crate::cell::schema::install_runtime_schema(&mut connection, cell, incarnation, 1).unwrap();
+    drop(connection);
+    let db = Db::open(&path, crab_ltx::Limits::default()).unwrap();
+    let mut executor = CellExecutor::new(db, cell, incarnation, 1);
+
+    // Each command commits locally, becomes pending, and is released by its
+    // fleet proof, so object publication may lag behind the actor. The budget
+    // that stops that lag from growing without bound is the admission under
+    // test.
+    for sequence in 1_u64..=MAX_PENDING_PUBLICATIONS as u64 {
+        let identity = MutationIdentity {
+            request_id: RequestId::from_bytes([sequence as u8; 16]),
+            issued_at_ms: 10,
+            expires_at_ms: 10_000,
+        };
+        let execution = executor
+            .execute(
+                identity,
+                Digest::from_bytes([sequence as u8; 32]),
+                20,
+                1 << 20,
+                |transaction| {
+                    transaction.execute(
+                        "UPDATE sys_meta SET logical_time_ms = logical_time_ms + 1",
+                        [],
+                    )?;
+                    Ok(HandlerOutcome::Success(vec![sequence as u8]))
+                },
+            )
+            .unwrap();
+        assert!(
+            matches!(execution, CommandExecution::Pending),
+            "sequence {sequence}"
+        );
+        executor.confirm_durable(sequence).unwrap();
+    }
+
+    // The budget is full: the next command is refused instead of queueing more
+    // unpublished work behind a provider that is already behind.
+    let identity = MutationIdentity {
+        request_id: RequestId::from_bytes([201; 16]),
+        issued_at_ms: 10,
+        expires_at_ms: 10_000,
+    };
+    assert!(matches!(
+        executor.execute(identity, Digest::from_bytes([9; 32]), 20, 1 << 20, |_| {
+            Ok(HandlerOutcome::Success(Vec::new()))
+        }),
+        Err(Error::PendingPublication)
+    ));
+}
+
+#[test]
 fn restored_executor_rejects_root_sequence_ahead_of_sqlite_metadata() {
     let directory = tempfile::TempDir::new().unwrap();
     let path = directory.path().join("cell.sqlite");
@@ -119,7 +178,7 @@ fn code_only_migration_commits_a_captured_system_cut() {
 }
 
 #[test]
-fn only_local_disk_admission_limits_become_capacity_errors() {
+fn declared_admission_limits_become_capacity_errors() {
     let disk = admission_error(crab_ltx::CrabError::Limit(
         crab_ltx::LimitKind::LocalDiskBytes,
     ));
@@ -128,8 +187,11 @@ fn only_local_disk_admission_limits_become_capacity_errors() {
     let database = crab_ltx::CrabError::Limit(crab_ltx::LimitKind::DatabaseBytes);
     assert!(matches!(
         admission_error(database),
-        Error::Ltx(crab_ltx::CrabError::Limit(
-            crab_ltx::LimitKind::DatabaseBytes
-        ))
+        Error::Capacity("database bytes")
     ));
+
+    // A fenced session is not a capacity refusal: the caller must restore
+    // authoritative state instead of retrying the same request.
+    let fenced = admission_error(crab_ltx::CrabError::Fenced);
+    assert!(matches!(fenced, Error::Ltx(crab_ltx::CrabError::Fenced)));
 }

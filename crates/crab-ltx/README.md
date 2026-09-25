@@ -513,6 +513,11 @@ in that order.
 
 - The first plan segment must be a full snapshot. Later segments must be
   contiguous, checksum-linked, ordered, and consistent in page size.
+- A commit whose delta cannot fit `Limits::max_capture_bytes` is captured as a
+  full database image bounded by `Limits::max_file_bytes`, not refused after the
+  commit: the image keeps the commit's TXID, pre-apply checksum, and chain
+  position, so a large write can never leave a local commit the session cannot
+  capture.
 - Every segment's declared size, BLAKE3 digest, LTX checksum, page ordering,
   page coverage, and pre/post database checksum is verified.
 - Restore and compaction create a new destination and never replace an existing
@@ -524,6 +529,24 @@ in that order.
 - Cancellation does not roll back work already dispatched to blocking or
   object-store workers. The host must await or reconcile the exact root before
   retrying.
+
+### Failure classes
+
+`CrabError::classify()` returns the contract a caller branches on:
+
+| Class | Caller action |
+| --- | --- |
+| `Retryable { after }` | Retry within the caller's own attempt budget, honoring `after` when the provider named one |
+| `Capacity` | The request was refused before an acknowledged side effect; free the resource, raise the bound, or split the request |
+| `Permanent` | The request cannot succeed with the same inputs or selected state |
+| `Ambiguous` | Work may have taken effect; reconcile before retrying |
+| `Fenced` | Close the handle and restore authoritative state |
+
+Callers must not dispatch on error messages, and a declared `Limit` failure is
+never a fence. A capture failure raised before the cut writer starts leaves the
+session usable with `Db::has_pending_capture()` set; the host must not
+acknowledge or serve that commit until a capture succeeds or the session is
+discarded.
 
 LTX CRC64 protects file structure and rolling database state. It is not a
 cryptographic authenticator. Crab manifests and Cell objects add BLAKE3 digests;
@@ -558,6 +581,20 @@ recover the authoritative plan or Cell root into a fresh directory instead.
 `Limits::default()` admits a 512 MiB database, 64 MiB per capture, 512 MiB per
 input/output file, 1 GiB across a plan or retained captures, and 1,024 segments.
 These are per-operation correctness bounds, not an RSS quota.
+
+`max_capture_bytes` bounds one incremental cut; a commit that cannot fit it is
+captured as a full database image bounded by `max_file_bytes`, and the
+publication path admits each captured segment up to `max_file_bytes` only when
+its index proves full-page coverage.
+
+One command that publishes a fresh root uploads a bounded set of immutable
+objects: the segment body, its index, the changed directory node, the root
+document, and any segment page. `CellReplica::publication_cost` and
+`take_publication_cost` report the exact object count and bytes per root so a
+host can budget object-store cost per command instead of inferring it from the
+database size. The local measurement frozen in
+`tests/cell/roots/lifecycle.rs` is five objects per small append (about 7 KiB
+for a 4 KiB payload); provider-scale cost distributions remain outstanding.
 
 Each live `VerifiedPlan` retains one reconstructed database image, bounded by
 `max_database_bytes`, plus its checksum state and segment metadata. Drop plans
@@ -596,10 +633,27 @@ snapshot/compaction byte identity, both supported page encodings, malformed
 chains, checksum failures, exact Cell roots, bundles, sparse activation,
 hydration, remote compaction, and provider/cache lifecycle boundaries.
 
-Still required before a broad production-readiness claim: external
-Litestream/Celld fixture interoperability, fuzzing, exhaustive filesystem and
-power-loss faults, broader platform/provider CI, and measured latency, memory,
-scratch, and concurrency qualification.
+The suite also ships the independent half of the format proof:
+
+- `tests/vectors/` holds snapshot files written by the pinned upstream Celld
+  encoder and by the `superfly/ltx` v0.5.2 Go reference writer Litestream uses;
+  `src/format_tests.rs` decodes them, restores their exact image, and requires
+  the sized-block files to be byte-identical to this crate's writer.
+- `tests/ltx/vectors.rs` replays every truncation and deterministic mutation of
+  those vectors through the same decoders `fuzz/fuzz_targets/` drives, so a
+  decoder panic fails the stable-toolchain test run.
+- `tests/host/hooks/matrix.rs` injects ordered failures at the capture, barrier,
+  checkpoint, restore, compaction, and publication seams and asserts the error
+  class plus the durable outcome.
+
+The nightly [`crab-ltx fuzz`](../../.github/workflows/crab-ltx-fuzz.yml) workflow
+runs the same targets on a schedule and per pull request, seeded from these
+vectors, and the stable replay stays in the normal test run.
+
+Still required before a broad production-readiness claim: exhaustive filesystem
+and power-loss faults beyond the injected matrix, broader platform/provider CI,
+and measured latency, memory, scratch, and concurrency qualification at fleet
+scale.
 
 ## Provenance and compatibility
 

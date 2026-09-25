@@ -1,4 +1,5 @@
 use super::*;
+use crate::{VerifiedPlan, restore_exact};
 use std::{
     path::Path,
     sync::{
@@ -130,8 +131,10 @@ fn failed_capture_emits_its_bounded_ledger() {
     let temp = tempfile::TempDir::new().unwrap();
     let telemetry = Arc::new(CaptureTelemetry::default());
     let host = crate::Host::default().with_ltx_telemetry(telemetry.clone());
+    // One retained cut fills the session plan budget, so the next capture is
+    // refused before the writer starts and still reports its bounded ledger.
     let limits = Limits {
-        max_capture_bytes: 128,
+        max_segments: 1,
         ..Limits::default()
     };
     let mut db = Db::open_with_host(&temp.path().join("failed.sqlite"), limits, host).unwrap();
@@ -141,12 +144,20 @@ fn failed_capture_emits_its_bounded_ledger() {
         )
     })
     .unwrap();
+    db.capture().unwrap();
 
-    assert!(db.capture().is_err());
+    // A checkpoint captures first, so its refusal is raised before the writer
+    // starts: the failed attempt still emits its bounded ledger.
+    assert!(matches!(
+        db.checkpoint(crate::CheckpointMode::Passive),
+        Err(CrabError::Limit(crate::LimitKind::RetainedCaptureArtifacts))
+    ));
     let attempts = telemetry.0.lock().unwrap();
-    assert_eq!(attempts.len(), 1);
-    assert!(!attempts[0].1);
-    assert!(attempts[0].0.total_nanos > 0);
+    assert_eq!(attempts.len(), 2);
+    assert!(attempts[0].1);
+    assert!(!attempts[1].1);
+    assert!(attempts[1].0.total_nanos > 0);
+    assert_eq!(attempts[1].0.wal_read_bytes, 0);
     assert!(attempts[0].0.wal_read_bytes > 0);
 }
 
@@ -213,6 +224,98 @@ fn managed_connections_disable_sqlite_lookaside() {
         assert_eq!(current, 0);
         assert_eq!(highwater, 0);
     }
+}
+
+#[test]
+fn oversized_commit_captures_as_a_full_image_instead_of_fencing() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let limits = Limits {
+        max_capture_bytes: 8 * 1024,
+        ..Limits::default()
+    };
+    let mut db = Db::open(&temp.path().join("oversized.sqlite"), limits).unwrap();
+    db.transaction(|tx| tx.execute_batch("CREATE TABLE payload(value BLOB)"))
+        .unwrap();
+    let first = db.capture().unwrap();
+
+    // A commit whose delta cannot fit the incremental bound must still be
+    // captured: the writer escalates it to a full database image bounded by
+    // the file bound instead of fencing the session.
+    db.transaction(|tx| tx.execute_batch("INSERT INTO payload VALUES(randomblob(65536))"))
+        .unwrap();
+    let second = db.capture().unwrap();
+    assert_eq!(second.segments.len(), 1);
+    let escalated = &second.segments[0];
+    assert!(
+        escalated.info().size_bytes > limits.max_capture_bytes,
+        "the escalated cut must exceed the incremental bound"
+    );
+    assert!(escalated.info().size_bytes <= limits.max_file_bytes);
+
+    // The escalated cut stays a valid chain element: a plan over both cuts
+    // restores the exact database.
+    let mut segments = first.segments.clone();
+    segments.extend(second.segments.iter().cloned());
+    let plan = VerifiedPlan::new(&segments, second.position, limits).unwrap();
+    let destination = temp.path().join("restored.sqlite");
+    assert_eq!(restore_exact(&plan, &destination).unwrap(), second.position);
+    let connection = Connection::open(&destination).unwrap();
+    let rows: i64 = connection
+        .query_row("SELECT count(*) FROM payload", [], |row| row.get(0))
+        .unwrap();
+    let bytes: i64 = connection
+        .query_row("SELECT length(value) FROM payload", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 1);
+    assert_eq!(bytes, 65536);
+}
+
+#[test]
+fn truncate_boundary_image_may_exceed_the_incremental_bound() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let limits = Limits {
+        max_capture_bytes: 64 * 1024,
+        ..Limits::default()
+    };
+    let mut db = Db::open(&temp.path().join("boundary.sqlite"), limits).unwrap();
+    db.transaction(|tx| {
+        tx.execute_batch(
+            "CREATE TABLE payload(value BLOB); CREATE INDEX payload_len ON payload(length(value))",
+        )
+    })
+    .unwrap();
+    let mut segments = db.capture().unwrap().segments;
+    for _ in 0..20 {
+        db.transaction(|tx| tx.execute_batch("INSERT INTO payload VALUES(randomblob(8192))"))
+            .unwrap();
+        segments.extend(db.capture().unwrap().segments);
+    }
+
+    // A truncate checkpoint writes the whole database as one boundary image.
+    // That image legitimately exceeds the incremental bound and is bounded by
+    // the file bound instead of failing and fencing the session.
+    let batch = db.checkpoint(crate::CheckpointMode::Truncate).unwrap();
+    let position = batch.position;
+    segments.extend(batch.segments);
+    let largest = segments
+        .iter()
+        .map(|segment| segment.info().size_bytes)
+        .max()
+        .unwrap();
+    assert!(
+        largest > limits.max_capture_bytes,
+        "the boundary image must exceed the incremental bound"
+    );
+    assert!(largest <= limits.max_file_bytes);
+
+    let plan = VerifiedPlan::new(&segments, position, limits).unwrap();
+    let destination = temp.path().join("boundary-restored.sqlite");
+    assert_eq!(restore_exact(&plan, &destination).unwrap(), position);
+    let connection = Connection::open(&destination).unwrap();
+    let rows: i64 = connection
+        .query_row("SELECT count(*) FROM payload", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 20);
 }
 
 #[test]

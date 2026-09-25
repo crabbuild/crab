@@ -1205,11 +1205,18 @@ fn transaction_error(error: TransactionError<Error>) -> Error {
 }
 
 fn admission_error(error: crab_ltx::CrabError) -> Error {
+    // A declared bound refused the work before any side effect, so the caller
+    // sees a capacity refusal instead of a fence or an unknown outcome.
+    match error.classify() {
+        crab_ltx::FailureClass::Capacity => ltx_capacity_error(&error),
+        _ => error.into(),
+    }
+}
+
+fn ltx_capacity_error(error: &crab_ltx::CrabError) -> Error {
     match error {
-        crab_ltx::CrabError::Limit(crab_ltx::LimitKind::LocalDiskBytes) => {
-            Error::Capacity("local disk bytes")
-        }
-        error => error.into(),
+        crab_ltx::CrabError::Limit(kind) => Error::Capacity(kind.as_str()),
+        _ => Error::Capacity("local storage"),
     }
 }
 
@@ -1219,9 +1226,13 @@ fn transaction_error_with_io(db: &Db, error: TransactionError<Error>) -> Error {
 }
 
 fn ltx_error(error: crab_ltx::CrabError) -> Error {
-    match error {
-        crab_ltx::CrabError::Deadline => Error::Deadline,
-        error => Error::Ltx(error),
+    match error.classify() {
+        crab_ltx::FailureClass::Capacity => ltx_capacity_error(&error),
+        crab_ltx::FailureClass::Fenced => Error::Fenced,
+        _ => match error {
+            crab_ltx::CrabError::Deadline => Error::Deadline,
+            error => Error::Ltx(error),
+        },
     }
 }
 

@@ -40,6 +40,7 @@ pub(crate) async fn upload_source(
         .store()
         .put_multipart_source_retry(&path, upload, size, *digest, MULTIPART_BYTES, &cancel, None)
         .await?;
+    replica.cost.record(size);
     Ok(())
 }
 

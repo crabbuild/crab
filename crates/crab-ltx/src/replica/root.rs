@@ -211,6 +211,16 @@ pub(super) fn encode_root(root: &RootDocument) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Decodes one root document and reports its descriptor-page count.
+pub(crate) fn inspect_root(bytes: &[u8]) -> Result<usize> {
+    Ok(decode_root(bytes)?.segment_pages.len())
+}
+
+/// Decodes one root descriptor page and reports its descriptor count.
+pub(crate) fn inspect_segment_page(bytes: &[u8]) -> Result<usize> {
+    Ok(decode_segment_page(bytes)?.len())
+}
+
 pub(super) fn decode_root(bytes: &[u8]) -> Result<RootDocument> {
     if bytes.len() as u64 > ROOT_BYTES {
         return Err(CrabError::Limit(crate::LimitKind::CellRootBytes));

@@ -20,6 +20,9 @@ outside this crate.
 5. `src/replica.rs` and `src/replica/` — Cell roots, directories, uploads, and
    compaction (see the module map below).
 6. `UPSTREAM.md` — Celld lineage, licenses, and review rules for imports.
+7. `src/internal.rs` — the unstable inspection surface external fuzzers and
+   auditors use; `tests/vectors/README.md` records the external fixture
+   provenance.
 
 ## Module map
 
@@ -46,6 +49,8 @@ concern each. Module files sit beside their root (`foo.rs` + `foo/`).
 | Change restore or compaction | `src/recovery.rs`, `src/replica/compaction.rs` | `tests/cell/restore.rs`, `tests/ltx/properties.rs` |
 | Change the paged VFS | `src/writable_vfs.rs`, `src/paged_io.rs` | `tests/cell/roots.rs` |
 | Change host hooks | `src/environment/` | `tests/host/hooks.rs` |
+| Change a decoder or the format | `src/codec.rs`, `src/ltx.rs`, `src/internal.rs` | `src/format_tests.rs`, `tests/ltx/vectors.rs`, `fuzz/` |
+| Change a durability seam | `src/capture/`, `src/db.rs`, `src/recovery.rs` | `tests/host/hooks/matrix.rs` |
 
 ## Layout and tests
 
@@ -64,10 +69,15 @@ concern each. Module files sit beside their root (`foo.rs` + `foo/`).
   zero-checksum continuation markers.
 - Capture records the committed WAL boundary; a valid prefix cannot hide a
   corrupt later committed frame.
+- A commit is never stranded by size: an incremental cut that cannot fit
+  `max_capture_bytes` is captured as a full database image bounded by
+  `max_file_bytes`, and only a failure after the cut writer starts fences the
+  session.
 - Restore and compaction install only fresh destinations and verify the exact
   requested endpoint.
 - Cancellation never pretends to roll back dispatched work: admission and
   scratch stay owned until that work finishes.
+- Callers branch on `CrabError::classify()`, never on error text.
 
 ## Features and platform
 
@@ -87,6 +97,23 @@ CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/<checkout> \
   cargo clippy -p crab-ltx --all-targets --features replica --locked -- -D warnings
 python3 crab/scripts/check-cell-ltx-layout.py
 ```
+
+External vectors and decoder fuzzing:
+
+```sh
+# Regenerate the celld-written fixtures (see tests/vectors/README.md).
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-ltx-vectors \
+  cargo run --release --manifest-path \
+  crates/crab-ltx/tests/vectors/generate/Cargo.toml -- crates/crab-ltx/tests/vectors
+
+# Deep search needs nightly; tests/ltx/vectors.rs replays the same entry points
+# on the stable toolchain during `cargo test -p crab-ltx --features replica`.
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-ltx-fuzz \
+  cargo +nightly fuzz run ltx -- -max_total_time=600
+```
+
+`.github/workflows/crab-ltx-fuzz.yml` runs the same targets per pull request and
+on a nightly schedule, seeded from `tests/vectors/`.
 
 ## Related documentation
 
