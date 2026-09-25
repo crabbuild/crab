@@ -537,6 +537,29 @@ path fence never bites, the receipt design, and the verified fallback behaviour.
 Nothing was left in the tree: the wiring was reverted and the runtime, http-server,
 and LTX suites are green again.
 
+The crab-ltx API that closes this, designed from source on 2026-09-24:
+
+- `Db::persist_continuation(&self, path: &Path) -> Result<()>` writes a
+  self-describing continuation: version, position (txid and checksum), page
+  size, page count, then the dense per-page checksum list. `PageChecksums`
+  already holds that list as a memory base or a file base and has `persist` for
+  the file form, so the writer is a header plus the same body the restore path
+  already produces at `<db>.crab-ltx-checksums`.
+- `Db::open_resumed_with_host(path, limits, host, continuation: &Path) -> Result<Db>`
+  opens the database at `path`, reads the continuation, and seeds through
+  `CaptureEngine::seed_continuation(position, checksums, page_size, count)` —
+  which already validates that the aggregate checksum matches the position. The
+  new checks are that the file length equals `page_count * page_size` and that
+  the continuation version is supported. Any mismatch is a hard error, and the
+  caller discards the file and restores.
+- The runtime then keeps only the receipt (identity, database path, continuation
+  path); the checksum index's home is settled by writing it beside the database
+  and moving it with the file on a wake.
+
+Tests for the pair: commit, persist, move the file, open it seeded, commit
+again, and assert the new capture continues the TXID chain from the recorded
+position; plus a rejection case for a page-count or aggregate-checksum mismatch.
+
 Until one of them lands, every wake remains a restore, and the counts from
 slice 5 stay the cold-route numbers.
 
