@@ -1,6 +1,6 @@
 # Plan 035: Harden crab-ltx as the Cell durability foundation
 
-Status: IN PROGRESS — local Slices 1–2 implemented; Slice 3 model and RustFS sparse-owner process kill pass; physical power-cut and protected proof gates remain; Slice 4 no-go pending production profile
+Status: IN PROGRESS — local Slices 1–3 pass; physical power-cut and protected proof gates remain; Slice 4 no-go pending production profile
 Priority: P0 correctness; P1 measured performance
 Effort: L, split into four reviewable changes
 Risk: High at the filesystem and recovery boundaries
@@ -335,3 +335,9 @@ status of this plan in `advisor-plans/README.md` after each slice.
   is actually on the production acknowledgement path. A bounded full-WAL
   rewrite or additional object path now would be speculative; choose and
   benchmark one only after that receipt identifies the dominant term.
+- The production `crab_cell_ltx_phase_seconds{phase="root_preparation"}`
+  histogram now times one `CellReplica::prepare` attempt, including admission,
+  immutable uploads, and verification. The existing capture phase and
+  durability-proof wait histograms can be compared in the protected run. Root
+  preparation may overlap follower proof, so its isolated duration alone does
+  not establish the response's critical path.

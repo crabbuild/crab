@@ -225,6 +225,14 @@ Omit `--sparse` for fresh rows. The published RustFS loopback measurements
 below are provider preparation cost; runtime fleet or exact-root response
 latency needs a separate qualification receipt.
 
+Production telemetry now includes
+`crab_cell_ltx_phase_seconds{phase="root_preparation"}` for each normal
+`CellReplica::prepare` attempt, alongside capture phases and
+`crab_cell_durability_wait_seconds{source="fleet|object"}`. Preparation includes
+admission, immutable uploads, and verification; it can overlap follower proof.
+Use the protected response profile to decide which phase controls acknowledgement
+latency before selecting another optimization.
+
 After removing the active sidecar's per-cut sync, a second seven-round matrix
 with the same commands and host measured:
 

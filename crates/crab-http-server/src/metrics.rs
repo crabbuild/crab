@@ -31,7 +31,7 @@ const RECOVERY_FAILURE_REASON_COUNT: usize = 4;
 const RECOVERY_PHASE_COUNT: usize = 5;
 const RECOVERY_WORK_COUNT: usize = 12;
 const NODE_LOG_ROTATION_RESULT_COUNT: usize = 4;
-const LTX_PHASE_COUNT: usize = 18;
+const LTX_PHASE_COUNT: usize = 19;
 const LTX_READ_ORIGIN_COUNT: usize = 4;
 const PROJECTION_PROBE_RESULT_COUNT: usize = 3;
 const PROJECTION_PHASE_COUNT: usize = 1;
@@ -82,6 +82,7 @@ const LTX_PHASE_LABELS: [&str; LTX_PHASE_COUNT] = [
     "fsync",
     "parent_sync",
     "checkpoint",
+    "root_preparation",
     "root_open",
     "directory",
     "frame_fetch",
@@ -1173,11 +1174,12 @@ impl crab_cell_runtime::fleet::telemetry::CellTelemetry for Metrics {
             crab_cell_runtime::ltx::LtxPhase::Fsync => 10,
             crab_cell_runtime::ltx::LtxPhase::ParentSync => 11,
             crab_cell_runtime::ltx::LtxPhase::Checkpoint => 12,
-            crab_cell_runtime::ltx::LtxPhase::RootOpen => 13,
-            crab_cell_runtime::ltx::LtxPhase::Directory => 14,
-            crab_cell_runtime::ltx::LtxPhase::FrameFetch => 15,
-            crab_cell_runtime::ltx::LtxPhase::RestoreWrite => 16,
-            crab_cell_runtime::ltx::LtxPhase::Compaction => 17,
+            crab_cell_runtime::ltx::LtxPhase::RootPreparation => 13,
+            crab_cell_runtime::ltx::LtxPhase::RootOpen => 14,
+            crab_cell_runtime::ltx::LtxPhase::Directory => 15,
+            crab_cell_runtime::ltx::LtxPhase::FrameFetch => 16,
+            crab_cell_runtime::ltx::LtxPhase::RestoreWrite => 17,
+            crab_cell_runtime::ltx::LtxPhase::Compaction => 18,
         };
         self.inner.ltx_phase_runs[index][usize::from(!succeeded)].increment(1);
         self.inner.ltx_phase_duration[index].record(elapsed.as_secs_f64());
@@ -2401,6 +2403,12 @@ mod tests {
         );
         <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::ltx_phase(
             &metrics,
+            crab_cell_runtime::ltx::LtxPhase::RootPreparation,
+            Duration::from_millis(15),
+            true,
+        );
+        <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::ltx_phase(
+            &metrics,
             crab_cell_runtime::ltx::LtxPhase::FrameFetch,
             Duration::from_millis(5),
             false,
@@ -2522,6 +2530,9 @@ mod tests {
         );
         assert!(rendered.contains("crab_cell_durability_proofs_total{source=\"fleet\"} 1"));
         assert!(rendered.contains("crab_cell_durability_proofs_total{source=\"object\"} 1"));
+        assert!(
+            rendered.contains("crab_cell_ltx_phase_seconds_count{phase=\"root_preparation\"} 1")
+        );
         // The proof counters alone cannot show a slow member: the wait
         // histogram is what proves how long each source blocked the commit.
         assert!(rendered.contains("crab_cell_durability_wait_seconds_count{source=\"fleet\"} 1"));

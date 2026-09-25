@@ -15,11 +15,18 @@ impl CellReplica {
         commit_sequence: u64,
         schema: u32,
     ) -> Result<PreparedRoot> {
-        let mut replica = self.clone();
-        replica.host = self.host.for_dirty().await?;
-        replica
-            .prepare_captured(base, cuts, commit_sequence, schema)
-            .await
+        let started = self.host.now_monotonic();
+        let result = async {
+            let mut replica = self.clone();
+            replica.host = self.host.for_dirty().await?;
+            replica
+                .prepare_captured(base, cuts, commit_sequence, schema)
+                .await
+        }
+        .await;
+        self.host
+            .observe_ltx_phase(crate::LtxPhase::RootPreparation, started, result.is_ok());
+        result
     }
 
     async fn prepare_captured(
