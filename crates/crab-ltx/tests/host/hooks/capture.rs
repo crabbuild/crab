@@ -66,7 +66,18 @@ fn deferred_captures_share_one_directory_barrier() {
         faults.file_syncs.load(Ordering::Relaxed),
         first.segments.len() + second.segments.len()
     );
-    assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 1);
+    // The first local barrier also seals the new ltx/0, ltx, and session names.
+    assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 4);
+    writer
+        .transaction(|tx| tx.execute("INSERT INTO t VALUES(3)", []))
+        .unwrap();
+    let third = writer.capture_deferred().unwrap();
+    writer.durability_barrier().unwrap();
+    assert_eq!(
+        faults.file_syncs.load(Ordering::Relaxed),
+        first.segments.len() + second.segments.len() + third.segments.len()
+    );
+    assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 5);
     writer.close().unwrap();
 }
 #[test]

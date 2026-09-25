@@ -1,4 +1,4 @@
-//! Models which host-file bytes and names survive a crash.
+//! Models which host-file bytes, names, and parent directories survive a crash.
 //!
 //! SQLite's VFS is deliberately outside this model; the tests below only
 //! qualify LTX artifacts and checksum sidecars supplied by `FileSystem`.
@@ -11,6 +11,8 @@ struct State {
     next: u64,
     live: HashMap<PathBuf, u64>,
     durable: HashMap<PathBuf, u64>,
+    live_dirs: HashSet<PathBuf>,
+    durable_dirs: HashSet<PathBuf>,
     synced: HashMap<u64, Vec<u8>>,
 }
 
@@ -18,6 +20,7 @@ struct State {
 struct VolatileFs {
     state: Arc<Mutex<State>>,
     fail_parent: AtomicBool,
+    fail_parent_path: Mutex<Option<PathBuf>>,
 }
 
 struct VolatileFile {
@@ -64,7 +67,9 @@ impl VolatileFs {
     }
 
     fn directory_barrier(&self, path: &Path) -> io::Result<()> {
-        if self.fail_parent.load(Ordering::Relaxed) {
+        if self.fail_parent.load(Ordering::Relaxed)
+            || self.fail_parent_path.lock().unwrap().as_deref() == Some(path)
+        {
             return Err(io::Error::other("modeled parent sync failure"));
         }
         DirectFileSystem.sync_parent(path)?;
@@ -78,11 +83,36 @@ impl VolatileFs {
             .map(|(name, id)| (name.clone(), *id))
             .collect();
         state.durable.extend(entries);
+        state.durable_dirs.retain(|name| name.parent() != parent);
+        let directories: Vec<_> = state
+            .live_dirs
+            .iter()
+            .filter(|name| name.parent() == parent)
+            .cloned()
+            .collect();
+        state.durable_dirs.extend(directories);
         Ok(())
     }
 
     fn crash(&self) {
         let mut state = self.state.lock().unwrap();
+        let directory_survives = |directory: &Path| {
+            directory.ancestors().all(|ancestor| {
+                !state.live_dirs.contains(ancestor) || state.durable_dirs.contains(ancestor)
+            })
+        };
+        let surviving_dirs: Vec<_> = state
+            .durable_dirs
+            .iter()
+            .filter(|directory| directory_survives(directory))
+            .cloned()
+            .collect();
+        let surviving_files: Vec<_> = state
+            .durable
+            .iter()
+            .filter(|(path, _)| path.parent().is_some_and(directory_survives))
+            .map(|(path, id)| (path.clone(), *id))
+            .collect();
         let paths: HashSet<_> = state
             .live
             .keys()
@@ -92,13 +122,21 @@ impl VolatileFs {
         for path in paths {
             let _ = std::fs::remove_file(path);
         }
-        for (path, id) in &state.durable {
+        let mut directories: Vec<_> = state.live_dirs.iter().collect();
+        directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+        for directory in directories {
+            let _ = std::fs::remove_dir_all(directory);
+        }
+        for directory in &surviving_dirs {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        for (path, id) in &surviving_files {
             if let Some(bytes) = state.synced.get(id) {
-                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                 std::fs::write(path, bytes).unwrap();
             }
         }
-        state.live = state.durable.clone();
+        state.live = surviving_files.into_iter().collect();
+        state.live_dirs = surviving_dirs.into_iter().collect();
     }
 }
 
@@ -142,7 +180,17 @@ impl FileSystem for VolatileFs {
         DirectFileSystem.file_len(path)
     }
     fn create_dir_all(&self, path: &Path) -> io::Result<()> {
-        DirectFileSystem.create_dir_all(path)
+        let mut created = Vec::new();
+        let mut ancestor = path;
+        while !DirectFileSystem.exists(ancestor)? {
+            created.push(ancestor.to_owned());
+            ancestor = ancestor
+                .parent()
+                .ok_or_else(|| io::Error::other("missing directory parent"))?;
+        }
+        DirectFileSystem.create_dir_all(path)?;
+        self.state.lock().unwrap().live_dirs.extend(created);
+        Ok(())
     }
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         DirectFileSystem.rename_uncommitted(from, to)?;
@@ -166,7 +214,9 @@ impl FileSystem for VolatileFs {
         DirectFileSystem.exists(path)
     }
     fn create_dir(&self, path: &Path) -> io::Result<()> {
-        DirectFileSystem.create_dir(path)
+        DirectFileSystem.create_dir(path)?;
+        self.state.lock().unwrap().live_dirs.insert(path.to_owned());
+        Ok(())
     }
     fn sync_parent(&self, path: &Path) -> io::Result<()> {
         self.directory_barrier(path)
@@ -187,7 +237,7 @@ impl FileSystem for VolatileFs {
 
 #[test]
 fn only_synced_ltx_bytes_and_parent_synced_names_survive_modeled_crash() {
-    for barrier in ["none", "file", "parent"] {
+    for barrier in ["none", "file", "file_parent", "ancestors"] {
         let directory = tempfile::TempDir::new().unwrap();
         let fs = Arc::new(VolatileFs::default());
         let host = Host::default().with_filesystem(fs.clone());
@@ -197,15 +247,23 @@ fn only_synced_ltx_bytes_and_parent_synced_names_survive_modeled_crash() {
             .unwrap();
         let cut = db.capture_deferred().unwrap();
         let segment = cut.segments[0].path().to_owned();
-        if barrier == "file" || barrier == "parent" {
+        if barrier != "none" {
             fs.open_rw(&segment).unwrap().sync_all().unwrap();
         }
-        if barrier == "parent" {
+        if barrier == "file_parent" || barrier == "ancestors" {
             fs.sync_parent(&segment).unwrap();
+        }
+        if barrier == "ancestors" {
+            let l0 = segment.parent().unwrap();
+            let ltx = l0.parent().unwrap();
+            let session = ltx.parent().unwrap();
+            for directory in [l0, ltx, session] {
+                fs.sync_parent(directory).unwrap();
+            }
         }
         drop(db);
         fs.crash();
-        if barrier == "parent" {
+        if barrier == "ancestors" {
             let plan = crab_ltx::VerifiedPlan::new(&cut.segments, cut.position, Limits::default())
                 .unwrap();
             let restored = directory.path().join("restored.sqlite");
@@ -218,7 +276,7 @@ fn only_synced_ltx_bytes_and_parent_synced_names_survive_modeled_crash() {
         } else {
             assert!(
                 !segment.exists(),
-                "{barrier} must not preserve the cut name"
+                "{barrier} must not preserve the complete cut path"
             );
         }
     }
@@ -274,6 +332,40 @@ fn immediate_capture_survives_modeled_crash_at_its_return_boundary() {
         .query_row("SELECT v FROM t", [], |row| row.get(0))
         .unwrap();
     assert_eq!(value, 7);
+}
+
+#[test]
+fn missing_session_directory_barrier_fences_local_acknowledgement() {
+    for deferred in [false, true] {
+        let directory = tempfile::TempDir::new().unwrap();
+        let fs = Arc::new(VolatileFs::default());
+        let host = Host::default().with_filesystem(fs.clone());
+        let source = directory.path().join("source.sqlite");
+        let mut db = Db::open_with_host(&source, Limits::default(), host).unwrap();
+        let session = fs
+            .state
+            .lock()
+            .unwrap()
+            .live_dirs
+            .iter()
+            .find(|path| path.to_string_lossy().ends_with("-crab-ltx"))
+            .cloned()
+            .unwrap();
+        db.transaction(|tx| tx.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES(7)"))
+            .unwrap();
+        *fs.fail_parent_path.lock().unwrap() = Some(session.clone());
+        if deferred {
+            db.capture_deferred().unwrap();
+            assert!(db.durability_barrier().is_err());
+        } else {
+            assert!(db.capture().is_err());
+        }
+        assert!(matches!(db.capture(), Err(CrabError::Fenced)));
+        *fs.fail_parent_path.lock().unwrap() = None;
+        drop(db);
+        fs.crash();
+        assert!(!session.exists(), "deferred={deferred}");
+    }
 }
 
 #[test]

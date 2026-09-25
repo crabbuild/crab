@@ -367,6 +367,7 @@ impl CaptureEngine {
                 self.host.create_dir_all(parent)?;
             }
             self.l0_dir_ready = true;
+            self.l0_ancestors_durable = false;
         }
         // A directory that vanished under a ready flag is recreated once and
         // the complete cut is retried. The candidate checksum index remains
@@ -389,6 +390,7 @@ impl CaptureEngine {
                 if let Some(parent) = &parent {
                     self.host.create_dir_all(parent)?;
                 }
+                self.l0_ancestors_durable = false;
                 self.write_streamed_cut(
                     &tmp_filename,
                     &index_filename,
@@ -405,6 +407,10 @@ impl CaptureEngine {
             }
             other => other?,
         };
+        if !self.defer_durability {
+            // The first acknowledged cut also needs the newly created path to survive.
+            self.sync_l0_ancestors()?;
+        }
         let post_checksum = checksums.checksum();
         // The checksum candidate remains isolated until the cut is durable. A
         // failed local index update fences the owning Db, so partially

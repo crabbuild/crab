@@ -139,6 +139,11 @@ Celld path fsyncs the file but uses a plain rename without a parent-directory
 sync. Do not treat the capture-only gap as a portable performance win without
 making that durability choice explicit.
 
+The September 21 comparison predates the fix that syncs the newly created
+`ltx/0`, `ltx`, and session-directory names on the first locally durable cut.
+Its numbers are historical rather than a current-build timing claim. Later
+cuts in the same session reuse that directory-chain proof.
+
 The Celld runner accepts `--sync-parent` as a diagnostic contract-normalization
 mode. After each upstream `Db::sync()`, it syncs Celld's L0 directory before
 recording capture completion. It also syncs the destination directory after

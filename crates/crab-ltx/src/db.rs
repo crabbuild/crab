@@ -487,9 +487,9 @@ impl Db {
 
     /// Makes all files published by deferred captures durable as one barrier.
     ///
-    /// The barrier syncs each completed file before syncing each destination
-    /// directory once. If either step fails, the session is fenced and pending
-    /// paths remain tracked for diagnostics; no caller may acknowledge them.
+    /// The barrier syncs each completed file, each destination directory once,
+    /// and the new LTX directory chain once per session. If any step fails, the
+    /// session is fenced; no caller may acknowledge the pending paths.
     pub fn durability_barrier(&mut self) -> Result<()> {
         self.ensure_active()?;
         self.flush_pending_durability()
@@ -515,7 +515,9 @@ impl Db {
                 .try_for_each(|path| self.host.filesystem.sync_parent(path))?;
             Ok::<(), std::io::Error>(())
         })()
-        .map_err(CrabError::from);
+        .map_err(CrabError::from)
+        // A new LTX parent name cannot survive merely because its own contents did.
+        .and_then(|()| self.capture.sync_l0_ancestors());
         if result.is_ok() {
             self.pending_durability.clear();
         } else {

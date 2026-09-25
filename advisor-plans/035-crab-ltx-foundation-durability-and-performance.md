@@ -347,3 +347,9 @@ status of this plan in `advisor-plans/README.md` after each slice.
   exact restore, database digest, clean resume, and next-cut continuity. Both
   modes passed a local process-kill smoke. No physical power-cut or block-device
   receipt has been produced on the required dedicated host.
+- Directory-aware crash modeling exposed a real first-cut hole: file sync and
+  `ltx/0` sync did not persist the newly created `0`, `ltx`, and session
+  directory names. Immediate capture and the deferred local barrier now sync
+  those ancestors leaf-to-root once per session; failure fences the writer.
+  The model failed before this fix and passes with it. This remains modeled
+  evidence until the dedicated-host fault run confirms the actual filesystem.

@@ -338,9 +338,9 @@ control, and discard it (`CellReplica::discard_resumed`) on any mismatch.
 | Operation | Local barrier | What it proves | May release a Cell response? |
 | --- | --- | --- | --- |
 | SQLite commit | SQLite WAL sync under `synchronous=FULL` | The local commit reached SQLite's WAL boundary | No |
-| `capture()` | LTX file sync, then rename and parent sync | The returned standalone LTX cuts have durable bytes and names | No |
+| `capture()` | LTX file sync, rename, parent sync, then first-cut directory-chain sync | The returned standalone LTX cuts have durable bytes and names | No |
 | `capture_deferred()` | No LTX file or name barrier; a sparse writer updates its mutable checksum sidecar without syncing it | The cut is readable for publication, but its LTX durability is pending | No |
-| `durability_barrier()` | Pending LTX files and their parent directories | Those deferred local cuts are durable | No |
+| `durability_barrier()` | Pending LTX files, their parent directories, and the first-cut directory chain | Those deferred local cuts are durable | No |
 | `persist_continuation()` | New dense checksum file and continuation, each with parent sync | A clean, drained local image can be considered for warm reuse | No |
 | Cell root publication or selected follower proof | Runtime owned provider or fleet proof | The exact authoritative root or durable follower tail covers the command | Yes, when runtime checks the matching position |
 
@@ -520,7 +520,7 @@ in that order.
 | `Db::transaction` | Commits one local SQL transaction; does not claim remote durability |
 | `Db::capture` | Returns every new ordered cut plus its exact TXID/checksum endpoint |
 | `Db::capture_deferred` | Returns complete, readable LTX files whose durability remains pending |
-| `Db::durability_barrier` | Flushes deferred files concurrently, then syncs each parent directory once; failure fences the session |
+| `Db::durability_barrier` | Flushes deferred files concurrently, then syncs their parent and the new directory chain once; failure fences the session |
 | `Db::checkpoint` | Captures a barrier, runs the selected SQLite checkpoint, and returns every generated cut |
 | `Db::snapshot` | Returns an independent full snapshot plus any pending captured cuts |
 | `VerifiedPlan::new` | Verifies the complete selected snapshot-plus-delta chain and owns its exact reconstructed image |
