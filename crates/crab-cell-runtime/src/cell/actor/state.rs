@@ -54,7 +54,7 @@ pub(super) enum Activation {
 }
 
 pub(super) struct RestoredActivation {
-    pub(super) database: crab_ltx::CellWritableDatabase,
+    pub(super) database: crate::cell::worker::RestoredDatabase,
     pub(super) destination: PathBuf,
     pub(super) incarnation: crate::identity::IncarnationId,
     pub(super) schema: u32,

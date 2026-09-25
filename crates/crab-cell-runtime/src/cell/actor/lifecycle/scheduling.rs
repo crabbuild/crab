@@ -225,14 +225,20 @@ pub(in crate::cell::actor) fn start_deactivate(
     let pool = pool.clone();
     tasks.spawn(async move {
         let result = async {
-            pool.deactivate(cell).await?;
             let mut publisher = active.publisher.ok_or(Error::Fenced)?;
+            // A release that already published its root may leave a resume
+            // record, so the next same-node activation can continue the local
+            // database instead of restoring the exact root again.
+            let control = publisher.control().value().clone();
+            match control.root {
+                Some(root) => pool.deactivate_resumable(cell, root, control.code).await?,
+                None => pool.deactivate(cell).await?,
+            }
             publisher.release().await?;
             // A released Cell that still has a deadline publishes one bounded
             // hint key, so the scheduler finds it without scanning every shard.
             // The hint is an accelerator: a failed write costs a later Tick
             // through the backstop and never a missed deadline.
-            let control = publisher.control().value();
             if let Some(due_ms) = control.next_due_ms
                 && let Err(error) = crate::cell::due::publish(
                     publisher.layout(),
@@ -305,7 +311,11 @@ pub(in crate::cell::actor) fn start_orphan_deactivate(
     let pool = pool.clone();
     tasks.spawn(async move {
         let result = async {
-            pool.deactivate(cell).await?;
+            let control = publisher.control().value().clone();
+            match control.root {
+                Some(root) => pool.deactivate_resumable(cell, root, control.code).await?,
+                None => pool.deactivate(cell).await?,
+            }
             publisher.release().await
         }
         .await;

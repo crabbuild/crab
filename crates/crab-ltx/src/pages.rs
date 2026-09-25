@@ -4,6 +4,8 @@ use crate::{CHECKSUM_FLAG, CrabError, Result, ltx};
 
 #[cfg(feature = "replica")]
 const CHECKSUM_READ_BYTES: usize = 64 * 1024;
+/// Buffered page-checksum writes keep a dense copy off the syscall path.
+const DENSE_WRITE_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]
 enum ChecksumBase {
@@ -218,6 +220,50 @@ impl PageChecksums {
 
     pub fn checksum(&self) -> u64 {
         self.checksum
+    }
+
+    /// Returns the database page count this index describes.
+    pub(crate) fn count(&self) -> u32 {
+        self.count
+    }
+
+    /// Writes the dense per-page checksum list, proving it folds to this index.
+    ///
+    /// The fold is the same aggregate the capture maintains, so a base file that
+    /// no longer matches it is refused instead of copied into a continuation
+    /// that a later open would trust.
+    pub(crate) fn write_dense(&self, sink: &mut dyn crate::environment::FileIo) -> Result<()> {
+        let mut base_file = {
+            #[cfg(feature = "replica")]
+            {
+                match &self.base {
+                    ChecksumBase::File(base) => Some(base.open()?),
+                    ChecksumBase::Memory(_) => None,
+                }
+            }
+            #[cfg(not(feature = "replica"))]
+            {
+                None
+            }
+        };
+        let mut fold = CHECKSUM_FLAG;
+        let mut output = Vec::with_capacity(DENSE_WRITE_BYTES);
+        for page in 1..=self.count {
+            let checksum = self.value(page, base_file.as_mut())?;
+            fold = CHECKSUM_FLAG | (fold ^ checksum);
+            output.extend_from_slice(&checksum.to_be_bytes());
+            if output.len() >= DENSE_WRITE_BYTES {
+                sink.write_all(&output)?;
+                output.clear();
+            }
+        }
+        if !output.is_empty() {
+            sink.write_all(&output)?;
+        }
+        if fold != self.checksum {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        Ok(())
     }
 
     #[cfg(feature = "replica")]

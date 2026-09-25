@@ -56,7 +56,8 @@ const RESIDENT_ROUTE_LABELS: [&str; 3] = ["hit", "miss", "refused"];
 const CATALOG_READ_LABELS: [&str; 2] = ["head", "page"];
 const CATALOG_READ_RESULT_LABELS: [&str; 2] = ["ok", "failed"];
 const CONTROL_READ_RESULT_LABELS: [&str; 2] = ["ok", "failed"];
-const ACTIVATION_PHASE_LABELS: [&str; 4] = ["ownership", "root_open", "restore", "activate"];
+const ACTIVATION_PHASE_LABELS: [&str; 5] =
+    ["ownership", "resume", "root_open", "restore", "activate"];
 const PRESSURE_TIER_COUNT: usize = 4;
 const PRESSURE_TIER_LABELS: [&str; PRESSURE_TIER_COUNT] =
     ["normal", "constrained", "shedding", "critical"];
@@ -184,7 +185,7 @@ struct MetricsInner {
     catalog_read_duration: [Histogram; 2],
     control_reads: [Counter; 2],
     control_read_duration: Histogram,
-    activation_phase_duration: [Histogram; 4],
+    activation_phase_duration: [Histogram; 5],
     pressure_tiers: [Gauge; PRESSURE_TIER_COUNT],
     ltx_phase_runs: [[Counter; 2]; LTX_PHASE_COUNT],
     ltx_phase_duration: [Histogram; LTX_PHASE_COUNT],
@@ -1210,9 +1211,10 @@ impl crab_cell_runtime::fleet::telemetry::CellTelemetry for Metrics {
     ) {
         let index = match phase {
             crab_cell_runtime::fleet::telemetry::ActivationPhase::Ownership => 0,
-            crab_cell_runtime::fleet::telemetry::ActivationPhase::RootOpen => 1,
-            crab_cell_runtime::fleet::telemetry::ActivationPhase::Restore => 2,
-            crab_cell_runtime::fleet::telemetry::ActivationPhase::Activate => 3,
+            crab_cell_runtime::fleet::telemetry::ActivationPhase::Resume => 1,
+            crab_cell_runtime::fleet::telemetry::ActivationPhase::RootOpen => 2,
+            crab_cell_runtime::fleet::telemetry::ActivationPhase::Restore => 3,
+            crab_cell_runtime::fleet::telemetry::ActivationPhase::Activate => 4,
         };
         self.inner.activation_phase_duration[index].record(elapsed.as_secs_f64());
     }

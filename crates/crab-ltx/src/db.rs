@@ -653,6 +653,95 @@ impl Db {
         self.capture.pos().into()
     }
 
+    /// Writes the continuation a later [`Db::open_resumed`] continues from.
+    ///
+    /// The session must be drained: a pending capture means a local commit has
+    /// no published cut, so the continuation would name a position no root
+    /// owns. A sparse activation must be fully materialized, because its
+    /// local file holds zeros where no page was ever faulted in. The record
+    /// authorizes nothing by itself — the caller still has to prove that the
+    /// file holds one authoritative root before opening it.
+    #[cfg(feature = "replica")]
+    pub fn persist_continuation(&self) -> Result<()> {
+        self.ensure_active()?;
+        if self.has_pending_capture() {
+            return Err(CrabError::InvalidState(
+                "capture continuation requires a drained database",
+            ));
+        }
+        if self.sparse && !self.hydration()?.is_some_and(crate::Hydration::complete) {
+            return Err(CrabError::InvalidState(
+                "capture continuation requires a fully materialized activation",
+            ));
+        }
+        let position = self.position();
+        let pages = self.capture.checksums().count();
+        let page_size = self.capture.page_size();
+        if position.txid == 0 || pages == 0 || position.checksum & crate::CHECKSUM_FLAG == 0 {
+            return Err(CrabError::InvalidState(
+                "capture continuation requires a committed position",
+            ));
+        }
+        crate::resume::write_checksums(&self.host, &self.path, self.capture.checksums())?;
+        crate::resume::write_continuation(
+            &self.host,
+            &self.path,
+            &crate::resume::Continuation {
+                position,
+                page_size,
+                pages,
+            },
+        )
+    }
+
+    /// Opens a database that a clean close left resumable at the same path.
+    ///
+    /// Reads the continuation and dense page checksums recorded beside the file,
+    /// requires the file to be exactly the recorded image, and seeds the capture
+    /// session from them. No origin object is read, so the caller must have
+    /// matched its own resume record against the authoritative control first.
+    #[cfg(feature = "replica")]
+    pub fn open_resumed(path: &Path, limits: Limits) -> Result<Self> {
+        Self::open_resumed_with_host(path, limits, crate::Host::default())
+    }
+
+    /// Opens a resumable database using the host's filesystem, SQLite VFS, and clock.
+    #[cfg(feature = "replica")]
+    pub fn open_resumed_with_host(path: &Path, limits: Limits, host: crate::Host) -> Result<Self> {
+        let limits = limits.validate()?;
+        let continuation = crate::resume::read_continuation(&host, path)?;
+        let database_bytes = u64::from(continuation.pages) * u64::from(continuation.page_size);
+        if database_bytes > limits.max_database_bytes {
+            return Err(CrabError::Limit(crate::LimitKind::DatabaseBytes));
+        }
+        if host.filesystem.file_len(path)? != database_bytes {
+            return Err(CrabError::InvalidState(
+                "resumed database length does not match its continuation",
+            ));
+        }
+        let checksums = crate::pages::PageChecksums::from_file(
+            crate::LtxHost {
+                facilities: host.clone(),
+                max_database_bytes: limits.max_database_bytes,
+                max_file_bytes: limits.max_database_bytes,
+            },
+            &crate::resume::checksum_path(path),
+            continuation.page_size,
+            continuation.pages,
+            continuation.position.checksum,
+        )?;
+        let vfs = host.sqlite_vfs.clone();
+        let local_disk = host.reserve_local_disk(database_bytes)?;
+        let mut db = Self::open_inner(path, limits, vfs.as_deref(), host, false, Some(local_disk))?;
+        db.capture.seed_continuation(
+            continuation.position,
+            checksums,
+            continuation.page_size,
+            continuation.pages,
+        )?;
+        Ok(db)
+    }
+
     /// Captures pending commits, then writes a full checksum-bearing snapshot.
     ///
     /// Its range is `1..=position.txid`. The snapshot can replace all preceding

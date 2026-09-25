@@ -63,6 +63,8 @@ pub enum CatalogReadKind {
 pub enum ActivationPhase {
     /// The conditional ownership transition that claims the Cell.
     Ownership,
+    /// Continuing a local database that already holds the observed root.
+    Resume,
     /// Verifying the immutable root graph through the origin.
     RootOpen,
     /// Materializing the verified root into local disk.

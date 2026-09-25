@@ -743,6 +743,29 @@ impl CellReplica {
         drop(file);
         crate::Db::open_with_host(destination, self.limits, self.host.clone())
     }
+
+    /// Moves a resumable database onto a fresh path and continues its capture.
+    ///
+    /// The caller owns the proof that the record it read still matches the
+    /// authoritative control: this path reads no origin object, so a foreign or
+    /// stale file would otherwise be served as though it held this replica's
+    /// root. A database that is not cleanly checkpointed is refused, and the
+    /// caller must fall back to restoring the exact root.
+    pub fn open_resumed(
+        &self,
+        source: &std::path::Path,
+        destination: &std::path::Path,
+    ) -> Result<crate::Db> {
+        let host = self.host.clone().without_dirty();
+        crate::resume::move_resumed(source, destination, &host)?;
+        crate::Db::open_resumed_with_host(destination, self.limits, host)
+    }
+
+    /// Removes a database and its resume sidecars that this replica refused.
+    pub fn discard_resumed(&self, database: &std::path::Path) -> Result<()> {
+        let host = self.host.clone().without_dirty();
+        crate::resume::discard_resumed(database, &host)
+    }
 }
 
 fn scheduled_compaction_range(

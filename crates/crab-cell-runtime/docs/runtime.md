@@ -209,6 +209,28 @@ Any control change restarts the 15-second observation period. The winner hydrate
 
 Sparse activation starts with no materialized pages. Full recovery reserves destination bytes before download and installs through an exclusive same-directory scratch file.
 
+## Reuse a local database only under a continuity record
+
+A clean release writes one resume record beside the database it closed. The
+record names the Cell, incarnation, schema, installed code, and the exact
+published root the file holds; the capture continuation and dense page
+checksums live in `crab-ltx` sidecars next to the same file.
+
+A same-node wake matches that record against the observed control and then
+moves the file onto the fresh activation path instead of restoring the root.
+The record never authorizes a tick, a read, or a write: the worker still
+verifies `sys_meta` identity, schema, sequence, and the SQLite position against
+the authoritative root, so a stale, foreign, torn, or half-written image is
+discarded and restored instead of served. The ownership epoch is deliberately
+absent from the match, because acquiring an idle Cell raises the epoch while
+leaving the root untouched.
+
+Two fences keep the fast path honest. A database whose WAL is not checkpointed
+is refused, because the file may sit behind the continuation it would seed from;
+and a sparse activation must be fully materialized, because an unfaulted page
+is a hole rather than data. Every failure above falls back to the exact restore
+and costs one cold activation, never correctness.
+
 ## Renew and self-fence ownership
 
 One node-level scanner renews owned Cells every three seconds. A mutation publication also advances owner progress.

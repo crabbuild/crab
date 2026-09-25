@@ -118,7 +118,7 @@ async fn cold_activation_reports_metadata_and_origin_reads() {
             fixture.replica.clone(),
             authority,
             idle,
-            fixture._directory.path().join("cold-path.sqlite"),
+            cold_node_directory(&fixture).join("cold-path.sqlite"),
             Owner {
                 session: successor,
                 endpoint: "https://cold-path.internal:8081".into(),
@@ -148,6 +148,198 @@ async fn cold_activation_reports_metadata_and_origin_reads() {
             crab_cell_runtime::fleet::telemetry::ActivationPhase::Activate,
         ]
     );
+
+    restored.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+}
+
+/// Returns a node directory that holds no local image of the fixture's Cell.
+///
+/// A cold route is what a node without a readable resume record pays, so tests
+/// that measure it must not reuse the directory the released database is in.
+fn cold_node_directory(fixture: &Fixture) -> std::path::PathBuf {
+    let directory = fixture._directory.path().join("cold-node");
+    std::fs::create_dir_all(&directory).unwrap();
+    directory
+}
+
+/// Boots one Cell, commits once, and releases it, leaving a resume record.
+async fn released_cell(fixture: &Fixture, session: SessionId, start_ms: i64) -> i64 {
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024, session).unwrap();
+    let handle = bootstrap_on(&runtime, fixture, session).await;
+    handle
+        .execute(
+            mutation_identity_window(161, start_ms, start_ms + 10_000),
+            Digest::from_bytes([162; 32]),
+            start_ms,
+            1_024,
+            1_024,
+            |transaction| {
+                transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                Ok(HandlerOutcome::Success(Vec::new()))
+            },
+        )
+        .await
+        .unwrap();
+    handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+    start_ms
+}
+
+/// Wakes a released Cell on the same node and returns what it read and ran.
+async fn wake_released_cell(
+    fixture: &Fixture,
+    successor: SessionId,
+    destination: std::path::PathBuf,
+) -> (
+    Arc<ColdPathRecorder>,
+    crab_cell_runtime::cell::actor::CellHandle,
+    CellRuntime,
+) {
+    let recorder = Arc::new(ColdPathRecorder::default());
+    let sink =
+        crab_cell_runtime::fleet::telemetry::CellTelemetryHandle::from_sink(recorder.clone());
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::with_telemetry(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+        sink.clone(),
+    );
+    let authority = CellAuthority::with_telemetry(fixture.layout.clone(), sink.clone());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let idle = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        16 * 1024 * 1024,
+        successor,
+    )
+    .unwrap();
+    runtime.install_telemetry(recorder.clone()).unwrap();
+    let restored = runtime
+        .acquire_idle_restored(
+            proof,
+            fixture.replica.clone(),
+            authority,
+            idle,
+            destination,
+            Owner {
+                session: successor,
+                endpoint: "https://warm-wake.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    (recorder, restored, runtime)
+}
+
+#[tokio::test]
+async fn a_warm_wake_continues_the_local_database_without_the_origin() {
+    let fixture = fixture_for(b"warm-wake");
+    let start_ms = now_ms();
+    released_cell(&fixture, SessionId::from_bytes([163; 16]), start_ms).await;
+
+    // The same node wakes the same root. The release record makes the local
+    // image the fast path, so this activation reads no origin object at all
+    // and never verifies or restores the immutable root graph.
+    let successor = SessionId::from_bytes([164; 16]);
+    let (recorder, restored, runtime) = wake_released_cell(
+        &fixture,
+        successor,
+        fixture._directory.path().join("warm.sqlite"),
+    )
+    .await;
+    assert_eq!(recorder.origin_requests(), 0);
+    assert_eq!(
+        recorder.activation_phases(),
+        [
+            crab_cell_runtime::fleet::telemetry::ActivationPhase::Ownership,
+            crab_cell_runtime::fleet::telemetry::ActivationPhase::Resume,
+            crab_cell_runtime::fleet::telemetry::ActivationPhase::Activate,
+        ]
+    );
+
+    // The resumed database continues the lineage rather than resetting it: the
+    // commit from the released session is readable, and the next commit lands
+    // on the same chain.
+    let outcome = restored
+        .execute(
+            mutation_identity_window(165, start_ms + 20_000, start_ms + 30_000),
+            Digest::from_bytes([166; 32]),
+            start_ms + 20_000,
+            1_024,
+            1_024,
+            |transaction| {
+                transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                let value: i64 =
+                    transaction.query_row("SELECT value FROM counter", [], |row| row.get(0))?;
+                Ok(HandlerOutcome::Success(value.to_be_bytes().to_vec()))
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome.result(), 2i64.to_be_bytes());
+
+    restored.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_resume_record_that_names_another_root_is_discarded() {
+    let fixture = fixture_for(b"stale-resume");
+    let start_ms = now_ms();
+    released_cell(&fixture, SessionId::from_bytes([167; 16]), start_ms).await;
+    let record = fixture._directory.path().join("cell.sqlite.resume");
+    let mut bytes = std::fs::read(&record).unwrap();
+    // Field layout: magic, version, schema, code, cell, incarnation, then the
+    // root digest the record has to match against the observed control.
+    bytes[96] ^= 0xff;
+    std::fs::write(&record, bytes).unwrap();
+
+    // A record that no longer names the observed root must be discarded with
+    // the database it names, and the wake must fall back to the exact restore.
+    let successor = SessionId::from_bytes([168; 16]);
+    let (recorder, restored, runtime) = wake_released_cell(
+        &fixture,
+        successor,
+        fixture._directory.path().join("cold-again.sqlite"),
+    )
+    .await;
+    assert!(recorder.origin_requests() > 0);
+    assert_eq!(
+        recorder.activation_phases(),
+        [
+            crab_cell_runtime::fleet::telemetry::ActivationPhase::Ownership,
+            crab_cell_runtime::fleet::telemetry::ActivationPhase::RootOpen,
+            crab_cell_runtime::fleet::telemetry::ActivationPhase::Restore,
+            crab_cell_runtime::fleet::telemetry::ActivationPhase::Activate,
+        ]
+    );
+    assert!(!fixture.database.exists());
+
+    let outcome = restored
+        .execute(
+            mutation_identity_window(169, start_ms + 20_000, start_ms + 30_000),
+            Digest::from_bytes([170; 32]),
+            start_ms + 20_000,
+            1_024,
+            1_024,
+            |transaction| {
+                let value: i64 =
+                    transaction.query_row("SELECT value FROM counter", [], |row| row.get(0))?;
+                Ok(HandlerOutcome::Success(value.to_be_bytes().to_vec()))
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome.result(), 1i64.to_be_bytes());
 
     restored.drain().await.unwrap();
     runtime.shutdown().await.unwrap();
@@ -730,7 +922,7 @@ async fn shutdown_releases_a_hydration_reservation_after_an_origin_wait() {
             fixture.replica.clone(),
             authority,
             observed,
-            fixture._directory.path().join("hydration-shutdown.sqlite"),
+            cold_node_directory(&fixture).join("hydration-shutdown.sqlite"),
             Owner {
                 session: successor,
                 endpoint: "https://hydration-shutdown.internal:8081".into(),

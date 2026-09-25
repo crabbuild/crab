@@ -560,8 +560,81 @@ Tests for the pair: commit, persist, move the file, open it seeded, commit
 again, and assert the new capture continues the TXID chain from the recorded
 position; plus a rejection case for a page-count or aggregate-checksum mismatch.
 
-Until one of them lands, every wake remains a restore, and the counts from
-slice 5 stay the cold-route numbers.
+Both landed on 2026-09-24, with one refinement and two fences the design did
+not have:
+
+- `Db::persist_continuation` writes the dense page checksums beside the
+  database and the continuation record next to them; `Db::open_resumed_with_host`
+  reads both, requires the file to be exactly the recorded image, and seeds the
+  capture session. The dense copy verifies its own fold, so a base file that no
+  longer matches the maintained aggregate is refused instead of copied.
+- The sidecar stays a fixed-width file rather than moving into a
+  header-prefixed continuation: `PageChecksums::from_file` already reads that
+  exact shape, and a memory base would make every resumed Cell's resident
+  footprint grow with its page count. The three files travel together through
+  `CellReplica::open_resumed`/`discard_resumed`.
+- Two fences are enforced by the writer, not by the reader: a database whose WAL
+  is not checkpointed is refused (the file may sit behind the continuation it
+  would seed from), and a sparse activation must be fully materialized (an
+  unfaulted page is a hole, not data). Both fall back to the exact restore.
+
+The runtime half is `crates/crab-cell-runtime/src/cell/resume.rs`: a fixed-width
+record carrying cell, incarnation, schema, code, and the control `RootRef`, one
+per released database at `<database>.resume`. A clean release writes it from
+`CellExecutor::close_resumable` before the writer closes; an activation consumes
+the record that matches the observed control, moves the database onto the fresh
+activation path, and discards every other record with the file it names. The
+epoch is deliberately not compared, and a record that fails any check is
+discarded rather than served.
+
+Evidence (all green on 2026-09-24):
+
+- `a_recorded_continuation_continues_the_chain_after_a_move` (crab-ltx): commits,
+  persists, moves the file, opens it seeded, commits again, and asserts the new
+  capture continues the TXID chain.
+- `a_resume_refuses_a_continuation_that_does_not_match_the_file`,
+  `a_resume_refuses_a_database_that_is_not_checkpointed`, and
+  `a_dense_checksum_copy_refuses_a_base_that_no_longer_folds_to_it` pin the
+  three refusals.
+- `a_warm_wake_continues_the_local_database_without_the_origin` (runtime):
+  bootstrap, commit, drain, then a same-directory wake records **zero origin
+  requests** and exactly `[Ownership, Resume, Activate]`, and the commit before
+  the release is still readable with the next one continuing the chain.
+- `a_resume_record_that_names_another_root_is_discarded` (runtime): a tampered
+  record makes the wake record `[Ownership, RootOpen, Restore, Activate]`, read
+  the origin again, and delete the file the record named. Run against an
+  always-matching record first, the assertion on `origin_requests() > 0` failed,
+  so the test measures the fence rather than the happy path.
+
+`ActivationPhase::Resume` joins the exported phase set, so
+`crab_cell_activation_phase_seconds{phase="resume"}` is how an operator sees a
+re-acquired Cell take the fast path; a re-acquired Cell with no `resume` sample
+fell back to a restore.
+
+Two known limits, both deliberate and both still open:
+
+- **The dormant window is uncharged.** The retained file's bytes are reserved
+  while the Cell is resident and released with the session, so an idle Cell's
+  local image sits outside the disk ledger until the next activation reserves it
+  again. Charging it needs a reservation handle the runtime can hold across the
+  release, which is the same change dormant residency needs.
+- **Ownership still turns over.** A release still returns the Cell to idle, so a
+  wake pays the re-claim CAS and a new epoch. Dormant residency — holding
+  ownership while shedding the resident handle — removes that claim, and is a
+  coordination-contract change rather than a local-image change.
+- **A process restart is still cold by construction.** The product keys its
+  scratch directory by the boot session
+  (`crates/crab-http-server/src/peer.rs`, `session_dir` = `sessions/<session>`),
+  and this slice deliberately keeps the runtime's record scoped to the
+  destination's own directory: the record names a file name, never a path
+  outside it. Warm wake therefore covers idle eviction, pressure shedding, and
+  a transfer back to the same node, but a restart re-acquires from the origin.
+  Making it survive a restart is a product-level adoption step — on boot, move
+  the newest previous session directory's `*.resume` slots (database, checksum,
+  continuation, record) into the new session's matching Cell directories — and
+  it does not need any further runtime or `crab-ltx` change. It does need its
+  own proof (crash residue from the previous boot must be discarded rather than
+  adopted), so it is a separate slice.
 
 Design:
 
@@ -673,7 +746,7 @@ no slice may promote a local run to a receipt.
 | 3a | Backpressure instead of fence on `PendingPublication` — folded into 3b | None | See 3b |
 | 3b | Durable-through watermark and pipelined commits | 3a | Interleaved proofs, read gating, hot-Cell benchmark |
 | 3c | Typed batch command (if measurement prefers it) | None | One transaction, one proof, per-command outcomes |
-| 4 | Resume receipt and dormant residency — blocked on a `crab-ltx` resume capability or a fresh-path policy | 1 | Warm/cold activation cost, stale-receipt rejection |
+| 4 | Resume record and local continuation — DONE; dormant residency and the dormant-window disk charge remain | 1 | DONE (zero-origin wake, stale-record and torn-image rejection); warm/cold cost distribution on real hardware still owed |
 | 5 | Phase-attributed local receipt | None | Dominant term named and reproduced |
 | 6 | Protected re-qualification | 2–5 | Signed profile rows |
 
@@ -708,12 +781,15 @@ What is true now, with the test that proves each claim:
 | 1 | Routing reads one catalog page; a page that disagrees with its locator is a hard error | `catalog_lookup_reads_only_the_page_that_can_hold_the_entry`, `catalog_rejects_an_unordered_page_locator`, `catalog_lookup_rejects_a_head_whose_locator_disagrees_with_its_page`, `catalog_lookup_reports_one_head_and_one_page_read` |
 | 2 stage 1 | A resident Cell ticks from memory, fenced by its published sequence; the cycle budget cannot be overspent | `resident_due_list_mirrors_the_published_head`, `resident_due_cell_ticks_without_a_shard_scan`, `resident_ticks_do_not_overspend_the_cycle_budget` |
 | 2 stage 2 | A clean release writes one hint; every cycle consumes hints and ticks resident Cells; the shard scan is a thirty-cycle backstop; foreign keys under a bucket are cleared | `clean_drain_publishes_and_consumes_one_due_hint`, `due_hint_listing_clears_foreign_keys`, `hinted_due_cell_ticks_without_a_shard_scan`, `foreground_cycle_ticks_hints_without_the_backstop`, `backstop_scan_runs_on_its_period` |
+| 4 | A clean release leaves a resume record beside a checkpointed, fully materialized database; a matching same-node wake moves it onto the fresh activation path and reads no origin object, and every mismatch discards it | `a_recorded_continuation_continues_the_chain_after_a_move`, `a_resume_refuses_a_continuation_that_does_not_match_the_file`, `a_resume_refuses_a_database_that_is_not_checkpointed`, `a_dense_checksum_copy_refuses_a_base_that_no_longer_folds_to_it`, `a_warm_wake_continues_the_local_database_without_the_origin`, `a_resume_record_that_names_another_root_is_discarded` |
 | 5 instrument | Catalog, control, and activation-phase costs are visible in production; a cold route measures two catalog reads, two control reads, three origin requests, and four phases | `cold_activation_reports_metadata_and_origin_reads`, `due_scan_reads_one_control_record_per_cell`, `hinted_tick_spends_a_bounded_metadata_budget` |
 
 Pinned costs to measure against: one empty 40-Cell shard pass is 40 control
 reads and 2 catalog reads; one hinted candidate is 8 catalog reads and 5
 control reads (down from 10/6 once the router reused the unowned observation it
-read inside the activation window); one cold route is 2/2/3 plus four phases.
+read inside the activation window); one cold route is 2/2/3 plus four phases;
+one same-node wake is 0 origin requests plus three phases (`ownership`,
+`resume`, `activate`).
 
 Verification commands for the whole set (one external target directory per
 checkout; `crab-http-server` needs a built `packages/ui/dist`):
@@ -729,14 +805,22 @@ node crates/crab-cell-runtime/docs/validate.mjs
 python3 crab/scripts/check-cell-ltx-layout.py
 ```
 
-Last full run, 2026-09-24: `crab-ltx` 66/41/26/6 green; `crab-cell-runtime`
-352/11/25/14/43/11/13/112 green with three ignored; `crab-cell-app` and
-`crab-cell-host` green; `crab-http-server --lib` 256 green; Clippy clean;
-layout, policy-entry-point, and docs validators pass.
+Last full run, 2026-09-24 (after slice 4): `crab-ltx --features replica`
+82/45/33/9 green with five ignored; `crab-cell-runtime --features test-support`
+353/11/25/14/43/11/13/117 green with three ignored; `crab-cell-app` and
+`crab-cell-host` green; `crab-http-server --lib` 257 green with four ignored;
+Clippy clean; layout, policy-entry-point, and docs validators pass.
+
+Two slice-5 tests had to name a cold node explicitly after slice 4 landed:
+`cold_activation_reports_metadata_and_origin_reads` and
+`shutdown_releases_a_hydration_reservation_after_an_origin_wait` both reused the
+released database's own directory, so a same-node wake turned them into warm
+routes. Both now activate from `cold_node_directory(&fixture)`, which is what a
+node without a resume record actually has.
 
 Still open, in dependency order: the 10³/10⁵/10⁶-Cell receipt for slice 2
 (which needs the shared-resolution follow-up first, or acceptance of the 10/6
 candidate cost); slice 3 (durable-through watermark with pipelined commits, or
-a typed batch command); slice 4 (a `crab-ltx` resume capability or a
-fresh-path policy); the provider-side slice-5 receipt; slice 6 (protected
-provider, Kubernetes, and scale gates).
+a typed batch command); slice 4's dormant residency and the dormant-window disk
+charge (the local-image reuse itself landed 2026-09-24); the provider-side
+slice-5 receipt; slice 6 (protected provider, Kubernetes, and scale gates).

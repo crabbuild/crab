@@ -63,16 +63,18 @@ fn run_worker_command(
         } => {
             let result = match cells.entry(cell) {
                 std::collections::hash_map::Entry::Occupied(_) => Err(Error::CellAlreadyActive),
-                std::collections::hash_map::Entry::Vacant(entry) => (*database)
-                    .open_writable(&destination)
-                    .map_err(Error::from)
-                    .and_then(|db| CellExecutor::from_restored(db, cell, incarnation, schema, root))
-                    .map(|executor| {
-                        entry.insert(ActiveCell {
-                            executor,
-                            _reservation: reservation,
-                        });
-                    }),
+                std::collections::hash_map::Entry::Vacant(entry) => match *database {
+                    RestoredDatabase::Paged(database) => database.open_writable(&destination),
+                    RestoredDatabase::Local(database) => Ok(*database),
+                }
+                .map_err(Error::from)
+                .and_then(|db| CellExecutor::from_restored(db, cell, incarnation, schema, root))
+                .map(|executor| {
+                    entry.insert(ActiveCell {
+                        executor,
+                        _reservation: reservation,
+                    });
+                }),
             };
             let _ = reply.send(result);
         }
@@ -368,6 +370,22 @@ fn run_worker_command(
                     .remove(&cell)
                     .ok_or(Error::CellNotActive)
                     .and_then(|cell| cell.executor.close()),
+            };
+            let _ = reply.send(result);
+        }
+        WorkerCommand::DeactivateResumable {
+            cell,
+            root,
+            code,
+            reply,
+        } => {
+            let result = match cells.get(&cell) {
+                None => Err(Error::CellNotActive),
+                Some(cell) if !cell.executor.drained() => Err(Error::PendingPublication),
+                Some(_) => cells
+                    .remove(&cell)
+                    .ok_or(Error::CellNotActive)
+                    .and_then(|cell| cell.executor.close_resumable(root, code)),
             };
             let _ = reply.send(result);
         }

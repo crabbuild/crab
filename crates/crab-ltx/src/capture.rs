@@ -421,6 +421,14 @@ impl CaptureEngine {
         self.position
     }
 
+    pub(crate) fn page_size(&self) -> u32 {
+        self.page_size
+    }
+
+    pub(crate) fn checksums(&self) -> &crate::pages::PageChecksums {
+        &self.checksums
+    }
+
     pub(crate) fn sealed_l0_segment(&self, txid: Txid) -> Option<crate::SegmentInfo> {
         self.last_l0_segment
             .as_ref()

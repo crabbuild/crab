@@ -55,6 +55,8 @@ mod ltx;
 mod lz4_block;
 mod pages;
 pub mod recovery;
+#[cfg(feature = "replica")]
+mod resume;
 pub mod types;
 mod wal;
 

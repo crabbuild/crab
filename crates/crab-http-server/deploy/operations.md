@@ -252,7 +252,7 @@ Monitor these platform and application signals:
 | `crab_cell_scheduler_items_total` | Maintenance advances plateau while Cells keep committing |
 | `crab_cell_catalog_reads_total` and `crab_cell_catalog_read_seconds` | One routing decision costs more than one `head` and one `page` read, or the metadata tail grows with the Cell population |
 | `crab_cell_control_reads_total` and `crab_cell_control_read_seconds` | Control reads per cycle grow with the Cell population rather than with due work, or a cold route needs more than the expected pair of reads |
-| `crab_cell_activation_phase_seconds` | A cold route's `root_open`, `restore`, or `activate` phase grows while `ownership` stays flat, which points at the object store or local disk rather than at ownership contention |
+| `crab_cell_activation_phase_seconds` | A cold route's `root_open`, `restore`, or `activate` phase grows while `ownership` stays flat, which points at the object store or local disk rather than at ownership contention. A `resume` phase means the wake continued a local database, so a re-acquired Cell with no `resume` sample is falling back to a restore |
 | `crab_cell_primitive_operations_total` | A primitive module's `failed` or `rejected` rate rises above its baseline |
 | `crab_cell_primitive_operation_seconds` | One primitive module's command or query tail grows |
 | `crab_cell_pressure_tier` | A node reports `constrained`, `shedding`, or `critical`; `shedding` means it is releasing settled Cells |

@@ -672,7 +672,7 @@ needs its own exit evidence.
 
 | Plan | Outcome | Priority | Effort | Depends on | Status |
 | --- | --- | --- | --- | --- | --- |
-| [034](034-cell-p0-scale-hardening.md) | Page-locator catalog lookup, due-work hint index with a full-scan backstop, monotone durable-through watermark with pipelined commits, dormant residency with a resume receipt, and phase-attributed diagnosis of the failing qualification tail | P0 | XL | Plans 015, 023, 024, 025, 031, 032 | IN PROGRESS — slice 1 DONE |
+| [034](034-cell-p0-scale-hardening.md) | Page-locator catalog lookup, due-work hint index with a full-scan backstop, monotone durable-through watermark with pipelined commits, dormant residency with a resume receipt, and phase-attributed diagnosis of the failing qualification tail | P0 | XL | Plans 015, 023, 024, 025, 031, 032 | IN PROGRESS — slices 1, 2, and 4 DONE; slice 3, the restart-wide resume adoption, the scale receipt, and the protected gates remain |
 
 Slice 1 is implemented and tested in `crates/crab-cell-runtime`: a version-two
 catalog head carries a page locator, so routing reads one page instead of the
@@ -789,3 +789,21 @@ count fit in the receipt, but the page-checksum index exists only after a
 restore, so its home is a crab-ltx decision. The rename mechanism, the
 fresh-path observation, the receipt design, and the verified fallback all
 stand; the fallback path passed its test during the attempt.
+
+Slice 4 landed on 2026-09-24 with the capability that attempt needed:
+`Db::persist_continuation` writes the dense page checksums and the continuation
+record beside the database, and `Db::open_resumed_with_host` seeds a fresh
+capture session from them. The runtime writes one fixed-width resume record per
+released database, consumes the record that still matches the observed control
+(discarding every other one with the file it names), and moves the database onto
+the fresh activation path, so a same-node wake reads no origin object at all:
+`a_warm_wake_continues_the_local_database_without_the_origin` records zero origin
+requests and exactly `[ownership, resume, activate]`, and
+`a_resume_record_that_names_another_root_is_discarded` fails against an
+always-matching record and passes with the fence restored. Two writer-side
+fences keep it honest: a database whose WAL is not checkpointed is refused, and a
+sparse activation must be fully materialized, because an unfaulted page is a
+hole rather than data. Both `crab-ltx` and runtime tests cover the refusals.
+Still open on this slice: charging the dormant window to the disk ledger,
+dormant residency (holding ownership across the shed), and the product-level
+adoption step that would let the slot survive a process restart.
