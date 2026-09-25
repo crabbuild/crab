@@ -1020,5 +1020,45 @@ fn array<const N: usize>(bytes: &[u8]) -> Result<[u8; N]> {
     bytes.try_into().map_err(|_| CrabError::LTXCorrupted)
 }
 
+/// Shape-checks one encoded directory node without a root graph.
+///
+/// Authentication needs the exact root's object extents, which this entry point
+/// does not have: a leaf is checked against extents derived from its own
+/// records, so every structural rule still runs while extent membership and the
+/// lock-page rule stay unverified. Audit tooling that must authenticate a node
+/// walks the root graph instead.
+pub(crate) fn inspect_node(bytes: &[u8]) -> Result<()> {
+    let header = Header::parse(bytes)?;
+    if header.kind == 1 {
+        verify_branch(bytes, &header)?;
+        return Ok(());
+    }
+    let mut extents: BTreeMap<[u8; 32], ObjectExtent> = BTreeMap::new();
+    let mut database_pages = 0_u32;
+    for index in 0..header.entries as usize {
+        let start = HEADER_BYTES + index * LEAF_RECORD_BYTES;
+        let page = read_u32(bytes, start)?;
+        let object = array(&bytes[start + 4..start + 36])?;
+        let offset = read_u64(bytes, start + 36)?;
+        let length = read_u32(bytes, start + 44)?;
+        let end = offset
+            .checked_add(u64::from(length))
+            .ok_or(CrabError::LTXCorrupted)?;
+        database_pages = database_pages.max(page);
+        extents
+            .entry(object)
+            .or_insert_with(|| ObjectExtent {
+                kind: crate::CellObjectKind::Ltx,
+                ranges: Vec::new(),
+            })
+            .ranges
+            .push(offset..end);
+    }
+    // Page size zero disables the lock-page membership rule: with no root graph
+    // there is no page size to work from, and every other rule still runs.
+    verify_leaf(bytes, &header, 0, database_pages, &extents)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;

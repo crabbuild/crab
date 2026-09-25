@@ -5,11 +5,13 @@ use crate::{CrabError, Result};
 pub(crate) const ENTRY_BYTES: usize = 60;
 const FRAME_PREFIX: usize = crate::ltx::PAGE_HEADER_SIZE + 4;
 
+/// Worst-case bytes of one replica-indexed page frame.
+///
+/// Shares the local cut bound's frame math so a page admitted by one path can
+/// never be rejected by the other.
 pub(crate) fn maximum_frame_bytes(page_size: u32) -> Result<u32> {
-    u32::try_from(crate::lz4_block::compress_bound(page_size as usize))
-        .ok()
-        .and_then(|bytes| bytes.checked_add(FRAME_PREFIX as u32))
-        .ok_or(CrabError::LTXCorrupted)
+    u32::try_from(crate::ltx::frame_payload_upper_bound(page_size)?)
+        .map_err(|_| CrabError::LTXCorrupted)
 }
 
 pub(crate) struct IndexEntry {

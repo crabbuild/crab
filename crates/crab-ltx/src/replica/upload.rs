@@ -31,6 +31,7 @@ impl CellReplica {
             .layout
             .incarnation_object_path(&self.cell, &self.incarnation, digest, kind);
         self.layout.store().put(&path, bytes.clone()).await?;
+        self.cost.record(bytes.len() as u64);
         if matches!(kind, CellObjectKind::Root | CellObjectKind::Directory) {
             cache::insert(
                 &self.layout,
@@ -133,7 +134,9 @@ impl CellReplica {
             .await;
         match cleanup_staged(self.layout.store(), &staged).await {
             Err(error) => Err(error),
-            Ok(()) => promotion.map(|_| ()).map_err(Into::into),
+            Ok(()) => promotion
+                .map(|_| self.cost.record(bundle.len()))
+                .map_err(Into::into),
         }
     }
 }

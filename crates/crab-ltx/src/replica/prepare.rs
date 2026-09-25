@@ -34,14 +34,17 @@ impl CellReplica {
             return Err(CrabError::InvalidState("empty Cell append"));
         }
         let captured_bytes = cuts.segments.iter().try_fold(0_u64, |total, segment| {
-            if segment.info().size_bytes > self.limits.max_capture_bytes {
+            // A full database image may legitimately exceed the incremental
+            // bound; the per-representation check below rejects an oversized
+            // delta after its index proves the coverage.
+            if segment.info().size_bytes > self.limits.max_file_bytes {
                 return Err(CrabError::Limit(crate::LimitKind::CapturedCellLtxBytes));
             }
             total
                 .checked_add(segment.info().size_bytes)
                 .ok_or(CrabError::Limit(crate::LimitKind::CapturedCellLtxBytes))
         })?;
-        if captured_bytes > self.limits.max_capture_bytes {
+        if captured_bytes > self.limits.max_plan_bytes {
             return Err(CrabError::Limit(crate::LimitKind::CapturedCellLtxBytes));
         }
         let load_base = async {
@@ -99,6 +102,7 @@ impl CellReplica {
                     upload::inspect_segment_source(self, Arc::clone(&source), &info).await?,
                 ),
             };
+            self.admit_segment_representation(&info, index.len())?;
             Ok(AppendInput {
                 info,
                 location: BodyLocation::Native,
@@ -111,6 +115,29 @@ impl CellReplica {
         .buffered(SEGMENT_TRANSFER_CONCURRENCY)
         .try_collect()
         .await
+    }
+
+    /// Admits one captured segment's representation against the publication bounds.
+    ///
+    /// A segment larger than the incremental bound must be a full database
+    /// image: its encoded index has to cover every page the commit published.
+    /// The capture writer already escalates an oversized delta to that
+    /// representation, so a large partial index is a corrupt or foreign cut.
+    fn admit_segment_representation(
+        &self,
+        info: &crate::SegmentInfo,
+        index_bytes: usize,
+    ) -> Result<()> {
+        if info.size_bytes <= self.limits.max_capture_bytes {
+            return Ok(());
+        }
+        let lock = crate::ltx::lock_pgno(info.page_size);
+        let expected_pages =
+            u64::from(info.database_pages) - u64::from(lock <= info.database_pages);
+        if (index_bytes / crate::paged::ENTRY_BYTES) as u64 != expected_pages {
+            return Err(CrabError::Limit(crate::LimitKind::CapturedCellLtxBytes));
+        }
+        Ok(())
     }
 
     /// Verifies selected Cell rows from a shared bundle and prepares one root append.
@@ -205,7 +232,9 @@ impl CellReplica {
             selected_bytes = selected_bytes
                 .checked_add(row.info.size_bytes)
                 .ok_or(CrabError::Limit(crate::LimitKind::CapturedCellBundleBytes))?;
-            if selected_bytes > self.limits.max_capture_bytes {
+            if row.info.size_bytes > self.limits.max_file_bytes
+                || selected_bytes > self.limits.max_plan_bytes
+            {
                 return Err(CrabError::Limit(crate::LimitKind::CapturedCellBundleBytes));
             }
             prospective.push(SegmentDescriptor::bundled(
@@ -223,6 +252,7 @@ impl CellReplica {
             {
                 return Err(CrabError::ChecksumMismatch);
             }
+            self.admit_segment_representation(&row.info, pages.len() * crate::paged::ENTRY_BYTES)?;
             let index_bytes = Bytes::from(crate::paged::encode_index_from_pages(&pages)?);
             inputs.push(AppendInput {
                 info: row.info.clone(),

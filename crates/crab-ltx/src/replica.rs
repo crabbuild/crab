@@ -15,11 +15,11 @@ use crate::{CaptureBatch, CrabError, Host, Limits, Position, Result};
 
 mod cache;
 mod compaction;
-mod directory;
+pub(crate) mod directory;
 mod merge;
 mod prepare;
 mod restore;
-mod root;
+pub(crate) mod root;
 mod upload;
 mod verify;
 
@@ -68,6 +68,51 @@ pub struct RootObjectRef {
     pub digest: [u8; 32],
     /// Kind of immutable object.
     pub kind: CellObjectKind,
+}
+
+/// Immutable publication cost a replica path paid.
+///
+/// One prepared root uploads a segment body and index, the changed directory
+/// nodes, and the root document, so a caller that wants the object-store cost
+/// of one command reads this ledger instead of inferring it from the database
+/// size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PublicationCost {
+    /// Immutable objects uploaded.
+    pub objects: u64,
+    /// Sum of immutable object bytes uploaded.
+    pub bytes: u64,
+}
+
+#[derive(Default)]
+pub(super) struct PublicationLedger {
+    objects: std::sync::atomic::AtomicU64,
+    bytes: std::sync::atomic::AtomicU64,
+}
+
+impl PublicationLedger {
+    pub(super) fn record(&self, bytes: u64) {
+        self.objects
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.bytes
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Returns the accumulated cost and resets the ledger.
+    fn take(&self) -> PublicationCost {
+        PublicationCost {
+            objects: self.objects.swap(0, std::sync::atomic::Ordering::AcqRel),
+            bytes: self.bytes.swap(0, std::sync::atomic::Ordering::AcqRel),
+        }
+    }
+
+    /// Returns the accumulated cost without resetting the ledger.
+    fn snapshot(&self) -> PublicationCost {
+        PublicationCost {
+            objects: self.objects.load(std::sync::atomic::Ordering::Relaxed),
+            bytes: self.bytes.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
 }
 
 /// A fully uploaded immutable root proposal.
@@ -628,6 +673,7 @@ pub struct CellReplica {
     incarnation: [u8; 16],
     limits: Limits,
     host: Host,
+    cost: Arc<PublicationLedger>,
 }
 
 impl CellReplica {
@@ -647,6 +693,7 @@ impl CellReplica {
             incarnation,
             limits: limits.validate()?,
             host: Host::default(),
+            cost: Arc::new(PublicationLedger::default()),
         })
     }
 
@@ -654,6 +701,27 @@ impl CellReplica {
     #[must_use]
     pub const fn limits(&self) -> Limits {
         self.limits
+    }
+
+    /// Returns the cumulative immutable publication cost this replica paid.
+    ///
+    /// The ledger covers every object the replica uploaded: segment bodies and
+    /// indexes, directory nodes, root documents, segment pages, bundle bodies,
+    /// and compaction outputs. Callers sampling per-command cost use
+    /// [`Self::take_publication_cost`] instead.
+    #[must_use]
+    pub fn publication_cost(&self) -> PublicationCost {
+        self.cost.snapshot()
+    }
+
+    /// Returns the publication cost accumulated since the last call and resets it.
+    ///
+    /// One Cell has a single publisher at a time, so the reset is safe there;
+    /// a caller that runs concurrent prepares must use
+    /// [`Self::publication_cost`] deltas instead.
+    #[must_use]
+    pub fn take_publication_cost(&self) -> PublicationCost {
+        self.cost.take()
     }
 
     /// Selects the caller's bounded I/O and blocking execution facilities.

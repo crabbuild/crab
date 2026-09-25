@@ -108,6 +108,18 @@ commit; it is not a runtime or compatibility contract.
 - Verification checks BLAKE3 metadata, the complete LTX structure, page order
   and coverage, every pre/post rolling database checksum, and the final image.
 
+### Capture representation and failure contract
+
+- A commit whose delta cannot fit `Limits::max_capture_bytes` is captured as a
+  full database image bounded by `Limits::max_file_bytes` instead of failing
+  after the commit. The image keeps the delivered TXID, pre-apply checksum, and
+  chain position, so it stays a valid successor cut and no oversized write can
+  strand a session.
+- The publication path admits a segment above the incremental bound only when
+  its index proves full-page coverage, in the native and bundle paths alike.
+- `CrabError::classify()` publishes the retry, capacity, permanent, ambiguous,
+  and fenced contract. Callers branch on the class, never on error text.
+
 ### Cell replication
 
 - `CellReplica` writes immutable content-addressed LTX, index, directory, bundle,

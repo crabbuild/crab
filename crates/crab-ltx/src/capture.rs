@@ -114,6 +114,13 @@ pub(crate) struct CaptureEngine {
     verified_schema_version: Option<i64>,
     last_l0_header: Option<(Txid, LastL0Header)>,
     last_l0_segment: Option<crate::SegmentInfo>,
+    /// Largest one incremental LTX cut may be.
+    ///
+    /// A commit whose delta cannot fit this bound is captured as a full
+    /// database image instead, which is bounded by the host's `max_file_bytes`.
+    /// The commit-time admission in `Db::transaction_with` normally refuses such
+    /// a commit before SQLite publishes it.
+    max_incremental_bytes: u64,
     #[cfg(feature = "replica")]
     sealed_l0_captured_indexes: HashMap<u64, Vec<u8>>,
 
@@ -140,6 +147,7 @@ impl CaptureEngine {
         path: impl AsRef<Path>,
         host: crate::LtxHost,
         vfs: Option<&str>,
+        max_incremental_bytes: u64,
     ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let meta_path = Self::meta_path_for(&path);
@@ -206,6 +214,7 @@ impl CaptureEngine {
             verified_schema_version: None,
             last_l0_header: None,
             last_l0_segment: None,
+            max_incremental_bytes,
             #[cfg(feature = "replica")]
             sealed_l0_captured_indexes: HashMap::new(),
             position: Pos::ZERO,

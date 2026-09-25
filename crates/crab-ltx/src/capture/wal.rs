@@ -183,6 +183,28 @@ impl CaptureEngine {
     }
 
     pub(super) fn sync_inner(&mut self, mut info: SyncInfo) -> Result<bool> {
+        let frame_size_bytes = self.page_size as i64 + WAL_FRAME_HEADER_SIZE as i64;
+        // Decide the representation before reading the WAL. A delta whose
+        // worst-case encoded size exceeds the incremental bound is captured as
+        // a full database image instead of fencing the session, and a full
+        // image needs the whole WAL: pages that only an earlier, already
+        // captured WAL segment holds are not in the database file yet. The
+        // bound uses the uncaptured frame count, so it never understates the
+        // delta the encoder would produce.
+        let uncaptured_frames = if info.snapshotting {
+            0
+        } else {
+            let uncaptured_bytes = self.wal_file_size()?.saturating_sub(info.offset).max(0) as u64;
+            uncaptured_bytes.div_ceil(frame_size_bytes.max(1) as u64)
+        };
+        let full_image = info.snapshotting
+            || ltx::cut_upper_bound(self.page_size, uncaptured_frames)?
+                > self.max_incremental_bytes;
+        if full_image && !info.snapshotting {
+            // A full image is anchored at the WAL header so every frame the
+            // current database state still depends on is in the page map.
+            info.offset = WAL_HEADER_SIZE as i64;
+        }
         // A capture that starts at the WAL header reads a logical WAL with no
         // backfilled prefix: the first sync, a restart, or a boundary image.
         // The checkpoint trigger counts from the backfilled boundary, so it
@@ -206,13 +228,12 @@ impl CaptureEngine {
         // suffix after a logical restart. Stop at the valid prefix instead of
         // repeatedly reading that suffix; a sparse-tail mismatch needs a full
         // re-read so a zero-filled prefix cannot hide uncaptured commits.
-        let frame_size_bytes = self.page_size as i64 + WAL_FRAME_HEADER_SIZE as i64;
         let mut sparse_tail = false;
         let mut fallback = false;
         if info.snapshotting {
             self.timing_observe_wal_snapshot();
         }
-        let mut wal = if info.snapshotting {
+        let mut wal = if info.snapshotting || full_image {
             let bytes = self.read_whole_wal()?;
             WalImage::whole(bytes)
         } else {
@@ -303,6 +324,24 @@ impl CaptureEngine {
         // Build the page stream for the encoder.
         self.host
             .check_database_size(u64::from(commit) * u64::from(self.page_size))?;
+        // Admit the selected representation against its bound. The full image
+        // keeps the current TXID, pre-apply checksum, and chain position, so it
+        // stays a valid successor cut of the same lineage.
+        let encoded_pages = if full_image {
+            u64::from(commit)
+        } else {
+            page_map
+                .len()
+                .saturating_add(commit.saturating_sub(info.prev_commit) as usize) as u64
+        };
+        let cut_limit = if full_image {
+            self.host.max_file_bytes
+        } else {
+            self.max_incremental_bytes
+        };
+        if ltx::cut_upper_bound(self.page_size, encoded_pages)? > cut_limit {
+            return Err(CrabError::Limit(crate::LimitKind::LtxFileBytes));
+        }
         let header = ltx::Header {
             version: ltx::VERSION,
             flags: 0,
@@ -339,7 +378,8 @@ impl CaptureEngine {
             header,
             &wal,
             &page_map,
-            info.snapshotting,
+            full_image,
+            cut_limit,
             info.prev_commit,
             commit,
             !self.defer_durability,
@@ -356,7 +396,8 @@ impl CaptureEngine {
                     header,
                     &wal,
                     &page_map,
-                    info.snapshotting,
+                    full_image,
+                    cut_limit,
                     info.prev_commit,
                     commit,
                     !self.defer_durability,
@@ -435,7 +476,8 @@ impl CaptureEngine {
         header: ltx::Header,
         wal: &WalImage,
         page_map: &HashMap<u32, i64>,
-        snapshotting: bool,
+        full_image: bool,
+        limit: u64,
         prev_commit: u32,
         commit: u32,
         durable: bool,
@@ -447,8 +489,16 @@ impl CaptureEngine {
                 .fold(0_usize, |total, index| total.saturating_add(index.len())),
         );
         let result = (|| -> Result<(crate::pages::PageChecksums, u64, [u8; 32], CapturedIndex)> {
-            let output = self.host.create(Path::new(tmp_filename))?;
-            let estimated_pages = if snapshotting {
+            // The cut is written through a host limited by the representation's
+            // bound, so an encoder that ever exceeded its admitted bound fails
+            // instead of publishing an oversized artifact.
+            let output_host = crate::LtxHost {
+                facilities: self.host.facilities.clone(),
+                max_database_bytes: self.host.max_database_bytes,
+                max_file_bytes: limit,
+            };
+            let output = output_host.create(Path::new(tmp_filename))?;
+            let estimated_pages = if full_image {
                 commit as usize
             } else {
                 page_map
@@ -499,7 +549,7 @@ impl CaptureEngine {
             encoder.encode_header(header)?;
 
             let mut checksums = self.checksums.clone();
-            if snapshotting {
+            if full_image {
                 let lock = lock_pgno(self.page_size);
                 let pages = (1..=commit).filter(|page| *page != lock).map(|pgno| {
                     let data = self.capture_page(wal, page_map, pgno)?;

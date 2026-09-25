@@ -35,6 +35,12 @@ pub mod error;
 #[cfg(feature = "replica")]
 mod hex;
 mod host;
+/// Unstable inspection surface for external fuzzers, auditors, and tools.
+///
+/// Nothing here carries a compatibility guarantee; production callers use the
+/// typed APIs instead.
+#[doc(hidden)]
+pub mod internal;
 #[cfg(feature = "replica")]
 pub use cell_layout::{CellObjectKind, CellStorageLayout};
 #[cfg(feature = "replica")]
@@ -70,8 +76,8 @@ mod writable_vfs;
 pub use node_frame::{NodeFrameScope, VerifiedNodeFrame, encode_node_frame, inspect_node_frame};
 #[cfg(feature = "replica")]
 pub use replica::{
-    CellPagedDatabase, CellReplica, CellWritableDatabase, PreparedRoot, RecoveryOverlay,
-    RootObjectRef, RootRef, VerifiedRoot,
+    CellPagedDatabase, CellReplica, CellWritableDatabase, PreparedRoot, PublicationCost,
+    RecoveryOverlay, RootObjectRef, RootRef, VerifiedRoot,
 };
 #[cfg(feature = "replica")]
 pub use writable_vfs::Hydration;
@@ -81,7 +87,7 @@ mod format_tests;
 
 pub use capture::CheckpointMode;
 pub use db::{Db, MANAGED_CONNECTION_PAGE_CACHE_BYTES, MANAGED_SQLITE_CONNECTIONS};
-pub use error::{CrabError, LimitKind, QueryError, Result, TransactionError};
+pub use error::{CrabError, FailureClass, LimitKind, QueryError, Result, TransactionError};
 pub use recovery::{VerifiedPlan, compact_exact, restore_exact};
 pub use rusqlite;
 pub use types::{CaptureBatch, CaptureTiming, Limits, LocalSegment, Position, SegmentInfo};
