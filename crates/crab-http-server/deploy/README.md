@@ -182,6 +182,11 @@ CRAB_HTTP_SERVER_IMAGE=ghcr.io/crabbuild/crab-http-server@sha256:qualified_diges
 
 ### Qualify three local Cell processes
 
+For an issue and label application that grows through 3, 5, 10, and 20
+individually limited Cell containers against RustFS, use the
+[Cell issue fleet example](cell-issue-fleet/README.md). Its 1 GiB node profile
+is experimental and has separate qualification evidence.
+
 The cluster overlay runs four independent server containers and one real
 RustFS origin. Each server has its own Cell tmpfs. They share a dedicated,
 long-lived Docker network-namespace sidecar so every unauthenticated listener
