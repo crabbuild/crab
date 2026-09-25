@@ -1561,7 +1561,7 @@ connection destination.
 | Route composition, Host checks, request correlation, readiness, metrics, and shutdown | `src/server.rs`, `src/metrics.rs` | Server, metrics, authentication, and maintenance tests |
 | OIDC, membership, sessions, tokens, CSRF, and back-channel logout | `src/auth.rs`, `src/members.rs` | `src/auth_tests.rs`, `src/auth_tests/members.rs`, `src/auth_tests/backchannel_logout.rs`, and `src/auth_tests/git_tokens.rs` |
 | Repository reads and raw paths | `src/api.rs` | `tests/verify_live.py` and frontend navigation tests |
-| HTTP capacity and overload behavior | server admission and public routes | `examples/qualify_http_load.rs`, its self-hosted tests, and retained JSON receipts |
+| HTTP capacity and overload behavior | server admission and public routes | `examples/qualify_http_load/main.rs`, its self-hosted tests, and retained JSON receipts |
 | Git protocol version 2 fetch | `src/git.rs` | `tests/verify_git_transport.py` and protocol CI |
 | Native receive, changed-path validation, and recovery | `src/receive.rs`, `src/receive/publish.rs`, `crab-git::receive_plan` | `src/receive_tests.rs` and `src/receive_fault_tests.rs` |
 | LFS transfer, range-resume, file-lock, and authoritative receive contracts | `src/lfs.rs`, `src/receive/publish.rs` | `src/lfs_tests.rs`, `src/receive_tests.rs`, `src/auth_tests/git_tokens.rs`, `tests/qualify_lfs_range_resume.sh`, and `tests/qualify_lfs_locking.sh` |
