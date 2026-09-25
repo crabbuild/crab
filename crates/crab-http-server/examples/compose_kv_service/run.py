@@ -167,7 +167,7 @@ def main():
             created = True
             compose(args.project, "up", "--detach", "--no-build", *nodes, env=env)
             resources = {}
-            for node in nodes:
+            for index, node in enumerate(nodes):
                 details = wait_healthy(args.project, node, env)
                 host = details["HostConfig"]
                 if host["NanoCpus"] != CPU_NANOSECONDS or host["Memory"] != MEMORY_BYTES:
@@ -179,17 +179,21 @@ def main():
                 }
                 if node not in values:
                     value = f"{args.project}:{node}"
+                    ingress = nodes[(index + 1) % size]
                     response = request(
-                        args.project, node, "PUT", "/kv/scale-marker",
+                        args.project, ingress, "PUT", f"/tenants/{node}/kv/scale-marker",
                         body={"request_id": str(uuid.uuid4()), "value": value}, env=env,
                     )
                     if response != {"committed": True}:
                         raise RuntimeError(f"{node} did not acknowledge its Cell write")
                     values[node] = value
             cell_status = {}
-            for node in nodes:
+            for index, node in enumerate(nodes):
                 health = request(args.project, node, "GET", "/health", env=env)
-                read = request(args.project, node, "GET", "/kv/scale-marker", env=env)
+                ingress = nodes[(index + 2) % size]
+                read = request(
+                    args.project, ingress, "GET", f"/tenants/{node}/kv/scale-marker", env=env,
+                )
                 if health.get("ready") is not True or health.get("active_cells") != 1:
                     raise RuntimeError(f"{node} does not have one ready Cell")
                 if read.get("value") != values[node]:

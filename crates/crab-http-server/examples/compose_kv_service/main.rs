@@ -41,7 +41,7 @@ use crab_cell_runtime::{Error, Result};
 use crab_ltx::{CellReplica, DiskBudget, Host, Limits};
 use crab_storage::{ObjectStoreCredentials, Store, build_explicit_store};
 use object_store::path::Path as ObjectPath;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -137,10 +137,12 @@ struct Service {
     node_name: String,
     node: Arc<CellNode>,
     lease: NodeLeaseGuard,
+    authority: CellAuthority,
+    http: reqwest::Client,
     kv: KvNamespace<ReferenceKv>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Write {
     request_id: Uuid,
     value: String,
@@ -215,7 +217,7 @@ async fn main() -> Result<()> {
             incarnation,
             Owner {
                 session,
-                endpoint: format!("https://{node_name}:8443"),
+                endpoint: format!("http://{node_name}:8080"),
             },
         )
         .await?;
@@ -224,7 +226,7 @@ async fn main() -> Result<()> {
         .bootstrap(
             proof,
             CellReplica::new(
-                layout,
+                layout.clone(),
                 *target.cell_id().as_bytes(),
                 *incarnation.as_bytes(),
                 Limits {
@@ -248,11 +250,13 @@ async fn main() -> Result<()> {
         node_name,
         node: Arc::clone(&node),
         lease: lease.clone(),
+        authority: CellAuthority::new(layout.clone()),
+        http: reqwest::Client::new(),
         kv: typed.kv::<ReferenceKv>(NAMESPACE)?,
     };
     let router = Router::new()
         .route("/health", get(health))
-        .route("/kv/{key}", get(read).put(write))
+        .route("/tenants/{tenant}/kv/{key}", get(read).put(write))
         .with_state(state);
     let listener = TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], 8080))).await?;
     let result = tokio::select! {
@@ -312,11 +316,14 @@ async fn health(State(state): State<Service>) -> HttpResult {
 
 async fn write(
     State(state): State<Service>,
-    Path(key): Path<String>,
+    Path((tenant, key)): Path<(String, String)>,
     Json(body): Json<Write>,
 ) -> HttpResult {
     if key.len() > 1024 || body.value.len() > 4096 {
         return Err((StatusCode::BAD_REQUEST, "key or value too large".into()));
+    }
+    if tenant != state.node_name {
+        return forward(&state, &tenant, &key, Some(&body)).await;
     }
     let now = now_ms().map_err(internal)?;
     let committed = state
@@ -345,7 +352,13 @@ async fn write(
     Ok(Json(json!({"committed": true})))
 }
 
-async fn read(State(state): State<Service>, Path(key): Path<String>) -> HttpResult {
+async fn read(
+    State(state): State<Service>,
+    Path((tenant, key)): Path<(String, String)>,
+) -> HttpResult {
+    if tenant != state.node_name {
+        return forward(&state, &tenant, &key, None).await;
+    }
     let observed = state
         .kv
         .get(SCOPE.to_vec(), key.into_bytes(), None)
@@ -361,6 +374,88 @@ async fn read(State(state): State<Service>, Path(key): Path<String>) -> HttpResu
         )
     })?;
     Ok(Json(json!({"value": value})))
+}
+
+async fn forward(state: &Service, tenant: &str, key: &str, body: Option<&Write>) -> HttpResult {
+    if tenant.is_empty() || tenant.len() > 128 || key.len() > 1024 {
+        return Err((StatusCode::BAD_REQUEST, "tenant or key too large".into()));
+    }
+    if !state.node.is_ready() || state.lease.check().is_err() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Cell node is not ready".into(),
+        ));
+    }
+    let digest = blake3::hash(tenant.as_bytes());
+    let mut tenant_bytes = [0; 16];
+    tenant_bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    let target = CellTarget::new(
+        TenantId::from_bytes(tenant_bytes),
+        APPLICATION,
+        NAMESPACE,
+        &partition_for_shard(0),
+    )
+    .map_err(internal)?;
+    let observed = state
+        .authority
+        .load(target.cell_id())
+        .await
+        .map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "tenant not found".into()))?;
+    let owner = observed.value().owner.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "tenant has no owner".into(),
+    ))?;
+    // A stale or inconsistent local owner record must fail closed, not recurse.
+    if owner.endpoint == format!("http://{}:8080", state.node_name) {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "tenant is unavailable".into(),
+        ));
+    }
+    let mut url = reqwest::Url::parse(&owner.endpoint)
+        .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+    url.path_segments_mut()
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "invalid owner endpoint".into(),
+            )
+        })?
+        .extend(["tenants", tenant, "kv", key]);
+    let request = match body {
+        Some(body) => state
+            .http
+            .put(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(
+                serde_json::to_vec(body)
+                    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
+            ),
+        None => state.http.get(url),
+    }
+    .timeout(Duration::from_secs(20));
+    let response = request
+        .send()
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err((
+            status,
+            response
+                .text()
+                .await
+                .unwrap_or_else(|error| error.to_string()),
+        ));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
+    serde_json::from_slice(&bytes)
+        .map(Json)
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))
 }
 
 fn required(name: &'static str) -> Result<String> {
