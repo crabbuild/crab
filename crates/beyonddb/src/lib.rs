@@ -98,7 +98,7 @@ static COMMANDS: [OperationDescriptor; 14] = [
     operation(15),
     operation(16),
 ];
-static QUERIES: [OperationDescriptor; 14] = [
+static QUERIES: [OperationDescriptor; 15] = [
     operation(4),
     operation(6),
     operation(7),
@@ -113,6 +113,7 @@ static QUERIES: [OperationDescriptor; 14] = [
     operation(16),
     operation(17),
     operation(18),
+    operation(19),
 ];
 
 /// Statically linked account application.
@@ -276,7 +277,8 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<ReadPublishedPartition>()?;
         registry.bind_query::<ReadSplitRoute>()?;
         registry.bind_query::<authorization::ReadUserPolicies>()?;
-        registry.bind_query::<tags::ReadTags>()
+        registry.bind_query::<tags::ReadTags>()?;
+        registry.bind_query::<transaction_token::ReadTransactionClaim>()
     }
 }
 

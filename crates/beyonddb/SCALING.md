@@ -15,7 +15,10 @@ independently owned data-range Cells for keyed CRUD and Scan. Account item
 commands are then fenced. Transactions confined to one routed data Cell
 commit their item writes in one Cell command or read one snapshot. Client
 request tokens first claim an account Cell record and then commit an applied
-receipt with the data mutation. Transactions across Cells remain rejected until
+receipt with the data mutation. A committed replay reads that claim before
+current routing, so a split cannot apply it in another Cell. A claimed request
+without an applied receipt still needs safe relocation if its source seals.
+Transactions across Cells remain rejected until
 a durable coordinator exists. A host-backed provisioner can create 1–256
 independent, evenly spaced initial data Cells during CreateTable and retry
 interrupted setup. This raises initial aggregate capacity and write parallelism.

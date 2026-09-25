@@ -1,6 +1,6 @@
 //! Account-scoped transaction token claims and Cell-local applied receipts.
 
-use crab_cell_runtime::registry::{Command, CommandContext, CommandResult};
+use crab_cell_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
 use serde::{Deserialize, Serialize};
 
 use crate::table::statement;
@@ -90,6 +90,51 @@ impl Command for ClaimTransactionToken {
         prune_expired(context, TokenStore::Claims, cutoff)?;
         Ok(CommandResult::Success(Json(
             ClaimTransactionTokenOutcome::Claimed(input.destination),
+        )))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ReadTransactionClaimOutcome {
+    Missing,
+    Claimed(TransactionDestination),
+    Mismatch,
+}
+
+pub struct ReadTransactionClaim;
+
+impl Query for ReadTransactionClaim {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 19;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<TransactionToken>;
+    type Output = Json<ReadTransactionClaimOutcome>;
+
+    fn execute(context: &mut QueryContext<'_>, Json(token): Self::Input) -> Result<Self::Output> {
+        if account_target(&token.account_id)?.cell_id() != context.cell_id() {
+            return Err(Error::Identity(
+                "transaction token reached the wrong account",
+            ));
+        }
+        let rows = context.sql(&statement(
+            "SELECT fingerprint, destination FROM ddb_transaction_claims \
+             WHERE token = ?1 AND created_at_ms > ?2",
+            vec![
+                SqlValue::Text(token.token),
+                SqlValue::Integer(context.now_ms().saturating_sub(TOKEN_LIFETIME_MS)),
+            ],
+        ))?;
+        let Some(row) = rows[0].rows.first() else {
+            return Ok(Json(ReadTransactionClaimOutcome::Missing));
+        };
+        let [SqlValue::Text(fingerprint), SqlValue::Blob(destination)] = row.as_slice() else {
+            return Err(Error::Command("invalid transaction claim row"));
+        };
+        if fingerprint != &token.fingerprint {
+            return Ok(Json(ReadTransactionClaimOutcome::Mismatch));
+        }
+        Ok(Json(ReadTransactionClaimOutcome::Claimed(
+            serde_json::from_slice(destination)?,
         )))
     }
 }
