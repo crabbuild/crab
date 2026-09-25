@@ -275,6 +275,7 @@ def main() -> None:
     parser.add_argument("--project", required=True)
     parser.add_argument("--gateway-port", type=int, default=18080)
     parser.add_argument("--node-port-base", type=int, default=18100)
+    parser.add_argument("--rustfs-port", type=int, default=19010)
     parser.add_argument("--skip-build", action="store_true")
     args = parser.parse_args()
     command("docker", "info", "--format", "{{.ServerVersion}}")
@@ -286,7 +287,7 @@ def main() -> None:
     ]
     if any(existing):
         raise RuntimeError(f"Compose project {args.project} already has resources; use a fresh project name")
-    path = render(args.state, args.project, args.gateway_port, args.node_port_base)
+    path = render(args.state, args.project, args.gateway_port, args.node_port_base, args.rustfs_port)
     compose(path, (), "config", "--quiet")
     if not args.skip_build:
         subprocess.run(["docker", "compose", "--file", str(path), "build", "release-init"], check=True)

@@ -12,6 +12,8 @@ use crab_cell_runtime::cell::catalog::CellCatalog;
 use crab_cell_runtime::cell::executor::Resolution;
 use crab_cell_runtime::peer::{PeerPrincipal, PeerRoundTrip, PeerSigner, PeerVerifier};
 use crab_cell_runtime::recovery::manifest::RecoveryManifestStore;
+use crab_storage::{ObjectStoreCredentials, build_explicit_store};
+use object_store::path::Path;
 use tokio::net::TcpListener;
 
 struct LoseMutationReply {
@@ -201,13 +203,13 @@ async fn recover_sql_on_second_node(fixture: &PerfFixture) -> (ReferenceClient, 
                 layout.clone(),
                 *target.cell_id().as_bytes(),
                 *IncarnationId::from_bytes([40; 16]).as_bytes(),
-                Limits::default(),
+                reference_limits(),
             )
             .unwrap(),
             authority,
             observed,
             fence,
-            RecoveryManifestStore::new(layout.clone(), Limits::default()),
+            RecoveryManifestStore::new(layout.clone(), reference_limits()),
             recovered_directory.path().join("recovered-sql.sqlite"),
             Owner {
                 session: node_session(1),
@@ -283,12 +285,44 @@ async fn three_node_host_serves_two_release_ids_with_unchanged_module_contracts(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "manual action-level latency and recovery qualification"]
 async fn reference_public_host_action_performance() {
+    run_public_host_action_performance(PerfFixture::start(3).await).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "manual RustFS action-level latency and recovery qualification"]
+async fn reference_public_host_rustfs_action_performance() {
+    let required = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
+    let store = build_explicit_store(
+        &required("CRAB_CELL_TEST_BUCKET"),
+        ObjectStoreCredentials::Aws {
+            access_key_id: required("AWS_ACCESS_KEY_ID"),
+            secret_access_key: required("AWS_SECRET_ACCESS_KEY"),
+            session_token: None,
+            region: "us-east-1".into(),
+        },
+        Some(&required("CRAB_CELL_TEST_ENDPOINT")),
+        true,
+    )
+    .unwrap();
+    let run_id = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = Path::from(format!(
+        "{}/public-host-{}-{run_id}",
+        required("CRAB_CELL_TEST_PREFIX"),
+        std::process::id()
+    ));
+    println!("PERF backend=rustfs object_prefix={root}");
+    run_public_host_action_performance(PerfFixture::start_with_store(3, store, root).await).await;
+}
+
+async fn run_public_host_action_performance(fixture: PerfFixture) {
     let iterations = std::env::var("CRAB_CELL_PERF_ITERATIONS")
         .ok()
         .map(|value| value.parse::<usize>().unwrap())
         .unwrap_or(30);
     assert!((1..=1_000).contains(&iterations));
-    let fixture = PerfFixture::start(3).await;
     let sql_handle = fixture.owned_handles[0]
         .iter()
         .find(|handle| handle.cell_id() == fixture.sql_target.cell_id())

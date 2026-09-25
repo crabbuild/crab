@@ -74,7 +74,9 @@ def caddyfile() -> str:
     return "\n".join(result) + "\n"
 
 
-def compose(state: Path, project: str, gateway_port: int, node_port_base: int) -> dict:
+def compose(
+    state: Path, project: str, gateway_port: int, node_port_base: int, rustfs_port: int
+) -> dict:
     server_image = f"{project}:local"
     storage_env = {
         "AWS_ACCESS_KEY_ID": "crab",
@@ -88,6 +90,7 @@ def compose(state: Path, project: str, gateway_port: int, node_port_base: int) -
     services = {
         "rustfs": {
             "image": RUSTFS_IMAGE,
+            "ports": [f"127.0.0.1:{rustfs_port}:9000"],
             "environment": {
                 "RUSTFS_ACCESS_KEY": "crab",
                 "RUSTFS_SECRET_KEY": "crab",
@@ -223,22 +226,29 @@ def compose(state: Path, project: str, gateway_port: int, node_port_base: int) -
     return {"name": project, "services": services, "volumes": volumes}
 
 
-def render(state: Path, project: str, gateway_port: int, node_port_base: int) -> Path:
+def render(
+    state: Path, project: str, gateway_port: int, node_port_base: int, rustfs_port: int
+) -> Path:
     state = state.expanduser().resolve()
     if state.is_relative_to(ROOT):
         raise ValueError("state must be outside the repository")
     if not re.fullmatch(r"crab-cell-issue-[a-z0-9-]+", project):
         raise ValueError("project must be named crab-cell-issue-*")
-    if not (1024 <= gateway_port <= 65535 and 1024 <= node_port_base + 20 <= 65535):
+    if not all(
+        1024 <= port <= 65535
+        for port in (gateway_port, node_port_base + 1, node_port_base + 20, rustfs_port)
+    ):
         raise ValueError("host ports must be unprivileged and valid")
-    if gateway_port in range(node_port_base + 1, node_port_base + 21):
-        raise ValueError("gateway port overlaps a node port")
+    node_ports = range(node_port_base + 1, node_port_base + 21)
+    if gateway_port == rustfs_port or gateway_port in node_ports or rustfs_port in node_ports:
+        raise ValueError("host ports overlap")
     (state / "config").mkdir(parents=True, exist_ok=True)
     for index in range(1, 21):
         (state / "config" / f"{node_name(index)}.toml").write_text(node_config(index))
     (state / "Caddyfile").write_text(caddyfile())
     path = state / "compose.yaml"
-    path.write_text(json.dumps(compose(state, project, gateway_port, node_port_base), indent=2) + "\n")
+    rendered = compose(state, project, gateway_port, node_port_base, rustfs_port)
+    path.write_text(json.dumps(rendered, indent=2) + "\n")
     return path
 
 
@@ -248,8 +258,13 @@ def main() -> None:
     parser.add_argument("--project", required=True)
     parser.add_argument("--gateway-port", type=int, default=18080)
     parser.add_argument("--node-port-base", type=int, default=18100)
+    parser.add_argument("--rustfs-port", type=int, default=19010)
     args = parser.parse_args()
-    print(render(args.state, args.project, args.gateway_port, args.node_port_base))
+    print(
+        render(
+            args.state, args.project, args.gateway_port, args.node_port_base, args.rustfs_port
+        )
+    )
 
 
 if __name__ == "__main__":
