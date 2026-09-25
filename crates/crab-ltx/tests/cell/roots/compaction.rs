@@ -3,6 +3,52 @@
 use super::*;
 
 #[tokio::test]
+async fn compaction_scratch_exhaustion_refuses_cleanly() {
+    let source = tempfile::TempDir::new().unwrap();
+    let mut writer = Db::open(&source.path().join("scratch.sqlite"), Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES(randomblob(65536))")
+        })
+        .unwrap();
+    let batch = writer.capture().unwrap();
+    let replica = replica(Store::new(Arc::new(InMemory::new())), [231; 32], [232; 16]);
+    let root = replica.prepare(None, &batch, 1, 1).await.unwrap().root();
+
+    // One scratch MiB cannot admit a whole-database compaction, so the request
+    // must be refused as capacity instead of starting work it cannot finish.
+    let constrained = replica
+        .clone()
+        .with_host(Host::default().with_scratch_slots(Arc::new(tokio::sync::Semaphore::new(1))));
+    let scratch = tempfile::TempDir::new().unwrap();
+    let error = match constrained
+        .prepare_compaction(&root, 0..1, 9, scratch.path())
+        .await
+    {
+        Ok(_) => panic!("an unadmitted compaction must not return a proposal"),
+        Err(error) => error,
+    };
+    assert_eq!(error.classify(), crab_ltx::FailureClass::Capacity);
+    assert_eq!(
+        std::fs::read_dir(scratch.path()).unwrap().count(),
+        0,
+        "a refused compaction must not leave scratch files"
+    );
+
+    // The pinned root is untouched and still verifies.
+    let verified = replica.open_root(&root).await.unwrap();
+    assert_eq!(verified.root().position, batch.position);
+
+    // The same request succeeds once the host can admit the scratch it needs.
+    let compacted = replica
+        .prepare_compaction(&root, 0..1, 9, scratch.path())
+        .await
+        .unwrap();
+    assert_eq!(compacted.root().position, batch.position);
+    writer.close().unwrap();
+}
+
+#[tokio::test]
 async fn scheduled_cell_compaction_promotes_fanout_and_preserves_root() {
     let source = tempfile::TempDir::new().unwrap();
     let database = source.path().join("scheduled.sqlite");

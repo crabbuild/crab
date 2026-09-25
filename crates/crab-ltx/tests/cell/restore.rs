@@ -28,6 +28,7 @@ const NO_FAULT: u8 = 0;
 const SHORT_RANGE: u8 = 1;
 const CORRUPT_RANGE: u8 = 2;
 const TIMEOUT_RANGE: u8 = 3;
+const PUT_FAILURE: u8 = 4;
 
 #[derive(Default)]
 struct RecordingTelemetry {
@@ -145,6 +146,20 @@ impl InstrumentedStore {
     fn reset(&self) {
         self.stats.reset();
     }
+
+    /// Fails an upload the way a transient provider failure arrives.
+    fn check_upload_fault(&self) -> object_store::Result<()> {
+        if self.fault.load(Ordering::SeqCst) != PUT_FAILURE {
+            return Ok(());
+        }
+        Err(object_store::Error::Generic {
+            store: "InstrumentedStore",
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "injected upload failure",
+            )),
+        })
+    }
 }
 
 impl fmt::Debug for InstrumentedStore {
@@ -167,6 +182,7 @@ impl ObjectStore for InstrumentedStore {
         payload: PutPayload,
         options: PutOptions,
     ) -> object_store::Result<PutResult> {
+        self.check_upload_fault()?;
         self.inner.put_opts(location, payload, options).await
     }
 
@@ -175,6 +191,7 @@ impl ObjectStore for InstrumentedStore {
         location: &Path,
         options: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.check_upload_fault()?;
         self.inner.put_multipart_opts(location, options).await
     }
 
@@ -360,6 +377,71 @@ fn delayed_replica(
 fn p95(samples: &mut [Duration]) -> Duration {
     samples.sort_unstable();
     samples[(samples.len() * 95).div_ceil(100) - 1]
+}
+
+#[tokio::test]
+async fn failed_upload_returns_no_proposal_and_the_retry_is_identical() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let mut writer = Db::open(&directory.path().join("source.sqlite"), Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE counter(value INTEGER NOT NULL);\
+                 INSERT INTO counter VALUES(0)",
+            )
+        })
+        .unwrap();
+    let first = writer.capture().unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute("UPDATE counter SET value = value + 1", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let next = writer.capture().unwrap();
+    let mut segments = first.segments;
+    segments.extend(next.segments);
+    let batch = CaptureBatch {
+        segments,
+        position: next.position,
+        timing: CaptureTiming::default(),
+    };
+
+    // A transient upload failure must surface as a retryable failure and must
+    // never hand back a root proposal.
+    let backend = Arc::new(InMemory::new());
+    let store = InstrumentedStore::new(backend.clone(), Duration::ZERO);
+    store.arm(PUT_FAILURE);
+    let replica = cell_replica(
+        Store::new(store.clone()),
+        [151; 32],
+        [152; 16],
+        Host::default(),
+    );
+    let error = match replica.prepare(None, &batch, 1, 1).await {
+        Ok(_) => panic!("a failed upload must not return a root proposal"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.classify(),
+        crab_ltx::FailureClass::Retryable { after: None }
+    );
+
+    // Clearing the fault and retrying the same inputs yields the canonical
+    // proposal: an independent replica over a fresh backend agrees byte for
+    // byte, so the failed attempt left no partial root behind.
+    store.arm(NO_FAULT);
+    let retried = replica.prepare(None, &batch, 1, 1).await.unwrap();
+    let fresh_backend = Arc::new(InMemory::new());
+    let fresh = cell_replica(
+        Store::new(fresh_backend),
+        [151; 32],
+        [152; 16],
+        Host::default(),
+    );
+    let canonical = fresh.prepare(None, &batch, 1, 1).await.unwrap();
+    assert_eq!(retried.root(), canonical.root());
+    assert_eq!(retried.root().position, batch.position);
 }
 
 #[tokio::test(start_paused = true)]

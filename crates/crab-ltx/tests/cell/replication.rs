@@ -207,6 +207,9 @@ fn capture_failure_fences_writer_and_stale_sessions_are_refused() {
         &path,
         Limits {
             max_capture_bytes: 32768,
+            // The escalated full image cannot fit either bound, so this commit
+            // is uncapturable and the session must fence.
+            max_file_bytes: 32768,
             ..Limits::default()
         },
     )

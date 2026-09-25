@@ -3,5 +3,7 @@
 mod ltx {
     pub mod crash;
     pub mod node_frame;
+    pub mod pinned;
     pub mod properties;
+    pub mod vectors;
 }

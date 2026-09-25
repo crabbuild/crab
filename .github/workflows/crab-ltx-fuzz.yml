@@ -1,0 +1,75 @@
+name: crab-ltx fuzz
+
+on:
+  schedule:
+    # A nightly search on top of the per-pull-request smoke run.
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/crab-ltx/**"
+      - ".github/workflows/crab-ltx-fuzz.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crab-ltx-fuzz-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: Decoder fuzz smoke
+    runs-on: ubuntu-latest
+    # Installing cargo-fuzz and building five targets dominates the runtime.
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      # Every pull request proves the targets run; the schedule searches longer.
+      FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '900' || '90' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache fuzz build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "crates/crab-ltx/fuzz -> target"
+          cache-on-failure: true
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Seed the corpus from the external vectors
+        run: |
+          mkdir -p "${RUNNER_TEMP}/corpus" "${RUNNER_TEMP}/artifacts"
+          cp crates/crab-ltx/tests/vectors/*.ltx "${RUNNER_TEMP}/corpus/"
+
+      - name: Replay the external vectors
+        # The stable-toolchain replay is the deterministic gate; the fuzz run
+        # below searches beyond it.
+        run: cargo test -p crab-ltx --features replica --locked --test ltx vectors
+
+      - name: Fuzz every decoder
+        working-directory: crates/crab-ltx
+        run: |
+          set -euo pipefail
+          for target in ltx root directory bundle node_frame; do
+            cargo +nightly fuzz run "${target}" -- \
+              -artifact_prefix="${RUNNER_TEMP}/artifacts/${target}-" \
+              -max_total_time="${FUZZ_SECONDS}" \
+              "${RUNNER_TEMP}/corpus"
+          done
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crab-ltx-fuzz-artifacts
+          path: ${{ runner.temp }}/artifacts
+          if-no-files-found: ignore

@@ -60,6 +60,7 @@ impl Executor for DelayedExecutor {
 #[derive(Clone, Default)]
 struct Faults {
     failure: Arc<Mutex<Option<&'static str>>>,
+    planned: Arc<Mutex<Vec<&'static str>>>,
     calls: Arc<Mutex<BTreeSet<&'static str>>>,
     largest_read: Arc<AtomicUsize>,
     read_calls: Arc<AtomicUsize>,
@@ -74,9 +75,23 @@ impl Faults {
     fn arm(&self, operation: Option<&'static str>) {
         *self.failure.lock().unwrap() = operation;
     }
+
+    /// Arms an ordered list of operations to fail, one injection per match.
+    ///
+    /// A plan models a sequence of failures across seams — a torn write, then a
+    /// failed rename — instead of one armed operation at a time.
+    fn plan(&self, operations: impl IntoIterator<Item = &'static str>) {
+        *self.planned.lock().unwrap() = operations.into_iter().collect();
+    }
+
     fn check(&self, operation: &'static str) -> io::Result<()> {
         self.calls.lock().unwrap().insert(operation);
         if *self.failure.lock().unwrap() == Some(operation) {
+            return Err(io::Error::new(io::ErrorKind::StorageFull, operation));
+        }
+        let mut planned = self.planned.lock().unwrap();
+        if planned.first() == Some(&operation) {
+            planned.remove(0);
             return Err(io::Error::new(io::ErrorKind::StorageFull, operation));
         }
         Ok(())
@@ -222,5 +237,6 @@ fn injected<T>(result: crab_ltx::Result<T>) {
 mod capture;
 mod compaction;
 mod injection;
+mod matrix;
 mod prepare;
 mod restore;
