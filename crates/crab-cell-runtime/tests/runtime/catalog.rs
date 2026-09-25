@@ -199,7 +199,7 @@ async fn catalog_lookup_reports_one_head_and_one_page_read() {
     .unwrap();
     let expected = entry(&target, CatalogRole::Repository, 12);
     catalog.provision(expected.clone()).await.unwrap();
-    // Provisioning republishes the page set, so the routing claim starts here.
+    // Provisioning reads catalog metadata, so the routing claim starts here.
     recorder.reads.lock().unwrap().clear();
     assert_eq!(
         catalog
@@ -293,6 +293,61 @@ async fn catalog_lookup_reads_only_the_page_that_can_hold_the_entry() {
         .await
         .unwrap();
     assert!(catalog.lookup(last.cell()).await.is_err());
+}
+
+#[tokio::test]
+async fn catalog_provision_replaces_only_the_affected_page() {
+    let (layout, tenant, _, entries) = provisioned_shard(257).await;
+    let shard = entries[0].cell().as_bytes()[0];
+    let before = head_json(&layout, shard).await;
+    let second_first = before["pages"][1]["first"].as_str().unwrap();
+    let second_digest = before["pages"][1]["digest"].clone();
+    let application = ApplicationId::from_bytes([21; 16]);
+    let namespace = NamespaceId::from_bytes([22; 16]);
+    let target = (0_u32..)
+        .map(|partition| {
+            CellTarget::new(tenant, application, namespace, &partition.to_be_bytes()).unwrap()
+        })
+        .find(|target| {
+            target.cell_id().as_bytes()[0] == shard
+                && hex(target.cell_id().as_bytes()).as_str() < second_first
+                && entries.iter().all(|entry| entry.cell() != target.cell_id())
+        })
+        .unwrap();
+    let recorder = Arc::new(CatalogReadRecorder::default());
+    let catalog = CellCatalog::with_telemetry(
+        layout.clone(),
+        tenant,
+        crab_cell_runtime::fleet::telemetry::CellTelemetryHandle::from_sink(recorder.clone()),
+    );
+    let expected = entry(&target, CatalogRole::Repository, 9);
+    catalog.provision(expected.clone()).await.unwrap();
+    assert_eq!(
+        recorder.reads.lock().unwrap().as_slice(),
+        [(CatalogReadKind::Head, true), (CatalogReadKind::Page, true)]
+    );
+    let after = head_json(&layout, shard).await;
+    assert_eq!(after["pages"][1]["digest"], second_digest);
+    assert_eq!(
+        catalog
+            .lookup(target.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .entry(),
+        &expected
+    );
+    let mut scan = catalog.scan_shard(shard).await.unwrap();
+    let mut cells = Vec::new();
+    while let Some(page) = scan.next_page().await.unwrap() {
+        cells.extend(page.entries().iter().map(|proof| proof.entry().cell()));
+    }
+    assert_eq!(cells.len(), 258);
+    assert!(
+        cells
+            .windows(2)
+            .all(|pair| pair[0].as_bytes() < pair[1].as_bytes())
+    );
 }
 
 #[tokio::test]

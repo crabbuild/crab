@@ -80,6 +80,13 @@ and data migration with explicit source and destination ownership. Increasing a
 namespace's shard count is therefore a release operation, not a live tuning
 knob.
 
+The implemented `CellType::with_entity_partitions` mode addresses distinct
+entity Cells by a stable 33-byte partition digest under a namespace declared
+with one shard. `CellType::entity_partition` derives the partition from the
+entity identity, and `ApplicationHandle` checks its encoding. This provides
+an application-validated target for an application's own split protocol; it
+does not repartition or migrate data automatically.
+
 ## Separate the author and operator APIs
 
 The public framework has two capability levels.
@@ -202,9 +209,10 @@ impl CellEntity for Orders {
 
 Partition encoders must be canonical, bounded, and covered by byte fixtures.
 Changing an entity key's encoding requires a new namespace or an explicit
-repartitioning migration. A decoder is not needed on the runtime routing path;
-the catalog retains the original bounded partition bytes for diagnostics and
-recovery.
+repartitioning migration. The implemented entity mode stores a domain-separated
+digest of the scope as its partition bytes. The application retains the mapping
+from logical entity ID to target; the catalog retains the target bytes needed
+for routing and recovery.
 
 ## Write deterministic commands
 

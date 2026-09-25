@@ -1,0 +1,232 @@
+# BeyondDB elastic Cell topology
+
+## Scope and present boundary
+
+"Unlimited" is not a literal capacity promise. DynamoDB requests, items, one
+writer for one key, node disk, object storage, and the Cell catalog all have
+finite bounds. The target is elastic aggregate capacity: add data Cells and
+hosts as a table grows, keep each Cell within its admission budget, and make
+capacity or hot-key pressure visible as throttling instead of data loss.
+
+The current implementation does **not** meet that target. Unactivated tables
+still store items in one account SQL Cell (`src/lib.rs`, `src/schema.sql`). Once
+an empty table's initial route is published, the ExtendDB adapter uses
+independently owned data-range Cells for keyed CRUD and Scan. Account item
+commands are then fenced. Transactions confined to one routed data Cell use
+one Cell command or snapshot; transactions across Cells remain rejected until
+a durable coordinator exists. A host-backed provisioner can create 1–256
+independent, evenly spaced initial data Cells during CreateTable and retry
+interrupted setup. This raises initial aggregate capacity and write parallelism.
+The host can plan a midpoint split of a serving range and repeat it on an
+opened child: admit children, seal the source, copy and verify items, publish
+the replacement route, and open the children. A host-invoked, cancellable
+account loop inspects one table range per tick, resumes pending splits,
+and splits at most one range above a SQLite database-image threshold. The
+ordinary sweep selects the next range by indexed lower boundary and checks
+ownership by partition ID without loading the full route. The
+measurement includes indexes and runtime tables but excludes WAL/LTX files.
+The provisioner can install this loop in a node task group, and the signed SDK
+host test now runs it there; a production serving binary still needs to install
+it for every admitted account. There is no merge controller, and the account
+directory remains bounded.
+The runtime client can now select a locally owned Cell or forward an operation
+through an authenticated peer round trip after reading catalog and authority.
+BeyondDB's HTTP state accepts that client. Its signed SDK test now forwards
+account, credential, and data Cell operations through the peer protocol from
+a separate runtime to the local owner, then verifies recovery. This is a
+loopback transport test. `build_peer_client` now binds the shared HTTP owner
+transport to the BeyondDB application. The product now composes a verified
+peer receiver and a fleet-scoped principal. A two-node test sends signed AWS
+SDK table and item requests through ExtendDB's public listener; its public
+node owns the data Cell while a second node owns account and credential Cells.
+After the second node's lease expires, its replacement fences the boot session
+and restores the account and credential Cells. Another public endpoint reads
+the data over pinned mTLS. The replacement rejects data takeover while that
+owner is live, then fences its expired boot session, restores the data Cell,
+and reads the committed item from object storage. Placement,
+unattended crash takeover, and a serving binary
+remain unimplemented, so this is not production multi-node service proof.
+Increasing a Cell's database budget does not increase
+write parallelism or provide online repartitioning. Both Cell types declare a
+512 MiB database budget and 64 MiB capture budget; host admission supplies
+and enforces its own limits.
+
+The current framework has two further bounds that affect the design:
+
+- `crab-cell-app` declares fixed namespace shard counts of 1–4,096. BeyondDB's
+  data Cell uses entity-partition mode to validate distinct partition targets.
+  The shard count and entity mode are part of the application descriptor, not
+  autoscaling knobs.
+- `crab-cell-runtime`'s catalog has 256 shards with at most 65,536 entries in
+  each. Provisioning now reads and rewrites one affected page plus the shard
+  head in the common case; a full head may require repacking its pages. A large
+  deployment still needs a measured catalog-capacity plan and, before that
+  bound is reached, a versioned catalog expansion. More database bytes per
+  Cell do not solve that catalog bound.
+
+SigV4 access keys are currently mapped to 256 fixed credential Cells by key
+ID. This avoids one global credential writer but remains a finite directory;
+credential-shard expansion needs a versioned key-routing migration before any
+shard reaches its database or writer limit. Revocation is committed in the
+credential's Cell and remains effective after owner recovery.
+
+## Target ownership
+
+```text
+authenticated request
+  -> account catalog Cell (table name -> immutable table ID)
+  -> table directory Cell (routing epoch, ordered partition ranges)
+  -> data Cell(s) (items, local indexes, stream intent, TTL state)
+  -> published LTX root / object storage
+
+cross-Cell transaction
+  -> coordinator Cell (token, participants, durable decision)
+  -> participant data Cells (prepared writes, locks, resolution)
+```
+
+Account and table metadata stay small. A data Cell owns a bounded range of
+hashed partition keys for one table. The directory stores stable Cell IDs,
+range boundaries, state, and a monotonically increasing routing epoch. Each
+data Cell also has its own epoch, so a split can replace one range without
+reinstalling unaffected Cells. Every item command carries table ID and its
+target Cell's epoch; a Cell rejects a stale route. Table
+IDs never change when a partition splits. Routing hashes a canonical encoding
+of the HASH key attributes only, so all sort-key siblings share one Cell owner.
+Query can then read that Cell in sort-key order. Scan reads the directory in
+64-range pages and pins its epoch while advancing through pages in one request.
+Keyed requests use an indexed owner-row lookup in the account Cell, so their
+route result stays constant in size as the range count grows. The account Cell
+stores one indexed row per range and updates only the split source and children
+on publication. Complete-route callers reconstruct from bounded indexed SQL
+pages. Split plans store only the source range, two children, and expected
+epoch. The host selects ranges, checks publication, and returns split results
+through bounded indexed reads and compact plans. Table status checks also use
+bounded directory reads. Full-route reconstruction remains available for
+diagnostics and tests, with a result-size ceiling.
+Continuation across separate Scan requests does not pin a route epoch, so
+online split and pagination semantics still need work. A single hot HASH key
+cannot be split by this hash-range scheme. The directory itself needs
+partitioning before it reaches the account Cell's budget.
+
+The data Cell module uses application-validated entity targets. Its immutable
+install contract checks table ownership, range and epoch. The account Cell
+validates and publishes an initial, gap-free route, trusting the provisioner
+to install each data Cell first. A real host test proves two Cells with distinct
+targets, adapter CRUD and Scan across their ranges, and object-store recovery
+of data and route state. A second host test covers initial Cell admission and
+recovery from an interrupted CreateTable after two data Cells were installed,
+and owner restart. It stores more than 64 MiB of item payload across both Cells
+and verifies their combined byte count after recovery. The account Cell now
+durably records a validated one-range split plan with its source, children,
+and expected epoch, and recovers it after owner restart. A
+source data Cell can durably seal its old epoch, reject subsequent ordinary
+reads and writes, and serve bounded export pages after owner restart. Split
+children accept idempotent imports while hidden from normal reads and writes;
+they activate only when the imported count and digest match the sealed export.
+Activated children remain hidden until route publication and a durable open
+command. Late imports are rejected after activation, including after owner restart.
+The account directory can consume the exact durable plan and switch the route
+with a predecessor compare-and-swap; owner restart retains the published route.
+The host-backed controller verifies the sealed source and both children before
+publication and resumes idempotently after interruption. A host test runs the
+account capacity loop to trigger a split, performs a second split, sends a
+signed AWS SDK write through ExtendDB's HTTP
+handler, and reads the item after owner restart. The signing credential is
+stored encrypted in a separate Cell and restored from object storage. Inline
+user policy is also stored in the account Cell and authorizes the signed
+request with developer mode disabled. This SDK test now uses a published and
+renewed node lease and the production HTTP state constructor. A
+Cell-backed authorization catalog satisfies ExtendDB's authorization gate;
+its management methods still fail explicitly. Full IAM and production serving
+remain unverified. The
+seal currently pauses access to the source range. Serving-loop integration,
+live copying, and a no-downtime cutover remain to be implemented. This
+is not a call to `partition_for_shard` with a larger number. Bypassing
+application target validation with a raw `CellClient` would leave product
+routing outside the compiled topology.
+
+## Online split and merge
+
+1. Observe database size, write queue delay, capture size, and key-range heat.
+   Choose a split boundary that moves actual traffic. A single hot item cannot
+   be split into simultaneous strong writers; throttle that key when needed.
+2. Record a split intent and new route epoch in the table directory. Provision
+   two destination Cells with their schemas and owner leases before copying.
+3. The source Cell enters a durable splitting state. Copy a published snapshot
+   into the destinations, replay the source's ordered changes, then fence new
+   source writes and drain the final delta. Reads may continue on the source
+   while its final state remains authoritative.
+4. Verify key coverage and checksums, publish both destination roots, then
+   atomically switch the directory route. Destination Cells accept writes only
+   for the published epoch. A stale source request is rejected and retried
+   through a fresh route lookup.
+5. Retain the sealed source until in-flight requests, transaction intents, and
+   backup pins no longer reference it. Merge is the reverse migration and uses
+   the same fencing and verification rules.
+
+No request is acknowledged between a source commit and its LTX publication.
+Owner loss at each step resumes from durable split state. If route publication
+is ambiguous, resolve the directory command by its mutation identity before
+admitting writes at either destination. A split never changes key ownership
+for a committed request without a durable fence.
+
+## Transactions and reads
+
+One-partition transactions continue to use one Cell command. A transaction
+across data Cells needs a durable coordinator and participant protocol:
+
+1. Order participants by Cell ID; each prepares its writes and locks the
+   affected keys under a transaction ID, routing epoch, and deadline. Prepared
+   values remain invisible to ordinary reads.
+2. Once every prepare is published, the coordinator publishes exactly one
+   commit or abort decision. Client tokens and request fingerprints live in
+   that coordinator's durable state, scoped to the account.
+3. Participants resolve the decision idempotently. They never infer abort
+   solely from a lease timeout: an unreachable coordinator might have
+   committed. Recovery and a background resolver finish abandoned intents.
+4. Keyed reads encountering an unresolved intent consult or wait for its
+   decision. `TransactGetItems` acquires a consistent read boundary across its
+   participants so it cannot see half of a committed transaction.
+
+Splits wait for or transfer prepared intents before fencing the source. TTL,
+stream records, and local secondary indexes commit with the base item in its
+data Cell. Global secondary indexes use a durable per-partition outbox and
+idempotent projections; their reads are eventually consistent. Base-table
+Query reads the HASH key's owner Cell in sort-key order; Scan fans out over a
+pinned directory epoch and returns a bounded continuation token naming
+per-partition cursors.
+
+## Recovery, backups, and admission
+
+Every serving owner uses a node lease, a fenced Cell takeover, and the current
+published LTX root. An account-wide backup pins one directory epoch and a
+coordinated published cut of all participating data Cells; independent Cell
+snapshots do not form a consistent backup. Restore creates a new directory
+generation and publishes it only after every required Cell is available.
+
+Autoscaling must create partitions *before* any Cell reaches its LTX or local
+disk admission limit. Per-Cell bounds remain finite and are measured against
+recovery time and object-store cost. At capacity, fail or throttle the request
+with an explicit retryable error. Never silently route writes to another Cell,
+increase an admission limit, or acknowledge an unpublished write.
+
+## Completion proof
+
+The agreed scale target is 10,000 active Cells and multi-terabyte stored data.
+The topology is complete only when tests drive the same ExtendDB HTTP endpoint
+used by an AWS SDK and establish all of the following:
+
+- Growth beyond one Cell and automatic split under sustained writes, including
+  a hot table with multiple active owners and a correct Query/Scan page across
+  a split.
+- Conditional writes and same-Cell/cross-Cell transactions remain atomic
+  through owner loss, ambiguous replies, split fencing, and coordinator
+  recovery. No acknowledged write disappears after restart from object storage.
+- Streams, TTL, local and global indexes, and backup/restore remain consistent
+  across a split and a change in table routing epoch.
+- Multi-node load tests measure throughput, p99 latency, split duration,
+  recovery time, catalog occupancy, disk usage, and object-store request cost.
+  Tests include 1,000 and 10,000 active Cells and verify overload behavior.
+
+Until these gates pass, BeyondDB is a bounded prototype, regardless of the
+declared database budget or the number of Cells the framework can address.

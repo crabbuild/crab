@@ -142,6 +142,23 @@ impl QueryContext<'_> {
         sql_query_batch(self.connection, batch)
     }
 
+    /// Returns the current SQLite database image size, including runtime and indexes.
+    pub fn database_bytes(&self) -> Result<u64> {
+        let pages: i64 = self
+            .connection
+            .query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let page_size: i64 = self
+            .connection
+            .query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        let pages =
+            u64::try_from(pages).map_err(|_| Error::Command("invalid database page count"))?;
+        let page_size =
+            u64::try_from(page_size).map_err(|_| Error::Command("invalid database page size"))?;
+        pages
+            .checked_mul(page_size)
+            .ok_or(Error::Command("database size overflow"))
+    }
+
     pub(crate) const fn primitive_connection(&self) -> &Connection {
         self.connection
     }

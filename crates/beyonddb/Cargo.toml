@@ -1,0 +1,44 @@
+[package]
+name = "beyonddb"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "DynamoDB account application over Crab Cells"
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+aes-gcm = "0.10"
+async-trait.workspace = true
+bigdecimal = "0.4"
+blake3.workspace = true
+crab-cell-app.workspace = true
+crab-cell-host.workspace = true
+crab-cell-peer-http.workspace = true
+crab-cell-runtime.workspace = true
+crab-ltx = { workspace = true, features = ["replica"] }
+extenddb-auth = { git = "https://github.com/ExtendDB/extenddb.git", rev = "bdb7b3df4ace3b80a6e928f144036d056aec0327" }
+extenddb-core = { git = "https://github.com/ExtendDB/extenddb.git", rev = "bdb7b3df4ace3b80a6e928f144036d056aec0327" }
+extenddb-server = { git = "https://github.com/ExtendDB/extenddb.git", rev = "bdb7b3df4ace3b80a6e928f144036d056aec0327" }
+extenddb-storage = { git = "https://github.com/ExtendDB/extenddb.git", rev = "bdb7b3df4ace3b80a6e928f144036d056aec0327" }
+getrandom = "0.3"
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tokio-util.workspace = true
+time.workspace = true
+uuid.workspace = true
+zeroize = "1"
+
+[dev-dependencies]
+aws-config.workspace = true
+aws-credential-types.workspace = true
+aws-sdk-dynamodb.workspace = true
+crab-storage.workspace = true
+ed25519-dalek.workspace = true
+extenddb-engine = { git = "https://github.com/ExtendDB/extenddb.git", rev = "bdb7b3df4ace3b80a6e928f144036d056aec0327" }
+object_store.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "time"] }

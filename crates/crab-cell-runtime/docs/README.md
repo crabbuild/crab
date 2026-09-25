@@ -17,6 +17,13 @@ The public HTTP server owns authentication and repository policy. The runtime ow
 
 The direct green route is local execution. The orange route is the single authenticated peer hop when another node owns the Cell. Both converge on the same registry, actor, SQLite, and LTX publication path.
 
+`CellClient::local_runtime` resolves a newly admitted local Cell through its
+catalog and owner record for each call. It serves embedded, single-node routing;
+`CellClient::runtime_with_peer` uses the same local path when this node owns the
+Cell and an authenticated peer round trip when another node owns it. The product
+server supplies the peer transport and owner lookup; neither constructor
+acquires an idle Cell.
+
 The dependency direction follows the same boundary:
 
 ```text
@@ -91,6 +98,11 @@ The runtime applies these rules:
 - **Disposable owner-local SQLite**: selected followers may durably fsync recent
   LTX tails, but the owner's mutable SQLite files remain disposable caches
 - **Bounded work**: commands, results, queues, workers, memory, and disk have explicit limits
+
+An application query can use `QueryContext::database_bytes()` to inspect its
+Cell's SQLite database image, including indexes and runtime tables. The value
+does not include WAL or LTX files, so capacity control must consider those
+separately.
 
 Read [runtime.md](runtime.md) for the actor and failure state machines. Read [storage.md](storage.md) for identity, control, root, and LTX formats.
 
