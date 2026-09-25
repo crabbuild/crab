@@ -1,0 +1,272 @@
+x-storage-environment: &storage-environment
+  AWS_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY:?set RUSTFS_ACCESS_KEY}
+  AWS_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY:?set RUSTFS_SECRET_KEY}
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_EC2_METADATA_DISABLED: "true"
+
+x-node: &node
+  image: ${CRAB_CELL_SCALE_IMAGE:-crab-cell-scale:local}
+  user: "10001:10001"
+  environment:
+    <<: *storage-environment
+    CRAB_CELL_BUCKET: crab-cell-scale
+    CRAB_CELL_ENDPOINT: http://rustfs:9000
+    CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+    CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+  cpus: 1.0
+  mem_limit: 1g
+  memswap_limit: 1g
+  pids_limit: 256
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs:
+    - /var/lib/crab/cells:rw,noexec,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=0700
+    - /tmp:rw,noexec,nosuid,nodev,size=32m,uid=10001,gid=10001,mode=0700
+  depends_on:
+    bucket-init:
+      condition: service_completed_successfully
+  healthcheck:
+    test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8080/health"]
+    interval: 5s
+    timeout: 3s
+    retries: 20
+    start_period: 10s
+  restart: "no"
+
+services:
+  rustfs:
+    image: ${RUSTFS_IMAGE:-ghcr.io/rustfs/rustfs:1.0.0-beta.8-glibc@sha256:040304b66e029a5cde4bed140b41513e925909839a9b912a40a98340610d1f66}
+    environment:
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?set RUSTFS_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?set RUSTFS_SECRET_KEY}
+      RUSTFS_CONSOLE_ENABLE: "false"
+      RUSTFS_OBS_LOG_DIRECTORY: /data/logs
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:9000/health/ready"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    restart: "no"
+
+  bucket-init:
+    image: ${AWS_CLI_IMAGE:-public.ecr.aws/aws-cli/aws-cli:2.27.41@sha256:1c2d7a51b1ff4f460bc3f1e1ee46a6cef47c7429ad9089ef99012a95e472a1a5}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - aws --endpoint-url http://rustfs:9000 s3api create-bucket --bucket crab-cell-scale
+    environment: *storage-environment
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    restart: "no"
+
+  node-01:
+    <<: *node
+    environment:
+      <<: *storage-environment
+      CRAB_CELL_BUCKET: crab-cell-scale
+      CRAB_CELL_ENDPOINT: http://rustfs:9000
+      CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+      CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+      CRAB_CELL_NODE_NAME: node-01
+
+  node-02:
+    <<: *node
+    environment:
+      <<: *storage-environment
+      CRAB_CELL_BUCKET: crab-cell-scale
+      CRAB_CELL_ENDPOINT: http://rustfs:9000
+      CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+      CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+      CRAB_CELL_NODE_NAME: node-02
+
+  node-03:
+    <<: *node
+    environment:
+      <<: *storage-environment
+      CRAB_CELL_BUCKET: crab-cell-scale
+      CRAB_CELL_ENDPOINT: http://rustfs:9000
+      CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+      CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+      CRAB_CELL_NODE_NAME: node-03
+
+  node-04:
+    <<: *node
+    environment:
+      <<: *storage-environment
+      CRAB_CELL_BUCKET: crab-cell-scale
+      CRAB_CELL_ENDPOINT: http://rustfs:9000
+      CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+      CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+      CRAB_CELL_NODE_NAME: node-04
+
+  node-05:
+    <<: *node
+    environment:
+      <<: *storage-environment
+      CRAB_CELL_BUCKET: crab-cell-scale
+      CRAB_CELL_ENDPOINT: http://rustfs:9000
+      CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+      CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+      CRAB_CELL_NODE_NAME: node-05
+
+  node-06:
+    <<: *node
+    environment:
+      <<: *storage-environment
+      CRAB_CELL_BUCKET: crab-cell-scale
+      CRAB_CELL_ENDPOINT: http://rustfs:9000
+      CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+      CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+      CRAB_CELL_NODE_NAME: node-06
+
+  node-07:
+    <<: *node
+    environment:
+      <<: *storage-environment
+      CRAB_CELL_BUCKET: crab-cell-scale
+      CRAB_CELL_ENDPOINT: http://rustfs:9000
+      CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+      CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+      CRAB_CELL_NODE_NAME: node-07
+
+  node-08:
+    <<: *node
+    environment:
+      <<: *storage-environment
+      CRAB_CELL_BUCKET: crab-cell-scale
+      CRAB_CELL_ENDPOINT: http://rustfs:9000
+      CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+      CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+      CRAB_CELL_NODE_NAME: node-08
+
+  node-09:
+    <<: *node
+    environment:
+      <<: *storage-environment
+      CRAB_CELL_BUCKET: crab-cell-scale
+      CRAB_CELL_ENDPOINT: http://rustfs:9000
+      CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+      CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+      CRAB_CELL_NODE_NAME: node-09
+
+  node-10:
+    <<: *node
+    environment:
+      <<: *storage-environment
+      CRAB_CELL_BUCKET: crab-cell-scale
+      CRAB_CELL_ENDPOINT: http://rustfs:9000
+      CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+      CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+      CRAB_CELL_NODE_NAME: node-10
+
+  node-11:
+    <<: *node
+    environment:
+      <<: *storage-environment
+      CRAB_CELL_BUCKET: crab-cell-scale
+      CRAB_CELL_ENDPOINT: http://rustfs:9000
+      CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+      CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+      CRAB_CELL_NODE_NAME: node-11
+
+  node-12:
+    <<: *node
+    environment:
+      <<: *storage-environment
+      CRAB_CELL_BUCKET: crab-cell-scale
+      CRAB_CELL_ENDPOINT: http://rustfs:9000
+      CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+      CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+      CRAB_CELL_NODE_NAME: node-12
+
+  node-13:
+    <<: *node
+    environment:
+      <<: *storage-environment
+      CRAB_CELL_BUCKET: crab-cell-scale
+      CRAB_CELL_ENDPOINT: http://rustfs:9000
+      CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+      CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+      CRAB_CELL_NODE_NAME: node-13
+
+  node-14:
+    <<: *node
+    environment:
+      <<: *storage-environment
+      CRAB_CELL_BUCKET: crab-cell-scale
+      CRAB_CELL_ENDPOINT: http://rustfs:9000
+      CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+      CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+      CRAB_CELL_NODE_NAME: node-14
+
+  node-15:
+    <<: *node
+    environment:
+      <<: *storage-environment
+      CRAB_CELL_BUCKET: crab-cell-scale
+      CRAB_CELL_ENDPOINT: http://rustfs:9000
+      CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+      CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+      CRAB_CELL_NODE_NAME: node-15
+
+  node-16:
+    <<: *node
+    environment:
+      <<: *storage-environment
+      CRAB_CELL_BUCKET: crab-cell-scale
+      CRAB_CELL_ENDPOINT: http://rustfs:9000
+      CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+      CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+      CRAB_CELL_NODE_NAME: node-16
+
+  node-17:
+    <<: *node
+    environment:
+      <<: *storage-environment
+      CRAB_CELL_BUCKET: crab-cell-scale
+      CRAB_CELL_ENDPOINT: http://rustfs:9000
+      CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+      CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+      CRAB_CELL_NODE_NAME: node-17
+
+  node-18:
+    <<: *node
+    environment:
+      <<: *storage-environment
+      CRAB_CELL_BUCKET: crab-cell-scale
+      CRAB_CELL_ENDPOINT: http://rustfs:9000
+      CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+      CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+      CRAB_CELL_NODE_NAME: node-18
+
+  node-19:
+    <<: *node
+    environment:
+      <<: *storage-environment
+      CRAB_CELL_BUCKET: crab-cell-scale
+      CRAB_CELL_ENDPOINT: http://rustfs:9000
+      CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+      CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+      CRAB_CELL_NODE_NAME: node-19
+
+  node-20:
+    <<: *node
+    environment:
+      <<: *storage-environment
+      CRAB_CELL_BUCKET: crab-cell-scale
+      CRAB_CELL_ENDPOINT: http://rustfs:9000
+      CRAB_CELL_PREFIX: ${CRAB_CELL_PREFIX:?set CRAB_CELL_PREFIX}
+      CRAB_CELL_DATA_DIR: /var/lib/crab/cells
+      CRAB_CELL_NODE_NAME: node-20
+
+volumes:
+  rustfs-data:
