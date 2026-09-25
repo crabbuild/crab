@@ -231,6 +231,41 @@ class RequestCountingProxyTest(unittest.TestCase):
             {"git_object_catalog_db/manifest:put": 1},
         )
 
+    def test_lightweight_snapshot_uses_path_cursor_without_copying_history(self) -> None:
+        self.proxy.trace_paths = True
+        before = self.proxy.snapshot(include_paths=False)
+        request = urllib.request.Request(
+            self.proxy.url
+            + "/crab/e2e-concurrent-push/run/git_object_catalog_db/manifest/current",
+            data=b"payload",
+            method="PUT",
+        )
+
+        with urllib.request.urlopen(request):
+            pass
+
+        after = self.proxy.snapshot(include_paths=False)
+
+        self.assertEqual(before["path_count"], 0)
+        self.assertEqual(after["path_count"], 1)
+        self.assertEqual(
+            RequestCountingProxy.delta(before, after)["requests"],
+            1,
+        )
+        self.assertEqual(
+            self.proxy.paths_since(before["path_count"]),
+            [
+                {
+                    "method": "PUT",
+                    "operation": "put",
+                    "category": "git_object_catalog_db/manifest",
+                    "status": 200,
+                    "key": "git_object_catalog_db/manifest/current",
+                    "range": None,
+                }
+            ],
+        )
+
     def test_preserves_head_content_length(self) -> None:
         request = urllib.request.Request(
             self.proxy.url + "/crab/e2e-concurrent-push/run/packs/pack.idx",

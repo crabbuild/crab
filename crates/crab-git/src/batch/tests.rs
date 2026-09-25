@@ -100,6 +100,12 @@ fn malformed_reordered_truncated_and_extra_responses_never_verify() {
     ] {
         assert!(verify_blob_batch(wire.as_slice(), &[blob], &|| false).is_err());
     }
+    let error = verify_blob_batch(format!("{oid} blob 5\ndata\n").as_bytes(), &[blob], &|| {
+        false
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("expected size Some(4)"));
+    assert!(error.to_string().contains("header bytes"));
     for length in 0..valid.len() {
         assert!(
             verify_blob_batch(&valid[..length], &[blob], &|| false).is_err(),

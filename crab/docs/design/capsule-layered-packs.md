@@ -1573,6 +1573,21 @@ not staged that pointer's local chunks. That is a staging-contract qualification
 failure, not an accepted fetch result: large-file replay must run through the
 normal `crab add` staging path before it can close the xorb/shard gate.
 
+### 2.5.48 September 25 skip the redundant fast-forward visibility walk
+
+The capsule push path already proves that an existing branch update is a
+fast-forward before accepting it. Visibility construction now reuses that
+per-ref proof: `new - old` is still enumerated exactly, while `old - new` is
+known to be empty and is no longer walked. Rewinds, tags, new refs, and updates
+whose ancestry cannot be proven retain their complete prior behavior.
+
+On a fresh full Kubernetes checkout at `6384b87ed0bef8bc893d2d4fd7ab93a1ce0fc2e1`,
+the otherwise-empty `git rev-list --objects HEAD~5000 --not HEAD~4999` took a
+71.2 ms median over five runs (64.4--84.2 ms after the first warm-up). This
+shows the duplicated graph walk is measurable, but does not predict the total
+push speedup. The focused capsule-push suite passes 11/11; Xet upload time,
+provider readback, and the final 5,000-push RustFS replay remain unqualified.
+
 ## 3. Goals
 
 The implementation MUST:

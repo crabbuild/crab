@@ -137,7 +137,7 @@ fn read_object(
     reader.take(100).read_until(b'\n', &mut header)?;
     let mismatch = || {
         invalid(format!(
-            "Git {} batch header differs for {oid}",
+            "Git {} batch header differs for {oid}: expected size {blob_size:?}, header bytes {header:?}",
             if blob_size.is_some() {
                 "blob"
             } else {

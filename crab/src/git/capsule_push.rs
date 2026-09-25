@@ -181,6 +181,7 @@ async fn run_inner(
     let mut outcomes = HashMap::with_capacity(specs.len());
     let mut edits = Vec::with_capacity(specs.len());
     let mut updates = Vec::with_capacity(specs.len());
+    let mut fast_forward_refs = BTreeSet::new();
 
     for spec in specs {
         if hidden.is_match(&spec.dst) {
@@ -273,6 +274,9 @@ async fn run_inner(
                 outcomes.insert(spec.dst.clone(), RefPushOutcome::Rejected(reason));
                 continue;
             }
+            if is_fast_forward {
+                fast_forward_refs.insert(spec.dst.clone());
+            }
         }
         edits.push(crab_metadata::capsule_protocol::CapsuleRefEdit::new(
             spec.dst.clone(),
@@ -317,7 +321,7 @@ async fn run_inner(
         config.force_full_graph,
     )
     .await?;
-    let visibility_delta = prepare_visibility_delta(&common_git_dir, &edits)?;
+    let visibility_delta = prepare_visibility_delta(&common_git_dir, &edits, &fast_forward_refs)?;
     tracing::debug!(
         git_packs = prepared.packs.len(),
         pointers = prepared.pointers.len(),
@@ -647,6 +651,7 @@ async fn publish_capsule(
 fn prepare_visibility_delta(
     git_dir: &Path,
     edits: &[crab_metadata::capsule_protocol::CapsuleRefEdit],
+    fast_forward_refs: &BTreeSet<String>,
 ) -> Result<Option<crab_metadata::capsule_protocol::CapsuleVisibilityDelta>> {
     let maximum = usize::try_from(crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS)
         .map_err(|_| CrabError::Internal("Git visibility limit does not fit usize".to_owned()))?;
@@ -663,13 +668,19 @@ fn prepare_visibility_delta(
                 maximum,
             )?
             .ok_or_else(|| visibility_limit_error(edit.ref_name()))?;
-            let removed = super::push::enumerate_visibility_difference(
-                git_dir,
-                old_oid,
-                Some(new_oid),
-                maximum.saturating_sub(added.len()),
-            )?
-            .ok_or_else(|| visibility_limit_error(edit.ref_name()))?;
+            // Ancestry is already proven by the ref-update decision; old history is
+            // therefore still reachable, so walking `old - new` only repeats that proof.
+            let removed = if fast_forward_refs.contains(edit.ref_name()) {
+                Vec::new()
+            } else {
+                super::push::enumerate_visibility_difference(
+                    git_dir,
+                    old_oid,
+                    Some(new_oid),
+                    maximum.saturating_sub(added.len()),
+                )?
+                .ok_or_else(|| visibility_limit_error(edit.ref_name()))?
+            };
             crab_metadata::git_visibility::GitVisibilityEdit::from_delta_objects(
                 Some(old_oid.to_owned()),
                 new_oid.to_owned(),
@@ -1024,7 +1035,8 @@ mod tests {
         let root = crab_write::capsule_protocol::open_root(layout)
             .await
             .expect("open root");
-        let visibility = prepare_visibility_delta(git_dir, &edits).expect("prepare Git visibility");
+        let visibility = prepare_visibility_delta(git_dir, &edits, &BTreeSet::new())
+            .expect("prepare Git visibility");
         let transaction =
             crab_metadata::capsule_protocol::CapsuleTransaction::new(root.record().digest(), edits)
                 .expect("build ref transaction");
@@ -1249,9 +1261,10 @@ mod tests {
             None,
         )];
 
-        let visibility = prepare_visibility_delta(&source.path().join(".git"), &edits)
-            .expect("prepare Git visibility")
-            .expect("new ref has visibility evidence");
+        let visibility =
+            prepare_visibility_delta(&source.path().join(".git"), &edits, &BTreeSet::new())
+                .expect("prepare Git visibility")
+                .expect("new ref has visibility evidence");
         let evidence = visibility
             .edits()
             .get(ref_name)
@@ -1260,6 +1273,101 @@ mod tests {
         assert!(evidence.replaces);
         assert_eq!(evidence.old_oid, None);
         assert!(evidence.added.binary_search(&tip).is_ok());
+    }
+
+    #[test]
+    fn fast_forward_visibility_reuses_proven_ancestry_for_empty_removals() {
+        let source = tempfile::tempdir().expect("source repository");
+        git(source.path(), &["init", "--initial-branch=main"]);
+        git(source.path(), &["config", "user.name", "Crab Test"]);
+        git(
+            source.path(),
+            &["config", "user.email", "crab@example.invalid"],
+        );
+        let old_oid = commit(source.path(), "first");
+        let new_oid = commit(source.path(), "second");
+        let git_dir = source.path().join(".git");
+        let ref_name = "refs/heads/main";
+        let edits = [crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+            ref_name,
+            Some(old_oid.clone()),
+            Some(new_oid.clone()),
+            None,
+        )];
+        let fast_forward_refs = BTreeSet::from([ref_name.to_owned()]);
+        let visibility = prepare_visibility_delta(&git_dir, &edits, &fast_forward_refs)
+            .expect("prepare fast-forward visibility")
+            .expect("existing ref has visibility evidence");
+        let evidence = visibility
+            .edits()
+            .get(ref_name)
+            .expect("main visibility evidence");
+        let expected_added = super::super::push::enumerate_visibility_difference(
+            &git_dir,
+            &new_oid,
+            Some(&old_oid),
+            usize::try_from(crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS)
+                .expect("visibility limit fits usize"),
+        )
+        .expect("enumerate newly reachable objects")
+        .expect("visibility is below its limit")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+
+        assert_eq!(evidence.old_oid.as_deref(), Some(old_oid.as_str()));
+        assert_eq!(evidence.new_oid, new_oid);
+        assert_eq!(
+            evidence.added.iter().cloned().collect::<BTreeSet<_>>(),
+            expected_added
+        );
+        assert!(evidence.removed.is_empty());
+        evidence.validate().expect("visibility edit remains valid");
+    }
+
+    #[test]
+    fn non_fast_forward_visibility_keeps_removed_objects() {
+        let source = tempfile::tempdir().expect("source repository");
+        git(source.path(), &["init", "--initial-branch=main"]);
+        git(source.path(), &["config", "user.name", "Crab Test"]);
+        git(
+            source.path(),
+            &["config", "user.email", "crab@example.invalid"],
+        );
+        let new_oid = commit(source.path(), "first");
+        let old_oid = commit(source.path(), "second");
+        let git_dir = source.path().join(".git");
+        let ref_name = "refs/heads/main";
+        let edits = [crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+            ref_name,
+            Some(old_oid.clone()),
+            Some(new_oid.clone()),
+            None,
+        )];
+        let visibility = prepare_visibility_delta(&git_dir, &edits, &BTreeSet::new())
+            .expect("prepare non-fast-forward visibility")
+            .expect("existing ref has visibility evidence");
+        let evidence = visibility
+            .edits()
+            .get(ref_name)
+            .expect("main visibility evidence");
+        let expected_removed = super::super::push::enumerate_visibility_difference(
+            &git_dir,
+            &old_oid,
+            Some(&new_oid),
+            usize::try_from(crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS)
+                .expect("visibility limit fits usize"),
+        )
+        .expect("enumerate no-longer-reachable objects")
+        .expect("visibility is below its limit")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+
+        assert!(!expected_removed.is_empty());
+        assert_eq!(
+            evidence.removed.iter().cloned().collect::<BTreeSet<_>>(),
+            expected_removed
+        );
+        evidence.validate().expect("visibility edit remains valid");
     }
 
     #[tokio::test]

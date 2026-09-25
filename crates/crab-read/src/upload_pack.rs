@@ -936,6 +936,37 @@ async fn plan_with_operation(
         return Ok(plan);
     }
     if !matches!(visibility, VisibilitySource::TipBound { .. }) {
+        // Exact catalog filters can be planned from the ordinal sidecar without
+        // materializing the full closure. Try that path before the unfiltered
+        // visibility shortcut, which intentionally handles only filter=none.
+        // Keeping this before the source planner makes blob:none clones use the
+        // bounded metadata join while retaining traversal as the correctness
+        // fallback when a sidecar is incomplete.
+        let prefer_catalog_filter = request.haves.is_empty()
+            && matches!(visibility, VisibilitySource::Catalog(_))
+            && request.filter.is_catalog_exact()
+            && visibility_selection_request_supported(request);
+        if prefer_catalog_filter
+            && let Some(plan) = plan_from_visibility_catalog(
+                operation,
+                &repository.refs().entries,
+                visible_ref_names,
+                visibility,
+                request,
+                maximum_objects,
+            )
+            .await?
+        {
+            tracing::info!(
+                telemetry_event = "visibility_plan",
+                strategy = "catalog_filter",
+                planned_objects = plan.object_ids.len(),
+                visibility_plan_ms = started.elapsed().as_millis() as u64,
+                "upload-pack object plan completed"
+            );
+            return Ok(plan);
+        }
+
         if let Some(plan) = plan_from_visibility_source(
             &repository.refs().entries,
             visible_ref_names,
@@ -966,15 +997,16 @@ async fn plan_with_operation(
             return Ok(plan);
         }
 
-        if let Some(plan) = plan_from_visibility_catalog(
-            operation,
-            &repository.refs().entries,
-            visible_ref_names,
-            visibility,
-            request,
-            maximum_objects,
-        )
-        .await?
+        if !prefer_catalog_filter
+            && let Some(plan) = plan_from_visibility_catalog(
+                operation,
+                &repository.refs().entries,
+                visible_ref_names,
+                visibility,
+                request,
+                maximum_objects,
+            )
+            .await?
         {
             tracing::info!(
                 telemetry_event = "visibility_plan",

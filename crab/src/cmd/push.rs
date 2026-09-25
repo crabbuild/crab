@@ -643,8 +643,17 @@ async fn run_push_once(
         .collect::<BTreeSet<_>>();
     let capsule_view = if args.follow_tags {
         crab_read::capsule_protocol::open_ref_view_from_root(&capsule_layout, root).await?
-    } else {
+    } else if args.dry_run {
         crab_read::capsule_protocol::open_ref_view_from_root_for_refs(
+            &capsule_layout,
+            root,
+            &requested_refs,
+        )
+        .await?
+    } else {
+        // A real publisher re-reads each selected head and conditionally updates
+        // its ETag; only dry-run needs a reader-side stability probe.
+        crab_read::capsule_protocol::open_ref_view_from_root_for_push(
             &capsule_layout,
             root,
             &requested_refs,

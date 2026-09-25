@@ -1305,6 +1305,7 @@ async fn check_capsule_git_connectivity(
     state: CapsuleFsckState,
 ) -> Result<()> {
     let workspace = tempfile::tempdir()?;
+    crab_git::initialize_bare_git_dir(workspace.path())?;
     let storage = store.as_storage().clone();
     let layout = crab_storage::StoreLayout::with_global_prefix(
         storage.clone(),

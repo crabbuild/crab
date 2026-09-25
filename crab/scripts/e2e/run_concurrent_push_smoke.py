@@ -526,7 +526,7 @@ class RequestCountingProxy:
             return "multipart_abort" if "uploadId" in query else "delete"
         return method.lower()
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self, *, include_paths: bool = True) -> dict[str, Any]:
         with self.lock:
             snapshot = {
                 "requests": self.requests,
@@ -539,8 +539,14 @@ class RequestCountingProxy:
                 "statuses": dict(sorted(self.statuses.items())),
             }
             if self.trace_paths:
-                snapshot["paths"] = list(self.paths)
+                snapshot["path_count"] = len(self.paths)
+                if include_paths:
+                    snapshot["paths"] = list(self.paths)
             return snapshot
+
+    def paths_since(self, cursor: int) -> list[dict[str, Any]]:
+        with self.lock:
+            return list(self.paths[cursor:])
 
     @staticmethod
     def delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:

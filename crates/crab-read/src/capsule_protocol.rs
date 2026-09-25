@@ -1873,6 +1873,7 @@ pub async fn verify_reachable_dependencies(
     }
 
     let workspace = tempfile::tempdir()?;
+    crab_git::initialize_bare_git_dir(workspace.path()).map_err(std::io::Error::other)?;
     tokio::select! {
         biased;
         () = cancellation.cancelled() => return Err(ReadError::Cancelled),
@@ -6349,6 +6350,163 @@ mod tests {
             .expect_err("candidate pack must count against the shared intake limit");
 
         assert!(matches!(error, ReadError::CapsuleReadLimit { .. }));
+    }
+
+    #[tokio::test]
+    async fn dependency_verification_checks_large_blobs_in_a_bare_workspace() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let source = tempfile::tempdir().unwrap();
+        let source_git = source.path().join("source.git");
+        let initialized = Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&source_git)
+            .output()
+            .unwrap();
+        assert!(initialized.status.success());
+        let run_git = |arguments: &[&str], input: &[u8]| {
+            let mut child = Command::new("git")
+                .arg("--git-dir")
+                .arg(&source_git)
+                .args(arguments)
+                .env("GIT_AUTHOR_NAME", "Crab Test")
+                .env("GIT_AUTHOR_EMAIL", "crab@example.invalid")
+                .env("GIT_COMMITTER_NAME", "Crab Test")
+                .env("GIT_COMMITTER_EMAIL", "crab@example.invalid")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(input).unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "git {arguments:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let blob_oid = run_git(&["hash-object", "-w", "--stdin"], &[0xa5; 4096]);
+        let tree_input = format!("100644 blob {blob_oid}\tlarge.bin\n");
+        let tree_oid = run_git(&["mktree"], tree_input.as_bytes());
+        let commit_oid = run_git(&["commit-tree", &tree_oid, "-m", "large blob"], b"");
+        run_git(&["update-ref", "refs/heads/main", &commit_oid], b"");
+        run_git(&["repack", "-a", "-d"], b"");
+
+        let pack_path = std::fs::read_dir(source_git.join("objects/pack"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "pack")
+            })
+            .unwrap();
+        let pack_bytes = std::fs::read(&pack_path).unwrap();
+        let indexed_dir = tempfile::tempdir().unwrap();
+        let indexed = crab_git::pack::install_pack_file_from_path(
+            indexed_dir.path(),
+            &pack_path,
+            blake3::hash(&pack_bytes).to_hex().as_ref(),
+            0,
+            true,
+        )
+        .unwrap();
+        let mut locations = crab_git::pack_locator::PackLocationIter::open(
+            &indexed.idx_path,
+            &indexed.rev_path,
+            pack_bytes.len() as u64,
+        )
+        .unwrap();
+        let object_count = locations.object_count();
+        let object_ids = locations
+            .by_ref()
+            .map(|location| location.unwrap().oid)
+            .collect::<Vec<_>>();
+        let kinds = crab_git::object_kinds_from_git_dir(&source_git, &object_ids).unwrap();
+        let ordered_kinds = object_ids
+            .iter()
+            .map(|oid| *kinds.get(oid).unwrap())
+            .collect::<Vec<_>>();
+        let checksum = gix_hash::ObjectId::from_hex(indexed.git_sha1.as_bytes()).unwrap();
+        let locator =
+            crab_git::pack_locator::encode_pack_kind_metadata(checksum, &ordered_kinds).unwrap();
+        let pack = crab_metadata::capsule_protocol::CapsuleGitPack::new(
+            Bytes::from(pack_bytes),
+            Bytes::from(std::fs::read(&indexed.idx_path).unwrap()),
+            Bytes::from(std::fs::read(&indexed.rev_path).unwrap()),
+            Bytes::from(locator),
+            indexed.git_sha1,
+            object_count,
+        )
+        .unwrap();
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "repositories/large-blob".to_owned());
+        let initial = RootRecord::encode(
+            RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
+        )
+        .unwrap();
+        let transaction = CapsuleTransaction::new(
+            initial.digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some(commit_oid.clone()),
+                None,
+            )],
+        )
+        .unwrap();
+        let transaction_id = transaction.id().unwrap();
+        let capsule = Capsule::build(&transaction, vec![pack], Vec::new()).unwrap();
+        let run = CapsuleRun::leaf(capsule).unwrap();
+        store
+            .put(&router.capsule_path(run.hash()), run.bytes().clone())
+            .await
+            .unwrap();
+        let pointer = CapsulePointer::new(
+            run.hash(),
+            run.bytes().len() as u64,
+            run.level(),
+            run.transaction_ids(),
+            run.newest_base_root_digest(),
+        )
+        .unwrap();
+        let root = initial
+            .root()
+            .advance(
+                initial.digest(),
+                BTreeMap::from([("refs/heads/main".to_owned(), commit_oid)]),
+                BTreeMap::new(),
+                vec![pointer],
+                &transaction_id,
+            )
+            .unwrap();
+        let root = RootRecord::encode(root).unwrap();
+        store
+            .create_strict(&router.capsule_root_path(), root.bytes().clone())
+            .await
+            .unwrap();
+        let view = open_view(&router, TEST_LIMITS).await.unwrap();
+        let proof = verify_reachable_dependencies(
+            &router,
+            &view,
+            CapsuleDependencyLimits {
+                max_git_bytes: 8 * 1024 * 1024,
+                pointer_scan: crab_git::walk::PointerScanLimits {
+                    objects: 16,
+                    lookups: 64,
+                    allocation_bytes: 1024 * 1024,
+                },
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(proof.reachable_crab_pointers, 0);
+        assert_eq!(proof.reachable_lfs_objects, 0);
     }
 
     #[tokio::test]
