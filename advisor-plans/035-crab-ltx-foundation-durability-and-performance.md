@@ -367,3 +367,13 @@ status of this plan in `advisor-plans/README.md` after each slice.
   3,003 / 6,024 µs. Raw JSON and reproduction details are in `perf/README.md`.
   These figures quantify the one-time local barrier cost, not Cell response
   latency or an end-to-end performance win.
+- Sibling-path audit of the directory fix: checkpoint calls the same L0 cut
+  writer; snapshot, compaction, and restore create scratch files beside a
+  caller-supplied destination and install them through `persist_file_new`,
+  which syncs that destination parent. Clean continuation writes both records
+  beside the database with parent sync, and `CellReplica::open_resumed` uses
+  synced renames.
+  The installed Rust 1.97.0 `std::fs::File::sync_all` implementation calls
+  `F_FULLFSYNC` on Apple targets and `fsync` on other Unix targets. These
+  source-level contracts support the modeled barrier but do not replace the
+  dedicated-host fault result.
