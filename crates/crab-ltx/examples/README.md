@@ -8,6 +8,7 @@ capture remains usable without the `replica` feature; object-store examples use
 | --- | --- |
 | `local_roundtrip` | Local WAL capture, verified plan construction, exact restore, and SQL verification |
 | `rustfs_cell_replica_scale_load` | Cell-scoped immutable publication, source deletion, exact restore, and full-range compaction with checksum verification |
+| `power_cut_probe` | Exact capture and clean-continuation checkpoints for an external power-cut controller |
 
 Run the local example from the repository root:
 
@@ -63,3 +64,55 @@ With `--features replica`, the canonical surface is:
 Mutable owner/epoch/root publication remains a `crab-cell-runtime` authority
 operation. `crab-ltx` prepares immutable bytes and never acknowledges an HTTP
 request or changes mutable Cell control.
+
+## Dedicated-host power-cut probe
+
+`power_cut_probe` has a writer stage and a verifier stage for each local
+durability contract. Run it on a dedicated fault host with the probe directory
+on a disposable test filesystem. Keep the controller and its captured stdout
+on a separate, unaffected device. The writer emits `READY_CAPTURE` immediately
+after a successful standalone `capture()` and parks with SQLite still open;
+`READY_RESUME` follows a successful `persist_continuation()` and `close()`.
+The controller must cut host power or inject the planned block-device fault
+when it observes the relevant marker. A process signal alone is only a smoke
+test, not power-loss evidence. For a block-device fault, verify only after a
+fresh mount without the writer's warm page cache; otherwise cached bytes can
+hide lost device writes.
+
+Build once on that host with its own mounted target directory:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-<fault-host>" \
+  cargo build --release -p crab-ltx --features replica \
+  --example power_cut_probe --locked
+```
+
+For the capture case, use a fresh directory on the disposable device. Record
+the `SEGMENT`, `TXID`, `CHECKSUM`, and `DIGEST` lines off-device before cutting
+at `READY_CAPTURE`. After reboot, use those exact values:
+
+```sh
+power_cut_probe capture-write <fresh-test-directory>
+power_cut_probe capture-verify <test-directory> <recorded-segment-path> \
+  <recorded-txid> <recorded-checksum> <recorded-digest>
+```
+
+The verifier checks the recorded LTX digest, constructs an exact verified
+plan, restores it into a fresh file, and reads the expected SQL value. For
+clean continuation, use a different fresh directory, record its `TXID`,
+`CHECKSUM`, and `DIGEST`, and cut at `READY_RESUME`:
+
+```sh
+power_cut_probe resume-write <fresh-test-directory>
+power_cut_probe resume-verify <test-directory> <recorded-txid> \
+  <recorded-checksum> <recorded-digest>
+```
+
+The resume verifier first checks the complete database BLAKE3 digest, then
+moves the continuation to a fresh path, verifies its exact recorded position
+and SQL value, and captures the next transaction. Each verifier is one-shot:
+start from a new directory for every cut. Save host/kernel, filesystem and
+mount options, device cache mode, fault mechanism, cut marker and timing,
+writer stdout, verifier stdout/stderr/exit status, and the expected and
+observed endpoint with the off-device evidence. Neither this probe nor a
+local process-kill smoke replaces the dedicated-host run in Plan 035.

@@ -183,8 +183,8 @@ must still show no authority bypass or stale-local adoption.
 ## Slice 3 — Strengthen crash and exactness qualification
 
 Scope: the existing `crab-ltx` host/ltx/cell test suites and their harnesses,
-plus docs/workflow wiring if the resulting gate is stable. No new storage
-format or fallback reader.
+the dedicated-host probe under `examples/`, plus docs/workflow wiring if the
+resulting gate is stable. No new storage format or fallback reader.
 
 1. Build a deterministic volatile-filesystem model around the existing
    `FileSystem` hook. Model LTX/sidecar file-data flush, rename, and
@@ -341,3 +341,9 @@ status of this plan in `advisor-plans/README.md` after each slice.
   durability-proof wait histograms can be compared in the protected run. Root
   preparation may overlap follower proof, so its isolated duration alone does
   not establish the response's critical path.
+- A dedicated-host probe now lives at `crates/crab-ltx/examples/power_cut_probe.rs`.
+  Its capture and continuation writers emit exact off-device checkpoints for
+  an external fault controller; their post-restart verifiers check LTX digest,
+  exact restore, database digest, clean resume, and next-cut continuity. Both
+  modes passed a local process-kill smoke. No physical power-cut or block-device
+  receipt has been produced on the required dedicated host.
