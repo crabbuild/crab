@@ -12,6 +12,7 @@ mod routing;
 mod server;
 mod split;
 mod table;
+mod tags;
 
 pub use expression_wire::WireCondition;
 pub use items::*;
@@ -80,7 +81,7 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 12] = [
+static COMMANDS: [OperationDescriptor; 13] = [
     operation(1),
     operation(2),
     operation(3),
@@ -93,8 +94,9 @@ static COMMANDS: [OperationDescriptor; 12] = [
     operation(12),
     operation(13),
     operation(14),
+    operation(15),
 ];
-static QUERIES: [OperationDescriptor; 13] = [
+static QUERIES: [OperationDescriptor; 14] = [
     operation(4),
     operation(6),
     operation(7),
@@ -108,6 +110,7 @@ static QUERIES: [OperationDescriptor; 13] = [
     operation(15),
     operation(16),
     operation(17),
+    operation(18),
 ];
 
 /// Statically linked account application.
@@ -223,6 +226,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
                 source.update(include_bytes!("routing.rs"));
                 source.update(include_bytes!("routing/split_state.rs"));
                 source.update(include_bytes!("authorization.rs"));
+                source.update(include_bytes!("tags.rs"));
                 Digest::from_bytes(*source.finalize().as_bytes())
             },
             retained_codes: &[],
@@ -254,6 +258,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<CommitSplit>()?;
         registry.bind_command::<authorization::PutUserPolicy>()?;
         registry.bind_command::<authorization::DeleteUserPolicy>()?;
+        registry.bind_command::<tags::UpdateTags>()?;
         registry.bind_query::<GetItem>()?;
         registry.bind_query::<TransactGet>()?;
         registry.bind_query::<DescribeTable>()?;
@@ -266,7 +271,8 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<ReadRoutePage>()?;
         registry.bind_query::<ReadPublishedPartition>()?;
         registry.bind_query::<ReadSplitRoute>()?;
-        registry.bind_query::<authorization::ReadUserPolicies>()
+        registry.bind_query::<authorization::ReadUserPolicies>()?;
+        registry.bind_query::<tags::ReadTags>()
     }
 }
 

@@ -132,6 +132,8 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         billing_mode: BillingMode::PayPerRequest,
         provisioned_throughput: None,
         deletion_protection_enabled: false,
+        initial_tags: Vec::new(),
+        resource_arn: None,
     };
     let created = client
         .command::<CreateTable>(&target, identity(4), Json(schema.clone()))

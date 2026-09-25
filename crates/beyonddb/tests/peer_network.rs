@@ -324,6 +324,8 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
                 billing_mode: BillingMode::PayPerRequest,
                 provisioned_throughput: None,
                 deletion_protection_enabled: false,
+                initial_tags: Vec::new(),
+                resource_arn: None,
             }),
         )
         .await

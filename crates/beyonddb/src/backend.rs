@@ -90,12 +90,11 @@ impl TableEngine for CellStorage {
                 || input.vector_indexes.as_ref().is_some_and(|v| !v.is_empty())
                 || input.stream_specification.is_some()
                 || input.sse_specification.is_some()
-                || input.tags.as_ref().is_some_and(|v| !v.is_empty())
                 || input.table_class.is_some()
                 || input.on_demand_throughput.is_some()
             {
                 return Err(unsupported(
-                    "table indexes, streams, SSE, tags, class, or on-demand ceilings",
+                    "table indexes, streams, SSE, class, or on-demand ceilings",
                 ));
             }
             extenddb_core::validation::validate_create_table(&input, &LimitsConfig::default())
@@ -109,6 +108,12 @@ impl TableEngine for CellStorage {
                 billing_mode: input.billing_mode.unwrap_or(BillingMode::Provisioned),
                 provisioned_throughput: input.provisioned_throughput,
                 deletion_protection_enabled: input.deletion_protection_enabled.unwrap_or(false),
+                initial_tags: input.tags.unwrap_or_default(),
+                resource_arn: Some(extenddb_storage::util::table_arn(
+                    &self.region,
+                    &account_id,
+                    &name,
+                )),
             };
             let submitted = spec.clone();
             let record = match self
