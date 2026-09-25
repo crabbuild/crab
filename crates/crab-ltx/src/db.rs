@@ -719,6 +719,11 @@ impl Db {
                 "resumed database length does not match its continuation",
             ));
         }
+        let ltx_host = crate::LtxHost {
+            facilities: host.clone(),
+            max_database_bytes: limits.max_database_bytes,
+            max_file_bytes: limits.max_database_bytes,
+        };
         let checksums = crate::pages::PageChecksums::from_file(
             crate::LtxHost {
                 facilities: host.clone(),
@@ -730,6 +735,9 @@ impl Db {
             continuation.pages,
             continuation.position.checksum,
         )?;
+        // The continuation and sidecar name a published image; a same-length
+        // local corruption must fall back to the authoritative root.
+        checksums.verify_database(&ltx_host, path, continuation.page_size)?;
         let vfs = host.sqlite_vfs.clone();
         let local_disk = host.reserve_local_disk(database_bytes)?;
         let mut db = Self::open_inner(path, limits, vfs.as_deref(), host, false, Some(local_disk))?;

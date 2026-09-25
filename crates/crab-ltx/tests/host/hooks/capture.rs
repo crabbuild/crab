@@ -131,8 +131,14 @@ async fn cell_checksum_write_failure_fences_after_sealing_the_cut() {
     writer
         .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(2)"))
         .unwrap();
+    let synced_before_cut = faults.file_syncs.load(Ordering::Relaxed);
+    writer.capture_deferred().unwrap();
+    assert_eq!(faults.file_syncs.load(Ordering::Relaxed), synced_before_cut);
+    writer
+        .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(3)"))
+        .unwrap();
     faults.arm(Some("write_all_at"));
-    injected(writer.capture());
+    injected(writer.capture_deferred());
     faults.arm(None);
     assert!(matches!(writer.capture(), Err(CrabError::Fenced)));
 }

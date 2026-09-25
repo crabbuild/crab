@@ -176,6 +176,75 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-ltx-replica-cost" \
   --payload-bytes 4096 --commands 32 --warmup 4
 ```
 
+### Sparse activation baseline (2026-09-25)
+
+Pass `--sparse` to bootstrap a root, close the source writer, and activate a
+real sparse writer through `open_root().paged().prepare_writable()` and
+`open_writable()`. This mode uses deferred capture, prepares an immutable
+successor, and prunes its local cut after preparation. It reports SQLite commit,
+capture, checksum-sidecar sync count/time, root preparation, WAL bytes read, and
+peak WAL-image allocation separately. The sidecar sync measurement wraps only
+the local `FileSystem`; it does not include SQLite VFS syncs. The fresh mode
+retains its original immediate-capture workload. Neither mode measures runtime
+response proof latency or grants authority merely by preparing a root.
+
+Seven independent release-process rounds per row on macOS 25.5, APFS on a USB
+SSD, Apple silicon, Rust 1.97.0, bundled SQLite 3.49.1, and `object_store`
+0.14.2 in-memory. Each small-payload round measured seven commands after five
+warmups; each 4 MiB round measured two after one warmup. Cells show p50 / p95
+across the seven per-round medians, in microseconds. Peak RSS is the median
+per-process maximum from `/usr/bin/time -l`. The large case sets
+`--max-capture-bytes 1048576` and recorded four complete WAL reads per round.
+
+| Workload | Payload | SQLite commit | LTX capture | Sidecar sync | Root prepare | Sidecar syncs / round | WAL read / round | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Fresh immediate | 4 KiB | 318 / 442 | 4,255 / 5,362 | 0 / 0 | 172 / 207 | 0 | 149 KiB | 11.8 MiB |
+| Sparse deferred | 4 KiB | 332 / 346 | 2,465 / 3,203 | 2,188 / 2,741 | 176 / 256 | 7 | 177 KiB | 12.1 MiB |
+| Fresh immediate | 16 KiB | 244 / 256 | 4,001 / 4,824 | 0 / 0 | 173 / 314 | 0 | 234 KiB | 12.0 MiB |
+| Sparse deferred | 16 KiB | 279 / 351 | 3,154 / 3,347 | 2,790 / 3,006 | 214 / 420 | 7 | 262 KiB | 12.3 MiB |
+| Fresh immediate | 4 MiB | 4,800 / 5,357 | 45,164 / 47,473 | 0 / 0 | 2,498 / 2,795 | 0 | 24.4 MiB | 37.1 MiB |
+| Sparse deferred | 4 MiB | 4,485 / 4,812 | 48,017 / 48,920 | 5,055 / 6,165 | 2,580 / 2,620 | 4 | 24.3 MiB | 37.8 MiB |
+
+The raw per-round JSON is outside tracked source at
+`$HOME/Workspace/crabbuild-target/crab-1bab/ltx-baseline-20260925/`. To
+reproduce a round after a release build, run the corresponding command seven
+times, retaining each JSON output and `/usr/bin/time -l` maximum resident set
+size:
+
+```bash
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-<checkout>" \
+  cargo build --release --locked \
+  --manifest-path crates/crab-ltx/perf/replica-cost/Cargo.toml
+/usr/bin/time -l "$HOME/Workspace/crabbuild-target/crab-<checkout>/release/crab-ltx-replica-cost" \
+  --sparse --payload-bytes 4096 --commands 12 --warmup 5
+```
+
+Replace the payload with `16384` for the middle row. For 4 MiB, use
+`--payload-bytes 4194304 --max-capture-bytes 1048576 --commands 3 --warmup 1`.
+Omit `--sparse` for fresh rows. The published RustFS loopback measurements
+below are provider preparation cost; runtime fleet or exact-root response
+latency needs a separate qualification receipt.
+
+After removing the active sidecar's per-cut sync, a second seven-round matrix
+with the same commands and host measured:
+
+| Workload | Payload | Capture p50 / p95 before → after | Sidecar syncs / round before → after | WAL read / round before → after |
+| --- | ---: | ---: | ---: | ---: |
+| Fresh immediate | 4 KiB | 4,255 / 5,362 → 3,912 / 4,502 | 0 → 0 | 149 → 149 KiB |
+| Sparse deferred | 4 KiB | 2,465 / 3,203 → 285 / 335 | 7 → 0 | 177 → 177 KiB |
+| Fresh immediate | 16 KiB | 4,001 / 4,824 → 4,465 / 5,565 | 0 → 0 | 234 → 234 KiB |
+| Sparse deferred | 16 KiB | 3,154 / 3,347 → 314 / 374 | 7 → 0 | 262 → 262 KiB |
+| Fresh immediate | 4 MiB | 45,164 / 47,473 → 43,154 / 45,192 | 0 → 0 | 24.4 → 24.4 MiB |
+| Sparse deferred | 4 MiB | 48,017 / 48,920 → 41,348 / 43,153 | 4 → 0 | 24.3 → 24.3 MiB |
+
+The second raw matrix is at
+`$HOME/Workspace/crabbuild-target/crab-1bab/ltx-after-sidecar-20260925/`.
+The unchanged fresh 16 KiB path moved by more than the desired 5% tolerance,
+so these two sequential matrices alone cannot establish a precise global
+latency regression bound. The sidecar sync count and sparse capture reduction
+are direct local evidence; a response-latency claim still requires the runtime
+qualification environment.
+
 Pass `--endpoint http://host:port --bucket <bucket> --access-key <key>
 --secret-key <secret>` to run the identical workload against an S3-compatible
 provider. The table below was measured on 2026-09-24 (Apple silicon, release

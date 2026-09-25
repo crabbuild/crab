@@ -599,6 +599,49 @@ fn a_resume_refuses_a_continuation_that_does_not_match_the_file() {
 
 #[cfg(feature = "replica")]
 #[test]
+fn a_resume_refuses_same_length_database_or_sidecar_corruption() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    for corrupt_sidecar in [false, true] {
+        let temp = tempfile::TempDir::new().unwrap();
+        let limits = Limits::default();
+        let source = temp.path().join("source.sqlite");
+        let db = committed_database(&source, limits);
+        db.persist_continuation().unwrap();
+        db.close().unwrap();
+
+        let host = crate::Host::default();
+        let destination = temp.path().join("corrupt.sqlite");
+        crate::resume::move_resumed(&source, &destination, &host).unwrap();
+        let corrupt = if corrupt_sidecar {
+            crate::resume::checksum_path(&destination)
+        } else {
+            destination.clone()
+        };
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&corrupt)
+            .unwrap();
+        file.seek(SeekFrom::End(-1)).unwrap();
+        let mut byte = [0];
+        file.read_exact(&mut byte).unwrap();
+        file.seek(SeekFrom::End(-1)).unwrap();
+        file.write_all(&[byte[0] ^ 1]).unwrap();
+        drop(file);
+
+        assert!(
+            matches!(
+                Db::open_resumed_with_host(&destination, limits, host),
+                Err(crate::CrabError::ChecksumMismatch)
+            ),
+            "corrupt_sidecar={corrupt_sidecar}"
+        );
+    }
+}
+
+#[cfg(feature = "replica")]
+#[test]
 fn a_resume_refuses_a_database_that_is_not_checkpointed() {
     let temp = tempfile::TempDir::new().unwrap();
     let limits = Limits::default();

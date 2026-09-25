@@ -327,9 +327,27 @@ The record is structural, never authoritative. It refuses a database whose WAL
 is not checkpointed (the file may sit behind the continuation) and a sparse
 activation that is not fully materialized (an unfaulted page is a hole, not
 data), and the writing side proves the dense copy still folds to the aggregate
-it seeds. Ownership and root identity stay with the caller: only open a resumed
+it seeds. The resumed open also checks every local database page against the
+recorded dense checksums before SQLite can reuse the image. Ownership and root
+identity stay with the caller: only open a resumed
 database that a resume record has already matched against the authoritative
 control, and discard it (`CellReplica::discard_resumed`) on any mismatch.
+
+## Local durability boundaries
+
+| Operation | Local barrier | What it proves | May release a Cell response? |
+| --- | --- | --- | --- |
+| SQLite commit | SQLite WAL sync under `synchronous=FULL` | The local commit reached SQLite's WAL boundary | No |
+| `capture()` | LTX file sync, then rename and parent sync | The returned standalone LTX cuts have durable bytes and names | No |
+| `capture_deferred()` | No LTX file or name barrier; a sparse writer updates its mutable checksum sidecar without syncing it | The cut is readable for publication, but its LTX durability is pending | No |
+| `durability_barrier()` | Pending LTX files and their parent directories | Those deferred local cuts are durable | No |
+| `persist_continuation()` | New dense checksum file and continuation, each with parent sync | A clean, drained local image can be considered for warm reuse | No |
+| Cell root publication or selected follower proof | Runtime owned provider or fleet proof | The exact authoritative root or durable follower tail covers the command | Yes, when runtime checks the matching position |
+
+The mutable checksum sidecar is local capture state, not a root selector. A
+missing or invalid sidecar discards warm reuse; the runtime restores its
+authority-pinned root. Process-kill tests do not prove physical power-loss
+durability for SQLite, the LTX file, or the filesystem's sync implementation.
 
 ## Preparing a Cell root
 
