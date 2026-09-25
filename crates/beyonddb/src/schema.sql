@@ -48,3 +48,20 @@ CREATE TABLE ddb_table_tags (
     tag_value TEXT NOT NULL,
     PRIMARY KEY (table_id, resource_arn, tag_key)
 );
+
+CREATE TABLE ddb_transaction_claims (
+    token TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL,
+    destination BLOB NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+CREATE INDEX ddb_transaction_claims_age ON ddb_transaction_claims (created_at_ms);
+
+CREATE TABLE ddb_transaction_applied (
+    account_id TEXT NOT NULL,
+    token TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (account_id, token)
+);
+CREATE INDEX ddb_transaction_applied_age ON ddb_transaction_applied (created_at_ms);

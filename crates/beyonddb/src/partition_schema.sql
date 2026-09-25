@@ -12,3 +12,12 @@ CREATE TABLE ddb_partition_items (
 );
 
 CREATE INDEX ddb_partition_query ON ddb_partition_items (partition_key, sort_key, item_key);
+
+CREATE TABLE ddb_transaction_applied (
+    account_id TEXT NOT NULL,
+    token TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (account_id, token)
+);
+CREATE INDEX ddb_transaction_applied_age ON ddb_transaction_applied (created_at_ms);

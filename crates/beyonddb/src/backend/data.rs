@@ -22,11 +22,16 @@ use extenddb_storage::{
 
 use super::{CellStorage, cell_error, mutation_identity, target, unsupported};
 use crate::expression_wire::{WireCondition, WireUpdate};
+use crate::transaction_token::{
+    ClaimTransactionToken, ClaimTransactionTokenInput, ClaimTransactionTokenOutcome,
+    TransactionDestination, TransactionToken,
+};
 use crate::{
-    DeleteItem, DeleteItemInput, GetItem, GetItemInput, GetItemOutcome, ItemMutationOutcome, Json,
-    PartitionDelete, PartitionDeleteInput, PartitionDeleteOutcome, PartitionGet, PartitionGetInput,
-    PartitionGetOutcome, PartitionPut, PartitionPutInput, PartitionPutOutcome, PartitionQuery,
-    PartitionQueryInput, PartitionQueryOutcome, PartitionTransactGet, PartitionTransactGetOutcome,
+    APPLICATION, ConditionCheckInput, DATA_NAMESPACE, DeleteItem, DeleteItemInput, GetItem,
+    GetItemInput, GetItemOutcome, ItemMutationOutcome, Json, PartitionDelete, PartitionDeleteInput,
+    PartitionDeleteOutcome, PartitionGet, PartitionGetInput, PartitionGetOutcome, PartitionPut,
+    PartitionPutInput, PartitionPutOutcome, PartitionQuery, PartitionQueryInput,
+    PartitionQueryOutcome, PartitionTransactGet, PartitionTransactGetOutcome,
     PartitionTransactWrite, PartitionTransactWriteInput, PartitionTransactWriteOutcome,
     PartitionUpdate, PartitionUpdateInput, PartitionUpdateOutcome, PutItem, PutItemInput,
     ScanItems, ScanItemsInput, ScanItemsOutcome, SortComparison, SortPredicate, TransactGet,
@@ -566,17 +571,23 @@ impl DataEngine for CellStorage {
         ops: &[TransactWriteOp<'_>],
         idempotency: Option<IdempotencyKey<'_>>,
     ) -> BoxedFuture<'_, Result<(), StorageError>> {
-        let prepared = prepare_writes(ops, idempotency.is_some());
+        let prepared = prepare_writes(ops);
+        let token = idempotency.map(|key| TransactionToken {
+            account_id: key.account_id.to_owned(),
+            token: key.token.to_owned(),
+            fingerprint: key.fingerprint.to_owned(),
+        });
         let routing: Vec<_> = ops
             .iter()
-            .filter_map(|op| match op {
+            .map(|op| match op {
                 TransactWriteOp::Put { key_info, item, .. } => {
-                    Some(((*key_info).clone(), (*item).clone()))
+                    ((*key_info).clone(), (*item).clone())
                 }
-                TransactWriteOp::Delete { key_info, key, .. } => {
-                    Some(((*key_info).clone(), (*key).clone()))
+                TransactWriteOp::Delete { key_info, key, .. }
+                | TransactWriteOp::Update { key_info, key, .. }
+                | TransactWriteOp::ConditionCheck { key_info, key, .. } => {
+                    ((*key_info).clone(), (*key).clone())
                 }
-                _ => None,
             })
             .collect();
         let return_old_on_failure: Vec<bool> = ops
@@ -602,6 +613,14 @@ impl DataEngine for CellStorage {
             .collect();
         Box::pin(async move {
             let (account_id, operations) = prepared?;
+            if token
+                .as_ref()
+                .is_some_and(|token| token.account_id != account_id)
+            {
+                return Err(StorageError::Validation(
+                    "transaction token account differs from items".into(),
+                ));
+            }
             let mut destination: Option<Option<(CellTarget, u64)>> = None;
             for (key_info, key) in &routing {
                 let next = self.transaction_destination(key_info, key).await?;
@@ -610,11 +629,75 @@ impl DataEngine for CellStorage {
                 }
                 destination = Some(next);
             }
+            let account = target(&account_id)?;
+            let current = destination.flatten();
+            let destination = if let Some(token) = token.as_ref() {
+                // The account claim fixes one destination for this token, so retries
+                // cannot apply the same request to another Cell after a route change.
+                let proposed = match &current {
+                    Some((cell, epoch)) => TransactionDestination::Data {
+                        partition: cell.partition().to_vec(),
+                        epoch: *epoch,
+                    },
+                    None => TransactionDestination::Account,
+                };
+                let claim = self
+                    .client
+                    .command::<ClaimTransactionToken>(
+                        &account,
+                        mutation_identity()?,
+                        Json(ClaimTransactionTokenInput {
+                            token: token.clone(),
+                            destination: proposed,
+                        }),
+                    )
+                    .await;
+                match claim {
+                    Ok(committed) => match committed.output.0 {
+                        ClaimTransactionTokenOutcome::Claimed(TransactionDestination::Account) => {
+                            None
+                        }
+                        ClaimTransactionTokenOutcome::Claimed(TransactionDestination::Data {
+                            partition,
+                            epoch,
+                        }) => {
+                            let cell = CellTarget::new(
+                                account.tenant(),
+                                APPLICATION,
+                                DATA_NAMESPACE,
+                                &partition,
+                            )
+                            .map_err(|error| StorageError::Internal(error.to_string()))?;
+                            Some((cell, epoch))
+                        }
+                        ClaimTransactionTokenOutcome::Mismatch => {
+                            return Err(StorageError::Internal(
+                                "unexpected successful token mismatch".into(),
+                            ));
+                        }
+                    },
+                    Err(InvocationError::Rejected(committed))
+                        if committed.output.0 == ClaimTransactionTokenOutcome::Mismatch =>
+                    {
+                        return Err(StorageError::IdempotentMismatch);
+                    }
+                    Err(InvocationError::Rejected(_)) => {
+                        return Err(StorageError::Internal(
+                            "unexpected rejected token claim".into(),
+                        ));
+                    }
+                    Err(error) => return Err(cell_error(error)),
+                }
+            } else {
+                current
+            };
             let count = operations.len();
-            if let Some(Some((target, epoch))) = destination {
+            if let Some((target, epoch)) = destination {
                 let table_id = match &operations[0] {
                     TransactionWrite::Put(input) => input.table_id.clone(),
                     TransactionWrite::Delete(input) => input.table_id.clone(),
+                    TransactionWrite::Update(input) => input.table_id.clone(),
+                    TransactionWrite::ConditionCheck(input) => input.table_id.clone(),
                 };
                 return match self
                     .client
@@ -625,6 +708,7 @@ impl DataEngine for CellStorage {
                             table_id,
                             epoch,
                             operations,
+                            idempotency: token,
                         }),
                     )
                     .await
@@ -641,6 +725,12 @@ impl DataEngine for CellStorage {
                         PartitionTransactWriteOutcome::Rejected { index, reason } => Err(
                             transaction_canceled(index, reason, count, &return_old_on_failure),
                         ),
+                        PartitionTransactWriteOutcome::Replay => {
+                            Err(StorageError::IdempotentReplay)
+                        }
+                        PartitionTransactWriteOutcome::Mismatch => {
+                            Err(StorageError::IdempotentMismatch)
+                        }
                         PartitionTransactWriteOutcome::NotInstalled
                         | PartitionTransactWriteOutcome::StaleRoute
                         | PartitionTransactWriteOutcome::Sealed
@@ -653,13 +743,15 @@ impl DataEngine for CellStorage {
                     Err(error) => Err(cell_error(error)),
                 };
             }
-            let target = target(&account_id)?;
             match self
                 .client
                 .command::<TransactWrite>(
-                    &target,
+                    &account,
                     mutation_identity()?,
-                    Json(TransactWriteInput { operations }),
+                    Json(TransactWriteInput {
+                        operations,
+                        idempotency: token,
+                    }),
                 )
                 .await
             {
@@ -674,6 +766,8 @@ impl DataEngine for CellStorage {
                         TransactionOutcome::Rejected { index, reason } => Err(
                             transaction_canceled(index, reason, count, &return_old_on_failure),
                         ),
+                        TransactionOutcome::Replay => Err(StorageError::IdempotentReplay),
+                        TransactionOutcome::Mismatch => Err(StorageError::IdempotentMismatch),
                         _ => Err(StorageError::Internal(
                             "unexpected rejected transaction result".into(),
                         )),
@@ -893,11 +987,7 @@ fn prepare_gets(ops: &[TransactGetOp<'_>]) -> Result<(String, Vec<GetItemInput>)
 
 fn prepare_writes(
     ops: &[TransactWriteOp<'_>],
-    idempotent: bool,
 ) -> Result<(String, Vec<TransactionWrite>), StorageError> {
-    if idempotent {
-        return Err(unsupported("transaction client request tokens"));
-    }
     let mut account_id = None;
     let mut operations = Vec::with_capacity(ops.len());
     for op in ops {
@@ -934,8 +1024,41 @@ fn prepare_writes(
                     condition: condition.map(|expr| WireCondition::from_core(expr, maps)),
                 }),
             ),
+            TransactWriteOp::Update {
+                key_info,
+                key,
+                actions,
+                condition,
+                maps,
+                stream,
+                ..
+            } if stream.is_none() => (
+                *key_info,
+                TransactionWrite::Update(UpdateItemInput {
+                    table_name: key_info.table_name.clone(),
+                    table_id: key_info.table_id.clone(),
+                    key: (*key).clone(),
+                    update: WireUpdate::from_core(actions, maps),
+                    condition: condition.map(|expr| WireCondition::from_core(expr, maps)),
+                }),
+            ),
+            TransactWriteOp::ConditionCheck {
+                key_info,
+                key,
+                condition,
+                maps,
+                ..
+            } => (
+                *key_info,
+                TransactionWrite::ConditionCheck(ConditionCheckInput {
+                    table_name: key_info.table_name.clone(),
+                    table_id: key_info.table_id.clone(),
+                    key: (*key).clone(),
+                    condition: WireCondition::from_core(condition, maps),
+                }),
+            ),
             _ => {
-                return Err(unsupported("update or streamed transaction write"));
+                return Err(unsupported("streamed transaction write"));
             }
         };
         if account_id

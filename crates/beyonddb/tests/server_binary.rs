@@ -12,7 +12,7 @@ use std::{
 };
 
 use aws_credential_types::Credentials;
-use aws_sdk_dynamodb::types::AttributeValue;
+use aws_sdk_dynamodb::types::{AttributeValue, ConditionCheck, TransactWriteItem, Update};
 use serde_json::json;
 
 struct ManagedChild(Child);
@@ -195,8 +195,27 @@ async fn bootstrap_sdk_write_survives_server_process_restart() {
         .unwrap();
     let mut rustfs = ManagedChild(rustfs);
     let deadline = Instant::now() + Duration::from_secs(20);
-    while TcpStream::connect_timeout(&s3, Duration::from_millis(200)).is_err() {
-        assert!(Instant::now() < deadline, "RustFS did not start");
+    loop {
+        let ready = Command::new("aws")
+            .args([
+                "--endpoint-url",
+                &format!("http://{s3}"),
+                "s3api",
+                "list-buckets",
+            ])
+            .env("AWS_ACCESS_KEY_ID", "crab")
+            .env("AWS_SECRET_ACCESS_KEY", "crab")
+            .env("AWS_DEFAULT_REGION", "us-east-1")
+            .output()
+            .unwrap();
+        if ready.status.success() {
+            break;
+        }
+        assert!(
+            rustfs.try_wait().unwrap().is_none(),
+            "RustFS exited before S3 readiness"
+        );
+        assert!(Instant::now() < deadline, "RustFS did not become S3 ready");
         std::thread::sleep(Duration::from_millis(100));
     }
     run(Command::new("aws")
@@ -371,9 +390,77 @@ async fn bootstrap_sdk_write_survives_server_process_restart() {
         .send()
         .await
         .unwrap();
+    let updated = HashMap::from([
+        ("id".into(), AttributeValue::S("process".into())),
+        ("value".into(), AttributeValue::S("updated".into())),
+    ]);
+    let update = |value: &str| {
+        TransactWriteItem::builder()
+            .update(
+                Update::builder()
+                    .table_name("ProcessData")
+                    .key("id", AttributeValue::S("process".into()))
+                    .update_expression("SET #v = :v")
+                    .expression_attribute_names("#v", "value")
+                    .expression_attribute_values(":v", AttributeValue::S(value.into()))
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+    };
+    let check = |condition: &str| {
+        TransactWriteItem::builder()
+            .condition_check(
+                ConditionCheck::builder()
+                    .table_name("ProcessData")
+                    .key("id", AttributeValue::S("absent".into()))
+                    .condition_expression(condition)
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+    };
+    sdk.transact_write_items()
+        .client_request_token("process-update-check")
+        .transact_items(update("updated"))
+        .transact_items(check("attribute_not_exists(id)"))
+        .send()
+        .await
+        .unwrap();
+    sdk.transact_write_items()
+        .client_request_token("process-update-check")
+        .transact_items(update("updated"))
+        .transact_items(check("attribute_not_exists(id)"))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        sdk.transact_write_items()
+            .client_request_token("process-update-check")
+            .transact_items(update("different"))
+            .transact_items(check("attribute_not_exists(id)"))
+            .send()
+            .await
+            .is_err()
+    );
+    assert!(
+        sdk.transact_write_items()
+            .transact_items(update("rolled back"))
+            .transact_items(check("attribute_exists(id)"))
+            .send()
+            .await
+            .is_err()
+    );
     stop(&mut child, &log);
     let mut restarted = start(&config, &log, false, s3);
     wait_healthy(&mut restarted, public, &log);
+    sdk.transact_write_items()
+        .client_request_token("process-update-check")
+        .transact_items(update("updated"))
+        .transact_items(check("attribute_not_exists(id)"))
+        .send()
+        .await
+        .unwrap();
     let read = sdk
         .get_item()
         .table_name("ProcessData")
@@ -381,7 +468,7 @@ async fn bootstrap_sdk_write_survives_server_process_restart() {
         .send()
         .await
         .unwrap();
-    assert_eq!(read.item(), Some(&item));
+    assert_eq!(read.item(), Some(&updated));
     let recovered_tags = sdk
         .list_tags_of_resource()
         .resource_arn(arn)

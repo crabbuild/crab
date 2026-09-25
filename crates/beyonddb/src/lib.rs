@@ -13,6 +13,7 @@ mod server;
 mod split;
 mod table;
 mod tags;
+mod transaction_token;
 
 pub use expression_wire::WireCondition;
 pub use items::*;
@@ -81,7 +82,7 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 13] = [
+static COMMANDS: [OperationDescriptor; 14] = [
     operation(1),
     operation(2),
     operation(3),
@@ -95,6 +96,7 @@ static COMMANDS: [OperationDescriptor; 13] = [
     operation(13),
     operation(14),
     operation(15),
+    operation(16),
 ];
 static QUERIES: [OperationDescriptor; 14] = [
     operation(4),
@@ -227,6 +229,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
                 source.update(include_bytes!("routing/split_state.rs"));
                 source.update(include_bytes!("authorization.rs"));
                 source.update(include_bytes!("tags.rs"));
+                source.update(include_bytes!("transaction_token.rs"));
                 Digest::from_bytes(*source.finalize().as_bytes())
             },
             retained_codes: &[],
@@ -259,6 +262,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<authorization::PutUserPolicy>()?;
         registry.bind_command::<authorization::DeleteUserPolicy>()?;
         registry.bind_command::<tags::UpdateTags>()?;
+        registry.bind_command::<transaction_token::ClaimTransactionToken>()?;
         registry.bind_query::<GetItem>()?;
         registry.bind_query::<TransactGet>()?;
         registry.bind_query::<DescribeTable>()?;

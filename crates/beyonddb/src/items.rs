@@ -323,6 +323,22 @@ pub enum TransactionWrite {
     Put(PutItemInput),
     /// Delete the item at its primary key.
     Delete(DeleteItemInput),
+    /// Apply an update expression to one item.
+    Update(UpdateItemInput),
+    /// Check one item without mutating it.
+    ConditionCheck(ConditionCheckInput),
+}
+
+/// A condition evaluated with other transaction operations.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConditionCheckInput {
+    /// Table to read.
+    pub table_name: String,
+    /// Immutable table identity from ExtendDB's catalog lookup.
+    pub table_id: String,
+    /// Complete primary key.
+    pub key: Item,
+    pub(crate) condition: WireCondition,
 }
 
 /// Account-local transactional writes.
@@ -330,6 +346,8 @@ pub enum TransactionWrite {
 pub struct TransactWriteInput {
     /// Ordered operations, which may address distinct tables in this account.
     pub operations: Vec<TransactionWrite>,
+    /// Client request token committed with the item mutations.
+    pub idempotency: Option<crate::transaction_token::TransactionToken>,
 }
 
 /// Result of an account-local transaction.
@@ -337,6 +355,10 @@ pub struct TransactWriteInput {
 pub enum TransactionOutcome {
     /// Every operation committed.
     Applied,
+    /// This token and payload already committed in this Cell.
+    Replay,
+    /// This token belongs to another request payload.
+    Mismatch,
     /// Nothing committed; the operation at this position failed validation.
     Rejected {
         /// Position of the failing operation.
@@ -369,6 +391,22 @@ impl Command for TransactWrite {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
+        if let Some(token) = input.idempotency.as_ref() {
+            if account_target(&token.account_id)? != *context.target() {
+                return Err(Error::Identity(
+                    "transaction token reached the wrong account",
+                ));
+            }
+            match crate::transaction_token::applied_token(context, token)? {
+                crate::transaction_token::AppliedToken::Fresh => {}
+                crate::transaction_token::AppliedToken::Replay => {
+                    return Ok(CommandResult::Rejected(Json(TransactionOutcome::Replay)));
+                }
+                crate::transaction_token::AppliedToken::Mismatch => {
+                    return Ok(CommandResult::Rejected(Json(TransactionOutcome::Mismatch)));
+                }
+            }
+        }
         if input.operations.is_empty() || input.operations.len() > 100 {
             return Ok(CommandResult::Rejected(Json(
                 TransactionOutcome::Rejected {
@@ -381,23 +419,33 @@ impl Command for TransactWrite {
         }
         let mut touched = HashSet::with_capacity(input.operations.len());
         for (index, operation) in input.operations.into_iter().enumerate() {
-            let (name, table_id, item, condition, delete) = match operation {
+            let (name, table_id, item, condition) = match &operation {
                 TransactionWrite::Put(input) => (
-                    input.table_name,
-                    input.table_id,
-                    input.item,
-                    input.condition,
-                    false,
+                    &input.table_name,
+                    &input.table_id,
+                    &input.item,
+                    input.condition.as_ref(),
                 ),
                 TransactionWrite::Delete(input) => (
-                    input.table_name,
-                    input.table_id,
-                    input.key,
-                    input.condition,
-                    true,
+                    &input.table_name,
+                    &input.table_id,
+                    &input.key,
+                    input.condition.as_ref(),
+                ),
+                TransactionWrite::Update(input) => (
+                    &input.table_name,
+                    &input.table_id,
+                    &input.key,
+                    input.condition.as_ref(),
+                ),
+                TransactionWrite::ConditionCheck(input) => (
+                    &input.table_name,
+                    &input.table_id,
+                    &input.key,
+                    Some(&input.condition),
                 ),
             };
-            let Some(table) = command_unrouted_table(context, &name)? else {
+            let Some(table) = command_unrouted_table(context, name)? else {
                 return Ok(CommandResult::Rejected(Json(
                     TransactionOutcome::Rejected {
                         index,
@@ -405,7 +453,7 @@ impl Command for TransactWrite {
                     },
                 )));
             };
-            if table.id != table_id {
+            if table.id != *table_id {
                 return Ok(CommandResult::Rejected(Json(
                     TransactionOutcome::Rejected {
                         index,
@@ -413,10 +461,9 @@ impl Command for TransactWrite {
                     },
                 )));
             }
-            let valid = if delete {
-                valid_key(&item, &table)
-            } else {
-                valid_item(&item, &table)
+            let valid = match operation {
+                TransactionWrite::Put(_) => valid_item(item, &table),
+                _ => valid_key(item, &table),
             };
             if !valid {
                 return Ok(CommandResult::Rejected(Json(
@@ -426,7 +473,7 @@ impl Command for TransactWrite {
                     },
                 )));
             }
-            let key = item_key(&item, &table.key_schema)?;
+            let key = item_key(item, &table.key_schema)?;
             if !touched.insert((table.id.clone(), key.clone())) {
                 return Ok(CommandResult::Rejected(Json(
                     TransactionOutcome::Rejected {
@@ -460,22 +507,54 @@ impl Command for TransactWrite {
                     }
                 }
             }
-            if delete {
-                context.sql(&statement(
-                    "DELETE FROM ddb_items WHERE table_id = ?1 AND item_key = ?2",
-                    vec![SqlValue::Text(table.id), SqlValue::Blob(key)],
-                ))?;
-            } else {
+            let next = match operation {
+                TransactionWrite::Put(input) => Some(input.item),
+                TransactionWrite::Delete(_) => None,
+                TransactionWrite::Update(input) => {
+                    let old = command_item(context, &table.id, &key)?;
+                    let mut new = old.unwrap_or(input.key);
+                    if let Err(reason) = input.update.apply(&mut new, &table.attribute_definitions)
+                    {
+                        return Ok(CommandResult::Rejected(Json(
+                            TransactionOutcome::Rejected {
+                                index,
+                                reason: TransactionFailure::Validation(reason),
+                            },
+                        )));
+                    }
+                    if !valid_item(&new, &table) || item_key(&new, &table.key_schema)? != key {
+                        return Ok(CommandResult::Rejected(Json(
+                            TransactionOutcome::Rejected {
+                                index,
+                                reason: TransactionFailure::Validation(
+                                    "item violates table schema".into(),
+                                ),
+                            },
+                        )));
+                    }
+                    Some(new)
+                }
+                TransactionWrite::ConditionCheck(_) => continue,
+            };
+            if let Some(next) = next {
                 context.sql(&statement(
                     "INSERT INTO ddb_items (table_id, item_key, item) VALUES (?1, ?2, ?3) \
                      ON CONFLICT(table_id, item_key) DO UPDATE SET item = excluded.item",
                     vec![
                         SqlValue::Text(table.id),
                         SqlValue::Blob(key),
-                        SqlValue::Blob(serde_json::to_vec(&item)?),
+                        SqlValue::Blob(serde_json::to_vec(&next)?),
                     ],
                 ))?;
+            } else {
+                context.sql(&statement(
+                    "DELETE FROM ddb_items WHERE table_id = ?1 AND item_key = ?2",
+                    vec![SqlValue::Text(table.id), SqlValue::Blob(key)],
+                ))?;
             }
+        }
+        if let Some(token) = input.idempotency.as_ref() {
+            crate::transaction_token::record_applied_token(context, token)?;
         }
         Ok(CommandResult::Success(Json(TransactionOutcome::Applied)))
     }
