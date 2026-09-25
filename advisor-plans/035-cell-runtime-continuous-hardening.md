@@ -190,8 +190,16 @@ write with `Limit(LtxFileBytes)`: incremental admission counted newly grown
 pages twice. The corrected page count passed a failing-before-fix local
 regression and the same live workload: six LTX segments, source deletion,
 exact restore, and full-range compaction with matching BLAKE3 and length.
-These are uncommitted macOS loopback RustFS results, not a signed provider,
+These are local macOS loopback RustFS results, not a signed provider,
 scale, Kubernetes, or release receipt.
+The separate `crab-http-server/examples/compose` reference service passed a
+Docker Compose expansion from 3 to 5, 10, and 20 containers against a RustFS
+container. Docker enforced 1 vCPU and 1 GiB per node; each node kept one
+acknowledged KV Cell value across later expansion stages, and the final
+isolated prefix contained 280 objects. The service uses tenant-partitioned
+Cells and a RustFS-backed session lease. It does not exercise the production
+server's 2 GiB/20 GiB admission, Cell migration, remote peer dispatch, or
+follower durability, so it is not the protected many-Cell resource receipt.
 
 ## Slice 1 — Prove the real durability seam under deterministic faults
 
