@@ -304,8 +304,11 @@ status of this plan in `advisor-plans/README.md` after each slice.
 - Slice 3 local model: `tests/host/hooks/volatile.rs` snapshots host-file bytes
   only at file sync and namespace entries only at parent sync. It models an
   immediate LTX return, deferred file/name cut points, a failed parent barrier,
-  mutable sidecar edits, and unsynced pruning. SQLite's VFS is deliberately
-  outside the model. An active sparse writer was process-killed after an
+  a shared deferred-batch barrier, checkpoint restart, mutable sidecar edits,
+  and unsynced pruning. SQLite's VFS is deliberately outside the model. A
+  separate-process clean writer now leaves a continuation that a successor
+  moves, verifies at its exact TXID/checksum, and extends by one cut. An active
+  sparse writer was process-killed after an
   unproved deferred cut; after deleting its local source, the test selected the
   previous immutable root, saw the old SQL value, and committed its next cut.
   That fixture does not run runtime authority or follower proof; the dedicated

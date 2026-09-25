@@ -277,6 +277,71 @@ fn immediate_capture_survives_modeled_crash_at_its_return_boundary() {
 }
 
 #[test]
+fn deferred_batch_survives_only_after_its_shared_barrier() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let fs = Arc::new(VolatileFs::default());
+    let host = Host::default().with_filesystem(fs.clone());
+    let mut db = Db::open_with_host(
+        &directory.path().join("source.sqlite"),
+        Limits::default(),
+        host,
+    )
+    .unwrap();
+    db.transaction(|tx| tx.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES(1)"))
+        .unwrap();
+    let first = db.capture_deferred().unwrap();
+    db.transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(2)"))
+        .unwrap();
+    let second = db.capture_deferred().unwrap();
+    db.durability_barrier().unwrap();
+    drop(db);
+    fs.crash();
+
+    let mut segments = first.segments;
+    segments.extend(second.segments);
+    let plan = crab_ltx::VerifiedPlan::new(&segments, second.position, Limits::default()).unwrap();
+    let restored = directory.path().join("restored.sqlite");
+    crab_ltx::restore_exact(&plan, &restored).unwrap();
+    let connection = crab_ltx::rusqlite::Connection::open(restored).unwrap();
+    let count: i64 = connection
+        .query_row("SELECT count(*) FROM t", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 2);
+}
+
+#[test]
+fn checkpoint_restart_preserves_the_acknowledged_cut_chain() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let fs = Arc::new(VolatileFs::default());
+    let host = Host::default().with_filesystem(fs.clone());
+    let mut db = Db::open_with_host(
+        &directory.path().join("source.sqlite"),
+        Limits::default(),
+        host,
+    )
+    .unwrap();
+    db.transaction(|tx| tx.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES(1)"))
+        .unwrap();
+    let first = db.capture().unwrap();
+    db.transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(2)"))
+        .unwrap();
+    let second = db.checkpoint(CheckpointMode::Truncate).unwrap();
+    drop(db);
+    fs.crash();
+
+    let mut segments = first.segments;
+    segments.extend(second.segments);
+    let plan = crab_ltx::VerifiedPlan::new(&segments, second.position, Limits::default()).unwrap();
+    let restored = directory.path().join("restored.sqlite");
+    crab_ltx::restore_exact(&plan, &restored).unwrap();
+    let connection = crab_ltx::rusqlite::Connection::open(restored).unwrap();
+    let count: i64 = connection
+        .query_row("SELECT count(*) FROM t", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 2);
+}
+
+#[test]
 fn mutable_sidecar_and_unsynced_prune_revert_at_modeled_crash() {
     let directory = tempfile::TempDir::new().unwrap();
     let fs = VolatileFs::default();

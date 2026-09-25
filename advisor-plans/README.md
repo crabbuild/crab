@@ -13,7 +13,7 @@ epoch-head surface removed by 016–017.
 
 | Plan | Priority | Effort | Depends on | Status |
 | --- | --- | --- | --- | --- |
-| [035](035-crab-ltx-foundation-durability-and-performance.md) | P0 correctness / P1 performance | L | 010 streaming path; 015 release qualification | IN PROGRESS — local slices 1–2 and RustFS sparse-owner process kill; physical power-cut and protected proof gates remain; Slice 4 no-go pending profile |
+| [035](035-crab-ltx-foundation-durability-and-performance.md) | P0 correctness / P1 performance | L | 010 streaming path; 015 release qualification | IN PROGRESS — local slices 1–3 pass, including modeled cuts, clean process resume, and RustFS sparse-owner process kill; physical power-cut and protected proof gates remain; Slice 4 no-go pending profile |
 
 ## Safe Cell rebalance and scale up/down
 
