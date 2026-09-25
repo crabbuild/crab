@@ -87,6 +87,59 @@ def push_window_summaries(pushes: list[dict[str, Any]], window_size: int) -> lis
     return summaries
 
 
+def fetch_summary(fetches: list[dict[str, Any]]) -> dict[str, Any]:
+    latencies = [int(item["elapsed_ms"]) for item in fetches]
+    requests = [int(item["object_store"]["requests"]) for item in fetches]
+    return {
+        "count": len(fetches),
+        "latency_ms": {
+            "mean": round(sum(latencies) / len(latencies), 2) if latencies else None,
+            "p50": percentile(latencies, 0.50),
+            "p95": percentile(latencies, 0.95),
+            "p99": percentile(latencies, 0.99),
+            "max": max(latencies, default=0),
+        },
+        "object_store_requests": {
+            "mean": round(sum(requests) / len(requests), 2) if requests else None,
+            "p50": percentile(requests, 0.50),
+            "p95": percentile(requests, 0.95),
+            "p99": percentile(requests, 0.99),
+            "max": max(requests, default=0),
+        },
+        "request_body_bytes": sum(
+            int(item["object_store"].get("request_body_bytes", 0)) for item in fetches
+        ),
+        "response_body_bytes": sum(
+            int(item["object_store"].get("response_body_bytes", 0)) for item in fetches
+        ),
+        "new_local_pack_count": sum(len(item.get("new_local_packs", [])) for item in fetches),
+        "max_new_local_packs": max(
+            (len(item.get("new_local_packs", [])) for item in fetches), default=0
+        ),
+    }
+
+
+def fetch_performance_gate(
+    summary: dict[str, Any], *, commits: int, interval: int
+) -> dict[str, Any]:
+    evaluated = interval == 500 and commits >= interval and summary["count"] == commits // interval
+    if not evaluated:
+        return {
+            "status": "not_evaluated",
+            "required_interval": 500,
+            "latency_p95_ms_lte_10000": None,
+            "requests_p95_lte_10": None,
+        }
+    latency_ok = summary["latency_ms"]["p95"] <= 10_000
+    requests_ok = summary["object_store_requests"]["p95"] <= 10
+    return {
+        "status": "passed" if latency_ok and requests_ok else "failed",
+        "required_interval": 500,
+        "latency_p95_ms_lte_10000": latency_ok,
+        "requests_p95_lte_10": requests_ok,
+    }
+
+
 def git_auto_maintenance_events(trace_path: Path) -> list[list[str]]:
     if not trace_path.exists():
         return []
@@ -650,6 +703,8 @@ class Qualification:
             raise RuntimeError(f"expected {expected_fetches} incremental fetches, got {len(fetches)}")
         latencies = [item["elapsed_ms"] for item in pushes]
         requests = [item["object_store"]["requests"] for item in pushes]
+        mean_push_latency_ms = sum(latencies) / len(latencies)
+        mean_push_requests = sum(requests) / len(requests)
         auto_events = [
             event
             for path in sorted(self.trace2_root.glob("*.jsonl"))
@@ -657,6 +712,20 @@ class Qualification:
         ]
         if auto_events:
             raise RuntimeError(f"Git ran automatic maintenance during qualification: {auto_events}")
+        fetch_metrics = fetch_summary(fetches)
+        fetch_gate = fetch_performance_gate(
+            fetch_metrics, commits=self.args.commits, interval=self.args.interval
+        )
+        push_requests_ok = mean_push_requests < 10
+        push_latency_ok = mean_push_latency_ms < 1_000
+        failed_gates = not push_requests_ok or not push_latency_ok or fetch_gate["status"] == "failed"
+        performance_status = (
+            "failed"
+            if failed_gates
+            else "passed"
+            if fetch_gate["status"] == "passed"
+            else "not_evaluated"
+        )
         self.report["metrics"] = {
             "seed": {
                 "elapsed_ms": seed["elapsed_ms"],
@@ -672,12 +741,19 @@ class Qualification:
             },
             "push_object_store_requests": {
                 "total": sum(requests),
-                "mean": round(sum(requests) / len(requests), 4),
+                "mean": round(mean_push_requests, 4),
                 "p50": percentile(requests, 0.50),
                 "p95": percentile(requests, 0.95),
                 "p99": percentile(requests, 0.99),
                 "max": max(requests),
                 "under_10_average": sum(requests) / len(requests) < 10,
+            },
+            "fetch": fetch_metrics,
+            "performance_gates": {
+                "status": performance_status,
+                "push_mean_latency_ms_under_1000": push_latency_ok,
+                "push_mean_requests_under_10": push_requests_ok,
+                "500_commit_fetch": fetch_gate,
             },
             "push_windows": push_window_summaries(pushes, self.args.interval),
             "git_auto_maintenance_events": auto_events,

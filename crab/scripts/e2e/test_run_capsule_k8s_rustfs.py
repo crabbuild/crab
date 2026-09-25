@@ -68,6 +68,60 @@ class CapsuleKubernetesQualificationTests(unittest.TestCase):
         self.assertEqual(windows[0]["resource_sample_count"], 1)
         self.assertEqual(windows[0]["children_max_rss"], 50)
 
+    def test_fetch_summary_reports_latency_io_and_pack_counts(self) -> None:
+        fetches = [
+            {
+                "elapsed_ms": 700,
+                "object_store": {
+                    "requests": 8,
+                    "request_body_bytes": 2,
+                    "response_body_bytes": 30,
+                },
+                "new_local_packs": ["pack-a"],
+            },
+            {
+                "elapsed_ms": 900,
+                "object_store": {
+                    "requests": 10,
+                    "request_body_bytes": 3,
+                    "response_body_bytes": 40,
+                },
+                "new_local_packs": ["pack-b"],
+            },
+        ]
+
+        summary = QUALIFICATION.fetch_summary(fetches)
+
+        self.assertEqual(summary["latency_ms"]["p95"], 900)
+        self.assertEqual(summary["object_store_requests"]["p95"], 10)
+        self.assertEqual(summary["request_body_bytes"], 5)
+        self.assertEqual(summary["response_body_bytes"], 70)
+        self.assertEqual(summary["new_local_pack_count"], 2)
+        self.assertEqual(summary["max_new_local_packs"], 1)
+
+    def test_fetch_performance_gate_only_evaluates_complete_500_commit_windows(self) -> None:
+        fetches = [
+            {"elapsed_ms": 9000, "object_store": {"requests": 10}},
+            {"elapsed_ms": 10000, "object_store": {"requests": 9}},
+        ]
+        summary = QUALIFICATION.fetch_summary(fetches)
+
+        self.assertEqual(
+            QUALIFICATION.fetch_performance_gate(summary, commits=1000, interval=500)["status"],
+            "passed",
+        )
+        self.assertEqual(
+            QUALIFICATION.fetch_performance_gate(summary, commits=20, interval=10)["status"],
+            "not_evaluated",
+        )
+        over_budget = QUALIFICATION.fetch_summary(
+            [{"elapsed_ms": 10_001, "object_store": {"requests": 11}}]
+        )
+        self.assertEqual(
+            QUALIFICATION.fetch_performance_gate(over_budget, commits=500, interval=500)["status"],
+            "failed",
+        )
+
     def test_git_auto_maintenance_parser_ignores_other_children(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             trace = Path(temporary) / "trace.jsonl"
