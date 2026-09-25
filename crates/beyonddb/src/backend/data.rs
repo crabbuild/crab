@@ -24,7 +24,7 @@ use super::{CellStorage, cell_error, mutation_identity, target, unsupported};
 use crate::expression_wire::{WireCondition, WireUpdate};
 use crate::transaction_token::{
     ClaimTransactionToken, ClaimTransactionTokenInput, ClaimTransactionTokenOutcome,
-    TransactionDestination, TransactionToken,
+    ReadTransactionClaim, ReadTransactionClaimOutcome, TransactionDestination, TransactionToken,
 };
 use crate::{
     APPLICATION, ConditionCheckInput, DATA_NAMESPACE, DeleteItem, DeleteItemInput, GetItem,
@@ -621,26 +621,47 @@ impl DataEngine for CellStorage {
                     "transaction token account differs from items".into(),
                 ));
             }
-            let mut destination: Option<Option<(CellTarget, u64)>> = None;
-            for (key_info, key) in &routing {
-                let next = self.transaction_destination(key_info, key).await?;
-                if destination.as_ref().is_some_and(|current| current != &next) {
-                    return Err(unsupported("cross-partition TransactWriteItems"));
-                }
-                destination = Some(next);
-            }
             let account = target(&account_id)?;
-            let current = destination.flatten();
-            let destination = if let Some(token) = token.as_ref() {
+            // A prior claim must be read before current routing: a split may
+            // scatter the keys, while the original Cell still holds the receipt.
+            let claimed = if let Some(token) = token.as_ref() {
+                let response = self
+                    .client
+                    .query::<ReadTransactionClaim>(&account, None, Json(token.clone()))
+                    .await
+                    .map_err(cell_error)?;
+                match response.output.0 {
+                    ReadTransactionClaimOutcome::Missing => None,
+                    ReadTransactionClaimOutcome::Claimed(destination) => Some(destination),
+                    ReadTransactionClaimOutcome::Mismatch => {
+                        return Err(StorageError::IdempotentMismatch);
+                    }
+                }
+            } else {
+                None
+            };
+            let mut current: Option<Option<(CellTarget, u64)>> = None;
+            if claimed.is_none() {
+                for (key_info, key) in &routing {
+                    let next = self.transaction_destination(key_info, key).await?;
+                    if current.as_ref().is_some_and(|current| current != &next) {
+                        return Err(unsupported("cross-partition TransactWriteItems"));
+                    }
+                    current = Some(next);
+                }
+            }
+            let proposed = match current.flatten() {
+                Some((cell, epoch)) => TransactionDestination::Data {
+                    partition: cell.partition().to_vec(),
+                    epoch,
+                },
+                None => TransactionDestination::Account,
+            };
+            let chosen = if let Some(destination) = claimed {
+                destination
+            } else if let Some(token) = token.as_ref() {
                 // The account claim fixes one destination for this token, so retries
                 // cannot apply the same request to another Cell after a route change.
-                let proposed = match &current {
-                    Some((cell, epoch)) => TransactionDestination::Data {
-                        partition: cell.partition().to_vec(),
-                        epoch: *epoch,
-                    },
-                    None => TransactionDestination::Account,
-                };
                 let claim = self
                     .client
                     .command::<ClaimTransactionToken>(
@@ -654,22 +675,7 @@ impl DataEngine for CellStorage {
                     .await;
                 match claim {
                     Ok(committed) => match committed.output.0 {
-                        ClaimTransactionTokenOutcome::Claimed(TransactionDestination::Account) => {
-                            None
-                        }
-                        ClaimTransactionTokenOutcome::Claimed(TransactionDestination::Data {
-                            partition,
-                            epoch,
-                        }) => {
-                            let cell = CellTarget::new(
-                                account.tenant(),
-                                APPLICATION,
-                                DATA_NAMESPACE,
-                                &partition,
-                            )
-                            .map_err(|error| StorageError::Internal(error.to_string()))?;
-                            Some((cell, epoch))
-                        }
+                        ClaimTransactionTokenOutcome::Claimed(destination) => destination,
                         ClaimTransactionTokenOutcome::Mismatch => {
                             return Err(StorageError::Internal(
                                 "unexpected successful token mismatch".into(),
@@ -689,7 +695,16 @@ impl DataEngine for CellStorage {
                     Err(error) => return Err(cell_error(error)),
                 }
             } else {
-                current
+                proposed
+            };
+            let destination = match chosen {
+                TransactionDestination::Account => None,
+                TransactionDestination::Data { partition, epoch } => {
+                    let cell =
+                        CellTarget::new(account.tenant(), APPLICATION, DATA_NAMESPACE, &partition)
+                            .map_err(|error| StorageError::Internal(error.to_string()))?;
+                    Some((cell, epoch))
+                }
             };
             let count = operations.len();
             if let Some((target, epoch)) = destination {

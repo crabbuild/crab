@@ -1181,6 +1181,53 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
             .unwrap()
             .is_none()
     );
+    let mut token_items = [None, None];
+    for index in 0..100 {
+        let item = Item::from([
+            (
+                "pk".into(),
+                AttributeValue::S(format!("split-token-{index}")),
+            ),
+            ("sk".into(), AttributeValue::N("0".into())),
+        ]);
+        let hash = data_key_hash(&created.table_id, &item, &key_info.base_key_schema).unwrap();
+        token_items[usize::from(hash[0] >> 7)].get_or_insert(item);
+        if token_items.iter().all(Option::is_some) {
+            break;
+        }
+    }
+    let [Some(left_token_item), Some(right_token_item)] = token_items else {
+        panic!("both split ranges need a transaction key");
+    };
+    let token_writes = [
+        TransactWriteOp::Put {
+            key_info: &key_info,
+            item: &left_token_item,
+            condition: None,
+            maps: &tx_maps,
+            return_values_on_ccf: Default::default(),
+            stream: None,
+        },
+        TransactWriteOp::Put {
+            key_info: &key_info,
+            item: &right_token_item,
+            condition: None,
+            maps: &tx_maps,
+            return_values_on_ccf: Default::default(),
+            stream: None,
+        },
+    ];
+    storage
+        .transact_write_items(
+            &token_writes,
+            Some(IdempotencyKey {
+                account_id: "123456789012",
+                token: "before-split",
+                fingerprint: "two-ranges",
+            }),
+        )
+        .await
+        .unwrap();
     provisioner
         .install_account_capacity_loop(
             &tasks,
@@ -1210,6 +1257,20 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
     .unwrap();
     assert_eq!(grown.partitions.len(), 2);
     assert_eq!(grown.epoch, 2);
+    let replay_after_split = storage
+        .transact_write_items(
+            &token_writes,
+            Some(IdempotencyKey {
+                account_id: "123456789012",
+                token: "before-split",
+                fingerprint: "two-ranges",
+            }),
+        )
+        .await;
+    assert!(matches!(
+        replay_after_split,
+        Err(StorageError::IdempotentReplay)
+    ));
     let first_range = provisioner
         .reconcile_account_capacity("123456789012", account_handle.clone(), u64::MAX, None)
         .await
@@ -1327,6 +1388,14 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
             "us-east-1",
         )
         .with_initial_partitions(provisioner.clone()),
+    );
+    assert_eq!(
+        routed.get_item(&key_info, &left_token_item).await.unwrap(),
+        Some(left_token_item)
+    );
+    assert_eq!(
+        routed.get_item(&key_info, &right_token_item).await.unwrap(),
+        Some(right_token_item)
     );
     let (after_split, _) = routed
         .query(&key_info, &range, &range_maps, true, Some(10), None, None)
@@ -1620,7 +1689,7 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         }
     }
     assert!(scan_cursor.is_none());
-    assert_eq!(scanned.len(), 7);
+    assert_eq!(scanned.len(), 9);
     assert!(scanned.contains(&sdk_item));
     let mutation_key = HashMap::from([
         ("pk".to_owned(), AwsAttributeValue::S("same".into())),

@@ -92,8 +92,10 @@ Single-Cell TransactWriteItems accepts Put, Delete, Update, and ConditionCheck.
 Its account Cell claims client request tokens across data Cells, and the
 selected Cell commits an applied-token receipt with the item writes. The SDK
 process test verifies replay, token mismatch, rollback, and recovery.
-Transactions spanning data Cells still need a coordinator. A retry after a
-route split can fail transiently while its original Cell is sealed or retired.
+Committed-token replays read the original Cell's receipt before consulting the
+current route, including after a split. Transactions spanning data Cells still
+need a coordinator. A token claimed but not applied before its source seals can
+fail transiently; relocation of that claim remains unfinished.
 Once a table's initial route is published, keyed CRUD and Scan use its data
 Cells; unactivated tables
 still use the account Cell unless a provisioner is configured. The host-backed
