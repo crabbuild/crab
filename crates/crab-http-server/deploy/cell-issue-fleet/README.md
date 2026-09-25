@@ -25,6 +25,10 @@ without regressing the published root, and restarts the lost node. The resulting
 envelope. This is a functional scale-up and routing check, not a throughput
 or capacity claim.
 
+The gateway uses round-robin routing across healthy nodes. The separate load
+qualification below sends equal issue writes and reads to every Cell through
+that gateway and records the entry node on each response.
+
 Each node container has a Docker limit of **1 vCPU and 1 GiB memory**, no swap,
 and its own persistent local Cell volume. The runtime applies a 30 GiB logical
 local disk admission limit per node and still checks actual free space. Docker
@@ -97,6 +101,34 @@ docker compose --file "$state/compose.yaml" \
   --profile five --profile ten --profile twenty ps
 cat "$state/report.json"
 ```
+
+## Qualify gateway distribution and Cell actions
+
+Run this after the desired scale stage is healthy. Pass the number of active
+nodes: `3`, `5`, `10`, or `20`. The example below exercises the full 20-node
+fleet with one concurrent client lane per Cell and 10 create/read pairs per
+lane:
+
+```sh
+python3 crates/crab-http-server/deploy/cell-issue-fleet/load.py \
+  --state "$state" --nodes 20 --pairs-per-cell 10
+```
+
+The script first reads every Cell through every active entry node. It then
+sends the same number of writes and reads to each Cell, verifies each write's
+readback, checks that successful entry traffic is within 70–130% of an even
+split, and waits for a newer RustFS root for every Cell. Finally it kills one
+owner, reads its last acknowledged issue through the gateway after takeover,
+checks that the root did not regress, and restarts the killed node. Temporary
+busy or unavailable responses are retried a bounded number of times; writes
+reuse their original request ID. The JSON report includes retry counts and
+end-to-end latency, including retry waits. A failed run exits nonzero.
+
+Each run writes `load-<nodes>-<run-id>.json` under the state directory. The
+measurement is the throughput of this fixed client workload on one machine,
+not maximum fleet throughput or a production SLO. See the
+[gateway load qualification](qualification/2026-09-25-gateway-load.md) for
+one local run and its limits.
 
 ## Measure public-host actions against RustFS
 
