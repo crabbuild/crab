@@ -4,12 +4,17 @@ use crab_ltx::CellStorageLayout;
 use crab_storage::{ETag, StorageError};
 use serde::{Deserialize, Serialize};
 
+use crate::fleet::telemetry::{CatalogReadKind, CellTelemetryHandle};
 use crate::identity::encode_hex;
 use crate::identity::{ApplicationId, CellId, CellTarget, Digest, NamespaceId, TenantId};
 use crate::retry::{Backoff, retry_hint, retryable_storage_error};
 use crate::{Error, Result};
 
-const MAX_HEAD_BYTES: u64 = 32 * 1024;
+// A version-two head carries one page locator per immutable page: a 64-hex
+// digest and a 64-hex first Cell id. The full 256-page shard needs about
+// 44 KiB, so the bound is one 64 KiB object read rather than the 32 KiB that
+// held only digests.
+const MAX_HEAD_BYTES: u64 = 64 * 1024;
 const MAX_PAGE_BYTES: u64 = 1024 * 1024;
 const ENTRIES_PER_PAGE: usize = 256;
 const MAX_PAGES: usize = 256;
@@ -147,7 +152,7 @@ pub struct CatalogShardScan {
     catalog: CellCatalog,
     shard: u8,
     revision: u64,
-    pages: Vec<Digest>,
+    pages: Vec<CatalogPageRef>,
     next_page: usize,
     previous: Option<CellId>,
 }
@@ -161,25 +166,26 @@ impl CatalogShardScan {
 
     /// Returns the immutable pages pinned by this shard-head observation.
     #[must_use]
-    pub fn page_digests(&self) -> &[Digest] {
-        &self.pages
+    pub fn page_digests(&self) -> Vec<Digest> {
+        self.pages.iter().map(|page| page.digest).collect()
     }
 
     /// Loads and verifies at most one 256-entry immutable page.
     pub async fn next_page(&mut self) -> Result<Option<CatalogScanPage>> {
-        let Some(digest) = self.pages.get(self.next_page).copied() else {
+        if self.next_page >= self.pages.len() {
             return Ok(None);
-        };
-        let entries = self.catalog.load_page(digest).await?;
+        }
+        let entries = self
+            .catalog
+            .load_located_page(self.shard, &self.pages, self.next_page)
+            .await?;
         let mut proofs = Vec::with_capacity(entries.len());
         for entry in entries {
-            entry.validate(self.catalog.tenant, self.catalog.application)?;
-            if entry.cell.as_bytes()[0] != self.shard
-                || self
-                    .previous
-                    .is_some_and(|previous| previous.as_bytes() >= entry.cell.as_bytes())
+            if self
+                .previous
+                .is_some_and(|previous| previous.as_bytes() >= entry.cell.as_bytes())
             {
-                return Err(Error::Catalog("invalid scanned catalog ordering or shard"));
+                return Err(Error::Catalog("invalid scanned catalog ordering"));
             }
             self.previous = Some(entry.cell);
             proofs.push(CatalogProof {
@@ -224,17 +230,32 @@ pub struct CellCatalog {
     layout: CellStorageLayout,
     tenant: TenantId,
     application: ApplicationId,
+    telemetry: CellTelemetryHandle,
 }
 
 impl CellCatalog {
     /// Binds the catalog to one Cell layout and tenant.
     #[must_use]
     pub fn new(layout: CellStorageLayout, tenant: TenantId) -> Self {
+        Self::with_telemetry(layout, tenant, CellTelemetryHandle::default())
+    }
+
+    /// Binds the catalog to one Cell layout, tenant, and telemetry sink.
+    ///
+    /// Routing and due-scan callers pass the node's handle so the metadata
+    /// plane's object-store reads appear beside the LTX origin counters.
+    #[must_use]
+    pub fn with_telemetry(
+        layout: CellStorageLayout,
+        tenant: TenantId,
+        telemetry: CellTelemetryHandle,
+    ) -> Self {
         let application = ApplicationId::from_bytes(*layout.application_id());
         Self {
             layout,
             tenant,
             application,
+            telemetry,
         }
     }
 
@@ -259,7 +280,7 @@ impl CellCatalog {
         loop {
             let observed = self.load_head(shard).await?;
             let mut entries = match &observed {
-                Some(observed) => self.load_entries(&observed.head).await?,
+                Some(observed) => self.load_entries(shard, &observed.head).await?,
                 None => Vec::new(),
             };
             match entries.binary_search_by(|value| value.cell.as_bytes().cmp(entry.cell.as_bytes()))
@@ -327,12 +348,23 @@ impl CellCatalog {
         }
     }
 
-    /// Loads one entry only after checking the head and every referenced page.
+    /// Loads one entry after checking the head locator and exactly one page.
+    ///
+    /// The head is a binary-search key list over immutable pages, so a lookup
+    /// reads the head and the one page that can hold the Cell. A locator that
+    /// disagrees with its page fails closed instead of reporting absence.
     pub async fn lookup(&self, cell: CellId) -> Result<Option<CatalogProof>> {
-        let Some(observed) = self.load_head(cell.as_bytes()[0]).await? else {
+        let shard = cell.as_bytes()[0];
+        let Some(observed) = self.load_head(shard).await? else {
             return Ok(None);
         };
-        let entries = self.load_entries(&observed.head).await?;
+        let Some(index) = observed.head.page_index(cell) else {
+            // The Cell id sorts below every provisioned entry in this shard.
+            return Ok(None);
+        };
+        let entries = self
+            .load_located_page(shard, &observed.head.pages, index)
+            .await?;
         Ok(entries
             .binary_search_by(|entry| entry.cell.as_bytes().cmp(cell.as_bytes()))
             .ok()
@@ -364,34 +396,7 @@ impl CellCatalog {
         revision: u64,
         pages: &[Digest],
     ) -> Result<Vec<CellId>> {
-        if pages.len() > MAX_PAGES || (revision == 0) != pages.is_empty() {
-            return Err(Error::Catalog("invalid pinned catalog head"));
-        }
-        let mut unique = std::collections::HashSet::with_capacity(pages.len());
-        if pages
-            .iter()
-            .any(|digest| !unique.insert(*digest.as_bytes()))
-        {
-            return Err(Error::Catalog("duplicate pinned catalog page"));
-        }
-        let mut cells = Vec::new();
-        for digest in pages {
-            for entry in self.load_page(*digest).await? {
-                entry.validate(self.tenant, self.application)?;
-                if entry.cell.as_bytes()[0] != shard
-                    || cells.last().is_some_and(|previous: &CellId| {
-                        previous.as_bytes() >= entry.cell.as_bytes()
-                    })
-                {
-                    return Err(Error::Catalog("invalid pinned catalog ordering or shard"));
-                }
-                cells.push(entry.cell);
-            }
-        }
-        if cells.len() > MAX_ENTRIES {
-            return Err(Error::Catalog("pinned catalog exceeds entry limit"));
-        }
-        Ok(cells)
+        Ok(self.load_pinned_pages(shard, revision, pages).await?.1)
     }
 
     pub(crate) async fn install_pinned_shard(
@@ -400,7 +405,7 @@ impl CellCatalog {
         revision: u64,
         pages: &[Digest],
     ) -> Result<()> {
-        self.pinned_cells(shard, revision, pages).await?;
+        let (page_refs, _) = self.load_pinned_pages(shard, revision, pages).await?;
         let observed = self.load_head(shard).await?;
         if revision == 0 {
             return if observed.is_none() {
@@ -413,7 +418,7 @@ impl CellCatalog {
         }
         let head = CatalogHead {
             revision,
-            pages: pages.to_vec(),
+            pages: page_refs,
         };
         let encoded = head.encode()?;
         let path = self.layout.catalog_head_path(shard);
@@ -426,7 +431,13 @@ impl CellCatalog {
             Ok(_) => Ok(()),
             Err(create_error) => match self.load_head(shard).await? {
                 Some(current)
-                    if current.head.revision == revision && current.head.pages == pages =>
+                    if current.head.revision == revision
+                        && current
+                            .head
+                            .pages
+                            .iter()
+                            .map(|page| page.digest)
+                            .eq(pages.iter().copied()) =>
                 {
                     Ok(())
                 }
@@ -451,27 +462,41 @@ impl CellCatalog {
 
     async fn load_head(&self, shard: u8) -> Result<Option<ObservedHead>> {
         let path = self.layout.catalog_head_path(shard);
-        let (body, token) = match self
+        let started = std::time::Instant::now();
+        let observed = self
             .layout
             .store()
             .get_with_etag_bounded(&path, MAX_HEAD_BYTES)
-            .await
-        {
+            .await;
+        let (body, token) = match observed {
             Ok(value) => value,
-            Err(StorageError::NotFound { .. }) => return Ok(None),
-            Err(error) => return Err(error.into()),
+            Err(StorageError::NotFound { .. }) => {
+                self.telemetry
+                    .catalog_read(CatalogReadKind::Head, started.elapsed(), true);
+                return Ok(None);
+            }
+            Err(error) => {
+                self.telemetry
+                    .catalog_read(CatalogReadKind::Head, started.elapsed(), false);
+                return Err(error.into());
+            }
         };
+        self.telemetry
+            .catalog_read(CatalogReadKind::Head, started.elapsed(), true);
         Ok(Some(ObservedHead {
             head: CatalogHead::decode(&body)?,
             token,
         }))
     }
 
-    async fn load_entries(&self, head: &CatalogHead) -> Result<Vec<CatalogEntry>> {
+    /// Loads every entry of one shard head in key order.
+    ///
+    /// Provisioning reads the complete shard because it republishes the page
+    /// set. Routing uses `lookup`, which reads one page.
+    async fn load_entries(&self, shard: u8, head: &CatalogHead) -> Result<Vec<CatalogEntry>> {
         let mut entries = Vec::new();
-        for digest in &head.pages {
-            for entry in self.load_page(*digest).await? {
-                entry.validate(self.tenant, self.application)?;
+        for index in 0..head.pages.len() {
+            for entry in self.load_located_page(shard, &head.pages, index).await? {
                 if entries.last().is_some_and(|previous: &CatalogEntry| {
                     previous.cell.as_bytes() >= entry.cell.as_bytes()
                 }) {
@@ -486,13 +511,121 @@ impl CellCatalog {
         Ok(entries)
     }
 
+    /// Loads one immutable page and proves it belongs where the locator says.
+    ///
+    /// The checks make a head that disagrees with its pages fail closed: the
+    /// page must open at the located first Cell id, stay inside the shard,
+    /// remain ordered, and end below the next locator key.
+    async fn load_located_page(
+        &self,
+        shard: u8,
+        pages: &[CatalogPageRef],
+        index: usize,
+    ) -> Result<Vec<CatalogEntry>> {
+        let reference = pages
+            .get(index)
+            .ok_or(Error::Catalog("invalid head page count"))?;
+        if reference.first.as_bytes()[0] != shard {
+            return Err(Error::Catalog("catalog page locator names another shard"));
+        }
+        let entries = self.load_page(reference.digest).await?;
+        let mut previous: Option<&[u8]> = None;
+        for entry in &entries {
+            entry.validate(self.tenant, self.application)?;
+            if entry.cell.as_bytes()[0] != shard
+                || previous.is_some_and(|value| value >= entry.cell.as_bytes().as_slice())
+            {
+                return Err(Error::Catalog("invalid located catalog ordering or shard"));
+            }
+            previous = Some(entry.cell.as_bytes());
+        }
+        if entries
+            .first()
+            .is_none_or(|entry| entry.cell != reference.first)
+        {
+            return Err(Error::Catalog(
+                "catalog page locator disagrees with its page",
+            ));
+        }
+        if let Some(next) = pages.get(index + 1)
+            && entries
+                .last()
+                .is_some_and(|entry| entry.cell.as_bytes() >= next.first.as_bytes())
+        {
+            return Err(Error::Catalog(
+                "catalog page locator disagrees with its page",
+            ));
+        }
+        Ok(entries)
+    }
+
+    /// Loads a pinned page list and returns its locators and Cells.
+    ///
+    /// Backup restore replays a manifest that names page digests only, so the
+    /// locators are rebuilt from the verified pages here.
+    async fn load_pinned_pages(
+        &self,
+        shard: u8,
+        revision: u64,
+        pages: &[Digest],
+    ) -> Result<(Vec<CatalogPageRef>, Vec<CellId>)> {
+        if pages.len() > MAX_PAGES || (revision == 0) != pages.is_empty() {
+            return Err(Error::Catalog("invalid pinned catalog head"));
+        }
+        let mut unique = std::collections::HashSet::with_capacity(pages.len());
+        if pages
+            .iter()
+            .any(|digest| !unique.insert(*digest.as_bytes()))
+        {
+            return Err(Error::Catalog("duplicate pinned catalog page"));
+        }
+        let mut page_refs = Vec::with_capacity(pages.len());
+        let mut cells = Vec::new();
+        for digest in pages {
+            let entries = self.load_page(*digest).await?;
+            let Some(first) = entries.first().map(|entry| entry.cell) else {
+                return Err(Error::Catalog("invalid page entry count"));
+            };
+            for entry in &entries {
+                entry.validate(self.tenant, self.application)?;
+                if entry.cell.as_bytes()[0] != shard
+                    || cells.last().is_some_and(|previous: &CellId| {
+                        previous.as_bytes() >= entry.cell.as_bytes()
+                    })
+                {
+                    return Err(Error::Catalog("invalid pinned catalog ordering or shard"));
+                }
+                cells.push(entry.cell);
+            }
+            page_refs.push(CatalogPageRef {
+                digest: *digest,
+                first,
+            });
+        }
+        if cells.len() > MAX_ENTRIES {
+            return Err(Error::Catalog("pinned catalog exceeds entry limit"));
+        }
+        Ok((page_refs, cells))
+    }
+
     async fn load_page(&self, digest: Digest) -> Result<Vec<CatalogEntry>> {
         let path = self.layout.catalog_object_path(digest.as_bytes());
-        let (body, _) = self
+        let started = std::time::Instant::now();
+        let observed = self
             .layout
             .store()
             .get_with_etag_bounded(&path, MAX_PAGE_BYTES)
-            .await?;
+            .await;
+        let (body, _) = match observed {
+            Ok(value) => value,
+            Err(error) => {
+                self.telemetry
+                    .catalog_read(CatalogReadKind::Page, started.elapsed(), false);
+                return Err(error.into());
+            }
+        };
+        self.telemetry
+            .catalog_read(CatalogReadKind::Page, started.elapsed(), true);
         if blake3::hash(&body).as_bytes() != digest.as_bytes() {
             return Err(Error::Catalog("page digest mismatch"));
         }
@@ -506,6 +639,10 @@ impl CellCatalog {
     async fn upload_pages(&self, revision: u64, entries: &[CatalogEntry]) -> Result<CatalogHead> {
         let mut pages = Vec::new();
         for entries in entries.chunks(ENTRIES_PER_PAGE) {
+            let first = entries
+                .first()
+                .ok_or(Error::Catalog("empty catalog page"))?
+                .cell;
             let encoded = CatalogPage {
                 entries: entries.to_vec(),
             }
@@ -521,7 +658,7 @@ impl CellCatalog {
                     Bytes::from(encoded),
                 )
                 .await?;
-            pages.push(digest);
+            pages.push(CatalogPageRef { digest, first });
         }
         if pages.is_empty() || pages.len() > MAX_PAGES {
             return Err(Error::Catalog("invalid head page count"));
