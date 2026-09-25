@@ -69,3 +69,32 @@ fn a_pinned_wal_reader_keeps_capture_progress_and_restores_exactly() {
         .unwrap();
     assert_eq!(rows, 64);
 }
+
+#[test]
+fn checkpoint_returns_every_sealed_cut_without_reopening_it_during_collection() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let database = temp.path().join("checkpoint.sqlite");
+    let limits = Limits::default();
+    let mut db = Db::open(&database, limits).unwrap();
+    db.transaction(|tx| tx.execute_batch("CREATE TABLE t(v BLOB)"))
+        .unwrap();
+    let first = db.capture().unwrap();
+    db.transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(randomblob(4096))"))
+        .unwrap();
+
+    let batch = db.checkpoint(CheckpointMode::Truncate).unwrap();
+    assert_eq!(batch.segments.len(), 2);
+    assert_eq!(batch.timing.verification_nanos, 0);
+    let mut segments = first.segments;
+    segments.extend(batch.segments);
+    let plan = VerifiedPlan::new(&segments, batch.position, limits).unwrap();
+    db.close().unwrap();
+
+    let restored = temp.path().join("checkpoint-restored.sqlite");
+    restore_exact(&plan, &restored).unwrap();
+    let connection = Connection::open(&restored).unwrap();
+    let length: i64 = connection
+        .query_row("SELECT length(v) FROM t", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(length, 4096);
+}

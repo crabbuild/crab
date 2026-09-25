@@ -526,12 +526,17 @@ async fn simultaneous_restores_share_host_io_admission() {
 }
 
 #[tokio::test]
-async fn replica_telemetry_attributes_cold_sparse_and_restore_work() {
+async fn replica_telemetry_attributes_prepare_cold_sparse_and_restore_work() {
     let fixture = fixture(4).await;
     let store = InstrumentedStore::new(fixture.backend.clone(), Duration::ZERO);
     let telemetry = Arc::new(RecordingTelemetry::default());
     let host = Host::default().with_ltx_telemetry(telemetry.clone());
-    let replica = cell_replica(Store::new(store), fixture.cell, fixture.incarnation, host);
+    let replica = cell_replica(
+        Store::new(store),
+        fixture.cell,
+        fixture.incarnation,
+        host.clone(),
+    );
 
     let opened = replica.open_root(&fixture.root).await.unwrap();
     opened.paged().read_page(1).await.unwrap();
@@ -540,9 +545,23 @@ async fn replica_telemetry_attributes_cold_sparse_and_restore_work() {
         .restore(&output.path().join("telemetry.sqlite"))
         .await
         .unwrap();
+    let mut writer = Db::open(&output.path().join("new.sqlite"), Limits::default()).unwrap();
+    writer
+        .transaction(|tx| tx.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES(1)"))
+        .unwrap();
+    let cuts = writer.capture().unwrap();
+    let append = cell_replica(
+        Store::new(Arc::new(InMemory::new())),
+        [151; 32],
+        [152; 16],
+        host,
+    );
+    append.prepare(None, &cuts, 1, 1).await.unwrap();
+    writer.close().unwrap();
 
     let phases = telemetry.phases.lock().unwrap();
     for expected in [
+        LtxPhase::RootPreparation,
         LtxPhase::RootOpen,
         LtxPhase::Directory,
         LtxPhase::FrameFetch,

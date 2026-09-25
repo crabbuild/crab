@@ -487,9 +487,9 @@ impl Db {
 
     /// Makes all files published by deferred captures durable as one barrier.
     ///
-    /// The barrier syncs each completed file before syncing each destination
-    /// directory once. If either step fails, the session is fenced and pending
-    /// paths remain tracked for diagnostics; no caller may acknowledge them.
+    /// The barrier syncs each completed file, each destination directory once,
+    /// and the new LTX directory chain once per session. If any step fails, the
+    /// session is fenced; no caller may acknowledge the pending paths.
     pub fn durability_barrier(&mut self) -> Result<()> {
         self.ensure_active()?;
         self.flush_pending_durability()
@@ -515,7 +515,9 @@ impl Db {
                 .try_for_each(|path| self.host.filesystem.sync_parent(path))?;
             Ok::<(), std::io::Error>(())
         })()
-        .map_err(CrabError::from);
+        .map_err(CrabError::from)
+        // A new LTX parent name cannot survive merely because its own contents did.
+        .and_then(|()| self.capture.sync_l0_ancestors());
         if result.is_ok() {
             self.pending_durability.clear();
         } else {
@@ -566,7 +568,7 @@ impl Db {
         if after.txid.0 > before.txid.0 {
             for txid in before.txid.0 + 1..=after.txid.0 {
                 let path = PathBuf::from(self.capture.ltx_path(0, Txid(txid), Txid(txid)));
-                let info = if let Some(info) = self.capture.sealed_l0_segment(Txid(txid)) {
+                let info = if let Some(info) = self.capture.take_sealed_l0_segment(Txid(txid)) {
                     info
                 } else {
                     // The inspection limit is the full-file bound: a captured
@@ -719,6 +721,11 @@ impl Db {
                 "resumed database length does not match its continuation",
             ));
         }
+        let ltx_host = crate::LtxHost {
+            facilities: host.clone(),
+            max_database_bytes: limits.max_database_bytes,
+            max_file_bytes: limits.max_database_bytes,
+        };
         let checksums = crate::pages::PageChecksums::from_file(
             crate::LtxHost {
                 facilities: host.clone(),
@@ -730,6 +737,9 @@ impl Db {
             continuation.pages,
             continuation.position.checksum,
         )?;
+        // The continuation and sidecar name a published image; a same-length
+        // local corruption must fall back to the authoritative root.
+        checksums.verify_database(&ltx_host, path, continuation.page_size)?;
         let vfs = host.sqlite_vfs.clone();
         let local_disk = host.reserve_local_disk(database_bytes)?;
         let mut db = Self::open_inner(path, limits, vfs.as_deref(), host, false, Some(local_disk))?;

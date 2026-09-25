@@ -2,6 +2,78 @@ use crab_ltx::{Db, Limits, LocalSegment, SegmentInfo, VerifiedPlan, restore_exac
 use std::io::{BufRead, Read, Write};
 use std::process::{Command, Stdio};
 
+#[cfg(feature = "replica")]
+#[test]
+fn clean_continuation_writer() {
+    let Some(path) = std::env::var_os("CRAB_LTX_CLEAN_RESUME_TEST_DIR") else {
+        return;
+    };
+    let path = std::path::PathBuf::from(path);
+    let mut db = Db::open(&path.join("source.sqlite"), Limits::default()).unwrap();
+    db.transaction(|tx| tx.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES(1)"))
+        .unwrap();
+    let batch = db.capture().unwrap();
+    db.persist_continuation().unwrap();
+    db.close().unwrap();
+    std::fs::write(
+        path.join("position"),
+        format!("{} {}", batch.position.txid, batch.position.checksum),
+    )
+    .unwrap();
+}
+
+#[cfg(feature = "replica")]
+#[test]
+fn clean_continuation_resumes_exact_chain_across_process_exit() {
+    use std::sync::Arc;
+
+    use crab_ltx::{CellReplica, CellStorageLayout};
+    use crab_storage::Store;
+    use object_store::{memory::InMemory, path::Path};
+
+    let directory = tempfile::TempDir::new().unwrap();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["ltx::crash::clean_continuation_writer", "--exact"])
+        .env("CRAB_LTX_CLEAN_RESUME_TEST_DIR", directory.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let recorded = std::fs::read_to_string(directory.path().join("position")).unwrap();
+    let mut fields = recorded.split_whitespace();
+    let txid: u64 = fields.next().unwrap().parse().unwrap();
+    let checksum: u64 = fields.next().unwrap().parse().unwrap();
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            Path::from("test"),
+            [1; 16],
+        ),
+        [2; 32],
+        [3; 16],
+        Limits::default(),
+    )
+    .unwrap();
+    let mut resumed = replica
+        .open_resumed(
+            &directory.path().join("source.sqlite"),
+            &directory.path().join("resumed.sqlite"),
+        )
+        .unwrap();
+    assert_eq!(resumed.position().txid, txid);
+    assert_eq!(resumed.position().checksum, checksum);
+    let value: i64 = resumed
+        .query_with(|connection| connection.query_row("SELECT v FROM t", [], |row| row.get(0)))
+        .unwrap();
+    assert_eq!(value, 1);
+    resumed
+        .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(2)"))
+        .unwrap();
+    let next = resumed.capture().unwrap();
+    assert_eq!(next.position.txid, txid + 1);
+    assert_eq!(next.segments[0].info().pre_checksum, checksum);
+    resumed.close().unwrap();
+}
+
 // Test-harness entry point in a separate process. The parent kills it while the
 // SQLite writer/read-lock connections are live; no orderly close is simulated.
 #[test]

@@ -32,6 +32,8 @@ pub enum LtxPhase {
     ParentSync,
     /// Checkpoint maintenance for the capture.
     Checkpoint,
+    /// Preparing one immutable successor root from captured cuts.
+    RootPreparation,
     /// Opening an exact root.
     RootOpen,
     /// Reading root directory pages.

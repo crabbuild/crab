@@ -1,5 +1,20 @@
 # Crate quality implementation plans
 
+## crab-ltx foundation hardening
+
+Planned on 2026-09-25 against `3b8d3b3614c`. [035](035-crab-ltx-foundation-durability-and-performance.md)
+is a four-slice execution track for the durability mechanics beneath
+`crab-cell-runtime`: contract and sparse-activation baseline, a proven
+checksum-sidecar barrier reduction, crash/exactness qualification, then one
+profile-selected optimization. Execute its slices in order. It depends on the
+existing streaming-publication work in 010 and protected qualification in 015
+for their respective boundaries; it does not reopen the standalone
+epoch-head surface removed by 016–017.
+
+| Plan | Priority | Effort | Depends on | Status |
+| --- | --- | --- | --- | --- |
+| [035](035-crab-ltx-foundation-durability-and-performance.md) | P0 correctness / P1 performance | L | 010 streaming path; 015 release qualification | IN PROGRESS — local slices 1–3 pass, including modeled cuts, clean process resume, and RustFS sparse-owner process kill; Slice 4 local capture optimization measured; physical power-cut and protected proof gates remain |
+
 ## Safe Cell rebalance and scale up/down
 
 Planned on 2026-09-21 against `cebc909940f137e4bd8445e524e77a154bf51a29`

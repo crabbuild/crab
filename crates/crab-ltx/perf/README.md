@@ -35,6 +35,47 @@ not independently durable per-capture latency. These small local samples
 confirm the durability-cost explanation; they are not production SLOs or
 evidence of a universal Crab win.
 
+### Current PR comparison (2026-09-25)
+
+The current `crab-ltx` release runner and Celld pinned at
+`10cb1303dac710dcb3b557e318e08c855261f68b` ran on the same macOS 25.5
+external APFS SSD. Each mode ran seven alternating independent processes;
+each process warmed one 128-transaction round and measured three more. The
+table shows the median of each process's median, followed by the nearest-rank
+p95 across the seven process medians. Times are for the whole 128-transaction
+round, in milliseconds.
+
+| Payload | Mode | Capture p50 | Recovery p50 | Full round p50 / p95 |
+| --- | --- | ---: | ---: | ---: |
+| 4 KiB | Crab immediate | 744 | 25 | 813 / 965 |
+| 4 KiB | Celld default | 403 | 13 | 461 / 773 |
+| 4 KiB | Celld with diagnostic directory syncs | 727 | 26 | 786 / 937 |
+| 16 KiB | Crab immediate | 805 | 28 | 919 / 946 |
+| 16 KiB | Celld default | 420 | 24 | 503 / 542 |
+| 16 KiB | Celld with diagnostic directory syncs | 784 | 29 | 875 / 939 |
+
+Celld's default syncs completed LTX file bytes but does not sync each renamed
+file's directory entry. The runner-only diagnostic syncs L0 after every cut,
+the new L0 ancestor names after the first cut, the new L1 name after
+compaction, and the restored file's parent. With that diagnostic, Crab's full
+round median is 3% slower at 4 KiB and 5% slower at 16 KiB. Against Celld's
+unchanged default it is 76% and 82% slower, respectively. The 4 KiB p95 has
+substantial run-to-run variance. The full-round comparison also includes
+different SQLite versions and different recovery verification work, so it is
+not an isolated capture-algorithm comparison.
+
+Crab `--durability-batch 8` measured 325 / 337 ms p50 / p95 at 4 KiB and
+309 / 328 ms at 16 KiB for the same round. Those medians are 29% and 39%
+below Celld's default full-round medians, but each group of eight cuts waits
+for one shared barrier before local durability can be acknowledged. They do
+not represent independent per-transaction durable latency. Raw JSON for all
+five modes is at
+`$HOME/Workspace/crabbuild-target/crab-1bab/ltx-celld-current-20260925/`.
+Reproduce each mode with `--transactions 128 --rounds 3 --warmup 1` and
+`--payload-bytes 4096` or `16384`, repeating in seven alternating processes;
+add `--sync-parent` for the Celld diagnostic or `--durability-batch 8` for
+Crab's grouped mode.
+
 ## Run it
 
 The script uses release builds, one warmup round, and five measured rounds by
@@ -100,9 +141,9 @@ important fields are:
 - `workload_write_us`: SQLite commit time for schema plus the `N` inserts.
 - `capture_us`: local WAL-to-LTX capture time, including local file syncs.
 - `capture_*_us`: Crab's capture phase ledger. `capture_fsync_us` is the LTX
-  file sync; `capture_parent_sync_us` is the directory-entry sync that makes
-  the atomic rename durable. The other fields split position resolution, WAL
-  reads, page collection, encoding, and local writes.
+  file sync; `capture_parent_sync_us` includes the rename's parent sync and,
+  on the first cut, the new directory-chain syncs. The other fields split
+  position resolution, WAL reads, page collection, encoding, and local writes.
 - `capture_barrier_us`: only populated for the Crab deferred mode; it includes
   the grouped file flush and final parent-directory barrier and is included in
   `capture_us`.
@@ -139,12 +180,32 @@ Celld path fsyncs the file but uses a plain rename without a parent-directory
 sync. Do not treat the capture-only gap as a portable performance win without
 making that durability choice explicit.
 
+The September 21 comparison and the sidecar before/after matrix below predate
+the fix that syncs the newly created `ltx/0`, `ltx`, and session-directory names
+on the first locally durable cut.
+Its numbers are historical rather than a current-build timing claim. Later
+cuts in the same session reuse that directory-chain proof.
+
+The `replica-cost` JSON now separates the schema bootstrap's first immediate
+capture (`bootstrap_capture_us`) and its complete parent-sync phase
+(`bootstrap_parent_sync_us`) from measured commands. On the current build,
+seven independent release processes with 4 KiB commands measured first-cut
+capture at 6,665 / 9,591 µs p50 / p95 and parent sync at 3,003 / 6,024 µs.
+This was macOS 25.5 on the same external APFS SSD, Rust 1.97.0, bundled
+SQLite 3.49.1, and the in-memory object store. The phase includes the final
+LTX rename's direct-parent sync and the three one-time ancestor syncs; it
+does not isolate those four calls individually. Raw per-process JSON is at
+`$HOME/Workspace/crabbuild-target/crab-1bab/ltx-firstcut-20260925/`.
+Reproduce each process with the release binary and
+`--payload-bytes 4096 --commands 12 --warmup 5`; repeat seven times.
+
 The Celld runner accepts `--sync-parent` as a diagnostic contract-normalization
 mode. After each upstream `Db::sync()`, it syncs Celld's L0 directory before
-recording capture completion. It also syncs the destination directory after
-compaction and restore installation. This is not pinned Celld behavior and
-must be reported separately; it answers what the local comparison looks like
-when both runners pay parent-directory barriers for installed artifacts.
+recording capture completion. On the first cut it also syncs the newly created
+`0`, `ltx`, and session-directory names; after compaction it syncs the new L1
+directory name. It syncs the destination directory after restore installation.
+This is runner-only behavior, not pinned Celld behavior. The September 21
+`--sync-parent` ratios above predate these additional directory-chain syncs.
 
 The grouped Crab mode measures batch completion: all captures remain
 unacknowledged until the final file-and-directory barrier succeeds. It is a
@@ -175,6 +236,123 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-ltx-replica-cost" \
   --manifest-path crates/crab-ltx/perf/replica-cost/Cargo.toml -- \
   --payload-bytes 4096 --commands 32 --warmup 4
 ```
+
+### Sparse activation baseline (2026-09-25)
+
+Pass `--sparse` to bootstrap a root, close the source writer, and activate a
+real sparse writer through `open_root().paged().prepare_writable()` and
+`open_writable()`. This mode uses deferred capture, prepares an immutable
+successor, and prunes its local cut after preparation. It reports SQLite commit,
+capture, checksum-sidecar sync count/time, root preparation, WAL bytes read, and
+peak WAL-image allocation separately. The sidecar sync measurement wraps only
+the local `FileSystem`; it does not include SQLite VFS syncs. The fresh mode
+retains its original immediate-capture workload. Neither mode measures runtime
+response proof latency or grants authority merely by preparing a root.
+
+The runner also emits per-command `capture_*_us` fields for all phases in
+`CaptureTiming`. They distinguish WAL transfer, page collection, cut encoding,
+checkpoint maintenance, and LTX reinspection during batch collection.
+
+### Large sparse checkpoint capture (2026-09-25)
+
+With `--sparse --payload-bytes 4194304 --max-capture-bytes 1048576
+--commands 3 --warmup 1`, seven independent release processes measured two
+commands each. Each row below is the p50 / nearest-rank p95 of the seven
+per-process medians, in microseconds. The before and after binaries ran on the
+same macOS/APFS host; run-to-run variation makes this local evidence rather
+than a response-latency SLO.
+
+| Phase | Before | After retaining every sealed cut |
+| --- | ---: | ---: |
+| SQLite commit | 4,327 / 4,550 | 4,482 / 5,258 |
+| LTX capture | 48,935 / 50,122 | 38,801 / 47,617 |
+| LTX reinspection during collection | 10,321 / 10,588 | 0 / 0 |
+| LTX encode | 21,376 / 21,984 | 21,632 / 22,089 |
+| In-memory root preparation | 2,860 / 2,926 | 2,881 / 2,967 |
+
+Checkpointing can seal a second cut before the command receives its batch.
+The prior implementation cached the newest cut's metadata and re-read the
+earlier LTX file to obtain its size, digest, and checksums. The writer already
+computed those values while sealing that same cut. The new cache holds each
+sealed result until collection, removing that reinspection. `VerifiedPlan`
+still reads and verifies every cut before exact restore. Raw per-process JSON
+is under `$HOME/Workspace/crabbuild-target/crab-1bab/ltx-slice4-profile-20260925/`
+(`sparse-*.json` and `metadata-cache-*.json`). The production response phase
+profile and provider durability receipt remain open.
+
+For a small-cut regression check, 21 independent processes per mode used
+`--payload-bytes 4096` or `16384`, `--commands 12 --warmup 5`. Sparse deferred
+capture measured 280 / 329 µs at 4 KiB and 301 / 351 µs at 16 KiB (p50 /
+p95), compared with the earlier seven-process 285 / 335 and 314 / 374 µs.
+Fresh immediate capture measured 4,278 / 5,578 µs and 4,572 / 5,509 µs,
+compared with 4,255 / 5,362 and 4,465 / 5,565 µs. These are different
+process counts and non-interleaved host runs, so small differences are not
+attributable to this change; none shows a greater than 5% p95 regression.
+
+Seven independent release-process rounds per row on macOS 25.5, APFS on a USB
+SSD, Apple silicon, Rust 1.97.0, bundled SQLite 3.49.1, and `object_store`
+0.14.2 in-memory. Each small-payload round measured seven commands after five
+warmups; each 4 MiB round measured two after one warmup. Cells show p50 / p95
+across the seven per-round medians, in microseconds. Peak RSS is the median
+per-process maximum from `/usr/bin/time -l`. The large case sets
+`--max-capture-bytes 1048576` and recorded four complete WAL reads per round.
+
+| Workload | Payload | SQLite commit | LTX capture | Sidecar sync | Root prepare | Sidecar syncs / round | WAL read / round | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Fresh immediate | 4 KiB | 318 / 442 | 4,255 / 5,362 | 0 / 0 | 172 / 207 | 0 | 149 KiB | 11.8 MiB |
+| Sparse deferred | 4 KiB | 332 / 346 | 2,465 / 3,203 | 2,188 / 2,741 | 176 / 256 | 7 | 177 KiB | 12.1 MiB |
+| Fresh immediate | 16 KiB | 244 / 256 | 4,001 / 4,824 | 0 / 0 | 173 / 314 | 0 | 234 KiB | 12.0 MiB |
+| Sparse deferred | 16 KiB | 279 / 351 | 3,154 / 3,347 | 2,790 / 3,006 | 214 / 420 | 7 | 262 KiB | 12.3 MiB |
+| Fresh immediate | 4 MiB | 4,800 / 5,357 | 45,164 / 47,473 | 0 / 0 | 2,498 / 2,795 | 0 | 24.4 MiB | 37.1 MiB |
+| Sparse deferred | 4 MiB | 4,485 / 4,812 | 48,017 / 48,920 | 5,055 / 6,165 | 2,580 / 2,620 | 4 | 24.3 MiB | 37.8 MiB |
+
+The raw per-round JSON is outside tracked source at
+`$HOME/Workspace/crabbuild-target/crab-1bab/ltx-baseline-20260925/`. To
+reproduce a round after a release build, run the corresponding command seven
+times, retaining each JSON output and `/usr/bin/time -l` maximum resident set
+size:
+
+```bash
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-<checkout>" \
+  cargo build --release --locked \
+  --manifest-path crates/crab-ltx/perf/replica-cost/Cargo.toml
+/usr/bin/time -l "$HOME/Workspace/crabbuild-target/crab-<checkout>/release/crab-ltx-replica-cost" \
+  --sparse --payload-bytes 4096 --commands 12 --warmup 5
+```
+
+Replace the payload with `16384` for the middle row. For 4 MiB, use
+`--payload-bytes 4194304 --max-capture-bytes 1048576 --commands 3 --warmup 1`.
+Omit `--sparse` for fresh rows. The published RustFS loopback measurements
+below are provider preparation cost; runtime fleet or exact-root response
+latency needs a separate qualification receipt.
+
+Production telemetry now includes
+`crab_cell_ltx_phase_seconds{phase="root_preparation"}` for each normal
+`CellReplica::prepare` attempt, alongside capture phases and
+`crab_cell_durability_wait_seconds{source="fleet|object"}`. Preparation includes
+admission, immutable uploads, and verification; it can overlap follower proof.
+Use the protected response profile to decide which phase controls acknowledgement
+latency before selecting another optimization.
+
+After removing the active sidecar's per-cut sync, a second seven-round matrix
+with the same commands and host measured:
+
+| Workload | Payload | Capture p50 / p95 before → after | Sidecar syncs / round before → after | WAL read / round before → after |
+| --- | ---: | ---: | ---: | ---: |
+| Fresh immediate | 4 KiB | 4,255 / 5,362 → 3,912 / 4,502 | 0 → 0 | 149 → 149 KiB |
+| Sparse deferred | 4 KiB | 2,465 / 3,203 → 285 / 335 | 7 → 0 | 177 → 177 KiB |
+| Fresh immediate | 16 KiB | 4,001 / 4,824 → 4,465 / 5,565 | 0 → 0 | 234 → 234 KiB |
+| Sparse deferred | 16 KiB | 3,154 / 3,347 → 314 / 374 | 7 → 0 | 262 → 262 KiB |
+| Fresh immediate | 4 MiB | 45,164 / 47,473 → 43,154 / 45,192 | 0 → 0 | 24.4 → 24.4 MiB |
+| Sparse deferred | 4 MiB | 48,017 / 48,920 → 41,348 / 43,153 | 4 → 0 | 24.3 → 24.3 MiB |
+
+The second raw matrix is at
+`$HOME/Workspace/crabbuild-target/crab-1bab/ltx-after-sidecar-20260925/`.
+The unchanged fresh 16 KiB path moved by more than the desired 5% tolerance,
+so these two sequential matrices alone cannot establish a precise global
+latency regression bound. The sidecar sync count and sparse capture reduction
+are direct local evidence; a response-latency claim still requires the runtime
+qualification environment.
 
 Pass `--endpoint http://host:port --bucket <bucket> --access-key <key>
 --secret-key <secret>` to run the identical workload against an S3-compatible

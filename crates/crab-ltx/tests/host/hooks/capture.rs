@@ -66,7 +66,18 @@ fn deferred_captures_share_one_directory_barrier() {
         faults.file_syncs.load(Ordering::Relaxed),
         first.segments.len() + second.segments.len()
     );
-    assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 1);
+    // The first local barrier also seals the new ltx/0, ltx, and session names.
+    assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 4);
+    writer
+        .transaction(|tx| tx.execute("INSERT INTO t VALUES(3)", []))
+        .unwrap();
+    let third = writer.capture_deferred().unwrap();
+    writer.durability_barrier().unwrap();
+    assert_eq!(
+        faults.file_syncs.load(Ordering::Relaxed),
+        first.segments.len() + second.segments.len() + third.segments.len()
+    );
+    assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 5);
     writer.close().unwrap();
 }
 #[test]
@@ -131,8 +142,14 @@ async fn cell_checksum_write_failure_fences_after_sealing_the_cut() {
     writer
         .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(2)"))
         .unwrap();
+    let synced_before_cut = faults.file_syncs.load(Ordering::Relaxed);
+    writer.capture_deferred().unwrap();
+    assert_eq!(faults.file_syncs.load(Ordering::Relaxed), synced_before_cut);
+    writer
+        .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(3)"))
+        .unwrap();
     faults.arm(Some("write_all_at"));
-    injected(writer.capture());
+    injected(writer.capture_deferred());
     faults.arm(None);
     assert!(matches!(writer.capture(), Err(CrabError::Fenced)));
 }

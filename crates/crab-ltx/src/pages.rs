@@ -181,7 +181,7 @@ impl PageChecksums {
         })
     }
 
-    /// Persists a successful candidate after its LTX cut is durably sealed.
+    /// Persists a successful candidate after its LTX cut is sealed.
     pub(crate) fn persist(&mut self) -> Result<()> {
         match self.base.clone() {
             ChecksumBase::Memory(base) => {
@@ -210,7 +210,9 @@ impl PageChecksums {
                     }
                 }
                 file.set_len(length)?;
-                file.sync_all()?;
+                // This base is active-session scratch. A clean handoff writes
+                // and syncs a fresh dense sidecar; a crash cannot reopen this
+                // session directory or use its mutable base as authority.
                 self.base_count = self.count;
                 self.changes.clear();
             }
@@ -225,6 +227,60 @@ impl PageChecksums {
     /// Returns the database page count this index describes.
     pub(crate) fn count(&self) -> u32 {
         self.count
+    }
+
+    /// Verifies the checksum-bearing pages of a clean local database.
+    #[cfg(feature = "replica")]
+    pub(crate) fn verify_database(
+        &self,
+        host: &crate::LtxHost,
+        path: &std::path::Path,
+        page_size: u32,
+    ) -> Result<()> {
+        let mut database = host.open(path)?;
+        let mut base_file = match &self.base {
+            ChecksumBase::File(base) => base.open()?,
+            ChecksumBase::Memory(_) => {
+                return Err(CrabError::InvalidState(
+                    "resume requires a file-backed checksum index",
+                ));
+            }
+        };
+        let mut fold = CHECKSUM_FLAG;
+        let pages_per_read = (CHECKSUM_READ_BYTES / page_size as usize).max(1) as u64;
+        let mut first = 1u64;
+        while first <= u64::from(self.count) {
+            let pages = (u64::from(self.count) - first + 1).min(pages_per_read);
+            let checksums = base_file.read_exact_at((first - 1) * 8, pages as usize * 8)?;
+            let image = database.read_exact_at(
+                (first - 1) * u64::from(page_size),
+                pages as usize * page_size as usize,
+            )?;
+            for (index, (stored, bytes)) in checksums
+                .chunks_exact(8)
+                .zip(image.chunks_exact(page_size as usize))
+                .enumerate()
+            {
+                let page = (first + index as u64) as u32;
+                let expected =
+                    u64::from_be_bytes(stored.try_into().map_err(|_| CrabError::LTXCorrupted)?);
+                if page == ltx::lock_pgno(page_size) {
+                    if expected != 0 {
+                        return Err(CrabError::ChecksumMismatch);
+                    }
+                    continue;
+                }
+                if expected != ltx::checksum_page(page, bytes) {
+                    return Err(CrabError::ChecksumMismatch);
+                }
+                fold = CHECKSUM_FLAG | (fold ^ expected);
+            }
+            first += pages;
+        }
+        if fold != self.checksum {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        Ok(())
     }
 
     /// Writes the dense per-page checksum list, proving it folds to this index.

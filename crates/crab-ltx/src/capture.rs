@@ -113,7 +113,7 @@ pub(crate) struct CaptureEngine {
     checkpointed_wal_offset: i64,
     verified_schema_version: Option<i64>,
     last_l0_header: Option<(Txid, LastL0Header)>,
-    last_l0_segment: Option<crate::SegmentInfo>,
+    sealed_l0_segments: HashMap<u64, crate::SegmentInfo>,
     /// Largest one incremental LTX cut may be.
     ///
     /// A commit whose delta cannot fit this bound is captured as a full
@@ -126,6 +126,7 @@ pub(crate) struct CaptureEngine {
 
     position: Pos,
     l0_dir_ready: bool,
+    l0_ancestors_durable: bool,
     wal_file: Option<crate::HostFile>,
     timing: Option<TimingRecorder>,
     defer_durability: bool,
@@ -213,12 +214,13 @@ impl CaptureEngine {
             checkpointed_wal_offset: 0,
             verified_schema_version: None,
             last_l0_header: None,
-            last_l0_segment: None,
+            sealed_l0_segments: HashMap::new(),
             max_incremental_bytes,
             #[cfg(feature = "replica")]
             sealed_l0_captured_indexes: HashMap::new(),
             position: Pos::ZERO,
             l0_dir_ready: false,
+            l0_ancestors_durable: false,
             wal_file: None,
             timing: None,
             defer_durability: false,
@@ -276,6 +278,26 @@ impl CaptureEngine {
 
     pub fn ltx_path(&self, level: u32, min_txid: Txid, max_txid: Txid) -> String {
         ltx_file_path(&self.meta_path.to_string_lossy(), level, min_txid, max_txid)
+    }
+
+    /// Seals the directory chain that contains the LTX file's synced name.
+    ///
+    /// Syncing `ltx/0` alone cannot preserve a newly created `0`, `ltx`, or
+    /// session-directory entry after power loss. Later cuts reuse these names.
+    pub(crate) fn sync_l0_ancestors(&mut self) -> Result<()> {
+        if self.l0_ancestors_durable {
+            return Ok(());
+        }
+        let ltx = self.meta_path.join("ltx");
+        let l0 = ltx.join("0");
+        self.timing_begin(TimingPhase::ParentSync);
+        let result = [&l0, &ltx, &self.meta_path]
+            .into_iter()
+            .try_for_each(|path| self.host.facilities.filesystem.sync_parent(path));
+        self.timing_end(TimingPhase::ParentSync);
+        result?;
+        self.l0_ancestors_durable = true;
+        Ok(())
     }
 
     fn acquire_read_lock(&mut self) -> Result<()> {
@@ -429,11 +451,8 @@ impl CaptureEngine {
         &self.checksums
     }
 
-    pub(crate) fn sealed_l0_segment(&self, txid: Txid) -> Option<crate::SegmentInfo> {
-        self.last_l0_segment
-            .as_ref()
-            .filter(|info| info.max_txid == txid.0)
-            .cloned()
+    pub(crate) fn take_sealed_l0_segment(&mut self, txid: Txid) -> Option<crate::SegmentInfo> {
+        self.sealed_l0_segments.remove(&txid.0)
     }
 
     #[cfg(feature = "replica")]
@@ -456,7 +475,7 @@ impl CaptureEngine {
             return Err(CrabError::ChecksumMismatch);
         }
         let wal = self.wal_header_bytes()?;
-        self.last_l0_segment = None;
+        self.sealed_l0_segments.clear();
         #[cfg(feature = "replica")]
         {
             self.sealed_l0_captured_indexes.clear();

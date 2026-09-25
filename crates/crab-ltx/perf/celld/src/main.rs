@@ -160,6 +160,7 @@ async fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error
     ltx_db.sync()?;
     if config.sync_parent {
         sync_ltx_parent(ltx_db.meta_path(), 0)?;
+        sync_ltx_ancestors(ltx_db.meta_path())?;
     }
     capture_us += elapsed_us(started);
 
@@ -200,6 +201,7 @@ async fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error
         .ok_or("Celld compaction produced no output")?;
     if config.sync_parent {
         sync_ltx_parent(&meta_path, 1)?;
+        sync_parent(&meta_path.join("ltx").join("1"))?;
     }
     let compact_us = elapsed_us(started);
     let compacted_ltx_bytes = u64::try_from(output.info.size)
@@ -247,6 +249,13 @@ async fn run_round(config: Config, round: usize) -> Result<Sample, Box<dyn Error
 fn sync_ltx_parent(meta_path: &Path, level: u32) -> Result<(), Box<dyn Error>> {
     std::fs::File::open(meta_path.join("ltx").join(level.to_string()))?.sync_all()?;
     Ok(())
+}
+
+fn sync_ltx_ancestors(meta_path: &Path) -> Result<(), Box<dyn Error>> {
+    let ltx = meta_path.join("ltx");
+    sync_parent(&ltx.join("0"))?;
+    sync_parent(&ltx)?;
+    sync_parent(meta_path)
 }
 
 fn sync_parent(path: &Path) -> Result<(), Box<dyn Error>> {

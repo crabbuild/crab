@@ -37,3 +37,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"
 [[example]]
 name = "rustfs_cell_replica_scale_load"
 required-features = ["replica"]
+
+[[example]]
+name = "power_cut_probe"
+required-features = ["replica"]
