@@ -58,8 +58,9 @@ async fn run_claim_cancellation(
 ) {
     let (peer_client, entered, dispatched) =
         peer_client_with_paused_mutation(registry, handles, after_dispatch);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let target = CellTarget::new(
         tenant,
         application,
@@ -221,8 +222,9 @@ async fn run_completion_cancellation(
 ) {
     let (peer_client, entered, dispatched) =
         peer_client_with_paused_mutation(registry, handles, after_dispatch);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let target = CellTarget::new(
         tenant,
         application,

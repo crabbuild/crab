@@ -66,8 +66,9 @@ async fn run_sql_absent_request_retry(
 ) {
     let (peer_client, dropped, dispatched) =
         peer_client_with_one_lost_mutation(registry, handles, true, 1);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let target = CellTarget::new(
         tenant,
         application,
@@ -144,8 +145,9 @@ async fn run_kv_absent_request_retry(
 ) {
     let (peer_client, dropped, dispatched) =
         peer_client_with_one_lost_mutation(registry, handles, true, 1);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let peer_kv = peer
         .kv::<fixture::ReferenceKv>(fixture::KV_NAMESPACE)
         .expect("peer KV");
@@ -216,8 +218,9 @@ async fn run_cron_absent_request_retry(
 ) {
     let (peer_client, dropped, dispatched) =
         peer_client_with_one_lost_mutation(registry, handles, true, 1);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let peer_cron = peer.cron::<fixture::ReferenceCron>().expect("peer Cron");
     let observer_cron = observer
         .cron::<fixture::ReferenceCron>()
@@ -290,8 +293,9 @@ async fn run_workflow_absent_request_retry(
 ) {
     let (peer_client, dropped, dispatched) =
         peer_client_with_one_lost_mutation(registry, handles, true, 1);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let peer_workflow = peer
         .workflow::<fixture::ReferenceWorkflow>()
         .expect("peer Workflow");
@@ -364,6 +368,7 @@ async fn run_blob_absent_request_retry(
         peer_client_with_one_lost_mutation(registry, handles, true, 1);
     let peer = node
         .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap()
         .with_blob_artifact_store(BlobArtifactStore::new(store));
     let peer_blob = peer.blob::<fixture::ReferenceBlob>().expect("peer Blob");
     let observer_blob = observer
@@ -465,8 +470,9 @@ async fn run_queue_absent_request_retry(
 ) {
     let (peer_client, dropped, dispatched) =
         peer_client_with_one_lost_mutation(registry, handles, true, 1);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let peer_queue = peer.queue::<fixture::ReferenceQueue>().expect("peer Queue");
     let observer_queue = observer
         .queue::<fixture::ReferenceQueue>()
@@ -561,8 +567,9 @@ async fn run_effect_absent_ack_retry(
 ) {
     let (peer_client, dropped, dispatched) =
         peer_client_with_one_lost_mutation(registry, handles, true, 1);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let target = CellTarget::new(
         tenant,
         application,

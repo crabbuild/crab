@@ -56,8 +56,9 @@ async fn run_public_sql_lost_response(
     (node, local, tenant, application, _directory, registry, handles, _store): PublicHostFixture,
 ) {
     let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false, 1);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let target = CellTarget::new(
         tenant,
         application,
@@ -133,8 +134,9 @@ async fn run_public_kv_lost_response(
     (node, local, tenant, application, _directory, registry, handles, _store): PublicHostFixture,
 ) {
     let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false, 1);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let peer_kv = peer
         .kv::<fixture::ReferenceKv>(fixture::KV_NAMESPACE)
         .expect("peer KV");
@@ -205,8 +207,9 @@ async fn run_public_queue_lost_response(
     (node, local, tenant, application, _directory, registry, handles, _store): PublicHostFixture,
 ) {
     let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false, 1);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let peer_queue = peer.queue::<fixture::ReferenceQueue>().expect("peer Queue");
     let observer_queue = local
         .queue::<fixture::ReferenceQueue>()
@@ -302,8 +305,9 @@ async fn run_public_cron_lost_response(
     (node, local, tenant, application, _directory, registry, handles, _store): PublicHostFixture,
 ) {
     let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false, 1);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let peer_cron = peer.cron::<fixture::ReferenceCron>().expect("peer Cron");
     let observer_cron = local
         .cron::<fixture::ReferenceCron>()
@@ -379,8 +383,9 @@ async fn run_public_workflow_lost_response(
     (node, local, tenant, application, _directory, registry, handles, _store): PublicHostFixture,
 ) {
     let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false, 1);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let peer_workflow = peer
         .workflow::<fixture::ReferenceWorkflow>()
         .expect("peer Workflow");
@@ -447,8 +452,9 @@ async fn run_public_effect_lost_response(
     (node, local, tenant, application, _directory, registry, handles, _store): PublicHostFixture,
 ) {
     let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false, 1);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let target = CellTarget::new(
         tenant,
         application,
@@ -559,6 +565,7 @@ async fn run_public_blob_lost_response(
     let (peer_client, dropped, _) = peer_client_with_one_lost_mutation(registry, handles, false, 1);
     let peer = node
         .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap()
         .with_blob_artifact_store(BlobArtifactStore::new(store));
     let peer_blob = peer.blob::<fixture::ReferenceBlob>().expect("peer Blob");
     let observer_blob = local

@@ -485,6 +485,12 @@ impl CellClient {
         }
     }
 
+    /// Returns the compiled registry identity used to encode typed calls.
+    #[must_use]
+    pub fn registry_digest(&self) -> Digest {
+        self.registry.release_digest()
+    }
+
     /// Returns a client clone wired to the configured object-store Blob data.
     #[must_use]
     pub fn with_blob_artifact_store(&self, store: crate::BlobArtifactStore) -> Self {

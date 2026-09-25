@@ -144,6 +144,7 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
         tenant,
         application_id,
     )
+    .unwrap()
     .with_blob_artifact_store(BlobArtifactStore::new(store.clone()));
     let now_ms = i64::try_from(
         std::time::SystemTime::now()
@@ -595,6 +596,7 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
         tenant,
         application_id,
     )
+    .unwrap()
     .with_blob_artifact_store(BlobArtifactStore::new(store));
     restored
         .sql::<ReferenceSql>(sql_target.clone())

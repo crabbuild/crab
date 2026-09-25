@@ -64,8 +64,9 @@ async fn run_queue_cancellation(
 ) {
     let (peer_client, entered, dispatched) =
         peer_client_with_paused_mutation(registry, handles, after_dispatch);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let target = CellTarget::new(
         tenant,
         application,
@@ -200,8 +201,9 @@ async fn run_blob_cancellation(
 ) {
     let (peer_client, entered, dispatched) =
         peer_client_with_paused_mutation(registry, handles, after_dispatch);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let target = CellTarget::new(
         tenant,
         application,
@@ -354,8 +356,9 @@ async fn run_effect_ack_cancellation(
 ) {
     let (peer_client, entered, dispatched) =
         peer_client_with_paused_mutation(registry, handles, after_dispatch);
-    let peer =
-        node.application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application);
+    let peer = node
+        .application_handle::<fixture::ReferenceApplication>(peer_client, tenant, application)
+        .unwrap();
     let target = CellTarget::new(
         tenant,
         application,

@@ -172,6 +172,7 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
             tenant,
             application_id,
         )
+        .unwrap()
         .with_blob_artifact_store(BlobArtifactStore::new(store.clone()));
     let source_kv = source_handle
         .kv::<fixture::ReferenceKv>(fixture::KV_NAMESPACE)
@@ -458,6 +459,7 @@ async fn run_public_primitive_takeover(store: Store, root: Path) {
             tenant,
             application_id,
         )
+        .unwrap()
         .with_blob_artifact_store(BlobArtifactStore::new(store));
     let successor_sql = successor_handle
         .sql::<fixture::ReferenceSql>(sql_target)

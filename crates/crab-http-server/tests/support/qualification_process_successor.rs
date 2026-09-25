@@ -51,6 +51,7 @@ pub(super) async fn run() {
         .expect("successor direct client");
     let typed = successor
         .application_handle::<fixture::ReferenceApplication>(direct.clone(), tenant, application_id)
+        .unwrap()
         .with_blob_artifact_store(BlobArtifactStore::new(store));
     if let Some(acknowledged) = &acknowledgement {
         process_duplicate::verify(&typed, tenant, application_id, acknowledged).await;

@@ -817,7 +817,10 @@ impl Registry {
         self.namespace_modules.len()
     }
 
-    pub(crate) fn command_contract<C: Command>(
+    /// Returns the compiled contract for a typed command in one namespace.
+    ///
+    /// Fails when the command's stable module, ID, or codec is absent.
+    pub fn command_contract<C: Command>(
         &self,
         namespace: NamespaceId,
     ) -> Result<OperationDescriptor> {
@@ -830,10 +833,10 @@ impl Registry {
         )
     }
 
-    pub(crate) fn query_contract<Q: Query>(
-        &self,
-        namespace: NamespaceId,
-    ) -> Result<OperationDescriptor> {
+    /// Returns the compiled contract for a typed query in one namespace.
+    ///
+    /// Fails when the query's stable module, ID, or codec is absent.
+    pub fn query_contract<Q: Query>(&self, namespace: NamespaceId) -> Result<OperationDescriptor> {
         self.operation_contract(
             namespace,
             Q::MODULE,

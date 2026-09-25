@@ -66,12 +66,14 @@ impl CellNode {
         self.runtime.is_shutting_down()
     }
     /// Binds a product-created typed client to this application's tenant scope.
+    ///
+    /// Rejects a client built from a different compiled registry.
     pub fn application_handle<A: CellApplication>(
         &self,
         client: CellClient,
         tenant: TenantId,
         application: ApplicationId,
-    ) -> ApplicationHandle<A> {
+    ) -> crab_cell_runtime::Result<ApplicationHandle<A>> {
         ApplicationHandle::new(client, Arc::clone(&self.application), tenant, application)
     }
 }

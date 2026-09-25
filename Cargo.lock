@@ -2191,6 +2191,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "blake3",
+ "crab-cell-host",
  "crab-cell-runtime",
  "crab-ltx",
  "crab-storage",
@@ -2199,6 +2200,7 @@ dependencies = [
  "object_store",
  "tempfile",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

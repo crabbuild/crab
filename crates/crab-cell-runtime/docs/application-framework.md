@@ -114,6 +114,12 @@ The operator API owns the current `CellCatalog`, `CellAuthority`, `CellRuntime`,
 It returns an application-bound client instead of exposing those parts
 individually.
 
+Binding an `ApplicationHandle` is fallible: its author type must name the
+compiled application, and its `CellClient` must carry the same release digest
+as the compiled registry. The host checks this before returning the handle,
+so a client assembled with a different release cannot dispatch through an
+application descriptor that validated a different set of operations.
+
 ## Declare one application
 
 The initial framework remains statically linked Rust. Attributes reduce
@@ -289,6 +295,17 @@ unfenced local-file read or a global timestamp spanning Cells.
 
 The generated client binds tenant, application, registry, and routing once.
 Each namespace accessor accepts only its declared key type.
+
+The current Rust `crab_cell_app::cell_client!` binding generates namespace
+accessors and typed command, prepare, query, and resolution methods from
+explicit stable IDs. Construction checks the compiled registry and operation
+traits; each accessor accepts a declared `CellKey` whose canonical bytes feed
+the compiled `CellType` shard contract. The
+reference application's independent descriptor-byte test, compile-fail
+examples, and three-node `CellNode` suite cover this initial binding. The
+rollout test overlaps two release identities with unchanged module contracts;
+additive code rollout remains unqualified. A general schema-driven generator
+and generated transport adapters remain open.
 
 ```rust,ignore
 let commerce = CommerceClient::new(node.application::<Commerce>()?);

@@ -134,16 +134,60 @@ impl CellModule for ReferenceSql {
             effect_targets: &[],
             dead_letter: None,
         }];
-        descriptor(SQL_MODULE, &[1, 3, 4, 6], &[2, 5, 6], NAMESPACES, &[], &[])
+        descriptor(
+            SQL_MODULE,
+            &[1, 3, 4, 6],
+            &[2, 5, 6, 7],
+            NAMESPACES,
+            &[],
+            &[],
+        )
     }
     fn register(self, registry: &mut RegistryBuilder) -> Result<()> {
         register_sql::<Self>(registry)?;
         registry.bind_command::<ReferenceCronReceiver>()?;
+        registry.bind_query::<ReferenceReceiptCount>()?;
         register_effect_delivery::<Self>(registry)
     }
 }
 
+pub(crate) struct ReferenceReceiptCount;
+
+impl crab_cell_runtime::registry::Query for ReferenceReceiptCount {
+    const MODULE: &'static str = SQL_MODULE;
+    const ID: u32 = 7;
+    const CODEC_VERSION: u32 = 1;
+    type Input = ();
+    type Output = u64;
+
+    fn execute(
+        context: &mut crab_cell_runtime::registry::QueryContext<'_>,
+        _input: Self::Input,
+    ) -> Result<Self::Output> {
+        let results = context.sql(&SqlBatch {
+            statements: vec![SqlStatement {
+                sql: "SELECT COUNT(*) FROM invoice_receipts".into(),
+                parameters: Vec::new(),
+            }],
+        })?;
+        match results[0].rows.first().and_then(|row| row.first()) {
+            Some(SqlValue::Integer(count)) => {
+                u64::try_from(*count).map_err(|_| Error::Command("negative invoice receipt count"))
+            }
+            _ => Err(Error::Command("invoice receipt count is unavailable")),
+        }
+    }
+}
+
 pub(crate) struct ReferenceCronReceiver;
+
+pub(crate) struct OrderId(pub(crate) Vec<u8>);
+
+impl crab_cell_app::CellKey for OrderId {
+    fn canonical_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 impl Command for ReferenceCronReceiver {
     const MODULE: &'static str = SQL_MODULE;
@@ -170,6 +214,17 @@ impl Command for ReferenceCronReceiver {
             }],
         })?;
         Ok(CommandResult::Success(()))
+    }
+}
+
+crab_cell_app::cell_client! {
+    pub(crate) struct ReferenceClient (ReferenceApplication) {
+        pub(crate) fn orders(scope: &OrderId) -> ReferenceOrderCell {
+            namespace: SQL_NAMESPACE,
+            module: SQL_MODULE,
+            commands: { pub(crate) fn receive_cron, prepare_receive_cron: ReferenceCronReceiver = 6; },
+            queries: { pub(crate) fn receipt_count: ReferenceReceiptCount = 7; }
+        }
     }
 }
 
