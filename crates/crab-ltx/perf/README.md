@@ -161,6 +161,56 @@ retention, scheduled multi-level compaction, or either implementation's paged
 VFS. Those paths have different contracts and need a second harness with the
 same object-store and authority model before they can be compared fairly.
 
+## Cell publication cost per command
+
+`replica-cost/` measures the other half of that scope: what one command costs
+the Cell object store when it publishes an immutable root. Each measured command
+commits one SQLite transaction, captures one LTX cut, and prepares one successor
+root through `CellReplica` over an in-memory `object_store`, which reports the
+objects and bytes a provider would receive.
+
+```bash
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-ltx-replica-cost" \
+  cargo run --release \
+  --manifest-path crates/crab-ltx/perf/replica-cost/Cargo.toml -- \
+  --payload-bytes 4096 --commands 32 --warmup 4
+```
+
+Pass `--endpoint http://host:port --bucket <bucket> --access-key <key>
+--secret-key <secret>` to run the identical workload against an S3-compatible
+provider. The table below was measured on 2026-09-24 (Apple silicon, release
+build, one bootstrap root then 28 measured commands) against the in-memory store
+and against a local RustFS server:
+
+| payload | objects/command | objects p95 | bytes/command | bytes p95 | in-memory us p50 / p95 | RustFS us p50 / p95 / p99 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 4 KiB | 5 | 5 | 13,050 | 20,009 | 189 / 289 | 99,872 / 139,124 / 152,133 |
+| 16 KiB | 5 | 5 | 19,057 | 29,331 | 222 / 393 | 87,197 / 94,588 / 98,919 |
+| 256 KiB | 7 | 11 | 81,735 | 105,934 | 408 / 556 | 85,729 / 126,159 / 155,510 |
+| 1 MiB | 8 | 11 | 159,666 | 178,523 | 604 / 848 | 97,929 / 120,578 / 132,084 |
+| 4 MiB | 13 | 14 | 526,784 | 547,043 | 1,102 / 1,583 | 126,178 / 145,947 / 149,441 |
+
+Every command pays a segment body, its index, the rewritten directory nodes, the
+root document, and any segment page. Object and byte counts are byte-identical
+across the two stores, so they are provider independent; only latency moves, and
+the RustFS rows are loopback latency, not a cloud bucket. Counts grow with the
+number of directory leaves a payload touches: 5 objects for a small write up to
+13 at the 4 MiB maximum a built-in primitive may write in one command. Byte cost
+is dominated by the rewritten leaves and root document, and the payload's
+compressibility matters more than its size.
+
+A hot Cell at 100 commands per second would issue roughly 500-1,300 immutable
+PUTs per second, which is why the runtime admits against one pending-publication
+byte high-water mark per Cell plus the 32-segment compaction debt that folds the
+root graph. Publication stays one serialized root per command because the object
+path is the long-term durability authority and the node-log fleet proof releases
+the command earlier; on this loopback RustFS path one command costs roughly
+0.09-0.15 seconds of provider work, so a Cell without a fleet proof is
+provider-latency bound, not CPU bound. Coalescing several commands into one root
+would save metadata objects, not bodies, and the fleet-proof race already
+absorbs most of that latency for enrolled nodes. Multi-Cell concurrency,
+cloud-bucket p99, and retention cost remain unmeasured.
+
 The runners also use the implementations' pinned bundled SQLite versions:
 Crab currently links SQLite 3.49.1 while the pinned Celld revision links SQLite
 3.45.0. `workload_write_us` and therefore `total_us` include that difference;

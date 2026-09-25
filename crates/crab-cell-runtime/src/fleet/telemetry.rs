@@ -82,6 +82,15 @@ pub trait CellTelemetry: Send + Sync {
     /// Records how one commit's node-log submission resolved.
     fn durability_submission(&self, _outcome: DurabilitySubmissionOutcome) {}
 
+    /// Records the immutable objects and bytes one preparation attempt uploaded.
+    ///
+    /// The count covers every object a Cell root needs — segment bodies,
+    /// indexes, directory nodes, root documents, segment pages, bundle bodies,
+    /// and compaction outputs — so an operator can size object-store cost per
+    /// command instead of inferring it from the database size. Failed attempts
+    /// record the objects they did upload.
+    fn publication_cost(&self, _objects: u64, _bytes: u64) {}
+
     /// Records bytes sent to follower append lanes and whether every lane acknowledged them.
     fn node_log_append(&self, _acknowledged: bool, _bytes: u64) {}
 
@@ -149,6 +158,12 @@ impl CellTelemetryHandle {
     pub(crate) fn durability_submission(&self, outcome: DurabilitySubmissionOutcome) {
         if let Some(telemetry) = self.inner.get() {
             telemetry.durability_submission(outcome);
+        }
+    }
+
+    pub(crate) fn publication_cost(&self, objects: u64, bytes: u64) {
+        if let Some(telemetry) = self.inner.get() {
+            telemetry.publication_cost(objects, bytes);
         }
     }
 

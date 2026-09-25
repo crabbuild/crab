@@ -1,0 +1,20 @@
+# Measures the immutable publication cost of one Cell command.
+#
+# Its own workspace, like the other runners here, so the crate under test is
+# built with the `replica` feature without touching the main workspace target.
+[package]
+name = "crab-ltx-replica-cost"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+crab-ltx = { path = "../../", features = ["replica"] }
+crab-storage = { path = "../../../crab-storage" }
+object_store = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }

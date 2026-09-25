@@ -279,12 +279,15 @@ impl CellPublisher {
         &mut self,
         pending: &crate::cell::executor::PendingCommit,
     ) -> Result<crab_ltx::PreparedRoot> {
-        self.prepare_append(
-            pending.cuts(),
-            pending.outcome().commit_sequence(),
-            self.observed.value().schema,
-        )
-        .await
+        let result = self
+            .prepare_append(
+                pending.cuts(),
+                pending.outcome().commit_sequence(),
+                self.observed.value().schema,
+            )
+            .await;
+        self.record_publication_cost();
+        result
     }
 
     pub(crate) async fn prepare_initial(
@@ -294,9 +297,11 @@ impl CellPublisher {
         if self.observed.value().root.is_some() {
             return Err(Error::Control("bootstrap control already has a root"));
         }
-        let prepared = self
+        let result = self
             .prepare_cuts(None, cuts, 0, self.observed.value().schema)
-            .await?;
+            .await;
+        self.record_publication_cost();
+        let prepared = result?;
         self.note_append(&prepared);
         Ok(prepared)
     }
@@ -309,12 +314,27 @@ impl CellPublisher {
         if self.observed.value().schema != pending.from_schema() {
             return Err(Error::Fenced);
         }
-        self.prepare_append(
-            pending.cuts(),
-            pending.commit_sequence(),
-            pending.to_schema(),
-        )
-        .await
+        let result = self
+            .prepare_append(
+                pending.cuts(),
+                pending.commit_sequence(),
+                pending.to_schema(),
+            )
+            .await;
+        self.record_publication_cost();
+        result
+    }
+
+    /// Reports the immutable cost of the last preparation attempt.
+    ///
+    /// The ledger is drained on every attempt, including failed ones, so a
+    /// provider retry loop that uploads objects before failing is visible as
+    /// cost instead of silently disappearing.
+    fn record_publication_cost(&self) {
+        let cost = self.replica.take_publication_cost();
+        if cost.objects > 0 {
+            self.telemetry.publication_cost(cost.objects, cost.bytes);
+        }
     }
 
     async fn prepare_append(
@@ -426,6 +446,7 @@ impl CellPublisher {
                     }
                 }
             };
+            self.record_publication_cost();
             match result {
                 Ok(prepared) => return Ok(prepared),
                 Err(error) if retryable_ltx_error(&error) => {
@@ -461,6 +482,7 @@ impl CellPublisher {
                     }
                 }
             };
+            self.record_publication_cost();
             match result {
                 Ok(prepared) => break prepared,
                 Err(error) if retryable_ltx_error(&error) => {
@@ -823,11 +845,9 @@ fn retryable_publication_error(error: &Error) -> bool {
 }
 
 fn retryable_ltx_error(error: &crab_ltx::CrabError) -> bool {
-    matches!(
-        error,
-        crab_ltx::CrabError::Storage(error)
-            if retryable_storage_error(error)
-    )
+    // The failure class is the retry contract; no sender decides from the
+    // error's shape or message.
+    error.classify().is_retryable()
 }
 
 fn runtime_retry_hint(error: &Error) -> Option<std::time::Duration> {
@@ -838,10 +858,7 @@ fn runtime_retry_hint(error: &Error) -> Option<std::time::Duration> {
 }
 
 fn ltx_retry_hint(error: &crab_ltx::CrabError) -> Option<std::time::Duration> {
-    let crab_ltx::CrabError::Storage(error) = error else {
-        return None;
-    };
-    retry_hint(error)
+    error.classify().retry_after()
 }
 
 #[cfg(test)]
