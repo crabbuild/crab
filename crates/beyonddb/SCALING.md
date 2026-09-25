@@ -25,9 +25,8 @@ and splits at most one range above a SQLite database-image threshold. The
 ordinary sweep selects the next range by indexed lower boundary and checks
 ownership by partition ID without loading the full route. The
 measurement includes indexes and runtime tables but excludes WAL/LTX files.
-The provisioner can install this loop in a node task group, and the signed SDK
-host test now runs it there; a production serving binary still needs to install
-it for every admitted account. There is no merge controller, and the account
+The provisioner can install this loop in a node task group, and the serving
+binary installs it for every locally admitted account. There is no merge controller, and the account
 directory remains bounded.
 The runtime client can now select a locally owned Cell or forward an operation
 through an authenticated peer round trip after reading catalog and authority.
@@ -44,8 +43,10 @@ and restores the account and credential Cells. Another public endpoint reads
 the data over pinned mTLS. The replacement rejects data takeover while that
 owner is live, then fences its expired boot session, restores the data Cell,
 and reads the committed item from object storage. Placement,
-unattended crash takeover, and a serving binary
-remain unimplemented, so this is not production multi-node service proof.
+unattended crash takeover, and multi-node capacity control remain unimplemented,
+so this is not production multi-node service proof. A separate process smoke
+now proves signed SDK writes and recovery through the serving binary against
+RustFS; it does not prove aggregate capacity or unattended failover.
 Increasing a Cell's database budget does not increase
 write parallelism or provide online repartitioning. Both Cell types declare a
 512 MiB database budget and 64 MiB capture budget; host admission supplies

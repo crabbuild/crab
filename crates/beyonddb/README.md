@@ -15,6 +15,71 @@ AWS SDK / DynamoDB JSON client
   -> Cell actor, SQLite transaction, LTX publication, object store
 ```
 
+## Running the current server
+
+`cargo run -p beyonddb --bin beyonddb -- config.json --bootstrap` starts one
+leased Cell node, a private mTLS peer listener, and ExtendDB's public DynamoDB
+listener. `--bootstrap` reads one access-key secret from stdin, stores it
+encrypted in a credential Cell, and commits the configured inline user policy.
+Run without `--bootstrap` after the first successful start. The encryption key
+file contains exactly 32 raw bytes and must be retained across restarts.
+
+```json
+{
+  "storage_url": "s3://my-bucket/beyonddb",
+  "node_id": "01994f26-5966-7b20-8b58-2fddf198a321",
+  "data_dir": "/srv/beyonddb/scratch",
+  "disk_budget_bytes": 107374182400,
+  "encryption_key_file": "/etc/beyonddb/encryption.key",
+  "region": "us-east-1",
+  "peer_bind": "0.0.0.0:9001",
+  "peer_endpoint": "https://node.example.com:9001",
+  "peer_certificate": "/etc/beyonddb/peer.crt",
+  "peer_private_key": "/etc/beyonddb/peer.key",
+  "peer_ca": "/etc/beyonddb/peer-ca.crt",
+  "peer_server_name": "node.example.com",
+  "public_bind": "0.0.0.0:8000",
+  "public_endpoint": "https://ddb.example.com:8000",
+  "public_certificate": "/etc/beyonddb/public.crt",
+  "public_private_key": "/etc/beyonddb/public.key",
+  "owned_accounts": ["123456789012"],
+  "owned_access_keys": ["AKIAIOSFODNN7EXAMPLE"],
+  "initial_partitions": 4,
+  "split_threshold_bytes": 268435456,
+  "bootstrap": {
+    "account_id": "123456789012",
+    "access_key_id": "AKIAIOSFODNN7EXAMPLE",
+    "principal_name": "operator",
+    "policy_name": "tables",
+    "policy_file": "/etc/beyonddb/operator-policy.json"
+  }
+}
+```
+
+The peer certificate must be an Ed25519 leaf trusted by `peer_ca`, valid for
+both client and server authentication, and cover `peer_server_name`. All nodes
+in one fleet use the same CA, storage root, compiled release, and encryption
+key. The public listener requires TLS unless bound to loopback. The object
+store must support strict create and conditional updates; local `file://`
+storage does not provide the required Cell authority semantics. A new node
+session uses a fresh scratch directory; graceful shutdown removes it after
+Cell drain. Crashed sessions may leave scratch directories for operator cleanup.
+
+The process smoke test starts RustFS, bootstraps a key, sends AWS SDK table and
+item requests, restarts the server, and reads the committed item. Run it in a
+dedicated environment with `rustfs`, `aws`, and `openssl` available:
+
+```bash
+CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-beyonddb \
+  cargo test -p beyonddb --test server_binary -- --ignored
+```
+
+This server uses an explicit list of locally owned account and credential
+Cells. Automatic placement, unattended takeover, multi-node capacity loops,
+management APIs, and the remaining DynamoDB operations are still required
+before this is a complete service. A public node with no locally owned account
+or credential Cells can forward signed requests to live owners through mTLS.
+
 The account Cell, independently owned data-range Cells, and a partial ExtendDB
 `StorageEngine` adapter are implemented today. Table and item operations have
 Cell paths; the remaining traits return explicit unsupported errors except for
@@ -24,8 +89,8 @@ still use the account Cell unless a provisioner is configured. The host-backed
 provisioner installs 1–256 initial data Cells per table during CreateTable and
 resumes after an interrupted setup. The initial count must stay fixed across
 retries. A host-backed controller can resume a recorded split. A cancellable
-account capacity loop can trigger a split, but no serving host starts that loop
-yet. There is no merge controller, BeyondDB HTTP binary, complete
+account capacity loop can trigger a split, and the serving binary starts that
+loop for locally owned accounts. There is no merge controller or complete
 `StorageEngine`/`CatalogStore` behavior, or account-management service yet.
 `build_http_state` now assembles ExtendDB's signed request path from a ready,
 leased Cell node. ExtendDB requires a `CatalogStore` even for DynamoDB request
@@ -43,8 +108,9 @@ threshold. That measurement includes indexes and runtime tables, but excludes
 WAL and LTX files. The account loop checks one table range per tick and can
 trigger one split per tick. The provisioner can install it in the node's task
 group, where failure closes readiness and shutdown cancels it before Cell drain.
-A serving binary still needs to install it for every admitted account and account
-for disk and capture pressure before a Cell reaches its admission limit.
+The serving binary installs it for every locally admitted account. The loop
+still needs disk and capture-pressure inputs before a Cell reaches its
+admission limit.
 One request-path gate now passes: a signed HTTP request reaches a durable Cell
 write and survives owner restart in a loopback integration test using ExtendDB's
 HTTP server and an AWS DynamoDB SDK client. The credential is encrypted and
@@ -56,7 +122,7 @@ against an inline user policy stored in the account Cell. The test verifies
 denial without a policy, denial for an unlisted table, immediate denial after
 policy removal, and policy recovery after owner restart. Group, role, boundary,
 and tag policy storage, credential provisioning, Cell-backed management
-operations, and a serving binary remain unfinished. Until policy-cache
+operations remain unfinished. Until policy-cache
 invalidation is wired, serving composition must use ExtendDB's pass-through
 authorization cache so removal takes effect immediately.
 The same SDK client creates another table and writes through its newly admitted
@@ -78,8 +144,7 @@ Both public endpoints then read the committed item, including a read that
 forwards to the data owner. The replacement refuses data takeover while that
 owner is live, then fences its expired node session after lease renewal stops,
 restores the data Cell from object storage, and reads the item again. A
-multi-node serving binary, automatic placement, and unattended takeover remain
-unfinished.
+automatic placement and unattended takeover remain unfinished.
 
 ## Cell ownership
 
@@ -140,8 +205,8 @@ The signed SDK host test uses `CellNodeBuilder::build`, a published node
 advertisement, a renewing lease guard, and a task group. The lease task keeps
 the authoritative advertisement fresh and fences the node on terminal failure;
 normal task cancellation leaves the guard live while the node drains. Other offline host
-tests use `build_unleased_for_maintenance`. A serving binary must renew its
-node lease through this task, supervise its tasks, and pass the host readiness gate before
+tests use `build_unleased_for_maintenance`. The serving binary renews its
+node lease through this task, supervises its tasks, and passes the host readiness gate before
 accepting requests. It must route to the current owner or perform a fenced takeover;
 bootstrapping another writer for an existing Cell is not valid.
 The provisioner also admits account and credential Cells, including acquisition

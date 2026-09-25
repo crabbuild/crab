@@ -274,8 +274,9 @@ impl CellCredentialStore {
     pub async fn put_credential(
         &self,
         access_key_id: &str,
-        credential: StoredCredential,
+        mut credential: StoredCredential,
     ) -> std::result::Result<(), StorageError> {
+        let secret_key = Zeroizing::new(std::mem::take(&mut credential.secret_key));
         crate::account_target(&credential.account_id)
             .map_err(|error| StorageError::Validation(error.to_string()))?;
         if credential.is_session
@@ -297,7 +298,7 @@ impl CellCredentialStore {
             .encrypt(
                 Nonce::from_slice(&nonce),
                 Payload {
-                    msg: credential.secret_key.as_bytes(),
+                    msg: secret_key.as_bytes(),
                     aad: access_key_id.as_bytes(),
                 },
             )

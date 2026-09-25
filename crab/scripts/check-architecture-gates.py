@@ -1885,8 +1885,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
     "crab-cell-runtime": {"normal": {"crab-ltx", "crab-storage"}},
     "crab-ltx": {"normal": {"crab-storage"}},
     "beyonddb": {
-        "normal": {"crab-cell-app", "crab-cell-host", "crab-cell-peer-http", "crab-cell-runtime", "crab-ltx"},
-        "dev": {"crab-storage"},
+        "normal": {"crab-cell-app", "crab-cell-host", "crab-cell-peer-http", "crab-cell-runtime", "crab-ltx", "crab-storage"},
     },
     "crab-remote": {
         "normal": {"crab-auth", "crab-coordination", "crab-git", "crab-metadata", "crab-read", "crab-remote-git", "crab-storage", "crab-write", "crab-xet"},
