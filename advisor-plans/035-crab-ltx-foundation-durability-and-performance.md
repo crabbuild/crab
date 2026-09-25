@@ -1,6 +1,6 @@
 # Plan 035: Harden crab-ltx as the Cell durability foundation
 
-Status: IN PROGRESS — local Slices 1–2 implemented; Slice 3 modeled and sparse process-kill tested; physical power-cut and protected proof gates remain; Slice 4 no-go pending production profile
+Status: IN PROGRESS — local Slices 1–2 implemented; Slice 3 model and RustFS sparse-owner process kill pass; physical power-cut and protected proof gates remain; Slice 4 no-go pending production profile
 Priority: P0 correctness; P1 measured performance
 Effort: L, split into four reviewable changes
 Risk: High at the filesystem and recovery boundaries
@@ -308,15 +308,21 @@ status of this plan in `advisor-plans/README.md` after each slice.
   outside the model. An active sparse writer was process-killed after an
   unproved deferred cut; after deleting its local source, the test selected the
   previous immutable root, saw the old SQL value, and committed its next cut.
-  That fixture does not run runtime authority or follower proof, so the
-  combined process-kill plus runtime-proof gate and a dedicated physical
-  power-cut/block-device run remain open.
+  That fixture does not run runtime authority or follower proof; the dedicated
+  physical power-cut/block-device run remains open.
 - The existing `crab-http-server` filesystem process-fault smoke passed after
   building its UI prerequisite: it killed an owner after three acknowledged
   settlements, recovered through a successor, and checked an independent
   observer. It exercises runtime acknowledgement proof, but its killed owner
   is a bootstrap owner rather than the sparse activation above. The combined
-  sparse-owner plus runtime-proof case remains open.
+  sparse-owner plus runtime-proof case was then added under
+  `crates/crab-cell-runtime/tests/runtime/lifecycle/ownership/sparse_process.rs`.
+  It passed against an isolated RustFS bucket: a child process activated a
+  sparse writer with its file-backed checksum sidecar, received success after
+  exact-root publication, was killed, and lost its local files. The successor
+  restored the published root, read the acknowledged SQL value, and published
+  the next commit. The test uses a real provider root CAS; it does not claim
+  physical power-cut evidence.
 - Slice 4 no-go for now: after the sidecar sync change, sparse 4 KiB and 16 KiB
   local captures are about 0.3 ms p50, while the 4 MiB full-WAL case is about
   41 ms p50 and reads about 24 MiB of WAL per measured round. Existing RustFS
