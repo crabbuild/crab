@@ -186,6 +186,53 @@ impl CellRuntime {
         self.inner.telemetry.clone()
     }
 
+    /// Lists resident Cells whose published due time has passed.
+    ///
+    /// The actor answers from its own map, so a scheduler can tick due work it
+    /// already owns without reading the Cell's catalog entry or control
+    /// record. Callers must treat the list as a hint: the Tick itself fences
+    /// against the publish sequence and re-derives what is due inside the
+    /// Cell's transaction.
+    pub async fn due_resident(
+        &self,
+        now_ms: i64,
+        limit: usize,
+    ) -> crate::Result<Vec<super::DueResident>> {
+        self.ensure_running()?;
+        if limit == 0 || now_ms < 0 {
+            return Ok(Vec::new());
+        }
+        let (reply, response) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Message::DueResident {
+                now_ms,
+                limit,
+                reply,
+            })
+            .await
+            .map_err(|_| Error::RuntimeClosed)?;
+        let due = response.await.map_err(|_| Error::RuntimeClosed)?;
+        Ok(due
+            .into_iter()
+            .map(|cell| {
+                super::DueResident::new(
+                    CellHandle {
+                        cell: cell.cell,
+                        incarnation: cell.incarnation,
+                        code: cell.code,
+                        schema: cell.schema,
+                        catalog: cell.catalog,
+                        inner: Arc::clone(&self.inner),
+                        admission: cell.admission,
+                    },
+                    cell.expected_commit_sequence,
+                    cell.next_due_ms,
+                )
+            })
+            .collect())
+    }
+
     /// Installs the successfully published process lease before Cell admission opens.
     pub fn install_node_lease(&self, guard: NodeLeaseGuard) -> crate::Result<()> {
         if self.inner.shutting_down.load(Ordering::Acquire) {

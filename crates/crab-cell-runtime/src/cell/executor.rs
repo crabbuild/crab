@@ -1071,6 +1071,35 @@ impl CellExecutor {
         Ok(())
     }
 
+    /// Closes a drained executor and leaves a local record of what it holds.
+    ///
+    /// The record only accelerates the next same-node activation of this exact
+    /// root: a database that cannot produce one is still closed cleanly, because
+    /// the object store, not the local file, is the authority.
+    pub(crate) fn close_resumable(self, root: crate::control::RootRef, code: Digest) -> Result<()> {
+        if self.has_pending() || self.fenced {
+            return Err(Error::Fenced);
+        }
+        let database = self.db.path().to_owned();
+        if let Err(error) = self.db.persist_continuation() {
+            tracing::debug!(error = %error, "Cell capture continuation was not recorded");
+        } else {
+            match crate::cell::resume::ResumeRecord::new(
+                self.cell,
+                self.incarnation,
+                self.schema,
+                code,
+                root,
+                &database,
+            ) {
+                Ok(record) => crate::cell::resume::write(&record, &database),
+                Err(error) => tracing::debug!(error = %error, "Cell resume record was refused"),
+            }
+        }
+        self.db.close()?;
+        Ok(())
+    }
+
     /// Closes a fenced executor without treating local pending state as authority.
     ///
     /// The caller must recover only from the authoritative immutable root. Local

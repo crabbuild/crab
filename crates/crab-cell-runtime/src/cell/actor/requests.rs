@@ -338,6 +338,8 @@ pub(super) fn start_publication(
     // root preparation and CAS; no second object publisher can overtake it.
     let pool = pool.clone();
     let retained_reservation = publication.retained_reservation;
+    let published_next_due_ms = publication.pending.next_due_ms();
+    let published_commit_sequence = publication.pending.outcome().commit_sequence();
     tasks.spawn(async move {
         let _retained_reservation = retained_reservation;
         let retained_bytes = publication.pending.retained_bytes();
@@ -425,6 +427,8 @@ pub(super) fn start_publication(
             publisher: Box::new(publisher),
             retained_bytes,
             node_logged,
+            next_due_ms: published_next_due_ms,
+            commit_sequence: published_commit_sequence,
             result,
             fenced,
         }

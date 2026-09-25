@@ -243,6 +243,7 @@ impl CellRuntime {
         }
         let reservation = self.inner.pool.reserve_activation()?;
         let successor = observed.value().takeover(owner)?;
+        let ownership_started = std::time::Instant::now();
         let claimed = match authority
             .transition(&observed, successor.clone(), Transition::Takeover)
             .await
@@ -259,6 +260,10 @@ impl CellRuntime {
                 current
             }
         };
+        self.inner.telemetry.activation_phase(
+            crate::fleet::telemetry::ActivationPhase::Ownership,
+            ownership_started.elapsed(),
+        );
         let rollback_authority = authority.clone();
         let rollback_claim = claimed.clone();
         let rollback_replica = replica.clone();
@@ -472,32 +477,90 @@ impl CellRuntime {
             .ok_or(Error::Control("activation requires a published root"))?;
         let incarnation = control.incarnation;
         let schema = control.schema;
-        let verified = replica.open_root(&root).await?;
+        // A resume record this node wrote on a clean release still names this
+        // exact root, so the local image can be continued instead of restored.
+        // The record is an accelerator: every failure falls back to the origin.
+        let database = match crate::cell::resume::take_matching(&destination, control, &replica) {
+            Some(source) => {
+                let resumed_started = std::time::Instant::now();
+                match replica.open_resumed(&source, &destination) {
+                    Ok(db) => {
+                        self.inner.telemetry.activation_phase(
+                            crate::fleet::telemetry::ActivationPhase::Resume,
+                            resumed_started.elapsed(),
+                        );
+                        crate::cell::worker::RestoredDatabase::Local(Box::new(db))
+                    }
+                    Err(error) => {
+                        tracing::debug!(error = %error, "Cell resume record did not continue");
+                        let _ = replica.discard_resumed(&destination);
+                        let _ = replica.discard_resumed(&source);
+                        self.restore_exact(&replica, &root, schema, &destination)
+                            .await?
+                    }
+                }
+            }
+            None => {
+                self.restore_exact(&replica, &root, schema, &destination)
+                    .await?
+            }
+        };
+        let current = authority.load(cell).await?.ok_or(Error::Fenced)?;
+        if !current.value().is_same_or_pure_renewal_of(observed.value()) {
+            return Err(Error::Fenced);
+        }
+        let activate_started = std::time::Instant::now();
+        let handle = self
+            .activate_inner(
+                catalog,
+                Activation::Restored(Box::new(RestoredActivation {
+                    database,
+                    destination,
+                    incarnation,
+                    schema,
+                    root,
+                    reservation,
+                })),
+                replica,
+                authority,
+                current,
+            )
+            .await?;
+        self.inner.telemetry.activation_phase(
+            crate::fleet::telemetry::ActivationPhase::Activate,
+            activate_started.elapsed(),
+        );
+        Ok(handle)
+    }
+
+    /// Verifies the immutable root and materializes it into the destination.
+    async fn restore_exact(
+        &self,
+        replica: &crab_ltx::CellReplica,
+        root: &crab_ltx::RootRef,
+        schema: u32,
+        destination: &Path,
+    ) -> crate::Result<crate::cell::worker::RestoredDatabase> {
+        let root_open_started = std::time::Instant::now();
+        let verified = replica.open_root(root).await?;
+        self.inner.telemetry.activation_phase(
+            crate::fleet::telemetry::ActivationPhase::RootOpen,
+            root_open_started.elapsed(),
+        );
         if verified.schema() != schema {
             return Err(Error::Control(
                 "immutable root schema does not match control",
             ));
         }
-        let database = verified.paged().prepare_writable(&destination).await?;
-        let current = authority.load(cell).await?.ok_or(Error::Fenced)?;
-        if !current.value().is_same_or_pure_renewal_of(observed.value()) {
-            return Err(Error::Fenced);
-        }
-        self.activate_inner(
-            catalog,
-            Activation::Restored(Box::new(RestoredActivation {
-                database,
-                destination,
-                incarnation,
-                schema,
-                root,
-                reservation,
-            })),
-            replica,
-            authority,
-            current,
-        )
-        .await
+        let restore_started = std::time::Instant::now();
+        let database = verified.paged().prepare_writable(destination).await?;
+        self.inner.telemetry.activation_phase(
+            crate::fleet::telemetry::ActivationPhase::Restore,
+            restore_started.elapsed(),
+        );
+        Ok(crate::cell::worker::RestoredDatabase::Paged(Box::new(
+            database,
+        )))
     }
 
     fn claiming_cell(
@@ -590,6 +653,7 @@ impl CellRuntime {
             .send(Message::Activate {
                 cell,
                 role: catalog.entry().role(),
+                catalog: catalog.clone(),
                 activation,
                 publisher: Box::new(publisher),
                 reply,

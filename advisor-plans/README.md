@@ -660,3 +660,150 @@ the capability suites with their shared harness, the documented public APIs,
 the deduplicated helpers, and the layout gate now on `main`. The Cellule-side
 rename, hardening merge, and release work are separate and are described in the
 plan's handoff section.
+
+## Cell P0 scale hardening
+
+Created 2026-09-24; planned against `7f36da6bb83`. This track closes the three
+structural P0 gaps that bound a Cell deployment before its hardware does:
+metadata cost that grows with the Cell population, one durability boundary per
+Cell commit, and a restore paid on every wake. Slice 1 (the catalog page
+locator) landed with the plan; the remaining slices are protocol work and each
+needs its own exit evidence.
+
+| Plan | Outcome | Priority | Effort | Depends on | Status |
+| --- | --- | --- | --- | --- | --- |
+| [034](034-cell-p0-scale-hardening.md) | Page-locator catalog lookup, due-work hint index with a full-scan backstop, monotone durable-through watermark with pipelined commits, dormant residency with a resume receipt, and phase-attributed diagnosis of the failing qualification tail | P0 | XL | Plans 015, 023, 024, 025, 031, 032 | IN PROGRESS — slices 1, 2, and 4 DONE; slice 3, the restart-wide resume adoption, the scale receipt, and the protected gates remain |
+
+Slice 1 is implemented and tested in `crates/crab-cell-runtime`: a version-two
+catalog head carries a page locator, so routing reads one page instead of the
+whole shard, and a page that disagrees with its locator is a hard error. Slice
+2's shape was refined after reading the Tick and actor paths — resident Cells
+tick themselves under the Tick's `expected_commit_sequence` staleness guard,
+and only non-resident Cells need hint discovery — and slice 3a was folded into
+3b because its trigger is unreachable from the actor today. The metadata
+plane's production instrument also landed: `crab_cell_catalog_reads_total` and
+`crab_cell_catalog_read_seconds` now count head and page reads, and the runtime
+suite pins one lookup to exactly one head and one page read. Slice 2 stage 1
+also landed: the actor mirrors the published due time and commit sequence,
+`CellRuntime::due_resident` answers from memory, and the product scheduler
+ticks resident Cells before it reads any catalog page or control record, with
+both a runtime test and an end-to-end scheduler test. Slice 2 stage 2 (hint
+discovery for non-resident Cells with a lengthened scan backstop) and slices
+3–4 and 6 remain TODO with their proof obligations; none of them may be
+promoted from a local run. Slice 5 has its metadata instrument in place:
+catalog and control reads are counted per phase, and the runtime suite pins one
+cold route at two catalog reads, two control reads, and three origin requests —
+four of seven object-store requests are metadata, and a resident route issues
+none. The phase-attributed receipt over the qualification workload is still
+owed before the provider p99 is attributed. Slice 4 was attempted and
+deliberately reverted: warm reuse is fenced inside `crab-ltx`, where one local
+database path is one capture session forever ("an existing capture directory is
+refused, even after a clean close"), so the slice needs either a `crab-ltx`
+resume capability that mints a new session over a proven-clean file or a
+fresh-path policy in the product router. The plan records the receipt design
+facts the spike established, including why the ownership epoch must not be part
+of the match. Slice 2 stage 2 also has its baseline pinned: a shard pass that
+finds nothing due costs one control read per Cell in the shard plus two catalog
+reads, proven by `due_scan_reads_one_control_record_per_cell` at 40 Cells and
+extrapolating to a full shard of GETs per empty pass. Stage 1 also picked up
+one defect and its regression test: the resident fast path could exhaust the
+per-cycle budget and the shard scan then subtracted past zero, so
+`scan_once_bounded` now skips the scan when the cycle is spent and
+`resident_ticks_do_not_overspend_the_cycle_budget` fails with the overflow on
+the unguarded code. Slice 5 also gained phase timing: activation now reports
+`ownership`, `root_open`, `restore`, and `activate` through
+`crab_cell_activation_phase_seconds`, and the cold-route test pins the phase
+order beside the read counts, so an operator can attribute a cold route's tail
+without running the protected workload.
+
+Slice 2 stage 2's first half also landed: the runtime publishes one bounded
+hint key when a clean release leaves a Cell with a deadline, the scheduler
+consumes hints first each cycle and confirms every candidate against its
+control, and the shard scan stays the backstop. Tests cover the write/consume
+contract and the hint-only tick. The backstop then moved to a thirty-cycle
+period, so the population scan no longer runs per second, and the scheduler's
+own catalog and control reads now bind the node telemetry handle — the
+`crab_cell_control_reads_total` series is what a scale receipt must watch. What
+remains for that slice's exit evidence is that measurement at 10³/10⁵/10⁶
+Cells, compared against the pinned 40-control-read empty pass. The instrument
+also produced the next concrete optimization: a hinted candidate costs 10
+catalog reads and 6 control reads today because the scheduler, router, and
+activation each confirm the Cell, so sharing one resolution comes before any
+further growth of the backstop period.
+
+The plan closes with a current-state handoff table: which claim each landed test
+proves, the three pinned costs to measure against (40 control reads for an empty
+shard pass, 10/6 for one hinted candidate, 2/2/3 plus four phases for one cold
+route), the exact verification commands, and the last full green run across
+`crab-ltx`, `crab-cell-runtime`, `crab-cell-app`, `crab-cell-host`, and
+`crab-http-server`. Release-path coverage is pinned too: drain, pressure
+eviction, and prepared transfer all publish their hint, and a fenced release
+deliberately does not.
+
+The shared-resolution follow-up eventually landed: two failed attempts (a
+broad hand-off and an unowned-only hand-off) both overflowed the worker stack in
+`pull_request_merge_methods_use_canonical_ref_publication`, and `RUST_MIN_STACK`
+bisection put the threshold between 2 MiB and 3 MiB — the routing path already
+runs near the default stack, and the extra values tipped it over. Boxing the
+activation future fixed it, and the unowned observation is now reused instead of
+re-read: one hinted candidate costs 8 catalog + 5 control reads, down from 10 +
+6, and the saving applies to every cold activation.
+
+The deep nesting itself is specific to the in-process peer transport the tests
+use: production forwarding crosses processes, so the same stack depth does not
+arise there. The boxed boundary stays as a hardening — bounded stack per level
+is what async routing should have — but no production stack-size knob was added
+on the strength of a test-only measurement.
+
+Slice 2's population-independence is now pinned locally: sixteen released Cells
+with two hints cost a foreground cycle 16 catalog + 10 control reads (two
+candidates at the pinned 8/5, nothing for the other fourteen), where the backstop
+cycle over the same Cells costs 355 + 72. A deadline outside the listing window
+also publishes no hint now, so the accelerator cannot leave behind keys nothing
+would ever list or delete.
+
+Slice 4's blocker is resolved on paper and validated in code: the epoch fence is
+per database path, so a cleanly closed database that is renamed to a path
+nothing has opened can be opened there with its rows intact
+(`a_cleanly_closed_database_survives_a_rename_to_a_fresh_path`). The warm-wake
+design therefore does not need a `crab-ltx` resume capability; it needs a
+per-activation destination name, the resume receipt, and a bounded sweep of the
+older files under that name. That test is kept as a dependency contract, since
+the whole warm-path design rests on it.
+
+Slice 4 is now implementation-ready rather than design-blocked: the plan carries
+the six ordered steps (open-existing wrapper, receipt module, activation rewrite,
+activation-database enum, receipt write on clean close, sweep), and the naming
+basis is verified — `Control::takeover` increments the epoch and no other
+transition changes it, so one epoch is one ownership session and `<stem>.e<epoch>`
+is a path no other session can use. Each step is independently verifiable, and
+the receipt deliberately excludes the ownership epoch from its match.
+
+Slice 4's implementation attempt then found the last real blocker and was
+reverted cleanly: the warm path failed the executor's open verification with
+`restored SQLite position does not match root`, because a plain
+`Db::open_with_host` starts an *unseeded* capture session and crab-ltx exposes
+no public way to seed one. Warm reuse therefore needs a public "open seeded"
+API plus a local source for the continuation — position, page size, and page
+count fit in the receipt, but the page-checksum index exists only after a
+restore, so its home is a crab-ltx decision. The rename mechanism, the
+fresh-path observation, the receipt design, and the verified fallback all
+stand; the fallback path passed its test during the attempt.
+
+Slice 4 landed on 2026-09-24 with the capability that attempt needed:
+`Db::persist_continuation` writes the dense page checksums and the continuation
+record beside the database, and `Db::open_resumed_with_host` seeds a fresh
+capture session from them. The runtime writes one fixed-width resume record per
+released database, consumes the record that still matches the observed control
+(discarding every other one with the file it names), and moves the database onto
+the fresh activation path, so a same-node wake reads no origin object at all:
+`a_warm_wake_continues_the_local_database_without_the_origin` records zero origin
+requests and exactly `[ownership, resume, activate]`, and
+`a_resume_record_that_names_another_root_is_discarded` fails against an
+always-matching record and passes with the fence restored. Two writer-side
+fences keep it honest: a database whose WAL is not checkpointed is refused, and a
+sparse activation must be fully materialized, because an unfaulted page is a
+hole rather than data. Both `crab-ltx` and runtime tests cover the refusals.
+Still open on this slice: charging the dormant window to the disk ledger,
+dormant residency (holding ownership across the shed), and the product-level
+adoption step that would let the slot survive a process restart.

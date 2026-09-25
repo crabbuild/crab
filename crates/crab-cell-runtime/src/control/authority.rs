@@ -34,13 +34,32 @@ impl VersionedControl {
 #[derive(Clone)]
 pub struct CellAuthority {
     layout: CellStorageLayout,
+    telemetry: crate::fleet::telemetry::CellTelemetryHandle,
 }
 
 impl CellAuthority {
     /// Binds the authority to one Cell storage layout.
     #[must_use]
     pub fn new(layout: CellStorageLayout) -> Self {
-        Self { layout }
+        Self::with_telemetry(
+            layout,
+            crate::fleet::telemetry::CellTelemetryHandle::default(),
+        )
+    }
+
+    /// Binds the authority to one Cell storage layout and telemetry sink.
+    #[must_use]
+    pub fn with_telemetry(
+        layout: CellStorageLayout,
+        telemetry: crate::fleet::telemetry::CellTelemetryHandle,
+    ) -> Self {
+        Self { layout, telemetry }
+    }
+
+    /// Returns the Cell storage layout this authority reads and writes.
+    #[must_use]
+    pub const fn layout(&self) -> &CellStorageLayout {
+        &self.layout
     }
 
     /// Strict-creates a bootstrap control only after catalog publication.
@@ -80,16 +99,24 @@ impl CellAuthority {
     /// Reads one exact control object; absence is not inferred from listing.
     pub async fn load(&self, cell: CellId) -> Result<Option<VersionedControl>> {
         let path = self.layout.control_path(cell.as_bytes());
-        let (body, token) = match self
+        let started = std::time::Instant::now();
+        let observed = self
             .layout
             .store()
             .get_with_etag_bounded(&path, MAX_CONTROL_BYTES)
-            .await
-        {
+            .await;
+        let (body, token) = match observed {
             Ok(observed) => observed,
-            Err(StorageError::NotFound { .. }) => return Ok(None),
-            Err(error) => return Err(error.into()),
+            Err(StorageError::NotFound { .. }) => {
+                self.telemetry.control_read(started.elapsed(), true);
+                return Ok(None);
+            }
+            Err(error) => {
+                self.telemetry.control_read(started.elapsed(), false);
+                return Err(error.into());
+            }
         };
+        self.telemetry.control_read(started.elapsed(), true);
         let value = Control::decode(&body)?;
         if value.cell != cell {
             return Err(crate::Error::Control("control path does not match Cell ID"));

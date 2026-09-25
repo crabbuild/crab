@@ -314,6 +314,23 @@ fn main() -> crab_ltx::Result<()> {
 }
 ```
 
+## Resume a local image without an origin read
+
+When a caller owns a local database it already proved against one published
+position, `Db::persist_continuation` records what a later session needs to
+continue it: the position, page size, page count, and the dense page checksums,
+written as two sidecars next to the database. `CellReplica::open_resumed` moves
+those files onto a fresh path and seeds the new capture session from them, so no
+origin object is read.
+
+The record is structural, never authoritative. It refuses a database whose WAL
+is not checkpointed (the file may sit behind the continuation) and a sparse
+activation that is not fully materialized (an unfaulted page is a hole, not
+data), and the writing side proves the dense copy still folds to the aggregate
+it seeds. Ownership and root identity stay with the caller: only open a resumed
+database that a resume record has already matched against the authoritative
+control, and discard it (`CellReplica::discard_resumed`) on any mismatch.
+
 ## Preparing a Cell root
 
 Enable `replica`, construct a `CellStorageLayout` from the application's
@@ -492,6 +509,8 @@ in that order.
 | `restore_exact` | Installs a fresh database at exactly the verified endpoint; never overwrites |
 | `compact_exact` | Produces a verified full snapshot without deleting its inputs |
 | `Db::resume` | Restores a verified plan into a fresh session and continues its TXID/checksum lineage |
+| `Db::persist_continuation` | Records the local continuation and dense page checksums a later resumed open seeds from |
+| `Db::open_resumed` | Opens a cleanly checkpointed, fully materialized local image and continues its lineage without reading an origin object |
 
 ### Cell replication (`replica`)
 
@@ -506,6 +525,8 @@ in that order.
 | `CellPagedDatabase::prepare_writable` | Seeds a fresh sparse writable activation at the root's exact position |
 | `Db::hydrate_step` | Resolves a bounded number of missing sparse pages on the owner-controlled database worker |
 | `CellReplica::reachable_objects` | Returns `RootObjectRef` values for the verified immutable dependency set |
+| `CellReplica::open_resumed` | Moves a resumable local image onto a fresh path and continues its capture session |
+| `CellReplica::discard_resumed` | Removes a local image and its resume sidecars that the caller refused |
 
 ## Safety model
 

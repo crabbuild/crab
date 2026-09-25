@@ -322,6 +322,7 @@ pub(super) fn handle_message(
         Message::Activate {
             cell,
             role,
+            catalog,
             activation,
             publisher,
             reply,
@@ -378,6 +379,7 @@ pub(super) fn handle_message(
                     cell,
                     generation,
                     role,
+                    catalog,
                     publisher,
                     admission,
                     reply,
@@ -523,6 +525,43 @@ pub(super) fn handle_message(
                 })
             });
             let _ = reply.send(local);
+        }
+        Message::DueResident {
+            now_ms,
+            limit,
+            reply,
+        } => {
+            // Scanning the actor's own map is what makes this path free of
+            // metadata reads. Due times arrive in any order, so order by
+            // (due, cell) and let the caller bound the batch.
+            let mut due = cells
+                .values()
+                .filter(|active| {
+                    active.transfer.is_none()
+                        && active.drain.is_none()
+                        && active.next_due_ms.is_some_and(|due| due <= now_ms)
+                        && matches!(
+                            active.coordination.lookup(),
+                            CoordinationDecision::LocalHandle
+                        )
+                })
+                .filter_map(|active| {
+                    let next_due_ms = active.next_due_ms?;
+                    Some(DueResidentCell {
+                        cell: active.catalog.entry().cell(),
+                        catalog: active.catalog.clone(),
+                        incarnation: active.incarnation,
+                        code: active.code,
+                        schema: active.schema,
+                        admission: Arc::clone(&active.admission),
+                        expected_commit_sequence: active.published_sequence,
+                        next_due_ms,
+                    })
+                })
+                .collect::<Vec<_>>();
+            due.sort_by_key(|cell| (cell.next_due_ms, *cell.cell.as_bytes()));
+            due.truncate(limit);
+            let _ = reply.send(due);
         }
         Message::Drain {
             cell,
@@ -735,6 +774,9 @@ pub(super) fn reject_fenced_message(message: Message) {
         }
         Message::Lookup { reply, .. } => {
             let _ = reply.send(None);
+        }
+        Message::DueResident { reply, .. } => {
+            let _ = reply.send(Vec::new());
         }
         Message::Drain { reply, .. } => {
             let _ = reply.send(Err(Error::Fenced));

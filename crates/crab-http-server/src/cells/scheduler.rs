@@ -43,6 +43,10 @@ use uuid::Uuid;
 use super::RepositoryCellRouter;
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(1);
+// The shard scan is the backstop, not the primary discovery path: hints and
+// resident Cells tick every cycle, and the backstop runs on this period so an
+// unhinted deadline waits at most one period instead of a full shard pass.
+const BACKSTOP_CYCLES: u32 = 30;
 const MAX_LIVE_NODES: usize = 10_000;
 const MAX_DUE_PER_CYCLE: usize = 128;
 const EFFECT_LEASE_MS: u32 = 30_000;
@@ -143,6 +147,8 @@ pub(crate) struct RepositoryCellScheduler {
     activity_cells: Arc<Mutex<HashSet<CellId>>>,
     activity_jobs: tokio::task::JoinSet<()>,
     last_node_collection_ms: i64,
+    /// Cycles left before the shard scan runs again.
+    backstop_cycles: u32,
 }
 
 impl RepositoryCellScheduler {
@@ -172,10 +178,17 @@ impl RepositoryCellScheduler {
                     store.with_recovery_artifacts(artifacts)
                 })
         };
+        // The scheduler's own catalog and control reads are the scan's cost, so
+        // they must report through the same sink as the routing reads.
+        let telemetry = router.runtime().telemetry_handle();
         Ok(Self {
             identity,
-            catalog: CellCatalog::new(layout.clone(), identity.tenant()),
-            authority: CellAuthority::new(layout.clone()),
+            catalog: CellCatalog::with_telemetry(
+                layout.clone(),
+                identity.tenant(),
+                telemetry.clone(),
+            ),
+            authority: CellAuthority::with_telemetry(layout.clone(), telemetry),
             releases: ReleaseStore::new(layout.clone(), identity)?,
             migration_progress: MigrationProgressStore::new(layout.clone(), identity)?,
             directory,
@@ -204,6 +217,7 @@ impl RepositoryCellScheduler {
             activity_cells: Arc::new(Mutex::new(HashSet::new())),
             activity_jobs: tokio::task::JoinSet::new(),
             last_node_collection_ms: 0,
+            backstop_cycles: 1,
         })
     }
 
@@ -242,7 +256,8 @@ impl RepositoryCellScheduler {
             }
             self.reap_activity_jobs();
             self.reap_migration_jobs();
-            match self.scan_once().await {
+            let backstop = self.backstop_due();
+            match self.scan_cycle(MAX_DUE_PER_CYCLE, backstop).await {
                 Ok(()) => self.status.mark_completed(super::unix_now_ms()?),
                 Err(error) => {
                     tracing::warn!(error = %error, "Cell scheduler scan failed");
@@ -265,11 +280,31 @@ impl RepositoryCellScheduler {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn scan_once(&mut self) -> crate::Result<()> {
-        self.scan_once_bounded(MAX_DUE_PER_CYCLE).await
+        self.scan_cycle(MAX_DUE_PER_CYCLE, true).await
     }
 
+    #[cfg(test)]
     async fn scan_once_bounded(&mut self, cycle_limit: usize) -> crate::Result<()> {
+        self.scan_cycle(cycle_limit, true).await
+    }
+
+    /// Reports whether this cycle runs the shard backstop scan.
+    ///
+    /// A fresh scheduler scans on its first cycle, then every
+    /// [`BACKSTOP_CYCLES`]th one.
+    fn backstop_due(&mut self) -> bool {
+        self.backstop_cycles = self.backstop_cycles.saturating_sub(1);
+        if self.backstop_cycles == 0 {
+            self.backstop_cycles = BACKSTOP_CYCLES;
+            return true;
+        }
+        false
+    }
+
+    /// Runs one scheduler cycle, optionally including the shard backstop scan.
+    async fn scan_cycle(&mut self, cycle_limit: usize, backstop: bool) -> crate::Result<()> {
         if cycle_limit == 0 || cycle_limit > MAX_DUE_PER_CYCLE {
             return Err(
                 crab_cell_runtime::Error::Control("scheduler cycle limit is invalid").into(),
@@ -278,6 +313,16 @@ impl RepositoryCellScheduler {
         let now_ms = super::unix_now_ms()?;
         self.reap_migration_jobs();
         self.reap_recovery_jobs(now_ms);
+        // Hints select released Cells whose deadline has arrived, so a Cell
+        // nobody holds does not wait for the shard scan to reach it. They never
+        // authorize a Tick: the control decides, and the scan stays the
+        // backstop for a missing hint. Half the cycle is the most they may
+        // take, so the resident fast path and the backstop always run.
+        let mut remaining = cycle_limit;
+        remaining -= self.tick_due_hints(now_ms, remaining.div_ceil(2)).await?;
+        // Due work this node already owns is answered from memory: a resident
+        // Cell must not wait for the fleet scan to reach its catalog shard.
+        remaining -= self.tick_resident_due(now_ms, remaining).await?;
         let advertisements = self.directory.live(now_ms, MAX_LIVE_NODES).await?;
         let nodes =
             self.fleet
@@ -311,21 +356,25 @@ impl RepositoryCellScheduler {
 
         self.schedule_migrations(&assigned).await?;
 
-        let mut remaining = cycle_limit;
         let mut exhausted = HashSet::new();
         let mut next_shard = start.wrapping_add(1);
-        for shard in &assigned {
-            let (attempted, complete) = self.scan_shard(*shard, now_ms, 1).await?;
-            remaining -= attempted;
-            if complete {
-                exhausted.insert(*shard);
-            }
-            if remaining == 0 {
-                next_shard = shard.wrapping_add(1);
-                break;
+        // The resident fast path may have used the whole cycle, in which case
+        // the shard scan must not start: it would spend a second slot the
+        // budget does not have.
+        if backstop && remaining != 0 {
+            for shard in &assigned {
+                let (attempted, complete) = self.scan_shard(*shard, now_ms, 1).await?;
+                remaining -= attempted;
+                if complete {
+                    exhausted.insert(*shard);
+                }
+                if remaining == 0 {
+                    next_shard = shard.wrapping_add(1);
+                    break;
+                }
             }
         }
-        if remaining != 0 {
+        if backstop && remaining != 0 {
             for shard in assigned {
                 if exhausted.contains(&shard) {
                     continue;
@@ -340,6 +389,94 @@ impl RepositoryCellScheduler {
         }
         self.next_shard = next_shard;
         Ok(())
+    }
+
+    /// Ticks Cells whose released owner left a due hint in an arrived bucket.
+    ///
+    /// A hint only selects a candidate: the authority load decides whether the
+    /// Cell is really due, and a missing hint is covered by the shard scan.
+    /// Returns the number of Ticks attempted.
+    async fn tick_due_hints(&mut self, now_ms: i64, limit: usize) -> crate::Result<usize> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        let hinted = crab_cell_runtime::cell::due::take(
+            self.authority.layout(),
+            now_ms,
+            limit.min(MAX_DUE_PER_CYCLE),
+        )
+        .await?;
+        let mut attempted = 0;
+        for cell in hinted {
+            let Some(proof) = self.catalog.lookup(cell).await? else {
+                continue;
+            };
+            let Some(control) = self.authority.load(cell).await? else {
+                continue;
+            };
+            let value = control.value();
+            if value.state == crab_cell_runtime::control::ControlState::Tombstoned
+                || value.root.is_none()
+                || value.next_due_ms.is_none_or(|due| due > now_ms)
+            {
+                continue;
+            }
+            let expected_commit_sequence =
+                value.root.as_ref().map_or(0, |root| root.commit_sequence);
+            let target = CellTarget::new(
+                self.identity.tenant(),
+                self.identity.application(),
+                proof.entry().namespace(),
+                proof.entry().partition(),
+            )?;
+            let scheduled = match self.router.route_scheduler_target(target).await {
+                Ok(scheduled) => scheduled,
+                Err(error) => {
+                    tracing::warn!(error = %error, "hinted Cell was not routed");
+                    continue;
+                }
+            };
+            let release_after = scheduled.should_release();
+            attempted += 1;
+            if let Err(error) = self
+                .process_cell(scheduled.cell, expected_commit_sequence, release_after)
+                .await
+            {
+                tracing::warn!(error = %error, "hinted Cell Tick failed");
+            }
+        }
+        Ok(attempted)
+    }
+
+    /// Ticks resident Cells whose published due time has passed.
+    ///
+    /// Returns the number of Ticks attempted. Each Tick carries the publish
+    /// sequence the runtime reported, so work the shard scan also finds
+    /// resolves `Stale` instead of advancing a deadline twice.
+    async fn tick_resident_due(&mut self, now_ms: i64, limit: usize) -> crate::Result<usize> {
+        let due = self.router.runtime().due_resident(now_ms, limit).await?;
+        let mut attempted = 0;
+        for resident in due {
+            attempted += 1;
+            let cell = match self
+                .router
+                .resident_scheduler_cell(resident.handle().clone())
+                .await
+            {
+                Ok(cell) => cell,
+                Err(error) => {
+                    tracing::warn!(error = %error, "resident Cell Tick was not dispatched");
+                    continue;
+                }
+            };
+            if let Err(error) = self
+                .process_cell(cell, resident.expected_commit_sequence(), false)
+                .await
+            {
+                tracing::warn!(error = %error, "resident Cell Tick failed");
+            }
+        }
+        Ok(attempted)
     }
 
     async fn schedule_migrations(&mut self, assigned: &[u8]) -> crate::Result<()> {

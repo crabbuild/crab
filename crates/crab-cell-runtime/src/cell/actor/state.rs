@@ -54,7 +54,7 @@ pub(super) enum Activation {
 }
 
 pub(super) struct RestoredActivation {
-    pub(super) database: crab_ltx::CellWritableDatabase,
+    pub(super) database: crate::cell::worker::RestoredDatabase,
     pub(super) destination: PathBuf,
     pub(super) incarnation: crate::identity::IncarnationId,
     pub(super) schema: u32,
@@ -77,6 +77,7 @@ pub(super) enum Message {
     Activate {
         cell: CellId,
         role: CatalogRole,
+        catalog: CatalogProof,
         activation: Activation,
         publisher: Box<CellPublisher>,
         reply: oneshot::Sender<crate::Result<Arc<CellAdmission>>>,
@@ -89,6 +90,15 @@ pub(super) enum Message {
         cell: CellId,
         require_resident: bool,
         reply: oneshot::Sender<Option<LocalCell>>,
+    },
+    /// Lists resident Cells whose published due time has passed.
+    ///
+    /// The scheduler uses this to tick a Cell it already owns without reading
+    /// its catalog entry or control record first.
+    DueResident {
+        now_ms: i64,
+        limit: usize,
+        reply: oneshot::Sender<Vec<DueResidentCell>>,
     },
     Drain {
         cell: CellId,
@@ -220,6 +230,7 @@ pub(super) struct ActiveCell {
     pub(super) code: Digest,
     pub(super) schema: u32,
     pub(super) role: CatalogRole,
+    pub(super) catalog: CatalogProof,
     pub(super) interrupt: Arc<crab_ltx::rusqlite::InterruptHandle>,
     pub(super) publisher: Option<CellPublisher>,
     pub(super) durability_submitter: CellDurabilitySubmitter,
@@ -237,6 +248,12 @@ pub(super) struct ActiveCell {
     pub(super) last_used_ms: i64,
     pub(super) last_work_at: std::time::Instant,
     pub(super) compaction_retry_at: std::time::Instant,
+    // The published head's due time and commit sequence, mirrored from the
+    // authoritative control so a resident Cell can be ticked without a
+    // metadata read. Both advance through the same publication that writes
+    // control, so a stale reader only produces a `Stale` Tick.
+    pub(super) next_due_ms: Option<i64>,
+    pub(super) published_sequence: u64,
 }
 
 pub(super) struct TransferPreflight {
@@ -293,11 +310,25 @@ pub(super) struct LocalCell {
     pub(super) schema: u32,
 }
 
+/// One resident Cell whose published due time has passed.
+pub(super) struct DueResidentCell {
+    pub(super) cell: CellId,
+    pub(super) catalog: CatalogProof,
+    pub(super) incarnation: crate::identity::IncarnationId,
+    pub(super) code: Digest,
+    pub(super) schema: u32,
+    pub(super) admission: Arc<CellAdmission>,
+    /// Commit sequence the last authoritative publication named.
+    pub(super) expected_commit_sequence: u64,
+    pub(super) next_due_ms: i64,
+}
+
 pub(super) enum TaskResult {
     Activated {
         cell: CellId,
         generation: u64,
         role: CatalogRole,
+        catalog: CatalogProof,
         publisher: Box<CellPublisher>,
         admission: Arc<CellAdmission>,
         reply: oneshot::Sender<crate::Result<Arc<CellAdmission>>>,
@@ -348,6 +379,8 @@ pub(super) enum TaskResult {
         publisher: Box<CellPublisher>,
         retained_bytes: u64,
         node_logged: bool,
+        next_due_ms: Option<i64>,
+        commit_sequence: u64,
         result: crate::Result<()>,
         fenced: bool,
     },

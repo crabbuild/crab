@@ -209,6 +209,28 @@ Any control change restarts the 15-second observation period. The winner hydrate
 
 Sparse activation starts with no materialized pages. Full recovery reserves destination bytes before download and installs through an exclusive same-directory scratch file.
 
+## Reuse a local database only under a continuity record
+
+A clean release writes one resume record beside the database it closed. The
+record names the Cell, incarnation, schema, installed code, and the exact
+published root the file holds; the capture continuation and dense page
+checksums live in `crab-ltx` sidecars next to the same file.
+
+A same-node wake matches that record against the observed control and then
+moves the file onto the fresh activation path instead of restoring the root.
+The record never authorizes a tick, a read, or a write: the worker still
+verifies `sys_meta` identity, schema, sequence, and the SQLite position against
+the authoritative root, so a stale, foreign, torn, or half-written image is
+discarded and restored instead of served. The ownership epoch is deliberately
+absent from the match, because acquiring an idle Cell raises the epoch while
+leaving the root untouched.
+
+Two fences keep the fast path honest. A database whose WAL is not checkpointed
+is refused, because the file may sit behind the continuation it would seed from;
+and a sparse activation must be fully materialized, because an unfaulted page
+is a hole rather than data. Every failure above falls back to the exact restore
+and costs one cold activation, never correctness.
+
 ## Renew and self-fence ownership
 
 One node-level scanner renews owned Cells every three seconds. A mutation publication also advances owner progress.
@@ -223,12 +245,30 @@ Bootstrap and every command transaction derive the earliest durable deadline fro
 
 The node scheduler:
 
-1. Reads revision-pinned catalog pages
-2. Assigns 256 catalog shards through rendezvous hashing
-3. Scans at most 128 due Cells per cycle
-4. Sends the typed maintenance Tick locally or to the authenticated owner
-5. Acquires an idle or stale Cell only when no valid owner can execute the Tick
-6. Runs registered activity and effect supervisors outside SQLite
+1. Ticks resident Cells whose published due time has passed, from memory
+2. Consumes due hints: one key per released deadline, listed from the current
+   minute bucket and the five behind it, each confirmed against its control
+3. Reads revision-pinned catalog pages and assigns 256 catalog shards through
+   rendezvous hashing
+4. Runs the shard scan as a backstop every thirtieth cycle, visiting at most
+   128 due Cells per scan
+5. Sends the typed maintenance Tick locally or to the authenticated owner
+6. Acquires an idle or stale Cell only when no valid owner can execute the Tick
+7. Runs registered activity and effect supervisors outside SQLite
+
+Steps 1 and 2 run every cycle, so a Cell this node owns and a Cell whose owner
+released it with a deadline are both ticked without a population scan. Step 4
+is what covers a missing hint — a failed write, a hint older than its window,
+or a Cell released before hints existed — and bounds that case at one backstop
+period instead of a full shard pass.
+
+A hint names one released Cell's deadline in the minute bucket that deadline
+falls in, and a listing walks the current bucket and the five behind it. A
+release whose deadline is already further behind than that window publishes
+nothing: no listing would see the key, so the backstop covers it instead of
+leaving behind an object nothing consumes. A key a listing meets but cannot
+parse is deleted, so a foreign object under the prefix cannot be re-listed
+forever.
 
 A Tick advances at most 128 ledger, expiry, lease, timer, or retention items. Protected shares prevent one maintenance class from starving another, and a Tick that reserves a share for a class it does not run fails instead of silently shrinking its usable work.
 

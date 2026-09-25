@@ -28,8 +28,8 @@ mod tasks;
 use lifecycle::*;
 use requests::*;
 
-pub use handle::CellHandle;
 use handle::{CellAdmission, WorkAdmission};
+pub use handle::{CellHandle, DueResident};
 
 use crate::Error;
 use crate::cell::catalog::{CatalogEntry, CatalogProof, CatalogRole};

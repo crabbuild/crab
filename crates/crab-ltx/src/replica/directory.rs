@@ -555,7 +555,7 @@ pub(super) async fn load_checksums(
     if height > 3 || verification.database_pages == 0 {
         return Err(CrabError::LTXCorrupted);
     }
-    let checksum_path = checksum_path(destination);
+    let checksum_path = crate::resume::checksum_path(destination);
     if verification.host.filesystem.exists(destination)?
         || verification.host.filesystem.exists(&checksum_path)?
     {
@@ -696,12 +696,6 @@ fn append_checksum(
         output.clear();
     }
     Ok(())
-}
-
-fn checksum_path(destination: &std::path::Path) -> std::path::PathBuf {
-    let mut path = destination.as_os_str().to_owned();
-    path.push(".crab-ltx-checksums");
-    path.into()
 }
 
 fn cleanup_checksum_file(host: &Host, path: &std::path::Path) {

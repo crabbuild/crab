@@ -157,6 +157,22 @@ impl CellStorageLayout {
         self.application_path(&format!("catalog/{shard:02x}/head.json"))
     }
 
+    /// Returns the due-hint prefix for one minute bucket.
+    ///
+    /// A hint is an accelerator, never authority: the Cell's own control and
+    /// SQLite state decide what is due, and the full catalog scan remains the
+    /// backstop when a hint is missing.
+    #[must_use]
+    pub fn due_hint_prefix(&self, bucket: u64) -> Path {
+        self.application_path(&format!("due/{bucket:016x}/"))
+    }
+
+    /// Returns the due-hint path for one Cell in one minute bucket.
+    #[must_use]
+    pub fn due_hint_path(&self, bucket: u64, cell: &[u8; 32]) -> Path {
+        self.application_path(&format!("due/{bucket:016x}/{}.json", encode_hex(cell)))
+    }
+
     /// Returns the catalog page object path for one digest.
     #[must_use]
     pub fn catalog_object_path(&self, digest: &[u8; 32]) -> Path {

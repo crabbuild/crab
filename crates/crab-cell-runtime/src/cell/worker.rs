@@ -217,7 +217,7 @@ impl SqlWorkerPool {
     pub(crate) async fn activate_restored(
         &self,
         cell: CellId,
-        database: crab_ltx::CellWritableDatabase,
+        database: RestoredDatabase,
         destination: PathBuf,
         incarnation: crate::identity::IncarnationId,
         schema: u32,
@@ -601,6 +601,27 @@ impl SqlWorkerPool {
         receive(response).await
     }
 
+    /// Closes a drained Cell and leaves a resume record for the root it holds.
+    pub(crate) async fn deactivate_resumable(
+        &self,
+        cell: CellId,
+        root: crate::control::RootRef,
+        code: Digest,
+    ) -> Result<()> {
+        let (reply, response) = oneshot::channel();
+        self.send(
+            cell,
+            WorkerCommand::DeactivateResumable {
+                cell,
+                root,
+                code,
+                reply,
+            },
+        )
+        .await?;
+        receive(response).await
+    }
+
     /// Removes and closes a fenced Cell for authoritative-root recovery.
     pub(crate) async fn discard(&self, cell: CellId) -> Result<()> {
         let (reply, response) = oneshot::channel();
@@ -777,6 +798,14 @@ impl Drop for PoolInner {
     }
 }
 
+/// How one activation reaches its exact root before the worker serves it.
+pub(crate) enum RestoredDatabase {
+    /// The exact root is restored into a fresh destination and read sparsely.
+    Paged(Box<crab_ltx::CellWritableDatabase>),
+    /// A local database already holds the root, so the origin is never read.
+    Local(Box<crab_ltx::Db>),
+}
+
 enum WorkerCommand {
     Reserved {
         command: Box<WorkerCommand>,
@@ -790,7 +819,7 @@ enum WorkerCommand {
     },
     ActivateRestored {
         cell: CellId,
-        database: Box<crab_ltx::CellWritableDatabase>,
+        database: Box<RestoredDatabase>,
         destination: PathBuf,
         incarnation: crate::identity::IncarnationId,
         schema: u32,
@@ -918,6 +947,12 @@ enum WorkerCommand {
     },
     Deactivate {
         cell: CellId,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    DeactivateResumable {
+        cell: CellId,
+        root: crate::control::RootRef,
+        code: Digest,
         reply: oneshot::Sender<Result<()>>,
     },
     Discard {

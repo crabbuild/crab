@@ -57,6 +57,8 @@ pub(super) fn handle_published(
     publisher: Box<CellPublisher>,
     retained_bytes: u64,
     node_logged: bool,
+    next_due_ms: Option<i64>,
+    commit_sequence: u64,
     mut result: crate::Result<()>,
     mut fenced: bool,
 ) {
@@ -82,6 +84,12 @@ pub(super) fn handle_published(
     active.finish_task(effect_id, CoordinationEffect::Publication);
     active.last_work_at = std::time::Instant::now();
     let object_published = result.is_ok();
+    if object_published {
+        // Control now names this commit, so the local mirror can answer a due
+        // scan without reading the record back.
+        active.next_due_ms = next_due_ms;
+        active.published_sequence = commit_sequence;
+    }
     if node_lease.check().is_err() {
         result = Err(Error::Fenced);
         fenced = true;

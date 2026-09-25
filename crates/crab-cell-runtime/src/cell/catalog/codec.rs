@@ -8,54 +8,97 @@ pub(super) struct ObservedHead {
     pub(super) token: ETag,
 }
 
+/// One immutable catalog page and the first Cell id it can contain.
+///
+/// The head carries these locators so a reader finds an entry with one page
+/// read. Without them a lookup must download every page in the shard, which
+/// makes cold routing cost grow with the Cell population.
+pub(super) struct CatalogPageRef {
+    pub(super) digest: Digest,
+    pub(super) first: CellId,
+}
+
 pub(super) struct CatalogHead {
     pub(super) revision: u64,
-    pub(super) pages: Vec<Digest>,
+    pub(super) pages: Vec<CatalogPageRef>,
 }
 
 impl CatalogHead {
     pub(super) fn encode(&self) -> Result<Vec<u8>> {
-        if self.revision == 0 || self.pages.is_empty() || self.pages.len() > MAX_PAGES {
-            return Err(Error::Catalog("invalid head bounds"));
-        }
+        self.validate()?;
         let encoded = serde_json::to_vec(&RawHead {
-            version: 1,
+            version: HEAD_VERSION,
             revision: self.revision.to_string(),
             pages: self
                 .pages
                 .iter()
-                .map(|digest| encode_hex(digest.as_bytes()))
+                .map(|page| RawPageRef {
+                    digest: encode_hex(page.digest.as_bytes()),
+                    first: encode_hex(page.first.as_bytes()),
+                })
                 .collect(),
         })?;
         if encoded.len() as u64 > MAX_HEAD_BYTES {
-            return Err(Error::Catalog("encoded head exceeds 32 KiB"));
+            return Err(Error::Catalog("encoded head exceeds 64 KiB"));
         }
         Ok(encoded)
     }
 
     pub(super) fn decode(body: &[u8]) -> Result<Self> {
         let raw: RawHead = serde_json::from_slice(body)?;
-        if raw.version != 1 || raw.pages.is_empty() || raw.pages.len() > MAX_PAGES {
-            return Err(Error::Catalog("invalid head version or page count"));
+        if raw.version != HEAD_VERSION {
+            return Err(Error::Catalog("unsupported head version"));
+        }
+        if raw.pages.is_empty() || raw.pages.len() > MAX_PAGES {
+            return Err(Error::Catalog("invalid head page count"));
         }
         let revision = canonical_u64(&raw.revision)?;
         let pages = raw
             .pages
             .iter()
-            .map(|value| decode_fixed(value).map(Digest::from_bytes))
+            .map(|page| {
+                Ok(CatalogPageRef {
+                    digest: Digest::from_bytes(decode_fixed(&page.digest)?),
+                    first: CellId::from_bytes(decode_fixed(&page.first)?),
+                })
+            })
             .collect::<Result<Vec<_>>>()?;
-        let mut unique = std::collections::HashSet::with_capacity(pages.len());
-        if pages
-            .iter()
-            .any(|digest| !unique.insert(*digest.as_bytes()))
-        {
-            return Err(Error::Catalog("duplicate page digest"));
-        }
         let head = Self { revision, pages };
         if head.encode()?.as_slice() != body {
             return Err(Error::Catalog("head JSON is not canonical"));
         }
         Ok(head)
+    }
+
+    /// Validates the version-two head invariants that both codecs share.
+    fn validate(&self) -> Result<()> {
+        if self.revision == 0 || self.pages.is_empty() || self.pages.len() > MAX_PAGES {
+            return Err(Error::Catalog("invalid head bounds"));
+        }
+        let mut unique = std::collections::HashSet::with_capacity(self.pages.len());
+        let mut previous: Option<&[u8]> = None;
+        for page in &self.pages {
+            if !unique.insert(*page.digest.as_bytes()) {
+                return Err(Error::Catalog("duplicate page digest"));
+            }
+            // The locator is a binary search key list: strictly increasing
+            // `first` values are what make one page answer exact.
+            if previous.is_some_and(|value| value >= page.first.as_bytes().as_slice()) {
+                return Err(Error::Catalog("catalog page locator is not ordered"));
+            }
+            previous = Some(page.first.as_bytes());
+        }
+        Ok(())
+    }
+
+    /// Returns the index of the one page that can hold `cell`.
+    ///
+    /// `None` means the Cell id sorts below every provisioned entry in the
+    /// shard, so no page can name it.
+    pub(super) fn page_index(&self, cell: CellId) -> Option<usize> {
+        self.pages
+            .partition_point(|page| page.first.as_bytes() <= cell.as_bytes())
+            .checked_sub(1)
     }
 }
 
@@ -90,12 +133,21 @@ impl CatalogPage {
     }
 }
 
+const HEAD_VERSION: u32 = 2;
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RawHead {
     version: u32,
     revision: String,
-    pages: Vec<String>,
+    pages: Vec<RawPageRef>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RawPageRef {
+    digest: String,
+    first: String,
 }
 
 #[derive(Serialize, Deserialize)]

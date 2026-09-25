@@ -41,6 +41,38 @@ pub enum PrimitiveOperationKind {
     Query,
 }
 
+/// Kind of one catalog object read.
+///
+/// Catalog heads and immutable pages are read on the routing and due-scan hot
+/// paths, and they bypass the LTX origin counters, so this bounded pair is the
+/// only production signal for the metadata plane's object-store calls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CatalogReadKind {
+    /// One shard-head observation.
+    Head,
+    /// One immutable page observation.
+    Page,
+}
+
+/// One phase of acquiring and activating a Cell on this node.
+///
+/// A cold route pays ownership, root open, and local restore before the Cell
+/// can answer; a warm route pays none of them. Timing the phases apart turns a
+/// tail-latency report into a statement about which path to fix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivationPhase {
+    /// The conditional ownership transition that claims the Cell.
+    Ownership,
+    /// Continuing a local database that already holds the observed root.
+    Resume,
+    /// Verifying the immutable root graph through the origin.
+    RootOpen,
+    /// Materializing the verified root into local disk.
+    Restore,
+    /// Opening the local database and publishing the serving control.
+    Activate,
+}
+
 /// Terminal outcome of one registered primitive call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrimitiveOperationOutcome {
@@ -100,6 +132,19 @@ pub trait CellTelemetry: Send + Sync {
     /// Records one finite LTX phase outcome.
     fn ltx_phase(&self, _phase: crab_ltx::LtxPhase, _elapsed: Duration, _succeeded: bool) {}
 
+    /// Records one catalog object read and its outcome.
+    fn catalog_read(&self, _kind: CatalogReadKind, _elapsed: Duration, _succeeded: bool) {}
+
+    /// Records one control-record read and its outcome.
+    ///
+    /// One control record is read per cold route, per due-scan cell, and per
+    /// recovery step, so this bounded counter is what makes the metadata
+    /// plane's dominant cost visible.
+    fn control_read(&self, _elapsed: Duration, _succeeded: bool) {}
+
+    /// Records the duration of one Cell activation phase.
+    fn activation_phase(&self, _phase: ActivationPhase, _elapsed: Duration) {}
+
     /// Records one logical read attributed to a bounded residency class.
     fn ltx_logical_read(&self, _origin: crab_ltx::LtxReadOrigin) {}
 
@@ -137,9 +182,39 @@ impl CellTelemetryHandle {
             .map_err(|_| crate::Error::Control("Cell telemetry was initialized twice"))
     }
 
+    /// Creates a handle bound to one sink.
+    ///
+    /// Runtime components that do not install through `CellRuntime` — a
+    /// standalone catalog, for example — use this to share the node's sink.
+    #[must_use]
+    pub fn from_sink(telemetry: Arc<dyn CellTelemetry>) -> Self {
+        let handle = Self::default();
+        // The lock is empty at construction, so this set cannot lose a race.
+        let _ = handle.inner.set(telemetry);
+        handle
+    }
+
     pub(crate) fn durability_proof(&self, source: DurabilitySource, waited: Duration) {
         if let Some(telemetry) = self.inner.get() {
             telemetry.durability_proof(source, waited);
+        }
+    }
+
+    pub(crate) fn catalog_read(&self, kind: CatalogReadKind, elapsed: Duration, succeeded: bool) {
+        if let Some(telemetry) = self.inner.get() {
+            telemetry.catalog_read(kind, elapsed, succeeded);
+        }
+    }
+
+    pub(crate) fn control_read(&self, elapsed: Duration, succeeded: bool) {
+        if let Some(telemetry) = self.inner.get() {
+            telemetry.control_read(elapsed, succeeded);
+        }
+    }
+
+    pub(crate) fn activation_phase(&self, phase: ActivationPhase, elapsed: Duration) {
+        if let Some(telemetry) = self.inner.get() {
+            telemetry.activation_phase(phase, elapsed);
         }
     }
 

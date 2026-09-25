@@ -52,6 +52,50 @@ pub(super) struct WorkAdmission {
     pub(super) _node_bytes: ResourceReservation,
 }
 
+/// One resident Cell whose published due time has passed.
+///
+/// A scheduler ticks such a Cell through the handle it already holds, so due
+/// work does not wait for a fleet scan to reach it. `expected_commit_sequence`
+/// is what the last authoritative publication named: a Tick built from it is a
+/// no-op when the Cell committed again in the meantime.
+pub struct DueResident {
+    handle: CellHandle,
+    expected_commit_sequence: u64,
+    next_due_ms: i64,
+}
+
+impl DueResident {
+    pub(super) const fn new(
+        handle: CellHandle,
+        expected_commit_sequence: u64,
+        next_due_ms: i64,
+    ) -> Self {
+        Self {
+            handle,
+            expected_commit_sequence,
+            next_due_ms,
+        }
+    }
+
+    /// Returns the resident handle to dispatch the Tick through.
+    #[must_use]
+    pub const fn handle(&self) -> &CellHandle {
+        &self.handle
+    }
+
+    /// Returns the commit sequence the last publication named.
+    #[must_use]
+    pub const fn expected_commit_sequence(&self) -> u64 {
+        self.expected_commit_sequence
+    }
+
+    /// Returns the due time this Cell published.
+    #[must_use]
+    pub const fn next_due_ms(&self) -> i64 {
+        self.next_due_ms
+    }
+}
+
 impl CellHandle {
     /// Returns the catalog proof that authorized this activation.
     #[must_use]

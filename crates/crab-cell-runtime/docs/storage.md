@@ -246,6 +246,21 @@ replacement before the next append.
 
 The catalog has 256 shards selected by the first Cell-ID byte. Each shard head names at most 256 immutable pages, and each page contains at most 256 sorted entries.
 
+A version-two head is the shard locator as well as the page list: every page
+appears with its digest and the first Cell ID it can contain. Routing
+binary-searches those keys and reads one page. Without the locator a lookup
+downloads every page in the shard, so cold routing cost would grow with the
+Cell population. Version-one heads, which carried digests only, are not read.
+
+The reader still verifies what it reads: the page digest, that the page opens
+at its located first Cell ID, that every entry stays inside the shard and in
+order, and that the page ends below the next locator key. A page that
+disagrees with its locator is a hard error rather than a reported absence.
+The locator itself is trusted, because only provisioning writes a head and it
+does so through the head CAS; an object store that loses or rewrites a head is
+a storage fault, not a routing input. A shard head is at most 64 KiB, which
+holds 256 locator pairs.
+
 An entry stores:
 
 - Cell ID
@@ -255,7 +270,10 @@ An entry stores:
 - Initial code digest
 - Initial schema version
 
-The per-shard ceiling is 65,536 entries. Provisioning uploads the immutable catalog page and CASes its head before creating `control.json`. A crash may leave an unused catalog entry, but never an unproven mutable Cell.
+The per-shard ceiling is 65,536 entries. Provisioning reads the complete
+shard, uploads the immutable catalog pages, and CASes its head before creating
+`control.json`. A crash may leave an unused catalog entry, but never an
+unproven mutable Cell.
 
 `CellAuthority::create_initial` requires a verified `CatalogProof`. Readers recompute every Cell ID and enforce ordering across page boundaries.
 

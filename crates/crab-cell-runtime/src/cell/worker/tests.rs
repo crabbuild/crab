@@ -121,7 +121,7 @@ async fn sparse_fault_pool_progresses_under_saturated_sql_workers() {
         tokio::join!(
             pool.activate_restored(
                 first.cell,
-                first.database,
+                crate::cell::worker::RestoredDatabase::Paged(Box::new(first.database)),
                 first.destination,
                 first.incarnation,
                 1,
@@ -130,7 +130,7 @@ async fn sparse_fault_pool_progresses_under_saturated_sql_workers() {
             ),
             pool.activate_restored(
                 second.cell,
-                second.database,
+                crate::cell::worker::RestoredDatabase::Paged(Box::new(second.database)),
                 second.destination,
                 second.incarnation,
                 1,
