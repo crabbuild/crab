@@ -179,7 +179,7 @@ def main() -> None:
     report["drain"] = drain_fleet(path, nodes)
     (path.parent / "mode-rollout-report.json").write_text(json.dumps(report, indent=2) + "\n")
     require_drained(report["drain"])
-    path = render(args.state, args.project, args.gateway_port, args.node_port_base, True)
+    path = render(args.state, args.project, args.gateway_port, args.node_port_base, object_durability=True)
     compose(path, (), "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300")
     verify_values(args.node_port_base, acknowledged)
     object_body = "acknowledged after the object-proof rollout"

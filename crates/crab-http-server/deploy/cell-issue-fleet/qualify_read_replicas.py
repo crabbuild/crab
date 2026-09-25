@@ -472,7 +472,7 @@ def main() -> None:
     label = f"label=com.docker.compose.project={args.project}"
     if any(command("docker", kind, "ls", "-q", "--filter", label) for kind in ("volume", "network")) or command("docker", "ps", "-aq", "--filter", label):
         raise RuntimeError(f"Compose project {args.project} already has resources")
-    path = render(args.state, args.project, args.gateway_port, args.node_port_base, True)
+    path = render(args.state, args.project, args.gateway_port, args.node_port_base, object_durability=True)
     compose(path, (), "config", "--quiet")
     if not args.skip_build:
         subprocess.run(["docker", "compose", "--file", str(path), "build", "release-init"], check=True)

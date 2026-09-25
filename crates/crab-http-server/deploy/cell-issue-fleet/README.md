@@ -34,8 +34,9 @@ on loopback, as required by this unauthenticated local example. Containers have
 separate processes, cgroups, and local volumes; this does not simulate separate
 pod network namespaces or a multi-host failure domain.
 
-RustFS is private to the Compose network. Its **disposable local** access key
-and secret key are both `crab`; do not expose this stack to other machines.
+RustFS is reachable from the Compose network and from host loopback only. Its
+**disposable local** access key and secret key are both `crab`; do not expose
+this stack to other machines.
 The RustFS volume and the peer identity volume persist across the four stages.
 The script never removes them automatically.
 
@@ -58,8 +59,9 @@ successive stages. It fails if a node is unhealthy, its effective Cell memory
 is not 1 GiB, a resource limit is missing, a Cell has no live owner, an issue
 is not visible through the gateway, or no Cell object reached RustFS. A fresh
 project name avoids touching another Compose stack. The default host ports are
-`18080` for the gateway and `18101`–`18120` for direct node access; choose
-other ports with `--gateway-port` and `--node-port-base` if needed.
+`18080` for the gateway, `18101`–`18120` for direct node access, and `19010`
+for RustFS on localhost. Choose other ports with `--gateway-port`,
+`--node-port-base`, and `--rustfs-port` if needed.
 
 To inspect the generated Compose definition without starting Docker:
 
@@ -95,6 +97,36 @@ docker compose --file "$state/compose.yaml" \
   --profile five --profile ten --profile twenty ps
 cat "$state/report.json"
 ```
+
+## Measure public-host actions against RustFS
+
+With the stack running, this ignored release-profile test runs 100 serial
+verified local actions and 100 serial forwarded actions through the reference
+application's public host API. Its Cell roots, LTX objects, and recovery reads
+use the Compose RustFS bucket. The result reports action throughput, latency,
+object durability wait, and one owner-loss recovery observation. Set the
+endpoint port to the value passed to `--rustfs-port`. Use a Cargo target
+directory unique to the checkout; the example path below is for the main
+checkout:
+
+```sh
+CRAB_CELL_TEST_BUCKET=crab-cell-issue-fleet \
+CRAB_CELL_TEST_ENDPOINT=http://127.0.0.1:19010 \
+CRAB_CELL_TEST_PREFIX=reference-performance \
+AWS_ACCESS_KEY_ID=crab AWS_SECRET_ACCESS_KEY=crab \
+CRAB_CELL_PERF_ITERATIONS=100 \
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-main" \
+  cargo test -p crab-cell-app --test reference_application \
+  public_host::reference_public_host_rustfs_action_performance \
+  --release --locked -- --ignored --nocapture
+```
+
+Each run gets a distinct object prefix. The application hosts in this test are
+still three processes on one machine; they use the Compose RustFS service but
+do not use the 20 Compose node processes. Keep the raw test output to compare
+RustFS measurements with the in-memory baseline. Serial actions do not
+establish saturation throughput or a production SLO. See the
+[RustFS action measurements](../../../crab-cell-app/performance/2026-09-25-public-host-rustfs.md).
 
 To stop this **disposable** project while preserving its data, use `down`
 without `--volumes`. Removing its volumes deletes the RustFS data, peer
