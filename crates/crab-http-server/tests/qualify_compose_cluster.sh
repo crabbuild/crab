@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 set +x
 trap 'echo "Qualification command failed at line ${LINENO}." >&2' ERR
 
@@ -439,7 +439,10 @@ for pair in \
     --argjson expected "$expected_disk" \
     --argjson observed "$observed_disk" \
     '$expected - $observed | if . < 0 then -. else . end')"
-  test "$delta" -le "$disk_probe_tolerance_bytes"
+  if ! test "$delta" -le "$disk_probe_tolerance_bytes"; then
+    echo "[DEBUG-capacity] free disk mismatch: startup=${expected_disk} current=${observed_disk} delta=${delta} tolerance=${disk_probe_tolerance_bytes}" >&2
+    exit 1
+  fi
 done
 
 metrics_a="$("${compose[@]}" exec -T server crab-http-server \
@@ -461,9 +464,10 @@ for pair in \
   expected_cells="$(jq -r '.admission.active_cells' <<<"$capacity")"
   observed_disk="$(awk '$1 == "crab_http_server_cell_runtime_local_disk_capacity_bytes" { print $2; exit }' <<<"$metrics")"
   observed_cells="$(awk '$1 == "crab_http_server_cell_runtime_active_cell_capacity" { print $2; exit }' <<<"$metrics")"
-  test -n "$observed_disk" && test -n "$observed_cells"
-  test "$observed_disk" = "$expected_disk"
-  test "$observed_cells" = "$expected_cells"
+  if [ "$observed_disk" != "$expected_disk" ] || [ "$observed_cells" != "$expected_cells" ]; then
+    echo "[DEBUG-capacity] metric mismatch: disk expected=${expected_disk} observed=${observed_disk:-missing}; cells expected=${expected_cells} observed=${observed_cells:-missing}" >&2
+    exit 1
+  fi
 done
 
 session_a="$(node_session server)"
@@ -501,8 +505,11 @@ assert_placement_parity() {
   local node="$3"
   local observed_active
   observed_active="$(awk '$1 == "crab_http_server_cell_runtime_active_cells" { print $2; exit }' <<<"$metrics")"
-  test -n "$observed_active"
-  jq --exit-status \
+  if [ -z "$observed_active" ]; then
+    echo "[DEBUG-capacity] active Cell gauge missing" >&2
+    return 1
+  fi
+  if ! jq --exit-status \
     --argjson expected_memory "$(jq -r '.resources.memory_bytes' <<<"$capacity")" \
     --argjson expected_disk "$(jq -r '.admission.local_disk_bytes' <<<"$capacity")" \
     --argjson expected_cells "$(jq -r '.admission.active_cells' <<<"$capacity")" \
@@ -512,7 +519,11 @@ assert_placement_parity() {
      .advertisement.placement.disk_capacity_bytes == $expected_disk and
      .advertisement.placement.max_active_cells == $expected_cells and
      .advertisement.placement.active_cells == $observed_active' \
-    <<<"$node" >/dev/null
+    <<<"$node" >/dev/null; then
+    echo "[DEBUG-capacity] placement mismatch: active=${observed_active}; capacity=${capacity}" >&2
+    jq '{session, live, placement: .advertisement.placement}' <<<"$node" >&2
+    return 1
+  fi
 }
 
 assert_placement_parity "$capacity_a" "$metrics_a" "$node_a"
