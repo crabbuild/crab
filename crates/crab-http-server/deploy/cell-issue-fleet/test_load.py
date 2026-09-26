@@ -3,6 +3,7 @@
 import io
 import json
 import tempfile
+import tarfile
 import threading
 import time
 import unittest
@@ -13,6 +14,117 @@ from unittest.mock import patch
 
 import load
 import qualify
+import import_image
+
+
+class ImageImportTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.artifact = Path(self.directory.name)
+        self.source = "a" * 40
+        self.config = json.dumps({
+            "architecture": "arm64", "os": "linux",
+            "config": {"Labels": {"org.opencontainers.image.revision": self.source}},
+        }).encode()
+        self.config_id = import_image.digest(self.config)
+        self.manifest = json.dumps({
+            "schemaVersion": 2,
+            "config": {"digest": self.config_id, "size": len(self.config)}, "layers": [],
+        }).encode()
+        self.manifest_id = import_image.digest(self.manifest)
+        self.files = {
+            "oci-layout": b'{"imageLayoutVersion":"1.0.0"}',
+            "manifest.json": json.dumps([{
+                "Config": "blobs/sha256/" + self.config_id[7:],
+                "RepoTags": ["crab-http-server:test"], "Layers": [],
+            }]).encode(),
+            "index.json": json.dumps({"schemaVersion": 2, "manifests": [{
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": self.manifest_id, "size": len(self.manifest),
+            }]}).encode(),
+            "blobs/sha256/" + self.manifest_id[7:]: self.manifest,
+            "blobs/sha256/" + self.config_id[7:]: self.config,
+        }
+        (self.artifact / "source-revision").write_text(self.source + "\n")
+        (self.artifact / "platform").write_text("linux/arm64\n")
+        (self.artifact / "image-id").write_text(self.config_id + "\n")
+        self.write_archive()
+
+    def write_archive(self):
+        path = self.artifact / "image.tar.gz"
+        with tarfile.open(path, "w:gz") as archive:
+            for name, data in self.files.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(data)
+                archive.addfile(member, io.BytesIO(data))
+        (self.artifact / "image.sha256").write_text(import_image.digest(path.read_bytes())[7:] + "  image.tar.gz\n")
+
+    def test_import_binds_both_docker_store_identities_to_the_same_archive(self):
+        for ci_id, installed in ((self.config_id, self.manifest_id), (self.manifest_id, self.config_id)):
+            with self.subTest(ci_id=ci_id):
+                (self.artifact / "image-id").write_text(ci_id + "\n")
+                receipt_path = self.artifact / (ci_id[7:] + ".json")
+                image = {"image": installed, "source": self.source, "platform": "linux/arm64"}
+                with patch.object(import_image, "command", side_effect=["loaded", installed + "\nsha256:" + "f" * 64, ""]) as commands, \
+                        patch.object(import_image, "image_provenance", return_value=image) as inspect:
+                    import_image.import_image(self.artifact, "crab-cell-issue-import-test", receipt_path)
+                inspect.assert_called_once_with(installed)
+                self.assertEqual(commands.call_args.args, (
+                    "docker", "image", "tag", installed, "crab-cell-issue-import-test:local",
+                ))
+                receipt = json.loads(receipt_path.read_text())
+                self.assertEqual(receipt["image"], installed)
+                self.assertEqual(receipt["ci_image_id"], ci_id)
+                self.assertEqual(receipt["config_digest"], self.config_id)
+                self.assertEqual(receipt["manifest_digest"], self.manifest_id)
+
+    def test_bad_artifact_never_reaches_docker(self):
+        cases = [
+            ("source-revision", "b" * 40, "source revision differs"),
+            ("platform", "linux/amd64", "platform differs"),
+            ("image-id", "sha256:" + "c" * 64, "neither the verified manifest"),
+            ("image.sha256", "0" * 64 + "  image.tar.gz", "checksum mismatch"),
+            ("image.sha256", "0" * 64 + "  ../image.tar.gz", "must name image.tar.gz"),
+        ]
+        for filename, value, error in cases:
+            path = self.artifact / filename
+            original = path.read_text()
+            with self.subTest(filename=filename, value=value), \
+                    patch.object(import_image, "command") as commands:
+                path.write_text(value)
+                try:
+                    with self.assertRaisesRegex(ValueError, error):
+                        import_image.import_image(self.artifact, "crab-cell-issue-import-test", self.artifact / "receipt.json")
+                    commands.assert_not_called()
+                finally:
+                    path.write_text(original)
+
+    def test_archive_checksum_cannot_hide_a_changed_config_blob(self):
+        self.files["blobs/sha256/" + self.config_id[7:]] = self.config.replace(b"arm64", b"amd64")
+        self.write_archive()
+        with self.assertRaisesRegex(ValueError, "descriptor does not match its blob"):
+            import_image.artifact_metadata(self.artifact)
+
+    def test_both_archive_entry_points_must_select_the_verified_image(self):
+        docker = json.loads(self.files["manifest.json"])
+        docker[0]["Config"] = "blobs/sha256/" + "f" * 64
+        self.files["manifest.json"] = json.dumps(docker).encode()
+        self.write_archive()
+        with patch.object(import_image, "command") as commands, \
+                self.assertRaisesRegex(ValueError, "select different images"):
+            import_image.import_image(self.artifact, "crab-cell-issue-import-test", self.artifact / "receipt.json")
+        commands.assert_not_called()
+
+    def test_an_unverified_loaded_image_cannot_receive_the_project_tag(self):
+        receipt_path = self.artifact / "receipt.json"
+        for installed in ("sha256:" + "f" * 64, self.config_id + "\n" + self.manifest_id):
+            with self.subTest(installed=installed), \
+                    patch.object(import_image, "command", side_effect=["loaded", installed]) as commands, \
+                    self.assertRaisesRegex(ValueError, "exactly one verified image"):
+                import_image.import_image(self.artifact, "crab-cell-issue-import-test", receipt_path)
+            self.assertEqual(commands.call_count, 2)
+            self.assertFalse(receipt_path.exists())
 
 
 class ImageProvenanceTests(unittest.TestCase):

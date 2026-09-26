@@ -118,19 +118,39 @@ state directory, so `--skip-build` does not need a source-tree bind mount.
 run_id=YOUR_SUCCESSFUL_RUN_ID
 state="$HOME/.codex/cell-issue-fleet/ci-$run_id"
 project="crab-cell-issue-ci-$run_id"
-gh run download "$run_id" --name "cell-runtime-image-$run_id" --dir "$state/image"
-(cd "$state/image" && shasum -a 256 -c image.sha256)
-gzip -dc "$state/image/image.tar.gz" | docker image load
-image_id="$(cat "$state/image/image-id")"
-test "$(docker image inspect "$image_id" --format '{{.Os}}/{{.Architecture}}')" = "$(cat "$state/image/platform")"
-docker image tag "$image_id" "$project:local"
-image_source="$(cat "$state/image/source-revision")"
+artifact="$HOME/Workspace/crabbuild-target/cell-image-ci-$run_id"
+gh run download "$run_id" --name "cell-runtime-image-$run_id" --dir "$artifact"
+python3 crates/crab-http-server/deploy/cell-issue-fleet/import_image.py \
+  --artifact "$artifact" --project "$project"
+image_source="$(cat "$artifact/source-revision")"
 git fetch origin "$image_source"
 checkout="$HOME/Workspace/Github/crabbuild/crab-cell-ci-$run_id"
 git worktree add --detach "$checkout" "$image_source"
 python3 "$checkout/crates/crab-http-server/deploy/cell-issue-fleet/qualify.py" \
   --state "$state" --project "$project" --skip-build --load-stages
 ```
+
+The importer checks the archive SHA-256, hashes its OCI manifest and config,
+and matches source/platform receipts before loading. Docker's two archive
+entry points must select the same config and layers. The installed image ID
+must equal that verified manifest or config digest; a mutable tag is never
+identity proof. This handles the observed CI config-ID → Colima manifest-ID
+change without accepting unrelated images. Docker's
+[classic and containerd stores](https://docs.docker.com/engine/storage/containerd/)
+have different image representations, and the
+[OCI manifest](https://github.com/opencontainers/image-spec/blob/v1.1.1/manifest.md)
+explicitly references its config by digest.
+
+`import-receipt.json` records the archive checksum, both content digests, CI
+image ID, installed ID, source, platform, and project tag. Preserve it beside
+the downloaded CI artifact. The current importer accepts the workflow's
+single-platform OCI export; other archive shapes fail explicitly. It refuses
+to overwrite a receipt; use a fresh `--output` for a repeat import.
+[Docker load](https://docs.docker.com/reference/cli/docker/image/load/) also
+restores the archive's original tags. The importer then creates the selected
+project's `local` tag; `qualify.py` pins that image before starting nodes.
+The artifact and receipt belong on the mounted workspace volume. Only the
+small generated Compose state needs the home-directory bind mount.
 
 To inspect the generated Compose definition without starting Docker:
 
