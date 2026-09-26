@@ -267,6 +267,9 @@ reduces admitted transaction concurrency and still needs scale qualification.
 
 The [cross-Cell transaction protocol](CROSS_CELL_TRANSACTIONS.md) specifies
 the decision, lock, visibility, and failure-recovery contract.
+Start with its [foundation assessment](CROSS_CELL_TRANSACTIONS.md#foundation-assessment-for-multiple-primary-keys)
+for a three-key transfer, reader isolation, the driver trust boundary, and
+the remaining 10,000-Cell qualification gates.
 Account and data Cells persist prepared write images, immutable read images,
 and exclusive write/shared read locks using one participant state machine.
 Ordinary reads respect write locks; writes respect both lock modes. Data Cells refuse split sealing; account Cells refuse
