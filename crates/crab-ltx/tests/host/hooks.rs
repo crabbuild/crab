@@ -74,6 +74,8 @@ struct Faults {
     track_all: Arc<AtomicBool>,
     #[cfg(feature = "replica")]
     create_pause: Arc<OnceLock<Arc<InstallPause>>>,
+    forbidden_thread: Arc<Mutex<Option<std::thread::ThreadId>>>,
+    pause: Arc<Mutex<Option<Arc<activation::Pause>>>>,
 }
 
 #[cfg(feature = "replica")]
@@ -107,6 +109,13 @@ impl Faults {
 
     fn check(&self, operation: &'static str) -> io::Result<()> {
         self.calls.lock().unwrap().insert(operation);
+        if *self.forbidden_thread.lock().unwrap() == Some(std::thread::current().id()) {
+            return Err(io::Error::other("filesystem work on async thread"));
+        }
+        let pause = self.pause.lock().unwrap().clone();
+        if let Some(pause) = pause {
+            pause.wait(operation);
+        }
         if *self.failure.lock().unwrap() == Some(operation) {
             return Err(io::Error::new(io::ErrorKind::StorageFull, operation));
         }
@@ -265,6 +274,8 @@ fn injected<T>(result: crab_ltx::Result<T>) {
     );
 }
 
+#[cfg(feature = "replica")]
+mod activation;
 mod capture;
 mod compaction;
 mod injection;

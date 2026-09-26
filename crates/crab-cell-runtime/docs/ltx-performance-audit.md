@@ -97,16 +97,17 @@ and accounting tests pass. Full-cache concurrent latency remains unmeasured.
 ### 3. Sparse writable activation still reads the complete checksum directory
 
 **Confirmed:** [prepare_writable](../../crab-ltx/src/replica.rs) awaits
-[load_checksums](../../crab-ltx/src/replica/directory.rs). That function visits
+[load_checksums](../../crab-ltx/src/replica/directory/checksums.rs). That function visits
 every directory node sequentially, authenticates every page entry, writes
 eight checksum bytes per database page, and syncs the checksum file before
 opening the writer. LTX page bodies are lazy; this metadata walk is eager.
 At 4 KiB pages a 10 GiB database alone needs a 20 MiB checksum file, excluding
 directory transfer and validation. Tiny bootstrap Cells hide this cost.
-The same async path directly calls synchronous filesystem writes and syncs,
-including the final checksum barrier, instead of dispatching them through the
-host's blocking executor. Slow local storage can therefore stall its Tokio
-worker as well as delaying activation; its impact is not yet measured.
+At the audited revision, this async path directly called synchronous filesystem
+writes and syncs, including the final checksum barrier, instead of dispatching
+them through the host's blocking executor. Slow local storage could therefore
+stall its Tokio worker as well as delaying activation; its fleet latency impact
+remains unmeasured.
 
 **Change to evaluate:** first remove finding 2's cache overhead and overlap
 independent authenticated node reads within existing host admission, retaining
@@ -123,6 +124,28 @@ corruption, canceled activation, fresh destination, and checksum-link tests
 must remain intact. A fast first page fault does not prove fast activation.
 Inject slow filesystem writes/syncs and verify unrelated task progress, bounded
 blocking admission, and cleanup when activation is canceled or returns an error.
+
+**Implementation:** checksum-file creation, bounded 64 KiB writes, final sync,
+parent sync, and metadata validation now use `Host::run`. The file owner moves
+with each dispatched job and retains dirty admission. Cancellation schedules
+cleanup through the same blocking-job ceiling; successful delivery disarms
+cleanup only after the validated checksum handle reaches its caller. Normal
+errors await cleanup before returning. Cleanup remains best effort when the
+filesystem or executor fails, and requires the Tokio runtime to stay alive.
+This follows the [runtime task contract](https://docs.rs/tokio/1.53.1/tokio/runtime/struct.Handle.html#method.spawn).
+
+The regression first failed on the old async-thread filesystem call, then
+passed with a 40 MB database, disk directory cache, and one blocking-job slot.
+Fault tests pause creation, writes, both sync barriers, and final metadata;
+unrelated async work progresses, cancellation retains both admissions through
+paused cleanup, and the same destination can be retried and queried. Error
+injection preserves pre-existing destinations. Exact-root, sparse publication,
+directory, and process-kill recovery tests pass. Ordered directory traversal is
+still sequential; activation percentiles and fleet interference remain open.
+The real RustFS HTTP/peer test also passes application mutations, owner
+takeover, restored collaboration state, and Git reads with this path.
+Full-image restore is a separate sibling: bulk writes/syncs already use host
+jobs, but initial file setup and scratch cleanup still need the same audit.
 
 ### 4. Range compaction can do whole-graph metadata work on the publication lane
 
