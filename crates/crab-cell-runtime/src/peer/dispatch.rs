@@ -91,6 +91,44 @@ impl PeerDispatcher {
         if let Err(error) = self.authorizer.authorize(request) {
             return error_reply(error);
         }
+        let resolved = if matches!(
+            request.operation(),
+            Some(wire::peer_request::Operation::Read(wire::ReadRequest {
+                operation: Some(wire::read_request::Operation::ReplicaQuery(_)),
+                ..
+            }))
+        ) {
+            // Explicit replica queries use snapshot admission, never owner activation.
+            Err(Error::CellNotActive)
+        } else {
+            self.resolver.resolve(request.target().clone()).await
+        };
+        self.dispatch_authorized(request, now_ms, resolved).await
+    }
+
+    /// Dispatches with a receiver-resolved local handle after rechecking authorization.
+    ///
+    /// The handle must still match the exact target; actor admission fences a
+    /// handle whose owner changed after resolution. Replica queries ignore the
+    /// owner result and use the admitted snapshot resolver.
+    pub async fn dispatch_resolved(
+        &self,
+        request: &VerifiedPeerRequest,
+        now_ms: i64,
+        resolved: Result<CellHandle>,
+    ) -> wire::PeerReply {
+        if let Err(error) = self.authorizer.authorize(request) {
+            return error_reply(error);
+        }
+        self.dispatch_authorized(request, now_ms, resolved).await
+    }
+
+    async fn dispatch_authorized(
+        &self,
+        request: &VerifiedPeerRequest,
+        now_ms: i64,
+        resolved: Result<CellHandle>,
+    ) -> wire::PeerReply {
         if let Some(wire::peer_request::Operation::Read(read)) = request.operation()
             && let Some(wire::read_request::Operation::ReplicaQuery(query)) =
                 read.operation.as_ref()
@@ -99,10 +137,17 @@ impl PeerDispatcher {
                 .replica_query(request.target().clone(), read, query, now_ms)
                 .await;
         }
-        let handle = match self.resolver.resolve(request.target().clone()).await {
+        let handle = match resolved {
             Ok(handle) => handle,
             Err(error) => return error_reply(error),
         };
+        let entry = handle.catalog().entry();
+        if handle.cell_id() != request.target().cell_id()
+            || entry.namespace() != request.target().namespace()
+            || entry.partition() != request.target().partition()
+        {
+            return error_reply(Error::CatalogCollision);
+        }
         let transport = LocalCellTransport {
             registry: Arc::clone(&self.registry),
             handles: Arc::new(HashMap::from([(handle.cell_id(), handle.clone())])),

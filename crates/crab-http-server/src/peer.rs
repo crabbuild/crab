@@ -675,11 +675,16 @@ impl LocalCellResolver {
         layout: CellStorageLayout,
         identity: ApplicationIdentity,
         runtime: CellRuntime,
+        telemetry: crab_cell_runtime::fleet::telemetry::CellTelemetryHandle,
     ) -> Self {
         Self {
             identity,
-            catalog: CellCatalog::new(layout.clone(), identity.tenant()),
-            authority: CellAuthority::new(layout),
+            catalog: CellCatalog::with_telemetry(
+                layout.clone(),
+                identity.tenant(),
+                telemetry.clone(),
+            ),
+            authority: CellAuthority::with_telemetry(layout, telemetry),
             runtime,
         }
     }
@@ -1037,7 +1042,7 @@ pub(crate) async fn forward(
             }
         ))
     );
-    let local_resolution = if replica_query {
+    let mut local_resolution = if replica_query {
         Err(CellError::CellNotActive)
     } else {
         receiver.resolver.resolve(request.target().clone()).await
@@ -1057,6 +1062,9 @@ pub(crate) async fn forward(
         {
             return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
         }
+        // Activation changed the local handle; resolve its exact catalog and
+        // control once before dispatch instead of reusing the earlier miss.
+        local_resolution = receiver.resolver.resolve(request.target().clone()).await;
     } else if !replica_query && local_unavailable && request.hop_count() < 2 {
         let remaining_ms = match remaining_timeout(started, request.remaining_ms()) {
             Ok(remaining_ms) => remaining_ms.saturating_sub(1),
@@ -1090,7 +1098,9 @@ pub(crate) async fn forward(
     if let Some(manager) = receiver.read_replicas.as_ref() {
         dispatcher = dispatcher.with_replica_resolver(Arc::new(manager.clone()));
     }
-    let reply = dispatcher.dispatch(&request, now_ms).await;
+    let reply = dispatcher
+        .dispatch_resolved(&request, now_ms, local_resolution)
+        .await;
     let Ok(_codec) = runtime.reserve_worker_job(codec_deadline).await else {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     };

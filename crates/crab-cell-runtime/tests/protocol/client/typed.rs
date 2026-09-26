@@ -2,6 +2,100 @@
 
 use super::*;
 
+fn verified_description(target: &CellTarget) -> VerifiedPeerRequest {
+    let session = SessionId::from_bytes([12; 16]);
+    let release = Digest::from_bytes([13; 32]);
+    let signer = PeerSigner::new(
+        session,
+        release,
+        ed25519_dalek::SigningKey::from_bytes(&[14; 32]),
+    );
+    let signed = signer
+        .sign(
+            PeerPrincipal {
+                issuer: "https://identity.example".into(),
+                subject: "alice".into(),
+                actions: vec!["repository.issue.create".into()],
+            },
+            1_000,
+            61_000,
+            30_000,
+            crab_cell_runtime::peer::PeerOperation::Read(wire::ReadRequest {
+                target: Some(wire::Target {
+                    tenant_id: target.tenant().as_bytes().to_vec(),
+                    application_id: target.application().as_bytes().to_vec(),
+                    namespace_id: target.namespace().as_bytes().to_vec(),
+                    partition: target.partition().to_vec(),
+                }),
+                timeout_ms: 30_000,
+                minimum: None,
+                operation: Some(wire::read_request::Operation::Describe(true)),
+            }),
+        )
+        .unwrap();
+    PeerVerifier::new(session, release, signer.verifying_key())
+        .verify(&signed, 1_000)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn resolved_peer_dispatch_uses_the_receivers_handle() {
+    let fixture = fixture().await;
+    let other = CellTarget::new(
+        fixture.target.tenant(),
+        fixture.target.application(),
+        fixture.target.namespace(),
+        b"another-repository",
+    )
+    .unwrap();
+    let dispatcher = PeerDispatcher::new(
+        Arc::clone(&fixture.registry),
+        Arc::new(LocalResolver {
+            target: other,
+            handle: fixture.handle().clone(),
+        }),
+        Arc::new(RepositoryAuthorizer),
+    );
+    let request = verified_description(&fixture.target);
+    let reply = dispatcher
+        .dispatch_resolved(&request, 1_000, Ok(fixture.handle().clone()))
+        .await;
+    assert!(matches!(
+        reply.outcome,
+        Some(wire::peer_reply::Outcome::Read(_))
+    ));
+    fixture.handle().drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn resolved_peer_dispatch_rejects_a_handle_for_another_target() {
+    let fixture = fixture().await;
+    let other = CellTarget::new(
+        fixture.target.tenant(),
+        fixture.target.application(),
+        fixture.target.namespace(),
+        b"another-repository",
+    )
+    .unwrap();
+    let dispatcher = PeerDispatcher::new(
+        Arc::clone(&fixture.registry),
+        Arc::new(LocalResolver {
+            target: fixture.target.clone(),
+            handle: fixture.handle().clone(),
+        }),
+        Arc::new(RepositoryAuthorizer),
+    );
+    let request = verified_description(&other);
+    let reply = dispatcher
+        .dispatch_resolved(&request, 1_000, Ok(fixture.handle().clone()))
+        .await;
+    assert!(matches!(
+        reply.outcome,
+        Some(wire::peer_reply::Outcome::Error(_))
+    ));
+    fixture.handle().drain().await.unwrap();
+}
+
 #[tokio::test]
 async fn typed_client_publishes_replays_rejections_and_receipted_reads() {
     let fixture = fixture().await;

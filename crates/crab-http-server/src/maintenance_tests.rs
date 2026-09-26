@@ -272,8 +272,12 @@ fn enable_catalog_readiness(server: &mut Arc<Server>) {
         *identity.application().as_bytes(),
     );
     let registry = Arc::new(crate::cells::compiled_registry().unwrap());
-    let resolver =
-        crate::peer::LocalCellResolver::new(layout.clone(), identity, server.cell_runtime.clone());
+    let resolver = crate::peer::LocalCellResolver::new(
+        layout.clone(),
+        identity,
+        server.cell_runtime.clone(),
+        server.cell_runtime.telemetry_handle(),
+    );
     let releases =
         crab_cell_runtime::recovery::release::ReleaseStore::new(layout.clone(), identity).unwrap();
     server.peer_receiver = Some(crate::peer::PeerReceiver::new(
