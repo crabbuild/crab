@@ -150,7 +150,6 @@ pub(super) async fn spool_indexes(
                 let length = descriptor.index_length;
                 Ok(SpoolInput {
                     descriptor,
-                    source: 0,
                     start: output_start,
                     length,
                 })
@@ -191,7 +190,7 @@ pub(super) struct SpoolCursor {
 impl SpoolCursor {
     pub(super) fn new(
         input: SpoolInput,
-        sources: &mut [Box<dyn FileIo>],
+        source: &mut dyn FileIo,
         buffer_entries: usize,
     ) -> Result<Self> {
         let mut cursor = Self {
@@ -202,11 +201,11 @@ impl SpoolCursor {
             input,
             current: None,
         };
-        cursor.advance(sources)?;
+        cursor.advance(source)?;
         Ok(cursor)
     }
 
-    pub(super) fn advance(&mut self, sources: &mut [Box<dyn FileIo>]) -> Result<()> {
+    pub(super) fn advance(&mut self, source: &mut dyn FileIo) -> Result<()> {
         let end = self
             .input
             .start
@@ -219,9 +218,6 @@ impl SpoolCursor {
         if self.offset > end || end - self.offset < crate::paged::ENTRY_BYTES as u64 {
             return Err(CrabError::LTXCorrupted);
         }
-        let source = sources
-            .get_mut(self.input.source)
-            .ok_or(CrabError::LTXCorrupted)?;
         if self.buffered_offset == self.buffer.len() {
             let length = (end - self.offset).min(self.buffer_bytes as u64) as usize;
             self.buffer = source.read_exact_at(self.offset, length)?;

@@ -688,8 +688,14 @@ effort, so skipped entries may require another origin read after restart.
 Cell compaction buffers sequential index reads within a combined 960 KiB
 budget and dispatches bounded merge batches through `Host` jobs. Scratch files
 and admission remain owned through canceled jobs and cleanup. Range compaction
-still rebuilds the complete directory and reserves scratch against the whole
-database; these bounds do not establish foreground latency isolation.
+spools only selected indexes/bodies, then streams new locators through the
+authenticated directory. It retains newer page versions, including disjoint
+segments in one bundle, and reuses unchanged branches. Traversal retains
+bounded state per tree level and at most eight pending node uploads. Scratch
+covers the selected inputs, worst-case encoded output and both index copies;
+it does not reserve two complete database images. Full-range compaction still
+visits the full directory. These bounds do not establish foreground latency
+isolation or sustained publisher capacity.
 
 Large-database and multi-tenant capacity still require workload-specific
 measurement. The existing tests prove bounded correctness behavior; they do not
@@ -743,6 +749,21 @@ Cell opens and another reads and closes. Each Cell must return its own value
 from the exact selected root. Each run retains objects under a unique
 `crab-ltx-tests/activation-registry/` prefix. The regular activation suite also
 covers conflicting path claims, setup failures and refusal of leftover files.
+
+Range compaction can also be checked against that real object store:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-your-worktree" \
+  cargo test -p crab-ltx --features replica --locked --test cell \
+  rustfs_range_compaction_preserves_exact_native_and_bundled_roots -- --ignored --nocapture
+```
+
+It compacts two updates on larger bases with a cold metadata cache and one
+MiB of scratch admission. Native and shared-bundle inputs, 512/4096-byte pages,
+multiple directory levels, and a newer overwrite must restore byte-identically.
+It bounds origin reads and uploaded objects, retaining its unique
+`crab-ltx-tests/range-compaction/` prefix. These are work and correctness checks,
+not service latency percentiles.
 
 The suite also ships the independent half of the format proof:
 

@@ -814,23 +814,29 @@ fn compaction_scratch_bytes(graph: &LoadedGraph, range: std::ops::Range<usize>) 
         .get(range)
         .filter(|descriptors| !descriptors.is_empty())
         .ok_or(CrabError::TxNotAvailable)?;
-    let base = crate::recovery::full_job_scratch_bytes(
-        graph.document.page_size,
-        graph.document.database_pages,
-    )?;
-    let indexes = graph
-        .descriptors
-        .iter()
-        .try_fold(base, |total, descriptor| {
-            total
-                .checked_add(descriptor.index_length)
-                .ok_or(CrabError::Limit(crate::LimitKind::ScratchDiskBytes))
-        })?;
-    selected.iter().try_fold(indexes, |total, descriptor| {
+    let indexes = selected.iter().try_fold(0_u64, |total, descriptor| {
+        total
+            .checked_add(descriptor.index_length)
+            .ok_or(CrabError::Limit(crate::LimitKind::ScratchDiskBytes))
+    })?;
+    let inputs = selected.iter().try_fold(indexes, |total, descriptor| {
         total
             .checked_add(descriptor.info.size_bytes)
             .ok_or(CrabError::Limit(crate::LimitKind::ScratchDiskBytes))
-    })
+    })?;
+    let endpoint = selected.last().ok_or(CrabError::TxNotAvailable)?;
+    let pages =
+        (indexes / crate::paged::ENTRY_BYTES as u64).min(u64::from(endpoint.info.database_pages));
+    // Five coexisting files: selected indexes/bodies, encoded LTX, its temporary
+    // varint index, and the fixed-width sidecar. Include worst-case compression
+    // and both index copies; logical database size is not a range-work bound.
+    let ltx = crate::ltx::cut_upper_bound(endpoint.info.page_size, pages)?;
+    pages
+        .checked_mul(30 + crate::paged::ENTRY_BYTES as u64)
+        .and_then(|output_indexes| output_indexes.checked_add(ltx))
+        .and_then(|outputs| inputs.checked_add(outputs))
+        .and_then(|total| total.checked_add(64 << 10))
+        .ok_or(CrabError::Limit(crate::LimitKind::ScratchDiskBytes))
 }
 
 struct AppendInput {

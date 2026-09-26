@@ -2,6 +2,82 @@
 
 use super::*;
 
+#[tokio::test(flavor = "multi_thread")]
+async fn compaction_reservation_covers_all_coexisting_scratch_files() {
+    for page_size in [512, 65_536] {
+        let source = tempfile::TempDir::new().unwrap();
+        let path = source.path().join("source.sqlite");
+        let initial = crab_ltx::rusqlite::Connection::open(&path).unwrap();
+        initial
+            .execute_batch(&format!("PRAGMA page_size={page_size}; CREATE TABLE t(v)"))
+            .unwrap();
+        drop(initial);
+        let mut writer = Db::open(&path, Limits::default()).unwrap();
+        writer
+            .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(randomblob(1048576))"))
+            .unwrap();
+        let replica = CellReplica::new(
+            CellStorageLayout::new(
+                Store::new(Arc::new(InMemory::new())),
+                ObjectPath::from("scratch-bound"),
+                [111; 16],
+            ),
+            [112; 32],
+            [113; 16],
+            Limits::default(),
+        )
+        .unwrap();
+        let prepared = replica
+            .prepare(None, &writer.capture().unwrap(), 1, 1)
+            .await
+            .unwrap();
+        let root = prepared.root();
+        let count = prepared.verified().segment_count();
+        writer.close().unwrap();
+        let scratch = tempfile::TempDir::new().unwrap();
+        let faults = Arc::new(Faults::default());
+        let slots = Arc::new(tokio::sync::Semaphore::new(8));
+        let replica = replica.with_host(
+            Host::default()
+                .with_filesystem(faults.clone())
+                .with_scratch_slots(slots.clone()),
+        );
+        let pause = Arc::new(Pause {
+            operation: "remove_file",
+            entered: tokio::sync::Notify::new(),
+            released: Mutex::new(false),
+            wake: std::sync::Condvar::new(),
+        });
+        let release = Release(pause.clone());
+        *faults.pause.lock().unwrap() = Some(pause.clone());
+        let destination = scratch.path().to_owned();
+        let mut task = tokio::spawn(async move {
+            replica
+                .prepare_compaction(&root, 0..count, 9, &destination)
+                .await
+        });
+        tokio::select! {
+            result = &mut task => panic!("compaction finished before cleanup: {:?}", result.unwrap().map(|prepared| prepared.root())),
+            result = tokio::time::timeout(Duration::from_secs(10), pause.entered.notified()) => result.unwrap(),
+        }
+        // Every spool/output grows monotonically and cleanup has not started:
+        // these five final file lengths are the operation's peak logical bytes.
+        let sizes = std::fs::read_dir(scratch.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().metadata().unwrap().len())
+            .collect::<Vec<_>>();
+        assert_eq!(sizes.len(), 5);
+        assert!(
+            sizes.iter().sum::<u64>() <= ((8 - slots.available_permits()) << 20) as u64,
+            "{page_size}-byte pages exceed reserved scratch"
+        );
+        drop(release);
+        assert_eq!(task.await.unwrap().unwrap().root().position, root.position);
+        assert_eq!(slots.available_permits(), 8);
+        assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+    }
+}
+
 #[cfg(feature = "replica")]
 #[tokio::test(start_paused = true)]
 async fn compaction_overlaps_independent_remote_transfers() {

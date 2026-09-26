@@ -4,12 +4,14 @@ use crate::{CellObjectKind, CellStorageLayout, CrabError, Host, Result};
 
 mod checksums;
 mod initial;
+mod relocate;
 mod update;
 
 pub(super) use checksums::load_checksums;
 pub(super) use initial::{
     build_and_upload as build_initial_and_upload, entries as initial_entries,
 };
+pub(super) use relocate::run as relocate_and_upload;
 
 const MAGIC: &[u8; 8] = b"CRBDIR01";
 const HEADER_BYTES: usize = 32;
