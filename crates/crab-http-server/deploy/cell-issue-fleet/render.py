@@ -124,7 +124,7 @@ def compose(
             "image": RUSTFS_IMAGE,
             "user": "0:0",
             "entrypoint": ["/bin/sh", "/scripts/peer-pki-init.sh"],
-            "volumes": ["peer-identity:/identity", f"{HERE / 'peer-pki-init.sh'}:/scripts/peer-pki-init.sh:ro"],
+            "volumes": ["peer-identity:/identity", f"{state / 'peer-pki-init.sh'}:/scripts/peer-pki-init.sh:ro"],
             "cap_drop": ["ALL"],
             "cap_add": ["CHOWN"],
             "restart": "no",
@@ -248,6 +248,7 @@ def render(
     for index in range(1, 21):
         (state / "config" / f"{node_name(index)}.toml").write_text(node_config(index))
     (state / "Caddyfile").write_text(caddyfile())
+    (state / "peer-pki-init.sh").write_text((HERE / "peer-pki-init.sh").read_text())
     path = state / "compose.yaml"
     rendered = compose(state, project, gateway_port, node_port_base, rustfs_port)
     path.write_text(json.dumps(rendered, indent=2) + "\n")
