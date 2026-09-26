@@ -331,7 +331,11 @@ impl ScaleEvidence {
                 return Err(Error::Control("qualification scale sample is incomplete"));
             }
         }
-        for samples in self.cell_samples.chunks_exact(SCALE_CELL_COUNTS.len()) {
+        for samples in self
+            .cell_samples
+            .as_chunks::<{ SCALE_CELL_COUNTS.len() }>()
+            .0
+        {
             for pair in samples.windows(2) {
                 if !pair[1].slope_fits_admission(&pair[0]) {
                     return Err(Error::Control(
