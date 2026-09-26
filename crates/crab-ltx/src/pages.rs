@@ -220,12 +220,15 @@ impl PageChecksums {
         // Retire the predecessor only after sealing. Its Arc otherwise forces
         // a complete memory-base copy even when only one checksum changed.
         *self = candidate;
+        // A sealed overlay is consumed once. Retaining its empty allocation
+        // makes every later candidate clone the largest historical table.
+        let changes = std::mem::take(&mut self.changes);
         match &mut self.base {
             ChecksumBase::Memory(base) => {
                 let dense = Arc::make_mut(base);
                 dense.truncate(self.base_count as usize);
                 dense.resize(self.count as usize, 0);
-                for (&page, &checksum) in &self.changes {
+                for (page, checksum) in changes {
                     if page <= self.count {
                         dense[page as usize - 1] = checksum;
                     }
@@ -235,8 +238,6 @@ impl PageChecksums {
                 if dense.capacity() > dense.len().saturating_mul(2) {
                     dense.shrink_to_fit();
                 }
-                self.base_count = self.count;
-                self.changes.clear();
             }
             #[cfg(feature = "replica")]
             ChecksumBase::File(base) => {
@@ -245,15 +246,14 @@ impl PageChecksums {
                 if length > u64::from(self.base_count) * 8 {
                     file.set_len(length)?;
                 }
-                let mut changes = self
-                    .changes
-                    .iter()
-                    .filter(|(page, _)| **page <= self.count)
+                let mut changes = changes
+                    .into_iter()
+                    .filter(|(page, _)| *page <= self.count)
                     .collect::<Vec<_>>();
-                changes.sort_unstable_by_key(|(page, _)| **page);
+                changes.sort_unstable_by_key(|(page, _)| *page);
                 let mut output = Vec::with_capacity(changes.len().min(DENSE_WRITE_BYTES / 8) * 8);
                 let mut start = 0;
-                for (&page, &checksum) in changes {
+                for (page, checksum) in changes {
                     let offset = u64::from(page - 1) * 8;
                     if !output.is_empty()
                         && (offset != start + output.len() as u64
@@ -270,14 +270,13 @@ impl PageChecksums {
                 if !output.is_empty() {
                     file.write_all_at(start, &output)?;
                 }
-                file.set_len(length)?;
                 // This base is active-session scratch. A clean handoff writes
                 // and syncs a fresh dense sidecar; a crash cannot reopen this
                 // session directory or use its mutable base as authority.
-                self.base_count = self.count;
-                self.changes.clear();
+                file.set_len(length)?;
             }
         }
+        self.base_count = self.count;
         Ok(())
     }
 
@@ -539,15 +538,18 @@ mod tests {
                 )
                 .unwrap();
             owner.commit(owner.clone()).unwrap();
+            assert_eq!(owner.changes.capacity(), 0, "merged {count}-page overlay");
             let before = allocation(&owner);
             let expected_before = owner.checksum();
             let mut candidate = owner.clone();
+            assert_eq!(candidate.changes.capacity(), 0, "next candidate overlay");
             candidate
                 .apply(512, count, &[(7, vec![91; 512])], 32 << 20)
                 .unwrap();
             assert_eq!(owner.checksum(), expected_before);
             // Sealing retires the predecessor before merging the isolated overlay.
             owner.commit(candidate).unwrap();
+            assert_eq!(owner.changes.capacity(), 0, "merged one-page overlay");
             assert_eq!(allocation(&owner), before, "{count} pages");
             assert_eq!(
                 owner.value(7, None).unwrap(),
@@ -634,6 +636,7 @@ mod tests {
         assert_eq!(index.checksum(), checksum(&pages));
         index.commit(index.clone()).unwrap();
         assert!(index.changes.is_empty());
+        assert_eq!(index.changes.capacity(), 0, "merged file overlay");
         assert_eq!(
             std::fs::read(&path).unwrap(),
             pages
@@ -655,6 +658,7 @@ mod tests {
             .unwrap();
         assert_eq!(index.checksum(), checksum(&pages));
         index.commit(index.clone()).unwrap();
+        assert_eq!(index.changes.capacity(), 0, "merged regrown overlay");
         assert_eq!(
             std::fs::read(path).unwrap(),
             pages

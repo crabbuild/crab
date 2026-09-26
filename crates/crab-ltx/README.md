@@ -670,6 +670,9 @@ memory array for fixed-size updates. Growth and retained shared snapshots may
 still allocate; large truncations release excess capacity. Restored capture
 reads overwritten checksums through one 4 KiB local window per cut, while
 truncation and clean-handoff scans retain their 64 KiB sequential buffers.
+A sealed merge consumes the changed-page overlay, releasing its hash-table
+allocation so later small cuts do not clone historical capacity. Unmerged
+recovery overlays retain their normal clone semantics.
 A failed sidecar merge fences the session. This changes local bookkeeping,
 not the LTX format or the authenticated metadata walk required for activation.
 
