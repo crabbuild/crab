@@ -469,3 +469,22 @@ fn reply_codec_rejects_unknown_fields_and_invalid_enums() {
         Some(wire::peer_reply::Outcome::Migration(_))
     ));
 }
+
+#[test]
+fn replica_behind_error_preserves_both_positions_over_peer_wire() {
+    let reply = dispatch::error_reply(Error::ReplicaBehind {
+        observed_sequence: 17,
+        minimum_sequence: 23,
+    });
+    let decoded = decode_peer_reply(&encode_peer_reply(&reply).unwrap()).unwrap();
+    let Some(wire::peer_reply::Outcome::Error(error)) = decoded.outcome else {
+        panic!("expected replica position error");
+    };
+    assert!(matches!(
+        transport::runtime_error(error),
+        Error::ReplicaBehind {
+            observed_sequence: 17,
+            minimum_sequence: 23
+        }
+    ));
+}

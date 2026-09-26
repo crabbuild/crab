@@ -401,6 +401,20 @@ impl CellRuntime {
         response.await.map_err(|_| Error::RuntimeClosed)?
     }
 
+    /// Lists active, non-draining catalog entries for bounded owner maintenance.
+    pub async fn active_catalog_entries(
+        &self,
+    ) -> crate::Result<Vec<crate::cell::catalog::CatalogEntry>> {
+        self.ensure_running()?;
+        let (reply, response) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Message::ActiveCatalogEntries { reply })
+            .await
+            .map_err(|_| Error::RuntimeClosed)?;
+        response.await.map_err(|_| Error::RuntimeClosed)?
+    }
+
     /// Counts live and transitioning Cells until their release has completed.
     pub async fn unreleased_cell_count(&self) -> crate::Result<usize> {
         self.ensure_running()?;

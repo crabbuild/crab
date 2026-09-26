@@ -124,6 +124,8 @@ fn rules(kind: MessageKind) -> Vec<FieldRule> {
             message(3, MessageKind::Receipt),
             scalar_oneof(10, 0, 1),
             oneof(15, Some(MessageKind::CellQuery), 1),
+            scalar_oneof(16, 0, 1),
+            oneof(17, Some(MessageKind::CellQuery), 1),
         ],
         MessageKind::ResolveRequest => vec![
             message(1, MessageKind::Target),
@@ -184,6 +186,7 @@ fn rules(kind: MessageKind) -> Vec<FieldRule> {
             oneof(2, Some(MessageKind::CellDescription), 1),
             scalar_oneof(6, 2, 1),
             oneof(7, Some(MessageKind::Error), 1),
+            scalar_oneof(8, 0, 1),
         ],
         MessageKind::ResolveReply => vec![scalar(1, 0), message(2, MessageKind::MutationReply)],
         MessageKind::Error => vec![
@@ -333,7 +336,7 @@ pub(super) fn oneof_payload<'a>(
 pub(super) fn validate_operation(tag: u32, payload: &[u8]) -> Result<()> {
     let (kind, required, operation_tags): (MessageKind, &[u32], &[u32]) = match tag {
         10 => (MessageKind::MutationRequest, &[1, 2], &[10]),
-        11 => (MessageKind::ReadRequest, &[1], &[10, 15]),
+        11 => (MessageKind::ReadRequest, &[1], &[10, 15, 16, 17]),
         12 => (MessageKind::ResolveRequest, &[1, 2, 3], &[]),
         13 => (MessageKind::EffectRequest, &[1, 2, 3], &[10]),
         14 => (MessageKind::EffectResolveRequest, &[1, 2, 3, 4], &[]),

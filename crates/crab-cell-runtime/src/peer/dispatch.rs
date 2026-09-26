@@ -4,7 +4,7 @@ use prost::Message;
 
 use crate::cell::actor::CellHandle;
 use crate::cell::executor::{MutationIdentity, Resolution, StoredOutcome};
-use crate::client::{CellDescription, Receipt};
+use crate::client::{CellDescription, CellReadReplica, Receipt};
 use crate::client::{
     CellTransport, EncodedCommand, EncodedObservation, EncodedQuery, EncodedResolve,
     LocalCellTransport, encoded_command_operation_digest, local_description, receipt,
@@ -30,6 +30,15 @@ pub trait PeerCellResolver: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Result<CellHandle>> + Send + 'static>>;
 }
 
+/// Resolves only an admitted local read-only snapshot on the receiving node.
+pub trait PeerReplicaResolver: Send + Sync + 'static {
+    /// Returns a ready snapshot for the exact target or an unavailable error.
+    fn resolve(
+        &self,
+        target: CellTarget,
+    ) -> Pin<Box<dyn Future<Output = Result<CellReadReplica>> + Send + 'static>>;
+}
+
 /// Rechecks current product authorization after peer authentication.
 pub trait PeerAuthorizer: Send + Sync + 'static {
     /// Rechecks product authorization for one verified request.
@@ -40,6 +49,7 @@ pub trait PeerAuthorizer: Send + Sync + 'static {
 pub struct PeerDispatcher {
     registry: Arc<Registry>,
     resolver: Arc<dyn PeerCellResolver>,
+    replicas: Option<Arc<dyn PeerReplicaResolver>>,
     authorizer: Arc<dyn PeerAuthorizer>,
     telemetry: CellTelemetryHandle,
 }
@@ -56,6 +66,7 @@ impl PeerDispatcher {
         Self {
             registry,
             resolver,
+            replicas: None,
             authorizer,
             telemetry: CellTelemetryHandle::default(),
         }
@@ -68,10 +79,25 @@ impl PeerDispatcher {
         self
     }
 
+    /// Binds an admitted snapshot resolver for explicit peer replica queries.
+    #[must_use]
+    pub fn with_replica_resolver(mut self, replicas: Arc<dyn PeerReplicaResolver>) -> Self {
+        self.replicas = Some(replicas);
+        self
+    }
+
     /// Authorizes, resolves and dispatches one verified request without a second SQL path.
     pub async fn dispatch(&self, request: &VerifiedPeerRequest, now_ms: i64) -> wire::PeerReply {
         if let Err(error) = self.authorizer.authorize(request) {
             return error_reply(error);
+        }
+        if let Some(wire::peer_request::Operation::Read(read)) = request.operation()
+            && let Some(wire::read_request::Operation::ReplicaQuery(query)) =
+                read.operation.as_ref()
+        {
+            return self
+                .replica_query(request.target().clone(), read, query, now_ms)
+                .await;
         }
         let handle = match self.resolver.resolve(request.target().clone()).await {
             Ok(handle) => handle,
@@ -103,6 +129,55 @@ impl PeerDispatcher {
                 self.migrate(&transport, migration, now_ms).await
             }
             None => error_reply(Error::Peer("peer operation is missing")),
+        }
+    }
+
+    async fn replica_query(
+        &self,
+        target: CellTarget,
+        read: &wire::ReadRequest,
+        query: &wire::CellQuery,
+        now_ms: i64,
+    ) -> wire::PeerReply {
+        let result = async {
+            let resolver = self.replicas.as_ref().ok_or(Error::ReplicaUnavailable)?;
+            let replica = resolver.resolve(target.clone()).await.map_err(|error| {
+                if matches!(error, Error::CellNotActive) {
+                    Error::ReplicaUnavailable
+                } else {
+                    error
+                }
+            })?;
+            let expected = replica.description();
+            let (module, operation) = self.registry.routed_query_contract(
+                target.namespace(),
+                query.query_id,
+                query.codec_version,
+            )?;
+            replica
+                .query_encoded(EncodedQuery {
+                    target,
+                    expected,
+                    minimum: read.minimum.as_ref().map(runtime_receipt).transpose()?,
+                    now_ms,
+                    module,
+                    operation_id: query.query_id,
+                    codec_version: query.codec_version,
+                    input: query.input.clone(),
+                    input_limit: operation.input_limit,
+                    output_limit: operation.output_limit,
+                })
+                .await
+        }
+        .await;
+        match result {
+            Ok(observation) => wire::PeerReply {
+                outcome: Some(wire::peer_reply::Outcome::Read(wire::ReadReply {
+                    receipt: Some(wire_receipt(observation.receipt)),
+                    result: Some(wire::read_reply::Result::CommandOutput(observation.output)),
+                })),
+            },
+            Err(error) => error_reply(error),
         }
     }
 
@@ -502,4 +577,5 @@ impl PeerDispatcher {
 
 mod convert;
 
+pub(crate) use convert::error_reply;
 use convert::*;

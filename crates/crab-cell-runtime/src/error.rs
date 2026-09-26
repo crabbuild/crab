@@ -106,6 +106,9 @@ pub enum Error {
         /// Minimum commit sequence required by the caller.
         minimum_sequence: u64,
     },
+    /// No selected local read replica can currently serve the Cell.
+    #[error("Cell read replica is unavailable")]
+    ReplicaUnavailable,
     /// The request ID was already used with different command bytes.
     #[error("request ID was already used for different command bytes")]
     RequestConflict,

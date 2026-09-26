@@ -11,10 +11,10 @@ mod protobuf;
 mod transport;
 mod validation;
 
-pub use dispatch::{PeerAuthorizer, PeerCellResolver, PeerDispatcher};
+pub use dispatch::{PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerReplicaResolver};
 pub(crate) use transport::PeerClientTransport;
 pub use transport::PeerRoundTrip;
-pub use transport::{EffectPeerClient, MigrationPeerClient};
+pub use transport::{EffectPeerClient, MigrationPeerClient, ReplicaPeerClient};
 
 use protobuf::{
     MessageKind, field_payload, oneof_payload, require_fields, validate_message, validate_operation,

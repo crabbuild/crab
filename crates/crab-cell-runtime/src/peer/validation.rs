@@ -70,6 +70,15 @@ pub(super) fn validate_read_reply(reply: &wire::ReadReply) -> Result<()> {
             }
             Ok(())
         }
+        Some(wire::read_reply::Result::ReplicaReady(true)) => validate_receipt(
+            reply
+                .receipt
+                .as_ref()
+                .ok_or(Error::Peer("replica-ready receipt is missing"))?,
+        ),
+        Some(wire::read_reply::Result::ReplicaReady(false)) => {
+            Err(Error::Peer("replica-ready selector must be true"))
+        }
         Some(wire::read_reply::Result::Error(error)) => validate_error(error),
         None => Err(Error::Peer("read reply result is missing")),
     }
@@ -119,6 +128,9 @@ pub(super) fn validate_error(error: &wire::Error) -> Result<()> {
         || error.application_details.len() > MAX_OPERATION_BYTES
     {
         return Err(Error::Peer("invalid peer error bounds"));
+    }
+    if code == wire::error::Code::ReplicaBehind && error.application_details.len() != 16 {
+        return Err(Error::Peer("invalid read replica position details"));
     }
     Ok(())
 }
@@ -273,8 +285,22 @@ pub(super) fn validate_read(request: &wire::ReadRequest) -> Result<()> {
         {
             Ok(())
         }
+        Some(wire::read_request::Operation::ReplicaActivate(true)) if request.minimum.is_none() => {
+            Ok(())
+        }
+        Some(wire::read_request::Operation::ReplicaQuery(query))
+            if query.query_id != 0 && query.codec_version != 0 =>
+        {
+            Ok(())
+        }
         Some(wire::read_request::Operation::CellQuery(_)) => {
             Err(Error::Peer("invalid Cell query identifier"))
+        }
+        Some(wire::read_request::Operation::ReplicaQuery(_)) => {
+            Err(Error::Peer("invalid replica query identifier"))
+        }
+        Some(wire::read_request::Operation::ReplicaActivate(_)) => {
+            Err(Error::Peer("invalid replica activation request"))
         }
         None => Err(Error::Peer("read operation is missing")),
     }

@@ -46,6 +46,10 @@ struct ReplicaSnapshot {
 }
 
 impl CellReadReplica {
+    pub(crate) fn description(&self) -> CellDescription {
+        self.expected
+    }
+
     /// Restores the exact S3 root currently named by one live serving owner.
     ///
     /// The caller supplies a fresh private destination and an admitting node
@@ -172,21 +176,59 @@ impl CellReadReplica {
         minimum: Option<Receipt>,
         input: Q::Input,
     ) -> Result<Observed<Q::Output>> {
+        let operation = self.registry.query_contract::<Q>(self.target.namespace())?;
+        validate_description(&self.registry, Q::MODULE, self.expected, operation)?;
+        let input = encode_wire(&input, operation.input_limit)?;
+        let observed = self
+            .query_encoded(EncodedQuery {
+                target: self.target.clone(),
+                expected: self.expected,
+                minimum,
+                now_ms: unix_time_ms()?,
+                module: Q::MODULE,
+                operation_id: Q::ID,
+                codec_version: Q::CODEC_VERSION,
+                input,
+                input_limit: operation.input_limit,
+                output_limit: operation.output_limit,
+            })
+            .await?;
+        Ok(Observed {
+            output: decode_wire(&observed.output, operation.output_limit)?,
+            receipt: observed.receipt,
+        })
+    }
+
+    pub(crate) async fn query_encoded(&self, query: EncodedQuery) -> Result<EncodedObservation> {
         self.runtime.ensure_running()?;
-        validate_minimum(self.expected, minimum)?;
+        if query.target != self.target || query.expected != self.expected {
+            return Err(Error::Fenced);
+        }
+        validate_minimum(self.expected, query.minimum)?;
+        let (module, operation) = self.registry.routed_query_contract(
+            self.target.namespace(),
+            query.operation_id,
+            query.codec_version,
+        )?;
+        if module != query.module
+            || operation.input_limit != query.input_limit
+            || operation.output_limit != query.output_limit
+        {
+            return Err(Error::Registry("replica query contract changed"));
+        }
+        validate_description(&self.registry, module, self.expected, operation)?;
         let snapshot = self.snapshot.read().await.clone();
         let observed = self.snapshot_receipt(&snapshot);
-        if let Some(minimum) =
-            minimum.filter(|minimum| observed.commit_sequence < minimum.commit_sequence)
+        if let Some(minimum) = query
+            .minimum
+            .filter(|minimum| observed.commit_sequence < minimum.commit_sequence)
         {
             return Err(Error::ReplicaBehind {
                 observed_sequence: observed.commit_sequence,
                 minimum_sequence: minimum.commit_sequence,
             });
         }
-        let operation = self.registry.query_contract::<Q>(self.target.namespace())?;
-        validate_description(&self.registry, Q::MODULE, self.expected, operation)?;
-        let input = encode_wire(&input, operation.input_limit)?;
+        let input = query.input;
         let deadline = Instant::now() + QUERY_DEADLINE;
         let permit = tokio::time::timeout_at(
             deadline.into(),
@@ -211,9 +253,9 @@ impl CellReadReplica {
             registry.execute_query(
                 &connection,
                 QueryInvocation {
-                    module: Q::MODULE,
-                    operation_id: Q::ID,
-                    codec_version: Q::CODEC_VERSION,
+                    module,
+                    operation_id: query.operation_id,
+                    codec_version: query.codec_version,
                     schema,
                     cell,
                     commit_sequence: sequence,
@@ -234,8 +276,8 @@ impl CellReadReplica {
             .await
             .map_err(|_| Error::Deadline)??;
         self.runtime.ensure_running()?;
-        Ok(Observed {
-            output: decode_wire(&result, operation.output_limit)?,
+        Ok(EncodedObservation {
+            output: result,
             receipt: observed,
         })
     }

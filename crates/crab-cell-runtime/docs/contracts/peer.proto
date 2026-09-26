@@ -119,6 +119,8 @@ message Error {
     UNAVAILABLE = 10;
     SCHEMA_INCOMPATIBLE = 11;
     INTERNAL = 12;
+    REPLICA_BEHIND = 13;
+    REPLICA_UNAVAILABLE = 14;
   }
   enum Outcome { UNSPECIFIED = 0; NOT_STARTED = 1; REJECTED = 2; UNKNOWN = 3; }
   Code code = 1;
@@ -145,6 +147,8 @@ message ReadRequest {
   oneof operation {
     bool describe = 10;
     CellQuery cell_query = 15;
+    bool replica_activate = 16; // Advisory; receiver verifies policy and current owner.
+    CellQuery replica_query = 17; // Explicit snapshot-consistent read.
   }
   reserved 11 to 14;
 }
@@ -160,6 +164,7 @@ message ReadReply {
     CellDescription description = 2;
     bytes command_output = 6;
     Error error = 7;
+    bool replica_ready = 8; // Receipt names the exact local snapshot.
   }
   reserved 3 to 5;
 }

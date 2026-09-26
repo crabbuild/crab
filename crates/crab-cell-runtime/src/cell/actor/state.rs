@@ -113,6 +113,9 @@ pub(super) enum Message {
     IdleTransferCandidates {
         reply: oneshot::Sender<crate::Result<IdleTransferCandidates>>,
     },
+    ActiveCatalogEntries {
+        reply: oneshot::Sender<crate::Result<Vec<crate::cell::catalog::CatalogEntry>>>,
+    },
     UnreleasedCellCount {
         reply: oneshot::Sender<crate::Result<usize>>,
     },

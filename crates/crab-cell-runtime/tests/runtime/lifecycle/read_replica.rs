@@ -3,8 +3,14 @@
 use super::*;
 use std::sync::{Barrier, OnceLock};
 
+use crab_cell_runtime::cell::actor::CellHandle;
+use crab_cell_runtime::client::CellDescription;
 use crab_cell_runtime::client::CellReadReplica;
 use crab_cell_runtime::node::{NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain};
+use crab_cell_runtime::peer::{
+    PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerReplicaResolver,
+    PeerRoundTrip, PeerSigner, PeerVerifier, ReplicaPeerClient, VerifiedPeerRequest,
+};
 use crab_cell_runtime::primitives::sql::{SqlBatch, SqlStatement, SqlValue};
 use crab_cell_runtime::registry::{
     BuildDescriptor, CellModule, MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor,
@@ -16,6 +22,89 @@ const SCHEMA: &str = "CREATE TABLE counter(value INTEGER NOT NULL)";
 const CODE: Digest = Digest::from_bytes([5; 32]);
 const NAMESPACE: NamespaceId = NamespaceId::from_bytes([6; 16]);
 static QUERY_BARRIERS: OnceLock<(Barrier, Barrier)> = OnceLock::new();
+
+struct ReplicaResolver(CellReadReplica);
+
+impl PeerReplicaResolver for ReplicaResolver {
+    fn resolve(
+        &self,
+        _target: CellTarget,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = crab_cell_runtime::Result<CellReadReplica>>
+                + Send
+                + 'static,
+        >,
+    > {
+        let reader = self.0.clone();
+        Box::pin(async move { Ok(reader) })
+    }
+}
+
+struct NoOwner;
+
+impl PeerCellResolver for NoOwner {
+    fn resolve(
+        &self,
+        _target: CellTarget,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = crab_cell_runtime::Result<CellHandle>>
+                + Send
+                + 'static,
+        >,
+    > {
+        Box::pin(async { Err(crab_cell_runtime::Error::CellNotActive) })
+    }
+}
+
+struct ReadAuthorizer;
+
+impl PeerAuthorizer for ReadAuthorizer {
+    fn authorize(&self, request: &VerifiedPeerRequest) -> crab_cell_runtime::Result<()> {
+        if request.permits("repository.read") {
+            Ok(())
+        } else {
+            Err(crab_cell_runtime::Error::PeerAuthorization("read denied"))
+        }
+    }
+}
+
+struct LoopbackReplica {
+    verifier: Arc<PeerVerifier>,
+    dispatcher: Arc<PeerDispatcher>,
+}
+
+impl PeerRoundTrip for LoopbackReplica {
+    fn send(
+        &self,
+        _target: CellTarget,
+        _request: Vec<u8>,
+        _remaining_ms: u32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>,
+    > {
+        Box::pin(async { Err(crab_cell_runtime::Error::Peer("owner route unavailable")) })
+    }
+
+    fn send_to_node(
+        &self,
+        _target: CellTarget,
+        _node: NodeAdvertisement,
+        request: Vec<u8>,
+        _remaining_ms: u32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>,
+    > {
+        let verifier = Arc::clone(&self.verifier);
+        let dispatcher = Arc::clone(&self.dispatcher);
+        Box::pin(async move {
+            let now = now_ms();
+            let verified = verifier.verify(&request, now)?;
+            dispatcher.dispatch_bytes(&verified, now).await
+        })
+    }
+}
 
 fn query_barriers() -> &'static (Barrier, Barrier) {
     QUERY_BARRIERS.get_or_init(|| (Barrier::new(2), Barrier::new(2)))
@@ -166,6 +255,9 @@ async fn exercise_replica_read(fixture: &Fixture) {
     )
     .unwrap();
     let handle = bootstrap_on(&runtime, fixture, session).await;
+    let active = runtime.active_catalog_entries().await.unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].cell(), fixture.target.cell_id());
 
     let mut builder = RegistryBuilder::new(BuildDescriptor {
         source_revision: "replica-test".into(),
@@ -249,6 +341,70 @@ async fn exercise_replica_read(fixture: &Fixture) {
         reader.query::<ReadCounter>(None, 0).await.unwrap().output,
         0
     );
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let control = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let expected = CellDescription {
+        cell: fixture.target.cell_id(),
+        incarnation: control.value().incarnation,
+        code: control.value().code,
+        schema: control.value().schema,
+    };
+    let peer_session = SessionId::from_bytes([21; 16]);
+    let peer_key = ed25519_dalek::SigningKey::from_bytes(&[22; 32]);
+    let dispatcher = PeerDispatcher::new(
+        Arc::clone(&registry),
+        Arc::new(NoOwner),
+        Arc::new(ReadAuthorizer),
+    )
+    .with_replica_resolver(Arc::new(ReplicaResolver(reader.clone())));
+    let transport = LoopbackReplica {
+        verifier: Arc::new(PeerVerifier::new(
+            peer_session,
+            release,
+            peer_key.verifying_key(),
+        )),
+        dispatcher: Arc::new(dispatcher),
+    };
+    let peer_client = ReplicaPeerClient::new(
+        Arc::clone(&registry),
+        Arc::new(PeerSigner::new(peer_session, release, peer_key)),
+        PeerPrincipal {
+            issuer: "test".into(),
+            subject: "reader".into(),
+            actions: vec!["repository.read".into()],
+        },
+        Arc::new(transport),
+    );
+    let reader_node = NodeAdvertisement::sign(
+        NodeId::from_bytes([23; 16]),
+        SessionId::from_bytes([14; 16]),
+        "https://reader.internal:8081".into(),
+        fleet,
+        Digest::from_bytes([24; 32]),
+        image,
+        release,
+        &ed25519_dalek::SigningKey::from_bytes(&[25; 32]),
+        1,
+        now_ms(),
+        now_ms() + 15_000,
+        vec![CODE],
+        vec![1],
+        NodeFailureDomain::default(),
+        NodeCapacity::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        peer_client
+            .query::<ReadCounter>(&fixture.target, reader_node.clone(), expected, None, 0)
+            .await
+            .unwrap()
+            .output,
+        0
+    );
     let committed = handle
         .execute(
             crate::support::fixtures::mutation_identity(91),
@@ -277,6 +433,12 @@ async fn exercise_replica_read(fixture: &Fixture) {
         Err(crab_cell_runtime::Error::ReplicaBehind { observed_sequence, minimum_sequence })
             if observed_sequence < minimum_sequence && minimum_sequence == minimum.commit_sequence
     ));
+    assert!(matches!(
+        peer_client.query::<ReadCounter>(&fixture.target, reader_node, expected, Some(minimum), 0).await,
+        Err(crab_cell_runtime::Error::ReplicaBehind { observed_sequence, minimum_sequence })
+            if observed_sequence < minimum_sequence && minimum_sequence == minimum.commit_sequence
+    ));
+    drop(peer_client);
 
     let refreshed_path = fixture._directory.path().join("refreshed.sqlite");
     std::fs::write(&refreshed_path, b"occupied").unwrap();
@@ -326,6 +488,7 @@ async fn exercise_replica_read(fixture: &Fixture) {
     );
 
     handle.drain().await.unwrap();
+    assert!(runtime.active_catalog_entries().await.unwrap().is_empty());
     assert!(matches!(
         reader.query::<ReadCounter>(None, 0).await,
         Err(crab_cell_runtime::Error::Fenced)
