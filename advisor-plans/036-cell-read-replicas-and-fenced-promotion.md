@@ -291,8 +291,9 @@ checks the SQLite cache setting.
 `desired_readers_follow_live_distinct_nodes_and_replace_a_lost_member` proves
 the advisory directory selection at targets 0, 1, 2, and 4, with distinct
 physical nodes, failure-domain preference, an expired reader, and a new live
-replacement. This selection still does not activate a reader or reserve its
-node resources.
+replacement. A candidate advertising less than the provisional reader-memory
+reservation is excluded. This selection still does not activate a reader or
+reserve its node resources.
 
 | Slice | Change owner | Implementation and focused gate | Completion evidence |
 | --- | --- | --- | --- |

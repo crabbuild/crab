@@ -45,7 +45,8 @@ impl NodeDirectory {
                 let capacity = candidate.capacity();
                 candidate.node() != owner_node
                     && candidate.module_digests().contains(&code)
-                    && capacity.free_memory_bytes > 0
+                    && capacity.free_memory_bytes
+                        >= crate::fleet::resource::READ_REPLICA_NATIVE_BYTES as u64
                     && capacity.free_disk_bytes > 0
                     && capacity.job_credits > 0
             })
