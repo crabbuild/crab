@@ -1,3 +1,7 @@
+mod elastic_cells {
+    pub(crate) mod transaction_visibility;
+}
+
 use std::{
     collections::HashMap,
     sync::{
@@ -1295,6 +1299,14 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
             AttributeValue::N("10".into()),
         ]
     );
+    elastic_cells::transaction_visibility::assert_range_read_barriers(
+        &storage,
+        &CellClient::local(Arc::clone(&registry), data_handle.clone()),
+        &data,
+        route.partitions[0].epoch,
+        &key_info,
+    )
+    .await;
     let usage_before_split = CellClient::local(Arc::clone(&registry), data_handle.clone())
         .query::<PartitionUsage>(&data, None, Json(()))
         .await
@@ -1690,6 +1702,27 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
     .unwrap()
     .unwrap();
     assert_eq!(sdk_read.item(), Some(&sdk_item));
+    let same_hash = data_key_hash(
+        &key_info.table_id,
+        &Item::from([("pk".into(), AttributeValue::S("same".into()))]),
+        &key_info.base_key_schema,
+    )
+    .unwrap();
+    let same_partition = grown
+        .partitions
+        .iter()
+        .find(|partition| {
+            partition.lower.is_none_or(|lower| same_hash >= lower)
+                && partition.upper.is_none_or(|upper| same_hash < upper)
+        })
+        .unwrap();
+    elastic_cells::transaction_visibility::assert_sdk_read_barrier(
+        &sdk,
+        &CellClient::local_runtime(Arc::clone(&registry), host.runtime(), layout.clone()),
+        same_partition,
+        &key_info.account_id,
+    )
+    .await;
     let described = sdk
         .describe_table()
         .table_name("Numbers")
@@ -2776,6 +2809,23 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             .unwrap();
         assert_eq!(recorded.output.0, CoordinatorPhaseOutcome::Recorded);
     }
+    // A committed transaction has only applied its first participant. The
+    // second must fail retryably rather than return an absent/old item.
+    let visibility_key_info = storage
+        .table_key_info("123456789012", "Books")
+        .await
+        .unwrap();
+    assert_eq!(
+        storage
+            .get_item(&visibility_key_info, &sides[0].2)
+            .await
+            .unwrap(),
+        Some(sides[0].2.clone())
+    );
+    assert!(matches!(
+        storage.get_item(&visibility_key_info, &sides[1].2).await,
+        Err(StorageError::Transient(_))
+    ));
     let unresolved = client
         .query::<ReadUnresolvedCoordinatorParticipants>(
             &coordinator_target,
@@ -3502,7 +3552,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         )
         .await
         .unwrap();
-    assert_eq!(hidden.output.0, PartitionGetOutcome::Found(None));
+    assert_eq!(hidden.output.0, PartitionGetOutcome::Conflict);
     let conflicting_write = client
         .command::<PartitionPut>(
             &left_target,
@@ -4623,6 +4673,33 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         recovered_intent.output.0,
         ReadPartitionTransactionOutcome::Prepared
     );
+    let recovered_read = restored_client
+        .query::<PartitionGet>(
+            restored_child_target,
+            None,
+            Json(PartitionGetInput {
+                table_id: table.id.clone(),
+                epoch: 3,
+                key: extenddb_core::types::extract_key(&changed_item, &table.key_schema),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recovered_read.output.0, PartitionGetOutcome::Conflict);
+    let recovered_scan = restored_client
+        .query::<PartitionScan>(
+            restored_child_target,
+            None,
+            Json(PartitionScanInput {
+                table_id: table.id.clone(),
+                epoch: 3,
+                limit: None,
+                exclusive_start_key: None,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recovered_scan.output.0, PartitionScanOutcome::Conflict);
     let recovered_conflict = restored_client
         .command::<PartitionPut>(
             restored_child_target,

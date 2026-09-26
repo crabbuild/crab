@@ -46,7 +46,11 @@ CREATE TABLE ddb_partition_transactions (
 
 CREATE TABLE ddb_partition_transaction_locks (
     item_key BLOB PRIMARY KEY,
+    partition_key BLOB NOT NULL,
+    sort_key BLOB NOT NULL,
     transaction_id BLOB NOT NULL REFERENCES ddb_partition_transactions(transaction_id)
 );
+CREATE INDEX ddb_partition_transaction_locks_range
+    ON ddb_partition_transaction_locks (partition_key, sort_key, item_key);
 CREATE INDEX ddb_partition_transaction_locks_owner
     ON ddb_partition_transaction_locks (transaction_id);

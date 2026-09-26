@@ -23,7 +23,9 @@ a durable coordinator driver exists. Data Cells now have durable prepare,
 key-lock, commit, and abort commands. Account-scoped coordinator shards can
 persist the participant set, prepare receipts, one decision, and resolution
 receipts. Those commands are not exposed through the ExtendDB adapter;
-recovery scheduling and post-decision reads still need implementation. A
+continuous recovery scheduling and read-triggered decision resolution still
+need implementation. Data Cell reads now fail retryably on unresolved intents;
+transactional reads return ordered cancellation reasons. A
 host-backed provisioner can create 1–256
 independent, evenly spaced initial data Cells during CreateTable and retry
 interrupted setup. This raises initial aggregate capacity and write parallelism.

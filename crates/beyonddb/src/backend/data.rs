@@ -139,6 +139,9 @@ impl DataEngine for CellStorage {
                     .map_err(cell_error)?;
                 return match output.output.0 {
                     PartitionGetOutcome::Found(item) => Ok(item),
+                    PartitionGetOutcome::Conflict => Err(StorageError::Transient(
+                        "read is waiting for transaction resolution".into(),
+                    )),
                     PartitionGetOutcome::InvalidKey => Err(StorageError::Validation(
                         "provided key does not match schema".into(),
                     )),
@@ -405,6 +408,9 @@ impl DataEngine for CellStorage {
                         items,
                         last_evaluated_key,
                     } => Ok((items, last_evaluated_key)),
+                    PartitionQueryOutcome::Conflict => Err(StorageError::Transient(
+                        "query is waiting for transaction resolution".into(),
+                    )),
                     PartitionQueryOutcome::InvalidKey | PartitionQueryOutcome::InvalidCondition => {
                         Err(StorageError::Validation(
                             "invalid Query key condition or continuation".into(),
@@ -542,6 +548,15 @@ impl DataEngine for CellStorage {
                     .map_err(cell_error)?;
                 match output.output.0 {
                     PartitionTransactGetOutcome::Found(items) => return Ok(items),
+                    PartitionTransactGetOutcome::Conflict { index } => {
+                        let mut reasons = vec![CancellationReason::none(); routing.len()];
+                        reasons[index] = CancellationReason {
+                            code: "TransactionConflict".into(),
+                            message: Some("item is locked by a transaction".into()),
+                            item: None,
+                        };
+                        return Err(StorageError::TransactionCanceled(reasons));
+                    }
                     PartitionTransactGetOutcome::InvalidCount => {
                         TransactionGetOutcome::InvalidCount
                     }

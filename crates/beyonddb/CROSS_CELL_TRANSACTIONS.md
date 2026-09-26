@@ -11,8 +11,9 @@ is one `PartitionTransactWrite` command and a single-Cell read is one
 destination, not a transaction outcome. Data Cells now have internal prepare,
 lock, and resolution commands. Sharded coordinator Cells store immutable
 participant sets and terminal decisions. The ExtendDB adapter does not yet
-drive this protocol or enforce its cross-Cell read rules, so the API remains
-unsupported.
+drive this protocol or acquire a cross-Cell read snapshot, so the API remains
+unsupported. Data Cell reads now reject unresolved intents instead of
+returning live images that could predate an already-published commit.
 
 Each coordinator now indexes records with unresolved participants and exposes
 bounded cursor pages. A new owner can discover both undecided and decided
@@ -172,6 +173,24 @@ otherwise a row absent from the live index could be silently skipped.
 Those APIs may mix committed versions across the response, consistent with
 their read-committed contract, but must never expose a prepared value.
 
+The implemented barrier fails closed until a participant resolves. `GetItem`
+checks its canonical key; a same-Cell `TransactGetItems` checks every requested
+key and returns an ordered `TransactionConflict` cancellation reason.
+`Query` probes an intent index using the same HASH key, numeric sort bounds,
+direction, and continuation as its live-row query. `Scan` checks locks after
+its continuation. Both detect pending creates even when no live row exists.
+The lock check and item reads execute in one serialized Cell query. Ordinary
+read conflicts map through ExtendDB to retryable `ServiceUnavailable` errors.
+
+These range barriers are conservative: they check the remaining range before
+applying the page limit, and compound RANGE predicates may fence extra keys
+within the same HASH group. Unrelated keyed reads and disjoint indexed query
+ranges remain available. Read-triggered decision lookup/resolution is not
+implemented; retry success currently depends on the transaction driver or
+startup recovery completing resolution. An outage never permits an old-value
+fallback. This is an internal safety prerequisite, not full DynamoDB read
+availability or cross-Cell snapshot support.
+
 Running independent `PartitionTransactGet` queries is insufficient: a write
 can commit between them and produce a mixed result. A cross-Cell
 `TransactGetItems` therefore acquires shared read locks on all requested keys
@@ -208,17 +227,47 @@ intent age, decision-to-resolution lag, conflict rate, retries, and capacity
 rejections. A permanently unavailable coordinator is an availability issue,
 not permission to discard a prepared transaction.
 
+## Read-barrier evidence and limits
+
+The visibility policy belongs in the data Cell query handlers, where the
+lock lookup and item lookup share the serialized SQLite execution. The runtime
+executor refuses queries while its logical head is unpublished
+(`crates/crab-cell-runtime/src/cell/executor.rs`, `CellExecutor::query`).
+Checking only in the HTTP adapter would leave direct/peer Cell calls exposed
+and introduce a check/read race.
+
+| Surface | Entry and enforcement | Evidence |
+| --- | --- | --- |
+| Keyed read | `CellStorage::get_item` → `PartitionGet` → canonical lock lookup | Two-Cell commit with only the first participant applied; the other returns a transient error. |
+| Transactional read | `CellStorage::transact_get_items` → `PartitionTransactGet` | Ordered cancellation through a signed AWS SDK request, then successful read after abort resolution. |
+| Query | `PartitionQuery` probes the intent range index before live rows | Pending create/delete, numeric equivalence, forward/reverse cursors, unrelated HASH and sort ranges. |
+| Scan | `PartitionScan` probes unvisited intent keys | Pending create without a live row, continuation past locks, and restored locks after owner restart. |
+| Split export | `SealPartition` refuses locks; `PartitionExport` requires sealed state | Existing seal, export, split, and recovery checks exercise this boundary. |
+
+These checks run in `tests/elastic_cells.rs` and its
+`elastic_cells/transaction_visibility.rs` module. The account read path has
+no prepared participant implementation yet; cross-Cell API admission remains
+closed. TTL candidate reads are internal hints; deletion still uses the
+lock-aware item command. Usage/statistics queries do not expose item images.
+
+The prior branch behavior returned live images without checking intents.
+`origin/main` has no BeyondDB transaction implementation. The new barrier
+addresses that unsafe visibility path, while the following API and recovery
+gates remain necessary.
+
 ## Required implementation and proof
 
 1. Add coordinator schema/commands and a bounded recovery cursor. The
    coordinator now records a per-transaction unresolved count, indexed cursor
    pages, immutable `BEGIN`, and one terminal decision. The direct Cell test
-   covers discovery of unfinished work after owner restart. A worker still
-   needs to consume those pages and drive resolution.
+   covers discovery of unfinished work after owner restart. Fenced startup
+   recovery consumes those pages and resolves data participants; continuous
+   serving-time recovery and changed-endpoint takeover remain outstanding.
 2. Add participant prepare, resolution, and key-lock records. Wire all
    mutation siblings and strong keyed reads through the conflict check before
-   allowing cross-Cell requests. Preserve current one-Cell fast path only if
-   it obeys the same conflict and token rules.
+   allowing cross-Cell requests. Data Cell mutations and reads now check locks;
+   account Cell participants still need this protocol. Preserve the one-Cell
+   fast path only if it obeys the same conflict and token rules.
 3. Make split seal reject outstanding intents, retain old owners until replay
    and resolution are safe, and prove restart at every split boundary.
 4. Add the adapter coordinator driver, ambiguous-reply resolution, ordered

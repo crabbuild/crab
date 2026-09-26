@@ -158,6 +158,11 @@ impl CellStorage {
                             items,
                             last_evaluated_key,
                         } => (items, last_evaluated_key),
+                        PartitionScanOutcome::Conflict => {
+                            return Err(StorageError::Transient(
+                                "scan is waiting for transaction resolution".into(),
+                            ));
+                        }
                         PartitionScanOutcome::InvalidKey => {
                             return Err(StorageError::Validation(
                                 "scan continuation key does not match table schema".into(),
