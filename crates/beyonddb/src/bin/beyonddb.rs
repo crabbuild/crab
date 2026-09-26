@@ -4,8 +4,8 @@ use std::{error::Error, io, io::Read, net::SocketAddr, path::PathBuf, sync::Arc,
 
 use beyonddb::{
     APPLICATION_ID, Beyonddb, CellAuthorizationStore, CellCredentialStore,
-    CellInitialPartitionProvisioner, NodeLeasePublisher, build_http_state, build_peer_client,
-    peer_router,
+    CellInitialPartitionProvisioner, CellStorage, NodeLeasePublisher, build_http_state,
+    build_peer_client, peer_router,
 };
 use crab_cell_app::CellApplication;
 use crab_cell_host::{CellNode, CellNodeBuilder, CellNodeTaskGroup};
@@ -328,6 +328,29 @@ async fn serve_ready(
                 &policy,
             )
             .await?;
+    }
+    if !config.owned_accounts.is_empty() {
+        let storage = CellStorage::new(client.clone(), config.region.clone());
+        let accounts = config.owned_accounts.clone();
+        let cancellation = tasks.cancellation_token();
+        tasks.spawn(async move {
+            let mut ticks = tokio::time::interval(Duration::from_secs(30));
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    () = cancellation.cancelled() => return Ok::<(), std::io::Error>(()),
+                    _ = ticks.tick() => {}
+                }
+                for account_id in &accounts {
+                    if cancellation.is_cancelled() {
+                        return Ok(());
+                    }
+                    if let Err(error) = storage.sweep_account_ttl(account_id).await {
+                        tracing::warn!(account_id, %error, "TTL sweep failed");
+                    }
+                }
+            }
+        })?;
     }
     let mut state = build_http_state(
         node,

@@ -14,6 +14,7 @@ mod split;
 mod table;
 mod tags;
 mod transaction_token;
+mod ttl;
 
 pub use expression_wire::WireCondition;
 pub use items::*;
@@ -26,6 +27,7 @@ pub use server::{
 };
 pub use split::*;
 pub use table::*;
+pub use ttl::*;
 
 pub use authorization::CellAuthorizationStore;
 pub use backend::{CellStorage, InitialPartitionProvisioner};
@@ -82,7 +84,7 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 14] = [
+static COMMANDS: [OperationDescriptor; 15] = [
     operation(1),
     operation(2),
     operation(3),
@@ -97,8 +99,9 @@ static COMMANDS: [OperationDescriptor; 14] = [
     operation(14),
     operation(15),
     operation(16),
+    operation(17),
 ];
-static QUERIES: [OperationDescriptor; 15] = [
+static QUERIES: [OperationDescriptor; 17] = [
     operation(4),
     operation(6),
     operation(7),
@@ -114,6 +117,8 @@ static QUERIES: [OperationDescriptor; 15] = [
     operation(17),
     operation(18),
     operation(19),
+    operation(20),
+    operation(21),
 ];
 
 /// Statically linked account application.
@@ -230,6 +235,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
                 source.update(include_bytes!("routing/split_state.rs"));
                 source.update(include_bytes!("authorization.rs"));
                 source.update(include_bytes!("tags.rs"));
+                source.update(include_bytes!("ttl.rs"));
                 source.update(include_bytes!("transaction_token.rs"));
                 Digest::from_bytes(*source.finalize().as_bytes())
             },
@@ -263,6 +269,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<authorization::PutUserPolicy>()?;
         registry.bind_command::<authorization::DeleteUserPolicy>()?;
         registry.bind_command::<tags::UpdateTags>()?;
+        registry.bind_command::<ttl::UpdateTtl>()?;
         registry.bind_command::<transaction_token::ClaimTransactionToken>()?;
         registry.bind_query::<GetItem>()?;
         registry.bind_query::<TransactGet>()?;
@@ -278,6 +285,8 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<ReadSplitRoute>()?;
         registry.bind_query::<authorization::ReadUserPolicies>()?;
         registry.bind_query::<tags::ReadTags>()?;
+        registry.bind_query::<ttl::ReadTtl>()?;
+        registry.bind_query::<ttl::ListTtlTables>()?;
         registry.bind_query::<transaction_token::ReadTransactionClaim>()
     }
 }

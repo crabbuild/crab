@@ -8,13 +8,13 @@ use std::{
     ops::{Deref, DerefMut},
     path::Path,
     process::{Child, Command, Stdio},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use aws_credential_types::Credentials;
 use aws_sdk_dynamodb::types::{
-    AttributeValue, ConditionCheck, KeysAndAttributes, PutRequest, TransactWriteItem, Update,
-    WriteRequest,
+    AttributeValue, ConditionCheck, KeysAndAttributes, PutRequest, TimeToLiveSpecification,
+    TransactWriteItem, Update, WriteRequest,
 };
 use serde_json::json;
 
@@ -513,6 +513,59 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
                 .collect()
         );
     }
+    let expires = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .saturating_sub(1);
+    sdk.put_item()
+        .table_name("ProcessData")
+        .item("id", AttributeValue::S("expired".into()))
+        .item("expires", AttributeValue::N(expires.to_string()))
+        .send()
+        .await
+        .unwrap();
+    sdk.update_time_to_live()
+        .table_name("ProcessData")
+        .time_to_live_specification(
+            TimeToLiveSpecification::builder()
+                .attribute_name("expires")
+                .enabled(true)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let ttl = sdk
+        .describe_time_to_live()
+        .table_name("ProcessData")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        ttl.time_to_live_description()
+            .and_then(|description| description.attribute_name()),
+        Some("expires")
+    );
+    let deadline = Instant::now() + Duration::from_secs(45);
+    loop {
+        let item = sdk
+            .get_item()
+            .table_name("ProcessData")
+            .key("id", AttributeValue::S("expired".into()))
+            .send()
+            .await
+            .unwrap();
+        if item.item().is_none() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "TTL worker did not delete expired item"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
     let updated = HashMap::from([
         ("id".into(), AttributeValue::S("process".into())),
         ("value".into(), AttributeValue::S("updated".into())),
@@ -596,6 +649,18 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
     let recovered_batch = read_batch().send().await.unwrap();
     let recovered = &recovered_batch.responses().unwrap()["ProcessData"];
     assert!(batch_items.iter().all(|item| recovered.contains(item)));
+    let recovered_ttl = sdk
+        .describe_time_to_live()
+        .table_name("ProcessData")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        recovered_ttl
+            .time_to_live_description()
+            .and_then(|description| description.attribute_name()),
+        Some("expires")
+    );
     let recovered_tags = sdk
         .list_tags_of_resource()
         .resource_arn(arn)
@@ -639,6 +704,18 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         .await
         .unwrap();
     assert!(recreated_tags.tags().is_empty());
+    let recreated_ttl = sdk
+        .describe_time_to_live()
+        .table_name("ProcessData")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        recreated_ttl
+            .time_to_live_description()
+            .and_then(|description| description.attribute_name())
+            .is_none()
+    );
     stop(&mut restarted, &log);
     let mut drained = start(&config, &log, false, s3);
     wait_healthy(&mut drained, public, &log);

@@ -4,11 +4,13 @@ mod key;
 mod query;
 mod scan;
 mod transaction;
+mod ttl;
 
 pub use key::data_key_hash;
 pub use query::*;
 pub use scan::*;
 pub use transaction::*;
+pub use ttl::*;
 
 use std::sync::OnceLock;
 
@@ -39,7 +41,7 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     effect_targets: &[],
     dead_letter: None,
 }];
-static COMMANDS: [OperationDescriptor; 9] = [
+static COMMANDS: [OperationDescriptor; 11] = [
     operation(1),
     operation(2),
     operation(3),
@@ -49,8 +51,10 @@ static COMMANDS: [OperationDescriptor; 9] = [
     operation(7),
     operation(8),
     operation(9),
+    operation(10),
+    operation(11),
 ];
-static QUERIES: [OperationDescriptor; 7] = [
+static QUERIES: [OperationDescriptor; 9] = [
     operation(1),
     operation(2),
     operation(3),
@@ -58,6 +62,8 @@ static QUERIES: [OperationDescriptor; 7] = [
     operation(5),
     operation(6),
     operation(7),
+    operation(8),
+    operation(9),
 ];
 
 const fn operation(id: u32) -> OperationDescriptor {
@@ -88,6 +94,7 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
                 source.update(include_bytes!("partition/query.rs"));
                 source.update(include_bytes!("partition/scan.rs"));
                 source.update(include_bytes!("partition/transaction.rs"));
+                source.update(include_bytes!("partition/ttl.rs"));
                 source.update(include_bytes!("items.rs"));
                 source.update(include_bytes!("table.rs"));
                 source.update(include_bytes!("expression_wire.rs"));
@@ -119,13 +126,17 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
         registry.bind_command::<ActivateImportedPartition>()?;
         registry.bind_command::<OpenPartition>()?;
         registry.bind_command::<PartitionTransactWrite>()?;
+        registry.bind_command::<ConfigurePartitionTtl>()?;
+        registry.bind_command::<BackfillPartitionTtl>()?;
         registry.bind_query::<PartitionGet>()?;
         registry.bind_query::<PartitionScan>()?;
         registry.bind_query::<PartitionExport>()?;
         registry.bind_query::<ReadPartitionState>()?;
         registry.bind_query::<PartitionQuery>()?;
         registry.bind_query::<PartitionTransactGet>()?;
-        registry.bind_query::<PartitionUsage>()
+        registry.bind_query::<PartitionUsage>()?;
+        registry.bind_query::<ReadExpiredPartition>()?;
+        registry.bind_query::<ReadPartitionTtl>()
     }
 }
 
@@ -1337,15 +1348,21 @@ fn write_item(
     schema: &[KeySchemaElement],
 ) -> Result<()> {
     let (partition_key, sort_key) = index_key(item, schema)?;
+    let (ttl_generation, ttl_epoch) = ttl::write_values(context, item)?;
     context.sql(&statement(
-        "INSERT INTO ddb_partition_items (item_key, partition_key, sort_key, item) \
-         VALUES (?1, ?2, ?3, ?4) ON CONFLICT(item_key) DO UPDATE SET \
-         partition_key = excluded.partition_key, sort_key = excluded.sort_key, item = excluded.item",
+        "INSERT INTO ddb_partition_items \
+         (item_key, partition_key, sort_key, item, ttl_generation, ttl_epoch) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(item_key) DO UPDATE SET \
+         partition_key = excluded.partition_key, sort_key = excluded.sort_key, \
+         item = excluded.item, ttl_generation = excluded.ttl_generation, \
+         ttl_epoch = excluded.ttl_epoch",
         vec![
             SqlValue::Blob(key),
             SqlValue::Blob(partition_key),
             SqlValue::Blob(sort_key),
             SqlValue::Blob(serde_json::to_vec(item)?),
+            ttl_generation,
+            ttl_epoch,
         ],
     ))?;
     Ok(())

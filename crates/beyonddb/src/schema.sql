@@ -49,6 +49,11 @@ CREATE TABLE ddb_table_tags (
     PRIMARY KEY (table_id, resource_arn, tag_key)
 );
 
+CREATE TABLE ddb_table_ttl (
+    table_id TEXT PRIMARY KEY REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
+    attribute_name TEXT NOT NULL
+);
+
 CREATE TABLE ddb_transaction_claims (
     token TEXT PRIMARY KEY,
     fingerprint TEXT NOT NULL,
