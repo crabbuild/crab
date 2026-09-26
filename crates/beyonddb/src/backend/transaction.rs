@@ -11,9 +11,9 @@ use crate::{
     DecideCrossCellTransactionInput, DecideCrossCellTransactionOutcome, Json,
     ParticipantTransactionState, PrepareAccountTransaction, PrepareAccountTransactionInput,
     PreparePartitionTransaction, PreparePartitionTransactionInput, PrepareTransactionOutcome,
-    ReadCoordinatorParticipant, ReadCoordinatorParticipantInput, ReadCrossCellTransaction,
-    ReadCrossCellTransactionInput, ReadTransactionInput, ReadUnresolvedCoordinatorParticipants,
-    RecordParticipantPrepare, TransactionFailure, account_target, coordinator_target, data_target,
+    ReadCoordinatorParticipantInput, ReadCrossCellTransaction, ReadCrossCellTransactionInput,
+    ReadTransactionInput, ReadUnresolvedCoordinatorParticipants, RecordParticipantPrepare,
+    TransactionFailure, account_target, coordinator_target, data_target,
 };
 
 impl CellStorage {
@@ -49,24 +49,17 @@ impl CellStorage {
             .0;
         for participant in participants {
             let payload = self
-                .client
-                .query::<ReadCoordinatorParticipant>(
+                .coordinator_participant(
                     &coordinator,
-                    None,
-                    Json(ReadCoordinatorParticipantInput {
+                    ReadCoordinatorParticipantInput {
                         account_id: read.account_id.clone(),
                         transaction_id,
                         routing_key: read.routing_key.clone(),
                         position: participant.position,
-                    }),
+                        chunk: 0,
+                    },
                 )
-                .await
-                .map_err(cell_error)?
-                .output
-                .0
-                .ok_or_else(|| {
-                    StorageError::Internal("transaction participant payload is missing".into())
-                })?;
+                .await?;
             let operations = payload
                 .operations
                 .iter()
@@ -276,13 +269,19 @@ impl CellStorage {
         let identity = mutation_identity()?;
         let result = match input {
             ParticipantPrepare::Account(input) => {
+                let reference = self
+                    .upload_transaction::<PrepareAccountTransaction>(target, identity, &input)
+                    .await?;
                 self.client
-                    .command::<PrepareAccountTransaction>(target, identity, Json(input))
+                    .command::<PrepareAccountTransaction>(target, identity, Json(reference))
                     .await
             }
             ParticipantPrepare::Data(input) => {
+                let reference = self
+                    .upload_transaction::<PreparePartitionTransaction>(target, identity, &input)
+                    .await?;
                 self.client
-                    .command::<PreparePartitionTransaction>(target, identity, Json(input))
+                    .command::<PreparePartitionTransaction>(target, identity, Json(reference))
                     .await
             }
         };

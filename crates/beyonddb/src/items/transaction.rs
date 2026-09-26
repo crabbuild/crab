@@ -169,17 +169,23 @@ pub struct PrepareAccountTransactionInput {
 /// Persist account item images and locks without exposing any writes.
 pub struct PrepareAccountTransaction;
 
+impl crate::MultipartTransactionCommand for PrepareAccountTransaction {
+    type Payload = PrepareAccountTransactionInput;
+    const UPLOAD_COMMAND_ID: u32 = 23;
+}
+
 impl Command for PrepareAccountTransaction {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 21;
     const CODEC_VERSION: u32 = 1;
-    type Input = Json<PrepareAccountTransactionInput>;
+    type Input = Json<crate::TransactionPayloadRef>;
     type Output = Json<PrepareTransactionOutcome>;
 
     fn execute(
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
+        let input = crate::transaction_transport::consume::<Self>(context, input)?;
         let digest = blake3::hash(&serde_json::to_vec(&input)?);
         if let Some(outcome) = participant::prepared(
             context,

@@ -18,6 +18,7 @@ mod tags;
 mod transaction_coordinator;
 mod transaction_payload;
 mod transaction_token;
+mod transaction_transport;
 mod ttl;
 
 pub use expression_wire::WireCondition;
@@ -38,6 +39,10 @@ pub use split::*;
 pub use table::*;
 pub use transaction_coordinator::*;
 pub use transaction_token::TransactionToken;
+pub use transaction_transport::{
+    MultipartTransactionCommand, TransactionPayloadChunk, TransactionPayloadRef,
+    UploadTransactionPayload,
+};
 pub use ttl::*;
 
 pub use authorization::CellAuthorizationStore;
@@ -96,7 +101,7 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 19] = [
+static COMMANDS: [OperationDescriptor; 20] = [
     operation(1),
     operation(2),
     operation(3),
@@ -116,6 +121,7 @@ static COMMANDS: [OperationDescriptor; 19] = [
     operation(20),
     operation(21),
     operation(22),
+    crate::transaction_transport::upload_operation(23),
 ];
 static QUERIES: [OperationDescriptor; 21] = [
     operation(4),
@@ -255,6 +261,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
                 source.update(include_bytes!("items/transaction.rs"));
                 source.update(include_bytes!("participant.rs"));
                 source.update(include_bytes!("transaction_payload.rs"));
+                source.update(include_bytes!("transaction_transport.rs"));
                 source.update(include_bytes!("items/scan.rs"));
                 source.update(include_bytes!("expression_wire.rs"));
                 source.update(include_bytes!("routing.rs"));
@@ -288,6 +295,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<PutItem>()?;
         registry.bind_command::<DeleteItem>()?;
         registry.bind_command::<TransactWrite>()?;
+        registry.bind_command::<crate::UploadTransactionPayload<PrepareAccountTransaction>>()?;
         registry.bind_command::<PrepareAccountTransaction>()?;
         registry.bind_command::<ResolveAccountTransaction>()?;
         registry.bind_command::<DeleteTable>()?;

@@ -580,7 +580,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         })
         .take(14)
         .collect();
-    let large_read = support::LargeRead::seed(&sdk, "RemoteTable", read_keys).await;
+    let large_read = support::LargeTransaction::single_cell(&sdk, "RemoteTable", read_keys).await;
     shutdown_tx.send(()).unwrap();
     server.await.unwrap().unwrap();
     owner_lease.cancel();
@@ -758,7 +758,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     assert_eq!(cross_owner_read.item(), Some(&item));
     recovery::assert_recovered_images(&replacement_sdk).await;
     large.assert_recovered(&replacement_sdk).await;
-    large_read.assert_read(&replacement_sdk).await;
+    large_read.assert_recovered(&replacement_sdk).await;
     assert!(
         replacement_provisioner
             .takeover_expired_partition(

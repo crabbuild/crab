@@ -6,10 +6,10 @@ use extenddb_storage::error::StorageError;
 use super::{CellStorage, cell_error};
 use crate::{
     CoordinatorDecision, CoordinatorParticipantTarget, GetItemInput, Json,
-    ReadAccountTransactionResult, ReadCoordinatorParticipant, ReadCoordinatorParticipantInput,
-    ReadCrossCellTransaction, ReadPartitionTransactionResult, ReadTransactionInput,
-    ReadTransactionResultInput, TransactionFailure, TransactionOperation, TransactionReadResult,
-    account_target, coordinator_target, data_target,
+    ReadAccountTransactionResult, ReadCoordinatorParticipantInput, ReadCrossCellTransaction,
+    ReadPartitionTransactionResult, ReadTransactionInput, ReadTransactionResultInput,
+    TransactionFailure, TransactionOperation, TransactionReadResult, account_target,
+    coordinator_target, data_target,
 };
 
 impl CellStorage {
@@ -58,15 +58,9 @@ impl CellStorage {
                 transaction_id: identity.transaction_id,
                 routing_key: identity.routing_key.clone(),
                 position,
+                chunk: 0,
             };
-            let participant = self
-                .client
-                .query::<ReadCoordinatorParticipant>(&coordinator, None, Json(input))
-                .await
-                .map_err(cell_error)?
-                .output
-                .0
-                .ok_or_else(|| StorageError::Internal("read participant disappeared".into()))?;
+            let participant = self.coordinator_participant(&coordinator, input).await?;
             let target = match &participant.target {
                 CoordinatorParticipantTarget::Account => account_target(account_id),
                 CoordinatorParticipantTarget::Data {

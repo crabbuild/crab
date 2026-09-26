@@ -1,11 +1,11 @@
 //! Decision publication and participant progress in a coordinator Cell.
 
+use crab_cell_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 use crab_cell_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CoordinatorDecision, CoordinatorParticipant, CoordinatorParticipantTarget, MODULE,
-    coordinator_target, read_decision,
+    CoordinatorDecision, CoordinatorParticipantTarget, MODULE, coordinator_target, read_decision,
 };
 use crate::table::statement;
 use crate::{Error, Json, Result, SqlValue};
@@ -406,9 +406,34 @@ pub struct ReadCoordinatorParticipantInput {
     pub transaction_id: [u8; 16],
     pub routing_key: Vec<u8>,
     pub position: u8,
+    pub chunk: u32,
 }
 
-/// Read one immutable participant payload for recovery.
+/// One bounded piece of immutable participant operations.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CoordinatorParticipantChunk {
+    pub target: CoordinatorParticipantTarget,
+    pub chunks: u32,
+    pub payload: Vec<u8>,
+}
+
+impl WireValue for CoordinatorParticipantChunk {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> std::result::Result<(), CodecError> {
+        Json(self.target.clone()).encode(encoder)?;
+        encoder.write_u32(self.chunks)?;
+        encoder.write_bytes(&self.payload)
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> std::result::Result<Self, CodecError> {
+        Ok(Self {
+            target: Json::decode(decoder)?.0,
+            chunks: decoder.read_u32()?,
+            payload: decoder.read_bytes()?.to_vec(),
+        })
+    }
+}
+
+/// Read one immutable participant payload chunk for recovery.
 pub struct ReadCoordinatorParticipant;
 
 impl Query for ReadCoordinatorParticipant {
@@ -416,7 +441,7 @@ impl Query for ReadCoordinatorParticipant {
     const ID: u32 = 2;
     const CODEC_VERSION: u32 = 1;
     type Input = Json<ReadCoordinatorParticipantInput>;
-    type Output = Json<Option<CoordinatorParticipant>>;
+    type Output = Option<CoordinatorParticipantChunk>;
 
     fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
         if coordinator_target(&input.account_id, &input.routing_key)?.cell_id() != context.cell_id()
@@ -436,20 +461,28 @@ impl Query for ReadCoordinatorParticipant {
             ],
         ))?;
         let Some(row) = rows[0].rows.first() else {
-            return Ok(Json(None));
+            return Ok(None);
         };
         let [SqlValue::Blob(target), SqlValue::Integer(chunks)] = row.as_slice() else {
             return Err(Error::Command("invalid coordinator payload"));
         };
-        Ok(Json(Some(CoordinatorParticipant {
+        let chunks = u32::try_from(*chunks)
+            .map_err(|_| Error::Command("invalid participant chunk count"))?;
+        if input.chunk >= chunks {
+            return Err(Error::Command("participant chunk is outside payload"));
+        }
+        let payload = context.sql(&statement(
+            "SELECT payload FROM ddb_transaction_payloads WHERE transaction_id = ?1 AND position = ?2 AND chunk = ?3",
+            vec![SqlValue::Blob(input.transaction_id.to_vec()), SqlValue::Integer(i64::from(input.position)), SqlValue::Integer(i64::from(input.chunk))],
+        ))?;
+        let Some([SqlValue::Blob(bytes)]) = payload[0].rows.first().map(Vec::as_slice) else {
+            return Err(Error::Command("participant chunk is missing"));
+        };
+        Ok(Some(CoordinatorParticipantChunk {
             target: serde_json::from_slice(target)?,
-            operations: serde_json::from_slice(&crate::transaction_payload::read(
-                |batch| context.sql(batch),
-                input.transaction_id,
-                i64::from(input.position),
-                *chunks,
-            )?)?,
-        })))
+            chunks,
+            payload: bytes.clone(),
+        }))
     }
 }
 

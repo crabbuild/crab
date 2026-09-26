@@ -87,13 +87,19 @@ scale before 10,000 Cells is a service-level claim.
 
 Let `P` be the number of participant Cells, rather than the number of keys.
 In an uncontended first attempt, the current driver issues `4P + 2` successful
-durable commands: one BEGIN, `P` prepares, `P` prepare-receipt records, one
+durable phase commands: one BEGIN, `P` prepares, `P` prepare-receipt records, one
 decision, `P` resolutions, and `P` resolution-receipt records. Registration,
 queries, activation, retries, and concurrent recovery add work. This is a
 command count, not an object-store request count; the runtime owns publication.
+Input transport adds one durable upload command per 256-KiB piece of BEGIN and
+each prepare input. If their serialized lengths are `B` and `S_i`, add
+`ceil(B / 256 KiB) + sum(ceil(S_i / 256 KiB))`. Recovery fetches coordinator
+operations one bounded piece at a time. When each input fits one chunk, the
+minimum total is `5P + 3`: eight commands for one participant, thirteen for two,
+and 503 for 100, before registration and retries.
 
 The coordinator itself serializes `2P + 2` of those commands. Two participant
-Cells therefore need ten durable commands; 100 participants need 402. Multiple
+Cells therefore need ten phase commands; 100 participants need 402. Multiple
 keys in one Cell share one prepare and resolution, so partition distribution
 matters as much as item count. Independent transactions can use different
 coordinator shards, but participant phases within one transaction currently
@@ -101,7 +107,7 @@ run sequentially. Adding nodes cannot remove that per-request latency.
 
 All transactional reads pay the same phase cost and persist their captured
 images; assembly additionally queries each saved item. A same-Cell read therefore
-requires six durable commands plus its result queries. Before optimizing the protocol, measure publication latency,
+requires six phase commands, at least two upload commands, and result queries. Before optimizing the protocol, measure publication latency,
 participant count, hot-key conflicts, recovery competition, and retained bytes.
 Batching coordinator progress or parallelizing participant work requires new
 failure/concurrency proof; neither optimization is implemented here.
@@ -166,11 +172,12 @@ are nonnegative; the coordinator reserves position -1 for its terminal abort
 reason, which can contain a large old item. A missing chunk is an error.
 
 Every chunk is written inside the original BEGIN, prepare, or decision command.
-There is no separately published upload phase. Locks, chunk counts, and payload
-rows commit or roll back together. Participant resolution reads its chunks,
+These durable phase payloads are distinct from the temporary wire-upload rows
+described below. Locks, chunk counts, and phase payload rows commit or roll back
+together. Participant resolution reads its chunks,
 applies images, deletes staged chunks, releases locks, and sets its terminal
 marker inside one command. Coordinator history remains retained as before;
-this change does not implement history collection or add durable phase commands.
+SQL chunking does not implement history collection or add decision phases.
 
 Large individual items also need bounded SQL, even below DynamoDB's item limit:
 JSON escapes can make their encoded images exceed 1 MiB. The shared
@@ -201,10 +208,9 @@ remains an availability qualification gap.
 
 The transaction payload schema is unshipped and replaces the former blob
 columns directly; no compatibility reader is retained. Item BLOB encoding and
-external APIs are unchanged. Encoded Cell RPC limits are still finite: a valid
-4-MiB DynamoDB transaction whose complete JSON encoding exceeds the Cell wire
-limit still needs a bounded admission/transport design. Aggregate evaluated
-Update size, capacity reservation, and history collection remain separate gaps.
+external APIs are unchanged. Bounded wire uploads now transfer BEGIN and prepare
+inputs that exceed one Cell RPC. Aggregate evaluated Update size, apply-capacity
+reservation, and history collection remain separate gaps.
 
 ## Cell wire payloads and transactional reads
 
@@ -232,7 +238,7 @@ The adapter and participant still enforce the raw 4-MiB read limit.
 lifecycle removes the failing path without adding a separate snapshot retention
 protocol. It deliberately trades the former optimization for one recovery path.
 
-**Cost:** same-Cell reads now publish six commands and retain recovery/image
+**Cost:** same-Cell reads publish six phase commands plus input uploads and retain recovery/image
 records. They depend on coordinator availability and contend with writes during
 prepare. This is a correctness tradeoff, not a read performance optimization.
 A future fast path needs a bounded snapshot handle and explicit retention and
@@ -250,54 +256,65 @@ the temporary table was deleted. This supplements the
 [DynamoDB transactional read contract](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_TransactGetItems.html);
 it does not qualify all cloud behavior.
 
-### Remaining write transport design
+### Bounded transaction input transport
 
-BEGIN still carries the complete write request, participant queries return an
-entire participant's operations, and prepare carries those operations again.
-Fixing just BEGIN would move the size failure into recovery or prepare. A valid
-large binary/escaped write can still exceed these boundaries. Individual item
-RPCs also need encoded-size qualification; this read change does not prove all
-possible attribute shapes fit one response.
+BEGIN, account prepare, and data prepare use the same upload protocol. Each
+phase receives a small reference containing a unique upload-attempt ID, the
+serialized length, Blake3 digest, and expiration time. Distinct drivers own
+distinct temporary inputs even when bytes and millisecond deadlines match;
+sealing one cannot consume the other. Its input arrives first as immutable 256-KiB pieces in
+`ddb_transaction_uploads`. Chunk bytes use binary wire framing; the upload's
+small acknowledgment and bounded recovery-query result have matching registry
+limits, avoiding a 4-MiB result reservation for every chunk.
 
-The next transport change needs these properties before replacing the current
-write path:
+The receiving command checks the index and exact expected chunk length. A
+retry accepts identical bytes and rejects changed bytes. Each input and the
+aggregate temporary payload per Cell are capped at 32 MiB. This bounds serialized
+transport; it does not change DynamoDB's item/request limits. A sealing handler
+assembles the complete serialized input in memory, so per-worker peak memory
+still needs measurement and admission proof before fleet qualification. Upload references
+expire within 60 seconds. Each arriving chunk collects at most eight expired
+rows; the deadline is part of the identity, so a delayed expired upload cannot
+recreate collected input. Collection is demand-driven, not a background history
+collector.
 
-1. Upload immutable bounded chunks with an identity, declared byte length,
-   count, and content digest. Retries of a chunk must accept identical bytes
-   and reject conflicting bytes. Bound both individual and aggregate uploads.
-2. Seal a complete request atomically at the coordinator. Validate every chunk,
-   original operation index, target/epoch, and request fingerprint before BEGIN
-   becomes recoverable work. An incomplete upload must not acquire key locks.
-3. Claim the client token with the sealed BEGIN. Concurrent token proposals
-   must converge on the original transaction and participant set. Lost replies
-   must use token/status lookup, including after route changes.
-4. Fetch coordinator operations and transfer participant inputs in bounded
-   pieces too. The participant must verify and assemble the complete immutable
-   input before atomically checking conditions, taking locks, saving evaluated
-   images, and recording PREPARED. Chunk arrival is never a prepare vote.
-5. Keep COMMIT/ABORT as the sole decision authority. A prepared participant
-   cannot expire its required chunks on an upload timeout. Recovery must finish
-   from published data without the original frontend or request body.
-6. Collect abandoned pre-BEGIN uploads separately from decided transaction
-   history. Expiry races need a durable terminal fence so delayed uploads or
-   prepares cannot resurrect discarded work. Budget upload, prepared, saved
-   result, and eventual apply bytes before admitting more work.
+BEGIN or prepare assembles every piece, checks total length and digest, and
+decodes the complete input inside its original application savepoint. It consumes
+the temporary rows atomically with the phase. Failure or rejection rolls this
+consumption back. BEGIN still validates participants and claims the client token;
+prepare still validates the coordinator and routing, evaluates conditions, locks
+keys, and saves images in one published command. Chunk arrival never counts as a
+prepare vote, claims a token, or creates a transaction decision.
 
-The runtime Blob capability does not directly provide this atomic SQL handoff.
-It requires a Blob-role namespace and hydrates object-store parts asynchronously
-in `BlobNamespace`; application `CommandContext` handlers expose synchronous
-bounded SQL. Reusing Blob storage would require a verified handoff/retention
-contract across those owners. Compression may reduce common payloads, but does
-not establish a bound for every legal attribute shape and is not a substitute
-for the protocol above.
+After successful sealing, coordinator operations and participant images belong
+to the durable transaction record and do not expire with the upload. Recovery
+reads coordinator operations through bounded chunk queries, then uses the same
+participant upload/prepare path. Lost upload replies can repeat the immutable
+chunk; lost phase replies still use the original coordinator/participant outcome
+rules. Expired input can be uploaded again under a fresh reference while the
+published transaction identity and decision remain unchanged.
 
-Acceptance must cover dropped chunk/seal/prepare replies, duplicate and missing
-chunks, differing bytes under one identity, concurrent token retries, upload
-expiry races, owner replacement before and after sealing, and abort during
-participant transfer. Run the same near-limit binary and escaped requests
-through signed SDK calls, recovery, and token replay. The pinned ExtendDB HTTP
-router also imposes a 16-MiB request body limit, which must be qualified separately
-from both DynamoDB's raw item accounting and the Cell transport limit.
+The host regression covers duplicate, conflicting, incomplete, expired, and
+forged input, then resumes an unsealed upload on a replacement owner. It also
+seals two independent uploads with identical bytes and deadlines; both converge
+on the same durable transaction. The mixed
+account/data fixture drops upload and phase replies. Signed SDK fixtures include
+ten 380-KiB binary values and four 380-KiB control-character strings grouped into
+one participant, with Put, Update, saved reads, and token replay after restart.
+The two-node fixture has also exposed retryable coordinator movement-budget
+exhaustion under its eight-Cell admission cap; this is an availability boundary,
+not evidence of a conflicting transaction decision.
+
+Remaining transport qualification includes abort while an upload is in flight,
+sustained temporary-capacity pressure, and deadline clock skew. Prepared/apply headroom and retained transaction history need separate
+admission and collection work. The pinned ExtendDB HTTP router also imposes a
+16-MiB request body limit; the internal 32-MiB transfer ceiling does not remove it.
+Individual item RPCs still need qualification for all encoded attribute shapes.
+
+The runtime Blob capability does not directly provide this atomic SQL handoff:
+it uses a Blob-role namespace with asynchronous hydration, while application
+handlers expose synchronous bounded SQL. This transport keeps ownership inside
+the existing phase savepoint and adds no second decision authority.
 
 ## Write state machine
 
@@ -613,8 +630,10 @@ empty transaction history.
 When local Cell activation reaches the active-Cell limit, admission
 inspects runtime-settled candidates in least-recently-used order, checks the
 indexed pending-transaction boundary, and requests release of at most one
-coordinator with no observed pending work. Account, data, and credential Cells
-are never selected for reclamation. The runtime rechecks the exact generation and
+coordinator with no observed pending work. This provisioner does not select
+account, data, or credential Cells for reclamation. The runtime's independent
+pressure policy can shed other settled Cells; general on-demand reactivation
+remains a product availability gap. The runtime rechecks the exact generation and
 settled-work gate, closes SQLite, publishes Idle ownership, and releases its
 reservation. Local Cell activations are serialized; cross-node ownership
 still uses authority CAS. Movement-budget or busy-owner failures are retryable.
@@ -895,9 +914,10 @@ of which bytes the public API counts.
 
 ### Implementation and qualification order
 
-1. The single-blob SQL ceiling is removed, with signed large-payload and
-   escaped-item coverage. Complete encoded wire-limit qualification, including
-   near-limit binary payloads and Updates that expand their stored images.
+1. SQL chunking and bounded BEGIN/prepare/recovery transport are implemented,
+   including large binary and escaped inputs. Complete HTTP-body, deadline,
+   orphan-capacity, and in-flight abort qualification, plus Updates that expand
+   their stored images.
 2. Qualify aggregate size semantics against the cloud reference before adding
    evaluated-image rejection; reserve or otherwise prove sufficient apply/recovery
    headroom. Test both account and data participants.

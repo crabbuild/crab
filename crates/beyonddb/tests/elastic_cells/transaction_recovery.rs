@@ -50,19 +50,20 @@ pub(super) async fn assert_background_recovery(
         epoch: 1,
     };
     isolated.operations[0].index = 0;
-    client
-        .command::<BeginCrossCellTransaction>(
-            &coordinator,
-            identity(231),
-            Json(BeginCrossCellTransactionInput {
-                account_id: account_id.into(),
-                transaction_id: bad_id,
-                token: None,
-                participants: vec![isolated],
-            }),
-        )
-        .await
-        .unwrap();
+    transaction_command!(
+        client,
+        BeginCrossCellTransaction,
+        &coordinator,
+        identity(231),
+        Json(BeginCrossCellTransactionInput {
+            account_id: account_id.into(),
+            transaction_id: bad_id,
+            token: None,
+            participants: vec![isolated],
+        }),
+    )
+    .await
+    .unwrap();
     let good_id = [232; 16];
     let mut request: Vec<_> = participants.iter().map(|(_, part)| part.clone()).collect();
     for participant in &mut request {
@@ -73,42 +74,44 @@ pub(super) async fn assert_background_recovery(
             .item
             .insert("value".into(), AttributeValue::N("3".into()));
     }
-    client
-        .command::<BeginCrossCellTransaction>(
-            &coordinator,
-            identity(232),
-            Json(BeginCrossCellTransactionInput {
+    transaction_command!(
+        client,
+        BeginCrossCellTransaction,
+        &coordinator,
+        identity(232),
+        Json(BeginCrossCellTransactionInput {
+            account_id: account_id.into(),
+            transaction_id: good_id,
+            token: Some(TransactionToken {
                 account_id: account_id.into(),
-                transaction_id: good_id,
-                token: Some(TransactionToken {
-                    account_id: account_id.into(),
-                    token: token.into(),
-                    fingerprint: "background-two-items".into(),
-                }),
-                participants: request.clone(),
+                token: token.into(),
+                fingerprint: "background-two-items".into(),
             }),
-        )
-        .await
-        .unwrap();
-    client
-        .command::<PreparePartitionTransaction>(
-            &participants[0].0,
-            identity(232),
-            Json(PreparePartitionTransactionInput {
-                table_id: table.id.clone(),
-                epoch: 1,
-                transaction_id: good_id,
-                coordinator_cell: *coordinator.cell_id().as_bytes(),
-                coordinator_key: token.as_bytes().to_vec(),
-                operations: request[0]
-                    .operations
-                    .iter()
-                    .map(|indexed| indexed.operation.clone())
-                    .collect(),
-            }),
-        )
-        .await
-        .unwrap();
+            participants: request.clone(),
+        }),
+    )
+    .await
+    .unwrap();
+    transaction_command!(
+        client,
+        PreparePartitionTransaction,
+        &participants[0].0,
+        identity(232),
+        Json(PreparePartitionTransactionInput {
+            table_id: table.id.clone(),
+            epoch: 1,
+            transaction_id: good_id,
+            coordinator_cell: *coordinator.cell_id().as_bytes(),
+            coordinator_key: token.as_bytes().to_vec(),
+            operations: request[0]
+                .operations
+                .iter()
+                .map(|indexed| indexed.operation.clone())
+                .collect(),
+        }),
+    )
+    .await
+    .unwrap();
     let pending = client
         .query::<ReadPendingCrossCellTransactions>(
             &coordinator,
@@ -271,44 +274,46 @@ pub(super) async fn assert_background_recovery(
     aborted_put
         .item
         .insert("value".into(), AttributeValue::N("4".into()));
-    client
-        .command::<BeginCrossCellTransaction>(
-            &abort_coordinator,
-            identity(234),
-            Json(BeginCrossCellTransactionInput {
-                account_id: account_id.into(),
-                transaction_id: abort_id,
-                token: None,
-                participants: vec![CoordinatorParticipant {
-                    target: CoordinatorParticipantTarget::Data {
-                        table_id: table.id.clone(),
-                        partition_id: isolated_partition,
-                        epoch: 1,
-                    },
-                    operations: vec![IndexedTransactionOperation {
-                        index: 0,
-                        operation: TransactionOperation::Put(aborted_put.clone()),
-                    }],
+    transaction_command!(
+        client,
+        BeginCrossCellTransaction,
+        &abort_coordinator,
+        identity(234),
+        Json(BeginCrossCellTransactionInput {
+            account_id: account_id.into(),
+            transaction_id: abort_id,
+            token: None,
+            participants: vec![CoordinatorParticipant {
+                target: CoordinatorParticipantTarget::Data {
+                    table_id: table.id.clone(),
+                    partition_id: isolated_partition,
+                    epoch: 1,
+                },
+                operations: vec![IndexedTransactionOperation {
+                    index: 0,
+                    operation: TransactionOperation::Put(aborted_put.clone()),
                 }],
-            }),
-        )
-        .await
-        .unwrap();
-    client
-        .command::<PreparePartitionTransaction>(
-            &isolated_target,
-            identity(234),
-            Json(PreparePartitionTransactionInput {
-                table_id: table.id.clone(),
-                epoch: 1,
-                transaction_id: abort_id,
-                coordinator_cell: *abort_coordinator.cell_id().as_bytes(),
-                coordinator_key: abort_id.to_vec(),
-                operations: vec![TransactionOperation::Put(aborted_put)],
-            }),
-        )
-        .await
-        .unwrap();
+            }],
+        }),
+    )
+    .await
+    .unwrap();
+    transaction_command!(
+        client,
+        PreparePartitionTransaction,
+        &isolated_target,
+        identity(234),
+        Json(PreparePartitionTransactionInput {
+            table_id: table.id.clone(),
+            epoch: 1,
+            transaction_id: abort_id,
+            coordinator_cell: *abort_coordinator.cell_id().as_bytes(),
+            coordinator_key: abort_id.to_vec(),
+            operations: vec![TransactionOperation::Put(aborted_put)],
+        }),
+    )
+    .await
+    .unwrap();
     let aborted = CoordinatorDecision::Abort {
         index: None,
         reason: None,

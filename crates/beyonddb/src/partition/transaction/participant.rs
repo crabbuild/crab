@@ -35,17 +35,23 @@ pub struct PreparePartitionTransactionInput {
 /// Persist staged images and shared or exclusive locks in one published command.
 pub struct PreparePartitionTransaction;
 
+impl crate::MultipartTransactionCommand for PreparePartitionTransaction {
+    type Payload = PreparePartitionTransactionInput;
+    const UPLOAD_COMMAND_ID: u32 = 14;
+}
+
 impl Command for PreparePartitionTransaction {
     const MODULE: &'static str = DATA_MODULE;
     const ID: u32 = 12;
     const CODEC_VERSION: u32 = 1;
-    type Input = Json<PreparePartitionTransactionInput>;
+    type Input = Json<crate::TransactionPayloadRef>;
     type Output = Json<PrepareTransactionOutcome>;
 
     fn execute(
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
+        let input = crate::transaction_transport::consume::<Self>(context, input)?;
         let digest = blake3::hash(&serde_json::to_vec(&input)?);
         if let Some(outcome) = crate::participant::prepared(
             context,

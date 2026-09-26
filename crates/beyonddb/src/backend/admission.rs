@@ -88,9 +88,13 @@ impl CellStorage {
             token: token.clone(),
             participants: participants.into_values().collect(),
         };
+        let identity = mutation_identity()?;
+        let reference = self
+            .upload_transaction::<BeginCrossCellTransaction>(&coordinator, identity, &input)
+            .await?;
         let result = self
             .client
-            .command::<BeginCrossCellTransaction>(&coordinator, mutation_identity()?, Json(input))
+            .command::<BeginCrossCellTransaction>(&coordinator, identity, Json(reference))
             .await;
         let (transaction_id, prior) = match result {
             Ok(result) => match result.output.0 {

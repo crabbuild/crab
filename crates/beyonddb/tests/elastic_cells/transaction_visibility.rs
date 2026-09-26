@@ -25,34 +25,35 @@ pub(crate) async fn assert_range_read_barriers(
         .unwrap()
         .cell_id()
         .as_bytes();
-    client
-        .command::<PreparePartitionTransaction>(
-            target,
-            identity(201),
-            Json(PreparePartitionTransactionInput {
-                table_id: key_info.table_id.clone(),
-                epoch,
-                transaction_id,
-                coordinator_cell,
-                coordinator_key: transaction_id.to_vec(),
-                operations: vec![
-                    TransactionOperation::Put(PutItemInput {
-                        table_name: key_info.table_name.clone(),
-                        table_id: key_info.table_id.clone(),
-                        item: created.clone(),
-                        condition: None,
-                    }),
-                    TransactionOperation::Delete(DeleteItemInput {
-                        table_name: key_info.table_name.clone(),
-                        table_id: key_info.table_id.clone(),
-                        key: deleted.clone(),
-                        condition: None,
-                    }),
-                ],
-            }),
-        )
-        .await
-        .unwrap();
+    transaction_command!(
+        client,
+        PreparePartitionTransaction,
+        target,
+        identity(201),
+        Json(PreparePartitionTransactionInput {
+            table_id: key_info.table_id.clone(),
+            epoch,
+            transaction_id,
+            coordinator_cell,
+            coordinator_key: transaction_id.to_vec(),
+            operations: vec![
+                TransactionOperation::Put(PutItemInput {
+                    table_name: key_info.table_name.clone(),
+                    table_id: key_info.table_id.clone(),
+                    item: created.clone(),
+                    condition: None,
+                }),
+                TransactionOperation::Delete(DeleteItemInput {
+                    table_name: key_info.table_name.clone(),
+                    table_id: key_info.table_id.clone(),
+                    key: deleted.clone(),
+                    condition: None,
+                }),
+            ],
+        }),
+    )
+    .await
+    .unwrap();
 
     // Neither an absent create nor an existing delete may escape the barrier.
     for locked in [&created, &deleted] {
@@ -281,26 +282,27 @@ pub(crate) async fn assert_sdk_read_barrier(
         ("pk".into(), AttributeValue::S("same".into())),
         ("sk".into(), AttributeValue::N("8".into())),
     ]);
-    client
-        .command::<PreparePartitionTransaction>(
-            &target,
-            identity(203),
-            Json(PreparePartitionTransactionInput {
+    transaction_command!(
+        client,
+        PreparePartitionTransaction,
+        &target,
+        identity(203),
+        Json(PreparePartitionTransactionInput {
+            table_id: partition.table.id.clone(),
+            epoch: partition.epoch,
+            transaction_id,
+            coordinator_cell,
+            coordinator_key: transaction_id.to_vec(),
+            operations: vec![TransactionOperation::Delete(DeleteItemInput {
+                table_name: partition.table.table_name.clone(),
                 table_id: partition.table.id.clone(),
-                epoch: partition.epoch,
-                transaction_id,
-                coordinator_cell,
-                coordinator_key: transaction_id.to_vec(),
-                operations: vec![TransactionOperation::Delete(DeleteItemInput {
-                    table_name: partition.table.table_name.clone(),
-                    table_id: partition.table.id.clone(),
-                    key,
-                    condition: None,
-                })],
-            }),
-        )
-        .await
-        .unwrap();
+                key,
+                condition: None,
+            })],
+        }),
+    )
+    .await
+    .unwrap();
     let request = || {
         sdk.transact_get_items().set_transact_items(Some(
             ["1.5", "8"]

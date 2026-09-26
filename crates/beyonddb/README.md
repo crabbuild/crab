@@ -247,7 +247,9 @@ cover multi-MiB transactions and replay across owner/process restart. Aggregate
 Update accounting needs cloud-reference qualification: DynamoDB Local accepts
 small Updates over more than 4 MiB of stored images. The protocol document and
 `scripts/probe-transaction-size.py` record this distinction. Transactions
-exceeding the encoded Cell RPC limit remain a separate gap.
+use bounded binary uploads for BEGIN and prepare inputs larger than one Cell
+RPC, plus bounded recovery queries. Temporary uploads are capped and expire;
+HTTP body limits, apply headroom, and history collection remain separate gaps.
 
 The [cross-Cell transaction protocol](CROSS_CELL_TRANSACTIONS.md) specifies
 the decision, lock, visibility, and failure-recovery contract.

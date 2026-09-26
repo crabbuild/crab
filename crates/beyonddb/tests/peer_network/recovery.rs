@@ -65,22 +65,23 @@ async fn abandon_commit(
         ));
     }
     participants.sort_by_key(|(target, _)| *target.cell_id().as_bytes());
-    client
-        .command::<BeginCrossCellTransaction>(
-            &coordinator,
-            identity(),
-            Json(BeginCrossCellTransactionInput {
-                account_id: account_id.into(),
-                transaction_id,
-                token: None,
-                participants: participants
-                    .iter()
-                    .map(|(_, participant)| participant.clone())
-                    .collect(),
-            }),
-        )
-        .await
-        .unwrap();
+    transaction_command!(
+        client,
+        BeginCrossCellTransaction,
+        &coordinator,
+        identity(),
+        Json(BeginCrossCellTransactionInput {
+            account_id: account_id.into(),
+            transaction_id,
+            token: None,
+            participants: participants
+                .iter()
+                .map(|(_, participant)| participant.clone())
+                .collect(),
+        }),
+    )
+    .await
+    .unwrap();
     for (position, (target, participant)) in participants.iter().enumerate() {
         let CoordinatorParticipantTarget::Data {
             table_id, epoch, ..
@@ -88,25 +89,26 @@ async fn abandon_commit(
         else {
             unreachable!()
         };
-        let prepare = client
-            .command::<PreparePartitionTransaction>(
-                target,
-                identity(),
-                Json(PreparePartitionTransactionInput {
-                    table_id: table_id.clone(),
-                    epoch: *epoch,
-                    transaction_id,
-                    coordinator_cell: *coordinator.cell_id().as_bytes(),
-                    coordinator_key: transaction_id.to_vec(),
-                    operations: participant
-                        .operations
-                        .iter()
-                        .map(|op| op.operation.clone())
-                        .collect(),
-                }),
-            )
-            .await
-            .unwrap();
+        let prepare = transaction_command!(
+            client,
+            PreparePartitionTransaction,
+            target,
+            identity(),
+            Json(PreparePartitionTransactionInput {
+                table_id: table_id.clone(),
+                epoch: *epoch,
+                transaction_id,
+                coordinator_cell: *coordinator.cell_id().as_bytes(),
+                coordinator_key: transaction_id.to_vec(),
+                operations: participant
+                    .operations
+                    .iter()
+                    .map(|op| op.operation.clone())
+                    .collect(),
+            }),
+        )
+        .await
+        .unwrap();
         client
             .command::<RecordParticipantPrepare>(
                 &coordinator,

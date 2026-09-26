@@ -1,3 +1,5 @@
+include!("support/transaction_transport.rs");
+
 mod elastic_cells {
     mod account_participant;
     mod coordinator_residency;
@@ -7,6 +9,7 @@ mod elastic_cells {
     mod transaction_driver;
     mod transaction_reads;
     mod transaction_recovery;
+    mod transaction_transport;
     pub(crate) mod transaction_visibility;
     mod ttl_transactions;
 }
@@ -2599,36 +2602,38 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .collect();
     let mut reversed_participants = participants.clone();
     reversed_participants.reverse();
-    let unordered_begin = client
-        .command::<BeginCrossCellTransaction>(
-            &coordinator_target,
-            identity(125),
-            Json(BeginCrossCellTransactionInput {
-                account_id: "123456789012".into(),
-                transaction_id,
-                token: None,
-                participants: reversed_participants,
-            }),
-        )
-        .await;
+    let unordered_begin = transaction_command!(
+        client,
+        BeginCrossCellTransaction,
+        &coordinator_target,
+        identity(125),
+        Json(BeginCrossCellTransactionInput {
+            account_id: "123456789012".into(),
+            transaction_id,
+            token: None,
+            participants: reversed_participants,
+        }),
+    )
+    .await;
     assert!(matches!(
         unordered_begin,
         Err(InvocationError::Rejected(result))
             if result.output.0 == BeginCrossCellTransactionOutcome::InvalidParticipants
     ));
-    let begun_transaction = client
-        .command::<BeginCrossCellTransaction>(
-            &coordinator_target,
-            identity(110),
-            Json(BeginCrossCellTransactionInput {
-                account_id: "123456789012".into(),
-                transaction_id,
-                token: None,
-                participants: participants.clone(),
-            }),
-        )
-        .await
-        .unwrap();
+    let begun_transaction = transaction_command!(
+        client,
+        BeginCrossCellTransaction,
+        &coordinator_target,
+        identity(110),
+        Json(BeginCrossCellTransactionInput {
+            account_id: "123456789012".into(),
+            transaction_id,
+            token: None,
+            participants: participants.clone(),
+        }),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         begun_transaction.output.0,
         BeginCrossCellTransactionOutcome::Begun
@@ -2684,21 +2689,22 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             if result.output.0 == DecideCrossCellTransactionOutcome::NotPrepared
     ));
     for (position, side) in sides.iter().enumerate() {
-        let prepared = client
-            .command::<PreparePartitionTransaction>(
-                &side.0,
-                identity(112 + u8::try_from(position).unwrap()),
-                Json(PreparePartitionTransactionInput {
-                    table_id: table.id.clone(),
-                    epoch: side.1,
-                    transaction_id,
-                    coordinator_cell: *coordinator_target.cell_id().as_bytes(),
-                    coordinator_key: transaction_id.to_vec(),
-                    operations: vec![participants[position].operations[0].operation.clone()],
-                }),
-            )
-            .await
-            .unwrap();
+        let prepared = transaction_command!(
+            client,
+            PreparePartitionTransaction,
+            &side.0,
+            identity(112 + u8::try_from(position).unwrap()),
+            Json(PreparePartitionTransactionInput {
+                table_id: table.id.clone(),
+                epoch: side.1,
+                transaction_id,
+                coordinator_cell: *coordinator_target.cell_id().as_bytes(),
+                coordinator_key: transaction_id.to_vec(),
+                operations: vec![participants[position].operations[0].operation.clone()],
+            }),
+        )
+        .await
+        .unwrap();
         assert_eq!(prepared.output.0, PrepareTransactionOutcome::Prepared);
         let recorded = client
             .command::<RecordParticipantPrepare>(
@@ -2754,19 +2760,20 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         Err(InvocationError::Rejected(result))
             if result.output.0 == DecideCrossCellTransactionOutcome::DecisionConflict
     ));
-    let repeated_begin = client
-        .command::<BeginCrossCellTransaction>(
-            &coordinator_target,
-            identity(124),
-            Json(BeginCrossCellTransactionInput {
-                account_id: "123456789012".into(),
-                transaction_id,
-                token: None,
-                participants: participants.clone(),
-            }),
-        )
-        .await
-        .unwrap();
+    let repeated_begin = transaction_command!(
+        client,
+        BeginCrossCellTransaction,
+        &coordinator_target,
+        identity(124),
+        Json(BeginCrossCellTransactionInput {
+            account_id: "123456789012".into(),
+            transaction_id,
+            token: None,
+            participants: participants.clone(),
+        }),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         repeated_begin.output.0,
         BeginCrossCellTransactionOutcome::Existing {
@@ -3547,14 +3554,15 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             condition: None,
         })],
     };
-    let prepared = client
-        .command::<PreparePartitionTransaction>(
-            &left_target,
-            identity(90),
-            Json(prepare_input.clone()),
-        )
-        .await
-        .unwrap();
+    let prepared = transaction_command!(
+        client,
+        PreparePartitionTransaction,
+        &left_target,
+        identity(90),
+        Json(prepare_input.clone()),
+    )
+    .await
+    .unwrap();
     assert_eq!(prepared.output.0, PrepareTransactionOutcome::Prepared);
     let prepared_state = client
         .query::<ReadPartitionTransaction>(
@@ -3640,9 +3648,14 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .await
         .unwrap();
     assert_eq!(abort.output.0, ResolveTransactionOutcome::Aborted);
-    let retry_after_abort = client
-        .command::<PreparePartitionTransaction>(&left_target, identity(94), Json(prepare_input))
-        .await;
+    let retry_after_abort = transaction_command!(
+        client,
+        PreparePartitionTransaction,
+        &left_target,
+        identity(94),
+        Json(prepare_input)
+    )
+    .await;
     assert!(matches!(
         retry_after_abort,
         Err(InvocationError::Rejected(result))
@@ -3673,9 +3686,14 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         )
         .await
         .unwrap();
-    let fenced_late_prepare = client
-        .command::<PreparePartitionTransaction>(&left_target, identity(99), Json(late_prepare))
-        .await;
+    let fenced_late_prepare = transaction_command!(
+        client,
+        PreparePartitionTransaction,
+        &left_target,
+        identity(99),
+        Json(late_prepare)
+    )
+    .await;
     assert!(matches!(
         fenced_late_prepare,
         Err(InvocationError::Rejected(result))
@@ -3694,14 +3712,15 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             condition: None,
         })],
     };
-    client
-        .command::<PreparePartitionTransaction>(
-            &left_target,
-            identity(95),
-            Json(committed_input.clone()),
-        )
-        .await
-        .unwrap();
+    transaction_command!(
+        client,
+        PreparePartitionTransaction,
+        &left_target,
+        identity(95),
+        Json(committed_input.clone()),
+    )
+    .await
+    .unwrap();
     let commit = client
         .command::<ResolvePartitionTransaction>(
             &left_target,
@@ -4241,26 +4260,27 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         visible.output.0,
         PartitionGetOutcome::Found(Some(changed_item.clone()))
     );
-    let recovery_prepare = child_client
-        .command::<PreparePartitionTransaction>(
-            &child_targets[first_child],
-            identity(101),
-            Json(PreparePartitionTransactionInput {
+    let recovery_prepare = transaction_command!(
+        child_client,
+        PreparePartitionTransaction,
+        &child_targets[first_child],
+        identity(101),
+        Json(PreparePartitionTransactionInput {
+            table_id: table.id.clone(),
+            epoch: 3,
+            transaction_id: [101; 16],
+            coordinator_cell: *account.cell_id().as_bytes(),
+            coordinator_key: [101; 16].to_vec(),
+            operations: vec![TransactionOperation::Put(PutItemInput {
+                table_name: table.table_name.clone(),
                 table_id: table.id.clone(),
-                epoch: 3,
-                transaction_id: [101; 16],
-                coordinator_cell: *account.cell_id().as_bytes(),
-                coordinator_key: [101; 16].to_vec(),
-                operations: vec![TransactionOperation::Put(PutItemInput {
-                    table_name: table.table_name.clone(),
-                    table_id: table.id.clone(),
-                    item: changed_item.clone(),
-                    condition: None,
-                })],
-            }),
-        )
-        .await
-        .unwrap();
+                item: changed_item.clone(),
+                condition: None,
+            })],
+        }),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         recovery_prepare.output.0,
         PrepareTransactionOutcome::Prepared
@@ -4287,19 +4307,20 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
                 && beyonddb::coordinator_target("123456789012", id).unwrap() == coordinator_target
         })
         .unwrap();
-    client
-        .command::<BeginCrossCellTransaction>(
-            &coordinator_target,
-            identity(126),
-            Json(BeginCrossCellTransactionInput {
-                account_id: "123456789012".into(),
-                transaction_id: pending_id,
-                token: None,
-                participants: vec![recovery_participant.clone()],
-            }),
-        )
-        .await
-        .unwrap();
+    transaction_command!(
+        client,
+        BeginCrossCellTransaction,
+        &coordinator_target,
+        identity(126),
+        Json(BeginCrossCellTransactionInput {
+            account_id: "123456789012".into(),
+            transaction_id: pending_id,
+            token: None,
+            participants: vec![recovery_participant.clone()],
+        }),
+    )
+    .await
+    .unwrap();
     let token_value = (0..=u16::MAX)
         .map(|suffix| format!("recovery-{suffix}"))
         .find(|token| {
@@ -4308,23 +4329,24 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         })
         .unwrap();
     let token_id = [127; 16];
-    client
-        .command::<BeginCrossCellTransaction>(
-            &coordinator_target,
-            identity(127),
-            Json(BeginCrossCellTransactionInput {
+    transaction_command!(
+        client,
+        BeginCrossCellTransaction,
+        &coordinator_target,
+        identity(127),
+        Json(BeginCrossCellTransactionInput {
+            account_id: "123456789012".into(),
+            transaction_id: token_id,
+            token: Some(TransactionToken {
                 account_id: "123456789012".into(),
-                transaction_id: token_id,
-                token: Some(TransactionToken {
-                    account_id: "123456789012".into(),
-                    token: token_value.clone(),
-                    fingerprint: "recovery-request".into(),
-                }),
-                participants: vec![recovery_participant.clone()],
+                token: token_value.clone(),
+                fingerprint: "recovery-request".into(),
             }),
-        )
-        .await
-        .unwrap();
+            participants: vec![recovery_participant.clone()],
+        }),
+    )
+    .await
+    .unwrap();
     let abort_id = (0..=u16::MAX)
         .map(|suffix| {
             let mut id = transaction_id;
@@ -4337,19 +4359,20 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
                 && beyonddb::coordinator_target("123456789012", id).unwrap() == coordinator_target
         })
         .unwrap();
-    client
-        .command::<BeginCrossCellTransaction>(
-            &coordinator_target,
-            identity(128),
-            Json(BeginCrossCellTransactionInput {
-                account_id: "123456789012".into(),
-                transaction_id: abort_id,
-                token: None,
-                participants: vec![recovery_participant],
-            }),
-        )
-        .await
-        .unwrap();
+    transaction_command!(
+        client,
+        BeginCrossCellTransaction,
+        &coordinator_target,
+        identity(128),
+        Json(BeginCrossCellTransactionInput {
+            account_id: "123456789012".into(),
+            transaction_id: abort_id,
+            token: None,
+            participants: vec![recovery_participant],
+        }),
+    )
+    .await
+    .unwrap();
     for handle in child_handles {
         handle.drain().await.unwrap();
     }
@@ -4732,6 +4755,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             &coordinator_target,
             None,
             Json(ReadCoordinatorParticipantInput {
+                chunk: 0,
                 account_id: "123456789012".into(),
                 transaction_id,
                 routing_key: transaction_id.to_vec(),
@@ -4740,7 +4764,13 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         )
         .await
         .unwrap();
-    assert_eq!(restored_participant.output.0, Some(participants[0].clone()));
+    let restored_participant = restored_participant.output.unwrap();
+    assert_eq!(restored_participant.target, participants[0].target);
+    assert_eq!(
+        serde_json::from_slice::<Vec<IndexedTransactionOperation>>(&restored_participant.payload)
+            .unwrap(),
+        participants[0].operations
+    );
     let recovered_intent = restored_client
         .query::<ReadPartitionTransaction>(
             restored_child_target,

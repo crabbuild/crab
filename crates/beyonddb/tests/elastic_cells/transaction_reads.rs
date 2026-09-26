@@ -74,22 +74,23 @@ pub(super) async fn assert_shared_snapshots(
             .await
             .unwrap();
         let coordinator = coordinator_target(account_id, &id).unwrap();
-        client
-            .command::<BeginCrossCellTransaction>(
-                &coordinator,
-                mutation(),
-                Json(BeginCrossCellTransactionInput {
-                    account_id: account_id.clone(),
-                    transaction_id: id,
-                    token: None,
-                    participants: participants
-                        .iter()
-                        .map(|(_, participant)| participant.clone())
-                        .collect(),
-                }),
-            )
-            .await
-            .unwrap();
+        transaction_command!(
+            client,
+            BeginCrossCellTransaction,
+            &coordinator,
+            mutation(),
+            Json(BeginCrossCellTransactionInput {
+                account_id: account_id.clone(),
+                transaction_id: id,
+                token: None,
+                participants: participants
+                    .iter()
+                    .map(|(_, participant)| participant.clone())
+                    .collect(),
+            }),
+        )
+        .await
+        .unwrap();
         for (target, participant) in &participants {
             let operations = participant
                 .operations
@@ -98,36 +99,38 @@ pub(super) async fn assert_shared_snapshots(
                 .collect();
             let result = match &participant.target {
                 CoordinatorParticipantTarget::Account => {
-                    client
-                        .command::<beyonddb::PrepareAccountTransaction>(
-                            target,
-                            mutation(),
-                            Json(beyonddb::PrepareAccountTransactionInput {
-                                transaction_id: id,
-                                coordinator_cell: *coordinator.cell_id().as_bytes(),
-                                coordinator_key: id.to_vec(),
-                                operations,
-                            }),
-                        )
-                        .await
+                    transaction_command!(
+                        client,
+                        beyonddb::PrepareAccountTransaction,
+                        target,
+                        mutation(),
+                        Json(beyonddb::PrepareAccountTransactionInput {
+                            transaction_id: id,
+                            coordinator_cell: *coordinator.cell_id().as_bytes(),
+                            coordinator_key: id.to_vec(),
+                            operations,
+                        }),
+                    )
+                    .await
                 }
                 CoordinatorParticipantTarget::Data {
                     table_id, epoch, ..
                 } => {
-                    client
-                        .command::<PreparePartitionTransaction>(
-                            target,
-                            mutation(),
-                            Json(PreparePartitionTransactionInput {
-                                table_id: table_id.clone(),
-                                epoch: *epoch,
-                                transaction_id: id,
-                                coordinator_cell: *coordinator.cell_id().as_bytes(),
-                                coordinator_key: id.to_vec(),
-                                operations,
-                            }),
-                        )
-                        .await
+                    transaction_command!(
+                        client,
+                        PreparePartitionTransaction,
+                        target,
+                        mutation(),
+                        Json(PreparePartitionTransactionInput {
+                            table_id: table_id.clone(),
+                            epoch: *epoch,
+                            transaction_id: id,
+                            coordinator_cell: *coordinator.cell_id().as_bytes(),
+                            coordinator_key: id.to_vec(),
+                            operations,
+                        }),
+                    )
+                    .await
                 }
             };
             assert_eq!(

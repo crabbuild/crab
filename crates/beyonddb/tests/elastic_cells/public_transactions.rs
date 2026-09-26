@@ -35,7 +35,7 @@ pub(super) async fn assert_lost_replies_and_canceled_token_reuse(
             Arc::new(TestPeerAuthorizer),
         )),
         lost: lost.clone(),
-        enabled: 15,
+        enabled: 127,
     };
     let client = CellClient::runtime_with_peer(
         registry,
@@ -75,8 +75,8 @@ pub(super) async fn assert_lost_replies_and_canceled_token_reuse(
         .unwrap();
     assert_eq!(
         lost.load(Ordering::SeqCst),
-        15,
-        "BEGIN, prepare, decision and resolution replies were dropped after dispatch"
+        127,
+        "uploads, BEGIN, prepare, decision and resolution replies were dropped after dispatch"
     );
     for info in &infos {
         assert_eq!(
@@ -99,7 +99,7 @@ pub(super) async fn assert_lost_replies_and_canceled_token_reuse(
 
     lost.store(0, Ordering::SeqCst);
     assert_large_participant_payloads(&storage, &infos).await;
-    assert_eq!(lost.load(Ordering::SeqCst), 15);
+    assert_eq!(lost.load(Ordering::SeqCst), 127);
 
     let new_item = Item::from([("id".into(), AttributeValue::S("canceled-retry".into()))]);
     let not_exists = Expr::Function {
@@ -176,7 +176,7 @@ pub(super) async fn assert_lost_replies_and_canceled_token_reuse(
         read,
         vec![Some(item.clone()), Some(new_item), None, Some(item.clone())]
     );
-    assert_eq!(lost.load(Ordering::SeqCst), 15);
+    assert_eq!(lost.load(Ordering::SeqCst), 127);
     super::transaction_reads::assert_shared_snapshots(
         &client,
         &storage,
@@ -207,7 +207,7 @@ async fn assert_large_participant_payloads(storage: &CellStorage, infos: &[Table
             let payload = if i == 0 {
                 format!("{}{}", "\0".repeat(160 * 1024), "🙂".repeat(20 * 1024))
             } else {
-                "x".repeat(320 * 1024)
+                "\0".repeat(320 * 1024)
             };
             item.insert("payload".into(), AttributeValue::S(payload));
             item

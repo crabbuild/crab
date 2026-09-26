@@ -226,46 +226,48 @@ async fn coordinator_history_outgrows_residency_and_released_read_recovers() {
         .map(u128::to_be_bytes)
         .find(|id| coordinator_target(ACCOUNT, id).unwrap() == oldest)
         .unwrap();
-    client
-        .command::<BeginCrossCellTransaction>(
-            &oldest,
-            identity(246),
-            Json(BeginCrossCellTransactionInput {
-                account_id: ACCOUNT.into(),
-                transaction_id: id,
-                token: None,
-                participants: vec![CoordinatorParticipant {
-                    target: CoordinatorParticipantTarget::Account,
-                    operations: vec![IndexedTransactionOperation {
-                        index: 0,
-                        operation: TransactionOperation::Read(GetItemInput {
-                            table_name: info.table_name.clone(),
-                            table_id: info.table_id.clone(),
-                            key: key.clone(),
-                        }),
-                    }],
+    transaction_command!(
+        client,
+        BeginCrossCellTransaction,
+        &oldest,
+        identity(246),
+        Json(BeginCrossCellTransactionInput {
+            account_id: ACCOUNT.into(),
+            transaction_id: id,
+            token: None,
+            participants: vec![CoordinatorParticipant {
+                target: CoordinatorParticipantTarget::Account,
+                operations: vec![IndexedTransactionOperation {
+                    index: 0,
+                    operation: TransactionOperation::Read(GetItemInput {
+                        table_name: info.table_name.clone(),
+                        table_id: info.table_id.clone(),
+                        key: key.clone(),
+                    }),
                 }],
-            }),
-        )
-        .await
-        .unwrap();
-    client
-        .command::<beyonddb::PrepareAccountTransaction>(
-            &account,
-            identity(247),
-            Json(beyonddb::PrepareAccountTransactionInput {
-                transaction_id: id,
-                coordinator_cell: *oldest.cell_id().as_bytes(),
-                coordinator_key: id.to_vec(),
-                operations: vec![TransactionOperation::Read(GetItemInput {
-                    table_name: info.table_name.clone(),
-                    table_id: info.table_id.clone(),
-                    key: key.clone(),
-                })],
-            }),
-        )
-        .await
-        .unwrap();
+            }],
+        }),
+    )
+    .await
+    .unwrap();
+    transaction_command!(
+        client,
+        beyonddb::PrepareAccountTransaction,
+        &account,
+        identity(247),
+        Json(beyonddb::PrepareAccountTransactionInput {
+            transaction_id: id,
+            coordinator_cell: *oldest.cell_id().as_bytes(),
+            coordinator_key: id.to_vec(),
+            operations: vec![TransactionOperation::Read(GetItemInput {
+                table_name: info.table_name.clone(),
+                table_id: info.table_id.clone(),
+                key: key.clone(),
+            })],
+        }),
+    )
+    .await
+    .unwrap();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let candidate = host

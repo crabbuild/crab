@@ -47,7 +47,7 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     effect_targets: &[],
     dead_letter: None,
 }];
-static COMMANDS: [OperationDescriptor; 13] = [
+static COMMANDS: [OperationDescriptor; 14] = [
     operation(1),
     operation(2),
     operation(3),
@@ -61,6 +61,7 @@ static COMMANDS: [OperationDescriptor; 13] = [
     operation(11),
     operation(12),
     operation(13),
+    crate::transaction_transport::upload_operation(14),
 ];
 static QUERIES: [OperationDescriptor; 10] = [
     operation(1),
@@ -109,6 +110,7 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
                 source.update(include_bytes!("item_storage.rs"));
                 source.update(include_bytes!("participant.rs"));
                 source.update(include_bytes!("transaction_payload.rs"));
+                source.update(include_bytes!("transaction_transport.rs"));
                 source.update(include_bytes!("table.rs"));
                 source.update(include_bytes!("expression_wire.rs"));
                 Digest::from_bytes(*source.finalize().as_bytes())
@@ -141,6 +143,7 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
         registry.bind_command::<PartitionTransactWrite>()?;
         registry.bind_command::<ConfigurePartitionTtl>()?;
         registry.bind_command::<BackfillPartitionTtl>()?;
+        registry.bind_command::<crate::UploadTransactionPayload<PreparePartitionTransaction>>()?;
         registry.bind_command::<PreparePartitionTransaction>()?;
         registry.bind_command::<ResolvePartitionTransaction>()?;
         registry.bind_query::<PartitionGet>()?;
