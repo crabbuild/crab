@@ -287,3 +287,14 @@ process-lifetime resident high-water mark; disk and descriptor counts are
 boundary samples. Any HTTP error, wrong value, old receipt, or missing reader
 fails the run while retaining evidence. This is a bounded single-host load
 measurement, not a production capacity or soak-test claim.
+
+`qualify_reader_perf.py` reuses that retained fixture to compare optimized
+images with the owner route. Pass `--state <same-state> --report <new-path>
+--image <image> --runtime-source <commit>`; new images must carry the matching
+`org.opencontainers.image.revision` label. It verifies running image IDs and
+node limits, uses the same eight clients and sixty-second windows, and runs
+three pairs in alternating order. `--rounds 1` provides an initial experiment.
+Every pair must have zero errors, correct values/receipts, all four readers,
+replica throughput at least 80% of owner throughput, and replica median/p99
+latency at most 120% of owner latency. Reports and derived Compose files are
+retained on failure; these limits apply only to the recorded local workload.

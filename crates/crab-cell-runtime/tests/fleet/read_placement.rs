@@ -2,12 +2,157 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crab_cell_runtime::identity::{CellId, Digest, NodeId, SessionId};
 use crab_cell_runtime::node::{NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain};
 use crab_ltx::CellStorageLayout;
 use crab_storage::Store;
 use object_store::{memory::InMemory, path::Path};
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_reader_selection_shares_discovery_across_cells() {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let counted = reads.clone();
+    let store =
+        Store::new(Arc::new(InMemory::new())).with_read_request_observer(Arc::new(move |_| {
+            counted.fetch_add(1, Ordering::Relaxed);
+        }));
+    let directory = NodeDirectory::new(
+        CellStorageLayout::new(store, Path::from("shared-reader-discovery"), [1; 16]),
+        Digest::from_bytes([6; 32]),
+        Digest::from_bytes([8; 32]),
+        Digest::from_bytes([9; 32]),
+    );
+    let code = Digest::from_bytes([10; 32]);
+    for node in 1..=5 {
+        advertise(
+            &directory,
+            node,
+            node,
+            "zone-a",
+            code,
+            32 << 20,
+            1_000,
+            16_000,
+        )
+        .await;
+    }
+    reads.store(0, Ordering::Relaxed);
+    let selections = (1..=16).map(|cell| {
+        let directory = directory.clone();
+        async move {
+            directory
+                .select_readers(
+                    CellId::from_bytes([cell; 32]),
+                    SessionId::from_bytes([1; 16]),
+                    code,
+                    4,
+                    2_000,
+                    16,
+                )
+                .await
+                .unwrap()
+        }
+    });
+    for selected in futures_util::future::join_all(selections).await {
+        assert_eq!(selected.len(), 4);
+        assert!(
+            selected
+                .iter()
+                .all(|node| node.session() != SessionId::from_bytes([1; 16]))
+        );
+    }
+    assert!(
+        reads.load(Ordering::Relaxed) <= 5 + 16,
+        "each query rescanned membership: {} provider reads",
+        reads.load(Ordering::Relaxed)
+    );
+}
+
+#[tokio::test]
+async fn advisory_discovery_preserves_expiry_fresh_authority_and_failed_refresh() {
+    use bytes::Bytes;
+    use object_store::ObjectStoreExt;
+
+    let inner = Arc::new(InMemory::new());
+    let layout = CellStorageLayout::new(
+        Store::new(inner.clone()),
+        Path::from("reader-discovery-expiry"),
+        [1; 16],
+    );
+    let directory = NodeDirectory::new(
+        layout.clone(),
+        Digest::from_bytes([6; 32]),
+        Digest::from_bytes([8; 32]),
+        Digest::from_bytes([9; 32]),
+    );
+    let remote = NodeDirectory::new(
+        layout.clone(),
+        Digest::from_bytes([6; 32]),
+        Digest::from_bytes([8; 32]),
+        Digest::from_bytes([9; 32]),
+    );
+    let code = Digest::from_bytes([10; 32]);
+    let cell = CellId::from_bytes([11; 32]);
+    let owner = SessionId::from_bytes([1; 16]);
+    advertise(&directory, 1, 1, "zone-a", code, 32 << 20, 1_000, 16_000).await;
+    advertise(&directory, 2, 2, "zone-b", code, 32 << 20, 1_000, 2_100).await;
+    assert_eq!(
+        directory
+            .select_readers(cell, owner, code, 4, 2_000, 16)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        directory
+            .select_readers(cell, owner, code, 4, 2_000, 1)
+            .await
+            .is_err()
+    );
+    let reader = remote
+        .load(SessionId::from_bytes([2; 16]), 2_000)
+        .await
+        .unwrap()
+        .unwrap();
+    remote.withdraw(&reader, 2_000).await.unwrap();
+    assert!(
+        !directory
+            .is_live(reader.advertisement().session(), 2_000)
+            .await
+            .unwrap()
+    );
+    assert_eq!(directory.live(2_000, 16).await.unwrap().len(), 1);
+    assert!(
+        directory
+            .select_readers(cell, owner, code, 4, 2_200, 16)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    advertise(&remote, 3, 3, "zone-c", code, 32 << 20, 2_200, 16_000).await;
+    let refreshed = directory
+        .select_readers(cell, owner, code, 4, 3_000, 16)
+        .await
+        .unwrap();
+    assert_eq!(refreshed[0].session(), SessionId::from_bytes([3; 16]));
+    inner
+        .put(
+            &layout.node_path(&[3; 16]),
+            Bytes::from_static(b"corrupt signed membership").into(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        directory
+            .select_readers(cell, owner, code, 4, 4_000, 16)
+            .await
+            .is_err()
+    );
+}
 
 async fn advertise(
     directory: &NodeDirectory,

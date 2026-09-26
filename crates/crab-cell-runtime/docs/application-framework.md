@@ -306,6 +306,11 @@ admitted-view resolver. The same router serves explicit HTTP issue-detail
 reads. It consults authority, S3 desired count, and signed live membership,
 prefers lower ingress-observed in-flight load, and bounds selection and all
 attempts by one five-second deadline. Peer attempts carry the remaining budget.
+Advisory reader discovery shares a bounded one-second membership snapshot
+across directory clones and Cells, with one concurrent refresh. Selection
+filters expired advertisements each time; a failed expired refresh returns an
+error. Local enrollment and withdrawal invalidate this discovery snapshot.
+Authority, peer authentication, and offline maintenance scans remain fresh.
 The author handle does not expose storage, local files, or routing internals.
 Fresh authority checks remain mandatory before a replica releases a result.
 Blob queries hydrate content-addressed parts with digest and length checks;

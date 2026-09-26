@@ -24,6 +24,9 @@ pub struct NodeDirectory {
     // record. Sharing this short-lived snapshot keeps cloned schedulers from
     // multiplying a full directory scan without changing failover authority.
     pub(super) recovery_scan: Arc<RwLock<Option<Arc<RecoveryScanSnapshot>>>>,
+    // Reader placement is advisory. Authority, session authentication and
+    // maintenance continue to read their canonical records directly.
+    reader_membership: Arc<RwLock<Option<advertisement::ReaderMembership>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -42,6 +45,7 @@ impl NodeDirectory {
             image,
             release,
             recovery_scan: Arc::new(RwLock::new(None)),
+            reader_membership: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -60,7 +64,7 @@ impl NodeDirectory {
         self.validate(&advertisement, now_ms)?;
         let encoded = advertisement.encode()?;
         let path = self.layout.node_path(advertisement.session.as_bytes());
-        match self
+        let result = match self
             .layout
             .store()
             .create_strict_with_etag(&path, Bytes::from(encoded))
@@ -74,7 +78,9 @@ impl NodeDirectory {
                 Some(current) if current.advertisement == advertisement => Ok(current),
                 Some(_) | None => Err(create_error.into()),
             },
-        }
+        };
+        self.reader_membership.write().await.take();
+        result
     }
 
     /// Loads and verifies one exact, currently valid boot session.
