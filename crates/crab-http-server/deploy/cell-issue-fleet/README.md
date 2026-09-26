@@ -243,5 +243,8 @@ provider inventories must match the deletion counters and the grace cutoff;
 the retained pin must still verify. Restarted nodes must recover the same issue
 and comment data, recruit two readers, and acknowledge a new write. The runner
 retains logs and its incremental `reader-retention-report.json` on failure.
+If interrupted after the incomplete one-object pass, repeat the command with
+`--resume`; it verifies the recorded image and exact maintenance authority,
+records the resumed runner revision, and retries the same prepared revision.
 It never lowers the grace period or rewrites object timestamps. Use only the
 disposable fixture: this command actually deletes eligible immutable objects.

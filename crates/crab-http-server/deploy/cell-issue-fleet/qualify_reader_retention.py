@@ -50,6 +50,8 @@ def main() -> None:
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--image", required=True)
     parser.add_argument("--runtime-source", required=True)
+    parser.add_argument("--resume", action="store_true",
+                        help="resume the recorded incomplete one-object sweep")
     parser.add_argument("--node-port-base", type=int, default=18100)
     args = parser.parse_args()
     raw = (args.state / "read-replica-report.json").read_bytes()
@@ -60,7 +62,7 @@ def main() -> None:
     if command("git", "status", "--porcelain"):
         raise RuntimeError("commit the runner before collecting source-bound evidence")
     output = args.state / "reader-retention-report.json"
-    if output.exists():
+    if output.exists() and not args.resume:
         raise RuntimeError("retention report exists; preserve it before another run")
     # Other application processes must remain stopped throughout this run.
     # Infrastructure may already be running; never touch another Compose project.
@@ -84,6 +86,17 @@ def main() -> None:
               "runner_source": command("git", "rev-parse", "HEAD"), "image": image,
               "original_report_sha256": hashlib.sha256(raw).hexdigest(),
               "project": config["name"], "started_at": datetime.now(timezone.utc).isoformat()}
+    if args.resume:
+        previous = json.loads(output.read_text())
+        for key in ("runtime_source", "image", "original_report_sha256", "project"):
+            if previous[key] != report[key]:
+                raise RuntimeError(f"resumed {key} does not match the original receipt")
+        if (len(previous.get("passes", [])) != 1 or previous["passes"][0]["counts"]["complete"]
+                or previous["passes"][0]["counts"]["deleted_objects"] != 1):
+            raise RuntimeError("resume requires exactly one incomplete bounded sweep")
+        previous["resumed_by"] = report["runner_source"]
+        previous["resumed_at"] = report["started_at"]
+        report = previous
 
     def save():
         output.write_text(json.dumps(report, indent=2) + "\n")
@@ -93,27 +106,42 @@ def main() -> None:
                                   "--config", CONFIG, "cells", *arguments))
 
     nodes = [node_name(index) for index in range(1, 4)]
-    compose(path, (), "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300",
-            "gateway", *nodes)
-    report["sessions"] = {node_name(index): prove_node(path, (), index)[0] for index in range(1, 4)}
-    set_reader_target(args.node_port_base, 1, 2)
-    report["before_values"] = values(args.node_port_base)
-    report["serving_readers"] = prove_readers(args.node_port_base, 3, 2)
-    report["control_before"] = cli("status", "--owner", "demo", "--name", "work-01")
-    pin = uuid.uuid4().hex
-    report["backup_pin"] = cli("backup", "create", "--pin", pin)
-    report["before_inventory"] = inventory(path)
-    report["release_before"] = cli("release", "status")
-    prepared = cli("release", "prepare", "--expected-revision",
-                   str(report["release_before"]["revision"]), "--image", "sha256:" + "1" * 64)
-    report["prepared"] = prepared
+    if not args.resume:
+        compose(path, (), "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300",
+                "gateway", *nodes)
+        report["sessions"] = {node_name(index): prove_node(path, (), index)[0] for index in range(1, 4)}
+        set_reader_target(args.node_port_base, 1, 2)
+        report["before_values"] = values(args.node_port_base)
+        report["serving_readers"] = prove_readers(args.node_port_base, 3, 2)
+        report["control_before"] = cli("status", "--owner", "demo", "--name", "work-01")
+        report["backup_pin"] = cli("backup", "create", "--pin", uuid.uuid4().hex)
+        report["before_inventory"] = inventory(path)
+        report["release_before"] = cli("release", "status")
+        report["prepared"] = cli("release", "prepare", "--expected-revision",
+                                 str(report["release_before"]["revision"]), "--image", "sha256:" + "1" * 64)
+        report["passes"] = []
+    elif cli("release", "status") != report["passes"][0]["release"]:
+        raise RuntimeError("recorded maintenance authority changed before resume")
+    prepared = report["prepared"]
+    pin = report["backup_pin"]["pin"]
+
+    def check_drained():
+        report["drained"] = {}
+        for service in nodes:
+            container = compose(path, (), "ps", "--all", "--quiet", service)
+            state = json.loads(command("docker", "inspect", "--format", "{{json .State}}", container))
+            if state["Running"] or state["ExitCode"] != 0 or state["OOMKilled"]:
+                raise RuntimeError(f"{service} did not drain successfully before the sweep")
+            report["drained"][service] = {"state": state}
+
+    if args.resume:
+        check_drained()
     save()
     arguments = ["docker", "compose", "--file", str(path), "run", "--rm", "--no-deps",
                  "maintenance", "--config", CONFIG, "cells", "release", "activate",
                  "--expected-revision", str(prepared["revision"]), "--strategy", "maintenance",
                  "--retention-grace-hours", "1", "--retention-max-deletes"]
-    report["passes"] = []
-    for limit in (1, 100_000):
+    for limit in ((100_000,) if args.resume else (1, 100_000)):
         started = datetime.now(timezone.utc)
         run = subprocess.run([*arguments, str(limit)], text=True, capture_output=True, timeout=600)
         finished = datetime.now(timezone.utc)
@@ -128,20 +156,18 @@ def main() -> None:
             if (run.returncode == 0 or counts["deleted_objects"] != 1 or counts["complete"]
                     or record["release"]["state"] != "maintenance"):
                 raise RuntimeError("aged fixture did not exercise an incomplete, fenced retention pass")
-            report["drained"] = {}
-            for service in nodes:
-                container = compose(path, (), "ps", "--all", "--quiet", service)
-                state = json.loads(command("docker", "inspect", "--format", "{{json .State}}", container))
-                if state["Running"] or state["ExitCode"] != 0 or state["OOMKilled"]:
-                    raise RuntimeError(f"{service} did not drain successfully before the sweep")
-                session = cli("node", "--session", report["sessions"][service], "--json")
-                if session["live"]:
-                    raise RuntimeError("a serving session remained live after retention")
-                report["drained"][service] = {"state": state, "session": session}
+            check_drained()
             save()
         elif (run.returncode != 0 or not counts["complete"]
-              or record["release"]["state"] != "ready" or counts["retained_pins"] != 1):
+              or record["release"]["state"] != "ready" or counts["retained_pins"] < 1):
             raise RuntimeError("same-revision maintenance retry did not complete with its backup pin")
+    # Node inspection uses startup admission and is intentionally unavailable
+    # during Maintenance. Check withdrawal after Ready, before any node restarts.
+    for service in nodes:
+        session = cli("node", "--session", report["sessions"][service], "--json")
+        if session["live"]:
+            raise RuntimeError("a serving session remained live after retention")
+        report["drained"][service]["session"] = session
     after = inventory(path)
     deleted = sorted(report["before_inventory"].keys() - after.keys())
     # Collector time falls inside the command interval. Use its upper bound;
