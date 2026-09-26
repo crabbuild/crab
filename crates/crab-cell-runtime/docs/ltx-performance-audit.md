@@ -80,6 +80,34 @@ tests and six recovery-metric collector tests pass. Runtime all-target Clippy,
 Bash parsing and ShellCheck also pass. No runtime election, durability mode or
 qualification threshold changed.
 
+The [fault-during-traffic driver](../../crab-http-server/deploy/cell-issue-fleet/FAULTS.md)
+now binds its kill trigger to a received acknowledgement and an unpublished
+fleet-proof action. It rechecks the active cohort, removes the owner's process
+and named Cell volume, verifies every acknowledged issue before restarting that
+owner, scans public issue lists for duplicate effects, and requires publication
+to drain afterward. Cleanup failures retain the original failure and cannot
+produce a pass. The 35 load, trace and fault tests pass. The pinned AWS CLI and
+local RustFS also pass the isolated target-prefix denial/cleanup probe. Those
+checks qualify the injector; the complete live fault and stage curves still
+need their own retained report.
+
+Both exact-source container gates now pass at `a3638ef7e55`:
+[AMD64](https://github.com/crabbuild/crab/actions/runs/36249416611) and
+[ARM64](https://github.com/crabbuild/crab/actions/runs/36249443776). They include
+the corrected acknowledging-cohort receipt check. They neither establish the
+cause of the earlier ARM failure nor provide a saturation curve. The separate
+deep property run remains queued at this observation.
+
+The local exact-source fleet attempt at the same revision stopped before
+serving traffic: the Docker volume had 29,724,612 KiB free and the node reported
+`Cell runtime requires at least 20 GiB usable local disk`. The existing reserve
+means that raw free space was insufficient. The failed report and node logs
+remain retained; no stage or latency result was produced. The container workflow
+now also accepts a successful image run for a fresh-worker fleet qualification,
+using the image source's stage runner and separately identified fault harness.
+This provides a reproducible environment for the pending live proof without
+lowering the runtime's disk admission requirement.
+
 ## Priority after the implemented changes
 
 The following is the current execution order. Numbered findings below retain

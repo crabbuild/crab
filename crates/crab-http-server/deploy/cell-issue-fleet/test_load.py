@@ -285,6 +285,25 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "contract_error")
         self.assertIn("request ID", result["error"])
 
+    def test_fault_hook_observes_a_received_acknowledgement_before_readback(self):
+        snapshots = []
+
+        def acknowledged(sample):
+            snapshots.append(json.loads(json.dumps(sample)))
+            self.assertEqual([status for status, _ in self.http_requests], [201])
+            self.assertIn(sample["request_id"], self.receipts)
+
+        sample = load.load_pair(self.gateway, 3, 1, 0, "fault", time.monotonic(), acknowledged)
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(len(snapshots[0]["operations"]), 1)
+        self.assertEqual(sample["outcome"], "success")
+        self.assertLessEqual(sample["started_ns"], snapshots[0]["acknowledged_ns"])
+        self.assertLessEqual(snapshots[0]["acknowledged_ns"], sample["completed_ns"])
+        self.invalid_request_id = True
+        sample = load.load_pair(self.gateway, 3, 1, 1, "fault", time.monotonic(), acknowledged)
+        self.assertEqual(sample["outcome"], "contract_error")
+        self.assertEqual(len(snapshots), 1)
+
     def test_acknowledged_readback_mismatch_stops_new_arrivals_and_retains_evidence(self):
         self.corrupt_read = True
         summary, samples = load.scheduled_load(

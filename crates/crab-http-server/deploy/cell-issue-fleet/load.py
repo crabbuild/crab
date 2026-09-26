@@ -236,11 +236,12 @@ def cover_routes(gateway: str, nodes: int, cells: int) -> tuple[dict, list[dict]
     return coverage, samples
 
 
-def load_pair(gateway: str, nodes: int, cell: int, arrival: int, run_id: str, scheduled: float) -> dict:
+def load_pair(gateway: str, nodes: int, cell: int, arrival: int, run_id: str, scheduled: float, on_acknowledged=None) -> dict:
     title = f"fleet-load-{run_id}-{cell:02d}-{arrival:06d}"
     request_id = str(uuid.uuid5(uuid.NAMESPACE_URL, title))
     result = {
         "cell": cell, "arrival": arrival, "request_id": request_id,
+        "started_ns": time.monotonic_ns(),
         "dispatch_delay_ms": (time.monotonic() - scheduled) * 1_000,
         "operations": [],
     }
@@ -256,6 +257,9 @@ def load_pair(gateway: str, nodes: int, cell: int, arrival: int, run_id: str, sc
             result.update(outcome="contract_error", error="unexpected issue creation result")
         else:
             result["acknowledged"] = {"number": number, "title": title}
+            result["acknowledged_ns"] = time.monotonic_ns()
+            if on_acknowledged is not None:
+                on_acknowledged(result)
             observed = load_request(gateway, nodes, "GET", issue_path(cell) + f"/{number}")
             body = observed.pop("body", {})
             result["operations"].append({"operation": "read", **observed})
@@ -264,11 +268,12 @@ def load_pair(gateway: str, nodes: int, cell: int, arrival: int, run_id: str, sc
                 result.update(outcome="contract_error", error="acknowledged issue readback mismatch")
             elif observed["outcome"] == "failed" and observed["retry_reasons"][-1] == 404:
                 result.update(outcome="contract_error", error="acknowledged issue disappeared")
+    result["completed_ns"] = time.monotonic_ns()
     result["scheduled_latency_ms"] = (time.monotonic() - scheduled) * 1_000
     return result
 
 
-def scheduled_load(gateway: str, nodes: int, workload: Workload, run_id: str, raw) -> tuple[dict, list[dict]]:
+def scheduled_load(gateway: str, nodes: int, workload: Workload, run_id: str, raw, on_acknowledged=None) -> tuple[dict, list[dict]]:
     count = math.ceil(workload.rate * workload.duration)
     samples = []
     started = time.monotonic()
@@ -302,7 +307,7 @@ def scheduled_load(gateway: str, nodes: int, workload: Workload, run_id: str, ra
                 record({"arrival": arrival, "cell": cell, "outcome": outcome,
                         "dispatch_delay_ms": late * 1_000, "operations": []})
                 continue
-            pending.add(executor.submit(load_pair, gateway, nodes, cell, arrival, run_id, scheduled))
+            pending.add(executor.submit(load_pair, gateway, nodes, cell, arrival, run_id, scheduled, on_acknowledged))
             peak = max(peak, len(pending))
         for future in concurrent.futures.as_completed(pending):
             record(future.result())
