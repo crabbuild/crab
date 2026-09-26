@@ -4,8 +4,8 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `17a3333ec7a`, including range-proportional compaction. The latest three-node action trace uses predecessor `e50055c48bb`. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
-| Status | Hydration fetch, sparse registration, persistent-cache construction isolation, conditional issue enrichment, recovery receipt preservation and range-proportional compaction are implemented. Loaded scale-out cannot assume idle ownership transfer. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
+| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `1a8c4ad670c`, plus bounded asynchronous cache fills recorded below. The latest three-node action trace uses predecessor `e50055c48bb`. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
+| Status | Hydration fetch, sparse registration, persistent-cache construction isolation, conditional issue enrichment, recovery receipt preservation, range-proportional compaction and bounded asynchronous cache fills are implemented. Loaded scale-out cannot assume idle ownership transfer. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
 
@@ -27,7 +27,7 @@ their original baseline and subsequent implementation evidence.
 | Order | Remaining gap | Decision and acceptance gate |
 | --- | --- | --- |
 | 1 | Current-source capacity and recovery evidence (5, 12, 16, 23) | Provision the actual Compose disk budget, then run fixed-workload and offered-rate curves. Count executed owners, successful responses and published commit coverage separately. Fault an acknowledged follower-only tail during arrivals. |
-| 2 | An admitted directory-cache fill still delays the reader (18) | Return authenticated bytes before optional persistence using host-owned, bounded fill work. Prove byte/job/disk accounting, shutdown and corruption handling; measure foreground latency with cache syncs paused. |
+| 2 | Cache fills return verified reads before persistence; service benefit is unqualified (18) | Measure first mutation, required host-job interference, skipped-cache origin traffic and foreground tails with slow local syncs. |
 | 3 | Synchronous demand faults, installation and cleanup block a shared SQL worker (9–10, 19) | Run cold and resident Cells on the same worker. Separate origin wait, installation and confirmation; evaluate scheduling changes only after that attribution. |
 | 4 | Writable activation and fresh checksum maintenance scale with total page count (3, 14, 20, 22) | First bound local checksum-block work; evaluate lazy authenticated metadata separately. Measure first query, first mutation and recovery storms at fixed changed-page count. |
 | 5 | Ordered root preparation and compaction constrain hot-Cell publication (4–5, 17) | Measure provider GET/HEAD/PUT phases and publisher queue age across repeated debt thresholds. Reuse verified unchanged metadata or coalesce roots only if those measurements justify it. |
@@ -65,8 +65,8 @@ of their underlying work.
    not merely move the full activation scan into the first mutation or add
    unbounded network waits to synchronous capture.
 2. **Specify cache work ownership before removing the await.**
-   [Directory reads](../../crab-ltx/src/replica/directory.rs) currently await
-   admitted persistence before returning verified origin bytes. The
+   The baseline [directory reads](../../crab-ltx/src/replica/directory.rs)
+   awaited admitted persistence before returning verified origin bytes. The
    [cache](../../crab-ltx/src/environment/directory_cache.rs) syncs each fill
    and rewrites the membership index; recency updates also scan the entry queue.
    A host-owned fill mechanism must bound retained bytes, deduplicate keys and
@@ -1337,10 +1337,54 @@ explicitly invoked host test, documented in the
 admission regression proves that busy job slots do not queue fill buffers and
 that a subsequent admitted fill persists normally.
 
-The reader performing an admitted fill still waits for local persistence.
-Disk-cache lookups also use the shared blocking pool. Host-owned write-behind,
-foreground isolation, cache-fill hit-rate effects and public action latency
-remain open; this change does not claim those gates.
+**Bounded asynchronous fill implementation:** verified directory bytes now
+return after immediate job admission and dispatch. A host-family tracker
+deduplicates in-flight keys; no extra task queue or thread pool was added.
+The existing job ceiling and directory-node size cap bound retained buffers.
+Each dispatched closure retains blocking-job and disk accounting through its
+completion or drop. Derived fills do not retain the reader's recovery/dirty
+cohort. Busy disk-cache lookups and per-key fill locks yield a cache miss,
+allowing authenticated origin reads to proceed. Failed optional fills cannot
+poison subsequent cache access; every returned entry retains shape and digest
+validation.
+
+Cache construction excludes accepted fills before cleaning private temporaries.
+`Host::drain_cache_fills` waits for accepted cache work; runtime shutdown calls
+it after stopping admission and draining Cells, workers and durability work.
+Canceling a drain does not release running jobs; callers can await it again.
+This follows the executor's accepted-job ownership contract and Tokio's
+[blocking-task lifetime](https://docs.rs/tokio/1.53.1/tokio/task/fn.spawn_blocking.html).
+There is no separate permanent cache shutdown state, so an explicitly drained
+host can be reused by another runtime.
+
+The strengthened public fault test first failed because root open waited for
+cache fsync. It now returns while the sync remains paused, as do fresh-store
+lookups for the same and another Cell sharing that cache. The one/two-job-slot
+matrix passes over memory storage and real RustFS, with exact SQLite restore.
+Draining and reopening remain pending until the pause is released. Private
+tests cover bounded dispatch, duplicate fills, dropped/rejected jobs, and
+filesystem failures/panics followed by a successful fill. Existing restart,
+corruption, symlink and cancellation tests remain required.
+
+The restart audit also reproduced an unaccounted cache file: when installed
+bytes outlived their membership entry, a later same-length fill reused them
+without reserving disk. Reuse now requires indexed membership; otherwise the
+normal replace/reserve path applies. Its regression changes disk usage from
+zero to the exact eight fixture bytes. An unchanged indexed fill updates only
+in-memory recency, sharing the existing cache-hit persistence rule.
+
+Verification passed: 16 host-environment unit tests, eight authenticated
+directory/restart tests, the real RustFS paused-fill matrix, and the public
+HTTP/mTLS RustFS collaboration test with owner takeover and Git readback.
+The cache-open lifecycle suite and runtime activation/shutdown regressions also
+pass. Replica/runtime and minimal-feature LTX all-target Clippy run with
+warnings denied. These are correctness and concurrency checks; no controlled
+service-latency comparison was performed.
+
+Fills and cache reads still share the blocking pool with required work, and
+membership changes still rewrite its index. Skipping cache access can increase
+origin traffic. Public first-read/first-mutation percentiles, cache-hit effects
+and sibling-Cell interference under sustained load remain open gates.
 
 ### 19. The initial asynchronous draft still blocked its own Cell and treated every error as stale
 

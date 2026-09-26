@@ -121,6 +121,7 @@ async fn directory_cache_survives_replica_restart_without_directory_origin_read(
     let warm = warm_replica.open_root(&root).await.unwrap();
     assert_eq!(warm.directory_height(), 1);
     warm.paged().read_page(1).await.unwrap();
+    cache_host.drain_cache_fills().await;
     assert!(cache_host.directory_cache_stats().unwrap().entries() >= 1);
     drop(first);
     drop(warm_replica);

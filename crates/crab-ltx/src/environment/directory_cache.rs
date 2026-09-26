@@ -11,7 +11,95 @@ use std::{
 };
 
 #[cfg(feature = "replica")]
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+
+#[derive(Default)]
+pub(super) struct CacheFills {
+    state: Mutex<CacheFillState>,
+    finished: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct CacheFillState {
+    paths: HashSet<PathBuf>,
+    opening: HashSet<PathBuf>,
+}
+
+impl CacheFills {
+    pub(super) fn claim(self: &Arc<Self>, path: PathBuf) -> Option<CacheFill> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if path
+            .parent()
+            .is_some_and(|root| state.opening.contains(root))
+            || !state.paths.insert(path.clone())
+        {
+            return None;
+        }
+        Some(CacheFill {
+            fills: Arc::clone(self),
+            path,
+            opening: false,
+        })
+    }
+
+    pub(super) async fn open(self: &Arc<Self>, root: PathBuf) -> CacheFill {
+        loop {
+            let finished = self.finished.notified();
+            {
+                let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                if !state.opening.contains(&root)
+                    && !state.paths.iter().any(|path| path.parent() == Some(&root))
+                {
+                    state.opening.insert(root.clone());
+                    return CacheFill {
+                        fills: Arc::clone(self),
+                        path: root,
+                        opening: true,
+                    };
+                }
+            }
+            finished.await;
+        }
+    }
+
+    pub(super) async fn drain(&self) {
+        loop {
+            // Register before checking: completion between the check and await
+            // must wake shutdown even when no later fill will finish.
+            let finished = self.finished.notified();
+            {
+                let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                if state.paths.is_empty() && state.opening.is_empty() {
+                    return;
+                }
+            }
+            finished.await;
+        }
+    }
+}
+
+pub(super) struct CacheFill {
+    fills: Arc<CacheFills>,
+    path: PathBuf,
+    opening: bool,
+}
+
+impl Drop for CacheFill {
+    fn drop(&mut self) {
+        let mut state = self
+            .fills
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.opening {
+            state.opening.remove(&self.path);
+        } else {
+            state.paths.remove(&self.path);
+        }
+        drop(state);
+        self.fills.finished.notify_waiters();
+    }
+}
 
 #[cfg(feature = "replica")]
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -186,9 +274,13 @@ impl DirectoryCache {
 
     pub(crate) fn get(&self, key: &str, max_bytes: u64) -> io::Result<Option<Vec<u8>>> {
         let lock = self.fill_lock(key);
-        let _guard = lock
-            .lock()
-            .map_err(|_| io::Error::other("cache fill lock poisoned"))?;
+        let _guard = match lock.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+            // Interrupted optional fills cannot poison canonical reads. File
+            // shape and the caller's digest check still authenticate every hit.
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+        };
         let path = self.key_path(key);
         if !self.filesystem.exists(&path)? {
             if self.remove_entry(key) {
@@ -260,16 +352,23 @@ impl DirectoryCache {
             return Ok(());
         }
         let lock = self.fill_lock(key);
-        let _guard = lock
-            .lock()
-            .map_err(|_| io::Error::other("cache fill lock poisoned"))?;
+        let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
         self.filesystem.create_dir_all(&self.root)?;
         let path = self.key_path(key);
         if self.filesystem.exists(&path)? {
             let length = self.filesystem.file_len(&path)?;
-            if length == bytes.len() as u64 {
+            let indexed = self
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .entries
+                .get(key)
+                .copied()
+                == Some(length);
+            // A previous fill may have installed bytes before its index write
+            // failed. Unindexed files need a fresh disk reservation on reuse.
+            if length == bytes.len() as u64 && indexed {
                 self.touch_entry(key, length);
-                self.persist_index();
                 return Ok(());
             }
             let _ = self.filesystem.remove_file(&path);
@@ -311,9 +410,7 @@ impl DirectoryCache {
 
     pub(crate) fn invalidate(&self, key: &str) -> io::Result<()> {
         let lock = self.fill_lock(key);
-        let _guard = lock
-            .lock()
-            .map_err(|_| io::Error::other("cache fill lock poisoned"))?;
+        let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
         let path = self.key_path(key);
         match self.filesystem.remove_file(&path) {
             Ok(()) => {}

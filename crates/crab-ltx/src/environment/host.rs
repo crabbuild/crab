@@ -15,7 +15,7 @@ mod budget;
 pub use budget::{DiskBudget, DiskReservation};
 
 #[cfg(feature = "replica")]
-use crate::environment::directory_cache::{DirectoryCache, DirectoryCacheStats};
+use crate::environment::directory_cache::{CacheFills, DirectoryCache, DirectoryCacheStats};
 #[cfg(feature = "replica")]
 use crate::environment::executor::{Executor, TokioExecutor};
 #[cfg(feature = "replica")]
@@ -185,6 +185,8 @@ pub struct Host {
     #[cfg(feature = "replica")]
     directory_cache: Option<Arc<DirectoryCache>>,
     #[cfg(feature = "replica")]
+    cache_fills: Arc<CacheFills>,
+    #[cfg(feature = "replica")]
     resource_admission: Option<Arc<dyn HostResourceAdmission>>,
     #[cfg(feature = "replica")]
     telemetry: Option<Arc<dyn LtxTelemetry>>,
@@ -287,15 +289,30 @@ impl Host {
         let capacity = (self.local_disk.capacity() / 8).clamp(1, 8 << 30);
         let filesystem = Arc::clone(&self.filesystem);
         let budget = self.local_disk.clone();
-        self.directory_cache = Some(
-            self.run(move || {
-                Arc::new(DirectoryCache::with_budget(
+        // Reopening cleans private temporaries. An earlier activation's fill
+        // may outlive its reader, so exclude fills until construction finishes.
+        let opening = self.cache_fills.open(root.clone()).await;
+        let (cache, opening) = self
+            .run(move || {
+                let cache = Arc::new(DirectoryCache::with_budget(
                     filesystem, root, capacity, budget,
-                ))
+                ));
+                (cache, opening)
             })
-            .await?,
-        );
+            .await?;
+        self.directory_cache = Some(cache);
+        drop(opening);
         Ok(self)
+    }
+
+    /// Waits for accepted cache fills and cache opens on all clones.
+    ///
+    /// Call after stopping replica work and before releasing its local directories
+    /// or executor. Cancellation leaves accepted jobs running; another call can
+    /// finish the drain. Cache failures never change canonical object durability.
+    #[cfg(feature = "replica")]
+    pub async fn drain_cache_fills(&self) {
+        self.cache_fills.drain().await;
     }
 
     /// Installs one embedding runtime ledger for bounded replica-host work.
@@ -652,14 +669,21 @@ impl Host {
         let Some(cache) = &self.directory_cache else {
             return Ok(None);
         };
+        // Cache access is optional. A busy fill must not queue a verified read
+        // behind local syncs; origin remains the authenticated source on a miss.
+        let permit = match self.job_slots.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(tokio::sync::TryAcquireError::NoPermits) => return Ok(None),
+            Err(error) => return Err(crate::CrabError::Other(Box::new(error))),
+        };
         let cache = Arc::clone(cache);
-        self.run(move || cache.get(&key, max_bytes))
+        self.run_admitted(permit, move || cache.get(&key, max_bytes))
             .await?
             .map_err(crate::CrabError::Io)
     }
 
     #[cfg(feature = "replica")]
-    pub(crate) async fn directory_cache_put(
+    pub(crate) fn directory_cache_put(
         &self,
         key: String,
         bytes: Vec<u8>,
@@ -668,6 +692,9 @@ impl Host {
         let Some(cache) = &self.directory_cache else {
             return Ok(());
         };
+        if bytes.is_empty() || bytes.len() as u64 > max_bytes {
+            return Ok(());
+        }
         // A cache fill is optional. Waiting here after releasing origin
         // admission would retain one node buffer per waiter without a bound.
         let permit = match self.job_slots.clone().try_acquire_owned() {
@@ -675,10 +702,25 @@ impl Host {
             Err(tokio::sync::TryAcquireError::NoPermits) => return Ok(()),
             Err(error) => return Err(crate::CrabError::Other(Box::new(error))),
         };
+        let Some(fill) = self.cache_fills.claim(cache.key_path(&key)) else {
+            return Ok(());
+        };
+        let resource = self.reserve_resource(HostResourceKind::BlockingJob, 1)?;
         let cache = Arc::clone(cache);
-        self.run_admitted(permit, move || cache.put(&key, &bytes, max_bytes))
-            .await?
-            .map_err(crate::CrabError::Io)
+        // Verified buffers are bounded by admitted jobs and the node-size cap.
+        // Derived fills own no capture/recovery cohort; only their job and disk
+        // accounting survive the read, including executor rejection or panic.
+        self.executor.dispatch(Box::new(move || {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                cache.put(&key, &bytes, max_bytes)
+            }));
+            drop(resource);
+            drop(permit);
+            // Shutdown observes completion only after the job's buffers and
+            // admission are released, so returning cannot hide running fills.
+            drop(fill);
+        }))?;
+        Ok(())
     }
 
     #[cfg(feature = "replica")]
@@ -806,6 +848,8 @@ impl Default for Host {
             scratch_monitor: Arc::new(UnlimitedScratch),
             #[cfg(feature = "replica")]
             directory_cache: None,
+            #[cfg(feature = "replica")]
+            cache_fills: Arc::new(CacheFills::default()),
             #[cfg(feature = "replica")]
             resource_admission: None,
             #[cfg(feature = "replica")]
