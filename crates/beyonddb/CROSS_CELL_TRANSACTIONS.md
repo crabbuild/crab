@@ -1,5 +1,117 @@
 # Cross-Cell transaction protocol
 
+## Foundation assessment for multiple primary keys
+
+Reviewed against implementation `b68e6486620`, the pinned ExtendDB storage
+contract, and the AWS transaction references below. The foundation is durable
+two-phase commit with shared/exclusive item locks. It implements cross-Cell
+transactions; production compatibility, bounded resource use, and the
+10,000-Cell, multi-TB target remain qualification gates.
+
+### One transaction, three independent keys
+
+Consider a transfer that updates `Accounts/A`, updates `Accounts/B`, and
+creates `Transfers/request-id`. Assume these keys route to three data Cells.
+The coordinator is a fourth Cell, selected independently of those table routes.
+Conditions such as sufficient balance are evaluated during participant prepare,
+under the same local command that captures the proposed image and acquires its
+lock. A separate preflight read cannot establish that condition.
+
+```mermaid
+flowchart TD
+    Request[TransactWriteItems: A, B, transfer] --> Engine[ExtendDB validation and expressions]
+    Engine --> Driver[BeyondDB: route and group by Cell]
+    Driver --> Coordinator[Coordinator Cell: immutable request and terminal decision]
+    Driver --> A[Cell A: lock, staged image, capacity claim]
+    Driver --> B[Cell B: lock, staged image, capacity claim]
+    Driver --> T[Cell T: lock, staged image, capacity claim]
+    Coordinator --> Recovery[Request driver or recovery worker]
+    Recovery --> Apply[Idempotent apply or abort in every participant]
+```
+
+If all three prepares succeed, the coordinator durably changes BEGIN to COMMIT.
+If a condition definitively fails while it is still BEGIN, it changes to ABORT.
+COMMIT and ABORT are immutable. A timeout provides neither decision. Success is
+returned only after all three participants have durably applied COMMIT and their
+resolution receipts have been recorded. Two keys in the same Cell share one
+prepare and one resolution; the public adapter currently uses this protocol
+even when every key belongs to one Cell.
+
+### Atomicity includes what concurrent readers can observe
+
+Suppose COMMIT is durable and Cell A has applied, but Cell B has not. The live
+SQLite files temporarily differ in their progress. Cell B still holds its
+exclusive intent, so a public read must resolve the decision and re-read, or
+return a retryable error. It must not return B's old image. The lock check and
+item read occur inside one Cell query, including when the item does not yet
+exist. The coordinator's durable COMMIT is the logical write serialization point.
+
+`TransactGetItems` prepares shared locks and immutable read images in every
+participant. Once the last shared prepare succeeds, all captured keys remain
+locked and those images coexist; this supplies its serialization point. Read
+resolution releases locks but preserves the saved images for response assembly.
+Re-reading live rows after releasing locks would lose that guarantee.
+
+Two separate `GetItem` calls can straddle a transaction and see different
+committed versions. Use `TransactGetItems` for an atomic multi-key view.
+`Query`, `Scan`, and batch reads do not promise a whole-response snapshot; their
+barriers must still cover prepared creates and deletes absent from live rows.
+These distinctions follow the [AWS isolation contract](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis.html).
+
+### Evidence map and trust boundary
+
+| Boundary | Owner and code | Evidence or remaining limit |
+| --- | --- | --- |
+| Public request | ExtendDB engine → `src/backend/data.rs` → `src/backend/admission.rs` | Account-scoped token lookup precedes data routing; immutable participants preserve replay across route changes. Engine table metadata validation still precedes this backend call. |
+| Prepare | `src/items/transaction.rs`, `src/partition/transaction.rs`, `src/partition/transaction/participant.rs` → `src/participant.rs` | Conditions, images, locks, saved reads, and page claims share one command. Account and data participants use the same phase record. |
+| Decision | `src/backend/transaction.rs` → `src/transaction_coordinator/phase.rs` | COMMIT requires every recorded prepare; the state cannot change to its opposite. Receipts are assertions from the trusted driver. |
+| Durability | Cell command → runtime executor and actor → LTX publication | Runtime success requires durability proof. BeyondDB relies on owner fencing and recovery of that proof; a local SQLite commit alone is insufficient. |
+| Resolution | `src/backend/recovery.rs` → participant wrappers → `src/participant.rs` | Apply/discard, lock release, capacity release, and terminal marker are atomic locally. Replays preserve newer writes. |
+| Other access paths | Keyed CRUD, range queries, scan, TTL, table deletion, split sealing | They consult the same locks. Split sealing refuses prepared work; recovery retains the original participant identity. |
+| Recovery admission | `src/provision/transactions.rs` → the same driver/resolver | Decided healthy participants progress after another admission fails; startup still fails readiness when recovery is incomplete. |
+| Baseline | `origin/main` has no BeyondDB subtree | This is an unreleased implementation in the draft PR, not qualification of an existing production service. |
+
+The trust boundary is explicit: `ResolveTransactionInput` carries a coordinator
+identity and a boolean decision. A participant does not independently read the
+coordinator or verify a decision certificate. The authenticated internal driver
+must supply the actual durable decision; crash and retry safety do not imply
+tolerance of a faulty or compromised driver. Changing that boundary requires
+decision evidence tied to the transaction, participant set, and fenced authority.
+
+### What must scale next
+
+| Priority | Current bound | Required work and acceptance evidence |
+| --- | --- | --- |
+| Safety qualification | Deterministic failure tests cover selected schedules | Exercise concurrent transfers, conditional write skew, read transactions, owner replacement, and lost replies with a recorded-history checker. Check conservation, serializability, and no duplicate effects at every injected phase cut. |
+| Bounded history | Completed decisions, participant markers, and committed read images are retained | Design an acknowledged retirement boundary that rejects late phase messages before deleting tombstones; include split/backup pins and outstanding read fetches. Ten-minute client token expiry alone cannot authorize deletion. Prove storage reaches a steady state under a soak workload. |
+| Admission | A 100-operation participant reserves about 278 MiB at 4-KiB pages, plus payload allowance | Qualify the allocation bound and contention cost; add WAL, disk, and heap admission. Coordinator progress also needs capacity to record decisions and receipts. Never reclaim an unresolved participant's claim on timeout. |
+| Latency | Sequential participant phases; at least `5P + 3` durable commands for single-chunk inputs | Measure publication and RPC time by participant count. Evaluate bounded parallel phases and batched coordinator progress with renewed crash/concurrency proof before changing the protocol. |
+| Fleet recovery | 4,096 fixed coordinator shards per account; the worker selects one shard per 250-ms tick | Integrate placement and recovery scheduling with bounded concurrency and backlog metrics. A nominal pass over 4,096 known shards already takes about 17 minutes before slow work; this is arithmetic, not measured RTO. |
+| Data distribution | HASH-key siblings share one Cell with a finite database budget | Qualify skew, hot keys, split headroom, and oversized item collections. More Cells do not distribute one key's lock or split a single HASH group in the current layout. |
+| API completion | Secondary indexes and Streams remain unsupported; aggregate evaluated Update-size semantics remain unqualified | Maintain local index and stream effects within participant resolution, use durable asynchronous propagation where the contract permits it, and qualify size/error semantics against AWS before claiming compatibility. |
+
+With 10,000 data Cells at a 256-MiB live-data split target, the arithmetic storage
+envelope is about 2.44 TiB. This excludes metadata, retained history, claims,
+skew, and availability headroom; it is not a demonstrated capacity. Total fleet
+size must also include account, credential, and coordinator Cells. The former
+single-account 64-MiB ceiling has been replaced by routed data Cells, but finite
+Cell budgets and the operational limits above remain.
+
+**Is this the best foundation?** Retain two-phase commit and the common lock
+boundary for the current single-writer Cell architecture. They fit the required
+cross-key contract and existing durable commands. Optimize after bounding history,
+establishing recovery capacity, and measuring contention. Adopting distributed
+MVCC would require a separate version-visibility and reclamation design; no
+measurement in this review justifies that replacement yet.
+
+Review verification: the existing `elastic_cells` suite passed all 24 tests in
+67.04 seconds on this implementation. It covers local/peer transaction paths,
+read barriers, replay, split fences, capacity exhaustion, and owner recovery.
+This review changes documentation only. The previously recorded signed
+SDK/RustFS process smoke at the same implementation passed in 358.24 seconds;
+it was not rerun for this documentation update. Neither run qualifies 10,000
+active Cells or multi-TB storage. Detailed failure reproductions follow below.
+
 ## Contract and current boundary
 
 This document describes the implemented write and read protocols and the
