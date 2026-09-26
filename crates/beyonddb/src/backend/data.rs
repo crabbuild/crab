@@ -758,6 +758,11 @@ impl DataEngine for CellStorage {
                         PartitionTransactWriteOutcome::Mismatch => {
                             Err(StorageError::IdempotentMismatch)
                         }
+                        PartitionTransactWriteOutcome::Conflict => {
+                            Err(StorageError::TransactionConflict(
+                                "item is locked by a transaction".into(),
+                            ))
+                        }
                         PartitionTransactWriteOutcome::NotInstalled
                         | PartitionTransactWriteOutcome::StaleRoute
                         | PartitionTransactWriteOutcome::Sealed

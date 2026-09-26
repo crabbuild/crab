@@ -41,7 +41,7 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     effect_targets: &[],
     dead_letter: None,
 }];
-static COMMANDS: [OperationDescriptor; 11] = [
+static COMMANDS: [OperationDescriptor; 13] = [
     operation(1),
     operation(2),
     operation(3),
@@ -53,8 +53,10 @@ static COMMANDS: [OperationDescriptor; 11] = [
     operation(9),
     operation(10),
     operation(11),
+    operation(12),
+    operation(13),
 ];
-static QUERIES: [OperationDescriptor; 9] = [
+static QUERIES: [OperationDescriptor; 10] = [
     operation(1),
     operation(2),
     operation(3),
@@ -64,6 +66,7 @@ static QUERIES: [OperationDescriptor; 9] = [
     operation(7),
     operation(8),
     operation(9),
+    operation(10),
 ];
 
 const fn operation(id: u32) -> OperationDescriptor {
@@ -94,6 +97,7 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
                 source.update(include_bytes!("partition/query.rs"));
                 source.update(include_bytes!("partition/scan.rs"));
                 source.update(include_bytes!("partition/transaction.rs"));
+                source.update(include_bytes!("partition/transaction/participant.rs"));
                 source.update(include_bytes!("partition/ttl.rs"));
                 source.update(include_bytes!("items.rs"));
                 source.update(include_bytes!("table.rs"));
@@ -128,6 +132,8 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
         registry.bind_command::<PartitionTransactWrite>()?;
         registry.bind_command::<ConfigurePartitionTtl>()?;
         registry.bind_command::<BackfillPartitionTtl>()?;
+        registry.bind_command::<PreparePartitionTransaction>()?;
+        registry.bind_command::<ResolvePartitionTransaction>()?;
         registry.bind_query::<PartitionGet>()?;
         registry.bind_query::<PartitionScan>()?;
         registry.bind_query::<PartitionExport>()?;
@@ -136,7 +142,8 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
         registry.bind_query::<PartitionTransactGet>()?;
         registry.bind_query::<PartitionUsage>()?;
         registry.bind_query::<ReadExpiredPartition>()?;
-        registry.bind_query::<ReadPartitionTtl>()
+        registry.bind_query::<ReadPartitionTtl>()?;
+        registry.bind_query::<ReadPartitionTransaction>()
     }
 }
 
@@ -499,6 +506,8 @@ pub enum SealPartitionOutcome {
     InvalidSeal,
     /// The source is already sealed for a different split.
     Conflict,
+    /// Prepared item intents must resolve before this source can be copied.
+    InFlightTransaction,
 }
 
 /// Permanently fence ordinary reads and writes on a split source.
@@ -549,6 +558,13 @@ impl Command for SealPartition {
                 )));
             }
             None => return Err(Error::Command("installed partition has no state")),
+        }
+        // The current split copies live rows only; sealing with an intent
+        // would strand its decision on the old owner.
+        if transaction::has_transaction_locks(context)? {
+            return Ok(CommandResult::Rejected(Json(
+                SealPartitionOutcome::InFlightTransaction,
+            )));
         }
         update_state(context, &PartitionState::Sealed(seal))?;
         Ok(CommandResult::Success(Json(SealPartitionOutcome::Sealed)))
@@ -837,6 +853,8 @@ pub enum PartitionPutOutcome {
     ConditionFailed(Option<Item>),
     /// The expression failed during evaluation.
     InvalidExpression(String),
+    /// A prepared transaction owns this item key.
+    TransactionConflict,
 }
 
 /// Replace one item in its owning data Cell.
@@ -889,6 +907,11 @@ impl Command for PartitionPut {
         )?) {
             return Ok(CommandResult::Rejected(Json(
                 PartitionPutOutcome::WrongPartition,
+            )));
+        }
+        if transaction::key_locked(context, &key)? {
+            return Ok(CommandResult::Rejected(Json(
+                PartitionPutOutcome::TransactionConflict,
             )));
         }
         let old = command_item(context, &key)?;
@@ -949,6 +972,8 @@ pub enum PartitionDeleteOutcome {
     ConditionFailed(Option<Item>),
     /// The expression failed during evaluation.
     InvalidExpression(String),
+    /// A prepared transaction owns this item key.
+    TransactionConflict,
 }
 
 /// Delete one item in its owning data Cell.
@@ -1005,6 +1030,11 @@ impl Command for PartitionDelete {
         )?) {
             return Ok(CommandResult::Rejected(Json(
                 PartitionDeleteOutcome::WrongPartition,
+            )));
+        }
+        if transaction::key_locked(context, &key)? {
+            return Ok(CommandResult::Rejected(Json(
+                PartitionDeleteOutcome::TransactionConflict,
             )));
         }
         let old = command_item(context, &key)?;
@@ -1088,6 +1118,8 @@ pub enum PartitionUpdateOutcome {
     ConditionFailed(Option<Item>),
     /// The expression failed during evaluation.
     InvalidExpression(String),
+    /// A prepared transaction owns this item key.
+    TransactionConflict,
 }
 
 /// Apply one ExtendDB update expression in its owning data Cell.
@@ -1144,6 +1176,11 @@ impl Command for PartitionUpdate {
         )?) {
             return Ok(CommandResult::Rejected(Json(
                 PartitionUpdateOutcome::WrongPartition,
+            )));
+        }
+        if transaction::key_locked(context, &key)? {
+            return Ok(CommandResult::Rejected(Json(
+                PartitionUpdateOutcome::TransactionConflict,
             )));
         }
         let old = command_item(context, &key)?;
