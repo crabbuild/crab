@@ -305,10 +305,66 @@ with warnings denied, and the native HTTP server build passes.
 This is native runtime/provider evidence; the earlier
 Compose image and performance figures are unchanged.
 
+## Reader drain and offline retention — 2026-09-26
+
+The aged disposable RustFS fixture exposed two maintenance bugs that also
+existed on the inspected `origin/main`. A bounded pass retired its operation's
+session, then the next pass tried to recreate that permanent tombstone.
+Also, the executor closed `CellRuntime` directly and final `CellNode` cleanup
+attempted a second runtime shutdown, returning `RuntimeClosed` after Ready.
+
+Source `db70890a75b` preserves tombstones and deterministically selects the
+next unused maintenance session. Competing executors strict-create the same
+identity, so only one advertises; a post-advertisement release check fences
+delayed retries. Ordinary node creation and random-session backup operations
+are unchanged. Source `287a5eb1397` routes terminal shutdown through the owning
+`CellNode`. Tests now use the real host and its storage contracts, and check
+both competing retry admission and final idempotent cleanup.
+
+The successful uninterrupted run used:
+
+- Runtime: `287a5eb1397c768f00f753bfc592c58236738a59`.
+- Runner and test fixtures: `a62084b1b731e21940575c88272a96c8ac4ee049`.
+- Image: `sha256:faf59e3a8b06bea7b4b57473428642a7677fd69b454ce3580150558d0fea381f`.
+- Interval: `2026-09-26T07:08:33.669661+00:00` through
+  `2026-09-26T07:09:51.491082+00:00`.
+- Receipt: `plan036-sparse-cost-1/reader-retention-report.json` in the local
+  qualification state directory; SHA-256
+  `acd3ab8278b0a88a0634dfa75bfe831f22630ad83bc92a0feffab076a9ad84f1`.
+
+Three constrained nodes served twenty existing issues, including two proven
+readers for work-01. The first retention pass deleted one object and left
+revision 8 in Maintenance. All three servers exited zero without OOM, and
+their old sessions were no longer live. Retrying the same prepared revision
+deleted another 5,455 objects, retained 823 reachable objects and both backup
+pins, preserved 327 objects within grace, and returned revision 9 Ready with
+exit code zero. Provider inventories matched all 5,456 deletions. No deleted
+object was younger than one hour at command completion; timestamps and the
+production grace minimum were unchanged.
+
+The retained pin verified. After restart, all twenty issue titles, bodies,
+and captured comments matched their pre-maintenance values. The observed Cell
+kept its incarnation and advanced from sequence 319 to 325, with two readers
+returning sequence 325; a new comment was acknowledged and read back. Values
+also matched the snapshot from before the earlier failed attempt's sweep.
+
+The earlier failed receipts and logs are preserved separately. In particular,
+`reader-retention-partial-report.json` records a sweep that deleted 27,363
+objects across two passes but failed final cleanup; it is not a passing run.
+A separate disk-admission failure was resolved by removing only this task's
+unused compiler-image layers, restoring 34 GiB free in Docker. No capacity
+threshold was lowered. All fixture containers are stopped; volumes remain.
+
+The singleton retry regression, three maintenance tests, ten runtime session
+tests, nine Python receipt tests, all-target runtime/HTTP Clippy, formatting,
+layout, and documentation validation pass. The final server image built
+successfully. This closes the local offline-retention case; it is not a
+concurrent online-retention protocol or a production release qualification.
+
 ## Scope still open
 
 The container runs do not establish complete per-query S3 costs, sustained
-hot Cell throughput, peak resources, retention/release fault combinations, or
+hot Cell throughput, peak resources, the complete release-fault matrix, or
 1k/5k/10k Cell admission. Distribution under uneven load across multiple
 ingress nodes remains unqualified. Sparse-reader measurements above show
 balanced distribution but lower throughput than owner reads in this workload.

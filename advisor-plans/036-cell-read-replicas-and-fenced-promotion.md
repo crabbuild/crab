@@ -424,6 +424,15 @@ acknowledged a new mutation. The isolated node first returned typed
 unavailability, then closed its public listener after its session expired;
 it never became primary. This is separate-process, single-host evidence.
 
+The local offline-retention case now passes on source `287a5eb1397`:
+three serving nodes drain, a one-object sweep remains fenced in Maintenance,
+and the same prepared revision resumes to Ready with a successful process exit.
+The run deletes 5,456 aged unreachable objects, preserves both backup pins,
+recovers all twenty issues and comments, recruits two readers, and acknowledges
+a new write. It exposed and fixed maintenance-session reuse after tombstoning
+and runtime shutdown bypassing its owning host. The linked qualification
+receipt distinguishes the failed attempts, fixed image, and successful run.
+
 ## Fault matrix and release gates
 
 The deterministic runtime/coordination suite must cover: target count changes
