@@ -317,6 +317,8 @@ async fn initial_streaming_directory_merges_truncation_and_regrowth() {
         })
         .unwrap();
     let truncated = writer.capture().unwrap();
+    let truncated_position = truncated.position;
+    let truncated_count = first.segments.len() + truncated.segments.len();
     writer
         .transaction(|transaction| {
             transaction.execute("INSERT INTO payload VALUES(randomblob(4000000))", [])?;
@@ -365,6 +367,28 @@ async fn initial_streaming_directory_merges_truncation_and_regrowth() {
         compacted.verified().restore(&destination).await.unwrap();
         assert_eq!(std::fs::read(destination).unwrap(), expected);
     }
+
+    // Compact the original image while the exact endpoint is still truncated.
+    // Its old suffix must be discarded rather than reintroduced by relocation.
+    let truncated_batch = CaptureBatch {
+        segments: batch.segments[..truncated_count].to_vec(),
+        position: truncated_position,
+        timing: CaptureTiming::default(),
+    };
+    let truncated = replica.prepare(None, &truncated_batch, 1, 1).await.unwrap();
+    let expected_path = directory.path().join("truncated.sqlite");
+    truncated.verified().restore(&expected_path).await.unwrap();
+    let scratch = tempfile::TempDir::new().unwrap();
+    let compacted = replica
+        .prepare_compaction(&truncated.root(), 0..1, 1, scratch.path())
+        .await
+        .unwrap();
+    let destination = scratch.path().join("compacted.sqlite");
+    compacted.verified().restore(&destination).await.unwrap();
+    assert_eq!(
+        std::fs::read(destination).unwrap(),
+        std::fs::read(expected_path).unwrap()
+    );
 }
 
 #[tokio::test]

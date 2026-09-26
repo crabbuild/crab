@@ -4,8 +4,8 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `2861b0064b1`, plus the issue-query and recovery-receipt changes recorded below. The latest three-node action trace uses predecessor `e50055c48bb`. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
-| Status | Hydration fetch, sparse registration, persistent-cache construction isolation, conditional issue enrichment and recovery receipt preservation are implemented. Loaded scale-out cannot assume idle ownership transfer. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
+| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `65b359d8dc2`, plus the range-compaction change recorded below. The latest three-node action trace uses predecessor `e50055c48bb`. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
+| Status | Hydration fetch, sparse registration, persistent-cache construction isolation, conditional issue enrichment, recovery receipt preservation and range-proportional compaction are implemented. Loaded scale-out cannot assume idle ownership transfer. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
 
@@ -31,7 +31,7 @@ harness separately.
 | P1 | Peer admission changes still need load qualification (15) | Measure concurrent hint expiry, activation delay, retained request bytes, and accepted-command cancellation through HTTP |
 | P1 | Cross-Cell SQL worker blocking (9) | Background fetch passes the same-worker probe; qualify demand faults, installation, confirmation and cleanup separately |
 | P1 | Directory-cache fills still extend reads and occupy shared blocking jobs (18) | Measure remaining cache-install wait and sibling foreground interference after origin admission isolation |
-| P1 | Whole-graph compaction and serial publication debt (4–5) | Sustained updates through repeated debt thresholds; compare response rate with publication rate |
+| P1 | Range-proportional compaction is implemented; serial publication capacity remains unqualified (4–5) | Sustained updates through repeated debt thresholds; compare response rate with publication rate |
 | P1 | Buffered compaction still needs sustained-load qualification (17) | Measure async task progress, foreground interference, and publisher drain through repeated compaction boundaries |
 | P1 | Cleanup on the SQL worker and decoder memory (10, 13) | Body/footer buffering and unused replica indexes removed; measure remaining index, confirmation time, RSS, and sibling-Cell latency |
 | P1 | Execution load is not proven balanced; continued traffic prevents the idle-transfer gate (12) | Separate settled capacity from scale-out during arrivals; record owner/execution distribution in both |
@@ -86,8 +86,8 @@ The immediate measured-work sequence is therefore:
    stages, then offered-rate curves. All 300 winners were object proof; this
    run does not assess the follower response path or publication backlog under
    saturation. Queue expansion has no supporting evidence from this load.
-3. For sustained write capacity, make compaction metadata and scratch grow with
-   the selected range (4–5). For recovery-size scaling, use authenticated
+3. Qualify the range-proportional compaction change under sustained write debt
+   (4–5). For recovery-size scaling, use authenticated
    checksum blocks (3, 14). Cold-demand worker isolation (9), cache fills (18)
    and placement under continuous traffic (12) require their own workloads.
 
@@ -101,9 +101,9 @@ This is not yet a verdict that the current PR meets the performance plan.
 1. Complete peer admission and same-worker interference qualification first.
    A low-latency local capture cannot compensate for an ingress rejection or
    a worker waiting on another Cell's storage request.
-2. First buffer compaction index reads and move bounded merge work off the async
-   task. Then make range compaction and its scratch reservation proportional to
-   the affected data before adding publication concurrency. Concurrent work must
+2. Buffered compaction, admitted merge jobs and range-proportional directory
+   work/scratch are implemented. Qualify sustained drain before adding
+   publication concurrency. Concurrent work must
    never create competing root publishers for one Cell. If publication still
    cannot drain, evaluate a
    bounded batch of consecutive cuts with one covering root and separate,
@@ -396,6 +396,59 @@ lifetime. Keep the current conservative bound until that proof exists.
 bytes, directory rewrites, scratch peak, root lag, foreground p99, and restored
 byte equality. Raw library tests around 96/97 descriptors cover descriptor-page
 boundaries; they do not substitute for the runtime's earlier debt threshold.
+
+**Implementation:** compaction now spools only the selected segment indexes
+and bodies. The new
+[`directory/relocate.rs`](../../crab-ltx/src/replica/directory/relocate.rs)
+streams compacted locators through the authenticated current directory. It
+replaces a locator only when its object **and byte range** belong to the
+selection, preserving newer cuts even inside the same bundle. It checks the
+old/new page checksum, validates affected leaves against the final extents,
+and preserves each branch's aggregate. Later truncation discards compacted
+suffix pages; unchanged subtrees retain their digests. This has the same
+authenticated-predecessor boundary as incremental append, not an exhaustive
+integrity scan of unchanged dependencies.
+
+Traversal retains bounded state per level, one streamed index batch, and
+at most eight pending directory uploads. Root/descriptor metadata still
+depends on segment count. Full-range compaction still reads the whole
+directory, and one Cell still has one ordered publisher. The immutable proposal
+retains the exact predecessor, TXID, commit sequence and schema; authority CAS
+and local-only compaction are unchanged.
+
+Scratch admission now sums selected compressed inputs and indexes, a
+worst-case encoded output bound, the temporary varint index, the output
+sidecar, and fixed footer headroom. A regression pauses cleanup after all five
+files reach their final lengths and verifies peak logical bytes fit the held
+reservation at 512/65536-byte pages. Cancellation continues to retain file,
+job and scratch ownership through cleanup. The former assertion that even a
+tiny promotion must exceed 64 MiB was removed; capacity refusal still tests
+an input/output set larger than its one-MiB admission, and small ranges now
+positively prove admission at that limit.
+
+The initial regression failed on `65b359d8dc2`: two small updates on a 16 MiB
+base fetched 247,175 bytes, despite a warm metadata cache. The expanded real
+RustFS test uses cold metadata, 512/4096-byte pages, native/shared-bundle inputs
+and multiple directory levels; it completes at one MiB scratch and restores
+the same database bytes, including a newer overwrite. Its observed reads were
+27,993/28,013 bytes and six uploaded objects for 4096-byte pages;
+61,738/61,762 bytes and seven objects for 512-byte pages.
+These are operation-work measurements, not before/after service percentiles;
+the baseline and expanded fixture differ in cache state and page coverage.
+The [executable runbook](../../crab-ltx/README.md#verification) records the real
+provider command. Retain `range-compaction-before.log`,
+`range-compaction-rustfs.log` and `range-compaction-host.log` under the external
+target. Repeated runtime debt boundaries, foreground tails and sustained
+publication drain remain open gates.
+
+Six focused compaction cases, the expanded truncate/regrow case, eight host
+failure/admission cases and four runtime dispatcher cases pass. Both the
+explicit RustFS range test and the public RustFS HTTP/mTLS collaboration,
+owner-loss and Git-readback test pass. Replica and minimal-feature LTX builds
+pass all-target Clippy with warnings denied; formatting and documentation
+validation pass. The unrelated staged reference-suite move still fails its
+old layout-inventory entry and remains outside this change. Current-source
+container/property CI and sustained fleet performance remain required.
 
 ### 5. Early follower responses do not establish sustainable write throughput
 
@@ -1644,9 +1697,9 @@ and individual activation still occupy their SQL worker.
 Demand SQLite VFS callbacks still return
 synchronously under the [SQLite I/O contract](https://www.sqlite.org/c3ref/io_methods.html).
 
-The highest remaining sustained-write opportunity is still range-proportional
-compaction and publication drain (4–5), followed by bounded root coalescing if
-measured debt justifies it. The highest recovery-size opportunity is bounded
+Range-proportional compaction (4) now removes the all-index transfer and
+whole-directory rebuild. Its sustained publication drain (5) remains to be
+measured before considering bounded root coalescing. The highest recovery-size opportunity is bounded
 authenticated checksum blocks (3, 14). These changes preserve one fenced writer,
 one ordered root publisher and each command's stable receipt. Raising queues,
 worker counts or provider concurrency alone does not remove the underlying work.

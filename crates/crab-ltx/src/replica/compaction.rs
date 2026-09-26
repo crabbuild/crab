@@ -97,19 +97,13 @@ async fn prepare_root(
     // The authenticated streams have separate scratch files. Both must finish
     // before the merge, but neither depends on the other's transfer.
     let (spooled, body_inputs) = futures_util::future::join(
-        spool_indexes(
-            replica,
-            &graph.descriptors,
-            &files.scratch,
-            &files.original_indexes,
-        ),
+        spool_indexes(replica, selected, &files.scratch, &files.original_indexes),
         spool_selected_bodies(replica, selected, &files.scratch, &files.original_bodies),
     )
     .await;
     let spooled = spooled?;
     let body_inputs = body_inputs?;
-    let selected_inputs = spooled[range.clone()].to_vec();
-    let artifacts = write_compacted(replica, selected_inputs, &body_inputs, &files).await?;
+    let artifacts = write_compacted(replica, spooled, &body_inputs, &files).await?;
 
     let first = selected.first().ok_or(CrabError::TxNotAvailable)?;
     let last = selected.last().ok_or(CrabError::TxNotAvailable)?;
@@ -157,36 +151,22 @@ async fn prepare_root(
     replica.validate_chain(&descriptors, base.position)?;
 
     let compacted_source = files.scratch.open(&files.compacted_index).await?;
-    let original_source = files.scratch.open(&files.original_indexes).await?;
-    let mut final_inputs = Vec::with_capacity(descriptors.len());
-    final_inputs.extend(spooled[..range.start].iter().cloned().map(|mut input| {
-        input.source = 1;
-        input
-    }));
-    final_inputs.push(SpoolInput {
+    let compacted_input = SpoolInput {
         descriptor,
-        source: 0,
         start: 0,
         length: artifacts.index.length,
-    });
-    final_inputs.extend(spooled[range.end..].iter().cloned().map(|mut input| {
-        input.source = 1;
-        input
-    }));
-    let entries = MergedEntries::open(
-        &replica.host,
-        vec![compacted_source, original_source],
-        final_inputs,
-    )
-    .await?;
+    };
+    let entries =
+        MergedEntries::open(&replica.host, compacted_source, vec![compacted_input]).await?;
     let endpoint = descriptors.last().ok_or(CrabError::LTXCorrupted)?;
     let page_size = endpoint.info.page_size;
     let database_pages = endpoint.info.database_pages;
-    let directory = directory::build_initial_and_upload(
-        entries.stream(replica.host.clone()),
-        page_size,
-        database_pages,
+    let directory = directory::relocate_and_upload(
         replica,
+        &graph,
+        &descriptors,
+        selected,
+        entries.stream(replica.host.clone()),
     )
     .await?;
     replica
@@ -216,7 +196,6 @@ struct Artifact {
 #[derive(Clone)]
 struct SpoolInput {
     descriptor: SegmentDescriptor,
-    source: usize,
     start: u64,
     length: u64,
 }
@@ -233,7 +212,7 @@ struct LocalBodyRange {
 }
 
 struct MergedEntries {
-    sources: Vec<Box<dyn FileIo>>,
+    source: Box<dyn FileIo>,
     cursors: Vec<SpoolCursor>,
     merge: LocatorMerge,
 }
@@ -241,7 +220,7 @@ struct MergedEntries {
 impl MergedEntries {
     async fn open(
         host: &crate::Host,
-        mut sources: Vec<Box<dyn FileIo>>,
+        mut source: Box<dyn FileIo>,
         inputs: Vec<SpoolInput>,
     ) -> Result<Self> {
         host.run(move || {
@@ -258,14 +237,14 @@ impl MergedEntries {
             );
             let mut cursors = Vec::with_capacity(inputs.len());
             for input in inputs {
-                let cursor = SpoolCursor::new(input, &mut sources, buffer_entries)?;
+                let cursor = SpoolCursor::new(input, source.as_mut(), buffer_entries)?;
                 if let Some(entry) = &cursor.current {
                     merge.push(cursors.len(), entry.page);
                 }
                 cursors.push(cursor);
             }
             Ok(Self {
-                sources,
+                source,
                 cursors,
                 merge,
             })
@@ -283,7 +262,7 @@ impl MergedEntries {
                 visited += 1;
                 let cursor = self.cursors.get_mut(index).ok_or(CrabError::LTXCorrupted)?;
                 let entry = cursor.current.take().ok_or(CrabError::LTXCorrupted)?;
-                cursor.advance(&mut self.sources)?;
+                cursor.advance(self.source.as_mut())?;
                 Ok((entry, cursor.current.as_ref().map(|entry| entry.page)))
             });
             match next {

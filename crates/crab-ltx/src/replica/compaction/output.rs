@@ -24,7 +24,7 @@ pub(super) async fn write_compacted(
     let post_checksum = last.post_checksum;
     let source = files.scratch.open(&files.original_indexes).await?;
     let mut body_source = files.scratch.open(&files.original_bodies).await?;
-    let entries = MergedEntries::open(&replica.host, vec![source], inputs)
+    let entries = MergedEntries::open(&replica.host, source, inputs)
         .await?
         .stream(replica.host.clone());
     futures_util::pin_mut!(entries);
