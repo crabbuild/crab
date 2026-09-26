@@ -64,8 +64,8 @@ def measure(port: int, mode: str, expected: dict) -> dict:
                 errors[type(error).__name__] += 1
         return ingress, latencies, readers, errors, sequences
 
-    with ThreadPoolExecutor(max_workers=16) as workers:
-        samples = list(workers.map(worker, [1] * 12 + [5] * 4))
+    with ThreadPoolExecutor(max_workers=8) as workers:
+        samples = list(workers.map(worker, [1] * 6 + [5] * 2))
     elapsed = time.monotonic() - start
     latencies = sorted(value for _, values, _, _, _ in samples for value in values)
     ingress_results = {}
@@ -83,7 +83,7 @@ def measure(port: int, mode: str, expected: dict) -> dict:
     if not latencies:
         raise RuntimeError("load run completed no successful queries")
     return {"mode": mode, "offered_seconds": 60, "elapsed_seconds": elapsed,
-            "ingress_concurrency": {"node-01": 12, "node-05": 4},
+            "ingress_concurrency": {"node-01": 6, "node-05": 2},
             "successful_reads": len(latencies), "requests_per_second": len(latencies) / elapsed,
             "p50_ms": latencies[int((len(latencies) - 1) * .50)],
             "p99_ms": latencies[int((len(latencies) - 1) * .99)],

@@ -4,6 +4,54 @@ use super::*;
 
 #[cfg(feature = "replica")]
 #[tokio::test(flavor = "multi_thread")]
+async fn read_view_storage_full_preserves_existing_files_and_can_retry() {
+    let (directory, faults, host, mut writer) = fixture();
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("read-view-storage-full"),
+            [4; 16],
+        ),
+        [5; 32],
+        [6; 16],
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(host);
+    let root = replica
+        .prepare(None, &writer.capture().unwrap(), 1, 1)
+        .await
+        .unwrap()
+        .root();
+    writer.close().unwrap();
+    let verified = replica.open_root(&root).await.unwrap();
+    let stale = directory.path().join("stale-reader.sqlite");
+    std::fs::write(&stale, b"untrusted previous process bytes").unwrap();
+    assert!(verified.open_read_only(&stale).is_err());
+    assert_eq!(
+        std::fs::read(&stale).unwrap(),
+        b"untrusted previous process bytes"
+    );
+
+    let destination = directory.path().join("fresh-reader.sqlite");
+    faults.arm(Some("create"));
+    injected(verified.open_read_only(&destination));
+    assert!(!destination.exists());
+    faults.arm(None);
+    let view = verified.open_read_only(&destination).unwrap();
+    assert_eq!(view.root(), root);
+    let count: u64 = view
+        .connection()
+        .unwrap()
+        .query_row("SELECT count(*) FROM t", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+    drop(view);
+    assert!(!destination.exists());
+}
+
+#[cfg(feature = "replica")]
+#[tokio::test(flavor = "multi_thread")]
 async fn cancelled_read_view_install_removes_its_unclaimed_destination() {
     let directory = tempfile::TempDir::new().unwrap();
     let faults = Arc::new(Faults::default());
