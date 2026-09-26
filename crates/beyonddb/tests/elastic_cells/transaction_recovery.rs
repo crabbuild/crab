@@ -205,7 +205,17 @@ pub(super) async fn assert_background_recovery(
         .install_task_group(CancellationToken::new(), CancellationToken::new())
         .unwrap();
     provisioner
-        .install_transaction_recovery_loop(&tasks, CellStorage::new(recovery_client, "us-east-1"))
+        .install_transaction_recovery_loop(
+            &tasks,
+            CellStorage::new(recovery_client, "us-east-1"),
+            NodeDirectory::new(
+                bootstrap.layout.clone(),
+                Digest::from_bytes([201; 32]),
+                Digest::from_bytes([202; 32]),
+                bootstrap.registry.release_digest(),
+            ),
+            vec![],
+        )
         .unwrap();
     assert_eq!(
         wait_for_resolution(&client, account_id, token.as_bytes(), good_id).await,

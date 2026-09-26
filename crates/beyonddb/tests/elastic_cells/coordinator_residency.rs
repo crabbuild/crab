@@ -297,7 +297,17 @@ async fn coordinator_history_outgrows_residency_and_released_read_recovers() {
         .install_task_group(CancellationToken::new(), CancellationToken::new())
         .unwrap();
     provisioner
-        .install_transaction_recovery_loop(&tasks, CellStorage::new(client.clone(), "us-east-1"))
+        .install_transaction_recovery_loop(
+            &tasks,
+            CellStorage::new(client.clone(), "us-east-1"),
+            NodeDirectory::new(
+                layout.clone(),
+                Digest::from_bytes([201; 32]),
+                Digest::from_bytes([202; 32]),
+                application.registry().release_digest(),
+            ),
+            vec![ACCOUNT.into()],
+        )
         .unwrap();
     let read = ReadTransactionInput {
         transaction_id: id,
@@ -336,8 +346,36 @@ async fn coordinator_history_outgrows_residency_and_released_read_recovers() {
             .0,
         TransactionReadResult::Item(Some(expected))
     );
+    // Registry discovery must settle even with twelve historical shards and
+    // only one spare slot. Reacquiring unchanged Idle roots would churn forever.
+    let mut epochs = coordinator_epochs(&layout, &tokens).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let current = coordinator_epochs(&layout, &tokens).await;
+        if current == epochs {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "discovery keeps reacquiring completed coordinator history"
+        );
+        epochs = current;
+    }
     tasks.cancellation_token().cancel();
     host.shutdown().await.unwrap();
+}
+
+async fn coordinator_epochs(layout: &CellStorageLayout, tokens: &[String]) -> Vec<u64> {
+    let authority = CellAuthority::new(layout.clone());
+    let mut epochs = Vec::new();
+    for token in tokens {
+        let cell = coordinator_target(ACCOUNT, token.as_bytes())
+            .unwrap()
+            .cell_id();
+        epochs.push(authority.load(cell).await.unwrap().unwrap().value().epoch);
+    }
+    epochs
 }
 
 async fn write(storage: &CellStorage, info: &TableKeyInfo, token: &str, version: usize) -> bool {
