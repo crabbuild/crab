@@ -98,6 +98,14 @@ pub enum Error {
     /// A command failed validation or its handler refused it.
     #[error("invalid Cell command: {0}")]
     Command(&'static str),
+    /// A read replica has not reached the requested Cell position.
+    #[error("Cell read replica is behind the requested receipt")]
+    ReplicaBehind {
+        /// Exact position the replica can currently serve.
+        observed: crate::client::Receipt,
+        /// Minimum position required by the caller.
+        minimum: crate::client::Receipt,
+    },
     /// The request ID was already used with different command bytes.
     #[error("request ID was already used for different command bytes")]
     RequestConflict,

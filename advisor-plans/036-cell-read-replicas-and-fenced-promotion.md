@@ -273,6 +273,10 @@ Refresh reserves a second view until old in-flight queries finish. Local and
 RustFS tests cover capacity rejection, concurrent charges, and full release;
 these provisional limits still need measured 1 GiB/1 vCPU receipts before
 product enablement.
+An explicit local replica query whose view is behind a caller's minimum now
+returns `ReplicaBehind` with both exact receipts. The peer wire still maps
+that error to generic unavailability until the replica read operation and its
+versioned error contract are added.
 The LTX restore install now removes a destination that its blocking worker
 successfully installed after the async read-view opener was cancelled;
 `cancelled_read_view_install_removes_its_unclaimed_destination` pauses at that

@@ -268,18 +268,15 @@ async fn exercise_replica_read(fixture: &Fixture) {
         reader.query::<ReadCounter>(None, 0).await.unwrap().output,
         0
     );
-    assert!(
-        reader
-            .query::<ReadCounter>(
-                Some(crab_cell_runtime::Receipt {
-                    commit_sequence: committed.commit_sequence(),
-                    ..reader.receipt().await
-                }),
-                0,
-            )
-            .await
-            .is_err()
-    );
+    let minimum = crab_cell_runtime::Receipt {
+        commit_sequence: committed.commit_sequence(),
+        ..reader.receipt().await
+    };
+    assert!(matches!(
+        reader.query::<ReadCounter>(Some(minimum), 0).await,
+        Err(crab_cell_runtime::Error::ReplicaBehind { observed, minimum: requested })
+            if observed.commit_sequence < requested.commit_sequence && requested == minimum
+    ));
 
     let refreshed_path = fixture._directory.path().join("refreshed.sqlite");
     std::fs::write(&refreshed_path, b"occupied").unwrap();

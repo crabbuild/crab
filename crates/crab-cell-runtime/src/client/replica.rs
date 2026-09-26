@@ -176,8 +176,10 @@ impl CellReadReplica {
         validate_minimum(self.expected, minimum)?;
         let snapshot = self.snapshot.read().await.clone();
         let observed = self.snapshot_receipt(&snapshot);
-        if minimum.is_some_and(|minimum| observed.commit_sequence < minimum.commit_sequence) {
-            return Err(Error::Command("replica is behind requested receipt"));
+        if let Some(minimum) =
+            minimum.filter(|minimum| observed.commit_sequence < minimum.commit_sequence)
+        {
+            return Err(Error::ReplicaBehind { observed, minimum });
         }
         let operation = self.registry.query_contract::<Q>(self.target.namespace())?;
         validate_description(&self.registry, Q::MODULE, self.expected, operation)?;

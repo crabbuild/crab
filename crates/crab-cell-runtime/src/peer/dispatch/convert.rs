@@ -186,6 +186,12 @@ pub(super) fn error_reply(error: Error) -> wire::PeerReply {
             "Cell runtime capacity is exhausted",
             100,
         ),
+        Error::ReplicaBehind { .. } => (
+            wire::error::Code::Unavailable,
+            wire::error::Outcome::NotStarted,
+            "Cell read replica is behind the requested receipt",
+            100,
+        ),
         Error::Fenced
         | Error::CellNotActive
         | Error::CellDraining
