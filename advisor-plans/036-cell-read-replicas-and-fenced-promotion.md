@@ -1,7 +1,8 @@
 # Plan 036: S3-durable Cell read replicas and fenced promotion
 
-Status: PARTIAL IMPLEMENTATION — local read-only exact-root query and S3
-desired-count policy exist; no product replica routing or production qualification
+Status: PARTIAL IMPLEMENTATION — local read-only exact-root query, atomic
+snapshot refresh, and S3 desired-count policy exist; no product replica routing
+or production qualification
 Base: `origin/main` at `de0bb234abc` (2026-09-25); Cell/LTX source compared with the planning checkout at `fa182c94c7e`
 Priority: P1 read scaling; P0 safety for any enabled deployment. Effort: XL. Risk: HIGH.
 Depends on: the recovery implementations tracked by plans 032 and 035;
@@ -51,6 +52,9 @@ Compose or RustFS receipts never satisfy it.
 Implementation status at this revision: `crab-ltx` can fully restore a verified
 root into a private read-only SQLite view, and `crab-cell-runtime` can execute a
 typed query against that view with a fresh authority/session response gate.
+`CellReadReplica::refresh` serializes refreshes, verifies the replacement root,
+and switches a shared snapshot after a fresh authority check; in-flight queries
+retain their exact old view until completion.
 The S3 desired-count object supports conditional create/update. These are
 library capabilities only: no server route, node-wide reconciler, sparse read
 view, object-only production profile, or warm-reader promotion preference is
@@ -246,17 +250,21 @@ record, mutable LTX head, or owner-to-owner database copy.
 ## Implementation slices and exit evidence
 
 Current slice state (local proof only): 0 partially reconciled in docs; 1 open;
-2 full-restore read-only opener and exact-root tests pass, but sparse view,
-refresh manager, and fault cases remain; 3 policy record passes CAS tests but
+2 full-restore read-only opener, atomic refresh, and exact-root tests pass, but
+sparse view, node-wide admission, and provider fault cases remain; 3 policy record passes CAS tests but
 placement/reconciliation is open; 4 local typed query and authority gate pass,
 but peer/product routing is open; 5 and 6 open. The code is not enabled on the
 HTTP server's request path.
 
 The ignored `rustfs_replica_reads_exact_root_and_policy_cas` test also passed
 against a local RustFS bucket with an isolated prefix. It exercised real S3
-root reads, snapshot refresh by reopening, fencing after release, and a policy
+root reads, atomic snapshot refresh, fencing after release, and a policy
 ETag update. It was one process, so it provides neither multi-node distribution
 nor protected-provider evidence.
+The local in-memory and RustFS tests now also prove that a failed refresh
+leaves the old value readable and that an in-flight query returns its old
+snapshot after a newer view is installed. Runtime Clippy passed with warnings
+denied. These are local library checks, not an admitted product replica route.
 
 | Slice | Change owner | Implementation and focused gate | Completion evidence |
 | --- | --- | --- | --- |

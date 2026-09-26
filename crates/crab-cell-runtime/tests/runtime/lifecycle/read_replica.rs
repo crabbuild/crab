@@ -1,7 +1,7 @@
 //! Read-only Cell snapshots and their authority response gate.
 
 use super::*;
-use std::sync::OnceLock;
+use std::sync::{Barrier, OnceLock};
 
 use crab_cell_runtime::client::CellReadReplica;
 use crab_cell_runtime::node::{NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain};
@@ -15,6 +15,11 @@ const MODULE: &str = "replica-counter";
 const SCHEMA: &str = "CREATE TABLE counter(value INTEGER NOT NULL)";
 const CODE: Digest = Digest::from_bytes([5; 32]);
 const NAMESPACE: NamespaceId = NamespaceId::from_bytes([6; 16]);
+static QUERY_BARRIERS: OnceLock<(Barrier, Barrier)> = OnceLock::new();
+
+fn query_barriers() -> &'static (Barrier, Barrier) {
+    QUERY_BARRIERS.get_or_init(|| (Barrier::new(2), Barrier::new(2)))
+}
 
 struct CounterModule;
 
@@ -76,8 +81,13 @@ impl Query for ReadCounter {
 
     fn execute(
         context: &mut QueryContext<'_>,
-        _input: Self::Input,
+        input: Self::Input,
     ) -> crab_cell_runtime::Result<Self::Output> {
+        if input == 99 {
+            let (entered, release) = query_barriers();
+            entered.wait();
+            release.wait();
+        }
         let result = context.sql(&SqlBatch {
             statements: vec![SqlStatement {
                 sql: "SELECT value FROM counter".into(),
@@ -221,7 +231,7 @@ async fn exercise_replica_read(fixture: &Fixture) {
         )
         .await
         .unwrap();
-    assert!(committed.commit_sequence() > reader.receipt().commit_sequence);
+    assert!(committed.commit_sequence() > reader.receipt().await.commit_sequence);
     assert_eq!(
         reader.query::<ReadCounter>(None, 0).await.unwrap().output,
         0
@@ -231,7 +241,7 @@ async fn exercise_replica_read(fixture: &Fixture) {
             .query::<ReadCounter>(
                 Some(crab_cell_runtime::Receipt {
                     commit_sequence: committed.commit_sequence(),
-                    ..reader.receipt()
+                    ..reader.receipt().await
                 }),
                 0,
             )
@@ -240,16 +250,39 @@ async fn exercise_replica_read(fixture: &Fixture) {
     );
 
     let refreshed_path = fixture._directory.path().join("refreshed.sqlite");
-    let refreshed = CellReadReplica::open(
-        registry,
-        CellAuthority::new(fixture.layout.clone()),
-        directory,
-        fixture.replica.clone(),
-        fixture.target.clone(),
-        &refreshed_path,
-    )
-    .await
-    .unwrap();
+    std::fs::write(&refreshed_path, b"occupied").unwrap();
+    assert!(reader.refresh(&refreshed_path).await.is_err());
+    assert_eq!(
+        reader.query::<ReadCounter>(None, 0).await.unwrap().output,
+        0
+    );
+    std::fs::remove_file(&refreshed_path).unwrap();
+    let pending_reader = reader.clone();
+    let pending = tokio::spawn(async move { pending_reader.query::<ReadCounter>(None, 99).await });
+    tokio::task::spawn_blocking(|| query_barriers().0.wait())
+        .await
+        .unwrap();
+    let refreshed = reader.clone();
+    assert_eq!(
+        refreshed
+            .refresh(&refreshed_path)
+            .await
+            .unwrap()
+            .commit_sequence,
+        committed.commit_sequence()
+    );
+    assert!(reader_path.exists());
+    tokio::task::spawn_blocking(|| query_barriers().1.wait())
+        .await
+        .unwrap();
+    let old = pending.await.unwrap().unwrap();
+    assert_eq!(old.output, 0);
+    assert!(old.receipt.commit_sequence < refreshed.receipt().await.commit_sequence);
+    assert!(!reader_path.exists());
+    assert_eq!(
+        reader.query::<ReadCounter>(None, 0).await.unwrap().output,
+        1
+    );
     assert_eq!(
         refreshed
             .query::<ReadCounter>(None, 0)
