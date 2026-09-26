@@ -303,7 +303,7 @@ pub(super) fn validate_read(request: &wire::ReadRequest) -> Result<()> {
         Some(wire::read_request::Operation::ReplicaQuery(query))
             if query.query_id != 0 && query.codec_version != 0 =>
         {
-            Ok(())
+            validate_expected_description(request.expected.as_ref())
         }
         Some(wire::read_request::Operation::CellQuery(_)) => {
             Err(Error::Peer("invalid Cell query identifier"))

@@ -145,7 +145,7 @@ message ReadRequest {
   Target target = 1;
   uint32 timeout_ms = 2;
   Receipt minimum = 3;
-  CellDescription expected = 4; // Required for CellQuery; Describe obtains this observation.
+  CellDescription expected = 4; // Required for CellQuery and ReplicaQuery; Describe obtains this observation.
   oneof operation {
     bool describe = 10;
     CellQuery cell_query = 15;

@@ -42,9 +42,11 @@ owner loss -> seal/recover acknowledged follower tail -> exact root
 A route hint, placement plan, or cached page is never Cell authority. A
 follower log stores recent LTX; it does not serve SQL. A durable response may
 precede object publication only when the selected follower proof covers it.
-The [canonical scaling contract](canonical-ltx-scaling.md) excludes read
-replicas and hot SQL standbys. Revisit that decision only after measured owner
-read saturation.
+The [canonical scaling contract](canonical-ltx-scaling.md) now includes explicit
+read-only replicas in object durability mode. [Plan 036](../../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md)
+keeps their policy, receipt and response authority checks separate from owner
+reads. Qualify replica routing, refresh and promotion against the same resource
+budget; earlier owner-only measurements do not establish replica performance.
 
 ## Baseline the current tree
 

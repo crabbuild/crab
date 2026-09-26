@@ -117,7 +117,7 @@ def main() -> None:
         "image": command("docker", "image", "inspect", "--format", "{{.Id}}", f"{args.project}:local"),
         "started_at": datetime.now(timezone.utc).isoformat(),
         "profile": "local-rustfs-fleet-to-object",
-        "initial_stage": run_stage(path, (), 0, 3, args.gateway_port, args.node_port_base),
+        "initial_stage": run_stage(path, (), 0, 3, args.gateway_port, args.node_port_base, 3),
     }
     nodes = [node_name(index) for index in range(1, 4)]
     acknowledged = {index: set() for index in range(1, 4)}

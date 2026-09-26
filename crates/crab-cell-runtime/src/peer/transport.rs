@@ -168,6 +168,7 @@ impl ReplicaPeerClient {
                 target: Some(wire_target(&query.target)),
                 timeout_ms: remaining_ms,
                 minimum: query.minimum.map(wire_receipt),
+                expected: Some(wire_description(query.expected)),
                 operation: Some(wire::read_request::Operation::ReplicaQuery(
                     wire::CellQuery {
                         query_id: query.operation_id,

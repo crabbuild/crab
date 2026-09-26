@@ -194,6 +194,7 @@ impl PeerDispatcher {
                 }
             })?;
             let expected = replica.description();
+            validate_expected(read.expected.as_ref(), expected)?;
             let (module, operation) = self.registry.routed_query_contract(
                 target.namespace(),
                 query.query_id,

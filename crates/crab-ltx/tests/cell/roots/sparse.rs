@@ -405,7 +405,9 @@ async fn immutable_reader_faults_only_needed_pages_and_preserves_provider_errors
     // same slot that a cold directory-cache lookup needs to complete its fault.
     let host = Host::default()
         .with_job_slots(Arc::new(tokio::sync::Semaphore::new(1)))
-        .with_directory_cache(directory.path().join("directory-cache"));
+        .with_directory_cache(directory.path().join("directory-cache"))
+        .await
+        .unwrap();
     let verified = replica.with_host(host).open_root(&root).await.unwrap();
     read_bytes.store(0, Ordering::SeqCst);
     let destination = directory.path().join("reader.sqlite");

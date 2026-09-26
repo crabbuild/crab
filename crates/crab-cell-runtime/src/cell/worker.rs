@@ -773,7 +773,7 @@ impl SqlWorkerPool {
     }
 
     async fn send_worker_job(&self, cell: CellId, command: WorkerCommand) -> Result<()> {
-        let reservation = self.reserve_job().await?;
+        let reservation = self.reserve_job(cell).await?;
         self.send(
             cell,
             WorkerCommand::Reserved {
@@ -784,7 +784,19 @@ impl SqlWorkerPool {
         .await
     }
 
-    pub(crate) async fn reserve_job(&self) -> Result<WorkerJobReservation> {
+    pub(crate) async fn reserve_snapshot_job(&self) -> Result<WorkerJobReservation> {
+        // Immutable connections have no writer-thread affinity. Borrow any SQL
+        // slot so refresh can progress beside an old view, within the node cap.
+        let permits = self
+            .inner
+            .worker_permits
+            .iter()
+            .map(|permit| Box::pin(Arc::clone(permit).acquire_owned()));
+        let (permit, _, _) = futures_util::future::select_all(permits).await;
+        self.job_reservation(permit.map_err(|_| Error::RuntimeClosed)?)
+    }
+
+    async fn reserve_job(&self, cell: CellId) -> Result<WorkerJobReservation> {
         let worker_permits = {
             let lifecycle = self
                 .inner
@@ -802,6 +814,10 @@ impl SqlWorkerPool {
             .acquire_owned()
             .await
             .map_err(|_| Error::RuntimeClosed)?;
+        self.job_reservation(permit)
+    }
+
+    fn job_reservation(&self, permit: OwnedSemaphorePermit) -> Result<WorkerJobReservation> {
         let lifecycle = self
             .inner
             .lifecycle

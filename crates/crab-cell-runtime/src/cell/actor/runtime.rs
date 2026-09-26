@@ -618,27 +618,7 @@ impl CellRuntime {
         &self,
     ) -> crate::Result<crate::cell::worker::WorkerJobReservation> {
         self.ensure_running()?;
-        self.inner.pool.reserve_job().await
-    }
-
-    /// Waits for one primitive worker slot within the caller's deadline.
-    pub async fn reserve_worker_job(
-        &self,
-        deadline: tokio::time::Instant,
-    ) -> crate::Result<NodeJobReservation> {
-        self.ensure_running()?;
-        let reservation = tokio::time::timeout_at(
-            deadline,
-            self.inner
-                .resources
-                .reserve(ResourceCost::zero().with_primitive_jobs(1)),
-        )
-        .await
-        .map_err(|_| Error::Deadline)??;
-        self.ensure_running()?;
-        Ok(NodeJobReservation {
-            _reservation: reservation,
-        })
+        self.inner.pool.reserve_snapshot_job().await
     }
 
     /// Tries to reserve one worker-job slot from the same ledger as SQL work.

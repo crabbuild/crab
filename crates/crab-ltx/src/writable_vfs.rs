@@ -55,14 +55,21 @@ fn views() -> &'static Mutex<HashMap<PathBuf, Weak<App>>> {
     VIEWS.get_or_init(Mutex::default)
 }
 
-struct ViewClaim(PathBuf);
+struct ViewClaim {
+    path: PathBuf,
+    cleanup: Option<crate::Host>,
+}
 
 impl Drop for ViewClaim {
     fn drop(&mut self) {
+        if let Some(host) = &self.cleanup {
+            // Keep the path claimed until this view's placeholder is removed.
+            let _ = host.filesystem.remove_file(&self.path);
+        }
         if let Ok(mut registry) = views().lock() {
             // The registry owns only discovery references. Releasing a claim
             // cannot destroy an App or join its I/O worker under this lock.
-            registry.remove(&self.0);
+            registry.remove(&self.path);
         }
     }
 }
@@ -72,7 +79,6 @@ pub(crate) struct Registration {
     app: Arc<App>,
     cursor: u32,
     vfs: &'static str,
-    cleanup: Option<crate::Host>,
 }
 
 impl Registration {
@@ -93,7 +99,7 @@ impl Registration {
         crate::recovery::reject_sidecars(&path, &host)?;
         let count = database.page_count();
         let page_size = database.page_size();
-        let claim = {
+        let mut claim = {
             let mut registry = views()
                 .lock()
                 .map_err(|_| CrabError::InvalidState("sparse registry poisoned"))?;
@@ -105,10 +111,23 @@ impl Registration {
             // Claim the path before setup without making an incomplete App
             // discoverable by SQLite. Failure drops only this setup's claim.
             entry.insert(Weak::new());
-            ViewClaim(path)
+            ViewClaim {
+                path,
+                cleanup: None,
+            }
         };
-        let path = &claim.0;
+        let path = &claim.path;
         let read_only = database.read_only();
+        // Writable setup failures leave a quarantined sparse file. Immutable
+        // snapshots own only a placeholder and remove it on every exit path.
+        let mut file = host.filesystem.create(path)?;
+        claim.cleanup = read_only.then(|| host.clone());
+        if !read_only {
+            file.set_len(u64::from(count) * u64::from(page_size))?;
+        }
+        file.sync_all()?;
+        host.filesystem.sync_parent(path)?;
+        drop(file);
         let app = Arc::new(App {
             io: Io::new(database)?,
             page_size,
@@ -127,23 +146,6 @@ impl Registration {
             }),
             error: Mutex::new(None),
         });
-        // Only a fresh file can receive a cut's missing-page map. Immutable
-        // views keep an empty placeholder: authenticated pages stay in memory.
-        let mut file = host.filesystem.create(path)?;
-        let initialized = (|| -> Result<()> {
-            if !read_only {
-                file.set_len(u64::from(count) * u64::from(page_size))?;
-            }
-            file.sync_all()?;
-            host.filesystem.sync_parent(path)?;
-            Ok(())
-        })();
-        drop(file);
-        if let Err(error) = initialized {
-            // Creation succeeded, so this registration owns the failed install.
-            let _ = host.filesystem.remove_file(path);
-            return Err(error);
-        }
         views()
             .lock()
             .map_err(|_| CrabError::InvalidState("sparse registry poisoned"))?
@@ -153,7 +155,6 @@ impl Registration {
             app,
             cursor: 1,
             vfs,
-            cleanup: read_only.then_some(host),
         })
     }
 
@@ -202,15 +203,6 @@ impl Registration {
 
     pub(crate) fn take_error(&self) -> Option<CrabError> {
         self.app.error.lock().ok().and_then(|mut e| e.take())
-    }
-}
-
-impl Drop for Registration {
-    fn drop(&mut self) {
-        if let Some(host) = &self.cleanup {
-            // Keep the path claimed until this view's placeholder is removed.
-            let _ = host.filesystem.remove_file(&self._claim.0);
-        }
     }
 }
 

@@ -141,6 +141,7 @@ impl RepositoryCellRouter {
                 target: Some(peer_target(target)),
                 timeout_ms: 5_000,
                 minimum: None,
+                expected: None,
                 operation: Some(peer_wire::read_request::Operation::ReplicaStatus(true)),
             }),
         )?;
@@ -310,6 +311,7 @@ impl RepositoryCellRouter {
                 target: Some(peer_target(&target)),
                 timeout_ms: 30_000,
                 minimum: None,
+                expected: None,
                 operation: Some(peer_wire::read_request::Operation::ReplicaReconcile(true)),
             }),
         )?;

@@ -492,7 +492,7 @@ def main() -> None:
     previous = 0
     revision = 0
     for size, profiles in phases:
-        stage = run_stage(path, profiles, previous, size, args.gateway_port, args.node_port_base)
+        stage = run_stage(path, profiles, previous, size, args.gateway_port, args.node_port_base, 20)
         target = size - 1
         policy = request_json(
             "PUT",

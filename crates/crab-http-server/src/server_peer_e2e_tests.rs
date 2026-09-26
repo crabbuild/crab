@@ -8,7 +8,7 @@ use crab_cell_runtime::control::authority::CellAuthority;
 use crab_cell_runtime::identity::{ApplicationId, Digest, SessionId, TenantId};
 use crab_cell_runtime::ltx::CellStorageLayout;
 use crab_cell_runtime::node::NodeDirectory;
-use crab_cell_runtime::peer::{PeerPrincipal, PeerReplicaResolver, ReplicaPeerClient};
+use crab_cell_runtime::peer::{PeerReplicaResolver, ReplicaPeerClient};
 use crab_storage::{ObjectStoreCredentials, build_explicit_store};
 use object_store::throttle::{ThrottleConfig, ThrottledStore};
 use object_store::{memory::InMemory, path::Path as ObjectPath};
@@ -254,13 +254,14 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
 
     let owner_runtime = runtime(owner_session);
     let receiver_reads = Arc::new(ReceiverReads::default());
+    let owner_hints = crate::peer::PeerOwnerHints::default();
     let owner_router = crate::cells::RepositoryCellRouter::new(
         identity,
         cell_layout.clone(),
         Arc::clone(&registry),
         owner_runtime.clone(),
         crate::cells::RepositoryCellPeer::new(
-            crate::peer::PeerOwnerHints::default(),
+            owner_hints.clone(),
             directory.clone(),
             Arc::new(crab_cell_runtime::peer::PeerSigner::new(
                 owner_session,
@@ -268,6 +269,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
                 peer_tls.signing_key().clone(),
             )),
             Arc::new(PeerHttpRoundTrip::new(
+                owner_hints.clone(),
                 identity,
                 CellAuthority::new(cell_layout.clone()),
                 directory.clone(),
@@ -445,7 +447,12 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
                 )
                 .unwrap(),
             ),
-            LocalCellResolver::new(cell_layout.clone(), identity, ingress_runtime.clone()),
+            LocalCellResolver::new(
+                cell_layout.clone(),
+                identity,
+                ingress_runtime.clone(),
+                ingress_runtime.telemetry_handle(),
+            ),
             round_trip,
             Some(reader.clone()),
         )),
@@ -1099,6 +1106,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             actions: vec!["repository.read".into()],
         },
         Arc::new(PeerHttpRoundTrip::new(
+            crate::peer::PeerOwnerHints::default(),
             identity,
             authority.clone(),
             directory.clone(),

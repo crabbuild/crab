@@ -279,7 +279,10 @@ async fn request_requires_the_live_sessions_mtls_certificate_and_signing_key() {
             )
             .await
             .unwrap()
-            .verify(&request, NOW_MS + 1)
+            .verify(
+                crate::peer::UnverifiedPeerRequest::decode(&request).unwrap(),
+                NOW_MS + 1
+            )
             .is_ok()
     );
     assert!(matches!(

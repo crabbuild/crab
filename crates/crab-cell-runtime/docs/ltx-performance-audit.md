@@ -4,7 +4,7 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; follow-up production changes through `c248fcaad78`, plus the boundary-attribution implementation and demand-interference diagnostic recorded below. The latest completed 3/5/10/20-node traces use `a3638ef7e55`. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
+| Scope | Initial baseline `0f3f4f7617a`; follow-up production changes through `c248fcaad78`, plus the boundary-attribution implementation and demand-interference diagnostic recorded below. The latest completed 3/5/10/20-node traces use `c248fcaad78`, with fault harness `15b608452d9`. Each diagnostic identifies its source separately. Historical comparisons use `origin/main` snapshot `de0bb234abc`. The follow-up integrates read replicas from `396e0ab1b40`; historical measurements do not qualify that combined source. |
 | Status | Hydration fetch, sparse registration, persistent-cache construction isolation, conditional issue enrichment, recovery receipt preservation, range-proportional compaction, bounded asynchronous cache fills and local checksum read/merge improvements are implemented. Loaded scale-out cannot assume idle ownership transfer. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
@@ -24,20 +24,72 @@ harness separately.
 The design retains the right authority boundary: one fenced
 SQLite writer, authenticated immutable roots, ordered publication and explicit
 durability proofs. Current evidence does not establish a supported high-throughput,
-low-latency profile. The latest fleet run exposed concentrated ownership;
-source-derived regressions now reproduce both a small-target donation failure
-and receiver overshoot. Checksum allocation, synchronous demand I/O and ordered
-publication retain their separate performance gates.
+low-latency profile. An earlier fleet run exposed concentrated ownership;
+the corrected placement now distributes execution across every node in the
+fixed-load fleet. Latency still increases at twenty nodes on the shared host.
+Checksum allocation, synchronous demand I/O and ordered publication retain
+their separate performance gates.
 
 | Priority | Gap | Next decision and proof |
 | --- | --- | --- |
-| High, reproduced placement defect | Rounding the receiver margin up prevents donation at a one-Cell target; a batch can also overfill its preferred receiver (26) | Round the margin to whole Cells and recheck projected receiver room. Both regressions now pass; qualify idle convergence and exact recovery in the real 3/5/10/20-node fleet. |
+| Implemented and fixed-load verified | Rounding the receiver margin up prevented donation at a one-Cell target; a batch could also overfill its preferred receiver (26) | Whole-Cell margins and projected receiver room pass both regressions. The latest 3/5/10/20-node run uses every execution owner; skew, sustained load and the combined source remain unqualified. |
 | High, implemented mechanism; latency unqualified | The baseline empty checksum overlay retained its largest allocation and cloned that capacity (25) | Sealed merges now consume the overlay. Compare large-cut → repeated one-page-cut allocation and latency for both bases, retaining failure fencing and recovery-plan clone semantics. |
 | High, reproduced latency interference | Demand faults block a resident sibling on the same SQL worker; installation, confirmation and cleanup also use that worker (9–10, 19) | Local RustFS release diagnostics show 43–45 ms median sibling delay without injected latency and 414–416 ms with 20 ms per GET. Qualify public actions on one vCPU before selecting bounded executor scheduling or prefetch. An active SQLite callback cannot yield its connection. |
 | High, recovery scaling | Writable activation still walks all authenticated checksum leaves (3, 14) | Measure first query and first mutation during concurrent recovery. Prototype demand-loaded existing directory leaves only with an aggregate/truncation integrity design and bounded old-checksum availability for capture. |
 | High, sustained throughput | One ordered publisher must drain every acknowledged commit; compaction shares that path (4–5, 17) | Measure published commit-sequence advance, oldest uncovered acknowledgement and retained bytes. Evaluate bounded consecutive-root coalescing only if the measured publisher cannot drain; preserve separate receipts and effect order. |
 | Medium, resource interference | Optional cache fills share blocking jobs with required work; read-ahead may fetch pages never used (6, 8, 18, 21) | Pause cache syncs while another Cell activates or publishes. Measure useful/fetched bytes and unused prefetch eviction before adding priority or changing cache policy. |
+| High, replica read path | Warm snapshots still require routing and response authority reads; refresh uses a new demand-cache view identity (27) | Count provider operations per successful replica read and bytes fetched after refresh. Preserve fencing while evaluating coalesced metadata observations and verified immutable-frame reuse. |
 | Release gate | Current-source saturation, recovery under arrivals and independent-host evidence are incomplete (12, 16, 23) | Run fixed-workload then offered-rate curves at 3/5/10/20 nodes, with actual owner distribution, cgroup/host resources and every acknowledged result checked after failure. |
+
+### Latest retained fleet evidence
+
+[Run 36255479387](https://github.com/crabbuild/crab/actions/runs/36255479387)
+passed all stages and the unpublished-owner fault. The image and stage runner
+use `c248fcaad78`; the fault harness uses `15b608452d9`. Each container is
+limited to one vCPU and 1 GiB, but all containers and RustFS share a **four-CPU,
+16,722,006,016-byte ARM64 host**. Twenty container limits do not provide twenty
+independent CPUs. This qualifies a shared-host fixture, not scale-out capacity.
+
+Every stage offered five create/read pairs per second for sixty seconds across
+the same twenty Cells. All 1,200 pairs succeeded without retries. Every write
+joined to an execution owner and every acknowledgement survived the subsequent
+published-root owner-loss check. Latencies below are milliseconds.
+
+| Nodes | Write p50 / p99 | Read p50 / p99 | Executed writes per owner |
+| --- | --- | --- | --- |
+| 3 | 23.145 / 41.127 | 5.879 / 12.934 | 90–105 across all 3 |
+| 5 | 29.755 / 60.734 | 11.473 / 19.100 | 60 on each of 5 |
+| 10 | 29.267 / 68.222 | 13.279 / 35.782 | 30 on each of 10 |
+| 20 | 65.484 / 160.765 | 64.709 / 120.615 | 15 on each of 20 |
+
+Only two of the 1,200 steady-stage writes used follower proof; the others used
+object proof. Peak in-flight pairs were one or two. These are low-offered-rate
+latency observations, not maximum throughput. Placement is now balanced at
+this workload, but the host and per-request/control-plane work still require
+separate attribution before explaining the twenty-node latency increase.
+
+The 180-second fault run offered 900 pairs. It denied immutable object writes
+for the target Cell, verified a received follower-proof acknowledgement at
+sequence 289 while the root remained at 288, then removed `node-16` and its
+local Cell volume. Recovery on `node-06` took 9.572 seconds from the recorded
+kill. All **898 acknowledged results** were verified before restarting the old
+owner, with no duplicate application results; publication drained afterward.
+Two writes to the affected Cell exhausted their retry budget after roughly
+3.2 seconds with 503/502 responses. The passing recovery gate does not mean
+uninterrupted availability. Retry/resolve behavior and a recovery-time objective
+must be qualified together; two failed submissions are retained in the report.
+
+Artifact `cell-fleet-qualification-36255479387` retains stage samples, node
+resource observations, logs, action joins and fault evidence. SHA256 of
+`load-20-stage.json` is
+`62839410bd9f09a90b64bbd9650ba956934f0e07ef6f0b98f3bb363a2195ff5a`;
+`fault-20/report.json` is
+`cdbeacbb375fe2265efa6a51a6a5535fcd2c69563f2d5171b818b893f4601c49`.
+This closes the earlier image's balanced fixed-load and acknowledged-tail
+recovery gates. It does not qualify the newly integrated read-replica source,
+offered-rate saturation, prolonged update/delete churn or independent hosts.
+
+### Measurement contract
 
 Report separate latency distributions for resident local actions, forwarded
 actions, cold first query, cold first mutation, and recovery. Hold the database,
@@ -147,12 +199,13 @@ their original baseline and subsequent implementation evidence.
 | --- | --- | --- |
 | 1 | Current-source capacity and recovery evidence (5, 12, 16, 23) | Provision the actual Compose disk budget, then run fixed-workload and offered-rate curves. Count executed owners, successful responses and published commit coverage separately. Fault an acknowledged follower-only tail during arrivals. |
 | 2 | Cache fills return verified reads before persistence; service benefit is unqualified (18) | Measure first mutation, required host-job interference, skipped-cache origin traffic and foreground tails with slow local syncs. |
-| 3 | Synchronous demand faults, installation and cleanup block a shared SQL worker (9–10, 19) | Run cold and resident Cells on the same worker. Separate origin wait, installation and confirmation; evaluate scheduling changes only after that attribution. |
-| 4 | Writable activation and checksum residency scale with total page count (3, 14, 20, 22, 25) | Qualify merged-overlay release and the local read/merge change; evaluate lazy authenticated metadata separately. Measure first query, first mutation and recovery storms at fixed changed-page count. |
-| 5 | Ordered root preparation and compaction constrain hot-Cell publication (4–5, 17) | Measure provider GET/HEAD/PUT phases and publisher queue age across repeated debt thresholds. Reuse verified unchanged metadata or coalesce roots only if those measurements justify it. |
-| 6 | Fixed read-ahead and fragmented hydration amplify object reads (8, 21) | Compare point, random and scan workloads on one fixed root; count useful/fetched bytes and concurrent duplicate ranges before changing the window. |
-| 7 | Checkpoint and full-image tails remain insufficiently sampled (6, 11, 13) | Sustained updates/deletes, pinned readers, large changes and simultaneous maintenance under 1 GiB; preserve checkpoint ordering and exact recovery. |
-| 8 | Application and transport improvements lack a controlled latency comparison (15, 24) | Repeat the same typed public actions, durability mode and topology; include peer hint expiry, retries and response enrichment. |
+| 3 | Replica routing repeats provider work; root refresh loses demand-page reuse (27) | Measure provider operations per response and hot-set bytes fetched after small updates. Compare bounded observation coalescing and verified immutable-frame reuse while retaining fresh response authority. |
+| 4 | Synchronous demand faults, installation and cleanup block a shared SQL worker (9–10, 19) | Run cold and resident Cells on the same worker. Separate origin wait, installation and confirmation; evaluate scheduling changes only after that attribution. |
+| 5 | Writable activation and checksum residency scale with total page count (3, 14, 20, 22, 25) | Qualify merged-overlay release and the local read/merge change; evaluate lazy authenticated metadata separately. Measure first query, first mutation and recovery storms at fixed changed-page count. |
+| 6 | Ordered root preparation and compaction constrain hot-Cell publication (4–5, 17) | Measure provider GET/HEAD/PUT phases and publisher queue age across repeated debt thresholds. Reuse verified unchanged metadata or coalesce roots only if those measurements justify it. |
+| 7 | Fixed read-ahead and fragmented hydration amplify object reads (8, 21) | Compare point, random and scan workloads on one fixed root; count useful/fetched bytes and concurrent duplicate ranges before changing the window. |
+| 8 | Checkpoint and full-image tails remain insufficiently sampled (6, 11, 13) | Sustained updates/deletes, pinned readers, large changes and simultaneous maintenance under 1 GiB; preserve checkpoint ordering and exact recovery. |
+| 9 | Application and transport improvements lack a controlled latency comparison (15, 24) | Repeat the same typed public actions, durability mode and topology; include peer hint expiry, retries and response enrichment. |
 
 These priorities identify code-supported risks and missing evidence. One
 three-node phase now has per-action attribution, but current-HEAD scale and
@@ -2136,6 +2189,14 @@ changed. Logs under the external target include `label-query-before-corrected.lo
 These prove removed work and application behavior; a fixed-workload release
 comparison is still needed to quantify latency or throughput improvement.
 
+The integration with `396e0ab1b40` keeps the newer `GetIssueDetail` composite
+query for owner and replica detail reads. Issue content and label names come
+from one SQLite snapshot and one typed query; a separate owner-side catalog
+read would mix snapshots when the selected reader lags. The create/list/edit
+conditional enrichment rules remain. Re-run their public query-count proof on
+the combined source rather than interpreting this historical record as a new
+replica latency result.
+
 ### 25. A cleared checksum overlay retains historical allocation across small cuts
 
 **Confirmed at `e47d1fc2c48`:** `PageChecksums` derives `Clone` and stores
@@ -2293,6 +2354,98 @@ entry and remains outside this implementation. Root rules require approval for
 that inventory change. Hydration's new public types live under `crab_ltx::db`,
 beside their owning `Db` API; the frozen root prelude is unchanged. No inventory
 was edited to suppress a failure. Full-plan completion remains unproven.
+
+### 27. Read replicas retain provider latency and refresh cache costs
+
+The read-replica extension landed on main at `396e0ab1b40`. It is an explicit
+object-durability read policy, not another writer or a SQL-serving follower log.
+The combined source needs new proof; earlier owner-only fleet percentiles and
+sparse-writer microbenchmarks do not qualify this path.
+
+There is useful upstream performance evidence: three five-node RustFS pairs
+at `c9d16ebeb358` measured 858–1,049 replica requests/s, median 6.70–7.33 ms
+and p99 37.73–44.97 ms for a fixed 75% node-1 / 25% node-5 ingress mix.
+Local-primary medians remained 1.86–1.91 ms. The [source-bound receipt](../../crab-http-server/deploy/cell-issue-fleet/qualification/2026-09-25-read-replicas.md#reader-discovery-optimization-under-fixed-ingress-traffic)
+records the controlled membership-discovery improvement; the raw final report
+hash was rechecked as `d5dc8e5ed6c1f77ca075457665a9ea54cfa86a40e0e2009e76657534dc0ec131`.
+This is positive evidence for reducing metadata work. It does not qualify the
+combined branch, a 20-node optimized workload, controlled write/refresh churn, or
+independent hosts.
+
+**Evidence map.** HTTP issue detail selects the replica policy in
+[`issues.rs`](../../crab-http-server/src/issues.rs). It calls the repository
+router, then [`ReplicaReadRouter::query`](../src/client/routing.rs).
+`selected` reads control and desired-reader policy concurrently on every
+selection. `NodeDirectory::select_readers` shares a signed membership scan for
+at most one second. The selected [`CellReadReplica`](../src/client/replica.rs)
+executes SQL, then reads control and the owner's live enrollment before
+releasing output. A remote attempt also performs peer authentication. The
+ordinary owner query remains a sibling with different authority and lifecycle
+ownership; its resident fast path is not proof of zero-provider replica reads.
+
+**Opportunity A: reduce repeated metadata work without weakening fencing.**
+Measure warm local and remote replica reads with no new writes, then with policy
+changes, owner death and authority outages. Record routing, peer authentication,
+SQL, final control, final liveness and provider attempts separately. Concurrent
+coalescing may remove duplicate routing reads. A post-SQL authority check
+must not reuse an observation whose read started before that query completed.
+An arbitrary TTL on the final check changes the response guarantee and needs
+an explicit lease/invalidation contract. Keep unavailable authority fail-closed
+until such a design is proven.
+The existing lifecycle suite verifies concurrent selection, schema fencing,
+owner failure and drain, but supplies no saturated 1-vCPU service curve.
+
+**Opportunity B: preserve useful immutable bytes across refresh.**
+`CellReadReplica::refresh` opens a fresh exact-root view when publication
+advances. [`Io::new`](../../crab-ltx/src/paged_io.rs) assigns each view a new
+identifier; the shared demand cache keys pages by `(view, page)`. Unchanged
+pages in an old snapshot therefore cannot directly hit that cache in the new
+snapshot. Authenticated directory metadata has its own cache, so this is a
+page-body reuse gap, not a claim that all metadata is downloaded again.
+Measure a fixed hot read set while small updates advance the root. Record cold
+bytes after each refresh, cache occupancy, retained old views and read p99.
+Consider a bounded cache keyed by verified immutable object/frame identity,
+with page checksum validation intact. A page number or mutable Cell ID alone
+cannot safely share bytes across roots, truncation or incarnations.
+
+**Opportunity C: qualify replica CPU admission alongside writer isolation.**
+The prior branch split writer admission by the owning Cell's worker shard;
+main's replica SQL used undifferentiated admission. Applying writer affinity to
+immutable views reproduced a progress failure: refresh waited behind an old
+query despite an unused second SQL slot. Immutable connections now borrow any
+available SQL slot, while writer jobs retain their own shard. Both paths share
+the node charge and hold their permit through completion, including caller
+cancellation. Shutdown closes admission before waiting for those charges.
+The public lifecycle regression requires refresh to finish while an old-view
+query is held, then verifies view lifetime, cancellation and drain. It now
+releases its injected pause before asserting, so a regression fails without
+hanging the process. This preserves main's concurrent refresh contract and the
+branch's writer isolation. A cold replica still consumes shared SQL capacity;
+measure mixed owner writes and replica reads on one vCPU before changing that
+allocation policy.
+
+**Best next fix?** First collect action-level replica traces and refresh cache
+misses on the combined revision. Reusing authenticated immutable bytes or
+coalescing concurrent observations may reduce real work. Increasing replicas,
+queue sizes or caching authority without a new correctness contract does not
+establish lower latency.
+
+**Integration proof.** The combined checkout passes 27 focused LTX activation,
+read-view cleanup and sparse-root cases; four worker-isolation cases; four
+replica lifecycle cases; and the exact-root/refresh/policy/schema/drain case
+against local RustFS. All 53 Python fleet tests, runtime/HTTP/LTX all-target
+Clippy with warnings denied, server build, and 28 schema/protocol assertions
+pass. These checks retain the separately staged test relocation; it remains
+outside this change, with its inventory gate still open. Source-patch and log
+hashes are retained beneath the checkout's external target directory.
+
+One initial in-memory HTTP run returned 504 for the healthy request after an
+injected timeout. An instrumented rerun and the real RustFS HTTP/mTLS test
+passed. The initial timing failure remains unexplained; no deadline or expected
+status was relaxed. The RustFS run also verifies replica selection, owner loss,
+restored application state and Git readback, and its received write joins to
+the actual text logs. This shared-process debug fixture supplies functional
+and trace-correlation evidence, not a throughput or tail-latency result.
 
 ## Safety and proof retained by the audit
 
