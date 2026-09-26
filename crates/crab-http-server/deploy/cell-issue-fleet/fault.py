@@ -8,6 +8,7 @@ import json
 import queue
 import re
 import subprocess
+import threading
 import time
 import uuid
 from collections import Counter, defaultdict
@@ -90,6 +91,7 @@ class TailFault:
         self.receipt = {}
         self.started_at = datetime.now(timezone.utc).isoformat()
         self.policy_installed = False
+        self.losing_owner = threading.Event()
 
     def cli(self, *args):
         return compose(self.path, self.profiles, "exec", "-T", self.observer,
@@ -173,6 +175,9 @@ class TailFault:
         events = []
         for index in range(1, self.nodes + 1):
             node = load.node_name(index)
+            if node == self.owner and self.receipt.get("owner_disk_removed"):
+                events.extend(action_traces.parse_log((self.output / "failed-owner.log").read_text(), node))
+                continue
             text = compose(self.path, self.profiles, "logs", "--no-color", "--no-log-prefix",
                            "--since", self.started_at, node)
             (destination / f"{node}.log").write_text(text)
@@ -234,6 +239,7 @@ class TailFault:
                             node_before=node, uncovered_bytes=uncovered,
                             control_pre_kill=last_control, node_pre_kill=last_node,
                             followers={member: identities[member] for member in members})
+        self.losing_owner.set()
         command("docker", "kill", "--signal", "KILL", container)
         self.receipt["killed_ns"] = time.monotonic_ns()
         # Capture the final owner trace before removing both the process and its
@@ -314,14 +320,40 @@ def main():
     try:
         with restart_after_fault(fault.receipt, restart):
             with fault.publication_denied():
-                with (output / "samples.jsonl").open("x") as raw, concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    failure = executor.submit(fault.run)
-                    summary, samples = load.scheduled_load(gateway, args.nodes, workload, run_id, raw, fault.on_acknowledged)
-                    report["load"] = summary
-                    failure.result()
+                with ((output / "samples.jsonl").open("x") as raw,
+                      (output / "nodes.jsonl").open("x") as node_samples,
+                      concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor):
+                    stop = threading.Event()
+                    expected_absent = lambda: {fault.owner} if fault.losing_owner.is_set() else set()
+                    observation = executor.submit(load.observe_nodes, path, profiles, args.nodes, stop, node_samples, expected_absent)
+                    try:
+                        failure = executor.submit(fault.run)
+                        summary, samples = load.scheduled_load(gateway, args.nodes, workload, run_id, raw, fault.on_acknowledged)
+                        report["load"] = summary
+                        failure.result()
+                    finally:
+                        stop.set()
+                        report["node_observations"] = observation.result()
             report["acknowledgements"] = load.verify_acknowledged(gateway, args.nodes, samples)
             report["unique_results"] = verify_unique_results(gateway, args.nodes, samples, run_id)
             killed, recovered = fault.receipt["killed_ns"], fault.receipt["recovered_ns"]
+            actions = action_traces.join(samples, fault.trace_events("after-recovery"))
+            started = {sample["request_id"]: sample["started_ns"] for sample in samples if "acknowledged" in sample}
+            with (output / "actions.jsonl").open("x") as joined:
+                for action in actions:
+                    at = started[action["submission_id"]]
+                    action["phase"] = "before" if at < killed else "during" if at <= recovered else "after"
+                    joined.write(json.dumps(action) + "\n")
+            report["action_traces"] = {}
+            for phase in ("before", "during", "after"):
+                values = [value for value in actions if value["phase"] == phase]
+                report["action_traces"][phase] = {
+                    "acknowledged_writes": len(values),
+                    "execution_owners": dict(Counter(value["owner"] for value in values)),
+                    "proofs": dict(Counter(value["proof"] for value in values)),
+                    "forwarded_writes": sum(value["entry"] != value["owner"] for value in values),
+                    "write_latency": load.percentiles([value["http_latency_ms"] for value in values]),
+                }
             during = [sample for sample in samples if killed <= sample.get("started_ns", 0) <= recovered]
             healthy = [sample for sample in during if sample["cell"] in unaffected]
             after = [sample for sample in samples if sample.get("started_ns", 0) > recovered]
@@ -331,7 +363,7 @@ def main():
                                                                        if sample["outcome"] == "success"]),
                 "after_recovery_pairs": len(after),
             }
-            if (summary["stopped_on_invariant"] or not healthy or not after
+            if (summary["stopped_on_invariant"] or report["node_observations"]["errors"] or not healthy or not after
                     or any(sample["outcome"] != "success" for sample in healthy)):
                 raise RuntimeError("arrivals did not span recovery with unaffected-Cell progress")
         report["publication_drain"] = load.drain_publication(path, profiles, args.nodes)

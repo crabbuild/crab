@@ -47,18 +47,27 @@ all failed, rejected and missed arrivals before comparing latency.
    drain across the complete fleet. Recovery and cleanup failures are retained
    separately; failed cleanup cannot produce a passing report.
 
-The driver saves `report.json`, every pair in `samples.jsonl`, the pre-kill
-node traces, and the removed owner's final log. Pair timestamps use the load
-process's monotonic clock; they are not comparable with server clocks.
+The driver saves `report.json`, every pair in `samples.jsonl`, resource samples
+in `nodes.jsonl`, joined acknowledged writes in `actions.jsonl`, node traces,
+and the removed owner's final log. Action summaries count actual execution
+owners, forwarded writes and response proofs before, during and after recovery.
+Phases use client dispatch time relative to the kill and verified-recovery
+observations. Pair and observation timestamps use the load process's monotonic
+clock; they are not comparable with server clocks.
+Resource sampling excludes only the selected owner once the kill starts.
+Surviving-node samples remain available if another observation fails. A
+snapshot racing the deliberate kill may retry once, retaining the first error;
+unexpected node loss or missing statistics still fails qualification.
 An interrupted run requires inspection of its report and bucket policy before
 the fixture is reused.
 
 ## Interpretation
 
-This is a functional fault gate with latency observations. It does not yet
-attribute every post-fault operation to its actual execution owner or collect
-resource snapshots while a node is absent. The other-owner latency population
-uses placement before the fault. It does not prove demand-page isolation,
+This is a functional fault gate with latency observations. Every acknowledged
+write is attributed to its actual execution owner, while the other-owner pair
+latency population uses placement before the fault. Read operations and failed
+attempts retain their HTTP outcomes but have no joined execution-owner proof.
+It does not prove demand-page isolation,
 saturation throughput, update/delete costs, network partitions, independent
 machine failures, or a supported production SLO.
 

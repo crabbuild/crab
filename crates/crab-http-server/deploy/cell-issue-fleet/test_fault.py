@@ -54,6 +54,16 @@ class TailFaultTests(unittest.TestCase):
         self.assertEqual(self.driver.acknowledgements.get_nowait()["operations"], [])
         self.assertTrue(self.driver.acknowledgements.empty())
 
+    def test_post_recovery_trace_join_retains_the_removed_owners_events(self):
+        self.driver.receipt["owner_disk_removed"] = True
+        (self.output / "failed-owner.log").write_text('event="cell_command_response" commit_sequence=9\n')
+        with patch.object(fault, "compose", return_value='event="application_submission" submission_id="received"\n') as compose:
+            events = self.driver.trace_events("after-recovery")
+        self.assertEqual({event["node"] for event in events}, {"node-01", "node-02", "node-03"})
+        self.assertEqual(compose.call_count, 2)
+        self.assertTrue(all(call.args[-1] != "node-03" for call in compose.call_args_list))
+        self.assertEqual(events[-1]["commit_sequence"], 9)
+
     def test_policy_cleanup_retains_both_primary_and_cleanup_failures(self):
         for primary in (False, True):
             with self.subTest(primary=primary), \
