@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    io::{BufReader, Read as _},
+    sync::Arc,
+};
 
 use crate::{CHECKSUM_FLAG, CrabError, Result, ltx};
 
@@ -204,10 +208,30 @@ impl PageChecksums {
                 if length > u64::from(self.base_count) * 8 {
                     file.set_len(length)?;
                 }
-                for (&page, &checksum) in &self.changes {
-                    if page <= self.count {
-                        file.write_all_at(u64::from(page - 1) * 8, &checksum.to_be_bytes())?;
+                let mut changes = self
+                    .changes
+                    .iter()
+                    .filter(|(page, _)| **page <= self.count)
+                    .collect::<Vec<_>>();
+                changes.sort_unstable_by_key(|(page, _)| **page);
+                let mut output = Vec::with_capacity(changes.len().min(DENSE_WRITE_BYTES / 8) * 8);
+                let mut start = 0;
+                for (&page, &checksum) in changes {
+                    let offset = u64::from(page - 1) * 8;
+                    if !output.is_empty()
+                        && (offset != start + output.len() as u64
+                            || output.len() == DENSE_WRITE_BYTES)
+                    {
+                        file.write_all_at(start, &output)?;
+                        output.clear();
                     }
+                    if output.is_empty() {
+                        start = offset;
+                    }
+                    output.extend_from_slice(&checksum.to_be_bytes());
+                }
+                if !output.is_empty() {
+                    file.write_all_at(start, &output)?;
                 }
                 file.set_len(length)?;
                 // This base is active-session scratch. A clean handoff writes
@@ -289,11 +313,13 @@ impl PageChecksums {
     /// no longer matches it is refused instead of copied into a continuation
     /// that a later open would trust.
     pub(crate) fn write_dense(&self, sink: &mut dyn crate::environment::FileIo) -> Result<()> {
-        let mut base_file = {
+        let mut base_file: Option<BufReader<crate::HostFile>> = {
             #[cfg(feature = "replica")]
             {
                 match &self.base {
-                    ChecksumBase::File(base) => Some(base.open()?),
+                    ChecksumBase::File(base) => {
+                        Some(BufReader::with_capacity(DENSE_WRITE_BYTES, base.open()?))
+                    }
                     ChecksumBase::Memory(_) => None,
                 }
             }
@@ -305,7 +331,25 @@ impl PageChecksums {
         let mut fold = CHECKSUM_FLAG;
         let mut output = Vec::with_capacity(DENSE_WRITE_BYTES);
         for page in 1..=self.count {
-            let checksum = self.value(page, base_file.as_mut())?;
+            let checksum = if page <= self.base_count
+                && let Some(file) = base_file.as_mut()
+            {
+                // Consume the base even when an overlay replaces this entry,
+                // so later pages retain their exact position in the sidecar.
+                let mut bytes = [0; 8];
+                file.read_exact(&mut bytes)?;
+                let checksum = self
+                    .changes
+                    .get(&page)
+                    .copied()
+                    .unwrap_or(u64::from_be_bytes(bytes));
+                if checksum != 0 && checksum & CHECKSUM_FLAG == 0 {
+                    return Err(CrabError::LTXCorrupted);
+                }
+                checksum
+            } else {
+                self.value(page, None)?
+            };
             fold = CHECKSUM_FLAG | (fold ^ checksum);
             output.extend_from_slice(&checksum.to_be_bytes());
             if output.len() >= DENSE_WRITE_BYTES {
@@ -480,16 +524,34 @@ mod tests {
         assert_eq!(index.checksum(), checksum(&pages));
         index.persist().unwrap();
         assert!(index.changes.is_empty());
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 24);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            pages
+                .iter()
+                .flat_map(|(number, bytes)| ltx::checksum_page(*number, bytes).to_be_bytes())
+                .collect::<Vec<_>>()
+        );
 
+        pages[0] = page(1, 6);
         pages.push(page(4, 7));
         pages.push(page(5, 8));
         index
-            .apply(4096, 5, &[pages[3].clone(), pages[4].clone()], 1 << 20)
+            .apply(
+                4096,
+                5,
+                &[pages[0].clone(), pages[3].clone(), pages[4].clone()],
+                1 << 20,
+            )
             .unwrap();
         assert_eq!(index.checksum(), checksum(&pages));
         index.persist().unwrap();
-        assert_eq!(std::fs::metadata(path).unwrap().len(), 40);
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            pages
+                .iter()
+                .flat_map(|(number, bytes)| ltx::checksum_page(*number, bytes).to_be_bytes())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -507,8 +569,9 @@ mod tests {
             .flat_map(|(number, bytes)| ltx::checksum_page(*number, bytes).to_be_bytes())
             .collect::<Vec<_>>();
         std::fs::write(&path, bytes).unwrap();
+        let facilities = crate::Host::default();
         let host = crate::LtxHost {
-            facilities: crate::Host::default(),
+            facilities: facilities.clone(),
             max_database_bytes: 32 << 20,
             max_file_bytes: 32 << 20,
         };
@@ -526,6 +589,25 @@ mod tests {
                 32 << 20,
             )
             .unwrap();
+
+        let dense_path = directory.path().join("dense");
+        let mut dense = facilities.filesystem.create(&dense_path).unwrap();
+        index.write_dense(dense.as_mut()).unwrap();
+        drop(dense);
+        let expected = pages
+            .iter()
+            .map(|(number, bytes)| {
+                let replacement = match number {
+                    101 => Some(vec![91; page_size as usize]),
+                    9_000 => Some(vec![92; page_size as usize]),
+                    19_999 => Some(vec![93; page_size as usize]),
+                    _ => None,
+                };
+                ltx::checksum_page(*number, replacement.as_ref().unwrap_or(bytes))
+            })
+            .flat_map(u64::to_be_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(std::fs::read(dense_path).unwrap(), expected);
 
         index.apply(page_size, 100, &[], 32 << 20).unwrap();
 

@@ -4,8 +4,8 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; follow-up through `a16c8efcc2b` plus decoder changes below; compared with `origin/main` at `de0bb234abc` |
-| Status | Findings 1–2, streaming cleanup, and redundant decoder metadata removed; activation overlap and phase probes added; worker isolation, memory qualification, checkpoint tails, and balanced execution qualification remain open |
+| Scope | Initial baseline `0f3f4f7617a`; follow-up through `0360485311b` plus checksum batching below; compared with the fetched `origin/main` snapshot `de0bb234abc`. Peer-routing proof is recorded separately in the scaling plan. |
+| Status | Findings 1–2, streaming cleanup, and redundant decoder metadata removed; activation overlap, phase probes, and checksum I/O batching added; worker isolation, remaining checksum maintenance, memory qualification, checkpoint tails, and balanced execution qualification remain open |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
 
@@ -28,6 +28,7 @@ harness separately.
 | P1 | Cleanup on the SQL worker and decoder memory (10, 13) | Body/footer buffering and unused replica indexes removed; measure remaining index, confirmation time, RSS, and sibling-Cell latency |
 | P1 | Execution load is not proven balanced (12) | Record owner/execution distribution and fixed offered load at every scale stage |
 | P2 | Eager checksum metadata and demand read amplification (3, 8) | First query **and first mutation**, point/random/scan workloads, cold and churned caches |
+| P2 | Checksum maintenance differs between fresh and restored Cells (14) | Hold database and changed-page count fixed; compare capture, clean handoff, host I/O calls, and allocations in both states |
 | P2 | Checkpoint tail cost and shared maintenance resources (6, 11) | Long update runs with checkpoint, hydration, and compaction interference |
 
 These priorities identify code-supported risks and missing evidence. They do
@@ -473,6 +474,17 @@ checkpoint measurements use a different harness and short runs; they cannot
 establish public action tails or memory headroom during a full-image cut.
 This path is unchanged from the main snapshot.
 
+Before moving checkpoints onto a concurrent connection, check the SQLite
+dependency too. The workspace enables `rusqlite`'s bundled feature; the locked
+`libsqlite3-sys` 0.32.0 source contains SQLite 3.49.1. SQLite's official
+[WAL-reset advisory](https://www.sqlite.org/wal.html) identifies a
+write/checkpoint race in that version range and names fixed releases. The
+current exclusive worker and managed checkpoint barrier serialize this path;
+this audit has not reproduced that upstream race in Crab. Any proposal to
+overlap those operations must qualify a fixed SQLite build first, then prove
+the capture barrier and restart handling. Record the linked SQLite version in
+the evidence; a Rust crate version alone does not identify it.
+
 ### 12. Even ingress and Cell targeting do not prove even owner execution
 
 **Confirmed:** [run_stage](../../crab-http-server/deploy/cell-issue-fleet/qualify.py)
@@ -506,6 +518,14 @@ Require current-source images, repeated sustained runs, and isolated multi-host
 failure domains before choosing supported limits. Run Entity, Shard, Workflow,
 and read-model actions through public application handles as well as this issue
 service; issue creation alone does not exercise those service compositions.
+
+There is also a provenance gap in the local runner: both `qualify.py` and
+`load.py` record the harness checkout's `git rev-parse HEAD` independently of
+the image ID. `--skip-build` does not verify that the selected image was built
+from that revision, and HEAD does not describe dirty build input. Require a
+clean build or retained source-tree digest, and verify image provenance before
+calling a comparison current-source evidence. Distinguish an OCI manifest
+digest from its configuration digest when comparing Docker engines.
 
 ### 13. A streaming decoder still retains avoidable metadata
 
@@ -559,7 +579,85 @@ processes per implementation. Baseline compilation and unrelated host activity
 limit attribution; overlapping whole-process RSS ranges do not prove a memory
 improvement. This evidence does not qualify public-action latency or capacity.
 
+### 14. Checksum bookkeeping depends on activation history and uses tiny file I/O
+
+**Confirmed:** fresh `Db::open` and `CellReplica::open_new` start with
+`PageChecksums::default()` in [capture initialization](../../crab-ltx/src/capture.rs).
+Sparse activation and clean resume seed a file-backed base instead.
+[PageChecksums::persist](../../crab-ltx/src/pages.rs) is called after each sealed
+cut in [WAL capture](../../crab-ltx/src/capture/wal.rs), before capture returns.
+The representations have materially different costs:
+
+| Path | Work at audited revision | Missing qualification |
+| --- | --- | --- |
+| Fresh Cell, memory base | Allocate a dense array for all database pages and copy the retained base on every cut, even for a small update | Database-size scaling of capture CPU and peak memory with changed pages held fixed |
+| Restored/resumed Cell, file base | Read each overwritten old checksum separately; persist each changed checksum with an 8-byte write in hash-map iteration order | Host calls, allocation count, local I/O time, and fragmented versus contiguous changes |
+| Clean handoff, file base | `write_dense` buffers output, but obtains each input checksum through a separate 8-byte read | Drain/eviction duration and other Cells waiting on the same worker |
+
+For a 512 MiB database with 4 KiB pages, the memory base is 1 MiB and a dense
+file-backed handoff reads 131,072 checksum entries individually. These are
+source-derived counts, not measured latency. The default filesystem implements
+each positional read with a seek, a new buffer, and a read. The
+[resume writer](../../crab-ltx/src/resume.rs) reaches this loop from
+`CellExecutor::close_resumable` on the SQL worker. Both representations and
+the handoff loop also exist in the compared main snapshot. Existing sparse
+capture results therefore cannot establish the cost of a long-lived fresh Cell.
+
+**Change to evaluate:** batch dense sidecar reads as well as writes; use a
+bounded checksum-block cache for ordered capture reads and coalesce adjacent
+changed checksums before persistence. Measure a shared block-based strategy
+for fresh and restored sessions after those changes. Keep transactional
+candidate isolation: the old checksum remains available until the cut is
+sealed, and partial sidecar failure fences the session. Local scratch is never
+recovery authority. The minimal-feature library still needs a tested local path.
+
+**Gate:** fixed-size updates, append, truncate/regrow, sparse activation, clean
+resume, and repeated eviction at multiple page sizes. Use `capture_deferred`
+in both runtime comparisons: the current replica-cost harness changes capture
+durability along with `--sparse`, so its two modes do not isolate this finding.
+Record checksum host
+reads/writes and bytes separately from SQLite WAL I/O, capture allocation peak,
+handoff time, and sibling-Cell p99. Preserve the file-backed overlay tests,
+`cell_checksum_write_failure_fences_after_sealing_the_cut`, process-exit
+continuation recovery, and same-length local-corruption refusal. Evaluate the
+verified whole-file scan in `open_resumed` separately: zero origin reads do not
+make warm reactivation constant time, and skipping that scan needs a replacement
+integrity proof.
+
+**Implementation:** file-backed persistence now sorts changed pages and writes
+contiguous checksums in blocks capped at 64 KiB. Dense handoff reads also use a
+64 KiB buffer, consuming base entries even when an overlay replaces them so
+later checksums retain their correct offsets. Aggregate verification, post-seal
+failure fencing, and the fresh durable handoff sidecar remain unchanged.
+Sorting retains one reference pair per changed page; the bounded output buffer
+does not make total capture memory constant.
+
+The 32 MiB real-SQLite regression fixture first reproduced 8,210 host reads
+for its 65,680-byte handoff sidecar. The same fixture now requires at most two
+reads and reproduces identical sidecar bytes. Updating that resumed database
+first reproduced 8,757 host writes for its roughly 34 MB cut; the changed path
+uses fewer than 1,024, including LTX writes, each at most 64 KiB. It re-reads and
+folds the persisted checksum blocks before clean handoff. These operation-count
+tests use local files; their unused replica transport is in memory. They do not
+measure RustFS latency or isolate checksum writes from all capture writes.
+
+Fresh-memory full-array copies, old-checksum reads during capture, and work on
+the shared SQL worker remain open. Multi-buffer overlays, disjoint writes, and
+truncate/regrow tests preserve byte equality. Public-action percentiles,
+allocation peak, and eviction interference still need qualification.
+
 ## Safety and proof retained by the audit
+
+The checksum batching follow-up passed 37 focused cases: two file-overlay
+cases, eleven capture/failure tests, seven modeled-crash cases, five resume
+integrity cases, process-exit continuation recovery, and eleven independent
+format/restore cases. Replica all-target Clippy with warnings denied and the
+minimal-feature local roundtrip example pass; the latter restored its visible
+issue after deleting the source database. The same three minimal-feature
+unused capture/checksum warnings remain. The combined routing/checksum tree
+also passed the real RustFS HTTP/mTLS application-mutation, owner-takeover,
+restored-collaboration, and Git-read test. These prove functional behavior;
+no checksum latency SLO or fleet capacity is claimed.
 
 The follow-up audit reran the LTX prune-accounting fault test and the runtime
 published-root/local-prune-failure test; both passed. The scheduled runner's
@@ -596,8 +694,15 @@ The qualifier now derives work from each surviving process's own before/after
 snapshots, rejects resets or missing data, and retains those snapshots in the
 receipt. Six deterministic cases cover the distinct claimant/owner roles,
 aggregation, process changes, invalid counters, and inactive-log zero work.
-A fresh Compose run must still prove the corrected gate end to end. This
-leaves current-source fleet performance proof open.
+The native ARM64 [follow-up run 36219430132](https://github.com/crabbuild/crab/actions/runs/36219430132)
+passed the corrected Compose gate at `a16c8efcc2b`, including owner loss and
+follower recovery. That result qualifies that source's functional fault path;
+it predates decoder commit `0360485311b` and the routing/checksum changes above.
+It supplies neither sustained 3/5/10/20-node latency curves nor current-head
+image qualification.
+The [HTTP container run at `0360485311b`](https://github.com/crabbuild/crab/actions/runs/36220235482)
+also passed, along with that revision's decoder fuzz workflow. Routing commit
+`4e0d71fe43d` and the checksum batching above still need their own image proof.
 
 Seven existing tests passed locally with real SQLite and in-memory object
 storage: four `environment::tests::directory_cache` cases, missing cached-root
