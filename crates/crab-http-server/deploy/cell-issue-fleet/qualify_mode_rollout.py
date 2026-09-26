@@ -30,15 +30,15 @@ def comment(port: int, body: str) -> dict:
                         {"request_id": str(uuid.uuid4()), "body": body})
 
 
-def verify_values(port: int, bodies: set[str]) -> None:
+def verify_values(port: int, bodies: dict[int, set[str]]) -> None:
     for index in range(1, 4):
         issue = request_json("GET", node_url(1, port) + issue_path(index) + "/1")
         labels = request_json("GET", node_url(1, port) + f"/api/repos/demo/work-{index:02d}/labels")
         if issue["title"] != f"Cell issue on node {index}" or labels["items"][0]["name"] != "distributed":
             raise RuntimeError("rollout changed an acknowledged issue or label")
-    comments = request_json("GET", node_url(1, port) + issue_path(1) + "/1/comments")
-    if not bodies.issubset({item["body"] for item in comments["items"]}):
-        raise RuntimeError("rollout lost an acknowledged comment")
+        comments = request_json("GET", node_url(1, port) + issue_path(index) + "/1/comments?limit=50")
+        if not bodies[index].issubset({item["body"] for item in comments["items"]}):
+            raise RuntimeError("rollout lost an acknowledged comment")
 
 
 def main() -> None:
@@ -65,17 +65,23 @@ def main() -> None:
         "initial_stage": run_stage(path, (), 0, 3, args.gateway_port, args.node_port_base),
     }
     nodes = [node_name(index) for index in range(1, 4)]
+    acknowledged = {index: set() for index in range(1, 4)}
     # A quiet local store can win every initial proof race. Activation follows
     # follower fsync during a mutation; polling idle logs cannot exercise it.
     for attempt in range(5):
         def write_probe(offset):
             index = offset % 3 + 1
-            return request_json(
+            body = f"fleet activation {attempt}:{offset}"
+            result = request_json(
                 "POST", node_url(index, args.node_port_base) + issue_path(index) + "/1/comments",
-                {"request_id": str(uuid.uuid4()), "body": f"fleet activation {attempt}:{offset}"},
+                {"request_id": str(uuid.uuid4()), "body": body},
             )
+            if result["body"] != body:
+                raise RuntimeError("fleet proof workload returned the wrong comment")
+            return index, body
         with ThreadPoolExecutor(max_workers=6) as workers:
-            list(workers.map(write_probe, range(18)))
+            for index, body in workers.map(write_probe, range(18)):
+                acknowledged[index].add(body)
         enrolled = []
         for index in range(1, 4):
             session, _, _ = prove_node(path, (), index)
@@ -92,6 +98,8 @@ def main() -> None:
     fleet_body = "acknowledged before the fleet-to-object drain"
     if comment(args.node_port_base, fleet_body)["body"] != fleet_body:
         raise RuntimeError("fleet comment was not acknowledged")
+    acknowledged[1].add(fleet_body)
+    report["fleet_comments"] = {index: sorted(bodies) for index, bodies in acknowledged.items()}
     report["fleet_metrics"] = {node_name(index): metrics(path, index) for index in range(1, 4)}
     if sum(proof_count(sample, "fleet") for sample in report["fleet_metrics"].values()) == 0:
         raise RuntimeError("the initial deployment never completed a fleet durability proof")
@@ -113,10 +121,12 @@ def main() -> None:
             raise RuntimeError(f"{service} did not finish the coverage barrier; fleet config retained")
     path = render(args.state, args.project, args.gateway_port, args.node_port_base, True)
     compose(path, (), "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300")
-    verify_values(args.node_port_base, {fleet_body})
+    verify_values(args.node_port_base, acknowledged)
     object_body = "acknowledged after the object-proof rollout"
     if comment(args.node_port_base, object_body)["body"] != object_body:
         raise RuntimeError("object comment was not acknowledged")
+    acknowledged[1].add(object_body)
+    report["object_comment"] = object_body
     report["object_metrics"] = {node_name(index): metrics(path, index) for index in range(1, 4)}
     if any(proof_count(sample, "fleet") != 0 for sample in report["object_metrics"].values()):
         raise RuntimeError("object-mode deployment issued a fleet proof")
@@ -135,7 +145,7 @@ def main() -> None:
             raise RuntimeError(f"refusing to remove an unowned Cell volume: {volume}")
         command("docker", "volume", "rm", volume)
     compose(path, (), "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300")
-    verify_values(args.node_port_base, {fleet_body, object_body})
+    verify_values(args.node_port_base, acknowledged)
     report["readers_after_all_disk_loss"] = prove_readers(args.node_port_base, 3, 2)
     report["all_three_local_volumes_lost"] = True
     report["completed_at"] = datetime.now(timezone.utc).isoformat()

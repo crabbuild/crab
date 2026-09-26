@@ -312,11 +312,17 @@ flowchart TD
     Sql[Close SQLite handles]
     Release[Release owned controls]
     Pool[Close and join SQL and blocking pools]
+    Log[Close the object-covered node log]
+    Session[Stop heartbeats and withdraw the session]
 
-    Close --> Requests --> Schedulers --> Publish --> Sql --> Release --> Pool
+    Close --> Requests --> Schedulers --> Publish --> Sql --> Release --> Pool --> Log --> Session
 ```
 
-Readiness closes as soon as terminal drain starts. Remaining runtime, pool, or handle clones stay permanently closed after shutdown.
+Readiness closes as soon as terminal drain starts. Lease maintenance continues
+through Cell publication and the node-log close barrier; early withdrawal
+fences that authority and makes the drain fail. Work and lease tasks share one
+bounded supervisor and one absolute shutdown deadline. Remaining runtime,
+pool, or handle clones stay permanently closed after shutdown.
 
 ## Preserve these invariants
 
