@@ -93,8 +93,20 @@ impl PeerHttpRoundTrip {
             return Err(CellError::Peer("request exceeds peer byte limit"));
         }
         let started = Instant::now();
-        let mut last_retry = None;
+        let mut last_retry: Option<(CellError, Duration)> = None;
         for _ in 0..2 {
+            if let Some((_, delay)) = &last_retry {
+                let remaining =
+                    Duration::from_millis(u64::from(remaining_timeout(started, timeout_ms)?));
+                if *delay >= remaining {
+                    return Err(CellError::Deadline);
+                }
+                if !delay.is_zero() {
+                    // Admission rejection has not started the operation. Pace
+                    // its one retry, then reload ownership in case it moved.
+                    tokio::time::sleep(*delay).await;
+                }
+            }
             let remaining_ms = remaining_timeout(started, timeout_ms)?;
             let owner = tokio::time::timeout(
                 Duration::from_millis(u64::from(remaining_ms)),
@@ -105,7 +117,7 @@ impl PeerHttpRoundTrip {
             let remaining_ms = remaining_timeout(started, timeout_ms)?;
             match self.send_once(&owner, request.clone(), remaining_ms).await {
                 Ok(PeerHttpAttempt::Reply(reply)) => return Ok(reply),
-                Ok(PeerHttpAttempt::Retry(error)) => last_retry = Some(error),
+                Ok(PeerHttpAttempt::Retry(error, delay)) => last_retry = Some((error, delay)),
                 Ok(PeerHttpAttempt::Unknown(error)) => {
                     return Err(CellError::PeerTransportUnknown {
                         context: "peer HTTP response was lost or invalid",
@@ -115,7 +127,7 @@ impl PeerHttpRoundTrip {
                 Err(error) => return Err(error),
             }
         }
-        Err(last_retry.unwrap_or(CellError::CellNotActive))
+        Err(last_retry.map_or(CellError::CellNotActive, |(error, _)| error))
     }
 
     async fn send_to_node_inner(
@@ -141,7 +153,7 @@ impl PeerHttpRoundTrip {
         };
         match self.send_once(&owner, request, timeout_ms).await? {
             PeerHttpAttempt::Reply(reply) => Ok(reply),
-            PeerHttpAttempt::Retry(error) => Err(error),
+            PeerHttpAttempt::Retry(error, _) => Err(error),
             PeerHttpAttempt::Unknown(error) => Err(CellError::PeerTransportUnknown {
                 context: "peer HTTP activation response was lost or invalid",
                 source: Box::new(error),
@@ -237,14 +249,33 @@ impl PeerHttpRoundTrip {
         {
             Ok(response) => response,
             Err(error) if error.is_connect() => {
-                return Ok(PeerHttpAttempt::Retry(peer_transport(error)));
+                return Ok(PeerHttpAttempt::Retry(
+                    peer_transport(error),
+                    Duration::ZERO,
+                ));
             }
             Err(error) => return Ok(PeerHttpAttempt::Unknown(peer_transport(error))),
         };
         match response.status() {
             StatusCode::OK => {}
             StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE => {
-                return Ok(PeerHttpAttempt::Retry(CellError::CellNotActive));
+                // Receivers also use a bare 503 to refresh stale ownership.
+                // Only an explicit delay identifies admission pressure here.
+                if let Some(seconds) = response
+                    .headers()
+                    .get(header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.parse::<u64>().ok())
+                {
+                    return Ok(PeerHttpAttempt::Retry(
+                        CellError::Capacity("peer HTTP admission"),
+                        Duration::from_secs(seconds),
+                    ));
+                }
+                return Ok(PeerHttpAttempt::Retry(
+                    CellError::CellNotActive,
+                    Duration::ZERO,
+                ));
             }
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
                 return Err(CellError::PeerAuthorization(
@@ -302,7 +333,10 @@ impl PeerHttpRoundTrip {
                 if error.code == peer_wire::error::Code::Unavailable as i32
                     && error.outcome == peer_wire::error::Outcome::NotStarted as i32
         ) {
-            return Ok(PeerHttpAttempt::Retry(CellError::CellNotActive));
+            return Ok(PeerHttpAttempt::Retry(
+                CellError::CellNotActive,
+                Duration::ZERO,
+            ));
         }
         Ok(PeerHttpAttempt::Reply(body))
     }
@@ -372,7 +406,7 @@ impl CachedPeerClient {
 
 enum PeerHttpAttempt {
     Reply(Vec<u8>),
-    Retry(CellError),
+    Retry(CellError, Duration),
     Unknown(CellError),
 }
 

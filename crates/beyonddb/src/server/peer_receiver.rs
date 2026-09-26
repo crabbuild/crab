@@ -163,7 +163,16 @@ async fn forward(
         return error(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
     let Some(_reservation) = receiver.runtime.try_reserve_worker_job().ok().flatten() else {
-        return error(StatusCode::SERVICE_UNAVAILABLE);
+        // This request has not been dispatched. Give the sender's bounded
+        // retry time to outlive the request currently holding the codec slot.
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [
+                (header::CACHE_CONTROL, "no-store"),
+                (header::RETRY_AFTER, "1"),
+            ],
+        )
+            .into_response();
     };
     let now_ms = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
         Ok(duration) => match i64::try_from(duration.as_millis()) {
