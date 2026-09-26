@@ -511,3 +511,73 @@ admission, and fairness across independent clients. The pinned ExtendDB
 maps to InternalServerError. Correct classification requires an upstream
 contract change; no dependency patch is included. No 10,000-Cell or multi-TB
 qualification was performed.
+
+### Admission timing and lease shutdown follow-up
+
+A diagnostic run of the unchanged 1,000-increment upstream test failed with
+two `ServiceUnavailable` responses in 622.93 seconds. Both calls expired at
+the client's 50-second Cell admission wait, before invoking the owner. The
+final counter assertion was not reached. This classifies those two failures;
+it does not establish the cause or execution outcome of the earlier 55 errors.
+
+During that run, 208 measured lease refreshes took at most 1,793 ms, leaving
+at least 5,206 ms on the previous guard. Wall-clock and monotonic elapsed time
+differed by at most 1 ms. Thus the earlier lease failure did not reproduce.
+The timing probes and SDK logging plugin were diagnostic only. Increasing
+lease duration or admission deadlines is not justified by this evidence.
+
+Inspection found a separate shutdown defect: `PublishedNodeLease::run` awaited
+directory refresh without observing cancellation or fencing during that await.
+The new regression counts entry into a PUT before a throttled store stalls it,
+then cancels renewal or fences the guard. Before the fix, cancellation failed
+its one-second completion bound (test failed in 4.03 seconds). An outer select
+now covers the whole renewal loop, including storage and retry waits.
+Cancellation retains the current deadline; fencing remains terminal. Dropping
+the request cannot establish whether its remote CAS committed and never grants
+a new local lease.
+
+The binary and both leased integration fixtures also now register renewal with
+`CellNodeTaskGroup::spawn_lease_maintenance` and the terminal node-shutdown
+token. Previously they registered ordinary work, which stops before runtime
+drain. The existing host phase retains the heartbeat until runtime publication
+and log closure finish; no new lifecycle owner is added.
+
+| Boundary | Evidence |
+| --- | --- |
+| Caller | Binary startup installs the published guard and retains renewal in the host's lease phase. Peer and numeric-query fixtures use the same ordering. |
+| Cancellation owner | `PublishedNodeLease::run` selects shutdown, guard fencing, or the existing refresh/retry loop. |
+| Storage contract | `Store::update` is an ETag CAS without blind retry; `NodeDirectory::refresh` resolves changed observations. Cancellation may leave an unknown remote write, so the local guard is never advanced on cancellation. |
+| Host contract | `CellNode::shutdown_until` drains work and runtime before canceling lease tasks; `session_withdrawal_waits_for_runtime_drain` protects that ordering. |
+| Regression | `stalled_lease_refresh_yields_to_shutdown_and_fencing` fails before the change and passes after it. Ordinary successful renewal and current-deadline preservation also pass. |
+| Baseline | Main has no BeyondDB. The preceding draft awaited refresh directly and registered renewal as ordinary work. |
+
+**Is this the best fix?** One cancellation boundary reuses the existing guard
+and host drain phase. It removes duplicated cancellation branches without
+changing the lease, retry interval, admission budget, or decision authority.
+This addresses shutdown liveness; it does not fix sustained write throughput.
+
+The upstream qualification runner now uses a separate 30-second setup client
+for durable bucket creation, which previously reused the one-second readiness
+probe client. Exhausted readiness polling fails explicitly and setup clients
+are closed. DynamoDB client timeouts, retries, and upstream assertions are
+unchanged. The diagnostic run above exercised the corrected setup path.
+
+Verification for this follow-up:
+
+- Three selected lease checks pass (9.05 seconds), including the stalled-PUT
+  regression for cancellation and fencing.
+- Signed SDK peer/restart passes (279.54 seconds), including cross-Cell
+  transactions, owner replacement, and exact counter persistence.
+- The compiled-server SDK/RustFS smoke fails (743.84 seconds) at the large
+  transaction Put in `tests/support/mod.rs:168`, with `ServiceUnavailable`.
+  It did not reach the historical-coordinator loop or restart assertions.
+  The response does not distinguish a known refusal from an ambiguous pending
+  invocation; the server log supplies no underlying error. This run does not
+  prove compiled-server restart behavior for this revision.
+- The serving binary builds; strict all-target Clippy passes (6.08 seconds).
+  Python Ruff, Cell/LTX layout, formatting, and diff checks pass. No dependency,
+  lockfile, or test assertion changes.
+
+The draft remains unqualified for sustained load and production scale. The
+large-transaction smoke failure needs underlying invocation evidence before
+assigning a cause or changing capacity, deadlines, or retry policy.

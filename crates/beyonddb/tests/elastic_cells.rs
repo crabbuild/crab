@@ -1038,6 +1038,57 @@ async fn published_node_lease_renews_before_drain() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_lease_refresh_yields_to_shutdown_and_fencing() {
+    use crab_storage::test_support::CountingObjectStore;
+    use object_store::throttle::{ThrottleConfig, ThrottledStore};
+
+    for cancel in [true, false] {
+        let slow = Arc::new(ThrottledStore::new(
+            InMemory::new(),
+            ThrottleConfig::default(),
+        ));
+        let counted = Arc::new(CountingObjectStore::new(slow.clone()));
+        let layout = CellStorageLayout::new(
+            Store::new(counted.clone()),
+            object_store::path::Path::from("stalled-node-lease"),
+            [42; 16],
+        );
+        let published = published_test_node_lease(&layout, SessionId::from_bytes([90; 16])).await;
+        let guard = published.guard();
+        let before = counted.put_requests();
+        slow.config_mut(|config| config.wait_put_per_call = Duration::from_secs(60));
+        let cancellation = CancellationToken::new();
+        let run_cancellation = cancellation.clone();
+        let task = tokio::spawn(async move { published.run(&run_cancellation).await });
+        // The outer counter observes entry before the inner store's sleep.
+        // Cancellation must interrupt a pending PUT, not just the heartbeat timer.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while counted.put_requests() == before {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        if cancel {
+            cancellation.cancel();
+        } else {
+            guard.fence();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("pending publication must not hold node shutdown open")
+            .unwrap();
+        if cancel {
+            result.unwrap();
+            guard.check().unwrap();
+        } else {
+            assert!(matches!(result, Err(crab_cell_runtime::Error::Fenced)));
+        }
+        guard.fence();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
     let application = Arc::new(
         Beyonddb::compile(BuildDescriptor {
@@ -1062,13 +1113,13 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         .unwrap();
     let lease_cancellation = CancellationToken::new();
     let tasks = host
-        .install_task_group(lease_cancellation.clone(), CancellationToken::new())
+        .install_task_group(CancellationToken::new(), lease_cancellation.clone())
         .unwrap();
     let published_lease = published_test_node_lease(&layout, session).await;
     host.install_node_lease_for_startup(published_lease.guard())
         .unwrap();
     tasks
-        .spawn(async move { published_lease.run(&lease_cancellation).await })
+        .spawn_lease_maintenance(async move { published_lease.run(&lease_cancellation).await })
         .unwrap();
     host.start().unwrap();
     let registry = application.registry();

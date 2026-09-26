@@ -150,12 +150,15 @@ try:
         stderr=(root / "rustfs.log").open("w"),
     )
     children.append(rustfs)
+    s3_options = {
+        "endpoint_url": f"http://127.0.0.1:{s3}",
+        "aws_access_key_id": "crab",
+        "aws_secret_access_key": "crab",
+        "region_name": "us-east-1",
+    }
     client = boto3.client(
         "s3",
-        endpoint_url=f"http://127.0.0.1:{s3}",
-        aws_access_key_id="crab",
-        aws_secret_access_key="crab",
-        region_name="us-east-1",
+        **s3_options,
         config=Config(retries={"max_attempts": 0}, connect_timeout=1, read_timeout=1),
     )
     for _ in range(100):
@@ -166,7 +169,19 @@ try:
             break
         except (BotoCoreError, ClientError):
             time.sleep(0.1)
-    client.create_bucket(Bucket="beyonddb-qualification")
+    else:
+        raise RuntimeError("RustFS readiness timed out")
+    client.close()
+    # Bucket creation is a durable setup write, not a one-second readiness probe.
+    setup = boto3.client(
+        "s3",
+        **s3_options,
+        config=Config(retries={"max_attempts": 0}, connect_timeout=1, read_timeout=30),
+    )
+    try:
+        setup.create_bucket(Bucket="beyonddb-qualification")
+    finally:
+        setup.close()
     env = dict(
         os.environ,
         AWS_ACCESS_KEY_ID="crab",

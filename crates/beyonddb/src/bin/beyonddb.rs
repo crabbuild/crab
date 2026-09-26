@@ -183,8 +183,8 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
         )
         .with_session(session)
         .build()?;
-    let cancellation = CancellationToken::new();
-    let tasks = node.install_task_group(cancellation.clone(), CancellationToken::new())?;
+    let node_shutdown = CancellationToken::new();
+    let tasks = node.install_task_group(CancellationToken::new(), node_shutdown.clone())?;
     let node_id = NodeId::from_bytes(*config.node_id.as_bytes());
     let endpoint = config.peer_endpoint.clone();
     let signer = tls.signing_key().clone();
@@ -219,7 +219,9 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
     .publish()
     .await?;
     node.install_node_lease_for_startup(published.guard())?;
-    tasks.spawn(async move { published.run(&cancellation).await })?;
+    // Publication during drain still needs the node lease. The host cancels
+    // lease maintenance only after the runtime and its durable log close.
+    tasks.spawn_lease_maintenance(async move { published.run(&node_shutdown).await })?;
     node.start()?;
 
     let serving = serve_ready(

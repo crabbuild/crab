@@ -145,7 +145,7 @@ async fn start_node(
     certificate: Digest,
     signing_key: SigningKey,
     node_byte: u8,
-    cancellation: CancellationToken,
+    node_shutdown: CancellationToken,
 ) -> (CellNode, Arc<CellNodeTaskGroup>) {
     let node = CellNodeBuilder::new(Arc::clone(&application))
         .with_runtime(SqlWorkerPool::new(1, 8).unwrap(), 16 * 1024 * 1024)
@@ -153,8 +153,10 @@ async fn start_node(
         .with_session(session)
         .build()
         .unwrap();
+    // The caller simulates process loss by canceling both phases. Ordinary
+    // host drain cancels only the child until runtime publication finishes.
     let tasks = node
-        .install_task_group(cancellation.clone(), CancellationToken::new())
+        .install_task_group(node_shutdown.child_token(), node_shutdown.clone())
         .unwrap();
     let fleet = directory.fleet();
     let release = application.registry().release_digest();
@@ -188,7 +190,7 @@ async fn start_node(
     node.install_node_lease_for_startup(published.guard())
         .unwrap();
     tasks
-        .spawn(async move { published.run(&cancellation).await })
+        .spawn_lease_maintenance(async move { published.run(&node_shutdown).await })
         .unwrap();
     node.start().unwrap();
     (node, tasks)

@@ -70,31 +70,34 @@ impl PublishedNodeLease {
     }
 
     /// Refresh the authoritative lease until cancellation or terminal failure.
+    ///
+    /// Serving hosts retain this task in their lease-maintenance phase until
+    /// runtime drain finishes. Cancellation leaves the current deadline intact.
     pub async fn run(mut self, cancellation: &CancellationToken) -> Result<()> {
+        let guard = self.guard.clone();
+        // A storage request can outlive the lease or shutdown. Dropping its
+        // future cannot revoke a remote CAS, but must never renew this guard.
+        tokio::select! {
+            () = cancellation.cancelled() => {
+                self.fence_on_drop = false;
+                Ok(())
+            },
+            () = guard.wait_fenced() => Err(Error::Fenced),
+            result = self.renew() => result,
+        }
+    }
+
+    async fn renew(&mut self) -> Result<()> {
         let mut ticks = tokio::time::interval(HEARTBEAT);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         ticks.tick().await;
         loop {
-            tokio::select! {
-                () = cancellation.cancelled() => {
-                    // The node drains its runtime after canceling owned tasks.
-                    // Keep the lease valid for that drain; expiry still fences it.
-                    self.fence_on_drop = false;
-                    return Ok(());
-                },
-                _ = ticks.tick() => {}
-            }
+            ticks.tick().await;
             loop {
                 match self.refresh().await {
                     Ok(()) => break,
                     Err(error) if self.guard.remaining() > FENCE_MARGIN => {
-                        tokio::select! {
-                            () = cancellation.cancelled() => {
-                                self.fence_on_drop = false;
-                                return Ok(());
-                            },
-                            () = tokio::time::sleep(RETRY) => {}
-                        }
+                        tokio::time::sleep(RETRY).await;
                         self.guard.check()?;
                         if self.guard.remaining() <= FENCE_MARGIN {
                             self.guard.fence();
