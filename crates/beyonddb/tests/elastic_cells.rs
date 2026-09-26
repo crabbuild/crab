@@ -6,6 +6,7 @@ mod elastic_cells {
     mod coordinator_tokens;
     mod public_transactions;
     mod read_resolution;
+    mod transaction_capacity;
     mod transaction_driver;
     mod transaction_reads;
     mod transaction_recovery;
@@ -195,6 +196,18 @@ impl Bootstrap<'_> {
         file: &std::path::Path,
         initialize: for<'a> fn(&rusqlite::Transaction<'a>) -> crab_cell_runtime::Result<()>,
     ) -> CellHandle {
+        self.cell_with_storage(target, module, byte, (file, Limits::default()), initialize)
+            .await
+    }
+
+    async fn cell_with_storage(
+        &self,
+        target: &CellTarget,
+        module: &'static str,
+        byte: u8,
+        (file, limits): (&std::path::Path, Limits),
+        initialize: for<'a> fn(&rusqlite::Transaction<'a>) -> crab_cell_runtime::Result<()>,
+    ) -> CellHandle {
         let proof = CellCatalog::new(self.layout.clone(), target.tenant())
             .provision(
                 CatalogEntry::new(
@@ -227,7 +240,7 @@ impl Bootstrap<'_> {
                     self.layout.clone(),
                     *target.cell_id().as_bytes(),
                     *incarnation.as_bytes(),
-                    Limits::default(),
+                    limits,
                 )
                 .unwrap(),
                 authority,

@@ -174,15 +174,21 @@ reason, which can contain a large old item. A missing chunk is an error.
 Every chunk is written inside the original BEGIN, prepare, or decision command.
 These durable phase payloads are distinct from the temporary wire-upload rows
 described below. Locks, chunk counts, and phase payload rows commit or roll back
-together. Participant resolution reads its chunks,
-applies images, deletes staged chunks, releases locks, and sets its terminal
-marker inside one command. Coordinator history remains retained as before;
+together. Participant resolution reads its chunks into memory, deletes the
+staged rows to reclaim their pages, applies images, releases locks, and sets
+its terminal marker inside one command. A failed apply rolls back the deletion
+as well as any partial image writes. Coordinator history remains retained as before;
 SQL chunking does not implement history collection or add decision phases.
 
 Large individual items also need bounded SQL, even below DynamoDB's item limit:
 JSON escapes can make their encoded images exceed 1 MiB. The shared
-`src/item_storage.rs` path initializes an empty BLOB and appends 256-KiB pieces
-inside the same command that updates indexes and TTL metadata. Reads use
+`src/item_storage.rs` path clears the old image, allocates its exact encoded
+size with `zeroblob`, and writes 256-KiB slices through
+`CommandContext::write_sql_blob` inside the command that updates indexes and TTL
+metadata. Incremental writes reuse allocated pages rather than repeatedly
+copying a growing BLOB. These item columns have no SQL triggers, CHECK
+constraints, or indexes; the application maintains the separate index and TTL
+columns in the same command. Reads use
 byte-based `substr` on BLOBs under the same serialized command/query context.
 This keeps the existing item JSON format and prevents prepare from succeeding
 only to hit the SQL parameter limit when applying its image after COMMIT.
@@ -779,7 +785,7 @@ fleet-availability findings remain open.
 | Public admission | ExtendDB `handle_transact_write_items` → `backend/data.rs` → `backend/admission.rs` → coordinator BEGIN | Signed SDK writes, token mismatch/replay, dropped BEGIN reply; evaluated aggregate write size remains unchecked. |
 | Prepare | `backend/transaction.rs` → account/data wrappers → shared `participant::record_prepare` | Mixed participants, conditions, absent-key locks, owner restart; the reproduced SQL payload limit is now addressed by bounded storage. |
 | Decision | Driver → `RecordParticipantPrepare` → `DecideCrossCellTransaction` | COMMIT requires every recorded prepare; terminal decisions cannot change. Receipts are trusted driver assertions, not independently verified certificates. |
-| Apply | `backend/recovery.rs` → account/data resolver → `participant::resolve` | Repeated resolution, abort-before-prepare tombstones, partial apply recovery; capacity reserved for eventual apply is not established. |
+| Apply | `backend/recovery.rs` → account/data resolver → `participant::resolve` | Repeated resolution, abort-before-prepare tombstones, partial apply recovery, and a near-full account/data regression; transaction-specific apply headroom is still not reserved. |
 | Reads | Get/Query/Scan barriers and `backend/transaction_read.rs` | Pending creates, partial COMMIT, shared snapshots, saved images; full concurrent-history/fault matrix remains open. |
 | Sibling writers | Ordinary item commands, conditional TTL delete, split seal, account table deletion | Key and split fences exist. TTL excludes prepared locks before candidate selection and defers conflicts acquired before deletion; the regression covers later-item/table progress and deletion after ABORT. Routed table deletion needs its own lifecycle qualification, beyond the account lock test. |
 | Durability | Cell command savepoint → runtime publication → owner authority | `Committed<T>` releases after publication; `CellExecutor::query` refuses an unpublished head. Restart/peer tests exercise this dependency. |
@@ -872,6 +878,52 @@ not fix this failure. JSON/peer
 encoding also needs explicit qualification: encoded bytes may exceed DynamoDB
 item bytes, especially for binary values and escaped strings.
 
+### Apply capacity after a durable COMMIT
+
+`tests/elastic_cells/transaction_capacity.rs` reproduced a post-COMMIT failure:
+account and data participants each prepared four 380-KiB items in 2-MiB SQLite
+Cells, accepted an unrelated 100-KiB write, then could not resolve the committed
+transaction. Both prepare receipts and the coordinator COMMIT were already
+published. A temporary probe located `SQLITE_FULL` inside item application.
+These smaller budgets exercise the actual compiled handlers through the raw
+runtime; production Cell declarations remain 512 MiB.
+
+There were two allocation problems. Resolution retained staged rows while
+creating live images. Deleting the staged rows first was insufficient: each
+SQL concatenation of the growing item still needed replacement BLOB pages.
+Resolution now releases staged rows after loading them, and item storage uses
+fixed-size incremental writes. Both operations remain inside the application
+savepoint. The same account/data regression now resolves COMMIT and verifies
+every item byte through the storage adapter.
+
+The runtime SQL integration fixture verifies a BLOB larger than 1 MiB, bounded
+writes, protected-table denial, out-of-range writes, rollback after partial
+writes on both rejection and handler error, and publication/owner restore.
+The method exposes no raw handle and closes its handle before returning.
+SQLite incremental I/O bypasses SQL authorizers, triggers, and CHECK evaluation;
+the runtime explicitly denies protected table names and documents the caller's
+application-invariant obligations. SQLite additionally rejects writable indexed
+columns and unsupported table types. The source contract was checked in the
+pinned rusqlite 0.34 and bundled SQLite implementation.
+
+**Is this the best fix here?** Reusing the existing item BLOB and SQLite's
+fixed-size I/O removes the measured duplicate allocation without changing
+persisted item encoding, the SQL batch limit, or transaction decision phases.
+Account items, partition items, and saved transactional read images share the
+same write path. The runtime owns the generic bounded I/O; BeyondDB owns image
+allocation, staged-payload release, and index consistency.
+
+Verification passed: all 20 targeted account/elastic/peer tests, six runtime
+SQL capability tests, strict all-target Clippy for both crates, and the separate
+signed SDK/RustFS hard-restart smoke (368.85 seconds). The process binary stayed
+fixed across restart. Format, diff, and Cell/LTX layout checks also passed.
+
+This is not yet an eventual-apply capacity proof for every workload. B-tree
+pages, index growth, runtime receipts, retained history, local WAL/disk admission,
+and peak heap allocations still need a prepare-time budget or a demonstrated
+bound. COMMIT remains irrevocable if one of those resources is unavailable;
+recovery must finish apply rather than return a cancellation or change to ABORT.
+
 ### Aggregate Update accounting needs cloud-contract qualification
 
 ExtendDB's `PreparedOp::item_size` counts a Put image, but estimates Update from
@@ -938,7 +990,8 @@ of which bytes the public API counts.
   their evidence; token expiry alone is insufficient.
 - **Apply headroom.** Prepare does not reserve a transaction-specific budget
   that guarantees later apply can complete despite unrelated writes/history
-  growth. Reproduce near-full Cells before asserting this liveness property.
+  growth. The near-full regression below fixes duplicate image allocation; it
+  does not establish a universal reservation guarantee.
 - **TTL fairness addressed.** Candidate selection excludes shared and exclusive
   locks before its two-item limit. A prepare racing that read can still make
   conditional deletion return `TransactionConflict`; the sweep defers that key

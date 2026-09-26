@@ -103,6 +103,25 @@ impl CommandContext<'_, '_> {
         sql_batch(self.transaction, batch)
     }
 
+    /// Writes a bounded slice into an existing application BLOB in this command.
+    ///
+    /// Allocate its fixed size with SQL `zeroblob` first. Only main-database
+    /// rowid tables and unindexed, non-key columns are supported. SQLite does
+    /// not run triggers or CHECK constraints for incremental writes: callers
+    /// must maintain application invariants in the same command. Protected
+    /// tables, writes beyond the BLOB, and operations over 1 MiB are rejected.
+    /// Propagate failures to roll back the command's application savepoint.
+    pub fn write_sql_blob(
+        &self,
+        table: &str,
+        column: &str,
+        row_id: i64,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<()> {
+        crate::primitives::sql::write_blob(self.transaction, table, column, row_id, offset, bytes)
+    }
+
     pub(crate) const fn primitive_transaction(&self) -> &Transaction<'_> {
         self.transaction
     }

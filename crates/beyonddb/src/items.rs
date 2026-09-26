@@ -443,7 +443,7 @@ fn write_item(
         "INSERT INTO ddb_items (table_id, item_key, item) VALUES (?1, ?2, X'') ON CONFLICT(table_id, item_key) DO UPDATE SET item = excluded.item",
         vec![SqlValue::Text(table_id.into()), SqlValue::Blob(key.to_vec())],
     ))?;
-    crate::item_storage::StoredItem::Account { table_id, key }.append(context, item)
+    crate::item_storage::StoredItem::Account { table_id, key }.write(context, item)
 }
 
 pub(crate) fn item_key(item: &Item, key_schema: &[KeySchemaElement]) -> Result<Vec<u8>> {
