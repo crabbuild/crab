@@ -95,7 +95,7 @@ def prove_node(path: Path, profiles: tuple[str, ...], index: int) -> tuple[str, 
     )
     if capacity["resources"]["memory_bytes"] != MEMORY_LIMIT or capacity["admission"]["active_cells"] < 1:
         raise RuntimeError(f"{service} did not admit the 1 GiB Cell profile")
-    session = compose(
+    candidates = compose(
         path,
         profiles,
         "exec",
@@ -103,9 +103,17 @@ def prove_node(path: Path, profiles: tuple[str, ...], index: int) -> tuple[str, 
         service,
         "sh",
         "-ec",
-        'for path in /var/lib/crab/cells/sessions/*; do [ -d "$path" ] && { basename "$path"; exit; }; done; exit 1',
+        'for path in /var/lib/crab/cells/sessions/*; do [ -d "$path" ] && basename "$path"; done',
     )
-    return session, capacity, container_id
+    live = []
+    for session in candidates.splitlines():
+        status = json.loads(compose(path, profiles, "exec", "-T", service, "crab-http-server",
+                                    "--config", CONFIG, "cells", "node", "--session", session, "--json"))
+        if status["live"] and status["advertisement"] is not None:
+            live.append(session)
+    if len(live) != 1:
+        raise RuntimeError(f"{service} has {len(live)} live boot sessions")
+    return live[0], capacity, container_id
 
 
 def object_count(path: Path, profiles: tuple[str, ...]) -> int:

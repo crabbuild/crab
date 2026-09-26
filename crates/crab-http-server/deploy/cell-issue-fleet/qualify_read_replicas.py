@@ -91,6 +91,15 @@ def measure_reads(port: int, size: int) -> dict:
     return result
 
 
+def set_reader_target(port: int, repository: int, desired: int) -> dict:
+    url = node_url(1, port) + f"/api/repos/demo/work-{repository:02d}/settings/read-replicas"
+    current = request_json("GET", url)
+    if current["desired_readers"] == desired and not current["stale_incarnation"]:
+        return current
+    return request_json("PUT", url,
+                        {"expected_revision": current["revision"], "desired_readers": desired})
+
+
 def node_inventory(path: Path, profiles: tuple[str, ...], size: int) -> dict:
     sessions = {}
     for index in range(1, size + 1):
@@ -102,8 +111,7 @@ def node_inventory(path: Path, profiles: tuple[str, ...], size: int) -> dict:
 
 
 def prove_reader_replacement(path: Path, profiles: tuple[str, ...], port: int) -> dict:
-    request_json("PUT", node_url(1, port) + "/api/repos/demo/work-18/settings/read-replicas",
-                 {"expected_revision": 0, "desired_readers": 2})
+    set_reader_target(port, 18, 2)
     before_readers = prove_readers(port, 20, 2, 18)
     sessions = node_inventory(path, profiles, 20)
     lost_index, lost_node = next((index, node) for index, node in sessions.values()
@@ -128,8 +136,7 @@ def prove_reader_replacement(path: Path, profiles: tuple[str, ...], port: int) -
 
 
 def prove_warm_promotion(path: Path, profiles: tuple[str, ...], port: int) -> dict:
-    request_json("PUT", node_url(1, port) + "/api/repos/demo/work-19/settings/read-replicas",
-                 {"expected_revision": 0, "desired_readers": 2})
+    set_reader_target(port, 19, 2)
     warm = prove_readers(port, 20, 2, 19)
     sessions = node_inventory(path, profiles, 20)
     args = ("crab-http-server", "--config", CONFIG, "cells", "status", "--owner", "demo", "--name", "work-19")
@@ -160,11 +167,7 @@ def prove_warm_promotion(path: Path, profiles: tuple[str, ...], port: int) -> di
 
 
 def prove_all_reader_loss(path: Path, profiles: tuple[str, ...], stage: dict, port: int, project: str) -> dict:
-    policy = request_json(
-        "PUT",
-        node_url(1, port) + "/api/repos/demo/work-20/settings/read-replicas",
-        {"expected_revision": 0, "desired_readers": 2},
-    )
+    policy = set_reader_target(port, 20, 2)
     if policy["desired_readers"] != 2:
         raise RuntimeError("all-reader-loss target was not applied")
     before_readers = prove_readers(port, 20, 2, 20)
@@ -228,6 +231,38 @@ def prove_all_reader_loss(path: Path, profiles: tuple[str, ...], stage: dict, po
         "recovery_seconds": round(time.monotonic() - started, 3),
         "replacement_readers": replacement,
     }
+
+
+def prove_authority_outage(path: Path, profiles: tuple[str, ...], port: int) -> dict:
+    url = node_url(1, port) + issue_path(1) + "/1?read=replica"
+    before = replica_issue(url, 1)
+    started = time.monotonic()
+    try:
+        compose(path, profiles, "pause", "rustfs")
+        try:
+            with urllib.request.urlopen(url, timeout=7) as response:
+                raise RuntimeError(f"replica returned HTTP {response.status} without authority")
+        except urllib.error.HTTPError as error:
+            body = json.load(error)
+            if error.code != 503 or body.get("error", {}).get("code") != "replica_unavailable":
+                raise RuntimeError(f"unexpected authority outage response: {error.code} {body}") from error
+            unavailable_seconds = round(time.monotonic() - started, 3)
+    finally:
+        compose(path, profiles, "unpause", "rustfs")
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            after = replica_issue(url, 1)
+            break
+        except (OSError, urllib.error.HTTPError):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(1)
+    if after[2] != before[2] or after[1] < before[1]:
+        raise RuntimeError("authority recovery changed incarnation or regressed the receipt")
+    return {"http_status": 503, "error_code": "replica_unavailable",
+            "unavailable_seconds": unavailable_seconds,
+            "before_sequence": before[1], "after_sequence": after[1], "incarnation": after[2]}
 
 
 def main() -> None:
@@ -296,6 +331,8 @@ def main() -> None:
     report["all_reader_loss"] = prove_all_reader_loss(
         path, phases[-1][1], report["stages"][-1], args.node_port_base, args.project
     )
+    (path.parent / "read-replica-report.json").write_text(json.dumps(report, indent=2) + "\n")
+    report["authority_outage"] = prove_authority_outage(path, phases[-1][1], args.node_port_base)
     (path.parent / "read-replica-report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(path.parent / "read-replica-report.json")
 
