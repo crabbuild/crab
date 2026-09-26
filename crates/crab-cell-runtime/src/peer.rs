@@ -45,6 +45,15 @@ pub mod wire {
     include!(concat!(env!("OUT_DIR"), "/crab.cell.peer.v1.rs"));
 }
 
+fn wire_description(value: crate::client::CellDescription) -> wire::CellDescription {
+    wire::CellDescription {
+        cell_id: value.cell.as_bytes().to_vec(),
+        incarnation: value.incarnation.as_bytes().to_vec(),
+        code: value.code.as_bytes().to_vec(),
+        schema: value.schema,
+    }
+}
+
 /// One peer operation currently executable by the typed Cell client.
 #[derive(Clone)]
 pub enum PeerOperation {
@@ -188,46 +197,40 @@ impl PeerVerifier {
 
     /// Strictly decodes and authenticates one request before actor admission.
     pub fn verify(&self, input: &[u8], now_ms: i64) -> Result<VerifiedPeerRequest> {
-        if input.len() > MAX_PEER_REQUEST_BYTES {
-            return Err(Error::Peer("request exceeds peer byte limit"));
-        }
-        let fields = validate_message(input, MessageKind::PeerRequest)?;
-        require_fields(&fields, &[1, 2, 3, 4])?;
-        let (tag, payload) = oneof_payload(input, &fields, &[10, 11, 12, 13, 14, 15])?;
-        if payload.len() > MAX_OPERATION_BYTES {
-            return Err(Error::Peer("operation exceeds wire limit"));
-        }
-        validate_operation(tag, payload)?;
-        let request = wire::PeerRequest::decode(input)?;
-        if request.version != PROTOCOL_VERSION
-            || !(1..=2).contains(&request.hop_count)
-            || !(1..=60_000).contains(&request.remaining_ms)
-        {
-            return Err(Error::Peer("unsupported peer version, hop, or deadline"));
-        }
+        self.verify_decoded(UnverifiedPeerRequest::decode(input)?, now_ms)
+    }
+
+    /// Authenticates a structurally checked request without decoding its payload again.
+    pub fn verify_decoded(
+        &self,
+        decoded: UnverifiedPeerRequest,
+        now_ms: i64,
+    ) -> Result<VerifiedPeerRequest> {
+        let UnverifiedPeerRequest {
+            request,
+            operation_tag,
+            operation_bytes,
+            ..
+        } = decoded;
         validate_decoded_operation(request.operation.as_ref(), now_ms)?;
         let authorization = request
             .authorization
             .as_ref()
             .ok_or(Error::Peer("authorization is missing"))?;
-        let authorization_bytes = field_payload(&fields, 2)?;
-        if authorization_bytes.len() > MAX_AUTHORIZATION_BYTES {
-            return Err(Error::Peer("authorization exceeds 16 KiB"));
-        }
         validate_authorization(authorization, now_ms, request.remaining_ms)?;
         if authorization.origin_session.as_slice() != self.session.as_bytes()
             || authorization.release_digest.as_slice() != self.release.as_bytes()
         {
             return Err(Error::Peer("peer enrollment or release does not match"));
         }
-        let expected_digest = blake3::hash(payload);
+        let expected_digest = blake3::hash(&operation_bytes);
         if authorization.payload_digest.as_slice() != expected_digest.as_bytes() {
             return Err(Error::Peer("peer payload digest does not match"));
         }
         let signature =
             Signature::from_slice(&authorization.signature).map_err(Error::PeerSignature)?;
         self.key
-            .verify_strict(&signing_bytes(tag, authorization)?, &signature)
+            .verify_strict(&signing_bytes(operation_tag, authorization)?, &signature)
             .map_err(Error::PeerSignature)?;
         let target = operation_target(request.operation.as_ref())?;
         let principal = PeerPrincipal {
@@ -240,33 +243,74 @@ impl PeerVerifier {
             target,
             principal,
             origin_session: self.session,
-            operation_tag: tag,
-            operation_bytes: payload.to_vec(),
+            operation_tag,
+            operation_bytes,
         })
     }
 }
 
-/// Reads the untrusted session claim only after strict structural validation.
+/// Structurally checked peer envelope whose claims are not authenticated.
 ///
-/// Callers use this value solely to locate an enrollment key. The returned
-/// session is not authenticated until [`PeerVerifier::verify`] succeeds.
-pub fn claimed_peer_session(input: &[u8]) -> Result<SessionId> {
-    if input.len() > MAX_PEER_REQUEST_BYTES {
-        return Err(Error::Peer("request exceeds peer byte limit"));
+/// Use its session only to locate enrollment and its timeout only to bound
+/// waiting. Actor admission requires [`PeerVerifier::verify_decoded`] first.
+pub struct UnverifiedPeerRequest {
+    request: wire::PeerRequest,
+    session: SessionId,
+    operation_tag: u32,
+    operation_bytes: Vec<u8>,
+}
+
+impl UnverifiedPeerRequest {
+    /// Strictly decodes one bounded request, retaining its exact signed payload.
+    pub fn decode(input: &[u8]) -> Result<Self> {
+        if input.len() > MAX_PEER_REQUEST_BYTES {
+            return Err(Error::Peer("request exceeds peer byte limit"));
+        }
+        let fields = validate_message(input, MessageKind::PeerRequest)?;
+        require_fields(&fields, &[1, 2, 3, 4])?;
+        let authorization_range = field_payload(&fields, 2)?;
+        if authorization_range.len() > MAX_AUTHORIZATION_BYTES {
+            return Err(Error::Peer("authorization exceeds 16 KiB"));
+        }
+        let authorization_fields =
+            validate_message(&input[authorization_range], MessageKind::Authorization)?;
+        require_fields(&authorization_fields, &[1, 2, 3, 5, 6, 7, 8, 9])?;
+        let (tag, payload) = oneof_payload(input, &fields, &[10, 11, 12, 13, 14, 15])?;
+        if payload.len() > MAX_OPERATION_BYTES {
+            return Err(Error::Peer("operation exceeds wire limit"));
+        }
+        validate_operation(tag, payload)?;
+        let request = wire::PeerRequest::decode(input)?;
+        if request.version != PROTOCOL_VERSION
+            || !(1..=2).contains(&request.hop_count)
+            || !(1..=60_000).contains(&request.remaining_ms)
+        {
+            return Err(Error::Peer("unsupported peer version, hop, or deadline"));
+        }
+        let authorization = request
+            .authorization
+            .as_ref()
+            .ok_or(Error::Peer("authorization is missing"))?;
+        let session = SessionId::try_from(authorization.origin_session.as_slice())?;
+        Ok(Self {
+            request,
+            session,
+            operation_tag: tag,
+            operation_bytes: payload.to_vec(),
+        })
     }
-    let fields = validate_message(input, MessageKind::PeerRequest)?;
-    require_fields(&fields, &[1, 2, 3, 4])?;
-    let authorization_range = field_payload(&fields, 2)?;
-    if authorization_range.len() > MAX_AUTHORIZATION_BYTES {
-        return Err(Error::Peer("authorization exceeds 16 KiB"));
+
+    /// Returns the untrusted session used solely for enrollment lookup.
+    #[must_use]
+    pub const fn session(&self) -> SessionId {
+        self.session
     }
-    let authorization_fields = validate_message(
-        &input[authorization_range.clone()],
-        MessageKind::Authorization,
-    )?;
-    require_fields(&authorization_fields, &[1, 2, 3, 5, 6, 7, 8, 9])?;
-    let authorization = wire::PeerAuthorization::decode(&input[authorization_range])?;
-    SessionId::try_from(authorization.origin_session.as_slice())
+
+    /// Returns the bounded, untrusted transport wait budget in milliseconds.
+    #[must_use]
+    pub const fn remaining_ms(&self) -> u32 {
+        self.request.remaining_ms
+    }
 }
 
 /// Authenticated request retaining the exact signed nested operation bytes.

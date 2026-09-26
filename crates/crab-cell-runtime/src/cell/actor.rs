@@ -38,7 +38,7 @@ use crate::cell::executor::{
     MigrationOutcome, MutationIdentity, PendingCommit, Resolution, StoredOutcome,
 };
 use crate::cell::worker::{CellReservation, Handler, Initializer, QueryHandler, WorkerState};
-use crate::cell::worker::{SqlWorkerPool, WorkerExecution};
+use crate::cell::worker::{HydrationStep, SqlWorkerPool, WorkerExecution};
 use crate::control::authority::{CellAuthority, VersionedControl};
 use crate::control::{Owner, Transition};
 use crate::coordination::{
@@ -72,6 +72,7 @@ const RENEWAL_SCAN: std::time::Duration = std::time::Duration::from_millis(100);
 const MAX_RENEWALS_IN_FLIGHT: usize = 32;
 const SQL_WALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 const HYDRATION_TICK: std::time::Duration = std::time::Duration::from_millis(100);
+const HYDRATION_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 // Four samples per second. The classifier still needs its 1000 ms dwell, so a
 // brief spike above the soft reserve cannot evict a Cell.
 const PRESSURE_SAMPLE: std::time::Duration = std::time::Duration::from_millis(250);
@@ -116,7 +117,9 @@ pub struct NodeByteReservation {
 /// Opaque node-wide worker-job reservation held until a primitive job exits.
 #[must_use = "dropping the reservation immediately releases its capacity"]
 pub struct NodeJobReservation {
+    // Return accounting before waking the next waiter on the admission gate.
     _reservation: ResourceReservation,
+    _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 /// Point-in-time node admission usage for one embedded Cell runtime.

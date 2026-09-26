@@ -15,6 +15,16 @@ on:
         description: "Expected digest for image_ref"
         required: false
         type: string
+      arm64:
+        description: "Build and qualify on a native Linux ARM64 runner"
+        required: false
+        default: false
+        type: boolean
+      fleet_image_run:
+        description: "Qualify fleet traffic using the image artifact from this successful run"
+        required: false
+        default: ""
+        type: string
   pull_request:
     paths:
       - ".dockerignore"
@@ -25,6 +35,17 @@ on:
       - "crates/**"
       - "packages/ui/**"
   workflow_dispatch:
+    inputs:
+      arm64:
+        description: "Build and qualify on a native Linux ARM64 runner"
+        required: false
+        default: false
+        type: boolean
+      fleet_image_run:
+        description: "Qualify fleet traffic using the image artifact from this successful run"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -36,9 +57,13 @@ concurrency:
 
 jobs:
   image:
+    if: ${{ !inputs.fleet_image_run }}
     name: Build and inspect image
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.arm64 && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     timeout-minutes: 45
+    env:
+      # The ARM runner is native; the repository's cross-linker is absent there.
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: cc
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -80,6 +105,10 @@ jobs:
              | all(. as $name | $names | index($name)))
           ' crates/crab-http-server/deploy/ecs/task-definition.example.json >/dev/null
           docker compose --file crates/crab-http-server/deploy/compose.yaml config --quiet
+          python3 -B -W error::ResourceWarning -m unittest discover \
+            -s crates/crab-http-server/deploy/cell-issue-fleet -p 'test_*.py' -v
+          python3 -B -m unittest discover \
+            -s crates/crab-http-server/tests -p 'test_*.py' -v
           docker compose \
             --file crates/crab-http-server/deploy/compose.yaml \
             --file crates/crab-http-server/deploy/compose.cluster.yaml \
@@ -729,10 +758,11 @@ jobs:
               echo "image_digest requires image_ref." >&2
               exit 1
             fi
-            docker build \
+            git archive --format=tar HEAD | docker build \
               --file crates/crab-http-server/deploy/Dockerfile \
+              --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
               --tag crab-http-server:test \
-              .
+              -
             digest="$(docker image inspect crab-http-server:test --format '{{.Id}}')"
           fi
           printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
@@ -749,6 +779,7 @@ jobs:
           crab-http-server:test
       - name: Verify runtime contract
         run: |
+          test "$(docker image inspect crab-http-server:test --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$(git rev-parse HEAD)"
           test "$(docker image inspect crab-http-server:test --format '{{.Config.User}}')" = "crab:crab"
           test "$(docker image inspect crab-http-server:test --format '{{.Config.StopSignal}}')" = "SIGTERM"
           docker image inspect crab-http-server:test --format '{{json .Config.Healthcheck.Test}}' | grep -F -- '"healthcheck"'
@@ -769,6 +800,10 @@ jobs:
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: stable
+      - name: Build the cluster receipt validator
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-http-server-receipt-target
+        run: cargo build --locked -p crab-cell-runtime --bin qualification_receipt
       - name: Exercise Compose startup, restore, crash recovery, and restart
         env:
           CRAB_HTTP_SERVER_IMAGE: crab-http-server:test
@@ -930,5 +965,106 @@ jobs:
         with:
           name: cell-runtime-qualification-${{ github.run_id }}
           path: ${{ runner.temp }}/crab-cell-runtime-qualification
+          if-no-files-found: error
+          retention-days: 14
+      - name: Export the qualified Linux image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_dir="${RUNNER_TEMP}/crab-http-server-qualified-image"
+          mkdir -p "$image_dir"
+          git rev-parse HEAD > "$image_dir/source-revision"
+          docker image inspect crab-http-server:test --format '{{.Id}}' > "$image_dir/image-id"
+          docker image inspect crab-http-server:test --format '{{.Os}}/{{.Architecture}}' > "$image_dir/platform"
+          docker image save --output "$image_dir/image.tar" crab-http-server:test
+          gzip -1 "$image_dir/image.tar"
+          cd "$image_dir"
+          sha256sum image.tar.gz > image.sha256
+      - name: Upload the qualified Linux image
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cell-runtime-image-${{ github.run_id }}
+          path: ${{ runner.temp }}/crab-http-server-qualified-image
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  fleet:
+    name: Qualify scheduled fleet traffic and owner loss
+    if: ${{ inputs.fleet_image_run }}
+    runs-on: ${{ inputs.arm64 && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+    env:
+      IMAGE_RUN: ${{ inputs.fleet_image_run }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
+      - name: Verify harness and import qualified image
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_RUN" =~ ^[0-9]+$ ]]
+          python3 -B -W error::ResourceWarning -m unittest discover \
+            -s crates/crab-http-server/deploy/cell-issue-fleet -p 'test_*.py'
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${IMAGE_RUN}" \
+            --jq '.conclusion' | grep --line-regexp success
+          artifact="${RUNNER_TEMP}/fleet-image"
+          project="crab-cell-issue-ci-${GITHUB_RUN_ID}"
+          gh run download "$IMAGE_RUN" --repo "$GITHUB_REPOSITORY" \
+            --name "cell-runtime-image-${IMAGE_RUN}" --dir "$artifact"
+          python3 -B crates/crab-http-server/deploy/cell-issue-fleet/import_image.py \
+            --artifact "$artifact" --project "$project"
+          source_revision="$(cat "$artifact/source-revision")"
+          git fetch --depth=1 origin "$source_revision"
+          git worktree add --detach "${RUNNER_TEMP}/fleet-server-source" "$source_revision"
+          mkdir "${RUNNER_TEMP}/fleet-evidence"
+          cp "$artifact/import-receipt.json" "${RUNNER_TEMP}/fleet-evidence/"
+          git rev-parse HEAD > "${RUNNER_TEMP}/fleet-evidence/harness-revision"
+          docker info --format '{{json .}}' > "${RUNNER_TEMP}/fleet-evidence/docker-info.json"
+          df -k /var/lib/docker > "${RUNNER_TEMP}/fleet-evidence/disk-before.txt"
+      - name: Measure fixed workload at 3, 5, 10 and 20 nodes
+        run: |
+          set -euo pipefail
+          # The existing qualifier requires a clean checkout matching the
+          # image. The fault driver records its separate harness revision.
+          python3 -B "${RUNNER_TEMP}/fleet-server-source/crates/crab-http-server/deploy/cell-issue-fleet/qualify.py" \
+            --state "${RUNNER_TEMP}/fleet-state" \
+            --project "crab-cell-issue-ci-${GITHUB_RUN_ID}" --skip-build \
+            --load-stages --cells 20 --load-rate 5 --load-duration 60 \
+            2>&1 | tee "${RUNNER_TEMP}/fleet-evidence/stages.log"
+      - name: Lose an acknowledged unpublished owner during arrivals
+        run: |
+          set -euo pipefail
+          python3 -B crates/crab-http-server/deploy/cell-issue-fleet/fault.py \
+            --state "${RUNNER_TEMP}/fleet-state" --nodes 20 --cells 20 \
+            --rate 5 --duration 180 --max-in-flight 64 \
+            --output "${RUNNER_TEMP}/fleet-evidence/fault-20" \
+            2>&1 | tee "${RUNNER_TEMP}/fleet-evidence/fault.log"
+      - name: Retain stage reports and final node logs
+        if: always()
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/fleet-evidence"
+          state="${RUNNER_TEMP}/fleet-state"
+          mkdir -p "$evidence"
+          if [ -d "$state" ]; then
+            find "$state" -maxdepth 1 -type f \( -name 'report.json' -o -name 'load-*.json' -o -name 'load-*.jsonl' \) \
+              -exec cp {} "$evidence/" \;
+            find "$state" -maxdepth 1 -type d -name '*.traces' -exec cp -R {} "$evidence/" \;
+          fi
+          if [ -f "$state/compose.yaml" ]; then
+            docker compose --file "$state/compose.yaml" --profile five --profile ten --profile twenty \
+              logs --no-color > "$evidence/compose.log" 2>&1
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: cell-fleet-qualification-${{ github.run_id }}
+          path: ${{ runner.temp }}/fleet-evidence
           if-no-files-found: error
           retention-days: 14

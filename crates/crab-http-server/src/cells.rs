@@ -1466,6 +1466,7 @@ pub(crate) async fn enter_maintenance(
         Arc::clone(&registry),
         runtime.clone(),
         RepositoryCellPeer::new(
+            crate::peer::PeerOwnerHints::default(),
             directory.clone(),
             Arc::new(PeerSigner::new(
                 session,
@@ -2746,6 +2747,7 @@ mod tests {
             Arc::clone(&registry),
             runtime.clone(),
             RepositoryCellPeer::new(
+                crate::peer::PeerOwnerHints::default(),
                 directory.clone(),
                 Arc::new(PeerSigner::new(
                     session,
@@ -2924,6 +2926,7 @@ mod tests {
             Arc::clone(&registry),
             runtime.clone(),
             RepositoryCellPeer::new(
+                crate::peer::PeerOwnerHints::default(),
                 directory.clone(),
                 Arc::new(PeerSigner::new(
                     session,
@@ -3695,6 +3698,7 @@ mod tests {
             layout.clone(),
             ApplicationIdentity::new(tenant, application),
             first_runtime.clone(),
+            first_runtime.telemetry_handle(),
         );
         let peer_handle = peer_resolver.resolve(target.clone()).await.unwrap();
         assert_eq!(peer_handle.cell_id(), first_handle.cell_id());

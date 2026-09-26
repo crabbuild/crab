@@ -756,13 +756,13 @@ pub(crate) struct PendingDurability {
 }
 
 impl PendingDurability {
-    pub(crate) async fn prove(&self) -> Result<()> {
+    pub(crate) async fn prove(&self) -> Result<crate::node::log::DurabilitySource> {
         let proof = self.durability.prove(self.ticket).await?;
         if proof.source() == crate::node::log::DurabilitySource::Fleet {
             self.telemetry
                 .durability_proof(proof.source(), self.submitted_at.elapsed());
         }
-        Ok(())
+        Ok(proof.source())
     }
 
     pub(crate) async fn prove_fleet(&self) -> Result<()> {

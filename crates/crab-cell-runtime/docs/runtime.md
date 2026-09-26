@@ -54,6 +54,12 @@ The node bounds:
 - Per-Cell request and byte admission
 - Node-wide memory, disk, and activity admission
 
+Worker-job admission uses one slot per SQL worker. A job waiting for a busy
+worker holds neither another worker's slot nor a node worker-job reservation.
+Once dispatched, the job owns its slot and reservation until execution ends,
+including when its caller is canceled. Lifecycle and publication-confirmation
+messages retain their bounded worker queue and do not need a job permit.
+
 Cancellation of a caller doesn't cancel accepted work. The actor still records and publishes the result, so a retry can resolve it.
 
 ## Execute commands in six phases
@@ -184,6 +190,21 @@ Native commands and queries receive a five-second wall deadline. The same deadli
 Arbitrary Rust cannot be preempted safely. When a callback exceeds the deadline, admission closes immediately, but the runtime retains worker and byte permits until the callback exits.
 
 After exit, recovery closes the SQLite handle and reloads control. It releases only authority that still names the same Cell, incarnation, code, schema, owner, and epoch.
+
+HTTP peer codecs use a separate primitive-job budget. Immediate and queued
+admission share that budget; queued admission checks one absolute deadline
+before waiting and after waking. Canceling a waiter reserves nothing, and
+runtime shutdown wakes queued callers with `RuntimeClosed`. Callers must
+reserve retained request bytes before waiting. Enrollment storage I/O releases
+the codec slot; decoded requests remain untrusted until signature verification
+rechecks the signed enrollment's lifetime.
+
+The HTTP receiver applies its received transport budget to enrollment,
+resolution, activation, dispatch waiting, and reply encoding. That budget
+starts after the request body arrives and remains distinct from the native
+work deadline above. Canceling the HTTP wait does not cancel an accepted
+mutation's durable completion; the caller resolves an ambiguous result using
+the same stable request identity.
 
 ## Recover from panic without losing the worker
 

@@ -14,6 +14,7 @@ use std::{
 
 use crab_ltx::rusqlite::OptionalExtension;
 use tokio::sync::Notify;
+use tracing::Instrument as _;
 
 use crate::cell::actor::CellHandle;
 use crate::cell::catalog::CatalogRole;
@@ -321,19 +322,51 @@ impl<C: Command> PreparedCommand<C> {
             .validate(now_ms)
             .map_err(InvocationError::NotStarted)?;
         self.request.now_ms = now_ms;
-        match self.client.transport.command(self.request).await {
-            Ok(outcome) => decode_pending::<C::Output>(&self.evidence, outcome),
-            Err(Error::OutcomeUnknown {
-                request_id,
-                operation_digest,
-                ..
-            }) if request_id == self.evidence.identity.request_id
-                && operation_digest == self.evidence.operation_digest =>
-            {
-                Err(InvocationError::Pending(Box::new(self.evidence)))
-            }
-            Err(error) => Err(InvocationError::NotStarted(error)),
+        let span = tracing::debug_span!(
+            target: "crab_cell_runtime::action",
+            "cell_invocation",
+            cell = ?self.request.expected.cell,
+            incarnation = ?self.request.expected.incarnation,
+            mutation_request_id = ?self.request.identity.request_id,
+            module = C::MODULE,
+            operation_id = C::ID,
+        );
+        async move {
+            let started = Instant::now();
+            tracing::debug!(target: "crab_cell_runtime::action", event = "cell_invocation_started");
+            let result = match self.client.transport.command(self.request).await {
+                Ok(outcome) => decode_pending::<C::Output>(&self.evidence, outcome),
+                Err(Error::OutcomeUnknown {
+                    request_id,
+                    operation_digest,
+                    ..
+                }) if request_id == self.evidence.identity.request_id
+                    && operation_digest == self.evidence.operation_digest =>
+                {
+                    Err(InvocationError::Pending(Box::new(self.evidence)))
+                }
+                Err(error) => Err(InvocationError::NotStarted(error)),
+            };
+            let (outcome, receipt) = match &result {
+                Ok(committed) => ("committed", Some(committed.receipt)),
+                Err(InvocationError::Rejected(committed)) => ("rejected", Some(committed.receipt)),
+                Err(InvocationError::InvalidPublishedResult { receipt, .. }) => {
+                    ("invalid_result", Some(*receipt))
+                }
+                Err(InvocationError::Pending(_)) => ("pending", None),
+                Err(InvocationError::NotStarted(_)) => ("not_started", None),
+            };
+            tracing::debug!(
+                target: "crab_cell_runtime::action",
+                event = "cell_invocation_completed",
+                outcome,
+                commit_sequence = receipt.map(|receipt| receipt.commit_sequence),
+                elapsed_us = started.elapsed().as_micros(),
+            );
+            result
         }
+        .instrument(span)
+        .await
     }
 }
 
@@ -472,6 +505,7 @@ pub(super) trait CellTransport: Send + Sync + 'static {
 pub struct CellClient {
     registry: Arc<Registry>,
     transport: Arc<dyn CellTransport>,
+    observed_description: Option<CellDescription>,
     blob_artifact_store: Option<crate::BlobArtifactStore>,
 }
 
@@ -481,6 +515,7 @@ impl CellClient {
         Self {
             registry,
             transport,
+            observed_description: None,
             blob_artifact_store: None,
         }
     }
@@ -489,6 +524,18 @@ impl CellClient {
     #[must_use]
     pub fn registry_digest(&self) -> Digest {
         self.registry.release_digest()
+    }
+
+    /// Binds this client to an already observed Cell contract for a routed request.
+    ///
+    /// The host supplies a description read from authority or the owner. Calls
+    /// skip Describe and must target this exact Cell. Receiver authorization,
+    /// contract validation, and actor admission still apply; stale observations
+    /// refuse execution and require the host to resolve a fresh route.
+    #[must_use]
+    pub fn with_observed_description(mut self, description: CellDescription) -> Self {
+        self.observed_description = Some(description);
+        self
     }
 
     /// Returns a client clone wired to the configured object-store Blob data.
@@ -831,11 +878,14 @@ impl CellClient {
         &self,
         target: &CellTarget,
     ) -> std::result::Result<CellDescription, InvocationError<T>> {
-        let description = self
-            .transport
-            .describe(target.clone())
-            .await
-            .map_err(InvocationError::NotStarted)?;
+        let description = match self.observed_description {
+            Some(description) => description,
+            None => self
+                .transport
+                .describe(target.clone())
+                .await
+                .map_err(InvocationError::NotStarted)?,
+        };
         if description.cell != target.cell_id() {
             return Err(InvocationError::NotStarted(Error::Command(
                 "transport described a different Cell",

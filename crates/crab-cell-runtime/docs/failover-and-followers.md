@@ -1500,6 +1500,9 @@ Prometheus metrics must remain bounded in cardinality:
 crab_cell_durability_proofs_total{source="fleet|object"}
 crab_cell_durability_submissions_total{outcome="fleet|unsupported|unavailable|rejected"}
 crab_cell_durability_wait_seconds{source="fleet|object"}
+crab_cell_command_responses_total{source="recorded|fleet|object"}
+crab_cell_command_response_seconds{source="recorded|fleet|object"}
+crab_cell_command_confirmation_seconds{source="recorded|fleet|object"}
 crab_cell_node_log_append_bytes_total{result="acked|nacked"}
 crab_cell_node_log_uncovered_bytes
 crab_cell_node_log_lanes{state="open|degraded|sealed"}
@@ -1516,6 +1519,20 @@ crab_cell_self_fences_total{reason}
 
 Cell ID, repository name, request ID, session ID, and object digest belong in
 structured logs or bounded administrative queries, never metric labels.
+
+Command responses count once at the final runtime reply boundary. `fleet` or
+`object` records the proof that released a new commit; `recorded` means a
+previously durable result was replayed. Later object publication can increment
+the proof counters without adding another response. Runtime errors and dropped
+receivers add no response; a durable application rejection is still a returned
+outcome. The same boundary covers effect delivery. Queries and migrations use
+separate paths and are excluded.
+
+Response duration starts at admitted enqueue and includes actor queueing,
+execution, capture, proof, and final worker confirmation. The confirmation
+histogram isolates that last worker wait and is zero for recorded results.
+These metrics exclude HTTP/peer transport and cannot alone establish public
+action latency or sustained publisher drain.
 
 The current server wiring emits durability-proof and follower-append events
 through `CellTelemetry`; it samples the signed node-log phase and session-lease

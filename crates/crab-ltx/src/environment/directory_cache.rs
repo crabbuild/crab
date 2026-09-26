@@ -11,7 +11,95 @@ use std::{
 };
 
 #[cfg(feature = "replica")]
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+
+#[derive(Default)]
+pub(super) struct CacheFills {
+    state: Mutex<CacheFillState>,
+    finished: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct CacheFillState {
+    paths: HashSet<PathBuf>,
+    opening: HashSet<PathBuf>,
+}
+
+impl CacheFills {
+    pub(super) fn claim(self: &Arc<Self>, path: PathBuf) -> Option<CacheFill> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if path
+            .parent()
+            .is_some_and(|root| state.opening.contains(root))
+            || !state.paths.insert(path.clone())
+        {
+            return None;
+        }
+        Some(CacheFill {
+            fills: Arc::clone(self),
+            path,
+            opening: false,
+        })
+    }
+
+    pub(super) async fn open(self: &Arc<Self>, root: PathBuf) -> CacheFill {
+        loop {
+            let finished = self.finished.notified();
+            {
+                let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                if !state.opening.contains(&root)
+                    && !state.paths.iter().any(|path| path.parent() == Some(&root))
+                {
+                    state.opening.insert(root.clone());
+                    return CacheFill {
+                        fills: Arc::clone(self),
+                        path: root,
+                        opening: true,
+                    };
+                }
+            }
+            finished.await;
+        }
+    }
+
+    pub(super) async fn drain(&self) {
+        loop {
+            // Register before checking: completion between the check and await
+            // must wake shutdown even when no later fill will finish.
+            let finished = self.finished.notified();
+            {
+                let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+                if state.paths.is_empty() && state.opening.is_empty() {
+                    return;
+                }
+            }
+            finished.await;
+        }
+    }
+}
+
+pub(super) struct CacheFill {
+    fills: Arc<CacheFills>,
+    path: PathBuf,
+    opening: bool,
+}
+
+impl Drop for CacheFill {
+    fn drop(&mut self) {
+        let mut state = self
+            .fills
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.opening {
+            state.opening.remove(&self.path);
+        } else {
+            state.paths.remove(&self.path);
+        }
+        drop(state);
+        self.fills.finished.notify_waiters();
+    }
+}
 
 #[cfg(feature = "replica")]
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -71,6 +159,8 @@ pub(crate) struct DirectoryCache {
 
 #[cfg(feature = "replica")]
 pub(crate) const MAX_DIRECTORY_CACHE_ENTRIES: usize = 16_384;
+#[cfg(feature = "replica")]
+const MAX_DIRECTORY_CACHE_INDEX_BYTES: u64 = 16 << 20;
 
 #[cfg(feature = "replica")]
 impl DirectoryCache {
@@ -91,6 +181,12 @@ impl DirectoryCache {
             .open(&index)
             .and_then(|mut file| {
                 let length = file.file_len()?;
+                if length > MAX_DIRECTORY_CACHE_INDEX_BYTES {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "cache index too large",
+                    ));
+                }
                 let length = usize::try_from(length).map_err(io::Error::other)?;
                 let bytes = file.read_exact_at(0, length)?;
                 let index: DirectoryCacheIndex =
@@ -104,40 +200,29 @@ impl DirectoryCache {
                 Ok(index.entries)
             })
             .unwrap_or_default();
-        let entries = entries
-            .into_iter()
-            .filter_map(|(key, length)| {
-                let path = root.join(hex_digest(blake3::hash(key.as_bytes()).as_bytes()));
-                let valid = length != 0
-                    && length <= max_bytes
-                    && filesystem.exists(&path).ok() == Some(true)
-                    && filesystem.file_len(&path).ok() == Some(length)
-                    && safe_cache_entry(&filesystem, &root, &path).ok() == Some(true);
-                if !valid {
-                    let _ = filesystem.remove_file(&path);
-                }
-                valid.then_some((key, length))
-            })
-            .collect::<BTreeMap<_, _>>();
         let mut retained = BTreeMap::new();
+        let mut bytes = 0u64;
         let mut reservations = BTreeMap::new();
         for (key, length) in entries {
-            let within_limits = length <= max_bytes
+            let path = root.join(hex_digest(blake3::hash(key.as_bytes()).as_bytes()));
+            let valid = length != 0
+                && length <= max_bytes
                 && retained.len() < MAX_DIRECTORY_CACHE_ENTRIES
-                && retained.values().copied().fold(0_u64, u64::saturating_add)
-                    <= max_bytes.saturating_sub(length);
-            let reservation = within_limits
-                .then(|| budget.try_reserve(length).ok())
-                .flatten();
+                && bytes <= max_bytes.saturating_sub(length)
+                && filesystem.exists(&path).ok() == Some(true)
+                && filesystem.file_len(&path).ok() == Some(length)
+                && safe_cache_entry(&filesystem, &root, &path).ok() == Some(true);
+            let reservation = valid.then(|| budget.try_reserve(length).ok()).flatten();
             if let Some(reservation) = reservation {
+                // The admission check proves this addition fits the cache cap.
+                // Re-summing earlier entries makes restart quadratic in count.
+                bytes += length;
                 retained.insert(key.clone(), length);
                 reservations.insert(key, reservation);
             } else {
-                let path = root.join(hex_digest(blake3::hash(key.as_bytes()).as_bytes()));
                 let _ = filesystem.remove_file(&path);
             }
         }
-        let bytes = retained.values().copied().sum();
         let order = retained.keys().cloned().collect();
         Self {
             filesystem,
@@ -189,13 +274,18 @@ impl DirectoryCache {
 
     pub(crate) fn get(&self, key: &str, max_bytes: u64) -> io::Result<Option<Vec<u8>>> {
         let lock = self.fill_lock(key);
-        let _guard = lock
-            .lock()
-            .map_err(|_| io::Error::other("cache fill lock poisoned"))?;
+        let _guard = match lock.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+            // Interrupted optional fills cannot poison canonical reads. File
+            // shape and the caller's digest check still authenticate every hit.
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+        };
         let path = self.key_path(key);
         if !self.filesystem.exists(&path)? {
-            self.remove_entry(key);
-            self.persist_index();
+            if self.remove_entry(key) {
+                self.persist_index();
+            }
             return Ok(None);
         }
         if !safe_cache_entry(&self.filesystem, &self.root, &path)? {
@@ -251,7 +341,8 @@ impl DirectoryCache {
             ));
         }
         self.touch_entry(key, length);
-        self.persist_index();
+        // Recency lives only in memory. Persisting an unchanged membership map
+        // turns a verified disk-cache hit into an unnecessary durable write.
         Ok(Some(bytes))
     }
 
@@ -261,16 +352,23 @@ impl DirectoryCache {
             return Ok(());
         }
         let lock = self.fill_lock(key);
-        let _guard = lock
-            .lock()
-            .map_err(|_| io::Error::other("cache fill lock poisoned"))?;
+        let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
         self.filesystem.create_dir_all(&self.root)?;
         let path = self.key_path(key);
         if self.filesystem.exists(&path)? {
             let length = self.filesystem.file_len(&path)?;
-            if length == bytes.len() as u64 {
+            let indexed = self
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .entries
+                .get(key)
+                .copied()
+                == Some(length);
+            // A previous fill may have installed bytes before its index write
+            // failed. Unindexed files need a fresh disk reservation on reuse.
+            if length == bytes.len() as u64 && indexed {
                 self.touch_entry(key, length);
-                self.persist_index();
                 return Ok(());
             }
             let _ = self.filesystem.remove_file(&path);
@@ -312,9 +410,7 @@ impl DirectoryCache {
 
     pub(crate) fn invalidate(&self, key: &str) -> io::Result<()> {
         let lock = self.fill_lock(key);
-        let _guard = lock
-            .lock()
-            .map_err(|_| io::Error::other("cache fill lock poisoned"))?;
+        let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
         let path = self.key_path(key);
         match self.filesystem.remove_file(&path) {
             Ok(()) => {}
@@ -358,16 +454,18 @@ impl DirectoryCache {
         state.reservations.insert(key.to_owned(), reservation);
     }
 
-    pub(crate) fn remove_entry(&self, key: &str) {
+    pub(crate) fn remove_entry(&self, key: &str) -> bool {
         let mut state = match self.state.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if let Some(previous) = state.entries.remove(key) {
+        let previous = state.entries.remove(key);
+        if let Some(previous) = previous {
             state.bytes = state.bytes.saturating_sub(previous);
         }
         state.reservations.remove(key);
         state.order.retain(|entry| entry != key);
+        previous.is_some()
     }
 
     pub(crate) fn make_room(&self, required: u64) -> io::Result<()> {

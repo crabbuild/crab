@@ -16,9 +16,13 @@ pub(in crate::cell::actor) fn start_background_hydration(
         return;
     }
     let resources = pool.resource_ledger();
+    let now = std::time::Instant::now();
     let candidates = cells
         .iter_mut()
         .filter_map(|(cell, active)| {
+            if now < active.hydration_retry_at {
+                return None;
+            }
             let reservation = resources
                 .try_reserve(ResourceCost::zero().with_hydration_jobs(1))
                 .ok()?;
@@ -48,13 +52,9 @@ pub(in crate::cell::actor) fn start_background_hydration(
         tasks.spawn(async move {
             let _reservation = reservation;
             let deadline = std::time::Instant::now() + SQL_WALL_DEADLINE;
-            let result = tokio::time::timeout_at(
-                deadline.into(),
-                pool.hydrate(cell, HYDRATION_PAGES_PER_STEP, deadline),
-            )
-            .await
-            .map_err(|_| Error::Deadline)
-            .and_then(|result| result);
+            // The worker distinguishes abandoned fetches from uncertain local
+            // installation. An outer timeout would erase that safety boundary.
+            let result = pool.hydrate(cell, HYDRATION_PAGES_PER_STEP, deadline).await;
             if result.is_err() {
                 let _ = pool.fence(cell).await;
             }

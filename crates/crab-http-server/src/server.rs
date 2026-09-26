@@ -1143,14 +1143,23 @@ pub async fn serve(config: Config) -> Result<()> {
         startup.layout.clone(),
         startup.identity,
         cell_runtime.clone(),
+        cell_runtime.telemetry_handle(),
     );
-    let peer_round_trip: Arc<dyn PeerRoundTrip> = Arc::new(crate::peer::PeerHttpRoundTrip::new(
-        startup.identity,
-        crab_cell_runtime::control::authority::CellAuthority::new(startup.layout.clone()),
-        directory.clone(),
-        peer_tls.client_identity(),
-        session,
-    ));
+    let owner_hints = crate::peer::PeerOwnerHints::default();
+    let peer_round_trip: Arc<dyn PeerRoundTrip> = Arc::new(
+        crate::peer::PeerHttpRoundTrip::new(
+            owner_hints.clone(),
+            startup.identity,
+            crab_cell_runtime::control::authority::CellAuthority::with_telemetry(
+                startup.layout.clone(),
+                cell_runtime.telemetry_handle(),
+            ),
+            directory.clone(),
+            peer_tls.client_identity(),
+            session,
+        )
+        .with_metrics(metrics.clone()),
+    );
     let node_log_transport: Arc<dyn crab_cell_runtime::node::log_transport::NodeLogTransport> =
         Arc::new(
             crate::peer::NodeLogHttpTransport::new(
@@ -1194,6 +1203,7 @@ pub async fn serve(config: Config) -> Result<()> {
         Arc::clone(&registry),
         cell_runtime.clone(),
         crate::cells::RepositoryCellPeer::new(
+            owner_hints,
             directory.clone(),
             Arc::new(PeerSigner::new(
                 session,
@@ -2151,8 +2161,9 @@ async fn boundary(State(server): State<Arc<Server>>, request: Request, next: Nex
             response.headers_mut().insert("x-request-id", value);
         }
         tracing::info!(
+            event = "http_response_ready",
             status = response.status().as_u16(),
-            elapsed_ms = started.elapsed().as_millis(),
+            elapsed_us = started.elapsed().as_micros(),
             "request completed"
         );
         let status = response.status();

@@ -7,6 +7,9 @@ use rusqlite::{Connection, Transaction};
 use crate::{CaptureBatch, CrabError, Limits, LocalSegment, Position, Result, SegmentInfo};
 use crate::{capture::CaptureEngine, host::LtxHost, ltx, types::Txid};
 
+#[cfg(feature = "replica")]
+pub use crate::writable_vfs::{HydrationBatch, HydrationRead};
+
 /// Number of SQLite connections retained by one open managed database.
 pub const MANAGED_SQLITE_CONNECTIONS: u64 = 3;
 
@@ -105,6 +108,35 @@ impl Db {
         })
     }
 
+    /// Selects up to 64 missing pages for asynchronous background hydration.
+    ///
+    /// The caller owns fetch admission and must install only on this activation.
+    #[cfg(feature = "replica")]
+    pub fn prepare_hydration(&self, pages: u32) -> Result<Option<HydrationRead>> {
+        self.ensure_active()?;
+        self.paged
+            .as_ref()
+            .map(|paged| paged.prepare_hydration(pages))
+            .transpose()
+    }
+
+    /// Installs authenticated pages without provider I/O on the SQLite worker.
+    ///
+    /// Superseded pages are skipped. An installation failure fences this Db.
+    #[cfg(feature = "replica")]
+    pub fn install_hydration(&mut self, batch: HydrationBatch) -> Result<crate::Hydration> {
+        self.ensure_active()?;
+        let result = self
+            .paged
+            .as_mut()
+            .ok_or(CrabError::InvalidState("not a sparse activation"))?
+            .install_hydration(&self.writer, batch);
+        if result.is_err() {
+            self.fenced = true;
+        }
+        result
+    }
+
     /// Takes the provider/checksum source behind a sparse SQLite I/O error.
     #[cfg(feature = "replica")]
     pub fn take_io_error(&self) -> Option<CrabError> {
@@ -141,8 +173,20 @@ impl Db {
                 index += 1;
                 continue;
             }
-            let bytes = self.host.read(segment.path(), segment.info().size_bytes)?;
-            crate::recovery::verify_segment(&bytes, segment.info(), self.limits)?;
+            let mut file = LtxHost {
+                facilities: self.host.clone(),
+                max_database_bytes: self.limits.max_database_bytes,
+                max_file_bytes: segment.info().size_bytes,
+            }
+            .open(segment.path())?;
+            if file.file_len()? != segment.info().size_bytes {
+                return Err(CrabError::ChecksumMismatch);
+            }
+            crate::recovery::verify_segment_reader(
+                std::io::BufReader::with_capacity(64 << 10, file),
+                segment.info(),
+                self.limits,
+            )?;
             // The published immutable root, not durable local deletion, releases
             // the result. A fresh session never adopts crash-resurrected residue.
             self.host.filesystem.remove_file(segment.path())?;

@@ -92,7 +92,7 @@ impl SegmentInfo {
         }
     }
 
-    #[cfg_attr(not(feature = "replica"), expect(dead_code))]
+    #[cfg(all(test, feature = "replica"))]
     pub(crate) fn from_decoded(bytes: &[u8], file: &crate::ltx::DecodedFile) -> Self {
         Self::from_inspected(file, bytes.len() as u64, *blake3::hash(bytes).as_bytes())
     }

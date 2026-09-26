@@ -252,9 +252,10 @@ async fn request_requires_the_live_sessions_mtls_certificate_and_signing_key() {
                 actions: vec!["repository.read".into()],
             },
             NOW_MS,
-            NOW_MS + 10_000,
+            NOW_MS + 20_000,
             5_000,
             PeerOperation::Read(peer_wire::ReadRequest {
+                expected: None,
                 target: Some(peer_wire::Target {
                     tenant_id: target.tenant().as_bytes().to_vec(),
                     application_id: target.application().as_bytes().to_vec(),
@@ -296,4 +297,33 @@ async fn request_requires_the_live_sessions_mtls_certificate_and_signing_key() {
             .await,
         Err(Error::PeerAuthorization(_))
     ));
+    let enrolled = directory
+        .peer_verifier(
+            SessionId::from_bytes([1; 16]),
+            Digest::from_bytes([3; 32]),
+            certificate_key,
+            NOW_MS + 1,
+        )
+        .await
+        .unwrap();
+    let later = NOW_MS + 10_001;
+    // The request remains valid after the enrolled node lease expires. A CPU
+    // queue must not turn the earlier enrollment observation into fresh proof.
+    assert!(
+        crate::peer::PeerVerifier::new(
+            SessionId::from_bytes([1; 16]),
+            Digest::from_bytes([5; 32]),
+            signer.verifying_key(),
+        )
+        .verify(&request, later)
+        .is_ok()
+    );
+    assert!(
+        enrolled
+            .verify(
+                crate::peer::UnverifiedPeerRequest::decode(&request).unwrap(),
+                later
+            )
+            .is_err()
+    );
 }

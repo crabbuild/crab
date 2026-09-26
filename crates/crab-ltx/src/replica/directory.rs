@@ -2,12 +2,16 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{CellObjectKind, CellStorageLayout, CrabError, Host, Result};
 
+mod checksums;
 mod initial;
+mod relocate;
 mod update;
 
+pub(super) use checksums::load_checksums;
 pub(super) use initial::{
     build_and_upload as build_initial_and_upload, entries as initial_entries,
 };
+pub(super) use relocate::run as relocate_and_upload;
 
 const MAGIC: &[u8; 8] = b"CRBDIR01";
 const HEADER_BYTES: usize = 32;
@@ -545,165 +549,6 @@ pub(super) async fn lookup_spans(
     Ok(spans)
 }
 
-pub(super) async fn load_checksums(
-    verification: Verification<'_>,
-    root: [u8; 32],
-    height: u32,
-    destination: &std::path::Path,
-    limits: crate::Limits,
-) -> Result<crate::pages::PageChecksums> {
-    if height > 3 || verification.database_pages == 0 {
-        return Err(CrabError::LTXCorrupted);
-    }
-    let checksum_path = crate::resume::checksum_path(destination);
-    if verification.host.filesystem.exists(destination)?
-        || verification.host.filesystem.exists(&checksum_path)?
-    {
-        return Err(CrabError::InvalidState(
-            "writable activation destination already exists",
-        ));
-    }
-    if u64::from(verification.database_pages) * 8 > limits.max_database_bytes {
-        return Err(CrabError::Limit(crate::LimitKind::ChecksumFileBytes));
-    }
-
-    let mut file = verification.host.filesystem.create(&checksum_path)?;
-    let result = async {
-        let mut pending = vec![(root, height, None)];
-        let mut previous_page = 0u32;
-        let mut seen = 0u64;
-        let mut checksum = crate::CHECKSUM_FLAG;
-        let mut output = Vec::with_capacity(64 << 10);
-        while let Some((digest, remaining, expected)) = pending.pop() {
-            let bytes = read_node(&verification, digest).await?;
-            let header = Header::parse(&bytes)?;
-            if (remaining == 0) != (header.kind == 0) {
-                return Err(CrabError::LTXCorrupted);
-            }
-            if header.kind == 0 {
-                let (aggregate, entries) = verify_leaf(
-                    &bytes,
-                    &header,
-                    verification.page_size,
-                    verification.database_pages,
-                    verification.extents,
-                )?;
-                if expected.is_some_and(|value| value != aggregate) {
-                    return Err(CrabError::ChecksumMismatch);
-                }
-                for entry in entries {
-                    let expected_page = previous_page
-                        .checked_add(1)
-                        .ok_or(CrabError::LTXCorrupted)?;
-                    let lock = crate::ltx::lock_pgno(verification.page_size);
-                    if expected_page == lock {
-                        append_checksum(file.as_mut(), &mut output, 0)?;
-                        previous_page = lock;
-                    }
-                    if entry.page
-                        != previous_page
-                            .checked_add(1)
-                            .ok_or(CrabError::LTXCorrupted)?
-                    {
-                        return Err(CrabError::LTXCorrupted);
-                    }
-                    append_checksum(file.as_mut(), &mut output, entry.checksum)?;
-                    checksum = crate::CHECKSUM_FLAG | (checksum ^ entry.checksum);
-                    previous_page = entry.page;
-                    seen += 1;
-                }
-                continue;
-            }
-            let (aggregate, children) = verify_branch(&bytes, &header)?;
-            if expected.is_some_and(|value| value != aggregate) {
-                return Err(CrabError::ChecksumMismatch);
-            }
-            let next = remaining.checked_sub(1).ok_or(CrabError::LTXCorrupted)?;
-            pending.extend(
-                children
-                    .into_iter()
-                    .rev()
-                    .map(|child| (child.digest, next, Some(child.aggregate))),
-            );
-        }
-        let lock = crate::ltx::lock_pgno(verification.page_size);
-        if previous_page < verification.database_pages {
-            if previous_page
-                .checked_add(1)
-                .ok_or(CrabError::LTXCorrupted)?
-                != lock
-                || lock != verification.database_pages
-            {
-                return Err(CrabError::LTXCorrupted);
-            }
-            append_checksum(file.as_mut(), &mut output, 0)?;
-        }
-        let expected =
-            u64::from(verification.database_pages) - u64::from(lock <= verification.database_pages);
-        if seen != expected {
-            return Err(CrabError::LTXCorrupted);
-        }
-        if !output.is_empty() {
-            file.write_all(&output)?;
-        }
-        file.sync_all()?;
-        Ok(checksum)
-    }
-    .await;
-    drop(file);
-
-    let checksum = match result {
-        Ok(checksum) => {
-            if let Err(error) = verification.host.filesystem.sync_parent(&checksum_path) {
-                cleanup_checksum_file(verification.host, &checksum_path);
-                return Err(error.into());
-            }
-            checksum
-        }
-        Err(error) => {
-            cleanup_checksum_file(verification.host, &checksum_path);
-            return Err(error);
-        }
-    };
-    crate::pages::PageChecksums::from_file(
-        crate::LtxHost {
-            // The checksum base lives with the active writer. Temporary job
-            // admission must end before that handle is returned.
-            facilities: verification
-                .host
-                .clone()
-                .without_recovery()
-                .without_dirty()
-                .without_scratch(),
-            max_database_bytes: limits.max_database_bytes,
-            max_file_bytes: limits.max_database_bytes,
-        },
-        &checksum_path,
-        verification.page_size,
-        verification.database_pages,
-        checksum,
-    )
-}
-
-fn append_checksum(
-    file: &mut dyn crate::environment::FileIo,
-    output: &mut Vec<u8>,
-    checksum: u64,
-) -> Result<()> {
-    output.extend_from_slice(&checksum.to_be_bytes());
-    if output.len() >= 64 << 10 {
-        file.write_all(output)?;
-        output.clear();
-    }
-    Ok(())
-}
-
-fn cleanup_checksum_file(host: &Host, path: &std::path::Path) {
-    if host.filesystem.remove_file(path).is_ok() {
-        let _ = host.filesystem.sync_parent(path);
-    }
-}
-
 async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<Arc<[u8]>> {
     let path = verification.layout.incarnation_object_path(
         verification.cell,
@@ -749,7 +594,7 @@ async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<
             .directory_cache_invalidate(persistent_key.clone())
             .await;
     }
-    let _permit = verification.host.io_permit().await?;
+    let permit = verification.host.io_permit().await?;
     let result = verification
         .layout
         .store()
@@ -764,10 +609,12 @@ async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<
     if *blake3::hash(&bytes).as_bytes() != digest {
         return Err(CrabError::ChecksumMismatch);
     }
+    // Verified bytes no longer need origin admission. Cache fills admit their
+    // own bounded job without queuing, so slow disk cannot occupy network slots.
+    drop(permit);
     let _ = verification
         .host
-        .directory_cache_put(persistent_key, bytes.to_vec(), MAX_NODE_BYTES)
-        .await;
+        .directory_cache_put(persistent_key, bytes.to_vec(), MAX_NODE_BYTES);
     let bytes: Arc<[u8]> = bytes.to_vec().into();
     super::cache::insert(
         verification.layout,

@@ -868,6 +868,7 @@ async fn scan_executes_registered_workflow_activity_without_blocking_the_scanner
         registry.clone(),
         runtime.clone(),
         super::super::RepositoryCellPeer::new(
+            crate::peer::PeerOwnerHints::default(),
             node_directory.clone(),
             Arc::new(PeerSigner::new(session, registry.release_digest(), key)),
             Arc::new(UnavailablePeer),
@@ -1041,6 +1042,7 @@ async fn scan_cursor_advances_when_the_cycle_budget_is_exhausted() {
         Arc::clone(&registry),
         runtime.clone(),
         super::super::RepositoryCellPeer::new(
+            crate::peer::PeerOwnerHints::default(),
             node_directory.clone(),
             Arc::new(PeerSigner::new(session, registry.release_digest(), key)),
             Arc::new(UnavailablePeer),
@@ -1254,6 +1256,7 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
         Arc::clone(&registry),
         local_runtime.clone(),
         super::super::RepositoryCellPeer::new(
+            crate::peer::PeerOwnerHints::default(),
             node_directory.clone(),
             Arc::new(PeerSigner::new(
                 local_session,
@@ -1411,6 +1414,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
         Arc::clone(&registry),
         runtime.clone(),
         super::super::RepositoryCellPeer::new(
+            crate::peer::PeerOwnerHints::default(),
             node_directory.clone(),
             Arc::new(PeerSigner::new(session, registry.release_digest(), key)),
             Arc::new(UnavailablePeer),
@@ -1561,6 +1565,7 @@ async fn due_scheduler_fixture(
         Arc::clone(&registry),
         runtime.clone(),
         super::super::RepositoryCellPeer::new(
+            crate::peer::PeerOwnerHints::default(),
             node_directory.clone(),
             Arc::new(PeerSigner::new(session, registry.release_digest(), key)),
             Arc::new(UnavailablePeer),
@@ -2039,6 +2044,7 @@ async fn activating_release_migrates_idle_cell_before_ready_gate() {
         Arc::clone(&registry),
         runtime.clone(),
         super::super::RepositoryCellPeer::new(
+            crate::peer::PeerOwnerHints::default(),
             node_directory.clone(),
             Arc::new(PeerSigner::new(session, registry.release_digest(), key)),
             Arc::new(UnavailablePeer),

@@ -5,6 +5,7 @@ use super::*;
 pub(super) struct RuntimeInner {
     pub(super) sender: mpsc::Sender<Message>,
     pub(super) resources: ResourceLedger,
+    pub(super) primitive_jobs: Arc<Semaphore>,
     pub(super) shutting_down: AtomicBool,
     pub(super) accepting_cells: AtomicBool,
     pub(super) session: SessionId,
@@ -131,6 +132,10 @@ pub(super) enum Message {
 }
 
 pub(super) struct QueuedCommand {
+    pub(super) trace: tracing::Span,
+    pub(super) telemetry: crate::fleet::telemetry::CellTelemetryHandle,
+    pub(super) queued_at: std::time::Instant,
+    pub(super) response_proof: Option<(crate::node::log::DurabilitySource, std::time::Duration)>,
     pub(super) cell: CellId,
     pub(super) admission: Arc<CellAdmission>,
     pub(super) operation: QueuedOperation,
@@ -249,6 +254,7 @@ pub(super) struct ActiveCell {
     pub(super) last_used_ms: i64,
     pub(super) last_work_at: std::time::Instant,
     pub(super) compaction_retry_at: std::time::Instant,
+    pub(super) hydration_retry_at: std::time::Instant,
     // The published head's due time and commit sequence, mirrored from the
     // authoritative control so a resident Cell can be ticked without a
     // metadata read. Both advance through the same publication that writes
@@ -343,7 +349,7 @@ pub(super) enum TaskResult {
         cell: CellId,
         generation: u64,
         effect_id: u64,
-        result: crate::Result<Option<crab_ltx::Hydration>>,
+        result: crate::Result<HydrationStep>,
     },
     InventoryRefreshed {
         cell: CellId,

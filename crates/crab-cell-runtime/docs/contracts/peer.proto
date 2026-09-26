@@ -94,6 +94,7 @@ message MutationRequest {
   Target target = 1;
   MutationIdentity identity = 2;
   uint32 timeout_ms = 3;
+  CellDescription expected = 4; // Required; checked against the active owner before execution.
   oneof operation {
     CellCommand cell_command = 10;
   }
@@ -142,6 +143,7 @@ message ReadRequest {
   Target target = 1;
   uint32 timeout_ms = 2;
   Receipt minimum = 3;
+  CellDescription expected = 4; // Required for CellQuery; Describe obtains this observation.
   oneof operation {
     bool describe = 10;
     CellQuery cell_query = 15;
@@ -163,7 +165,12 @@ message ReadReply {
   }
   reserved 3 to 5;
 }
-message ResolveRequest { Target target = 1; MutationIdentity identity = 2; bytes operation_digest = 3; }
+message ResolveRequest {
+  Target target = 1;
+  MutationIdentity identity = 2;
+  bytes operation_digest = 3;
+  CellDescription expected = 4;
+}
 message ResolveReply {
   enum State { INVALID = 0; COMMITTED = 1; REJECTED = 2; ABSENT = 3; UNKNOWN = 4; EXPIRED = 5; }
   State state = 1;

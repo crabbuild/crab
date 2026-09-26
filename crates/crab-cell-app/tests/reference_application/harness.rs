@@ -58,7 +58,7 @@ where
                 layout.clone(),
                 *target.cell_id().as_bytes(),
                 *incarnation.as_bytes(),
-                Limits::default(),
+                reference_limits(),
             )?,
             authority,
             observed,
@@ -66,6 +66,16 @@ where
             initialize,
         )
         .await
+}
+
+pub(crate) fn reference_limits() -> Limits {
+    // The reference application's Cell types declare these bounds. CellNode
+    // rejects a replica whose limits differ from that application contract.
+    Limits {
+        max_database_bytes: 64 * 1024 * 1024,
+        max_capture_bytes: 16 * 1024 * 1024,
+        ..Limits::default()
+    }
 }
 
 pub(crate) fn reference_host() -> Host {

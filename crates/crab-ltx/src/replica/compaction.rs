@@ -1,6 +1,11 @@
-use std::{io, ops::Range, path::Path};
+use std::{
+    io,
+    ops::Range,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
-use futures_util::{StreamExt as _, stream};
+use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 
 use super::merge::LocatorMerge;
 use super::{
@@ -16,7 +21,8 @@ pub(super) mod scratch;
 use scratch::ScratchFiles;
 
 use output::*;
-pub(super) use scratch::{upload, upload_source};
+use scratch::upload;
+pub(super) use scratch::upload_source;
 use source::*;
 
 const INDEX_READ_BYTES: u64 = 60 * 8_192;
@@ -42,33 +48,62 @@ pub(super) async fn prepare(
         return Err(CrabError::InvalidState("invalid compaction level or range"));
     }
 
-    let mut scratch = ScratchFiles::new(&replica.host, scratch_directory);
-    let original_indexes = scratch.create("source-indexes")?;
-    let original_bodies = scratch.create("source-bodies")?;
-    let compacted_ltx = scratch.create("compacted-ltx")?;
-    let codec_index = scratch.create("codec-index")?;
-    let compacted_index = scratch.create("compacted-index")?;
+    let host = replica.host.clone();
+    let directory = scratch_directory.to_owned();
+    let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
+    let (cleaned, cleanup) = tokio::sync::oneshot::channel();
+    let result = async {
+        let files = replica
+            .host
+            .run(move || {
+                let mut scratch = ScratchFiles::new(host, &directory, runtime, cleaned);
+                Ok::<_, CrabError>(CompactionFiles {
+                    original_indexes: scratch.create("source-indexes")?,
+                    original_bodies: scratch.create("source-bodies")?,
+                    compacted_ltx: scratch.create("compacted-ltx")?,
+                    codec_index: scratch.create("codec-index")?,
+                    compacted_index: scratch.create("compacted-index")?,
+                    scratch: Arc::new(scratch),
+                })
+            })
+            .await??;
+        prepare_root(replica, base, graph, range, level, files).await
+    }
+    .await;
+    // Ordinary completion includes cleanup. Cancellation leaves cleanup owned
+    // by the last dispatched file job instead of unlinking its inputs early.
+    let _ = cleanup.await;
+    result
+}
+
+struct CompactionFiles {
+    original_indexes: PathBuf,
+    original_bodies: PathBuf,
+    compacted_ltx: PathBuf,
+    codec_index: PathBuf,
+    compacted_index: PathBuf,
+    scratch: Arc<ScratchFiles>,
+}
+
+async fn prepare_root(
+    replica: &CellReplica,
+    base: &RootRef,
+    graph: LoadedGraph,
+    range: Range<usize>,
+    level: u8,
+    files: CompactionFiles,
+) -> Result<PreparedRoot> {
+    let selected = &graph.descriptors[range.clone()];
     // The authenticated streams have separate scratch files. Both must finish
     // before the merge, but neither depends on the other's transfer.
     let (spooled, body_inputs) = futures_util::future::join(
-        spool_indexes(replica, &graph.descriptors, &original_indexes),
-        spool_selected_bodies(replica, selected, &original_bodies),
+        spool_indexes(replica, selected, &files.scratch, &files.original_indexes),
+        spool_selected_bodies(replica, selected, &files.scratch, &files.original_bodies),
     )
     .await;
     let spooled = spooled?;
     let body_inputs = body_inputs?;
-    let selected_inputs = spooled[range.clone()].to_vec();
-    let artifacts = write_compacted(
-        replica,
-        &selected_inputs,
-        &original_indexes,
-        &original_bodies,
-        &body_inputs,
-        &compacted_ltx,
-        &codec_index,
-        &compacted_index,
-    )
-    .await?;
+    let artifacts = write_compacted(replica, spooled, &body_inputs, &files).await?;
 
     let first = selected.first().ok_or(CrabError::TxNotAvailable)?;
     let last = selected.last().ok_or(CrabError::TxNotAvailable)?;
@@ -92,13 +127,17 @@ pub(super) async fn prepare(
     let (body_upload, index_upload) = futures_util::future::join(
         upload(
             replica,
-            &compacted_ltx,
+            &files.scratch,
+            &files.compacted_ltx,
+            artifacts.ltx.length,
             &descriptor.info.blake3,
             CellObjectKind::Ltx,
         ),
         upload(
             replica,
-            &compacted_index,
+            &files.scratch,
+            &files.compacted_index,
+            artifacts.index.length,
             &descriptor.index_digest,
             CellObjectKind::Index,
         ),
@@ -111,29 +150,25 @@ pub(super) async fn prepare(
     descriptors.splice(range.clone(), [descriptor.clone()]);
     replica.validate_chain(&descriptors, base.position)?;
 
-    let compacted_source = replica.host.filesystem.open(&compacted_index)?;
-    let original_source = replica.host.filesystem.open(&original_indexes)?;
-    let mut final_inputs = Vec::with_capacity(descriptors.len());
-    final_inputs.extend(spooled[..range.start].iter().cloned().map(|mut input| {
-        input.source = 1;
-        input
-    }));
-    final_inputs.push(SpoolInput {
+    let compacted_source = files.scratch.open(&files.compacted_index).await?;
+    let compacted_input = SpoolInput {
         descriptor,
-        source: 0,
         start: 0,
         length: artifacts.index.length,
-    });
-    final_inputs.extend(spooled[range.end..].iter().cloned().map(|mut input| {
-        input.source = 1;
-        input
-    }));
-    let entries = MergedEntries::new(vec![compacted_source, original_source], final_inputs)?;
+    };
+    let entries =
+        MergedEntries::open(&replica.host, compacted_source, vec![compacted_input]).await?;
     let endpoint = descriptors.last().ok_or(CrabError::LTXCorrupted)?;
     let page_size = endpoint.info.page_size;
     let database_pages = endpoint.info.database_pages;
-    let directory =
-        directory::build_initial_and_upload(entries, page_size, database_pages, replica).await?;
+    let directory = directory::relocate_and_upload(
+        replica,
+        &graph,
+        &descriptors,
+        selected,
+        entries.stream(replica.host.clone()),
+    )
+    .await?;
     replica
         .finish_root(
             Some(base),
@@ -161,7 +196,6 @@ struct Artifact {
 #[derive(Clone)]
 struct SpoolInput {
     descriptor: SegmentDescriptor,
-    source: usize,
     start: u64,
     length: u64,
 }
@@ -178,51 +212,91 @@ struct LocalBodyRange {
 }
 
 struct MergedEntries {
-    sources: Vec<Box<dyn FileIo>>,
+    source: Box<dyn FileIo>,
     cursors: Vec<SpoolCursor>,
     merge: LocatorMerge,
 }
 
 impl MergedEntries {
-    fn new(mut sources: Vec<Box<dyn FileIo>>, inputs: Vec<SpoolInput>) -> Result<Self> {
-        if inputs.is_empty() {
-            return Err(CrabError::LTXCorrupted);
-        }
-        let mut merge = LocatorMerge::new(
-            inputs
-                .iter()
-                .map(|input| input.descriptor.info.database_pages),
-        );
-        let mut cursors = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            let cursor = SpoolCursor::new(input, &mut sources)?;
-            if let Some(entry) = &cursor.current {
-                merge.push(cursors.len(), entry.page);
+    async fn open(
+        host: &crate::Host,
+        mut source: Box<dyn FileIo>,
+        inputs: Vec<SpoolInput>,
+    ) -> Result<Self> {
+        host.run(move || {
+            const TOTAL_BUFFER_ENTRIES: usize = 16_384;
+            let buffer_entries = TOTAL_BUFFER_ENTRIES
+                .checked_div(inputs.len())
+                .filter(|entries| *entries > 0)
+                .ok_or(CrabError::LTXCorrupted)?
+                .min(1_024);
+            let mut merge = LocatorMerge::new(
+                inputs
+                    .iter()
+                    .map(|input| input.descriptor.info.database_pages),
+            );
+            let mut cursors = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                let cursor = SpoolCursor::new(input, source.as_mut(), buffer_entries)?;
+                if let Some(entry) = &cursor.current {
+                    merge.push(cursors.len(), entry.page);
+                }
+                cursors.push(cursor);
             }
-            cursors.push(cursor);
-        }
-        Ok(Self {
-            sources,
-            cursors,
-            merge,
+            Ok(Self {
+                source,
+                cursors,
+                merge,
+            })
         })
+        .await?
     }
-}
 
-impl Iterator for MergedEntries {
-    type Item = Result<DirectoryEntry>;
+    fn next_batch(&mut self) -> Result<(Vec<DirectoryEntry>, bool)> {
+        let mut batch = Vec::new();
+        let mut visited = 0;
+        // Stop between page groups, including discarded pages. One group
+        // visits at most the admitted descriptor count.
+        while visited < 4_096 {
+            let next = self.merge.next_group(|index| {
+                visited += 1;
+                let cursor = self.cursors.get_mut(index).ok_or(CrabError::LTXCorrupted)?;
+                let entry = cursor.current.take().ok_or(CrabError::LTXCorrupted)?;
+                cursor.advance(self.source.as_mut())?;
+                Ok((entry, cursor.current.as_ref().map(|entry| entry.page)))
+            });
+            match next {
+                Some(Ok(Some(entry))) => batch.push(entry),
+                Some(Ok(None)) => {}
+                Some(Err(error)) => return Err(error),
+                None => return Ok((batch, true)),
+            }
+        }
+        Ok((batch, false))
+    }
 
-    fn next(&mut self) -> Option<Self::Item> {
-        let Self {
-            sources,
-            cursors,
-            merge,
-        } = self;
-        merge.next_locator(|index| {
-            let cursor = cursors.get_mut(index).ok_or(CrabError::LTXCorrupted)?;
-            let entry = cursor.current.take().ok_or(CrabError::LTXCorrupted)?;
-            cursor.advance(sources)?;
-            Ok((entry, cursor.current.as_ref().map(|entry| entry.page)))
+    fn stream(self, host: crate::Host) -> impl futures_util::Stream<Item = Result<DirectoryEntry>> {
+        stream::try_unfold(Some(self), move |entries| {
+            let host = host.clone();
+            async move {
+                let Some(mut entries) = entries else {
+                    return Ok::<_, CrabError>(None);
+                };
+                let (entries, batch, finished) = host
+                    .run(move || {
+                        let (batch, finished) = entries.next_batch()?;
+                        Ok::<_, CrabError>((entries, batch, finished))
+                    })
+                    .await??;
+                if finished && batch.is_empty() {
+                    return Ok(None);
+                }
+                Ok(Some((
+                    stream::iter(batch.into_iter().map(Ok)),
+                    (!finished).then_some(entries),
+                )))
+            }
         })
+        .try_flatten()
     }
 }

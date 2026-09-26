@@ -81,6 +81,9 @@ impl CellRuntime {
         {
             return Err(Error::Control("bootstrap requires an unpublished control"));
         }
+        let replica = self
+            .replica_with_directory_cache(replica, &destination)
+            .await?;
         let reservation = self.inner.pool.reserve_activation()?;
         let incarnation = observed.value().incarnation;
         let schema = observed.value().schema;
@@ -130,6 +133,9 @@ impl CellRuntime {
         if owner.session != takeover.claimant() {
             return Err(Error::Fenced);
         }
+        let replica = self
+            .replica_with_directory_cache(replica, &destination)
+            .await?;
         loop {
             if observed.value().state != crate::control::ControlState::Recovering
                 || observed.value().owner.is_none()
@@ -208,7 +214,9 @@ impl CellRuntime {
         self.check_application_limits(&catalog, replica.limits())?;
         self.check_application_limits(&catalog, recovery_store.limits())?;
         self.activation_cell(&catalog, &observed)?;
-        let replica = self.replica_with_directory_cache(replica, &destination)?;
+        let replica = self
+            .replica_with_directory_cache(replica, &destination)
+            .await?;
         let observed = self
             .publish_attached_recovery(&replica, &authority, observed, &recovery_store)
             .await?;
@@ -246,6 +254,9 @@ impl CellRuntime {
                 "idle acquisition requires a published idle control",
             ));
         }
+        let replica = self
+            .replica_with_directory_cache(replica, &destination)
+            .await?;
         let reservation = self.inner.pool.reserve_activation()?;
         let successor = observed.value().takeover(owner)?;
         let ownership_started = std::time::Instant::now();
@@ -319,7 +330,9 @@ impl CellRuntime {
         self.ensure_acquiring()?;
         self.check_application_limits(&catalog, replica.limits())?;
         self.check_application_limits(&catalog, recovery_store.limits())?;
-        let replica = self.replica_with_directory_cache(replica, &destination)?;
+        let replica = self
+            .replica_with_directory_cache(replica, &destination)
+            .await?;
         let rollback_node_lease = self.inner.node_lease.guard()?;
         let rollback_authority = authority.clone();
         let rollback_replica = replica.clone();
@@ -474,9 +487,8 @@ impl CellRuntime {
         destination: PathBuf,
         reservation: CellReservation,
     ) -> crate::Result<CellHandle> {
-        // Root verification precedes actor activation, so it must use the same
-        // persistent directory cache as the publisher path below.
-        let replica = self.replica_with_directory_cache(replica, &destination)?;
+        // Acquisition installed one cache owner before recovery. Keep that
+        // replica through root verification, SQLite and publisher activation.
         let cell = self.activation_cell(&catalog, &observed)?;
         let control = observed.value();
         let root = control
@@ -669,16 +681,6 @@ impl CellRuntime {
         }
         .ok_or(Error::Control("Cell activation destination has no parent"))?
         .to_owned();
-        let replica = self.replica_with_directory_cache(replica, &scratch_directory)?;
-        let activation = match activation {
-            Activation::Bootstrap(mut bootstrap) => {
-                // The worker's new Db must use the same host admission and
-                // filesystem as the publisher that confirms its captured cuts.
-                bootstrap.replica = replica.clone();
-                Activation::Bootstrap(bootstrap)
-            }
-            restored => restored,
-        };
         let (reply, response) = oneshot::channel();
         let mut publisher = CellPublisher::new(replica, authority, observed, scratch_directory);
         if let Some(node_lease) = self.inner.node_lease.guard()? {
@@ -710,7 +712,7 @@ impl CellRuntime {
         })
     }
 
-    fn replica_with_directory_cache(
+    async fn replica_with_directory_cache(
         &self,
         replica: crab_ltx::CellReplica,
         destination: &Path,
@@ -722,7 +724,8 @@ impl CellRuntime {
             .inner
             .replica_host
             .clone()
-            .with_directory_cache(scratch_directory.join(".crab-cell-directory-cache"));
+            .with_directory_cache(scratch_directory.join(".crab-cell-directory-cache"))
+            .await?;
         Ok(replica.with_host(host))
     }
 }

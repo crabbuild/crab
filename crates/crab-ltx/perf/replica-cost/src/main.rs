@@ -11,8 +11,9 @@
 //! counts are provider independent; only latency changes.
 
 mod filesystem;
+mod storage;
 
-use crab_ltx::{CellReplica, CellStorageLayout, Db, Host, Limits};
+use crab_ltx::{CellReplica, CellStorageLayout, Host, Limits};
 use crab_storage::{ObjectStoreCredentials, Store};
 use object_store::{memory::InMemory, path::Path, ObjectStore};
 use serde::Serialize;
@@ -25,6 +26,7 @@ struct Config {
     commands: usize,
     warmup: usize,
     sparse: bool,
+    random_payload: bool,
     max_capture_bytes: Option<u64>,
     endpoint: Option<String>,
     bucket: String,
@@ -58,6 +60,9 @@ struct Sample {
     wal_snapshot_reads: u32,
     wal_full_reads: u32,
     elapsed_us: u64,
+    prune_us: u64,
+    captured_bytes: u64,
+    preparation_io: Vec<storage::BackendCost>,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,7 +72,9 @@ struct Report {
     workload: &'static str,
     sqlite_version: &'static str,
     payload_bytes: usize,
+    payload_pattern: &'static str,
     measured_commands: usize,
+    restored_rows: usize,
     bootstrap_capture_us: u64,
     bootstrap_parent_sync_us: u64,
     objects_per_command: u64,
@@ -101,8 +108,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(max_capture_bytes) = config.max_capture_bytes {
         limits.max_capture_bytes = max_capture_bytes;
     }
-    let mut database = Db::open(&database_path, limits)?;
     let (store, store_label, prefix) = open_store(&config)?;
+    let backend = Arc::new(storage::StorageCosts::default());
+    let store = store.with_storage_observer(backend.clone());
     let syncs = Arc::new(filesystem::ChecksumSyncs::default());
     let host = Host::default().with_filesystem(Arc::new(filesystem::MeasuredFileSystem {
         syncs: syncs.clone(),
@@ -114,6 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         limits,
     )?
     .with_host(host);
+    let mut database = replica.open_new(&database_path)?;
 
     database.transaction(|transaction| {
         transaction
@@ -124,6 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bootstrap_capture_us = bootstrap_started.elapsed().as_micros() as u64;
     let bootstrap_parent_sync_us = first.timing.parent_sync_nanos / 1_000;
     let mut root = Some(replica.prepare(None, &first, 1, 1).await?.root());
+    database.prune_captured(&first)?;
     let _bootstrap = replica.take_publication_cost();
 
     let mut database = if config.sparse {
@@ -143,7 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut samples = Vec::with_capacity(config.commands);
     for command in 0..config.commands {
-        let payload = payload(command, config.payload_bytes);
+        let payload = payload(command, config.payload_bytes, config.random_payload);
         let commit_started = Instant::now();
         database.transaction(|transaction| {
             transaction.execute(
@@ -154,23 +164,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
         let commit_us = commit_started.elapsed().as_micros() as u64;
         let capture_started = Instant::now();
-        let batch = if config.sparse {
-            database.capture_deferred()?
-        } else {
-            database.capture()?
-        };
+        // Compare activation histories under the runtime's same capture and
+        // cleanup boundaries; immediate capture would add another barrier.
+        let batch = database.capture_deferred()?;
         let capture_us = capture_started.elapsed().as_micros() as u64;
         let (checksum_sync_calls, checksum_sync_us) = syncs.take();
+        // Exclude bootstrap, activation, and sparse reads during commit/capture.
+        let _prior_io = backend.take();
         let started = Instant::now();
         let prepared = replica
             .prepare(root.as_ref(), &batch, command as u64 + 2, 1)
             .await?;
         let elapsed = started.elapsed();
+        let preparation_io = backend.take();
         let cost = replica.take_publication_cost();
         root = Some(prepared.root());
-        if config.sparse {
-            database.prune_captured(&batch)?;
-        }
+        let started = Instant::now();
+        database.prune_captured(&batch)?;
+        let prune_us = started.elapsed().as_micros() as u64;
         if command >= config.warmup {
             samples.push(Sample {
                 command,
@@ -197,10 +208,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 wal_snapshot_reads: batch.timing.wal_snapshot_reads,
                 wal_full_reads: batch.timing.wal_full_reads,
                 elapsed_us: elapsed.as_micros() as u64,
+                prune_us,
+                captured_bytes: batch
+                    .segments
+                    .iter()
+                    .map(|segment| segment.info().size_bytes)
+                    .sum(),
+                preparation_io,
             });
         }
     }
     database.close()?;
+
+    // Validate the final selected root independently of the writer and its
+    // pruned local cuts. This work stays outside all measured phases.
+    let restored = directory.path().join("restored.sqlite");
+    replica
+        .open_root(root.as_ref().ok_or("final root missing")?)
+        .await?
+        .restore(&restored)
+        .await?;
+    let connection = crab_ltx::rusqlite::Connection::open_with_flags(
+        restored,
+        crab_ltx::rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let mut statement = connection.prepare("SELECT id, value FROM payload ORDER BY id")?;
+    let mut rows = statement.query([])?;
+    let mut restored_rows = 0;
+    while let Some(row) = rows.next()? {
+        let id: u64 = row.get(0)?;
+        let value: Vec<u8> = row.get(1)?;
+        if id != restored_rows as u64 + 1
+            || value != payload(restored_rows, config.payload_bytes, config.random_payload)
+        {
+            return Err("restored root changed a committed payload".into());
+        }
+        restored_rows += 1;
+    }
+    if restored_rows != config.commands {
+        return Err("restored root lost committed payloads".into());
+    }
 
     if samples.is_empty() {
         return Err("at least one measured command is required".into());
@@ -211,6 +258,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &samples,
         bootstrap_capture_us,
         bootstrap_parent_sync_us,
+        restored_rows,
     );
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -253,11 +301,24 @@ fn open_store(
     Ok((store, label, prefix))
 }
 
-/// Deterministic, incompressible-enough payload for one command.
-fn payload(command: usize, bytes: usize) -> Vec<u8> {
-    (0..bytes)
-        .map(|index| ((command * 131 + index) % 251) as u8)
-        .collect()
+fn payload(command: usize, bytes: usize, random: bool) -> Vec<u8> {
+    if !random {
+        // Retain the periodic fixture so historical cost rows are reproducible.
+        return (0..bytes)
+            .map(|index| ((command * 131 + index) % 251) as u8)
+            .collect();
+    }
+    let mut state = (command as u64).wrapping_add(1);
+    let mut payload = vec![0; bytes];
+    for chunk in payload.chunks_mut(8) {
+        // A fixed command seed makes this high-entropy workload repeatable.
+        // This generator is only test data, never a security primitive.
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        chunk.copy_from_slice(&state.to_le_bytes()[..chunk.len()]);
+    }
+    payload
 }
 
 fn percentile(values: &[u64], percent: usize) -> u64 {
@@ -272,6 +333,7 @@ fn summarize(
     samples: &[Sample],
     bootstrap_capture_us: u64,
     bootstrap_parent_sync_us: u64,
+    restored_rows: usize,
 ) -> Report {
     let objects: Vec<u64> = samples.iter().map(|sample| sample.objects).collect();
     let bytes: Vec<u64> = samples.iter().map(|sample| sample.bytes).collect();
@@ -291,10 +353,16 @@ fn summarize(
         workload: if config.sparse {
             "sparse deferred capture"
         } else {
-            "fresh immediate capture"
+            "fresh deferred capture"
         },
         payload_bytes: config.payload_bytes,
+        payload_pattern: if config.random_payload {
+            "xorshift64-command-seeded"
+        } else {
+            "periodic-251"
+        },
         measured_commands: samples.len(),
+        restored_rows,
         bootstrap_capture_us,
         bootstrap_parent_sync_us,
         objects_per_command: total_objects / samples.len() as u64,
@@ -342,6 +410,7 @@ impl Config {
         let commands = option(&args, "--commands")?.unwrap_or(64);
         let warmup = option(&args, "--warmup")?.unwrap_or(4);
         let sparse = args.iter().any(|arg| arg == "--sparse");
+        let random_payload = args.iter().any(|arg| arg == "--random-payload");
         let max_capture_bytes = option(&args, "--max-capture-bytes")?.map(|bytes| bytes as u64);
         if payload_bytes == 0 || commands == 0 || warmup >= commands {
             return Err(
@@ -357,6 +426,7 @@ impl Config {
             commands,
             warmup,
             sparse,
+            random_payload,
             max_capture_bytes,
             endpoint,
             bucket,

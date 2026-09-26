@@ -228,7 +228,11 @@ same object-store and authority model before they can be compared fairly.
 the Cell object store when it publishes an immutable root. Each measured command
 commits one SQLite transaction, captures one LTX cut, and prepares one successor
 root through `CellReplica` over an in-memory `object_store`, which reports the
-objects and bytes a provider would receive.
+objects and bytes a provider would receive. Supply `--endpoint` and the bucket
+arguments below to measure real RustFS requests. Both fresh and sparse modes
+use the same measured host, deferred capture and exact-cut pruning. The runner
+restores the final root from the provider into a fresh destination and verifies
+every committed payload byte before emitting a report.
 
 ```bash
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-ltx-replica-cost" \
@@ -245,13 +249,140 @@ real sparse writer through `open_root().paged().prepare_writable()` and
 successor, and prunes its local cut after preparation. It reports SQLite commit,
 capture, checksum-sidecar sync count/time, root preparation, WAL bytes read, and
 peak WAL-image allocation separately. The sidecar sync measurement wraps only
-the local `FileSystem`; it does not include SQLite VFS syncs. The fresh mode
-retains its original immediate-capture workload. Neither mode measures runtime
+the local `FileSystem`; it does not include SQLite VFS syncs. In the original
+baseline, fresh mode used immediate capture and retained cuts. That historical
+comparison also changed the barrier and cleanup workload; the matched runner
+described below removes those differences. Neither mode measures runtime
 response proof latency or grants authority merely by preparing a root.
 
 The runner also emits per-command `capture_*_us` fields for all phases in
 `CaptureTiming`. They distinguish WAL transfer, page collection, cut encoding,
 checkpoint maintenance, and LTX reinspection during batch collection.
+`prune_us` measures cleanup after root preparation in both modes; historical
+fresh reports have null because they retained cuts. `captured_bytes` is the total LTX length in that
+command's batch, including any checkpoint cut. Preparation timing excludes
+cleanup, and neither timing includes the runtime authority CAS.
+
+### Matched capture and provider restore (2026-09-26)
+
+The follow-up to `3ced0777a6f` opens fresh databases through `CellReplica` so
+both histories share the instrumented host. Both capture deferred cuts and
+prune after preparing each successor, including the bootstrap. Final restore
+and payload verification run outside the timed phases; `restored_rows` must
+equal the configured command count.
+
+Three release processes per history used local RustFS, 32 transactions, four
+warmups, and 4 KiB command-seeded random payloads. Run order alternated between
+fresh and sparse. Every process restored all 32 rows byte-for-byte and prepared
+five immutable objects per measured command.
+
+| Repeat | Fresh capture p50 / p95, µs | Sparse capture p50 / p95, µs | Fresh prepare p50 / p95, µs | Sparse prepare p50 / p95, µs |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 342 / 463 | 723 / 1,812 | 3,648 / 4,666 | 4,377 / 6,391 |
+| 2 | 322 / 426 | 616 / 803 | 3,761 / 6,009 | 3,603 / 4,815 |
+| 3 | 336 / 471 | 618 / 911 | 3,774 / 5,392 | 3,597 / 5,210 |
+
+These small-database, shared-host diagnostics do not isolate checksum
+representation from all sparse VFS work, measure activation latency, or
+establish service capacity. No before/after performance gain is inferred.
+Deferred rename time remains in `capture_parent_sync_us`; that field is a
+phase duration, not proof that a directory sync occurred. SQLite's own syncs
+are separate from the deferred LTX barrier.
+
+Retained evidence is under the external per-checkout target's
+`matched-capture-20260926/`: six JSON reports, stderr, source diff, and source
+and binary SHA-256 values. Reproduce each history with a fresh process; add
+`--sparse` for the restored history:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
+TMPDIR="$HOME/Workspace/crabbuild-target/crab-8bc8/tmp" \
+  cargo run --release --locked \
+  --manifest-path crates/crab-ltx/perf/replica-cost/Cargo.toml -- \
+  --random-payload --payload-bytes 4096 --commands 32 --warmup 4 \
+  --endpoint http://127.0.0.1:19010 --bucket crab-cell-issue-fleet \
+  --access-key crab --secret-key crab
+```
+
+### Streaming published-cut cleanup (2026-09-26)
+
+Three release processes per workload and implementation used local RustFS,
+command-seeded random payloads, sparse deferred capture, six commands, and one
+warmup. The large workload used 4 MiB inserts and a 1 MiB incremental-capture
+limit, exercising full-image cuts and checkpoint batches. Both versions used
+the same macOS/APFS host and RustFS instance. Baseline production source was
+`0c898097e95`; the candidate replaces cleanup's full-file buffer with a 64 KiB
+buffered reader and verifies its digest during decoding.
+
+| Captured bytes in batch | Before cleanup, median ms | Streaming cleanup, median ms |
+| ---: | ---: | ---: |
+| 16,941,374 | 63.204 | 52.233 |
+| 25,412,106 | 94.847 | 88.384 |
+| 33,882,834 | 128.005 | 127.587 |
+| 42,353,558 | 160.156 | 143.721 |
+| 50,824,284 | 194.740 | 153.671 |
+
+Each row is the median of three matching command positions, not a tail
+percentile. The small 4 KiB payload workload produced 5,162–7,155-byte batches;
+its pooled cleanup median was 161 microseconds for both implementations over
+15 measured commands each. Variation is visible in the raw samples. These
+measurements suggest a large-cut benefit but do not establish an application
+latency improvement, a 1 GiB RSS bound, or sustained throughput.
+
+Raw reports, binary SHA-256 values, host metadata, and the candidate source diff
+are retained under
+`$HOME/Workspace/crabbuild-target/crab-8bc8/prune-streaming-20260926/`.
+`summary.json` retains every per-command comparison. Reproduce the large run
+against an existing local RustFS bucket:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
+TMPDIR="$HOME/Workspace/crabbuild-target/crab-8bc8/tmp" \
+  cargo run --release --locked \
+  --manifest-path crates/crab-ltx/perf/replica-cost/Cargo.toml -- \
+  --sparse --random-payload --payload-bytes 4194304 \
+  --max-capture-bytes 1048576 --commands 6 --warmup 1 \
+  --endpoint http://127.0.0.1:19010 --bucket crab-cell-issue-fleet \
+  --access-key crab --secret-key crab
+```
+
+Cleanup still decodes every page and retains decoder indexes on the SQL worker.
+The transfer-bound regression rejects a whole-file read for a large random cut;
+the failure cases retain accounting and allow retry after repair. Decoder index
+memory and same-worker response interference remain separate audit gates.
+
+### Streaming footer and optional replica index (2026-09-26)
+
+The next decoder change removes unused replica entries from ordinary
+verification, compares footer entries as a stream, and moves requested replica
+indexes to their caller instead of cloning them. Three release processes per
+implementation repeated the preceding RustFS workload. Baseline LTX behavior
+matches `5c2abfd915e` (unchanged by `a16c8efcc2b`); candidate production changes
+are retained as a source diff beside the reports.
+
+| Captured bytes in batch | Previous decoder cleanup, median ms | Changed decoder cleanup, median ms |
+| ---: | ---: | ---: |
+| 16,941,374 | 46.035 | 25.091 |
+| 25,412,106 | 70.635 | 37.511 |
+| 33,882,834 | 92.304 | 50.118 |
+| 42,353,558 | 131.654 | 63.285 |
+| 50,824,284 | 140.464 | 101.878 |
+
+Rows compare three samples at the same command position. Small-cut pooled
+medians were 202 and 139 microseconds across 15 commands per implementation.
+These are exploratory observations: the shared developer host had unrelated
+compiler/VM activity, and baseline samples overlapped focused compilation.
+The runs were sequential, not randomized or isolated, so the differences
+cannot establish a causal gain or public-action percentiles.
+
+Whole-process maximum RSS for the large workload ranged from 86.5–92.9 MB
+before and 83.6–91.7 MB after; those ranges do not establish a memory reduction.
+They include SQLite, capture, publication, and cleanup, not decoder allocations
+alone. Concurrent verification under the 1 GiB node profile remains unmeasured.
+Raw JSON, `/usr/bin/time -l` output, binary digests, source provenance/diff, and
+per-command comparison are retained under
+`$HOME/Workspace/crabbuild-target/crab-8bc8/decoder-streaming-20260926/`.
+Use the preceding command to reproduce the workload.
 
 ### Large sparse checkpoint capture (2026-09-25)
 
@@ -377,17 +508,160 @@ number of directory leaves a payload touches: 5 objects for a small write up to
 is dominated by the rewritten leaves and root document, and the payload's
 compressibility matters more than its size.
 
-A hot Cell at 100 commands per second would issue roughly 500-1,300 immutable
-PUTs per second, which is why the runtime admits against one pending-publication
-byte high-water mark per Cell plus the 32-segment compaction debt that folds the
+A hot Cell offering 100 commands per second would demand roughly 500-1,300
+logical immutable-object uploads per second at these measured costs. These
+are not HTTP request counts: at that revision native LTX bodies used multipart even when small,
+and retries, metadata reads, and authority CAS add requests. The runtime admits
+against one pending-publication byte high-water mark per Cell plus the
+32-segment compaction debt that folds the
 root graph. Publication stays one serialized root per command because the object
 path is the long-term durability authority and the node-log fleet proof releases
 the command earlier; on this loopback RustFS path one command costs roughly
 0.09-0.15 seconds of provider work, so a Cell without a fleet proof is
 provider-latency bound, not CPU bound. Coalescing several commands into one root
-would save metadata objects, not bodies, and the fleet-proof race already
-absorbs most of that latency for enrolled nodes. Multi-Cell concurrency,
+could save metadata objects while retaining each command's captured bodies.
+Fleet proof can release a response before object publication; the response
+winner and sustained publication drain rate still need measurement. Multi-Cell concurrency,
 cloud-bucket p99, and retention cost remain unmeasured.
+
+Audit qualification limits: `replica-cost` generates a periodic payload that
+repeats every 251 bytes; it does not represent incompressible data. Its direct
+`CellReplica::prepare` loop excludes runtime authority CAS, the follower race,
+and scheduled compaction. With 28 measured commands, nearest-rank p99 is the
+maximum sample. Retain these rows as a reproducible historical workload;
+qualify entropy, sustained publication debt, and application latency separately.
+The [LTX performance audit](../../crab-cell-runtime/docs/ltx-performance-audit.md)
+records source-backed optimization candidates and their acceptance gates.
+
+### Small-body transfer experiment
+
+On 2026-09-25, seven independent release processes before (`a7091fd7138`)
+and after (`85a3bf684d3`) the bounded single-PUT change used the same loopback
+RustFS container. Each process ran `--sparse --payload-bytes 4096 --commands 32
+--warmup 4`: 28 measured preparations of the historical periodic payload.
+Values below are the median of the seven per-run statistics, in microseconds:
+
+| Measurement | Before | After |
+| --- | ---: | ---: |
+| Root preparation p50 | 6,642 | 6,163 |
+| Root preparation p95 | 10,951 | 12,142 |
+| SQLite commit p50 | 463 | 550 |
+| Capture p50 | 542 | 653 |
+| Logical objects / command | 5 | 5 |
+| Mean bytes / command | 13,046 | 13,046 |
+
+Raw samples and source/binary SHA-256 metadata are retained outside the
+checkout under `$HOME/.codex/cell-vfs-ltx-scale/ltx-upload-a7091fd/`, with
+`before-0.json` through `before-6.json` and matching `after-*` files.
+The store image is the pinned RustFS `1.0.0-beta.8-glibc` from the Compose
+example; the harness uses `object_store` 0.14.2 and bundled SQLite 3.49.1.
+
+This is an inconclusive latency comparison: phases ran sequentially on one
+shared host, p95 worsened, and the unchanged commit/capture paths also slowed.
+The baseline itself differs substantially from the earlier RustFS table.
+Do not attribute that historical difference to this patch or claim a p99,
+fleet throughput, or latency SLO. This harness does not install the persistent
+directory cache, so it cannot measure removal of cache-index writes.
+
+Focused transport tests prove the narrower change: native, compacted, and
+bundled bodies up to 256 KiB use single PUT; larger bodies keep multipart;
+lost responses reconcile; conflicting bytes are refused; restored databases
+are identical. A real RustFS public HTTP/peer test also passed mutations and
+restoration after takeover. Public-action p95/p99 and sustained publication
+drain remain the performance acceptance gates.
+
+### Backend calls and payload entropy
+
+The runner now uses the existing `Store::with_storage_observer` boundary.
+Each sample's `preparation_io` records backend operation/outcome, calls,
+accumulated duration, bytes read, and bytes written for root preparation.
+Bootstrap, activation, and commit/capture reads are excluded. Calls retried
+by `Store` appear separately; retries inside the provider client do not.
+These are logical backend calls, not a wire-level HTTP request counter.
+Concurrent call durations overlap and must not be added to infer wall time.
+
+The default report labels its historical data `periodic-251`.
+`--random-payload` selects deterministic command-seeded xorshift64 bytes and
+labels them `xorshift64-command-seeded`. Generation is outside the timed SQL
+transaction. This is workload data, not a cryptographic random generator.
+
+```sh
+TMPDIR="$HOME/Workspace/crabbuild-target/crab-8bc8/tmp" \
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
+  cargo run --release --locked --manifest-path \
+  crates/crab-ltx/perf/replica-cost/Cargo.toml -- \
+  --sparse --random-payload --payload-bytes 300000 --commands 12 --warmup 4 \
+  --endpoint http://127.0.0.1:19010 --bucket crab-cell-issue-fleet \
+  --access-key crab --secret-key crab
+```
+
+Three real RustFS smoke runs at `6226f0445c1`, each with eight measured
+preparations after four warmups, produced these aggregate counts:
+
+| Payload | HEAD | PUT | Multipart start / part / complete | Mean logical bytes / root |
+| --- | ---: | ---: | ---: | ---: |
+| 4 KiB periodic | 16 | 40 | 0 / 0 / 0 | 7,468 |
+| 4 KiB random | 16 | 40 | 0 / 0 / 0 | 13,627 |
+| 300,000 bytes random | 16 | 51 | 8 / 8 / 8 | 356,575 |
+
+All calls completed successfully. The small-root path still performs two
+metadata presence checks and five immutable PUTs per measured command. The
+larger body crosses the bounded single-PUT threshold. Raw `io-committed-*.json`
+samples and source/binary metadata are retained beside the comparison above.
+These short runs verify observation wiring and expose payload sensitivity;
+they do not establish tail latency, runtime CAS cost, compaction cost, or
+sustainable throughput. Keep the missing-root-metadata refusal invariant when
+evaluating those two HEADs.
+
+### Sparse activation over real RustFS
+
+The scale example at `42b7eb8e0c9` measures cold and reused metadata at one,
+four, and eight shared I/O slots. The library includes bounded leaf overlap
+from `b2c3b51bede`. See the [runnable example](../examples/README.md#rustfs-scale-workload)
+for setup, JSON fields, and cache semantics. This experiment compares admission
+settings on the same implementation; it is not a previous-revision comparison.
+
+Two release processes on 2026-09-25 (local time) used SQLite `randomblob`
+payloads of 32 MiB and 256 MiB. Each process produced three samples per
+slot/cache pair, reversing slot order in the middle round. The table gives
+median checksum-preparation milliseconds; calls/bytes were identical in all
+three cold samples for each size and slot count.
+
+| Payload | Metadata cache | 1 slot | 4 slots | 8 slots | Origin calls / bytes |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 32 MiB | Cold | 100.464 | 74.721 | 73.979 | 33 / 723,272 |
+| 32 MiB | Reused | 52.158 | 78.214 | 83.789 | 0 / 0 |
+| 256 MiB | Cold | 1,057.293 | 419.734 | 295.320 | 259 / 5,797,768 |
+| 256 MiB | Reused | 119.020 | 57.479 | 71.758 | 0 / 0 |
+
+The databases contained 8,207 and 65,626 pages of 4 KiB. Every activation
+queried its restored row successfully and materialized four pages. Both
+processes deleted the source and passed byte-identical full restore and
+compaction restore. Cold checksum preparation benefits from overlap in these
+samples; the zero-origin phase still has substantial and variable local work.
+Wider concurrency does not improve every phase: cold writable-open medians at
+256 MiB were 107, 82, and 126 ms for one, four, and eight slots. Three samples
+per setting do not establish tails or a universally optimal concurrency.
+
+The first query made two range calls totaling 524,994 bytes at 32 MiB and
+265,332 bytes at 256 MiB. The current VFS requests up to 64 contiguous
+same-object pages per miss. This exposes a demand-read versus read-ahead
+tradeoff to qualify with scans and hydration before changing policy.
+
+Environment: native ARM64 release binary on macOS 26.5.2, external APFS volume,
+Rust 1.97.0, SQLite 3.49.1, workspace `object_store` 0.14.1. RustFS ran in the
+existing Colima ARM64 VM (8 CPUs, approximately 16 GiB), using
+`1.0.0-beta.8-glibc` at digest
+`sha256:040304b66e029a5cde4bed140b41513e925909839a9b912a40a98340610d1f66`.
+Provider connections and provider-side caches were reused. This is a local
+library probe without per-node cgroup limits, runtime ownership/CAS, followers,
+concurrent application traffic, or a persistent directory cache.
+
+Raw JSON lines and phase summaries: `32mib.log` and `256mib.log` under
+`$HOME/Workspace/crabbuild-target/crab-8bc8/activation-probe/`. Binary SHA-256:
+`0be9ec6e3015dff76aea2a7c769c87a0087335d265cd86a32a66cd638954ac47`.
+The same directory retains source/environment metadata and stderr. Keep this
+microbenchmark separate from public-action and fleet qualification.
 
 The runners also use the implementations' pinned bundled SQLite versions:
 Crab currently links SQLite 3.49.1 while the pinned Celld revision links SQLite

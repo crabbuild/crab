@@ -251,9 +251,14 @@ publication succeeds. This is how `crab-cell-runtime` avoids duplicating a
 follower fsync or authoritative object-root CAS with a soon-to-be-deleted local
 file barrier. Failure before the external proof remains an unknown outcome;
 the runtime never acknowledges the local cut alone. Published-cut cleanup
-reverifies and unlinks the local file without making that deletion an
-acknowledgement barrier. A session always uses a fresh metadata directory, so
-crash-resurrected cleanup residue remains quarantined.
+reverifies the local file through a buffered stream and unlinks it without
+making that deletion an acknowledgement barrier. A session always uses a fresh
+metadata directory, so crash-resurrected cleanup residue remains quarantined.
+Streaming avoids retaining the complete compressed file; verification still
+decodes all pages and retains the observed page index on the caller's worker.
+Verification streams the footer through a bounded buffer and builds replica
+lookup entries only when the caller requests them; memory still grows with the
+number of observed pages.
 
 ## Checkpoint without losing capture boundaries
 
@@ -483,8 +488,19 @@ async fn objects_to_pin(
 A verified root can become writable without first downloading every page.
 `prepare_writable` fetches the authenticated checksum directory asynchronously;
 `open_writable` must then run on the Cell's dedicated SQLite worker. Page faults
-fetch and verify missing pages, while `hydrate_step` resolves a bounded amount
-of remaining work proactively.
+fetch and verify missing pages. Direct synchronous embedders can use
+`hydrate_step` on their database worker. The Cell runtime instead uses
+`prepare_hydration` to select at most 64 missing pages, fetches through
+`db::HydrationRead::fetch` outside its SQL worker, then returns the resulting
+`db::HydrationBatch` to `install_hydration` on the owning activation.
+
+The caller admits retained page bytes before fetching and retains that
+reservation through installation, including canceled installation waiters.
+Demand-prefetched pages are reused. Installation verifies activation identity
+and skips pages superseded by checkpointed writes or truncation. Abandoning a
+fetch does not advance progress; an installation error fences the database.
+SQLite demand faults remain synchronous, and local page installation can
+still delay the worker on a slow disk.
 
 ```rust,ignore
 use std::path::Path;
@@ -509,6 +525,12 @@ async fn activate_sparse(
 The sparse database remains pinned to the selected root. New writes still use
 `Db::transaction`, `capture`, immutable preparation, and authority CAS
 in that order.
+
+Sparse opening claims its canonical path under a short registry lock. File
+creation, syncs, bridge startup and allocations happen outside that lock, so
+one slow activation does not hold up another Cell's registration or teardown.
+Failed setup releases its registry claim and leaves created local files
+quarantined; it never deletes or adopts an interrupted sparse database.
 
 ## Core API
 
@@ -542,6 +564,7 @@ in that order.
 | `VerifiedRoot::paged` | Opens authenticated page and page-run reads |
 | `CellPagedDatabase::prepare_writable` | Seeds a fresh sparse writable activation at the root's exact position |
 | `Db::hydrate_step` | Resolves a bounded number of missing sparse pages on the owner-controlled database worker |
+| `Db::prepare_hydration` / `db::HydrationRead::fetch` / `Db::install_hydration` | Splits bounded page selection and owner installation from asynchronous authenticated fetch; caller owns memory admission and scheduling |
 | `CellReplica::reachable_objects` | Returns `RootObjectRef` values for the verified immutable dependency set |
 | `CellReplica::open_resumed` | Moves a resumable local image onto a fresh path and continues its capture session |
 | `CellReplica::discard_resumed` | Removes a local image and its resume sidecars that the caller refused |
@@ -641,11 +664,60 @@ after restore, resume, or compaction; services that build several plans at once
 must admit their combined decoded size rather than only their compressed LTX
 input size.
 
+Checksum candidates retain an isolated overlay until their LTX cut is sealed.
+The successful merge retires the predecessor and reuses an exclusively owned
+memory array for fixed-size updates. Growth and retained shared snapshots may
+still allocate; large truncations release excess capacity. Restored capture
+reads overwritten checksums through one 4 KiB local window per cut, while
+truncation and clean-handoff scans retain their 64 KiB sequential buffers.
+A sealed merge consumes the changed-page overlay, releasing its hash-table
+allocation so later small cuts do not clone historical capacity. Unmerged
+recovery overlays retain their normal clone semantics.
+A failed sidecar merge fences the session. This changes local bookkeeping,
+not the LTX format or the authenticated metadata walk required for activation.
+
 Each open `Db` retains three SQLite connections with a 64 KiB page-cache
 target per connection. `Host` can share disk, I/O, blocking-job, recovery,
 dirty-job, scratch, and telemetry admission across many databases. Sparse page
 read-ahead is capped at 64 pages or 1 MiB per request, and the shared decoded
 page cache is capped at 8 MiB.
+
+`Host::with_directory_cache(root).await?` opens persistent cache membership on
+an admitted blocking job. Restart reads at most 16 MiB of index input and
+retains at most 16,384 entries within the shared disk budget. The runtime
+creates one cache owner beside the activation's database and shares its host
+through recovery, SQLite and publication. Cancellation keeps dispatched work
+and its reservations alive until completion. Local capture APIs remain
+synchronous and retain their caller-owned worker contract.
+
+Verified directory reads release object-store admission before persisting a
+cache fill. Fills use immediate blocking-job admission and skip persistence
+when that pool is busy, keeping pending node buffers bounded without a second
+queue. Verified bytes return after dispatch, without waiting for local syncs.
+Concurrent fills of one key are deduplicated, and cache lookups skip busy jobs
+or fill locks. Accepted fills retain their buffers, job and disk accounting
+until completion, including canceled readers, dispatch rejection and panics.
+Reopening a cache excludes outstanding fills from temporary-file cleanup.
+
+Call `Host::drain_cache_fills().await` after stopping replica work and before
+reusing its local directories or stopping its executor. `CellRuntime::shutdown`
+does this after draining Cells and workers. A canceled drain can be retried;
+the host can subsequently serve a new runtime. Cache persistence is best
+effort, so skipped entries may require another verified origin read. Fills
+still share the blocking pool with required work; this does not establish
+foreground latency isolation or reduce membership-index rewrite cost.
+
+Cell compaction buffers sequential index reads within a combined 960 KiB
+budget and dispatches bounded merge batches through `Host` jobs. Scratch files
+and admission remain owned through canceled jobs and cleanup. Range compaction
+spools only selected indexes/bodies, then streams new locators through the
+authenticated directory. It retains newer page versions, including disjoint
+segments in one bundle, and reuses unchanged branches. Traversal retains
+bounded state per tree level and at most eight pending node uploads. Scratch
+covers the selected inputs, worst-case encoded output and both index copies;
+it does not reserve two complete database images. Full-range compaction still
+visits the full directory. These bounds do not establish foreground latency
+isolation or sustained publisher capacity.
 
 Large-database and multi-tenant capacity still require workload-specific
 measurement. The existing tests prove bounded correctness behavior; they do not
@@ -671,6 +743,50 @@ growth and truncation, cold restore, process death followed by source loss,
 snapshot/compaction byte identity, both supported page encodings, malformed
 chains, checksum failures, exact Cell roots, bundles, sparse activation,
 hydration, remote compaction, and provider/cache lifecycle boundaries.
+
+After configuring the existing [RustFS test environment](examples/README.md),
+run the cache-admission fault test against its real object store:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-your-worktree" \
+  cargo test -p crab-ltx --features replica --locked --test host \
+  rustfs_directory_cache_fill -- --ignored --nocapture
+```
+
+It pauses cache fsync with one origin permit and one/two blocking slots,
+verifies the original and concurrent reads return, and restores exact SQLite
+state. A canceled drain retains admission; cache reopen waits for persistence.
+Each run uses a unique `crab-ltx-tests/cache-admission/` prefix and retains its objects.
+The pause/deadline assertions are concurrency proof, not latency percentiles.
+
+The sparse-activation isolation test uses the same environment:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-your-worktree" \
+  cargo test -p crab-ltx --features replica --locked --test host \
+  rustfs_sparse_activation_io -- --ignored --nocapture
+```
+
+It pauses file sync, parent sync and bridge startup in turn while a different
+Cell opens and another reads and closes. Each Cell must return its own value
+from the exact selected root. Each run retains objects under a unique
+`crab-ltx-tests/activation-registry/` prefix. The regular activation suite also
+covers conflicting path claims, setup failures and refusal of leftover files.
+
+Range compaction can also be checked against that real object store:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-your-worktree" \
+  cargo test -p crab-ltx --features replica --locked --test cell \
+  rustfs_range_compaction_preserves_exact_native_and_bundled_roots -- --ignored --nocapture
+```
+
+It compacts two updates on larger bases with a cold metadata cache and one
+MiB of scratch admission. Native and shared-bundle inputs, 512/4096-byte pages,
+multiple directory levels, and a newer overwrite must restore byte-identically.
+It bounds origin reads and uploaded objects, retaining its unique
+`crab-ltx-tests/range-compaction/` prefix. These are work and correctness checks,
+not service latency percentiles.
 
 The suite also ships the independent half of the format proof:
 

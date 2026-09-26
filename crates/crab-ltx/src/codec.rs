@@ -8,7 +8,7 @@ use crate::ltx::{
     CHECKSUM_SIZE, Crc64, HEADER_SIZE, Header, PAGE_HEADER_FLAG_SIZE, PAGE_HEADER_SIZE, PageHeader,
     TRAILER_SIZE, Trailer, checksum_page, lock_pgno,
 };
-use std::io::{Read, Write};
+use std::io::{BufReader, Read, Write};
 
 const INDEX_COPY_BYTES: usize = 64 << 10;
 
@@ -30,7 +30,7 @@ pub(crate) struct Decoder<R> {
     hash: Crc64,
     rolling_checksum: u64,
     #[cfg(feature = "replica")]
-    replica_index: Vec<EncodedPage>,
+    replica_index: Option<Vec<EncodedPage>>,
 }
 
 impl<R: Read> Decoder<R> {
@@ -49,7 +49,15 @@ impl<R: Read> Decoder<R> {
             hash: Crc64::new(),
             rolling_checksum: 0,
             #[cfg(feature = "replica")]
-            replica_index: Vec::new(),
+            replica_index: None,
+        }
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) fn new_with_index(reader: R) -> Self {
+        Self {
+            replica_index: Some(Vec::new()),
+            ..Self::new(reader)
         }
     }
 
@@ -108,23 +116,25 @@ impl<R: Read> Decoder<R> {
             }
             self.compressed.resize(compressed_size, 0);
             self.reader.read_exact(&mut self.compressed)?;
-            let mut frame_hash = blake3::Hasher::new();
-            frame_hash.update(&header_bytes);
-            frame_hash.update(&size_bytes);
-            frame_hash.update(&self.compressed);
             let n = lz4_flex::block::decompress_into(&self.compressed, data)
                 .map_err(|error| CrabError::Other(Box::new(error)))?;
             if n != data.len() {
                 return Err(CrabError::LTXCorrupted);
             }
             #[cfg(feature = "replica")]
-            self.replica_index.push(EncodedPage {
-                page: page.pgno,
-                offset,
-                size: self.reader.bytes - offset,
-                frame_hash: *frame_hash.finalize().as_bytes(),
-                checksum: checksum_page(page.pgno, data),
-            });
+            if let Some(index) = &mut self.replica_index {
+                let mut frame_hash = blake3::Hasher::new();
+                frame_hash.update(&header_bytes);
+                frame_hash.update(&size_bytes);
+                frame_hash.update(&self.compressed);
+                index.push(EncodedPage {
+                    page: page.pgno,
+                    offset,
+                    size: self.reader.bytes - offset,
+                    frame_hash: *frame_hash.finalize().as_bytes(),
+                    checksum: checksum_page(page.pgno, data),
+                });
+            }
         } else {
             let mut decoder = lz4_flex::frame::FrameDecoder::new(&mut self.reader);
             decoder
@@ -139,13 +149,15 @@ impl<R: Read> Decoder<R> {
                 return Err(CrabError::LTXCorrupted);
             }
             #[cfg(feature = "replica")]
-            self.replica_index.push(EncodedPage {
-                page: page.pgno,
-                offset,
-                size: self.reader.bytes - offset,
-                frame_hash: [0; 32],
-                checksum: checksum_page(page.pgno, data),
-            });
+            if let Some(index) = &mut self.replica_index {
+                index.push(EncodedPage {
+                    page: page.pgno,
+                    offset,
+                    size: self.reader.bytes - offset,
+                    frame_hash: [0; 32],
+                    checksum: checksum_page(page.pgno, data),
+                });
+            }
         }
 
         self.index
@@ -169,32 +181,30 @@ impl<R: Read> Decoder<R> {
             return Err(CrabError::LTXCorrupted);
         }
 
-        let mut remaining = Vec::new();
-        let mut chunk = [0; INDEX_COPY_BYTES];
-        loop {
-            let read = self.reader.read(&mut chunk)?;
-            if read == 0 {
-                break;
+        // Buffer footer reads so varints do not cause one filesystem call per
+        // byte. Count consumed encodings separately from the reader's readahead.
+        let mut footer = BufReader::with_capacity(INDEX_COPY_BYTES, &mut self.reader);
+        let mut index_size = 0;
+        for &(page, offset, size) in &self.index {
+            for expected in [u64::from(page), offset, size] {
+                let (actual, bytes) = read_uvarint(&mut footer, &mut self.hash)?;
+                if actual != expected {
+                    return Err(CrabError::LTXCorrupted);
+                }
+                index_size += bytes;
             }
-            remaining.extend_from_slice(&chunk[..read]);
         }
-        if remaining.len() < 8 + TRAILER_SIZE {
+        let (end, bytes) = read_uvarint(&mut footer, &mut self.hash)?;
+        if end != 0 {
             return Err(CrabError::LTXCorrupted);
         }
-
-        let trailer_offset = remaining.len() - TRAILER_SIZE;
-        let size_offset = trailer_offset - 8;
-        let index_size = u64::from_be_bytes(
-            remaining[size_offset..trailer_offset]
-                .try_into()
-                .map_err(|_| CrabError::LTXCorrupted)?,
-        ) as usize;
-        if index_size != size_offset {
+        index_size += bytes;
+        let mut size_bytes = [0; 8];
+        read_footer_exact(&mut footer, &mut size_bytes)?;
+        if u64::from_be_bytes(size_bytes) != index_size {
             return Err(CrabError::LTXCorrupted);
         }
-        if decode_page_index(&remaining[..size_offset])? != self.index {
-            return Err(CrabError::LTXCorrupted);
-        }
+        self.hash.update(&size_bytes);
         if self.header.is_snapshot() {
             let last = if self.header.commit == lock_pgno(self.header.page_size) {
                 self.header.commit - 1
@@ -206,10 +216,15 @@ impl<R: Read> Decoder<R> {
             }
         }
 
-        self.trailer = Trailer::parse(&remaining[trailer_offset..])?;
+        let mut trailer_bytes = [0; TRAILER_SIZE];
+        read_footer_exact(&mut footer, &mut trailer_bytes)?;
+        self.trailer = Trailer::parse(&trailer_bytes)?;
         self.trailer.validate(self.header)?;
         self.hash
-            .update(&remaining[..remaining.len() - CHECKSUM_SIZE]);
+            .update(&trailer_bytes[..TRAILER_SIZE - CHECKSUM_SIZE]);
+        if footer.read(&mut [0; 1])? != 0 {
+            return Err(CrabError::LTXCorrupted);
+        }
         if CHECKSUM_FLAG | self.hash.sum64() != self.trailer.file_checksum {
             return Err(CrabError::ChecksumMismatch);
         }
@@ -235,8 +250,9 @@ impl<R: Read> Decoder<R> {
     }
 
     #[cfg(feature = "replica")]
-    pub(crate) fn replica_index(&self) -> &[EncodedPage] {
-        &self.replica_index
+    pub(crate) fn into_replica_index(self) -> Result<Vec<EncodedPage>> {
+        self.replica_index
+            .ok_or(CrabError::InvalidState("LTX page index was not requested"))
     }
 }
 
@@ -453,46 +469,35 @@ impl<W: Write> Encoder<W> {
     }
 }
 
-pub(crate) fn decode_page_index(bytes: &[u8]) -> Result<Vec<(u32, u64, u64)>> {
-    let mut position = 0;
-    let mut entries = Vec::new();
-    loop {
-        let page_number = read_uvarint(bytes, &mut position)?;
-        if page_number == 0 {
-            break;
-        }
-        let offset = read_uvarint(bytes, &mut position)?;
-        let size = read_uvarint(bytes, &mut position)?;
-        entries.push((
-            u32::try_from(page_number).map_err(|_| CrabError::LTXCorrupted)?,
-            offset,
-            size,
-        ));
-    }
-    if position != bytes.len() {
-        return Err(CrabError::LTXCorrupted);
-    }
-    Ok(entries)
-}
-
-fn read_uvarint(bytes: &[u8], position: &mut usize) -> Result<u64> {
+fn read_uvarint(reader: &mut impl Read, hash: &mut Crc64) -> Result<(u64, u64)> {
     let mut value = 0u64;
-    let mut shift = 0u32;
-    loop {
-        let byte = *bytes.get(*position).ok_or(CrabError::LTXCorrupted)?;
-        *position += 1;
+    let mut bytes = [0; 10];
+    for index in 0..bytes.len() {
+        read_footer_exact(reader, &mut bytes[index..=index])?;
+        let byte = bytes[index];
         if byte < 0x80 {
-            if shift >= 64 || (shift == 63 && byte > 1) {
+            if index == 9 && byte > 1 {
                 return Err(CrabError::LTXCorrupted);
             }
-            return Ok(value | (u64::from(byte) << shift));
+            hash.update(&bytes[..=index]);
+            return Ok((value | (u64::from(byte) << (index * 7)), index as u64 + 1));
         }
-        value |= u64::from(byte & 0x7f) << shift;
-        shift += 7;
-        if shift >= 70 {
+        value |= u64::from(byte & 0x7f) << (index * 7);
+    }
+    Err(CrabError::LTXCorrupted)
+}
+
+fn read_footer_exact(reader: &mut impl Read, mut bytes: &mut [u8]) -> Result<()> {
+    // A clean EOF inside the footer is malformed input. Preserve actual I/O
+    // failures so callers retain their retry/capacity classification and cause.
+    while !bytes.is_empty() {
+        let read = reader.read(bytes)?;
+        if read == 0 {
             return Err(CrabError::LTXCorrupted);
         }
+        bytes = &mut bytes[read..];
     }
+    Ok(())
 }
 
 fn write_uvarint(bytes: &mut Vec<u8>, mut value: u64) {
@@ -521,6 +526,81 @@ impl<R: Read> Read for CountingReader<R> {
 mod tests {
     use super::*;
     use crate::{Txid, ltx};
+
+    #[test]
+    #[cfg(feature = "replica")]
+    fn ordinary_verification_does_not_collect_replica_entries() {
+        for bytes in [
+            include_bytes!("../tests/vectors/celld-10cb130-snapshot-block-512.ltx").as_slice(),
+            include_bytes!("../tests/vectors/celld-10cb130-snapshot-frame-512.ltx").as_slice(),
+        ] {
+            let mut decoder = Decoder::new(bytes);
+            decoder.decode_header().unwrap();
+            let mut scratch = vec![0; decoder.header.page_size as usize];
+            while decoder.decode_page(&mut scratch).unwrap().is_some() {}
+            decoder.close().unwrap();
+            assert!(decoder.replica_index.is_none());
+        }
+    }
+
+    #[test]
+    fn footer_io_failures_preserve_their_source_and_classification() {
+        struct Fault;
+        impl Read for Fault {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::TimedOut))
+            }
+        }
+        let error = read_uvarint(&mut Fault, &mut Crc64::new()).unwrap_err();
+        assert!(matches!(
+            error,
+            CrabError::Io(ref source) if source.kind() == std::io::ErrorKind::TimedOut
+        ));
+        assert_eq!(
+            error.classify(),
+            crate::FailureClass::Retryable { after: None }
+        );
+    }
+
+    #[test]
+    fn malformed_footer_rejection_does_not_drain_an_unbounded_tail() {
+        let mut encoder = Encoder::new_block(Vec::new());
+        encoder
+            .encode_header(ltx::Header {
+                version: ltx::VERSION,
+                page_size: 4_096,
+                commit: 1,
+                min_txid: Txid(1),
+                max_txid: Txid(1),
+                ..ltx::Header::default()
+            })
+            .unwrap();
+        let page = vec![1; 4_096];
+        encoder
+            .encode_page(ltx::PageHeader { pgno: 1, flags: 0 }, &page)
+            .unwrap();
+        encoder.close(checksum_page(1, &page)).unwrap();
+        let bytes = encoder.into_writer();
+
+        for early_end in [false, true] {
+            let mut prefix = bytes.clone();
+            if early_end {
+                prefix[HEADER_SIZE..HEADER_SIZE + PAGE_HEADER_SIZE].fill(0);
+            }
+            let mut reader = CountingReader {
+                inner: std::io::Cursor::new(prefix).chain(std::io::repeat(0).take(8 << 20)),
+                bytes: 0,
+                digest: blake3::Hasher::new(),
+            };
+            let mut decoder = Decoder::new(&mut reader);
+            decoder.decode_header().unwrap();
+            let mut scratch = vec![0; 4_096];
+            while decoder.decode_page(&mut scratch).unwrap().is_some() {}
+            assert!(matches!(decoder.close(), Err(CrabError::LTXCorrupted)));
+            drop(decoder);
+            assert!(reader.bytes < 128 << 10, "early end: {early_end}");
+        }
+    }
 
     #[test]
     fn file_spooled_index_matches_in_memory_encoder_bytes() {
@@ -567,7 +647,7 @@ mod tests {
         ));
 
         assert_eq!(actual, expected);
-        ltx::decode_file(&actual).unwrap();
+        crate::ltx::inspect_reader(std::io::Cursor::new(&actual)).unwrap();
     }
 }
 
@@ -576,11 +656,11 @@ fn uvarint_roundtrips_every_boundary_value() {
     for value in [0_u64, 1, 127, 128, 16_383, 16_384, u64::MAX - 1, u64::MAX] {
         let mut bytes = Vec::new();
         write_uvarint(&mut bytes, value);
-        let mut position = 0;
-        assert_eq!(read_uvarint(&bytes, &mut position).unwrap(), value);
+        let (decoded, position) = read_uvarint(&mut bytes.as_slice(), &mut Crc64::new()).unwrap();
+        assert_eq!(decoded, value);
         assert_eq!(
             position,
-            bytes.len(),
+            bytes.len() as u64,
             "varint {value} must consume exactly its encoding"
         );
     }
@@ -588,31 +668,30 @@ fn uvarint_roundtrips_every_boundary_value() {
 
 #[test]
 fn uvarint_rejects_a_truncated_encoding() {
-    let mut position = 0;
     assert!(matches!(
-        read_uvarint(&[0x80], &mut position),
+        read_uvarint(&mut [0x80].as_slice(), &mut Crc64::new()),
         Err(CrabError::LTXCorrupted)
     ));
 }
 
 #[test]
 fn uvarint_rejects_encodings_that_overflow_the_value() {
-    let mut position = 0;
     assert!(matches!(
-        read_uvarint(&[0xff; 10], &mut position),
+        read_uvarint(&mut [0xff; 10].as_slice(), &mut Crc64::new()),
         Err(CrabError::LTXCorrupted)
     ));
 
-    let mut position = 0;
     let mut overflows = vec![0xff; 9];
     overflows.push(0x02);
     assert!(matches!(
-        read_uvarint(&overflows, &mut position),
+        read_uvarint(&mut overflows.as_slice(), &mut Crc64::new()),
         Err(CrabError::LTXCorrupted)
     ));
 
-    let mut position = 0;
     let mut maximal = vec![0xff; 9];
     maximal.push(0x01);
-    assert_eq!(read_uvarint(&maximal, &mut position).unwrap(), u64::MAX);
+    assert_eq!(
+        read_uvarint(&mut maximal.as_slice(), &mut Crc64::new()).unwrap(),
+        (u64::MAX, 10)
+    );
 }

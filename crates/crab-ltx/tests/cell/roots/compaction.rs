@@ -2,20 +2,206 @@
 
 use super::*;
 
+#[tokio::test(flavor = "multi_thread")]
+async fn range_compaction_reads_and_reserves_only_the_selected_data() {
+    verify_range_compaction(Arc::new(InMemory::new()), Path::from("runtime")).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the RustFS environment documented in README.md"]
+async fn rustfs_range_compaction_preserves_exact_native_and_bundled_roots() {
+    let bucket = std::env::var("CRAB_LTX_TEST_BUCKET").unwrap();
+    let endpoint = std::env::var("CRAB_LTX_TEST_ENDPOINT").unwrap();
+    let store = crab_storage::build_explicit_store(
+        &bucket,
+        crab_storage::ObjectStoreCredentials::Aws {
+            access_key_id: std::env::var("AWS_ACCESS_KEY_ID").unwrap(),
+            secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").unwrap(),
+            session_token: None,
+            region: "us-east-1".into(),
+        },
+        Some(&endpoint),
+        endpoint.starts_with("http://"),
+    )
+    .unwrap();
+    let run = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    verify_range_compaction(
+        store.inner().clone(),
+        Path::from(format!(
+            "crab-ltx-tests/range-compaction/{run}-{}",
+            std::process::id()
+        )),
+    )
+    .await;
+}
+
+async fn verify_range_compaction(backend: Arc<dyn object_store::ObjectStore>, prefix: Path) {
+    for (page_size, rows, payload) in [(4096, 4096, 3000), (512, 70000, 400)] {
+        let prefix = prefix.clone().join(page_size.to_string());
+        let source = tempfile::TempDir::new().unwrap();
+        let path = source.path().join("range.sqlite");
+        let initial = crab_ltx::rusqlite::Connection::open(&path).unwrap();
+        initial.execute_batch(&format!("PRAGMA page_size={page_size}; CREATE TABLE t(k INTEGER PRIMARY KEY, v BLOB NOT NULL)")).unwrap();
+        drop(initial);
+        let mut writer = Db::open(&path, Limits::default()).unwrap();
+        writer
+            .transaction(|tx| {
+                tx.execute(
+                    "WITH RECURSIVE n(k) AS (VALUES(1) UNION ALL SELECT k+1 FROM n WHERE k<?1) \
+                 INSERT INTO t SELECT k, zeroblob(?2) FROM n",
+                    (rows, payload),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let read_bytes = Arc::new(AtomicU64::new(0));
+        let observed = read_bytes.clone();
+        let store = Store::new(backend.clone()).with_read_byte_observer(Arc::new(move |bytes| {
+            observed.fetch_add(bytes, Ordering::Relaxed);
+        }));
+        let replica = CellReplica::new(
+            CellStorageLayout::new(store, prefix.clone(), [3; 16]),
+            [233; 32],
+            [234; 16],
+            Limits::default(),
+        )
+        .unwrap();
+        let first = writer.capture().unwrap();
+        let mut root = replica.prepare(None, &first, 1, 1).await.unwrap().root();
+        let start = replica.open_root(&root).await.unwrap().segment_count();
+        let mut end = start;
+        let mut segments = first.segments;
+        // The later overwrite must remain newer than the selected pair of cuts.
+        for (sequence, key, value) in [(2, 1, 11), (3, rows, 22), (4, 1, 33)] {
+            writer
+                .transaction(|tx| {
+                    tx.execute(
+                        "UPDATE t SET v=?1 WHERE k=?2",
+                        (vec![value; payload as usize], key),
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            let captured = writer.capture().unwrap();
+            root = replica
+                .prepare(Some(&root), &captured, sequence, 1)
+                .await
+                .unwrap()
+                .root();
+            segments.extend(captured.segments);
+            if sequence == 3 {
+                end = replica.open_root(&root).await.unwrap().segment_count();
+            }
+        }
+        writer.close().unwrap();
+        let bundle = Bundle::encode(
+            segments
+                .iter()
+                .map(|segment| {
+                    BundleEntry::for_cell(
+                        [233; 32],
+                        [234; 16],
+                        segment.info().clone(),
+                        std::fs::read(segment.path()).unwrap(),
+                    )
+                })
+                .collect(),
+            Limits::default(),
+        )
+        .unwrap();
+        let bundled = replica
+            .prepare_bundle(None, &bundle, 4, 1)
+            .await
+            .unwrap()
+            .root();
+        let scratch = tempfile::TempDir::new().unwrap();
+        let original = scratch.path().join("original.sqlite");
+        replica
+            .open_root(&root)
+            .await
+            .unwrap()
+            .restore(&original)
+            .await
+            .unwrap();
+        let expected = std::fs::read(original).unwrap();
+        assert!(expected.len() > 16 << 20);
+
+        for (representation, root) in [("native", root), ("bundle", bundled)] {
+            let scratch_mib = 1;
+            let slots = Arc::new(tokio::sync::Semaphore::new(scratch_mib));
+            let observed = read_bytes.clone();
+            let cold = CellReplica::new(
+                CellStorageLayout::new(
+                    Store::new(backend.clone()).with_read_byte_observer(Arc::new(move |bytes| {
+                        observed.fetch_add(bytes, Ordering::Relaxed);
+                    })),
+                    prefix.clone(),
+                    [3; 16],
+                ),
+                [233; 32],
+                [234; 16],
+                Limits::default(),
+            )
+            .unwrap();
+            let limited = cold.with_host(Host::default().with_scratch_slots(slots.clone()));
+            read_bytes.store(0, Ordering::Relaxed);
+            let compacted = limited
+                .prepare_compaction(&root, start..end, 1, scratch.path())
+                .await
+                .unwrap();
+            let cost = limited.take_publication_cost();
+            assert!(
+                cost.objects <= 10,
+                "range compaction rewrote {} objects",
+                cost.objects
+            );
+            assert!(
+                read_bytes.load(Ordering::Relaxed) < 128 << 10,
+                "a tiny range downloaded {} bytes of unrelated metadata",
+                read_bytes.load(Ordering::Relaxed)
+            );
+            assert_eq!(slots.available_permits(), scratch_mib);
+            eprintln!(
+                "range compaction: {page_size}-byte pages, {representation}, {} read bytes, {} uploaded objects, {scratch_mib} MiB scratch available",
+                read_bytes.load(Ordering::Relaxed),
+                cost.objects,
+            );
+            assert_eq!(compacted.predecessor(), Some(root));
+            assert_eq!(compacted.root().position, root.position);
+            assert_eq!(compacted.root().commit_sequence, root.commit_sequence);
+            let destination = scratch
+                .path()
+                .join(format!("range-{representation}.sqlite"));
+            replica
+                .open_root(&compacted.root())
+                .await
+                .unwrap()
+                .restore(&destination)
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read(destination).unwrap(), expected);
+        }
+    }
+}
+
 #[tokio::test]
 async fn compaction_scratch_exhaustion_refuses_cleanly() {
     let source = tempfile::TempDir::new().unwrap();
     let mut writer = Db::open(&source.path().join("scratch.sqlite"), Limits::default()).unwrap();
     writer
         .transaction(|transaction| {
-            transaction.execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES(randomblob(65536))")
+            transaction
+                .execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES(randomblob(1048576))")
         })
         .unwrap();
     let batch = writer.capture().unwrap();
     let replica = replica(Store::new(Arc::new(InMemory::new())), [231; 32], [232; 16]);
     let root = replica.prepare(None, &batch, 1, 1).await.unwrap().root();
 
-    // One scratch MiB cannot admit a whole-database compaction, so the request
+    // One scratch MiB cannot hold this input and its output, so the request
     // must be refused as capacity instead of starting work it cannot finish.
     let constrained = replica
         .clone()
@@ -85,20 +271,6 @@ async fn scheduled_cell_compaction_promotes_fanout_and_preserves_root() {
     assert_eq!(replica.open_root(&root).await.unwrap().segment_count(), 8);
 
     let scratch = tempfile::TempDir::new().unwrap();
-    let scratch_slots = Arc::new(tokio::sync::Semaphore::new(64));
-    let limited = replica
-        .clone()
-        .with_host(Host::default().with_scratch_slots(scratch_slots.clone()));
-    assert!(matches!(
-        limited
-            .prepare_scheduled_compaction(&root, scratch.path())
-            .await,
-        Err(crab_ltx::CrabError::Limit(
-            crab_ltx::LimitKind::ScratchDiskBytes
-        ))
-    ));
-    assert_eq!(scratch_slots.available_permits(), 64);
-    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
     let compacted = replica
         .prepare_scheduled_compaction(&root, scratch.path())
         .await

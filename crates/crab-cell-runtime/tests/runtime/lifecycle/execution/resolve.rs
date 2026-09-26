@@ -78,7 +78,12 @@ async fn query_waits_for_preceding_publication_and_cannot_write() {
 #[tokio::test]
 async fn cancelled_command_waiter_is_resolved_by_original_identity() {
     let fixture = fixture();
-    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    use super::super::durability::RecordingResponses;
+    use crab_cell_runtime::fleet::telemetry::CommandResponseSource;
+
+    let (runtime, handle, _) = activate_runtime(&fixture, 16 * 1024 * 1024).await;
+    let responses = Arc::new(RecordingResponses::default());
+    runtime.install_telemetry(responses.clone()).unwrap();
     let request = mutation_identity_window(10, 10, 10_000);
     let digest = Digest::from_bytes([11; 32]);
     let (started_tx, started_rx) = mpsc::channel();
@@ -113,6 +118,11 @@ async fn cancelled_command_waiter_is_resolved_by_original_identity() {
         StoredOutcome::Success { ref result, commit_sequence: 1 } if result == b"survived"
     ));
     handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+    assert_eq!(
+        responses.0.lock().unwrap().as_slice(),
+        &[CommandResponseSource::Recorded]
+    );
 }
 #[tokio::test]
 async fn resolve_distinguishes_committed_absent_conflict_and_expired() {

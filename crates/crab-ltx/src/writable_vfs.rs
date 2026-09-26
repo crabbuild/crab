@@ -4,11 +4,15 @@
 use crate::{CrabError, Result, paged_io::Io};
 use rusqlite::{Connection, ffi};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     ffi::{CStr, CString, c_char, c_int, c_void},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
+
+mod hydration;
+
+pub use hydration::{HydrationBatch, HydrationRead};
 
 /// Progress resolving an inherited cut: locally materialized or superseded pages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,13 +49,25 @@ struct App {
     error: Mutex<Option<CrabError>>,
 }
 
-fn views() -> &'static Mutex<HashMap<PathBuf, Arc<App>>> {
-    static VIEWS: OnceLock<Mutex<HashMap<PathBuf, Arc<App>>>> = OnceLock::new();
+fn views() -> &'static Mutex<HashMap<PathBuf, Weak<App>>> {
+    static VIEWS: OnceLock<Mutex<HashMap<PathBuf, Weak<App>>>> = OnceLock::new();
     VIEWS.get_or_init(Mutex::default)
 }
 
+struct ViewClaim(PathBuf);
+
+impl Drop for ViewClaim {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = views().lock() {
+            // The registry owns only discovery references. Releasing a claim
+            // cannot destroy an App or join its I/O worker under this lock.
+            registry.remove(&self.0);
+        }
+    }
+}
+
 pub(crate) struct Registration {
-    path: PathBuf,
+    _claim: ViewClaim,
     app: Arc<App>,
     cursor: u32,
     vfs: &'static str,
@@ -75,20 +91,27 @@ impl Registration {
         crate::recovery::reject_sidecars(&path, &host)?;
         let count = database.page_count();
         let page_size = database.page_size();
-        let mut registry = views()
-            .lock()
-            .map_err(|_| CrabError::InvalidState("sparse registry poisoned"))?;
-        if registry.contains_key(&path) {
-            return Err(CrabError::InvalidState(
-                "sparse activation already registered",
-            ));
-        }
+        let claim = {
+            let mut registry = views()
+                .lock()
+                .map_err(|_| CrabError::InvalidState("sparse registry poisoned"))?;
+            let Entry::Vacant(entry) = registry.entry(path.clone()) else {
+                return Err(CrabError::InvalidState(
+                    "sparse activation already registered",
+                ));
+            };
+            // Claim the path before setup without making an incomplete App
+            // discoverable by SQLite. Failure drops only this setup's claim.
+            entry.insert(Weak::new());
+            ViewClaim(path)
+        };
+        let path = &claim.0;
         // Only a fresh file can receive a cut's missing-page map. An interrupted
         // activation is quarantined, never reopened as though its holes were data.
-        let mut file = host.filesystem.create(&path)?;
+        let mut file = host.filesystem.create(path)?;
         file.set_len(u64::from(count) * u64::from(page_size))?;
         file.sync_all()?;
-        host.filesystem.sync_parent(&path)?;
+        host.filesystem.sync_parent(path)?;
         let app = Arc::new(App {
             io: Io::new(database)?,
             page_size,
@@ -102,9 +125,12 @@ impl Registration {
             }),
             error: Mutex::new(None),
         });
-        registry.insert(path.clone(), app.clone());
+        views()
+            .lock()
+            .map_err(|_| CrabError::InvalidState("sparse registry poisoned"))?
+            .insert(path.clone(), Arc::downgrade(&app));
         Ok(Self {
-            path,
+            _claim: claim,
             app,
             cursor: 1,
             vfs,
@@ -159,14 +185,6 @@ impl Registration {
     }
 }
 
-impl Drop for Registration {
-    fn drop(&mut self) {
-        if let Ok(mut registry) = views().lock() {
-            registry.remove(&self.path);
-        }
-    }
-}
-
 #[repr(C)]
 struct File {
     methods: *const ffi::sqlite3_io_methods,
@@ -211,32 +229,42 @@ unsafe fn hydrate(file: *mut File, first: u32, last: u32) -> Result<()> {
                 }
             }
             let bytes = app.io.page(page)?;
-            let mut state = app
-                .state
-                .lock()
-                .map_err(|_| CrabError::InvalidState("sparse state poisoned"))?;
-            state.faults += 1;
-            // A checkpoint or truncate may have won while the fetch ran. Keep
-            // the recheck and local write under the same gate as xWrite/xTruncate.
-            if page > state.ceiling || state.present[page as usize - 1] {
-                continue;
-            }
-            if bytes.len() != app.page_size as usize {
-                return Err(CrabError::LTXCorrupted);
-            }
-            app.local_disk.try_grow(u64::from(app.page_size))?;
-            let base = (*file).base;
-            let write = (*(*base).pMethods)
-                .xWrite
-                .ok_or(CrabError::InvalidState("base VFS lacks xWrite"))?;
-            sqlite(write(
-                base,
-                bytes.as_ptr().cast(),
-                bytes.len() as c_int,
-                i64::from(page - 1) * i64::from(app.page_size),
-            ))?;
-            mark(app, &mut state, page);
+            install_page(file, page, &bytes)?;
         }
+        Ok(())
+    }
+}
+
+unsafe fn install_page(file: *mut File, page: u32, bytes: &[u8]) -> Result<()> {
+    // SAFETY: the caller retains the live wrapper and its activation Arc while
+    // exclusively borrowing the owning SQLite connection.
+    unsafe {
+        let app = &*(*file).app;
+        let mut state = app
+            .state
+            .lock()
+            .map_err(|_| CrabError::InvalidState("sparse state poisoned"))?;
+        state.faults += 1;
+        // Owner writes and truncation can supersede pages while async fetch runs.
+        // Use the same gate as xWrite/xTruncate so inherited bytes never win.
+        if page > state.ceiling || state.present[page as usize - 1] {
+            return Ok(());
+        }
+        if bytes.len() != app.page_size as usize {
+            return Err(CrabError::LTXCorrupted);
+        }
+        app.local_disk.try_grow(u64::from(app.page_size))?;
+        let base = (*file).base;
+        let write = (*(*base).pMethods)
+            .xWrite
+            .ok_or(CrabError::InvalidState("base VFS lacks xWrite"))?;
+        sqlite(write(
+            base,
+            bytes.as_ptr().cast(),
+            bytes.len() as c_int,
+            i64::from(page - 1) * i64::from(app.page_size),
+        ))?;
+        mark(app, &mut state, page);
         Ok(())
     }
 }
@@ -507,7 +535,7 @@ unsafe extern "C" fn x_open(
             let Ok(registry) = views().lock() else {
                 return ffi::SQLITE_CANTOPEN;
             };
-            let Some(app) = registry.get(Path::new(path)).cloned() else {
+            let Some(app) = registry.get(Path::new(path)).and_then(Weak::upgrade) else {
                 return ffi::SQLITE_CANTOPEN;
             };
             Some(app)

@@ -139,6 +139,50 @@ fn hydration_promotion_is_bounded_and_fenced_on_failure() {
     assert_eq!(failed.residency(), Residency::Sparse);
 }
 #[test]
+fn hydration_completion_preserves_concurrent_foreground_ownership() {
+    let mut state = CoordinationState::serving_with_residency(true, Residency::Sparse);
+    assert_eq!(
+        state.step(CoordinationInput::BeginHydration {
+            queue_empty: true,
+            publication_idle: true,
+            lease_live: true,
+        }),
+        CoordinationDecision::Started
+    );
+    let hydration = state.begin_effect(CoordinationEffect::Hydration);
+    assert_eq!(
+        state.step(CoordinationInput::BeginWork {
+            kind: AdmissionKind::Command,
+            publisher_ready: true,
+        }),
+        CoordinationDecision::Started
+    );
+    let work = state.begin_effect(CoordinationEffect::Work(AdmissionKind::Command));
+    state.step(CoordinationInput::CompleteEffect {
+        effect_id: hydration,
+        effect: CoordinationEffect::Hydration,
+    });
+    state.step(CoordinationInput::FinishHydration {
+        complete: true,
+        stale: false,
+    });
+    assert!(state.is_busy());
+    assert_eq!(
+        state.step(CoordinationInput::BeginDrain),
+        CoordinationDecision::Started
+    );
+    assert!(!state.can_deactivate());
+    state.step(CoordinationInput::CompleteEffect {
+        effect_id: work,
+        effect: CoordinationEffect::Work(AdmissionKind::Command),
+    });
+    assert_eq!(
+        state.step(CoordinationInput::FinishWork { fenced: false }),
+        CoordinationDecision::ReadyToDeactivate
+    );
+}
+
+#[test]
 fn migration_queues_successor_work_until_publication_drains() {
     let mut state = CoordinationState::serving(true);
     state.step(CoordinationInput::BeginPublication);

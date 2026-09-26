@@ -350,7 +350,28 @@ impl NodeDirectory {
         certificate_public_key: [u8; 32],
         now_ms: i64,
     ) -> Result<crate::peer::VerifiedPeerRequest> {
-        let session = crate::peer::claimed_peer_session(input)?;
+        let request = crate::peer::UnverifiedPeerRequest::decode(input)?;
+        self.peer_verifier(
+            request.session(),
+            certificate,
+            certificate_public_key,
+            now_ms,
+        )
+        .await?
+        .verify(request, now_ms)
+    }
+
+    /// Loads a live enrollment and binds its verifier to the mTLS identity.
+    ///
+    /// The returned verifier rechecks enrollment expiry when verification runs,
+    /// allowing callers to release CPU admission during this provider read.
+    pub async fn peer_verifier(
+        &self,
+        session: SessionId,
+        certificate: Digest,
+        certificate_public_key: [u8; 32],
+        now_ms: i64,
+    ) -> Result<EnrolledPeerVerifier> {
         let enrolled = self
             .load(session, now_ms)
             .await?
@@ -365,12 +386,15 @@ impl NodeDirectory {
                 "mTLS certificate key does not match peer session",
             ));
         }
-        crate::peer::PeerVerifier::new(
+        let verifier = crate::peer::PeerVerifier::new(
             session,
             self.release,
             enrolled.advertisement.verifying_key()?,
-        )
-        .verify(input, now_ms)
+        );
+        Ok(EnrolledPeerVerifier {
+            advertisement: enrolled.advertisement,
+            verifier,
+        })
     }
 
     /// Conditionally publishes the next heartbeat for the same boot session.

@@ -129,6 +129,7 @@ impl CellRuntime {
         }
         pool.configure_retained_capacity(node_retained_bytes)?;
         let resources = pool.resource_ledger();
+        let primitive_jobs = Arc::new(Semaphore::new(resources.snapshot()?.limit.primitive_jobs()));
         resources.set_disk_limit(replica_host.local_disk_capacity())?;
         resources.set_host_limits(
             replica_host.io_capacity(),
@@ -159,6 +160,7 @@ impl CellRuntime {
             inner: Arc::new(RuntimeInner {
                 sender,
                 resources,
+                primitive_jobs,
                 shutting_down: AtomicBool::new(false),
                 accepting_cells: AtomicBool::new(true),
                 session,
@@ -338,6 +340,7 @@ impl CellRuntime {
         {
             return Err(Error::RuntimeClosed);
         }
+        self.inner.primitive_jobs.close();
         let (reply, response) = oneshot::channel();
         self.inner
             .sender
@@ -350,6 +353,9 @@ impl CellRuntime {
             Some((_, durability)) => durability.shutdown().await,
             None => Ok(()),
         };
+        // Admission and replica work are stopped. Optional fills outlive their
+        // readers, so keep artifacts/executors until accepted fills complete.
+        self.inner.replica_host.drain_cache_fills().await;
         drain.and(workers).and(durability)
     }
 
@@ -588,16 +594,52 @@ impl CellRuntime {
     /// original runtime error.
     pub fn try_reserve_worker_job(&self) -> crate::Result<Option<NodeJobReservation>> {
         self.ensure_running()?;
-        match self
-            .inner
-            .resources
-            .try_reserve(ResourceCost::zero().with_primitive_jobs(1))
-        {
-            Ok(reservation) => Ok(Some(NodeJobReservation {
-                _reservation: reservation,
-            })),
-            Err(Error::Capacity(_)) => Ok(None),
-            Err(error) => Err(error),
+        match Arc::clone(&self.inner.primitive_jobs).try_acquire_owned() {
+            Ok(permit) => self.worker_job_reservation(permit).map(Some),
+            Err(tokio::sync::TryAcquireError::NoPermits) => Ok(None),
+            Err(tokio::sync::TryAcquireError::Closed) => Err(Error::RuntimeClosed),
         }
+    }
+
+    /// Waits for one primitive-job slot until the deadline or runtime shutdown.
+    ///
+    /// Callers must bound memory retained by waiters. Cancellation before
+    /// admission reserves nothing; dispatched work must retain the returned
+    /// reservation until it completes.
+    pub async fn reserve_worker_job(
+        &self,
+        deadline: std::time::Instant,
+    ) -> crate::Result<NodeJobReservation> {
+        self.ensure_running()?;
+        if std::time::Instant::now() >= deadline {
+            return Err(Error::Deadline);
+        }
+        let permit = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            Arc::clone(&self.inner.primitive_jobs).acquire_owned(),
+        )
+        .await
+        .map_err(|_| Error::Deadline)?
+        .map_err(|_| Error::RuntimeClosed)?;
+        // Tokio polls a ready permit before its timer. Recheck after waking so
+        // a released slot cannot revive work whose admission budget expired.
+        if std::time::Instant::now() >= deadline {
+            return Err(Error::Deadline);
+        }
+        self.worker_job_reservation(permit)
+    }
+
+    fn worker_job_reservation(
+        &self,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> crate::Result<NodeJobReservation> {
+        self.ensure_running()?;
+        Ok(NodeJobReservation {
+            _reservation: self
+                .inner
+                .resources
+                .try_reserve(ResourceCost::zero().with_primitive_jobs(1))?,
+            _permit: permit,
+        })
     }
 }

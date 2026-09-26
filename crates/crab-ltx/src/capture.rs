@@ -443,10 +443,12 @@ impl CaptureEngine {
         self.position
     }
 
+    #[cfg(feature = "replica")]
     pub(crate) fn page_size(&self) -> u32 {
         self.page_size
     }
 
+    #[cfg(feature = "replica")]
     pub(crate) fn checksums(&self) -> &crate::pages::PageChecksums {
         &self.checksums
     }

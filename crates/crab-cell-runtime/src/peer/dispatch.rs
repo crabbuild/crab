@@ -17,7 +17,7 @@ use crate::primitives::effects::InboxDelivery;
 use crate::registry::{CommandInvocation, Registry};
 use crate::{Error, Result};
 
-use super::{VerifiedPeerRequest, wire};
+use super::{VerifiedPeerRequest, wire, wire_description};
 
 const MAX_RESULT_BYTES: usize = 1024 * 1024;
 
@@ -73,10 +73,43 @@ impl PeerDispatcher {
         if let Err(error) = self.authorizer.authorize(request) {
             return error_reply(error);
         }
-        let handle = match self.resolver.resolve(request.target().clone()).await {
+        let resolved = self.resolver.resolve(request.target().clone()).await;
+        self.dispatch_authorized(request, now_ms, resolved).await
+    }
+
+    /// Dispatches with a receiver-resolved local handle after rechecking authorization.
+    ///
+    /// The handle must still match the exact target; actor admission fences a
+    /// handle whose owner changed after resolution.
+    pub async fn dispatch_resolved(
+        &self,
+        request: &VerifiedPeerRequest,
+        now_ms: i64,
+        resolved: Result<CellHandle>,
+    ) -> wire::PeerReply {
+        if let Err(error) = self.authorizer.authorize(request) {
+            return error_reply(error);
+        }
+        self.dispatch_authorized(request, now_ms, resolved).await
+    }
+
+    async fn dispatch_authorized(
+        &self,
+        request: &VerifiedPeerRequest,
+        now_ms: i64,
+        resolved: Result<CellHandle>,
+    ) -> wire::PeerReply {
+        let handle = match resolved {
             Ok(handle) => handle,
             Err(error) => return error_reply(error),
         };
+        let entry = handle.catalog().entry();
+        if handle.cell_id() != request.target().cell_id()
+            || entry.namespace() != request.target().namespace()
+            || entry.partition() != request.target().partition()
+        {
+            return error_reply(Error::CatalogCollision);
+        }
         let transport = LocalCellTransport {
             registry: Arc::clone(&self.registry),
             handles: Arc::new(HashMap::from([(handle.cell_id(), handle.clone())])),
@@ -139,6 +172,7 @@ impl PeerDispatcher {
         now_ms: i64,
     ) -> Result<StoredOutcome> {
         let expected = local_description(&transport.handle);
+        validate_expected(request.expected.as_ref(), expected)?;
         let identity = mutation_identity(
             request
                 .identity
@@ -195,7 +229,7 @@ impl PeerDispatcher {
         let expected = local_description(&transport.handle);
         let result = match request.operation.as_ref() {
             Some(wire::read_request::Operation::Describe(true)) => {
-                wire::read_reply::Result::Description(description(expected))
+                wire::read_reply::Result::Description(wire_description(expected))
             }
             Some(wire::read_request::Operation::CellQuery(query)) => {
                 match self
@@ -233,6 +267,7 @@ impl PeerDispatcher {
         expected: CellDescription,
         now_ms: i64,
     ) -> Result<EncodedObservation> {
+        validate_expected(request.expected.as_ref(), expected)?;
         let target = request_target(request.target.as_ref())?;
         let (module, descriptor) = self.registry.routed_query_contract(
             target.namespace(),
@@ -270,6 +305,7 @@ impl PeerDispatcher {
     ) -> wire::PeerReply {
         let expected = local_description(&transport.handle);
         let result = async {
+            validate_expected(request.expected.as_ref(), expected)?;
             let identity = mutation_identity(
                 request
                     .identity
@@ -448,7 +484,7 @@ impl PeerDispatcher {
         match result {
             Ok(current) => wire::PeerReply {
                 outcome: Some(wire::peer_reply::Outcome::Migration(wire::MigrationReply {
-                    description: Some(description(current)),
+                    description: Some(wire_description(current)),
                 })),
             },
             Err(error) => error_reply(error),

@@ -68,6 +68,7 @@ struct PausingStore {
     released: AtomicBool,
     get_armed: AtomicBool,
     fail_next_get: AtomicBool,
+    transient_get_failures: AtomicUsize,
     get_blocked: AtomicBool,
     get_released: AtomicBool,
     entered: Notify,
@@ -92,6 +93,7 @@ impl PausingStore {
             released: AtomicBool::new(false),
             get_armed: AtomicBool::new(false),
             fail_next_get: AtomicBool::new(false),
+            transient_get_failures: AtomicUsize::new(0),
             get_blocked: AtomicBool::new(false),
             get_released: AtomicBool::new(false),
             entered: Notify::new(),
@@ -261,6 +263,22 @@ impl ObjectStore for PausingStore {
             && location.as_ref().ends_with("/head.json")
         {
             self.catalog_head_barrier.wait().await;
+        }
+        if options.range.is_some()
+            && self
+                .transient_get_failures
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+        {
+            return Err(object_store::Error::Generic {
+                store: "pausing-store",
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "injected transient get failure",
+                )),
+            });
         }
         if self.fail_next_get.swap(false, Ordering::AcqRel) {
             return Err(object_store::Error::PermissionDenied {

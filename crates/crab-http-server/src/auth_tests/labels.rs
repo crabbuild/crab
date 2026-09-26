@@ -98,18 +98,20 @@ async fn repository_labels_are_durable_assignable_and_tombstoned() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(assigned.unwrap()["labels"][0]["name"], "kind/bug");
-    assert_eq!(
-        write(
-            &h,
-            &alice,
-            "PATCH",
-            &issue_path,
-            json!({"version":2,"label_ids":[id,id]})
-        )
-        .await
-        .0,
-        StatusCode::BAD_REQUEST
-    );
+    for invalid in [vec![id, id], vec![id + 1_000]] {
+        assert_eq!(
+            write(
+                &h,
+                &alice,
+                "PATCH",
+                &issue_path,
+                json!({"version":2,"label_ids":invalid})
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
     assert_eq!(
         write(&h, &alice, "DELETE", &path, json!({"version":1}))
             .await

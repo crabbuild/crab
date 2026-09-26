@@ -168,9 +168,32 @@ impl PerfFixture {
         Self::start_with_successor(nodes, None).await
     }
 
+    pub(super) async fn start_with_store(
+        nodes: usize,
+        store: Store,
+        root: object_store::path::Path,
+    ) -> Self {
+        Self::start_configured(nodes, None, store, root).await
+    }
+
     pub(super) async fn start_with_successor(
         nodes: usize,
         successor: Option<Arc<crab_cell_app::CompiledApplication>>,
+    ) -> Self {
+        Self::start_configured(
+            nodes,
+            successor,
+            Store::new(Arc::new(InMemory::new())),
+            object_store::path::Path::from("reference-performance"),
+        )
+        .await
+    }
+
+    async fn start_configured(
+        nodes: usize,
+        successor: Option<Arc<crab_cell_app::CompiledApplication>>,
+        store: Store,
+        root: object_store::path::Path,
     ) -> Self {
         assert!(nodes == 1 || nodes == 3);
         assert!(successor.is_none() || nodes == 3);
@@ -178,12 +201,7 @@ impl PerfFixture {
         let registry = application.registry();
         let tenant = TenantId::from_bytes([81; 16]);
         let application_id = ApplicationId::from_bytes([82; 16]);
-        let store = Store::new(Arc::new(InMemory::new()));
-        let layout = CellStorageLayout::new(
-            store.clone(),
-            object_store::path::Path::from("reference-performance"),
-            *application_id.as_bytes(),
-        );
+        let layout = CellStorageLayout::new(store.clone(), root, *application_id.as_bytes());
         let directory = tempfile::TempDir::new().unwrap();
         let mut leases = Vec::new();
         let mut durability = Vec::new();

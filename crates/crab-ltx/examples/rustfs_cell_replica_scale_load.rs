@@ -1,11 +1,16 @@
 mod support;
 
-use crab_ltx::{CellReplica, CellStorageLayout, CrabError, Db, Limits, RootRef};
+use crab_ltx::{CellReplica, CellStorageLayout, CrabError, Db, Host, Limits, RootRef};
+use crab_storage::Store;
 use object_store::path::Path as ObjectPath;
 use std::{
     fs::{self, File},
     io::{self, Read as _},
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
 use support::rustfs_target;
@@ -36,8 +41,8 @@ async fn main() -> crab_ltx::Result<()> {
 
     let target = rustfs_target("cell-replica-native-scale")?;
     let layout = CellStorageLayout::new(
-        target.store,
-        ObjectPath::from(target.repository_prefix),
+        target.store.clone(),
+        ObjectPath::from(target.repository_prefix.as_str()),
         [7; 16],
     );
     let replica = CellReplica::new(layout, [8; 32], [9; 16], limits)?;
@@ -136,19 +141,23 @@ async fn main() -> crab_ltx::Result<()> {
     tokio::task::spawn_blocking(move || writer.close())
         .await
         .map_err(|_| CrabError::InvalidState("Cell scale writer stopped"))??;
+    let load_elapsed = started.elapsed();
     let source_digest = stream_digest(&database)?;
     remove_sqlite_artifacts(&database)?;
 
     let prepared = prepared.ok_or(CrabError::InvalidState("Cell scale produced no root"))?;
     let root = root.ok_or(CrabError::InvalidState("Cell scale produced no root"))?;
+    measure_activation(&target, &root, limits, &workload_root).await?;
     let restored = recovery_directory.path().join("restored.sqlite");
     let restore_started = Instant::now();
     prepared.verified().restore(&restored).await?;
+    let restore_elapsed = restore_started.elapsed();
     let restored_digest = stream_digest(&restored)?;
     if restored_digest != source_digest {
         return Err(CrabError::ChecksumMismatch);
     }
 
+    let compaction_started = Instant::now();
     let compacted = replica
         .prepare_compaction(
             &root,
@@ -157,8 +166,11 @@ async fn main() -> crab_ltx::Result<()> {
             scratch_directory.path(),
         )
         .await?;
+    let compaction_elapsed = compaction_started.elapsed();
     let compacted_path = recovery_directory.path().join("compacted.sqlite");
+    let compacted_restore_started = Instant::now();
     compacted.verified().restore(&compacted_path).await?;
+    let compacted_restore_elapsed = compacted_restore_started.elapsed();
     if stream_digest(&compacted_path)? != source_digest {
         return Err(CrabError::ChecksumMismatch);
     }
@@ -174,13 +186,118 @@ async fn main() -> crab_ltx::Result<()> {
         "root digest:              {}",
         blake3::Hash::from_bytes(root.digest).to_hex()
     );
-    println!("load wall time:           {:.3?}", started.elapsed());
-    println!(
-        "restore wall time:        {:.3?}",
-        restore_started.elapsed()
-    );
+    println!("load wall time:           {load_elapsed:.3?}");
+    println!("restore wall time:        {restore_elapsed:.3?}");
+    println!("compaction wall time:     {compaction_elapsed:.3?}");
+    println!("compacted restore time:   {compacted_restore_elapsed:.3?}");
     println!("source deleted:           true");
     println!("compaction checksum:      exact");
+    Ok(())
+}
+
+#[derive(Default)]
+struct Reads {
+    requests: AtomicU64,
+    bytes: AtomicU64,
+}
+
+impl Reads {
+    fn finish(&self, started: Instant) -> serde_json::Value {
+        serde_json::json!({
+            "elapsed_us": started.elapsed().as_micros(),
+            "requests": self.requests.swap(0, Ordering::Relaxed),
+            "bytes": self.bytes.swap(0, Ordering::Relaxed),
+        })
+    }
+}
+
+async fn measure_activation(
+    target: &support::RustfsTarget,
+    root: &RootRef,
+    limits: Limits,
+    workload_root: &Path,
+) -> crab_ltx::Result<()> {
+    for round in 0..3 {
+        let order = if round % 2 == 0 { [1, 4, 8] } else { [8, 4, 1] };
+        for slots in order {
+            let reads = Arc::new(Reads::default());
+            let requests = reads.clone();
+            let bytes = reads.clone();
+            // A new Store identity excludes the publication process's immutable
+            // caches. Reuse the provider connection pool to isolate metadata work.
+            let store = Store::new(target.store.inner().clone())
+                .with_read_request_observer(Arc::new(move |_| {
+                    requests.requests.fetch_add(1, Ordering::Relaxed);
+                }))
+                .with_read_byte_observer(Arc::new(move |count| {
+                    bytes.bytes.fetch_add(count, Ordering::Relaxed);
+                }));
+            let layout = CellStorageLayout::new(
+                store,
+                ObjectPath::from(target.repository_prefix.as_str()),
+                [7; 16],
+            );
+            let host = Host::default().with_io_slots(Arc::new(tokio::sync::Semaphore::new(slots)));
+            let replica = CellReplica::new(layout, [8; 32], [9; 16], limits)?.with_host(host);
+            for cache in ["cold_metadata", "reused_metadata"] {
+                let directory = temporary_directory(workload_root, "activation")?;
+                let destination = directory.path().join("active.sqlite");
+                let started = Instant::now();
+                let verified = replica.open_root(root).await?;
+                let root_open = reads.finish(started);
+                let pages = verified.database_pages();
+                let started = Instant::now();
+                let prepared = verified.paged().prepare_writable(&destination).await?;
+                let checksums = reads.finish(started);
+                let worker_reads = reads.clone();
+                let started = Instant::now();
+                let (open, query, hydration) = tokio::task::spawn_blocking(move || {
+                    let mut database = prepared.open_writable(&destination)?;
+                    let open = worker_reads.finish(started);
+                    let started = Instant::now();
+                    let length: i64 = database
+                        .query_with(|db| {
+                            db.query_row(
+                                "SELECT length(value) FROM payload WHERE rowid = 1",
+                                [],
+                                |row| row.get(0),
+                            )
+                        })
+                        .map_err(|error| CrabError::Other(Box::new(error)))?;
+                    let query = worker_reads.finish(started);
+                    if length != ROW_BYTES {
+                        return Err(CrabError::ChecksumMismatch);
+                    }
+                    let hydration = database.hydration()?.ok_or(CrabError::InvalidState(
+                        "Cell scale activation is not sparse",
+                    ))?;
+                    database.close()?;
+                    Ok::<_, CrabError>((open, query, hydration))
+                })
+                .await
+                .map_err(|_| CrabError::InvalidState("Cell scale activation worker stopped"))??;
+                // Exclude close from the next root-open sample.
+                let _ = reads.finish(Instant::now());
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "measurement": "sparse_activation",
+                        "round": round,
+                        "io_slots": slots,
+                        "cache": cache,
+                        "database_pages": pages,
+                        "sqlite_version": rusqlite::version(),
+                        "root_open": root_open,
+                        "checksums": checksums,
+                        "writable_open": open,
+                        "first_query": query,
+                        "hydrated_pages": hydration.resolved,
+                        "page_faults": hydration.faults,
+                    })
+                );
+            }
+        }
+    }
     Ok(())
 }
 
