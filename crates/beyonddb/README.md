@@ -101,6 +101,9 @@ trait remains unsupported; the worker lists tables by locally owned account.
 UpdateTimeToLive primes at most one route page and returns while the worker
 reconciles the rest; disabling stops expiry sweeps without dropping the fixed
 data Cell index.
+TTL candidate selection skips shared and exclusive transaction locks. If a
+prepare races selection, the conditional delete defers that item while the
+sweep continues; later passes revisit it after transaction resolution.
 The synchronous table-transition worker is also implemented. Table resource tags now have Cell-backed CreateTable, TagResource, UntagResource,
 and ListTagsOfResource paths; DeleteTable removes their rows. The RustFS
 process test verifies these requests through the AWS SDK across a server
@@ -241,8 +244,10 @@ Transaction request/intent payloads use bounded SQL chunks while remaining in
 one local command. Item and saved-read images also use bounded BLOB transfers,
 including JSON images larger than 1 MiB after escaping. The signed SDK fixtures
 cover multi-MiB transactions and replay across owner/process restart. Aggregate
-evaluated Update limits and transactions exceeding the encoded Cell RPC limit
-remain qualification gaps.
+Update accounting needs cloud-reference qualification: DynamoDB Local accepts
+small Updates over more than 4 MiB of stored images. The protocol document and
+`scripts/probe-transaction-size.py` record this distinction. Transactions
+exceeding the encoded Cell RPC limit remain a separate gap.
 
 The [cross-Cell transaction protocol](CROSS_CELL_TRANSACTIONS.md) specifies
 the decision, lock, visibility, and failure-recovery contract.

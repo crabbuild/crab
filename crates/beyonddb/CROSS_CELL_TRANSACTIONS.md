@@ -621,7 +621,7 @@ gates remain necessary.
 ## Foundation review
 
 Historical review baseline: `88d06d986c9`. The SQL payload finding below is
-resolved by the bounded storage path above. The aggregate-size, retention, and
+resolved by the bounded storage path above. Aggregate-size semantics need cloud-reference qualification; retention and
 fleet-availability findings remain open.
 `origin/main` has no BeyondDB implementation to serve as a production baseline.
 
@@ -634,7 +634,7 @@ fleet-availability findings remain open.
 | Decision | Driver → `RecordParticipantPrepare` → `DecideCrossCellTransaction` | COMMIT requires every recorded prepare; terminal decisions cannot change. Receipts are trusted driver assertions, not independently verified certificates. |
 | Apply | `backend/recovery.rs` → account/data resolver → `participant::resolve` | Repeated resolution, abort-before-prepare tombstones, partial apply recovery; capacity reserved for eventual apply is not established. |
 | Reads | Get/Query/Scan barriers and `backend/transaction_read.rs` | Pending creates, partial COMMIT, shared snapshots, saved images; full concurrent-history/fault matrix remains open. |
-| Sibling writers | Ordinary item commands, conditional TTL delete, split seal, account table deletion | Key and split fences exist. TTL propagates a transaction conflict out of the current sweep; its outer worker logs and retries. Routed table deletion needs its own lifecycle qualification, beyond the account lock test. |
+| Sibling writers | Ordinary item commands, conditional TTL delete, split seal, account table deletion | Key and split fences exist. TTL excludes prepared locks before candidate selection and defers conflicts acquired before deletion; the regression covers later-item/table progress and deletion after ABORT. Routed table deletion needs its own lifecycle qualification, beyond the account lock test. |
 | Durability | Cell command savepoint → runtime publication → owner authority | `Committed<T>` releases after publication; `CellExecutor::query` refuses an unpublished head. Restart/peer tests exercise this dependency. |
 | Recovery discovery | Account shard registry → provisioner → serving/startup resolver | Same-endpoint restart and coordinator reactivation; unattended replacement at a different endpoint is still missing. |
 
@@ -725,22 +725,54 @@ not fix this failure. JSON/peer
 encoding also needs explicit qualification: encoded bytes may exceed DynamoDB
 item bytes, especially for binary values and escaped strings.
 
-### Aggregate Update size remains a separate gap
+### Aggregate Update accounting needs cloud-contract qualification
 
 ExtendDB's `PreparedOp::item_size` counts a Put image, but estimates Update from
-its key and expression values. BeyondDB evaluates Updates under the locks and
-validates each resulting item, yet neither participant wrapper nor coordinator
-sums the evaluated write images across the transaction. The pinned SQLite
-backend also lacks that aggregate post-evaluation check. This is source evidence;
-the oversized transaction probe reached the SQL limit first and did not prove
-that a transaction exceeding 4 MiB commits.
+its key and expression values. BeyondDB validates each evaluated image, yet
+neither participant nor coordinator sums those images across the transaction.
+The pinned SQLite backend also lacks an aggregate post-evaluation check. This
+is a source observation, not proof that the cloud service rejects that workload.
 
-Prepare must also publish immutable size accounting
-with its outcome. The coordinator must enforce the aggregate limit before
-COMMIT, including resumed prepares and lost replies. The accounting convention
-for Delete and ConditionCheck needs explicit compatibility evidence; it must
-not be guessed from their small request keys. An over-limit request needs a
-terminal ABORT and complete lock cleanup, never an error discovered after apply.
+A live reference probe against **DynamoDB Local 3.3.1** changes the next step.
+The probe seeds twelve items with 380-KiB ASCII payloads (more than 4 MiB in
+aggregate), performs each transaction, then checks every item with a consistent
+Get. Each case starts from a fresh seed.
+
+| Operation over all twelve keys | Local result |
+| --- | --- |
+| Update a small Boolean attribute | Accepted; all twelve updates visible. |
+| Delete existing items | Accepted; all twelve absent. |
+| ConditionCheck `attribute_exists(id)` | Accepted; all twelve unchanged. |
+| Put small replacements | Accepted; large attributes removed. |
+| Update removing the large attribute | Accepted; large attributes removed. |
+| Put twelve 380-KiB payloads in the request | `ValidationException`: transaction payload exceeds 4 MB; seed unchanged. |
+
+The artifact came from the download linked by the
+[AWS local setup guide](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.DownloadingAndRunning.html),
+verified against its published SHA-256:
+`f80bcec477f85f57e2c77f8d54aa6b672a8403fceff0c450560aee1cf6c21163`.
+The [cloud API contract](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_TransactWriteItems.html)
+states a 4-MiB aggregate limit, but does not distinguish request-side data from
+old or evaluated images precisely enough to resolve this observed difference.
+Local acceptance is not cloud parity proof. Rejecting these operations now
+would deliberately diverge from the available executable reference.
+
+`scripts/probe-transaction-size.py` reproduces the matrix through the AWS CLI,
+verifies all affected items, and deletes its uniquely named temporary table.
+Use an explicit local endpoint, or a designated AWS test profile and region:
+
+```sh
+python3 crates/beyonddb/scripts/probe-transaction-size.py --endpoint-url http://127.0.0.1:8000
+python3 crates/beyonddb/scripts/probe-transaction-size.py --profile TEST_PROFILE --region TEST_REGION
+```
+
+A cloud run is still required before changing this rejection policy. If it
+requires evaluated accounting, participant prepare must durably record the
+required byte count and replay it after ambiguous replies; the coordinator
+must decide ABORT before any apply when the aggregate exceeds the bound.
+Delete, ConditionCheck, shrinking Update, and replacement Put must use the
+same reference-backed convention. Apply headroom remains necessary regardless
+of which bytes the public API counts.
 
 ### Availability and scale constraints
 
@@ -760,18 +792,23 @@ terminal ABORT and complete lock cleanup, never an error discovered after apply.
 - **Apply headroom.** Prepare does not reserve a transaction-specific budget
   that guarantees later apply can complete despite unrelated writes/history
   growth. Reproduce near-full Cells before asserting this liveness property.
-- **TTL fairness.** Conditional expiration uses the lock-aware delete command,
-  so it cannot overwrite an intent. `TransactionConflict` ends the current
-  account sweep before cursor advancement; the binary logs it and keeps its
-  worker alive. Defer that key and preserve progress over unrelated candidates.
+- **TTL fairness addressed.** Candidate selection excludes shared and exclusive
+  locks before its two-item limit. A prepare racing that read can still make
+  conditional deletion return `TransactionConflict`; the sweep defers that key
+  and advances through unrelated items and tables. The expiry entry is retained
+  for later passes after resolution. `tests/elastic_cells/ttl_transactions.rs`
+  reproduces both failures, then verifies progress and deletion after durable
+  ABORT. Existing expiry and lock indexes serve the selection query; no new
+  index or persisted cursor is introduced.
 
 ### Implementation and qualification order
 
 1. The single-blob SQL ceiling is removed, with signed large-payload and
    escaped-item coverage. Complete encoded wire-limit qualification, including
    near-limit binary payloads and Updates that expand their stored images.
-2. Enforce evaluated aggregate size before COMMIT; reserve or otherwise prove
-   sufficient apply/recovery headroom. Test both account and data participants.
+2. Qualify aggregate size semantics against the cloud reference before adding
+   evaluated-image rejection; reserve or otherwise prove sufficient apply/recovery
+   headroom. Test both account and data participants.
 3. Add systematic concurrent histories and crash cuts at BEGIN, each prepare,
    receipt, decision, apply, and final receipt. Assert no mixed successful
    TransactGet, no double apply, no opposing terminal decisions, and eventual
