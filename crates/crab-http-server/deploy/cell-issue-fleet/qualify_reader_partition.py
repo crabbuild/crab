@@ -29,8 +29,9 @@ def unavailable(url: str, withdrawn: bool = False) -> dict:
             body = None
         else:
             body = json.loads(raw)
-        if body is not None and (error.code != 503 or body.get("error", {}).get("code") != "replica_unavailable"):
-            raise RuntimeError("isolated reader did not fail closed") from error
+            if (error.code != 503 or not isinstance(body, dict)
+                    or body.get("error", {}).get("code") != "replica_unavailable"):
+                raise RuntimeError("isolated reader did not fail closed") from error
         return {"status": error.code, "body": body, "seconds": round(time.monotonic() - started, 3)}
 
 
