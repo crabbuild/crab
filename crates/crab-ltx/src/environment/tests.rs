@@ -17,6 +17,30 @@ use crate::environment::directory_cache::DirectoryCache;
 #[cfg(feature = "replica")]
 use crate::environment::executor::TokioExecutor;
 
+#[cfg(feature = "replica")]
+#[tokio::test]
+async fn directory_cache_fill_does_not_queue_bytes_behind_busy_jobs() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let jobs = Arc::new(tokio::sync::Semaphore::new(1));
+    let host = Host::default()
+        .with_job_slots(jobs.clone())
+        .with_directory_cache(directory.path().join("cache"));
+    let occupied = jobs.acquire().await.unwrap();
+    tokio::time::timeout(
+        Duration::from_millis(250),
+        host.directory_cache_put("node".into(), b"verified".to_vec(), 64),
+    )
+    .await
+    .expect("optional cache fills must not queue verified bytes")
+    .unwrap();
+    assert_eq!(host.directory_cache_stats().unwrap().entries(), 0);
+    drop(occupied);
+    host.directory_cache_put("node".into(), b"verified".to_vec(), 64)
+        .await
+        .unwrap();
+    assert_eq!(host.directory_cache_stats().unwrap().entries(), 1);
+}
+
 #[test]
 fn disk_budget_reservations_resize_and_release_exact_bytes() {
     let budget = DiskBudget::new(10);

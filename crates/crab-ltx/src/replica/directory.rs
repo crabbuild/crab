@@ -592,7 +592,7 @@ async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<
             .directory_cache_invalidate(persistent_key.clone())
             .await;
     }
-    let _permit = verification.host.io_permit().await?;
+    let permit = verification.host.io_permit().await?;
     let result = verification
         .layout
         .store()
@@ -607,6 +607,9 @@ async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<
     if *blake3::hash(&bytes).as_bytes() != digest {
         return Err(CrabError::ChecksumMismatch);
     }
+    // Verified bytes no longer need origin admission. Cache fills admit their
+    // own bounded job without queuing, so slow disk cannot occupy network slots.
+    drop(permit);
     let _ = verification
         .host
         .directory_cache_put(persistent_key, bytes.to_vec(), MAX_NODE_BYTES)

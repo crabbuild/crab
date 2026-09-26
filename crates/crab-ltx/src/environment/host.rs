@@ -661,8 +661,15 @@ impl Host {
         let Some(cache) = &self.directory_cache else {
             return Ok(());
         };
+        // A cache fill is optional. Waiting here after releasing origin
+        // admission would retain one node buffer per waiter without a bound.
+        let permit = match self.job_slots.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(tokio::sync::TryAcquireError::NoPermits) => return Ok(()),
+            Err(error) => return Err(crate::CrabError::Other(Box::new(error))),
+        };
         let cache = Arc::clone(cache);
-        self.run(move || cache.put(&key, &bytes, max_bytes))
+        self.run_admitted(permit, move || cache.put(&key, &bytes, max_bytes))
             .await?
             .map_err(crate::CrabError::Io)
     }
@@ -689,6 +696,15 @@ impl Host {
             .acquire_owned()
             .await
             .map_err(|e| crate::CrabError::Other(Box::new(e)))?;
+        self.run_admitted(permit, operation).await
+    }
+
+    #[cfg(feature = "replica")]
+    async fn run_admitted<T: Send + 'static>(
+        &self,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        operation: impl FnOnce() -> T + Send + 'static,
+    ) -> crate::Result<T> {
         let resource = self.reserve_resource(HostResourceKind::BlockingJob, 1)?;
         let (send, receive) = tokio::sync::oneshot::channel();
         let recovery = self.recovery.clone();

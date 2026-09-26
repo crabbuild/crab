@@ -652,6 +652,13 @@ dirty-job, scratch, and telemetry admission across many databases. Sparse page
 read-ahead is capped at 64 pages or 1 MiB per request, and the shared decoded
 page cache is capped at 8 MiB.
 
+Verified directory reads release object-store admission before persisting a
+cache fill. Fills use immediate blocking-job admission and skip persistence
+when that pool is busy, keeping pending node buffers bounded without a second
+queue. Admitted fills still finish before the read returns; cancellation keeps
+their job and disk reservations until completion. Cache persistence is best
+effort, so skipped entries may require another origin read after restart.
+
 Cell compaction buffers sequential index reads within a combined 960 KiB
 budget and dispatches bounded merge batches through `Host` jobs. Scratch files
 and admission remain owned through canceled jobs and cleanup. Range compaction
@@ -682,6 +689,20 @@ growth and truncation, cold restore, process death followed by source loss,
 snapshot/compaction byte identity, both supported page encodings, malformed
 chains, checksum failures, exact Cell roots, bundles, sparse activation,
 hydration, remote compaction, and provider/cache lifecycle boundaries.
+
+After configuring the existing [RustFS test environment](examples/README.md),
+run the cache-admission fault test against its real object store:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-your-worktree" \
+  cargo test -p crab-ltx --features replica --locked --test host \
+  rustfs_directory_cache_fill -- --ignored --nocapture
+```
+
+It pauses a cache fsync with one origin permit, verifies a separate origin
+read and exact SQLite restore, and checks canceled-job admission. Each run
+uses a unique `crab-ltx-tests/cache-admission/` prefix and retains its objects.
+The pause/deadline assertions are concurrency proof, not latency percentiles.
 
 The suite also ships the independent half of the format proof:
 
