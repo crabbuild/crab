@@ -61,8 +61,8 @@ def qualify(path: Path, port: int) -> dict:
     killed = False
     result = {"isolated_node": isolated, "owner_node": owner, "observer_node": observer}
     try:
-        compose(partition_path, profiles, "up", "--detach", "--no-build", "--no-deps", "store-proxy")
-        compose(partition_path, profiles, "up", "--detach", "--no-build", "--no-deps",
+        compose(partition_path, profiles, "up", "--detach", "--no-build", "store-proxy")
+        compose(partition_path, profiles, "up", "--detach", "--no-build",
                 "--wait", "--wait-timeout", "300", isolated)
         isolated_session, _, _ = prove_node(partition_path, profiles, isolated_index)
         status = json.loads(compose(path, profiles, "exec", "-T", observer,
@@ -109,11 +109,11 @@ def qualify(path: Path, port: int) -> dict:
         if paused:
             compose(partition_path, profiles, "unpause", "store-proxy")
         if killed:
-            compose(path, profiles, "up", "--detach", "--no-build", "--no-deps",
+            compose(path, profiles, "up", "--detach", "--no-build",
                     "--wait", "--wait-timeout", "300", owner)
         # Restore the original endpoint even when a proof fails. Local volumes
         # remain intact; the old session cannot regain authority after takeover.
-        compose(path, profiles, "up", "--detach", "--no-build", "--no-deps",
+        compose(path, profiles, "up", "--detach", "--no-build",
                 "--wait", "--wait-timeout", "300", isolated)
         compose(partition_path, profiles, "stop", "store-proxy")
     recovered = request_json("GET", node_url(isolated_index, port) + issue_path(1) + "/1")
