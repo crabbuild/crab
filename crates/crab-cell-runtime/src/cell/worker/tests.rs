@@ -7,7 +7,7 @@ use object_store::{
     path::Path,
     throttle::{ThrottleConfig, ThrottledStore},
 };
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 struct SparseActivation {
     _source: tempfile::TempDir,
@@ -51,7 +51,7 @@ async fn worker_and_runtime_reservations_share_one_node_ledger() {
     pool.shutdown().await.unwrap();
 }
 
-async fn sparse_activation(cell_byte: u8, store: Store) -> SparseActivation {
+async fn sparse_activation(cell_byte: u8, store: Store, payload_bytes: usize) -> SparseActivation {
     let cell = CellId::from_bytes([cell_byte; 32]);
     let incarnation = crate::identity::IncarnationId::from_bytes([cell_byte + 16; 16]);
     let layout = CellStorageLayout::new(store, Path::from("sparse-workers"), [9; 16]);
@@ -68,8 +68,10 @@ async fn sparse_activation(cell_byte: u8, store: Store) -> SparseActivation {
         .unwrap();
     let (executor, cuts, _) =
         CellExecutor::bootstrap(managed, cell, incarnation, 1, |transaction| {
-            transaction.execute_batch(
-                "CREATE TABLE payload(value BLOB NOT NULL); INSERT INTO payload VALUES(randomblob(262144))",
+            transaction.execute_batch("CREATE TABLE payload(value BLOB NOT NULL)")?;
+            transaction.execute(
+                "INSERT INTO payload VALUES(randomblob(?1))",
+                [payload_bytes],
             )?;
             Ok(())
         })
@@ -107,8 +109,8 @@ async fn sparse_fault_pool_progresses_under_saturated_sql_workers() {
         observed.fetch_add(bytes, Ordering::Relaxed);
     }));
     // Repeated-byte Cell prefixes select distinct workers modulo two.
-    let first = sparse_activation(0, store.clone()).await;
-    let second = sparse_activation(1, store).await;
+    let first = sparse_activation(0, store.clone(), 262_144).await;
+    let second = sparse_activation(1, store, 262_144).await;
     assert_eq!(worker_index(first.cell, 2), 0);
     assert_eq!(worker_index(second.cell, 2), 1);
     read_bytes.store(0, Ordering::Relaxed);
@@ -181,4 +183,94 @@ async fn sparse_fault_pool_progresses_under_saturated_sql_workers() {
     pool.deactivate(first.cell).await.unwrap();
     pool.deactivate(second.cell).await.unwrap();
     pool.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_sparse_shard_leaves_the_other_workers_query_admission_available() {
+    let backend = Arc::new(ThrottledStore::new(
+        InMemory::new(),
+        ThrottleConfig::default(),
+    ));
+    let armed = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let notify = started.clone();
+    let watching = armed.clone();
+    let store = Store::new(backend.clone()).with_read_request_observer(Arc::new(move |_| {
+        if watching.load(Ordering::Acquire) {
+            notify.notify_one();
+        }
+    }));
+    let cold = sparse_activation(0, store, 4 << 20).await;
+    let resident = sparse_activation(1, Store::new(Arc::new(InMemory::new())), 262_144).await;
+    let queued = sparse_activation(2, Store::new(Arc::new(InMemory::new())), 262_144).await;
+    let pool = SqlWorkerPool::new(2, 3).unwrap();
+    let cells = [cold.cell, resident.cell, queued.cell];
+    for activation in [&cold, &resident, &queued] {
+        pool.activate_restored(
+            activation.cell,
+            RestoredDatabase::Paged(Box::new(activation.database.clone())),
+            activation.destination.clone(),
+            activation.incarnation,
+            1,
+            activation.root,
+            pool.reserve_activation().unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+    while !pool
+        .hydration(resident.cell)
+        .await
+        .unwrap()
+        .unwrap()
+        .complete()
+    {
+        pool.hydrate(resident.cell, 64, Instant::now() + Duration::from_secs(5))
+            .await
+            .unwrap();
+    }
+
+    backend.config_mut(|config| config.wait_get_per_call = Duration::from_secs(3));
+    armed.store(true, Ordering::Release);
+    let mut hydration =
+        Box::pin(pool.hydrate(cold.cell, 64, Instant::now() + Duration::from_secs(10)));
+    assert!(futures_util::poll!(&mut hydration).is_pending());
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("hydration must reach a delayed origin read");
+    let mut waiting = Box::pin(pool.query(
+        queued.cell,
+        8,
+        Instant::now() + Duration::from_secs(10),
+        Box::new(|_| Ok(Vec::new())),
+    ));
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+    let independent = tokio::time::timeout(
+        Duration::from_secs(1),
+        pool.query(
+            resident.cell,
+            8,
+            Instant::now() + Duration::from_secs(10),
+            Box::new(|connection| {
+                let length: i64 =
+                    connection
+                        .query_row("SELECT length(value) FROM payload", [], |row| row.get(0))?;
+                Ok(length.to_le_bytes().to_vec())
+            }),
+        ),
+    )
+    .await;
+    drop(waiting);
+    backend.config_mut(|config| config.wait_get_per_call = Duration::ZERO);
+    hydration.await.unwrap();
+    for cell in cells {
+        pool.deactivate(cell).await.unwrap();
+    }
+    pool.shutdown().await.unwrap();
+    assert_eq!(
+        independent
+            .expect("idle worker was starved by another shard")
+            .unwrap(),
+        262_144_i64.to_le_bytes(),
+    );
 }
