@@ -4,10 +4,10 @@
 use crate::{CrabError, Result, paged_io::Io};
 use rusqlite::{Connection, ffi};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     ffi::{CStr, CString, c_char, c_int, c_void},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 
 mod hydration;
@@ -50,13 +50,25 @@ struct App {
     error: Mutex<Option<CrabError>>,
 }
 
-fn views() -> &'static Mutex<HashMap<PathBuf, Arc<App>>> {
-    static VIEWS: OnceLock<Mutex<HashMap<PathBuf, Arc<App>>>> = OnceLock::new();
+fn views() -> &'static Mutex<HashMap<PathBuf, Weak<App>>> {
+    static VIEWS: OnceLock<Mutex<HashMap<PathBuf, Weak<App>>>> = OnceLock::new();
     VIEWS.get_or_init(Mutex::default)
 }
 
+struct ViewClaim(PathBuf);
+
+impl Drop for ViewClaim {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = views().lock() {
+            // The registry owns only discovery references. Releasing a claim
+            // cannot destroy an App or join its I/O worker under this lock.
+            registry.remove(&self.0);
+        }
+    }
+}
+
 pub(crate) struct Registration {
-    path: PathBuf,
+    _claim: ViewClaim,
     app: Arc<App>,
     cursor: u32,
     vfs: &'static str,
@@ -81,14 +93,21 @@ impl Registration {
         crate::recovery::reject_sidecars(&path, &host)?;
         let count = database.page_count();
         let page_size = database.page_size();
-        let mut registry = views()
-            .lock()
-            .map_err(|_| CrabError::InvalidState("sparse registry poisoned"))?;
-        if registry.contains_key(&path) {
-            return Err(CrabError::InvalidState(
-                "sparse activation already registered",
-            ));
-        }
+        let claim = {
+            let mut registry = views()
+                .lock()
+                .map_err(|_| CrabError::InvalidState("sparse registry poisoned"))?;
+            let Entry::Vacant(entry) = registry.entry(path.clone()) else {
+                return Err(CrabError::InvalidState(
+                    "sparse activation already registered",
+                ));
+            };
+            // Claim the path before setup without making an incomplete App
+            // discoverable by SQLite. Failure drops only this setup's claim.
+            entry.insert(Weak::new());
+            ViewClaim(path)
+        };
+        let path = &claim.0;
         let read_only = database.read_only();
         let app = Arc::new(App {
             io: Io::new(database)?,
@@ -110,24 +129,27 @@ impl Registration {
         });
         // Only a fresh file can receive a cut's missing-page map. Immutable
         // views keep an empty placeholder: authenticated pages stay in memory.
-        let mut file = host.filesystem.create(&path)?;
+        let mut file = host.filesystem.create(path)?;
         let initialized = (|| -> Result<()> {
             if !read_only {
                 file.set_len(u64::from(count) * u64::from(page_size))?;
             }
             file.sync_all()?;
-            host.filesystem.sync_parent(&path)?;
+            host.filesystem.sync_parent(path)?;
             Ok(())
         })();
         drop(file);
         if let Err(error) = initialized {
             // Creation succeeded, so this registration owns the failed install.
-            let _ = host.filesystem.remove_file(&path);
+            let _ = host.filesystem.remove_file(path);
             return Err(error);
         }
-        registry.insert(path.clone(), app.clone());
+        views()
+            .lock()
+            .map_err(|_| CrabError::InvalidState("sparse registry poisoned"))?
+            .insert(path.clone(), Arc::downgrade(&app));
         Ok(Self {
-            path,
+            _claim: claim,
             app,
             cursor: 1,
             vfs,
@@ -185,11 +207,9 @@ impl Registration {
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        if let Ok(mut registry) = views().lock() {
-            registry.remove(&self.path);
-        }
         if let Some(host) = &self.cleanup {
-            let _ = host.filesystem.remove_file(&self.path);
+            // Keep the path claimed until this view's placeholder is removed.
+            let _ = host.filesystem.remove_file(&self._claim.0);
         }
     }
 }
@@ -614,7 +634,7 @@ unsafe extern "C" fn x_open(
             let Ok(registry) = views().lock() else {
                 return ffi::SQLITE_CANTOPEN;
             };
-            let Some(app) = registry.get(Path::new(path)).cloned() else {
+            let Some(app) = registry.get(Path::new(path)).and_then(Weak::upgrade) else {
                 return ffi::SQLITE_CANTOPEN;
             };
             let mode = if app.read_only {
