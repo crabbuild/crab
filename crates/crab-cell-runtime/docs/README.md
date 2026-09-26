@@ -187,6 +187,7 @@ This rule removes compatibility branches from product code. It does not permit d
 | Design follower durability, response gating, and warm failover | [Follower durability and warm failover](failover-and-followers.md) |
 | Complete canonical LTX scaling and decide standalone replication | [Canonical Cell LTX scaling](canonical-ltx-scaling.md) |
 | Execute owner routing, VFS/LTX, and application scale qualification | [SQLite VFS and LTX scaling plan](vfs-ltx-scale-plan.md) |
+| Prioritize LTX latency and publication-capacity experiments | [LTX performance audit](ltx-performance-audit.md) |
 | Inspect persistent identities, paths, control JSON, or LTX roots | [Storage and recovery](storage.md) |
 | Implement SQL, KV, Blob, Queue, Cron, Workflow, or effects | [Primitive contracts](primitives.md) |
 | Add a native product feature | [Rust programming model](rust-api.md) |

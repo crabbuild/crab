@@ -281,6 +281,14 @@ not claim a recovery percentile from one owner-loss sample.
 
 ### LTX audit gates before tuning
 
+The [source audit](ltx-performance-audit.md) adds concrete experiments in
+execution order: small-body single PUT, zero-write disk-cache hits, bounded
+parallel checksum-directory loading, and incremental compaction metadata.
+Measure response proof and sustained drain alongside those changes. Keep
+root coalescing and durability-mode changes behind their stronger recovery
+gates. Qualify the runtime's 8/32-segment compaction boundaries and the
+benchmark's periodic payload before using its cost rows as capacity evidence.
+
 The local [replica cost record](../../crab-ltx/perf/README.md#cell-publication-cost-per-command)
 measures about 0.3 ms for a small sparse deferred capture, but 87–139 ms
 at p50/p95 for a small successor-root preparation over loopback RustFS.
