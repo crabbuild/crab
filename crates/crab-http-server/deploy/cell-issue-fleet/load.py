@@ -570,7 +570,7 @@ def recover_owner(
         raise RuntimeError("load-balanced owner recovery did not complete in 120 seconds")
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--nodes", type=int, choices=(3, 5, 10, 20), required=True)
@@ -608,7 +608,7 @@ def main() -> None:
     _, before = owner_map(path, profiles, args.nodes, args.cells)
     coverage, coverage_samples = cover_routes(gateway, args.nodes, args.cells)
     report = {
-        "schema": 5,
+        "schema": 6,
         "source": command("git", "-C", str(ROOT), "rev-parse", "HEAD"),
         "source_role": "load_generator",
         "source_dirty": bool(command("git", "-C", str(ROOT), "status", "--porcelain")),
@@ -633,6 +633,7 @@ def main() -> None:
         "node_cell_coverage": coverage,
         "coverage_read_latency": percentiles([sample["latency_ms"] for sample in coverage_samples]),
         "passed": False,
+        "integrity_verified": False,
     }
     try:
         with raw_path.open("x") as raw, nodes_path.open("x") as node_samples:
@@ -707,11 +708,16 @@ def main() -> None:
                 path, profiles, gateway, args.nodes, owners_at_recovery[target],
                 recovery_baseline[target], acknowledged[target], target, samples, report["owner_loss"],
             )
-        report["passed"] = (balanced and not report["node_observations"]["errors"]
-                            and summary["outcomes"].get("success", 0) == summary["planned_pairs"]
-                            and bool(after))
+        if not balanced or report["node_observations"]["errors"] or not after:
+            raise RuntimeError("ingress, resource observations or root progress failed qualification")
+        # Only a fully verified sample may be retained as an overloaded point.
+        # Lost acknowledgements, incomplete traces and failed drain remain fatal.
+        report["integrity_verified"] = True
+        report["passed"] = summary["outcomes"].get("success", 0) == summary["planned_pairs"]
         if not report["passed"]:
-            raise RuntimeError("offered load was not fully served or ingress was uneven; inspect the retained report")
+            report["error"] = "offered load was not fully served; inspect failures and generator limits"
+            return 2
+        return 0
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
         report["error"] = str(error)
         raise
@@ -721,4 +727,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

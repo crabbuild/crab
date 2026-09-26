@@ -583,6 +583,53 @@ class LoadTests(unittest.TestCase):
                 self.assertEqual("new_session" in receipt, valid)
                 self.assertEqual("error" in receipt, not valid)
 
+    def test_rate_curve_retains_overload_and_repeated_controls_but_stops_on_broken_proof(self):
+        for failure in (None, "overload", "integrity", "process"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "compose.yaml"
+                path.write_text("{}")
+                args = ["qualify.py", "--state", directory, "--project", "crab-cell-test",
+                        "--skip-build", "--load-stages", "--load-rate", "5", "20", "5"]
+                measured = []
+
+                def point(command, **kwargs):
+                    rate = float(command[command.index("--rate") + 1])
+                    nodes = int(command[command.index("--nodes") + 1])
+                    output = Path(command[command.index("--output") + 1])
+                    self.assertFalse(output.exists(), "a repeated rate overwrote its first sample")
+                    measured.append((nodes, rate))
+                    failed = rate == 20 and failure is not None
+                    receipt = {"passed": not failed, "integrity_verified": failure != "integrity" or not failed,
+                               "owner_loss": {"acknowledgements": {"verified": 3}},
+                               "workload": {"rate": rate}, "nodes": nodes}
+                    output.write_text(json.dumps(receipt))
+                    return subprocess.CompletedProcess(command, 1 if failed and failure == "process" else 2 if failed else 0)
+
+                with patch.object(qualify.sys, "argv", args), \
+                        patch.object(qualify, "command", return_value=""), \
+                        patch.object(qualify, "compose", return_value=""), \
+                        patch.object(qualify, "render", return_value=path), \
+                        patch.object(qualify, "pin_image", return_value={}), \
+                        patch.object(qualify, "run_stage", side_effect=lambda *args: {"nodes": args[3]}), \
+                        patch.object(load, "wait_for_placement", return_value=({20: "node-03"}, {})), \
+                        patch.object(qualify.subprocess, "run", side_effect=point):
+                    if failure in ("integrity", "process"):
+                        with self.assertRaises((RuntimeError, subprocess.CalledProcessError)):
+                            qualify.main()
+                    else:
+                        self.assertEqual(qualify.main(), 2 if failure else 0)
+                report = json.loads((Path(directory) / "report.json").read_text())
+                if failure in ("integrity", "process"):
+                    self.assertEqual(measured, [(3, 5), (3, 20)])
+                    self.assertFalse(report["completed"])
+                else:
+                    self.assertEqual(measured, [(size, rate) for size in (3, 5, 10, 20) for rate in (5, 20, 5)])
+                    self.assertTrue(report["completed"])
+                    self.assertEqual(report["passed"], failure is None)
+                    for stage in report["stages"]:
+                        self.assertEqual([point["rate"] for point in stage["loads"]], [5, 20, 5])
+                        self.assertEqual([point["passed"] for point in stage["loads"]], [True, failure is None, True])
+
     def test_qualification_report_retains_failed_load_and_recovery_receipts(self):
         for load_stages in (False, True):
             with self.subTest(load_stages=load_stages), tempfile.TemporaryDirectory() as directory:
@@ -610,7 +657,7 @@ class LoadTests(unittest.TestCase):
                 report = json.loads((Path(directory) / "report.json").read_text())
                 self.assertFalse(report["passed"])
                 if load_stages:
-                    self.assertEqual(report["stages"][0]["load_report"], "load-3-stage.json")
+                    self.assertEqual(report["stages"][0]["loads"][0]["report"], "load-3-01.json")
                 else:
                     self.assertEqual(report["owner_loss"]["new_session"], "new")
                     self.assertFalse(report["owner_loss"]["restart"]["passed"])

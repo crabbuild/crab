@@ -354,7 +354,7 @@ def prove_owner_loss(path: Path, profiles: tuple[str, ...], owner: str, gateway_
         raise RuntimeError("owner-loss recovery did not complete in 120 seconds")
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--project", required=True)
@@ -364,14 +364,16 @@ def main() -> None:
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--load-stages", action="store_true", help="run gateway load while each stage is active")
     parser.add_argument("--cells", type=int, default=20, help="fixed Cell count across every node stage")
-    parser.add_argument("--load-rate", type=float, default=5, help="scheduled create/read pairs per second")
+    parser.add_argument("--load-rate", type=float, nargs="+", default=[5], help="ordered rates of scheduled create/read pairs per second; repeat a rate for another control")
     parser.add_argument("--load-duration", type=float, default=60)
     parser.add_argument("--load-max-in-flight", type=int, default=64)
+    parser.add_argument("--load-hot-share", type=float, default=0, help="fraction directed to Cell 1; zero is uniform")
     args = parser.parse_args()
     # Import after module initialization: load uses the same Compose helpers.
     from load import Workload, wait_for_placement
     try:
-        Workload(args.cells, args.load_rate, args.load_duration, args.load_max_in_flight, 0)
+        for rate in args.load_rate:
+            Workload(args.cells, rate, args.load_duration, args.load_max_in_flight, args.load_hot_share)
     except ValueError as error:
         parser.error(str(error))
     source = command("git", "-C", str(ROOT), "rev-parse", "HEAD")
@@ -400,6 +402,7 @@ def main() -> None:
         "node_memory_limit_bytes": MEMORY_LIMIT,
         "stages": [],
         "passed": False,
+        "completed": False,
     }
     phases = [(3, ()), (5, ("five",)), (10, ("five", "ten")), (20, ("five", "ten", "twenty"))]
     previous = 0
@@ -416,21 +419,40 @@ def main() -> None:
             (path.parent / "report.json").write_text(json.dumps(report, indent=2) + "\n")
             print(f"Verified {size} nodes and {args.cells} Cell-backed issue services", flush=True)
             if args.load_stages:
-                output = path.parent / f"load-{size}-stage.json"
-                stage["load_report"] = output.name
-                subprocess.run([
-                    sys.executable,
-                    str(Path(__file__).with_name("load.py")),
-                    "--state", str(path.parent),
-                    "--nodes", str(size),
-                    "--gateway-port", str(args.gateway_port),
-                    "--cells", str(args.cells),
-                    "--rate", str(args.load_rate),
-                    "--duration", str(args.load_duration),
-                    "--max-in-flight", str(args.load_max_in_flight),
-                    "--output", str(output),
-                ], check=True)
-                last_load = output
+                stage["loads"] = []
+                for index, rate in enumerate(args.load_rate, 1):
+                    output = path.parent / f"load-{size}-{index:02d}.json"
+                    point = {"rate": rate, "report": output.name}
+                    stage["loads"].append(point)
+                    (path.parent / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+                    if index > 1:
+                        # Each preceding point loses an owner. Reestablish the
+                        # same placement criterion before timing another rate.
+                        point["placement"] = {}
+                        wait_for_placement(path, profiles, size, args.cells, point["placement"])
+                    result = subprocess.run([
+                        sys.executable,
+                        str(Path(__file__).with_name("load.py")),
+                        "--state", str(path.parent),
+                        "--nodes", str(size),
+                        "--gateway-port", str(args.gateway_port),
+                        "--cells", str(args.cells),
+                        "--rate", str(rate),
+                        "--duration", str(args.load_duration),
+                        "--max-in-flight", str(args.load_max_in_flight),
+                        "--hot-share", str(args.load_hot_share),
+                        "--output", str(output),
+                    ], check=False)
+                    if result.returncode not in (0, 2):
+                        result.check_returncode()
+                    receipt = json.loads(output.read_text())
+                    if (receipt.get("integrity_verified") is not True
+                            or receipt.get("passed") is not (result.returncode == 0)
+                            or receipt.get("nodes") != size or receipt.get("workload", {}).get("rate") != rate):
+                        raise RuntimeError("load point lacks matching integrity and completion evidence")
+                    point["passed"] = receipt["passed"]
+                    last_load = output
+                    (path.parent / "report.json").write_text(json.dumps(report, indent=2) + "\n")
             previous = size
         if last_load:
             report["owner_loss"] = json.loads(last_load.read_text())["owner_loss"]
@@ -438,7 +460,9 @@ def main() -> None:
         else:
             report["owner_loss"] = {}
             prove_owner_loss(path, phases[-1][1], report["stages"][-1]["owners"][f"work-{args.cells:02d}"], args.gateway_port, args.cells, report["owner_loss"])
-        report["passed"] = True
+        report["completed"] = True
+        report["passed"] = all(point["passed"] for stage in report["stages"] for point in stage.get("loads", []))
+        return 0 if report["passed"] else 2
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
         report["error"] = str(error)
         raise
@@ -448,4 +472,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

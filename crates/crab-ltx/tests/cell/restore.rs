@@ -24,6 +24,7 @@ use object_store::{
     path::Path,
 };
 
+mod read_ahead;
 mod upload;
 
 const NO_FAULT: u8 = 0;
@@ -55,6 +56,7 @@ impl LtxTelemetry for RecordingTelemetry {
 }
 
 struct ReadStats {
+    ranges: Mutex<Vec<(Path, std::ops::Range<u64>)>>,
     active: AtomicUsize,
     peak: AtomicUsize,
     active_ranges: AtomicUsize,
@@ -68,6 +70,7 @@ struct ReadStats {
 impl ReadStats {
     fn new() -> Self {
         Self {
+            ranges: Mutex::new(Vec::new()),
             active: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
             active_ranges: AtomicUsize::new(0),
@@ -97,6 +100,7 @@ impl ReadStats {
     }
 
     fn reset(&self) {
+        self.ranges.lock().unwrap().clear();
         assert_eq!(self.active.load(Ordering::SeqCst), 0);
         assert_eq!(self.active_ranges.load(Ordering::SeqCst), 0);
         assert_eq!(self.active_range_bytes.load(Ordering::SeqCst), 0);
@@ -231,6 +235,11 @@ impl ObjectStore for InstrumentedStore {
     ) -> object_store::Result<GetResult> {
         let is_range = options.range.is_some();
         let range_bytes = if let Some(GetRange::Bounded(range)) = &options.range {
+            self.stats
+                .ranges
+                .lock()
+                .unwrap()
+                .push((location.clone(), range.clone()));
             let bytes = usize::try_from(range.end - range.start).unwrap_or(usize::MAX);
             self.stats
                 .maximum_range_bytes

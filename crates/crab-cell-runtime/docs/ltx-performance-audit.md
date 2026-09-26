@@ -4,7 +4,7 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; follow-up production changes through `c248fcaad78`, plus the boundary-attribution implementation and demand-interference diagnostic recorded below. The latest completed 3/5/10/20-node traces use `c248fcaad78`, with fault harness `15b608452d9`. Each diagnostic identifies its source separately. Historical comparisons use `origin/main` snapshot `de0bb234abc`. The follow-up integrates read replicas from `396e0ab1b40`; historical measurements do not qualify that combined source. |
+| Scope | Initial baseline `0f3f4f7617a`; follow-up production changes through `c248fcaad78`, plus the boundary-attribution implementation and demand-interference diagnostic recorded below. The latest completed 3/5/10/20-node traces use `c248fcaad78`, with fault harness `15b608452d9`. The read-view RustFS diagnostic in finding 28 uses `5bbc7021c46`. Each diagnostic identifies its source separately. Historical comparisons use `origin/main` snapshot `de0bb234abc`. The follow-up integrates read replicas from `396e0ab1b40`; historical fleet measurements do not qualify that combined source. |
 | Status | Hydration fetch, sparse registration, persistent-cache construction isolation, conditional issue enrichment, recovery receipt preservation, range-proportional compaction, bounded asynchronous cache fills and local checksum read/merge improvements are implemented. Loaded scale-out cannot assume idle ownership transfer. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
@@ -39,6 +39,7 @@ their separate performance gates.
 | High, sustained throughput | One ordered publisher must drain every acknowledged commit; compaction shares that path (4–5, 17) | Measure published commit-sequence advance, oldest uncovered acknowledgement and retained bytes. Evaluate bounded consecutive-root coalescing only if the measured publisher cannot drain; preserve separate receipts and effect order. |
 | Medium, resource interference | Optional cache fills share blocking jobs with required work; read-ahead may fetch pages never used (6, 8, 18, 21) | Pause cache syncs while another Cell activates or publishes. Measure useful/fetched bytes and unused prefetch eviction before adding priority or changing cache policy. |
 | High, replica read path | Warm snapshots still require routing and response authority reads; refresh uses a new demand-cache view identity (27) | Count provider operations per successful replica read and bytes fetched after refresh. Preserve fencing while evaluating coalesced metadata observations and verified immutable-frame reuse. |
+| High, implemented and range-verified; service latency open | A fragmented root's demand read-ahead fetched 55 pages already cached in that same view (28) | Demand misses now stop before a cached suffix. Exact-range regressions pass at 512/4096-byte pages in memory and RustFS; cross-view reuse and public-action latency benefit remain unmeasured. |
 | Release gate | Current-source saturation, recovery under arrivals and independent-host evidence are incomplete (12, 16, 23) | Run fixed-workload then offered-rate curves at 3/5/10/20 nodes, with actual owner distribution, cgroup/host resources and every acknowledged result checked after failure. |
 
 ### Latest retained fleet evidence
@@ -102,11 +103,13 @@ from the final root. Their [matched measurements](../../crab-ltx/perf/README.md#
 are small-database diagnostics, not a service latency or representation-only
 performance claim.
 
-**Is this the best fix, rather than only a plausible one?** Releasing a merged
-checksum overlay is the smallest newly reproduced allocation opportunity.
-Worker isolation and publication drain have larger architectural consequences;
-choose their implementation using action traces and interference measurements.
-Keep the current VFS/LTX authority model while resolving these specific costs.
+**Is this the best fix, rather than only a plausible one?** Bounding demand
+read-ahead at a cached suffix removes reproduced duplicate work using the
+existing hydration rule and exact-view identity. It needs no new format or
+cross-root cache contract. Worker isolation and publication drain have larger
+architectural consequences; choose their implementation using action traces
+and interference measurements. Keep the current VFS/LTX authority model while
+resolving these specific costs.
 
 The [AMD64 Compose run](https://github.com/crabbuild/crab/actions/runs/36246017568)
 and [deep property run](https://github.com/crabbuild/crab/actions/runs/36246048251)
@@ -2424,11 +2427,12 @@ branch's writer isolation. A cold replica still consumes shared SQL capacity;
 measure mixed owner writes and replica reads on one vCPU before changing that
 allocation policy.
 
-**Best next fix?** First collect action-level replica traces and refresh cache
-misses on the combined revision. Reusing authenticated immutable bytes or
-coalescing concurrent observations may reduce real work. Increasing replicas,
-queue sizes or caching authority without a new correctness contract does not
-establish lower latency.
+**Best next fix?** Finding 28 now reproduces avoidable demand read-ahead within
+one view. Bound that fetch before changing cache identity across views, then
+compare action-level replica traces and refresh misses on the combined revision.
+Reusing authenticated immutable bytes or coalescing concurrent observations may
+reduce further work. Increasing replicas, queue sizes or caching authority
+without a new correctness contract does not establish lower latency.
 
 **Integration proof.** The combined checkout passes 27 focused LTX activation,
 read-view cleanup and sparse-root cases; four worker-isolation cases; four
@@ -2446,6 +2450,120 @@ status was relaxed. The RustFS run also verifies replica selection, owner loss,
 restored application state and Git readback, and its received write joins to
 the actual text logs. This shared-process debug fixture supplies functional
 and trace-correlation evidence, not a throughput or tail-latency result.
+
+### 28. Demand read-ahead fetches a cached suffix after small updates
+
+**Confirmed at `5bbc7021c46`, using local RustFS.** A new diagnostic published
+128 random 4 KiB payloads, opened an immutable SQL view, and read every payload
+through `sum(length(hex(value)))`. It repeated the query, opened another view
+of the same exact root, then opened a successor after updating only a separate
+counter. Old views remained alive; page-cache capacity exceeded this working
+set. Each query returned the expected aggregate with frame and page checksum
+verification enabled.
+
+| View and operation | Range GETs | Origin bytes |
+| --- | ---: | ---: |
+| First root: open and scan | 3 | 540,969 |
+| Same view: repeat scan | 0 | 0 |
+| Same root, new view: open and scan | 3 | 540,969 |
+| Successor after counter update: open and scan | 5 | 746,111 |
+| Each new view: repeat scan | 0 | 0 |
+
+This establishes two separate costs. View identity prevents reuse across
+views, as described in finding 27. Within the successor view, demand read-ahead
+also fetched an already cached suffix. A second run instrumented the actual
+fetch: page 15 fetched pages 15–78; the subsequent miss at page 6 fetched
+pages 6–69, including **55 pages already cached**. The successor transferred
+746,029 bytes versus 540,942 for the initial root, again about 38% more.
+`Cache::insert` discarded the duplicate pages after transfer, verification and
+decoding had already occurred. The measured excess is origin traffic; neither
+38% lower service latency nor a fleet throughput gain has been demonstrated.
+
+**Evidence map.** The public entry is
+[`VerifiedRoot::open_read_only`](../../crab-ltx/src/replica.rs), with connection
+ownership in [`ReadOnlyRoot`](../../crab-ltx/src/replica/read_only.rs).
+[`CellReadReplica::refresh`](../src/client/replica.rs) creates such replacement
+views after an exact root advances. This diagnostic exercises that LTX opening
+and SQL path directly; it excludes runtime routing and authority confirmation.
+[`Io::page` and `fetch`](../../crab-ltx/src/paged_io.rs) check only the requested
+page before asking `read_run` for 64 pages. `read_run` returns the first
+contiguous immutable span in that window. It does not stop at an already cached
+later page. Compared main `396e0ab1b40` has the same demand-fetch behavior.
+
+The sibling `Io::hydration_pages` already bounds a missing prefix before cached
+pages. Writable VFS demand reads install pages locally, so later reads can
+bypass this cache; immutable views repeatedly use it. The fix must preserve
+both consumers, rather than assuming their hit patterns are identical.
+Existing `read_only_roots_keep_exact_snapshots_without_materializing_pages`,
+`directory_nodes_are_shared_across_exact_root_views`, and the sparse hydration
+tests protect related correctness but do not assert demand-fetch byte reuse.
+
+**Best next fix and gate.** On a demand miss, compute the bounded uncached
+prefix using the current view's cache before issuing the range read. Reuse the
+existing 64-page/1-MiB bound and exact-root identity. In the deterministic case
+above, the miss at page 6 should stop before page 15. Cache eviction between
+selection and completion may cause a later miss; it must never cause a missing
+requested page or substitute another view's data. Compare point, random and
+scan workloads, fragmented roots, concurrent cache churn, hydration, deadlines,
+and corruption. Keep the checksum and frame checks. This change can remove
+known duplicate work without introducing a cross-root cache contract.
+
+Then evaluate bounded immutable-frame reuse across roots, keyed by an
+authenticated locator and frame identity, while each current root independently
+authorizes its page mapping. Preserve missing-metadata checks, truncation,
+incarnation isolation and retained old snapshots. Cache policy, fetch
+coalescing and publication batching are separate experiments.
+
+**Proof and limits.** Three diagnostic runs passed against RustFS
+`1.0.0-beta.8-glibc`. These are debug-build work-count probes on the local host,
+with no 1-vCPU/1-GiB limit applied to the Rust test. The uninstrumented successor
+open-and-scan took 99.388 ms and its warm repeat 2.254 ms; single samples are
+not latency percentiles. Temporary tests and fetch logging were removed after
+capturing their exact patches. Under the checkout's external Cargo target,
+`ltx-design-audit/read-view-audit-receipt.json` retains the source revision,
+patch/log SHA256 values and measurements; the adjacent `read-view-refresh.*`
+and `read-view-overlap.*` files reproduce both checks. The uninstrumented log
+SHA256 is `4c3bf4555d63337bedead4edc05bacdfc9bc2d6632bc85ac5e784d10abcd7ac5`;
+the overlap log SHA256 is
+`690dbc1df0785cbf3cef1e63309e437955fddb4419985de2cae1c5c07cc441b0`.
+The initial audit changed no runtime source, dependency version, public API or
+qualification threshold.
+
+**Implementation and regression proof.** Demand fetching now uses the same
+bounded `Cache::missing_prefix` selection as asynchronous hydration. Selection
+holds the cache lock only for a bounded lookup; provider work runs after release.
+Eviction during a fetch can cause a later miss but cannot change the requested
+page's identity or skip its verification. The existing per-view request gate,
+deadline, maximum fetch window and cache cap remain in force.
+
+The new [public SQL regression](../../crab-ltx/tests/cell/restore/read_ahead.rs)
+failed before the fix on overlapping origin ranges. Afterward it passes for
+512/4096-byte pages against both memory and actual RustFS, comparing full
+payload hashes and requiring disjoint origin ranges within the isolated
+working set. A repeated scan issues no range reads. RustFS reports 21 ranges /
+544,913 bytes at 512-byte pages and five ranges / 540,912 bytes at 4-KiB pages.
+The earlier diagnostic and this regression use different payload generators;
+these counts are not a controlled latency comparison. Eleven sparse-writer
+and hydration tests, four pager cache/deadline tests, minimal-feature checking,
+LTX all-target Clippy with warnings denied and the downstream HTTP server build
+also pass. Logs are retained
+under `ltx-design-audit/read-ahead-*.log` in the external target directory.
+
+The fleet qualifier now retains ordered 5→20→50→5 offered-rate points at each
+node count, with distinct reports and a lower-rate repeat after overload.
+Exit 2 is accepted as a measurement only after integrity, traces, publication
+drain and owner-loss checks finish; its `passed` flag remains false. The new
+classification and sequence tests pass with the 55-test Python suite under
+strict resource warnings. The reader-partition probe now closes HTTP error
+responses before interpreting their bodies; existing success and rejected-body
+cases also assert closure. Workflow syntax validation passes. Current-image execution of those curves,
+longer churn and independent-host qualification remain open.
+
+At the preceding `5bbc7021c46` revision, [image run 36258714307](https://github.com/crabbuild/crab/actions/runs/36258714307)
+passed build, Compose startup, restore, crash recovery and restart. It does
+not cover the subsequent demand-read or rate-curve changes. The separate
+architecture gate still rejects the app-to-host development dependency; its
+staged suite relocation and inventory approval remain outside this change.
 
 ## Safety and proof retained by the audit
 

@@ -82,17 +82,37 @@ source and checksum evidence.
 
 To run the gateway workload while each stage has exactly 3, 5, 10, or 20
 active nodes, add `--load-stages`. The functional checks remain the default
-when this option is omitted. Each loaded stage writes
-`load-<nodes>-stage.json` beside `report.json`; the latter links all four
-reports. The default offered rate is five create/read pairs per second for 60 seconds,
-with at most 64 pairs in flight. Use `--load-rate`, `--load-duration`, and
-`--load-max-in-flight` to choose the workload; keep them and `--cells` fixed
-when comparing node counts.
+when this option is omitted. Each rate writes `load-<nodes>-<index>.json`
+beside `report.json`; each stage's `loads` array links its ordered points.
+The default is five create/read pairs per second for 60 seconds, with at most
+64 pairs in flight. `--load-rate` accepts an ordered list, including repeated
+controls. Keep it, `--load-duration`, `--load-max-in-flight`, `--load-hot-share`
+and `--cells` fixed when comparing node counts. Hot share zero targets Cells
+uniformly; a positive fraction directs that portion to Cell 1.
 
 ```sh
 python3 crates/crab-http-server/deploy/cell-issue-fleet/qualify.py \
-  --state "$state" --project crab-cell-issue-run-1 --load-stages
+  --state "$state" --project crab-cell-issue-run-1 --load-stages \
+  --load-rate 5 20 50 5 --load-duration 60
 ```
+
+Each point drains publication, checks every acknowledgement and its action
+trace, and verifies owner loss before returning. The next point waits for
+placement to settle again. Exit 0 means every offered pair was served. Exit 2
+retains a partially served point with `integrity_verified: true` and
+`passed: false`; the qualifier continues the rate sequence. Broken contracts,
+missing acknowledgements/traces, failed drain, uneven successful ingress,
+missing resource observations or failed recovery remain fatal.
+
+The top-level report sets `completed: true` only after every point finishes
+its checks; `passed` is true only when every point served its offered load.
+CI measures 5→20→50→5 pairs/s at each node count, records each point in the job
+summary, and continues the separate unpublished-tail fault after a verified
+overload. A successful measurement job therefore does not imply all rates
+were fully served: inspect `passed` and the raw failures in each receipt.
+The final five-pair/s point detects drift, but preceding writes have enlarged
+the database; it is not an identical-state causal comparison. These bounded
+curves still require longer churn, hot-Cell and independent-host qualification.
 
 ### Run a CI-qualified Linux image
 

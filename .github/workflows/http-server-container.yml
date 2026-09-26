@@ -993,7 +993,7 @@ jobs:
     name: Qualify scheduled fleet traffic and owner loss
     if: ${{ inputs.fleet_image_run }}
     runs-on: ${{ inputs.arm64 && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     permissions:
       contents: read
       actions: read
@@ -1027,16 +1027,36 @@ jobs:
           git rev-parse HEAD > "${RUNNER_TEMP}/fleet-evidence/harness-revision"
           docker info --format '{{json .}}' > "${RUNNER_TEMP}/fleet-evidence/docker-info.json"
           df -k /var/lib/docker > "${RUNNER_TEMP}/fleet-evidence/disk-before.txt"
-      - name: Measure fixed workload at 3, 5, 10 and 20 nodes
+      - name: Measure offered-rate curves at 3, 5, 10 and 20 nodes
         run: |
           set -euo pipefail
           # The existing qualifier requires a clean checkout matching the
           # image. The fault driver records its separate harness revision.
+          set +e
           python3 -B "${RUNNER_TEMP}/fleet-server-source/crates/crab-http-server/deploy/cell-issue-fleet/qualify.py" \
             --state "${RUNNER_TEMP}/fleet-state" \
             --project "crab-cell-issue-ci-${GITHUB_RUN_ID}" --skip-build \
-            --load-stages --cells 20 --load-rate 5 --load-duration 60 \
+            --load-stages --cells 20 --load-rate 5 20 50 5 --load-duration 60 \
             2>&1 | tee "${RUNNER_TEMP}/fleet-evidence/stages.log"
+          stage_status=("${PIPESTATUS[@]}")
+          set -e
+          [ "${stage_status[1]}" -eq 0 ]
+          python3 - "${stage_status[0]}" "${RUNNER_TEMP}/fleet-state/report.json" <<'PY'
+          import json, os, pathlib, sys
+          status = int(sys.argv[1])
+          report = json.loads(pathlib.Path(sys.argv[2]).read_text())
+          if status not in (0, 2) or report.get("completed") is not True or report.get("passed") is not (status == 0):
+              raise SystemExit("rate curve did not complete its integrity and recovery gates")
+          # Exit 2 retains overload as failed capacity evidence. It must not
+          # prevent the separate unpublished-tail fault measurement.
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("## Fleet offered-rate measurements\n\n")
+              summary.write("All points completed integrity checks. Fully served every point: " + str(report["passed"]) + "\n\n")
+              summary.write("| Nodes | Pairs/s | Fully served | Report |\n| --- | --- | --- | --- |\n")
+              for stage in report["stages"]:
+                  for point in stage["loads"]:
+                      summary.write(f'| {stage["nodes"]} | {point["rate"]} | {point["passed"]} | {point["report"]} |\n')
+          PY
       - name: Lose an acknowledged unpublished owner during arrivals
         run: |
           set -euo pipefail

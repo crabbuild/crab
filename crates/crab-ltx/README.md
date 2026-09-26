@@ -696,6 +696,12 @@ dirty-job, scratch, and telemetry admission across many databases. Sparse page
 read-ahead is capped at 64 pages or 1 MiB per request, and the shared decoded
 page cache is capped at 8 MiB.
 
+Demand reads and asynchronous hydration stop a missing prefix before pages
+already cached in the same view. This avoids transferring and decoding an
+overlapping prefetched suffix when SQLite visits fragmented page ranges.
+Eviction can cause later misses; cache bytes never replace exact-root page
+authentication. New immutable views still have separate demand-cache identities.
+
 `Host::with_directory_cache(root).await?` opens persistent cache membership on
 an admitted blocking job. Restart reads at most 16 MiB of index input and
 retains at most 16,384 entries within the shared disk budget. The runtime
@@ -801,6 +807,21 @@ multiple directory levels, and a newer overwrite must restore byte-identically.
 It bounds origin reads and uploaded objects, retaining its unique
 `crab-ltx-tests/range-compaction/` prefix. These are work and correctness checks,
 not service latency percentiles.
+
+The demand-read regression uses the same RustFS environment:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-your-worktree" \
+  cargo test -p crab-ltx --features replica --locked --test cell \
+  rustfs_fragmented_snapshot_demand_reads_do_not_refetch_cached_frames -- --ignored --nocapture
+```
+
+It changes a separate counter, opens the resulting immutable view, and reads
+the unchanged payload at 512/4096-byte page sizes. Payload hashes must match,
+origin byte ranges must not overlap while the working set fits the isolated
+cache, and a repeated scan must issue no range reads. Objects remain under a
+unique `crab-ltx-tests/read-ahead/` prefix. This proves bounded transfer work,
+not a service latency percentile or cache reuse across different views.
 
 The suite also ships the independent half of the format proof:
 

@@ -145,6 +145,18 @@ struct Cache {
 }
 
 impl Cache {
+    fn missing_prefix(&self, view: u64, first: u32, count: u32) -> u32 {
+        // The first page is missing. A later page may already be prefetched;
+        // stop before it so demand reads and hydration do not fetch it twice.
+        (1..count)
+            .find(|offset| {
+                first
+                    .checked_add(*offset)
+                    .is_some_and(|page| self.pages.contains_key(&(view, page)))
+            })
+            .unwrap_or(count)
+    }
+
     fn insert(&mut self, view: u64, pages: Pages) {
         for (page, bytes) in pages {
             let key = (view, page);
@@ -230,9 +242,15 @@ impl Driver {
 
 async fn fetch(request: &Request, cache: &Mutex<Cache>) -> Result<Vec<u8>> {
     let deadline = tokio::time::Instant::from_std(request.deadline);
+    let count = cache
+        .lock()
+        .map_err(|_| CrabError::InvalidState("paged cache poisoned"))?
+        .missing_prefix(request.view, request.page, 64);
     let pages = tokio::time::timeout_at(
         deadline,
-        request.database.read_run(request.page, 64, request.origin),
+        request
+            .database
+            .read_run(request.page, count, request.origin),
     )
     .await
     .map_err(|_| CrabError::Deadline)??;
@@ -285,15 +303,7 @@ impl Io {
             if !cached.is_empty() {
                 return Ok(cached);
             }
-            // A SQL fault may have prefetched a later part of this batch.
-            // Stop the missing prefix before it instead of downloading it twice.
-            (1..count)
-                .find(|offset| {
-                    first
-                        .checked_add(*offset)
-                        .is_some_and(|page| cache.pages.contains_key(&(self.view, page)))
-                })
-                .unwrap_or(count)
+            cache.missing_prefix(self.view, first, count)
         };
         self.database
             .read_run(first, missing, crate::LtxReadOrigin::Hydrating)

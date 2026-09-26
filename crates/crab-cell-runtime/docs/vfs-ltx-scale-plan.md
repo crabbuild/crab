@@ -123,7 +123,7 @@ be labeled separately in any comparison.
 **Change:** extend the existing Compose qualifier to run the current
 `load.py` workload at 3, 5, 10, and 20 nodes immediately after each
 stage becomes healthy. Keep the existing command as the default functional
-check. Save one raw load report per stage with source revision, image digest,
+check. Save one raw load report per offered rate in each stage with source revision, image digest,
 Compose profile, node limits, RustFS identity, workload size, and retry counts.
 The runner must not silently retry a mutation with a new request ID.
 
@@ -138,9 +138,9 @@ recovers the last acknowledged issue. Record p50/p95/p99 and max for reads,
 writes, and recovery, plus retry and error counts. Do not set a production
 latency or Cell-count limit from one shared-host Compose run.
 
-**Exit:** four stage reports are retained and can be compared to a second
-run with the same profile. A report with retries is valid evidence but is
-not an error-free service result.
+**Exit:** four stage groups retain their ordered rate reports and can be
+compared to a second run with the same profile. A report with retries is valid
+evidence but is not an error-free service result.
 
 The qualifier now builds a clean committed Git archive, verifies the image's
 revision label even with `--skip-build`, and pins every server service to the
@@ -149,6 +149,16 @@ server revision/platform separately from generator source; imported images
 still require their CI source/checksum receipts. Wrong-source refusal and real
 Docker archive/tag-retention proof pass. Four current-source stage curves and
 a repeated 20-node run are still required.
+
+The runner now accepts ordered `--load-rate 5 20 50 5` points, retaining each
+point's samples, traces, resource observations, publication drain and owner-loss
+checks. Verified overload returns exit 2 with `passed: false`, allowing later
+controls to run; failed integrity or recovery stops the sequence. CI retains
+overload as capacity evidence and separately exercises unpublished-tail loss.
+Its completion status is not proof that every offered rate was served. The
+repeated control can reveal drift as data accumulates; it does not reset the
+database to its initial state. These curves are implemented but still require
+current-image execution before satisfying the exit gate.
 
 ## Work packet 2: remove redundant peer resolution
 
@@ -285,6 +295,16 @@ now measures phase durations and read bytes at fixed database sizes and I/O
 admission settings. Its three samples per setting are diagnostic; sustained
 multi-Cell tails and first-mutation latency remain required.
 
+The [read-view RustFS audit](ltx-performance-audit.md#28-demand-read-ahead-fetches-a-cached-suffix-after-small-updates)
+reproduces two additional costs: fresh immutable views refetch unchanged page
+bodies, and a fragmented root's demand read-ahead refetches a cached suffix.
+Demand misses now share hydration's uncached-prefix selection within the
+existing window. Require no duplicated cached suffix in the regression, then compare
+point/random/scan traffic and cache churn. Next evaluate authenticated frame
+reuse across exact roots, retaining truncate/regrow and incarnation isolation.
+Measure GETs, useful/fetched bytes, decode work and public-action p99 separately;
+the observed 38% extra origin bytes do not establish a latency improvement.
+
 Include two Cells on the **same SQL worker** in the interference matrix. A
 cold page wait, hydration step, or published-cut cleanup currently occupies
 that worker; the independent provider driver does not let the resident Cell
@@ -380,10 +400,12 @@ in packet 4 remains open.
 Checksum persistence now coalesces adjacent changed entries into writes capped
 at 64 KiB; clean handoff buffers dense checksum reads to the same bound. Local
 real-SQLite tests reproduce the old per-entry I/O and verify reduced host calls,
-exact sidecar bytes, corruption refusal, and post-seal failure fencing. Fresh
-Cells still copy their dense memory index per cut, and restored Cells still
-read overwritten old checksums individually. The fresh/restored comparison,
-allocation and handoff measurements, and sibling-Cell latency gate in
+exact sidecar bytes, corruption refusal, and post-seal failure fencing. Fixed-size
+fresh updates now reuse an exclusively owned dense memory index, restored old
+checksum reads use a 4 KiB window, and successful merges release the changed-page
+overlay allocation. Shared snapshots or growth can still allocate; activation
+still walks the complete authenticated checksum directory. The fresh/restored
+comparison, allocation and handoff measurements, and sibling-Cell latency gate in
 [audit finding 14](ltx-performance-audit.md) remain open.
 
 The local [replica cost record](../../crab-ltx/perf/README.md#cell-publication-cost-per-command)

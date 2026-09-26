@@ -22,7 +22,8 @@ def unavailable(url: str, withdrawn: bool = False) -> dict:
         with urllib.request.urlopen(url + "?read=replica", timeout=10) as response:
             raise RuntimeError(f"isolated reader returned HTTP {response.status}")
     except urllib.error.HTTPError as error:
-        raw = error.read()
+        with error:
+            raw = error.read()
         # Lease expiry closes the public listener. Only a fresh expired-session
         # proof permits the gateway's empty error in place of the live-node error.
         if error.code == 502 and withdrawn and not raw:
