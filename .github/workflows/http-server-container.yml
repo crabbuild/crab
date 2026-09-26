@@ -50,6 +50,9 @@ jobs:
     name: Build and inspect image
     runs-on: ${{ inputs.arm64 && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     timeout-minutes: 45
+    env:
+      # The ARM runner is native; the repository's cross-linker is absent there.
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: cc
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -780,6 +783,10 @@ jobs:
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: stable
+      - name: Build the cluster receipt validator
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-http-server-receipt-target
+        run: cargo build --locked -p crab-cell-runtime --bin qualification_receipt
       - name: Exercise Compose startup, restore, crash recovery, and restart
         env:
           CRAB_HTTP_SERVER_IMAGE: crab-http-server:test
