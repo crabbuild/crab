@@ -35,6 +35,16 @@ readiness is available. The server sends an authenticated owner hint after the
 CAS and also reconciles owned Cells periodically. A stale revision returns
 HTTP 409. This API is available only in the object durability profile.
 
+For repository issue detail, `GET /api/repos/{owner}/{name}/issues/{number}?read=replica`
+selects an admitted reader and returns `x-crab-cell-reader`,
+`x-crab-cell-incarnation`, and `x-crab-cell-sequence` headers naming the
+serving node and the issue query's observed position. Supply
+both `after_incarnation` (32 lowercase hex digits) and `after_sequence` on a
+later replica request to require at least that position. The route reports
+`replica_behind` (409) or `replica_unavailable` (503) and never runs the issue
+query on the owner as a fallback. The default issue route still reads from the
+owner. Other issue metadata may be resolved separately from the owner.
+
 ## Configure one process per node
 
 The existing HTTP server owns Cell runtime construction. Configuration supplies the authoritative object store, local volume, public listener, management listener, and peer identity.

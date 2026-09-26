@@ -1,8 +1,8 @@
 # Plan 036: S3-durable Cell read replicas and fenced promotion
 
 Status: PARTIAL IMPLEMENTATION — exact-root views, S3 desired-count policy,
-private peer activation/query, object-mode reconciliation, and an operator
-target API exist; no public product replica route or production qualification
+private peer activation/query, object-mode reconciliation, an operator
+target API, and explicit issue-detail replica reads exist; no production qualification
 Base: `origin/main` at `de0bb234abc` (2026-09-25); Cell/LTX source compared with the planning checkout at `fa182c94c7e`
 Priority: P1 read scaling; P0 safety for any enabled deployment. Effort: XL. Risk: HIGH.
 Depends on: the recovery implementations tracked by plans 032 and 035;
@@ -60,7 +60,9 @@ durability mode, the server now reconciles active owner Cells, sends authenticat
 activation hints to selected nodes, refreshes their admitted read views, and
 accepts explicit authenticated private replica queries. An administrator may
 CAS the target count through the product API, which sends an authenticated
-owner wake-up hint. No public product route, verified ready-count status,
+owner wake-up hint. An explicit issue-detail route uses selected replicas and
+reports actual receipts without falling back to the writer. No general product
+read route, verified ready-count status,
 sparse read view, warm-reader promotion preference, or
 production qualification is enabled.
 The server can select the existing object proof path with `[cells]
@@ -263,8 +265,8 @@ sparse view and provider fault cases remain; 3 policy CAS, signed selection,
 owner reconciliation, private activation, node admission, and administrator
 target CAS with owner hint exist, but verified ready status and churn qualification
 remain; 4 typed local and peer queries, position
-errors, receipt checks, and authority gates exist, but public product routing
-remains open; 5 and 6 open. Private peer replica requests are accepted only in
+errors, receipt checks, authority gates, and explicit issue-detail routing exist,
+but other product reads remain owner-only; 5 and 6 open. Private peer replica requests are accepted only in
 the object-durability server profile.
 
 The ignored `rustfs_replica_reads_exact_root_and_policy_cas` test also passed

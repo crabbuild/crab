@@ -22,8 +22,8 @@ def node_name(index: int) -> str:
     return f"node-{index:02d}"
 
 
-def node_config(index: int) -> str:
-    return (
+def node_config(index: int, object_durability: bool = False) -> str:
+    config = (
         f'listen = "127.0.0.1:{8200 + index}"\n'
         f'management_listen = "127.0.0.1:{9200 + index}"\n\n'
         '[cells]\n'
@@ -38,6 +38,9 @@ def node_config(index: int) -> str:
         '[storage]\n'
         f'url = "s3://{BUCKET}/repositories"\n'
     )
+    if object_durability:
+        return config.replace("[cells]\n", '[cells]\ndurability = "object"\n', 1)
+    return config
 
 
 def caddyfile() -> str:
@@ -223,7 +226,7 @@ def compose(state: Path, project: str, gateway_port: int, node_port_base: int) -
     return {"name": project, "services": services, "volumes": volumes}
 
 
-def render(state: Path, project: str, gateway_port: int, node_port_base: int) -> Path:
+def render(state: Path, project: str, gateway_port: int, node_port_base: int, object_durability: bool = False) -> Path:
     state = state.expanduser().resolve()
     if state.is_relative_to(ROOT):
         raise ValueError("state must be outside the repository")
@@ -235,7 +238,7 @@ def render(state: Path, project: str, gateway_port: int, node_port_base: int) ->
         raise ValueError("gateway port overlaps a node port")
     (state / "config").mkdir(parents=True, exist_ok=True)
     for index in range(1, 21):
-        (state / "config" / f"{node_name(index)}.toml").write_text(node_config(index))
+        (state / "config" / f"{node_name(index)}.toml").write_text(node_config(index, object_durability))
     (state / "Caddyfile").write_text(caddyfile())
     path = state / "compose.yaml"
     path.write_text(json.dumps(compose(state, project, gateway_port, node_port_base), indent=2) + "\n")
@@ -248,8 +251,9 @@ def main() -> None:
     parser.add_argument("--project", required=True)
     parser.add_argument("--gateway-port", type=int, default=18080)
     parser.add_argument("--node-port-base", type=int, default=18100)
+    parser.add_argument("--object-durability", action="store_true")
     args = parser.parse_args()
-    print(render(args.state, args.project, args.gateway_port, args.node_port_base))
+    print(render(args.state, args.project, args.gateway_port, args.node_port_base, args.object_durability))
 
 
 if __name__ == "__main__":

@@ -278,6 +278,16 @@ impl IntoResponse for Error {
                 "busy",
                 "Collaboration requests are busy; retry the same submission shortly",
             ),
+            Self::Cell(crab_cell_runtime::Error::ReplicaBehind { .. }) => (
+                StatusCode::CONFLICT,
+                "replica_behind",
+                "Read replicas have not reached the requested Cell receipt",
+            ),
+            Self::Cell(crab_cell_runtime::Error::ReplicaUnavailable) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "replica_unavailable",
+                "No selected read replica is currently ready",
+            ),
             Self::CellPending => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "outcome_unknown",

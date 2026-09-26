@@ -689,6 +689,48 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .await
         .unwrap();
     assert_eq!(observed.output.unwrap().title, "Remote Cell");
+    let replica_url = format!("{public_origin}/api/repos/team/repo/issues/1?read=replica");
+    let replica_response = client.get(&replica_url).send().await.unwrap();
+    let replica_status = replica_response.status();
+    let replica_headers = replica_response.headers().clone();
+    let replica_bytes = replica_response.bytes().await.unwrap();
+    assert_eq!(
+        replica_status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&replica_bytes)
+    );
+    assert_eq!(
+        replica_headers
+            .get("x-crab-cell-reader")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .len(),
+        32
+    );
+    let incarnation = replica_headers
+        .get("x-crab-cell-incarnation")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let sequence = replica_headers
+        .get("x-crab-cell-sequence")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    let replica_body: Value = serde_json::from_slice(&replica_bytes).unwrap();
+    assert_eq!(replica_body["title"], "Remote Cell");
+    let behind_url = format!(
+        "{replica_url}&after_incarnation={incarnation}&after_sequence={}",
+        sequence + 1
+    );
+    let behind = json_get(&client, behind_url.as_str()).await;
+    assert_eq!(behind.0, StatusCode::CONFLICT);
+    assert_eq!(behind.1["error"]["code"], "replica_behind");
     let selected_reader = directory
         .load(ingress_session, crate::cells::unix_now_ms().unwrap())
         .await
@@ -767,6 +809,9 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     stop_readers.cancel();
     reader_task.await.unwrap().unwrap();
     assert_eq!(ingress_runtime.stats().file_descriptors(), 0);
+    let unavailable = json_get(&client, replica_url.as_str()).await;
+    assert_eq!(unavailable.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(unavailable.1["error"]["code"], "replica_unavailable");
     let restored_target = json_request(
         &client,
         reqwest::Method::PUT,

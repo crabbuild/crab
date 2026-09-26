@@ -103,3 +103,20 @@ identity, and every node's local Cell volume.
 The 1 GiB profile is an evaluation profile. This single-machine Compose run
 cannot establish a supported production Cell count, recovery SLO, cloud-store
 durability, independent network failure behavior, or multi-host throughput.
+
+## S3-rooted read replicas
+
+Use a fresh project and state directory for the object durability profile:
+
+```sh
+python3 crates/crab-http-server/deploy/cell-issue-fleet/qualify_read_replicas.py \
+  --state "$HOME/.codex/cell-issue-fleet/read-replicas-1" \
+  --project crab-cell-issue-read-replicas-1
+```
+
+This run applies read-replica targets of 2, 4, 9, and 19 as the fleet grows
+from 3 to 20 nodes. It queries the original issue through an explicit replica
+route and records each serving node from `x-crab-cell-reader` in
+`read-replica-report.json`. Every Cell mutation uses the object durability
+profile. The report proves local RustFS side effects and observed reader
+distribution on one host; it does not replace protected-provider evidence.

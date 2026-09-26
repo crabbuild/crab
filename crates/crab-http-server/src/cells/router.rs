@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicI64, Ordering},
+        atomic::{AtomicI64, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -16,25 +16,25 @@ use crab_cell_runtime::cell::application::ApplicationIdentity;
 use crab_cell_runtime::cell::catalog::CatalogRole;
 use crab_cell_runtime::cell::catalog::{CatalogProof, CellCatalog};
 use crab_cell_runtime::cell::worker::ACTIVE_CELL_PAGE_CACHE_BYTES;
-use crab_cell_runtime::client::CellClient;
-use crab_cell_runtime::client::CellDescription;
+use crab_cell_runtime::client::{CellClient, CellDescription, Observed, Receipt};
 use crab_cell_runtime::control::authority::{CellAuthority, VersionedControl};
 use crab_cell_runtime::control::{ControlState, Owner};
 use crab_cell_runtime::fleet::placement::{
     CellTransferDemand, FleetBalance, PlacementObservation, PlacementPlanner,
 };
-use crab_cell_runtime::identity::CellTarget;
+use crab_cell_runtime::identity::{CellTarget, NodeId};
 use crab_cell_runtime::ltx::CellReplica;
 use crab_cell_runtime::ltx::CellStorageLayout;
 use crab_cell_runtime::node::NodeDirectory;
 use crab_cell_runtime::peer::{
-    EffectPeerClient, MigrationPeerClient, PeerOperation, PeerPrincipal, PeerRoundTrip, PeerSigner,
-    wire as peer_wire,
+    EffectPeerClient, MigrationPeerClient, PeerOperation, PeerPrincipal, PeerReplicaResolver,
+    PeerRoundTrip, PeerSigner, ReplicaPeerClient, wire as peer_wire,
 };
 use crab_cell_runtime::primitives::maintenance::PersistedWorkInventory;
 use crab_cell_runtime::primitives::workflow::MAX_ACTIVITY_PAYLOAD_BYTES;
 use crab_cell_runtime::read_policy::ReadPolicyStore;
 use crab_cell_runtime::recovery::release::{ReleaseState, ReleaseStore};
+use crab_cell_runtime::registry::Query;
 use crab_cell_runtime::registry::Registry;
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -82,6 +82,7 @@ pub(crate) struct RepositoryCellRouter {
     // sampled at or before it may predate the released ownership, so the whole
     // fleet view is discarded until every member samples again.
     rebalance_settled_at_ms: Arc<AtomicI64>,
+    replica_query_cursor: Arc<AtomicU64>,
 }
 
 #[derive(Clone)]
@@ -114,6 +115,117 @@ impl ScheduledRepositoryCell {
 }
 
 impl RepositoryCellRouter {
+    pub(crate) async fn query_replica<Q: Query>(
+        &self,
+        repository: Uuid,
+        principal: &Identity,
+        local: &super::ReadReplicaManager,
+        minimum: Option<Receipt>,
+        input: Q::Input,
+    ) -> crab_cell_runtime::Result<(Observed<Q::Output>, NodeId)>
+    where
+        Q::Input: Clone,
+    {
+        let target = self.repository_target(repository)?;
+        let cell = target.cell_id();
+        let control = self
+            .authority
+            .load(cell)
+            .await?
+            .ok_or(crab_cell_runtime::Error::ReplicaUnavailable)?;
+        let control = control.value();
+        if control.state != ControlState::Serving || control.recovery.is_some() {
+            return Err(crab_cell_runtime::Error::Fenced);
+        }
+        let owner = control
+            .owner
+            .as_ref()
+            .ok_or(crab_cell_runtime::Error::Fenced)?;
+        let policy = ReadPolicyStore::new(self.layout.clone())
+            .load(cell)
+            .await?
+            .ok_or(crab_cell_runtime::Error::ReplicaUnavailable)?;
+        let policy = policy.value();
+        if policy.incarnation() != control.incarnation || policy.desired_readers() == 0 {
+            return Err(crab_cell_runtime::Error::ReplicaUnavailable);
+        }
+        let selected = self
+            .peer
+            .directory
+            .select_readers(
+                cell,
+                owner.session,
+                control.code,
+                usize::from(policy.desired_readers()),
+                super::unix_now_ms()
+                    .map_err(|_| crab_cell_runtime::Error::Command("clock failed"))?,
+                10_000,
+            )
+            .await?;
+        if selected.is_empty() {
+            return Err(crab_cell_runtime::Error::ReplicaUnavailable);
+        }
+        let expected = CellDescription {
+            cell,
+            incarnation: control.incarnation,
+            code: control.code,
+            schema: control.schema,
+        };
+        let client = ReplicaPeerClient::new(
+            Arc::clone(&self.registry),
+            Arc::clone(&self.peer.signer),
+            PeerPrincipal {
+                issuer: principal.issuer.clone(),
+                subject: principal.subject.clone(),
+                actions: vec!["repository.read".into()],
+            },
+            Arc::clone(&self.peer.round_trip),
+        );
+        let start =
+            self.replica_query_cursor.fetch_add(1, Ordering::Relaxed) as usize % selected.len();
+        let mut behind = None;
+        let mut fenced = false;
+        let attempts = async {
+            for offset in 0..selected.len() {
+                let node = selected[(start + offset) % selected.len()].clone();
+                let reader_node = node.node();
+                // Peer transport refuses self-dials; the admitted local view
+                // runs the same post-query authority gate as a remote reader.
+                let queried = if node.session() == self.peer.owner.session {
+                    match local.resolve(target.clone()).await {
+                        Ok(reader) => reader.query::<Q>(minimum, input.clone()).await,
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    client
+                        .query::<Q>(&target, node, expected, minimum, input.clone())
+                        .await
+                };
+                match queried {
+                    Ok(result) => return Ok((result, reader_node)),
+                    Err(error @ crab_cell_runtime::Error::ReplicaBehind { .. }) => {
+                        behind = Some(error)
+                    }
+                    Err(crab_cell_runtime::Error::Fenced) => fenced = true,
+                    Err(error @ crab_cell_runtime::Error::PeerAuthorization(_)) => {
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        tracing::debug!(?cell, error = %error, "selected read replica unavailable")
+                    }
+                }
+            }
+            Err(behind.unwrap_or(if fenced {
+                crab_cell_runtime::Error::Fenced
+            } else {
+                crab_cell_runtime::Error::ReplicaUnavailable
+            }))
+        };
+        tokio::time::timeout(Duration::from_secs(5), attempts)
+            .await
+            .unwrap_or(Err(crab_cell_runtime::Error::ReplicaUnavailable))
+    }
+
     pub(crate) async fn run_read_replica_reconciliation(
         &self,
         cancellation: CancellationToken,
@@ -284,6 +396,7 @@ impl RepositoryCellRouter {
                 .into(),
             rebalance_evidence: Arc::new(Mutex::new(HashMap::new())),
             rebalance_settled_at_ms: Arc::new(AtomicI64::new(0)),
+            replica_query_cursor: Arc::new(AtomicU64::new(0)),
         })
     }
 
