@@ -337,9 +337,10 @@ supports hash-only tables
 and sort-key tables once their initial data route is published.
 Low-level account and partition commands support local atomic transactions.
 The public adapter routes all transactional writes through the coordinator,
-including account participants before route activation. Same-Cell transactional
-reads use a local snapshot; cross-Cell reads use durable shared locks and
-captured participant images. Account-local
+including account participants before route activation. All transactional reads
+use durable shared locks and captured participant images, retrieved individually
+to avoid an aggregate Cell response limit. Same-Cell reads now pay the same
+coordinator protocol cost. Account-local
 sort-key Query, index operations, and streamed writes remain unsupported.
 `tests/account_cell.rs` exercises them through a real
 `CellNodeBuilder` and in-memory object store, including request replay,

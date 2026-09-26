@@ -565,6 +565,22 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
             .collect(),
     )
     .await;
+    let partition = &other_partitions[0];
+    let read_keys = (0..1_000)
+        .map(|i| format!("large-read-{i}"))
+        .filter(|id| {
+            let key = extenddb_core::types::Item::from([(
+                "id".into(),
+                extenddb_core::types::AttributeValue::S(id.clone()),
+            )]);
+            let hash =
+                beyonddb::data_key_hash(&other_table.id, &key, &other_table.key_schema).unwrap();
+            partition.lower.is_none_or(|lower| hash >= lower)
+                && partition.upper.is_none_or(|upper| hash < upper)
+        })
+        .take(14)
+        .collect();
+    let large_read = support::LargeRead::seed(&sdk, "RemoteTable", read_keys).await;
     shutdown_tx.send(()).unwrap();
     server.await.unwrap().unwrap();
     owner_lease.cancel();
@@ -742,6 +758,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     assert_eq!(cross_owner_read.item(), Some(&item));
     recovery::assert_recovered_images(&replacement_sdk).await;
     large.assert_recovered(&replacement_sdk).await;
+    large_read.assert_read(&replacement_sdk).await;
     assert!(
         replacement_provisioner
             .takeover_expired_partition(

@@ -241,13 +241,14 @@ for a committed request without a durable fence.
 The full state machine, visibility rules, split fence, and recovery proof are
 specified in [the cross-Cell transaction protocol](CROSS_CELL_TRANSACTIONS.md).
 
-Low-level local transactions use one Cell command. All public transactional
-writes use the coordinator protocol; the full target also requires read
-coordination and fleet recovery:
+Low-level local writes use one Cell command. All public transactional reads
+and writes use the coordinator protocol, including requests confined to one
+Cell. General fleet recovery remains incomplete:
 
-1. Order participants by Cell ID; each prepares its writes and locks the
-   affected keys under a transaction ID, routing epoch, and deadline. Prepared
-   values remain invisible to ordinary reads.
+1. Order participants by Cell ID; each prepares operations and locks affected
+   keys under transaction/coordinator identities. Data participants validate
+   the original routing epoch. Prepared writes remain invisible; reads capture
+   immutable existing/absent images under shared locks.
 2. Once every prepare is published, the coordinator publishes exactly one
    commit or abort decision. Client tokens and request fingerprints live in
    that coordinator's durable state, scoped to the account.
@@ -258,10 +259,11 @@ coordination and fleet recovery:
    decision. `TransactGetItems` acquires a consistent read boundary across its
    participants so it cannot see half of a committed transaction.
 
-Splits wait for or transfer prepared intents before fencing the source. TTL,
-stream records, and local secondary indexes commit with the base item in its
-data Cell. Global secondary indexes use a durable per-partition outbox and
-idempotent projections; their reads are eventually consistent. Base-table
+Splits refuse to seal a source with prepared intents. TTL metadata commits
+with the base item. Stream records and local secondary indexes must eventually
+join that atomic boundary; they are not implemented. Global secondary indexes
+would require a durable per-partition outbox and idempotent projections with
+eventually consistent reads; that path is also not implemented. Base-table
 Query reads the HASH key's owner Cell in sort-key order; Scan fans out over a
 pinned directory epoch and returns a bounded continuation token naming
 per-partition cursors.

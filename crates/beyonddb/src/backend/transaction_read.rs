@@ -1,4 +1,4 @@
-//! Serializable cross-Cell reads from immutable participant snapshots.
+//! Serializable transactional reads from immutable participant snapshots.
 
 use extenddb_core::types::{Item, TableKeyInfo};
 use extenddb_storage::error::StorageError;
@@ -13,7 +13,7 @@ use crate::{
 };
 
 impl CellStorage {
-    pub(super) async fn cross_cell_read(
+    pub(super) async fn transaction_read(
         &self,
         account_id: &str,
         inputs: Vec<GetItemInput>,
