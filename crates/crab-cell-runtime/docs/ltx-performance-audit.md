@@ -4,7 +4,7 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; follow-up production changes through `c248fcaad78`, plus the boundary-attribution implementation and demand-interference diagnostic recorded below. The latest completed 3/5/10/20-node traces use `c248fcaad78`, with fault harness `15b608452d9`. The read-view RustFS diagnostic in finding 28 uses `5bbc7021c46`. Each diagnostic identifies its source separately. Historical comparisons use `origin/main` snapshot `de0bb234abc`. The follow-up integrates read replicas from `396e0ab1b40`; historical fleet measurements do not qualify that combined source. |
+| Scope | Initial baseline `0f3f4f7617a`; follow-up production changes through `c248fcaad78`, plus the boundary-attribution implementation and demand-interference diagnostic recorded below. The latest completed 3/5/10/20-node traces use `c248fcaad78`, with fault harness `15b608452d9`. The read-view RustFS diagnostic in finding 28 uses `5bbc7021c46`. Each diagnostic identifies its source separately. Historical comparisons use `origin/main` snapshot `de0bb234abc`. The follow-up integrates read replicas from `396e0ab1b40`. The newer offered-rate run uses `8e61bcf3ad2` and stops on a ten-node recovery failure; it does not qualify the full combined fleet. |
 | Status | Hydration fetch, sparse registration, persistent-cache construction isolation, conditional issue enrichment, recovery receipt preservation, range-proportional compaction, bounded asynchronous cache fills and local checksum read/merge improvements are implemented. Loaded scale-out cannot assume idle ownership transfer. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
@@ -32,6 +32,8 @@ their separate performance gates.
 
 | Priority | Gap | Next decision and proof |
 | --- | --- | --- |
+| Highest, fixed in focused tests; fleet open | An inactive-log node claim blocked other successors restoring that node's Cells (30) | Permanent fencing evidence now permits independent Cell CAS; active-tail recovery stays exclusive. The two-Cell RustFS regression passes. Re-run the failed fleet point. |
+| High, measured application round trip | Covered repository mutations pay an archive-state query before their command; saturated ten-node p99 is 1,448.518 ms (31) | Evaluate checking writable state in the same command transaction. Cover archive/unarchive ordering, retries, all mutation siblings and external-write policy before removing the HTTP check. |
 | Implemented and fixed-load verified | Rounding the receiver margin up prevented donation at a one-Cell target; a batch could also overfill its preferred receiver (26) | Whole-Cell margins and projected receiver room pass both regressions. The latest 3/5/10/20-node run uses every execution owner; skew, sustained load and the combined source remain unqualified. |
 | High, implemented mechanism; latency unqualified | The baseline empty checksum overlay retained its largest allocation and cloned that capacity (25) | Sealed merges now consume the overlay. Compare large-cut → repeated one-page-cut allocation and latency for both bases, retaining failure fencing and recovery-plan clone semantics. |
 | High, reproduced latency interference | Demand faults block a resident sibling on the same SQL worker; installation, confirmation and cleanup also use that worker (9–10, 19) | Local RustFS release diagnostics show 43–45 ms median sibling delay without injected latency and 414–416 ms with 20 ms per GET. Qualify public actions on one vCPU before selecting bounded executor scheduling or prefetch. An active SQLite callback cannot yield its connection. |
@@ -43,7 +45,80 @@ their separate performance gates.
 | Release gate | Current-source saturation, recovery under arrivals and independent-host evidence are incomplete (12, 16, 23) | Run fixed-workload then offered-rate curves at 3/5/10/20 nodes, with actual owner distribution, cgroup/host resources and every acknowledged result checked after failure. |
 | High, verifier corrected; live proof open | Fleet acknowledgement checks ignored issue bodies (29) | Compare number, title and full request-specific body on creation, readback and recovery. Earlier receipts remain ID/title evidence; rerun with the stronger harness before claiming payload recovery. |
 
-### Latest retained fleet evidence
+### Latest offered-rate evidence: recovery and capacity gates failed
+
+[Run 36265830657](https://github.com/crabbuild/crab/actions/runs/36265830657)
+finished with failure. Its image and stage runner use `8e61bcf3ad2`; the job
+and fault harness use `f3c4d56416f`. The imported ARM64 image digest is
+`sha256:c2b47dfab9b0e6db4cedc411a68ea8f8d106add757e13edacb1c8b8dfb38d79e`.
+Each node has one-vCPU/1-GiB limits; all nodes, RustFS and the load generator
+share four CPUs and 16,722,006,016 bytes of host memory. This measures shared-host
+contention, not independently provisioned node capacity.
+
+Each point offers create/read pairs for sixty seconds across twenty Cells.
+Every acknowledged write joins to an execution owner. All expected owners
+execute work. Load schema 7 checks the issue number, title and complete body.
+
+| Nodes | Offered pairs/s | Acknowledged / scheduled | Write p99 ms | Read p99 ms | Gate result |
+| --- | --- | --- | --- | --- | --- |
+| 3 | 5 | 300 / 300 | 42.243 | 15.240 | Pass |
+| 3 | 20 | 1,200 / 1,200 | 53.343 | 17.590 | Pass |
+| 3 | 50 | 2,997 / 3,000 | 123.177 | 38.983 | 3 late arrivals; recovery passes |
+| 3 | 5 repeat | 300 / 300 | 44.790 | 14.696 | Pass |
+| 5 | 5 | 300 / 300 | 58.828 | 23.932 | Pass |
+| 5 | 20 | 1,200 / 1,200 | 76.092 | 34.492 | Pass |
+| 5 | 50 | 2,989 / 3,000 | 413.899 | 171.747 | 11 late arrivals; recovery passes |
+| 5 | 5 repeat | 300 / 300 | 61.325 | 25.580 | Pass |
+| 10 | 5 | 300 / 300 | 94.603 | 51.798 | Pass |
+| 10 | 20 | 1,200 / 1,200 | 233.176 | 121.692 | Pass |
+| 10 | 50 | 2,121 / 3,000 | 2,587.981 | 1,509.477 | 834 capacity and 45 late arrivals; recovery passes |
+| 10 | 5 repeat | 300 / 300 | 74.793 | 45.221 | Timed arrivals pass; post-loss readback fails |
+
+These are observed points, not supported service limits. The ten-node 50-pair/s
+point reached the client's 64-pair concurrency cap; successful admitted requests
+do not erase the 879 missed arrivals. The later five-pair/s point returned to
+lower latency, but its recovery check failed. The twenty-node stage and the
+separate unpublished-tail fault were **not run**. The job did not time out.
+
+The final point drained publication and verified all 300 acknowledgements
+before killing `node-10`. `work-20` recovered on another session in 10.883 seconds
+with the same root. Reading `work-01` from that same dead owner then failed six
+times on different entry nodes with `node recovery is already claimed`.
+This is failed post-loss availability and incomplete recovery proof; the report
+does not establish data loss. See finding 30 for the authority-boundary defect.
+
+Action durations at the saturated ten-node point identify where to investigate:
+
+| Measured phase | p50 ms | p99 ms |
+| --- | --- | --- |
+| HTTP write | 1,159.720 | 2,587.981 |
+| Archive-state check | 477.083 | 1,448.518 |
+| Cell invocation | 618.742 | 1,612.772 |
+| Actor queue | 0.068 | 933.306 |
+| Durability proof wait | 329.956 | 698.034 |
+| SQL worker queue | 0.040 | 4.640 |
+| SQL worker execution | 2.750 | 21.136 |
+| WAL/LTX capture | 0.528 | 7.932 |
+
+Durations overlap; their percentiles must not be added or subtracted. The
+archive check is a separate pre-command Cell query (finding 31). LTX capture
+and SQL worker execution are small compared with end-to-end latency in this
+workload. That does not rule out cold-demand or large-database checksum costs.
+Of 2,121 writes, 1,235 use object proof and 886 use follower proof. Forwarded
+writes number 1,930, with p99 2,597.073 ms versus 1,851.544 ms for 191 local
+writes; this observational split does not isolate the causal forwarding cost.
+
+Artifact `cell-fleet-qualification-36265830657` retains all twelve reports,
+arrival samples, action joins, node metrics and Compose logs. SHA256 of
+`load-10-04.json` is
+`b74c6ff2f84dab4d9763668235cae82ef95c5c35cafe8cdc10e8dd842f826ecd`.
+Reproduce phase summaries with `action_traces.summarize` over each retained
+`load-*.traces/actions.jsonl`; the phase definitions live in
+[the trace joiner](../../crab-http-server/deploy/cell-issue-fleet/action_traces.py).
+A corrected-source fleet rerun must retain the same arrival, body verification,
+and recovery gates before changing the performance verdict.
+
+### Earlier fixed-rate fleet evidence
 
 [Run 36255479387](https://github.com/crabbuild/crab/actions/runs/36255479387)
 passed all stages and the unpublished-owner fault. The image and stage runner
@@ -2697,9 +2772,112 @@ Source: [HTTP create/detail and summary contracts](../../crab-http-server/src/is
 [unpublished-tail recovery](../../crab-http-server/deploy/cell-issue-fleet/fault.py).
 All 56 fleet harness tests pass with resource warnings treated as errors.
 Load schema 7 and fault schema 2 distinguish the stronger proof and changed
-payload from historical runs. Current-image RustFS fleet execution is still
-required; these harness regressions do not themselves prove runtime recovery
-or a latency improvement. This adds no runtime or storage-format change.
+payload from historical runs. Run 36265830657 exercises the stronger harness:
+eleven points pass full payload recovery, while the final ten-node point fails
+post-loss readback (finding 30). Twenty-node and unpublished-tail coverage on
+that source remain unrun. The harness change adds no runtime or storage-format
+change and does not establish a latency improvement.
+
+### 30. An inactive-log recovery claim serializes unrelated Cell takeovers
+
+**Observed:** the final ten-node point of run 36265830657 recovered `work-20`
+from `node-10`, then failed to read the acknowledged issue in `work-01`, which
+had the same prior owner. Six requests over approximately 3.4 seconds failed
+with `Node("node recovery is already claimed")`. The recovery claim lifetime is
+30 seconds. All writes in that point used object proof and publication drained
+before the kill.
+
+**Source:** [request routing](../../crab-http-server/src/cells/router.rs)
+loads a `takeover_proof`, then calls `claim_expired_for_takeover` if absent.
+[The directory](../src/node/directory/recovery.rs) originally required the
+current claimant to match even when the tombstone had no active log.
+[The tombstone claim](../src/node/directory.rs) rejects other claimants until
+expiry. Thus different Cells inherit an unnecessary node-wide exclusion.
+An inactive log reaches this error; an active log returns `PendingPublication`
+earlier in the request path. This separates the observed symptom from an
+unfinished active-tail recovery. The same predicates exist on `origin/main`
+at `396e0ab1b40` and in the measured image `8e61bcf3ad2`.
+
+The correct ownership boundary is a permanent expired-session fence plus a
+separate CAS for each Cell. An absent/inactive log cannot have acknowledged
+follower-only state: [node durability](../src/node/durability.rs) activates the
+authoritative log before issuing follower proof. A tombstone prevents a stale
+enrollment from activating later. An active log must still complete exclusive
+recovery and pin its overlays before other nodes receive takeover proof.
+[Cell takeover](../src/cell/actor/acquire.rs) checks the old session, verifies
+the claimant, reloads current control, CASes ownership and restores the exact
+root before serving. Sharing the node fence must preserve each of those steps.
+
+**Implemented:** `takeover_proof` accepts the permanent tombstone for any live
+successor when the log is absent/inactive, or when active-log recovery has
+sealed/retired it. A request-path claim failure reloads that proof to resolve a
+competing fence or an ambiguous CAS response. Generic recovery claims retain
+their exclusive generation and lease checks. No storage format, public type,
+retry deadline, or acknowledgement requirement changes.
+
+Both the public directory regression and the two-Cell application regression
+failed with the recorded claim-conflict error before this fix and pass after
+it. The application regression publishes two different issue payloads and
+receipts, reconstructs the controls left by one expired owner, and restores
+them on different successors before claim expiry. It also passes against
+local RustFS `1.0.0-beta.8-glibc` at port 19010 using a fresh isolated bucket
+and prefix. This is a real SQLite/object-store regression; it does not kill
+separate node processes. The directory test additionally covers stale
+pre-claim observations, inactive enrolled logs, active-log exclusion, rejected
+late activation and expired successors. All 34 existing node-directory tests
+and seven router tests pass; the ignored RustFS case is run separately and
+passes.
+
+Run the RustFS case with the existing `CRAB_HTTP_CELL_TEST_BUCKET`,
+`CRAB_HTTP_CELL_TEST_ENDPOINT`, `CRAB_HTTP_CELL_TEST_PREFIX`, `AWS_ACCESS_KEY_ID`
+and `AWS_SECRET_ACCESS_KEY` test environment. Use a fresh prefix per invocation:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/<checkout>" \
+  cargo test -p crab-http-server --locked --lib \
+  cells::router::tests::rustfs_different_successors_restore_cells_from_one_fenced_node \
+  -- --exact --ignored --nocapture
+```
+
+The full RustFS fleet recovery gate must be rerun on the corrected image;
+these focused regressions cannot replace the original process-loss scenario.
+
+### 31. The archive check adds a serialized Cell invocation before mutations
+
+**Measured:** at ten nodes and 50 offered pairs/s, the archive-state check's
+p50/p99 is 477.083/1,448.518 ms, versus capture's 0.528/7.932 ms. The timing is
+measured around the check on the entry node; it includes routing, query and
+waiting, not just the SQL statement. Actor queue p99 is also 933.306 ms. These
+measurements prioritize round-trip and queue reduction over further small-cut
+checksum tuning for this workload; they do not isolate host CPU or provider
+service time.
+
+[HTTP middleware](../../crab-http-server/src/server.rs) invokes
+`archived_mutation_response` before unsafe repository requests. It calls
+[load_lifecycle](../../crab-http-server/src/repository_settings.rs), which routes
+and executes `GetRepositoryLifecycle`; then the handler separately routes its
+mutation. [CreateIssue](../../crab-http-server/src/cells/repository.rs) validates
+and deduplicates its input, but does not check archive state in that transaction.
+The preflight exists on `origin/main`; action instrumentation only exposes its
+cost. Existing [HTTP/mTLS coverage](../../crab-http-server/src/server_peer_e2e_tests.rs)
+expects this query, so it is not an accidental trace attribution.
+
+**Next experiment:** place writable-state admission at the repository command
+transaction boundary, with an explicit policy for operations allowed while
+archived. Prove ordered archive → mutation rejection, mutation → archive
+success, unarchive → mutation success, concurrent submissions and replay of an
+already-committed request. Only then remove redundant preflight reads for those
+commands and compare the same workload with identical durability semantics.
+A stale boolean cache would change the decision's authority and is not proof.
+
+This cannot be a CreateIssue-only patch: comments, issue edits, reviews,
+settings and other registered mutations share the policy. Archive/unarchive
+and membership have explicit HTTP exceptions. Git, LFS, contents and branches
+also perform storage effects outside the collaboration command transaction;
+their current archive checks need their own ordering contract. Count provider
+reads and local/forwarded invocations per action as well as latency. Preserve
+authorization, idempotency, durable rejection behavior and the current public
+error mapping. No archive behavior is changed by this audit.
 
 ## Safety and proof retained by the audit
 

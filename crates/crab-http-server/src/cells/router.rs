@@ -1896,6 +1896,208 @@ mod tests {
         third_runtime.shutdown().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn different_successors_restore_cells_from_one_fenced_node() {
+        restore_cells_from_one_fenced_node(
+            Store::new(Arc::new(InMemory::new())),
+            "independent-cell-takeover",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an isolated RustFS prefix and test credentials"]
+    async fn rustfs_different_successors_restore_cells_from_one_fenced_node() {
+        let required = |name| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
+        let store = crab_storage::build_explicit_store(
+            &required("CRAB_HTTP_CELL_TEST_BUCKET"),
+            crab_storage::ObjectStoreCredentials::Aws {
+                access_key_id: required("AWS_ACCESS_KEY_ID"),
+                secret_access_key: required("AWS_SECRET_ACCESS_KEY"),
+                session_token: None,
+                region: "us-east-1".into(),
+            },
+            Some(&required("CRAB_HTTP_CELL_TEST_ENDPOINT")),
+            true,
+        )
+        .unwrap();
+        restore_cells_from_one_fenced_node(store, &required("CRAB_HTTP_CELL_TEST_PREFIX")).await;
+    }
+
+    async fn restore_cells_from_one_fenced_node(store: Store, root: &str) {
+        let identity = ApplicationIdentity::new(
+            TenantId::from_bytes([61; 16]),
+            ApplicationId::from_bytes([62; 16]),
+        );
+        let layout = CellStorageLayout::new(
+            store,
+            ObjectPath::from(root),
+            *identity.application().as_bytes(),
+        );
+        let registry = Arc::new(crate::cells::compiled_registry().unwrap());
+        bootstrap_release_at(
+            &layout,
+            identity,
+            &registry,
+            &format!("sha256:{}", "e".repeat(64)),
+        )
+        .await
+        .unwrap();
+        let source = SessionId::from_bytes([63; 16]);
+        let source_runtime =
+            CellRuntime::new(SqlWorkerPool::new(1, 4).unwrap(), 16 << 20, source).unwrap();
+        let source_dir = tempfile::TempDir::new().unwrap();
+        let source_router = router(
+            identity,
+            layout.clone(),
+            registry.clone(),
+            source_runtime.clone(),
+            source,
+            source_dir.path().to_path_buf(),
+        );
+        let principal = Identity {
+            issuer: "https://crab.build".into(),
+            subject: "recovery-reader".into(),
+            name: "Recovery Reader".into(),
+        };
+        let mut acknowledged = Vec::new();
+        for byte in [64, 65] {
+            let repository = Uuid::from_bytes([byte; 16]);
+            let target = CellTarget::new(
+                identity.tenant(),
+                identity.application(),
+                REPOSITORY_NAMESPACE,
+                repository.as_bytes(),
+            )
+            .unwrap();
+            let (proof, authority) =
+                crate::cells::provision_repository(&layout, identity, &registry, &target)
+                    .await
+                    .unwrap();
+            let control = authority
+                .create_initial(&proof, IncarnationId::from_bytes([byte; 16]), owner(source))
+                .await
+                .unwrap();
+            source_runtime.bootstrap(
+                proof,
+                CellReplica::new(layout.clone(), *target.cell_id().as_bytes(),
+                    *control.value().incarnation.as_bytes(), repository_replica_limits()).unwrap(),
+                authority, control, source_dir.path().join(format!("{byte}.sqlite")),
+                move |transaction| {
+                    initialize_repository_schema(transaction)?;
+                    transaction.execute(
+                        "INSERT INTO repository_identity(singleton, repository_uuid) VALUES (1, ?1)",
+                        [repository.as_bytes().as_slice()],
+                    )?;
+                    Ok(())
+                },
+            ).await.unwrap();
+            let routed = source_router
+                .route(repository, &principal, "repository.issue.create")
+                .await
+                .unwrap();
+            let created = routed
+                .client
+                .command::<CreateIssue>(
+                    &routed.target,
+                    mutation(byte),
+                    CreateIssueInput {
+                        submission_id: [byte; 16],
+                        author: RepositoryAuthor {
+                            issuer: principal.issuer.clone(),
+                            subject: principal.subject.clone(),
+                            name: principal.name.clone(),
+                        },
+                        title: format!("Cell {byte}"),
+                        body: format!("Durable payload {byte}"),
+                    },
+                )
+                .await
+                .unwrap();
+            let crate::cells::repository::CreateIssueOutcome::Created(issue) = created.output
+            else {
+                panic!("issue creation was rejected");
+            };
+            acknowledged.push((repository, target, created.receipt, *issue));
+        }
+        source_runtime.shutdown().await.unwrap();
+        let directory = source_router.peer.directory.clone();
+        let now_ms = crate::cells::unix_now_ms().unwrap();
+        let fleet = directory.fleet();
+        let image = crab_cell_runtime::Digest::from_bytes([22; 32]);
+        let expired = fleet_advertisement(
+            &registry,
+            fleet,
+            image,
+            source,
+            &SigningKey::from_bytes(&[63; 32]),
+            now_ms - 20_000,
+            2,
+            10,
+        );
+        directory.create(expired, now_ms - 20_000).await.unwrap();
+        let authority = CellAuthority::new(layout.clone());
+        // Reconstruct two published controls left by one expired owner. Each
+        // successor must recover its own Cell without waiting for a node claim.
+        for (_, target, _, _) in &acknowledged {
+            let idle = authority.load(target.cell_id()).await.unwrap().unwrap();
+            let stale = idle.value().takeover(owner(source)).unwrap();
+            authority
+                .transition(&idle, stale, Transition::Takeover)
+                .await
+                .unwrap();
+        }
+        for (index, (_, target, receipt, issue)) in acknowledged.into_iter().enumerate() {
+            let session = SessionId::from_bytes([66 + index as u8; 16]);
+            directory
+                .create(
+                    fleet_advertisement(
+                        &registry,
+                        fleet,
+                        image,
+                        session,
+                        &SigningKey::from_bytes(&[7; 32]),
+                        now_ms,
+                        0,
+                        10,
+                    ),
+                    now_ms,
+                )
+                .await
+                .unwrap();
+            let runtime =
+                CellRuntime::new(SqlWorkerPool::new(1, 4).unwrap(), 16 << 20, session).unwrap();
+            let destination = tempfile::TempDir::new().unwrap();
+            let successor = router(
+                identity,
+                layout.clone(),
+                registry.clone(),
+                runtime.clone(),
+                session,
+                destination.path().to_path_buf(),
+            );
+            let restored = successor
+                .activate_local_target(
+                    target.clone(),
+                    successor.runtime_principal(&["cell.activate"]),
+                )
+                .await
+                .unwrap()
+                .cell;
+            assert_eq!(
+                restored
+                    .client
+                    .query::<GetIssue>(&target, Some(receipt), issue.number)
+                    .await
+                    .unwrap()
+                    .output,
+                Some(issue)
+            );
+            runtime.shutdown().await.unwrap();
+        }
+        assert!(!directory.is_live(source, now_ms).await.unwrap());
+    }
+
     fn fleet_advertisement(
         registry: &Registry,
         fleet: crab_cell_runtime::Digest,

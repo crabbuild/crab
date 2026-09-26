@@ -40,18 +40,29 @@ impl NodeDirectory {
             .await
     }
 
-    /// Claims an expired session for request-path takeover only when its node
-    /// log is already inactive. An active log returns `PendingPublication`
-    /// without writing a claim so the follower recovery scheduler can proceed.
+    /// Fences an expired session or reuses its completed takeover authority.
+    ///
+    /// An unsealed active log returns `PendingPublication` without writing a
+    /// claim so the follower recovery scheduler can proceed.
     pub async fn claim_expired_for_takeover(
         &self,
         session: SessionId,
         claimant: SessionId,
         now_ms: i64,
     ) -> Result<NodeTakeoverProof> {
-        self.claim_expired_inner(session, claimant, now_ms, true, false)
-            .await?
-            .direct_takeover()
+        match self
+            .claim_expired_inner(session, claimant, now_ms, true, false)
+            .await
+        {
+            Ok(fenced) => fenced.direct_takeover(),
+            // Another request may have fenced the same dead session after our
+            // routing observation. Re-read durable proof before reporting its
+            // claim conflict; Cell ownership still requires a separate CAS.
+            Err(error) => self
+                .takeover_proof(session, claimant, now_ms)
+                .await?
+                .ok_or(error),
+        }
     }
 
     pub(super) async fn claim_expired_inner(
@@ -144,7 +155,7 @@ impl NodeDirectory {
         }
     }
 
-    /// Loads takeover authority already persisted by a completed node recovery.
+    /// Loads takeover authority from a permanent fence with no unrecovered active log.
     pub async fn takeover_proof(
         &self,
         session: SessionId,
@@ -167,16 +178,15 @@ impl NodeDirectory {
         if tombstone.session != session {
             return Err(Error::Node("node tombstone session differs"));
         }
-        let claimed_by_caller = tombstone.claimant == Some(claimant)
-            && tombstone
-                .claim_expires_at_ms
-                .is_some_and(|expires_at_ms| expires_at_ms > now_ms);
+        // The claim serializes active follower-tail recovery, not all Cells
+        // from one failed node. Absent/inactive logs cannot add acknowledged
+        // state after fencing, so each live successor can acquire its own Cell.
         let ready = match tombstone.log.as_ref() {
             Some(log) if matches!(log.phase(), NodeLogPhase::Sealed | NodeLogPhase::Retired) => {
                 true
             }
-            Some(log) => !log.active() && claimed_by_caller,
-            None => claimed_by_caller,
+            Some(log) => !log.active(),
+            None => true,
         };
         Ok(ready.then_some(NodeTakeoverProof { session, claimant }))
     }
