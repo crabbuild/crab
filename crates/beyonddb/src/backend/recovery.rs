@@ -71,6 +71,7 @@ impl CellStorage {
         coordinator: &CellTarget,
     ) -> Result<(), StorageError> {
         let mut after = None;
+        let mut failure = None;
         loop {
             let page = self
                 .client
@@ -84,52 +85,64 @@ impl CellStorage {
                 .output
                 .0;
             if page.is_empty() {
-                return Ok(());
+                return failure.map_or(Ok(()), Err);
             }
             after = page.last().map(|entry| entry.cursor.clone());
             for entry in page {
-                if entry.state == PendingTransactionState::Begin {
-                    let decision = self
-                        .client
-                        .command::<DecideCrossCellTransaction>(
-                            coordinator,
-                            mutation_identity()?,
-                            Json(DecideCrossCellTransactionInput {
-                                account_id: entry.account_id.clone(),
-                                transaction_id: entry.transaction_id,
-                                routing_key: entry.routing_key.clone(),
-                                decision: CoordinatorDecision::Abort {
-                                    index: None,
-                                    reason: None,
-                                },
-                            }),
-                        )
-                        .await;
-                    match decision {
-                        Ok(committed)
-                            if matches!(
-                                committed.output.0,
-                                DecideCrossCellTransactionOutcome::Decided(_)
-                            ) => {}
-                        Err(InvocationError::Rejected(committed))
-                            if committed.output.0
-                                == DecideCrossCellTransactionOutcome::DecisionConflict => {}
-                        Ok(_) | Err(InvocationError::Rejected(_)) => {
-                            return Err(StorageError::Internal(
-                                "coordinator refused recovery decision".into(),
-                            ));
-                        }
-                        Err(error) => return Err(cell_error(error)),
-                    }
+                // One blocked transaction must not retain other records' locks.
+                // Readiness still fails until the whole recovered shard settles.
+                if let Err(error) = self.recover_fenced_transaction(coordinator, entry).await {
+                    failure.get_or_insert(error);
                 }
-                self.finish_decided_cross_cell_transaction(
-                    &entry.account_id,
-                    &entry.routing_key,
-                    entry.transaction_id,
-                )
-                .await?;
             }
         }
+    }
+
+    async fn recover_fenced_transaction(
+        &self,
+        coordinator: &CellTarget,
+        entry: PendingCrossCellTransaction,
+    ) -> Result<(), StorageError> {
+        if entry.state == PendingTransactionState::Begin {
+            let decision = self
+                .client
+                .command::<DecideCrossCellTransaction>(
+                    coordinator,
+                    mutation_identity()?,
+                    Json(DecideCrossCellTransactionInput {
+                        account_id: entry.account_id.clone(),
+                        transaction_id: entry.transaction_id,
+                        routing_key: entry.routing_key.clone(),
+                        decision: CoordinatorDecision::Abort {
+                            index: None,
+                            reason: None,
+                        },
+                    }),
+                )
+                .await;
+            match decision {
+                Ok(committed)
+                    if matches!(
+                        committed.output.0,
+                        DecideCrossCellTransactionOutcome::Decided(_)
+                    ) => {}
+                Err(InvocationError::Rejected(committed))
+                    if committed.output.0
+                        == DecideCrossCellTransactionOutcome::DecisionConflict => {}
+                Ok(_) | Err(InvocationError::Rejected(_)) => {
+                    return Err(StorageError::Internal(
+                        "coordinator refused recovery decision".into(),
+                    ));
+                }
+                Err(error) => return Err(cell_error(error)),
+            }
+        }
+        self.finish_decided_cross_cell_transaction(
+            &entry.account_id,
+            &entry.routing_key,
+            entry.transaction_id,
+        )
+        .await
     }
 
     /// Finish a published decision across account and data Cell participants.

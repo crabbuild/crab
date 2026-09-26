@@ -6,6 +6,7 @@ mod elastic_cells {
     mod coordinator_tokens;
     mod public_transactions;
     mod read_resolution;
+    mod recovery_admission;
     mod transaction_capacity;
     mod transaction_driver;
     mod transaction_reads;

@@ -284,20 +284,12 @@ async fn serve_ready(
         )?
         .with_initial_partition_count(config.initial_partitions)?,
     );
+    let mut owned_accounts = Vec::with_capacity(config.owned_accounts.len());
     for account_id in &config.owned_accounts {
         let account = provisioner
             .recover_owned_account(account_id, &directory)
             .await?;
-        provisioner
-            .recover_registered_partitions(account_id, account.clone(), &directory)
-            .await?;
-        provisioner.install_account_capacity_loop(
-            &tasks,
-            account_id.clone(),
-            account,
-            config.split_threshold_bytes,
-            Duration::from_secs(3),
-        )?;
+        owned_accounts.push((account_id, account));
     }
     for key_id in &config.owned_access_keys {
         provisioner
@@ -331,29 +323,6 @@ async fn serve_ready(
             )
             .await?;
     }
-    if !config.owned_accounts.is_empty() {
-        let storage = CellStorage::new(client.clone(), config.region.clone());
-        let accounts = config.owned_accounts.clone();
-        let cancellation = tasks.cancellation_token();
-        tasks.spawn(async move {
-            let mut ticks = tokio::time::interval(Duration::from_secs(30));
-            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {
-                    () = cancellation.cancelled() => return Ok::<(), std::io::Error>(()),
-                    _ = ticks.tick() => {}
-                }
-                for account_id in &accounts {
-                    if cancellation.is_cancelled() {
-                        return Ok(());
-                    }
-                    if let Err(error) = storage.sweep_account_ttl(account_id).await {
-                        tracing::warn!(account_id, %error, "TTL sweep failed");
-                    }
-                }
-            }
-        })?;
-    }
     let mut state = build_http_state(
         node,
         client.clone(),
@@ -377,25 +346,62 @@ async fn serve_ready(
         .with_graceful_shutdown(async move { peer_shutdown.cancelled().await })
         .await
     });
-    let recovery: Result<(), extenddb_storage::error::StorageError> = async {
+    let recovery: ServerResult<()> = async {
         let storage = CellStorage::new(client.clone(), config.region.clone());
-        for account_id in &config.owned_accounts {
+        for (account_id, account) in owned_accounts {
             provisioner
-                .recover_registered_coordinators(account_id, &client, &storage, &directory)
+                .recover_registered_account(
+                    account_id,
+                    account.clone(),
+                    &client,
+                    &storage,
+                    &directory,
+                )
                 .await?;
+            provisioner.install_account_capacity_loop(
+                &tasks,
+                account_id.clone(),
+                account,
+                config.split_threshold_bytes,
+                Duration::from_secs(3),
+            )?;
         }
         provisioner.install_transaction_recovery_loop(
             &tasks,
             storage,
             directory.clone(),
             config.owned_accounts.clone(),
-        )
+        )?;
+        if !config.owned_accounts.is_empty() {
+            let storage = CellStorage::new(client.clone(), config.region.clone());
+            let accounts = config.owned_accounts.clone();
+            let cancellation = tasks.cancellation_token();
+            tasks.spawn(async move {
+                let mut ticks = tokio::time::interval(Duration::from_secs(30));
+                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        () = cancellation.cancelled() => return Ok::<(), std::io::Error>(()),
+                        _ = ticks.tick() => {}
+                    }
+                    for account_id in &accounts {
+                        if cancellation.is_cancelled() {
+                            return Ok(());
+                        }
+                        if let Err(error) = storage.sweep_account_ttl(account_id).await {
+                            tracing::warn!(account_id, %error, "TTL sweep failed");
+                        }
+                    }
+                }
+            })?;
+        }
+        Ok(())
     }
     .await;
     if let Err(error) = recovery {
         peer_cancel.cancel();
         peer_server.await??;
-        return Err(error.into());
+        return Err(error);
     }
     let mut public_server = tokio::spawn(extenddb_server::start_server(
         public_listener,

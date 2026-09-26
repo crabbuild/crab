@@ -299,8 +299,11 @@ skips a completed Idle root only when it matches an observed empty-work receipt;
 new or changed roots remain discoverable. Cell admission reclaims settled
 coordinators at the active-Cell limit; idle shards restore before token lookup.
 Recovery reactivates released coordinators; startup resolves shards one at a
-time. General Cell placement/activation, bounded transaction/read-image
-retention, and fleet qualification remain incomplete. Production admits 64
+time. A participant admission failure no longer prevents a published decision
+from resolving healthy Cells. Startup continues through the shard's pending
+records but retains errors and fails readiness until recovery completes. Serving
+recovery keeps undecided transactions behind successful admission. General Cell
+placement/activation, bounded transaction/read-image retention, and fleet qualification remain incomplete. Production admits 64
 active Cells per node; busy coordinators apply retryable backpressure. See
 SCALING.md for the unqualified 10,000-Cell, multi-TB target.
 

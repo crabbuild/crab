@@ -35,6 +35,7 @@ uuid.workspace = true
 zeroize = "1"
 
 [dev-dependencies]
+crab-storage = { workspace = true, features = ["test-support"] }
 aws-config.workspace = true
 aws-credential-types.workspace = true
 aws-sdk-dynamodb.workspace = true

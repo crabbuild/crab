@@ -336,23 +336,60 @@ impl CellInitialPartitionProvisioner {
             .map_err(|_| StorageError::Internal("coordinator recovery lock poisoned".into()))?
             .insert(cell, shard.clone());
         if let Some((entry, _)) = pending {
-            self.recover_pending_participants(
-                &shard.target,
-                &entry,
-                storage.client(),
-                nodes,
-                &mut HashSet::new(),
-            )
-            .await?;
-            storage
-                .resume_cross_cell_transaction(
-                    &entry.account_id,
-                    &entry.routing_key,
-                    entry.transaction_id,
+            let admission = self
+                .recover_pending_participants(
+                    &shard.target,
+                    &entry,
+                    storage.client(),
+                    nodes,
+                    &mut HashSet::new(),
                 )
-                .await?;
+                .await;
+            if entry.state == crate::PendingTransactionState::Begin {
+                admission?;
+                storage
+                    .resume_cross_cell_transaction(
+                        &entry.account_id,
+                        &entry.routing_key,
+                        entry.transaction_id,
+                    )
+                    .await?;
+            } else {
+                // A published decision can release healthy participants even if
+                // another owner cannot be admitted. Resolution still checks the
+                // coordinator and normal Cell authority; admission errors survive.
+                let resolution = storage
+                    .finish_decided_cross_cell_transaction(
+                        &entry.account_id,
+                        &entry.routing_key,
+                        entry.transaction_id,
+                    )
+                    .await;
+                admission.and(resolution)?;
+            }
         }
         Ok(())
+    }
+
+    /// Restore registered data and coordinator Cells before serving an account.
+    ///
+    /// Requires an owned account Cell and available private peer routing. Data
+    /// admission errors do not skip coordinator recovery, but still fail readiness.
+    pub async fn recover_registered_account(
+        &self,
+        account_id: &str,
+        account: crab_cell_runtime::cell::actor::CellHandle,
+        client: &CellClient,
+        storage: &CellStorage,
+        nodes: &NodeDirectory,
+    ) -> Result<(), StorageError> {
+        let admission = self
+            .recover_registered_partitions(account_id, account, nodes)
+            .await;
+        let resolution = self
+            .recover_registered_coordinators(account_id, client, storage, nodes)
+            .await;
+        admission.and(resolution)
     }
 
     /// Recover idle or expired registered coordinators for a configured account.
@@ -420,9 +457,14 @@ impl CellInitialPartitionProvisioner {
                     }
                 };
                 if local {
-                    self.recover_transaction_participants(&target, client, nodes)
-                        .await?;
-                    storage.recover_fenced_coordinator(&target).await?;
+                    let admission = self
+                        .recover_transaction_participants(&target, client, nodes)
+                        .await;
+                    // Startup owns a fenced coordinator, so BEGIN may be aborted.
+                    // Finish reachable work before failing readiness for any
+                    // remaining admission or resolution error.
+                    let resolution = storage.recover_fenced_coordinator(&target).await;
+                    admission.and(resolution)?;
                 }
             }
         }
@@ -439,6 +481,7 @@ impl CellInitialPartitionProvisioner {
         nodes: &NodeDirectory,
     ) -> Result<(), StorageError> {
         let mut after = None;
+        let mut failure = None;
         loop {
             let page = client
                 .query::<ReadPendingCrossCellTransactions>(
@@ -451,14 +494,18 @@ impl CellInitialPartitionProvisioner {
                 .output
                 .0;
             if page.is_empty() {
-                return Ok(());
+                return failure.map_or(Ok(()), Err);
             }
             after = page.last().map(|entry| entry.cursor.clone());
             // Bound deduplication memory to one page, even for a large backlog.
             let mut visited = HashSet::new();
             for entry in page {
-                self.recover_pending_participants(coordinator, &entry, client, nodes, &mut visited)
-                    .await?;
+                if let Err(error) = self
+                    .recover_pending_participants(coordinator, &entry, client, nodes, &mut visited)
+                    .await
+                {
+                    failure.get_or_insert(error);
+                }
             }
         }
     }
@@ -485,6 +532,7 @@ impl CellInitialPartitionProvisioner {
             .map_err(cell_error)?
             .output
             .0;
+        let mut failure = None;
         for participant in targets {
             let (target, module, initialize): (CellTarget, &'static str, Initialize) =
                 match participant.target {
@@ -504,12 +552,21 @@ impl CellInitialPartitionProvisioner {
                         initialize_partition,
                     ),
                 };
-            if visited.insert(target.cell_id()) {
-                self.recover_discovered_owner(&target, module, initialize, nodes)
-                    .await?;
+            if !visited.contains(&target.cell_id()) {
+                match self
+                    .recover_discovered_owner(&target, module, initialize, nodes)
+                    .await
+                {
+                    Ok(_) => {
+                        visited.insert(target.cell_id());
+                    }
+                    Err(error) => {
+                        failure.get_or_insert(error);
+                    }
+                }
             }
         }
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
 }
 
