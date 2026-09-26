@@ -283,14 +283,16 @@ with fault injection during rollout still open;
 cache, cancellation cleanup, and provider fault tests pass locally; runtime
 and product mTLS tests pass on local RustFS; 3 policy CAS, signed selection,
 owner reconciliation, private activation, node admission, and administrator
-target CAS with owner hint and bounded readiness status exist; broader churn qualification
-remains; 4 typed local and peer queries, position
+target CAS with owner hint and bounded readiness status exist; local
+0→1→2→4→1 convergence passes, including shrink during reader loss;
+broader churn qualification remains; 4 typed local and peer queries, position
 errors, receipt checks, authority gates, and explicit issue-detail routing exist,
 including ingress-observed in-flight load selection under one request deadline,
 and explicit policy on typed/generated application clients, but other product
 reads remain owner-only; 5 has warm-reader preference and
 local automatic takeover coverage; 6 has a source/image-bound 3/5/10/20-node Compose run with reader replacement,
-warm promotion, all-reader disk loss, and authority outage; broader capacity
+warm promotion, all-reader disk loss with a new acknowledged write, global
+authority outage, and a separately isolated reader during takeover; broader capacity
 and fault qualification remain open. Private peer replica requests are accepted only in
 the object-durability server profile.
 
@@ -342,7 +344,7 @@ mTLS peer route, the policy change to zero releases reader admission, and the
 old view is fenced after the owner epoch changes. This is one-process test
 wiring, not the required independent Pod qualification.
 
-The final uninterrupted local Compose run used runtime source `75b6da1a97d`,
+The earlier uninterrupted local Compose run used runtime source `75b6da1a97d`,
 runner `f8b164094e3`, and image
 `sha256:921dc5c7ec9ba004df65430a03a8cb9f1a0957e62a253f4578c876ed4e66b2ce`.
 At 3/5/10/20 nodes, all 2/4/9/19 selected readers served correct issue details;
@@ -397,7 +399,18 @@ reader's first observed fresh result. These whole-node windows include
 background work and exclude uninstrumented membership/policy calls and
 provider-internal retries; they are not total billable S3 requests. Routing now
 reuses the host's instrumented authority instead of silently dropping its
-control-read telemetry. A fresh-image run is required to qualify these changes.
+control-read telemetry. A fresh-image 3/5/10/20-node run at `d6904ba187de`
+passed with these measurements and the sparse views. Five-node replica
+throughput was 411.72 requests/s with exactly 50 of 200 reads per secondary;
+the same workload's owner route achieved 3,051.56 requests/s. Separate
+follow-ups proved a new S3-rooted write after deleting every original Cell
+disk and the explicit target-count sequence during reader loss. The linked
+qualification receipt preserves each runner/image boundary and report hash.
+A further local S3-path partition left one reader without authority while a
+healthy node recovered the unchanged root, acquired the next epoch, and
+acknowledged a new mutation. The isolated node first returned typed
+unavailability, then closed its public listener after its session expired;
+it never became primary. This is separate-process, single-host evidence.
 
 ## Fault matrix and release gates
 

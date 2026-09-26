@@ -185,14 +185,104 @@ Local evidence for this change:
   formatting, crate layout, and 66 documented Rust snippet checks passed.
 
 The earlier container images and throughput measurements predate this sparse
-implementation. This follow-up is local library and one-process mTLS evidence;
-it does not establish new multi-container throughput or peak-resource results.
+implementation. The fresh-image run below qualifies its multi-container path.
+
+## Sparse reader container qualification — 2026-09-26
+
+An uninterrupted local RustFS 3→5→10→20-node run passed, starting at
+`2026-09-26T05:33:18.971219+00:00`. Runtime and runner were the clean source
+`d6904ba187de801f087a611900c7e71e3e9a2d0b`; image:
+`sha256:555c381cf1092a60dc982e18d9008d689c569b458d99722493cfd638bd94fbd3`.
+Every application node retained the inspected 1 CPU / 1 GiB / no-swap limits.
+
+Each workload contains 200 requests at concurrency eight. The owner route
+uses the ingress's local owner; replica routes involve remote readers. These
+short samples are not sustained-load or throughput-scaling evidence.
+
+| Nodes | Owner requests/s | Replica requests/s | Replica p50 / p99 ms | Actual requests per reader |
+| --- | ---: | ---: | ---: | --- |
+| 3 | 3,152.57 | 530.08 | 13.70 / 66.29 | 98, 102 |
+| 5 | 3,051.56 | 411.72 | 18.63 / 33.29 | 50 each across 4 |
+| 10 | 2,423.16 | 247.93 | 31.09 / 51.31 | 22–23 across 9 |
+| 20 | 2,763.04 | 98.09 | 75.33 / 141.21 | 10–11 across 19 |
+
+The instrumented authority now counts routing loads. Whole-node windows
+observed 2.0 control loads per completed replica read at 3/5/10 nodes and
+2.685 at 20 nodes. LTX bytes in those read windows were 0, 0, 1,440, and 0;
+the 10-node window also included background page work. These counters exclude
+membership/policy reads and provider-internal retries. Collection skew and
+background work prevent interpreting them as exact per-request or total
+billable S3 costs. Raw labeled series and collection timestamps are retained.
+
+| Nodes | Latest poll-observed freshness after ACK, seconds | Reader-node LTX bytes during refresh | Sampled process RSS, MiB | Open FDs | Local Cell disk, KiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 3 | 3.473144 | 67,686 | 44.4–49.1 | 46–88 | 756–904 |
+| 5 | 2.802640 | 132,612 | 43.2–51.0 | 35–104 | 32–1,836 |
+| 10 | 1.046711 | 284,895 | 45.2–54.6 | 44–149 | 32–3,128 |
+| 20 | 2.189718 | 638,495 | 51.2–61.6 | 59–123 | 32–3,516 |
+
+Freshness bounds include authority inspection and polling. Refresh bytes
+include background work and query page faults. Resource ranges cover whole
+application nodes, including owner work; they are samples, not peaks or
+per-view allocations. The provisional 12 MiB view reservation is unchanged.
+
+Fault results in this uninterrupted run:
+
+- Reader replacement: 13.957 seconds; writer and epoch unchanged.
+- Warm-reader promotion plus a new acknowledged comment: 8.158 seconds.
+- Owner and both reader volumes deleted: identical root recovered and two
+  replacement readers recruited; phase including node restart took 39.443 seconds.
+- RustFS pause: HTTP 503 `replica_unavailable` after 5.151 seconds, then
+  recovered with the same incarnation and observed sequence 161.
+
+Raw receipt: `$HOME/.codex/cell-issue-fleet/plan036-sparse-cost-1/read-replica-report.json`.
+SHA-256: `fd86dce3ab43ede8a00e56c99ff1189938dc7ccdb410be6e62637062c0b3ad3b`.
+An unchanged copy is retained as `initial-read-replica-report.json`.
+
+Two additional phases ran on that exact image, with separately committed
+runners and separate receipts. They are not part of the uninterrupted run:
+
+- Runner `41dcfea0dea09edf8172419d2d3bc78dc071c14b` repeated all-three-disk
+  loss, recovered the identical sequence-149 root, recruited readers, then
+  acknowledged and served a new issue-body update. Its epoch-4 writer
+  advanced the durable root to sequence 152. Recovery, write, recruitment,
+  and node restart took 22.342 seconds. Receipt `all-loss-write-followup.json`,
+  SHA-256 `c2a01691debd1d95548788035c80589a2f08f732bbb9714d493d81cdc1e58249`.
+- Runner `53cf478f316` exercised desired counts 0→1→2→4→1. Actual ready
+  counts matched each target; zero returned `replica_unavailable`. A selected
+  reader was killed before the shrink to one. Writer and epoch remained
+  unchanged, with no root rewind. Observed convergence took 0.566, 0.796,
+  1.101, 1.845, and 0.735 seconds. Receipt `reader-targets-followup.json`,
+  SHA-256 `938151f3538b912063433ff336f6f0b598eda9ef30b587168de3d1bb164f1d0d`.
+
+A third follow-up used runner `f5459d76d03af8367b5883b7fcd4eca18c135d9d`
+with the same runtime/image. From `2026-09-26T05:59:19.203089+00:00` to
+`2026-09-26T06:00:50.275902+00:00`, a paused per-node S3 proxy isolated
+`node-02` from RustFS while preserving HTTP and peer networking. Before the
+partition it demonstrably served replica queries. During the partition it
+returned typed HTTP 503 after 5.005 seconds while `/livez` still returned 200.
+After killing the primary on `node-10`, healthy `node-15` acquired epoch 4,
+recovered the identical sequence-289 root, and acknowledged a new comment at
+sequence 290. Recovery and the write took 9.658 seconds.
+
+The isolated session never became owner. Its authoritative session expired
+and its public listener closed, producing an empty gateway 502. The node
+process was still draining, with no OOM kill. This agrees with the lease-watch
+cancellation path in `src/server.rs`; the qualifier requires a fresh expired
+session before accepting that response. Connectivity and the original
+endpoint were restored, both affected nodes returned healthy, and the proxy
+was stopped. Receipt `reader-partition-report.json`, SHA-256
+`764597c215322a84b317ceaf581bd87b698ce583877198577ea870cc2ce3decd`.
+The earlier setup failures and the stricter error-shape assertion failure
+remain in separate logs; they are not passing receipts. Seven Python evidence
+checks pass, including rejection of an empty gateway error without expiry.
 
 ## Scope still open
 
-The container runs do not measure per-query S3 calls or refresh bytes, sustained
+The container runs do not establish complete per-query S3 costs, sustained
 hot Cell throughput, peak resources, retention/release fault combinations, or
-1k/5k/10k Cell admission. Sparse-reader performance and distribution under
-uneven load across multiple ingress nodes remain unqualified.
+1k/5k/10k Cell admission. Distribution under uneven load across multiple
+ingress nodes remains unqualified. Sparse-reader measurements above show
+balanced distribution but lower throughput than owner reads in this workload.
 Protected S3 and multi-host release gates remain outside the requested local
 RustFS execution scope. See [Plan 036](../../../../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md).
