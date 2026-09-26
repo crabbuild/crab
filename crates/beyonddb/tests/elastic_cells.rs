@@ -3,6 +3,7 @@ mod elastic_cells {
     mod coordinator_tokens;
     mod public_transactions;
     mod transaction_driver;
+    mod transaction_recovery;
     pub(crate) mod transaction_visibility;
 }
 

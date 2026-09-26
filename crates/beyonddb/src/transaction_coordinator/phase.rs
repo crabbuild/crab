@@ -485,6 +485,39 @@ pub struct PendingTransactionCursor {
     pub transaction_id: [u8; 16],
 }
 
+/// Capture the last pending identity so arrivals cannot prolong a recovery pass.
+pub struct ReadPendingTransactionBoundary;
+
+impl Query for ReadPendingTransactionBoundary {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 6;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<()>;
+    type Output = Json<Option<PendingTransactionCursor>>;
+
+    fn execute(context: &mut QueryContext<'_>, _: Self::Input) -> Result<Self::Output> {
+        let rows = context.sql(&statement(
+            "SELECT created_at_ms, transaction_id FROM ddb_coordinator_transactions \
+             INDEXED BY ddb_coordinator_pending WHERE unresolved_count > 0 \
+             ORDER BY created_at_ms DESC, transaction_id DESC LIMIT 1",
+            vec![],
+        ))?;
+        let Some(row) = rows[0].rows.first() else {
+            return Ok(Json(None));
+        };
+        let [SqlValue::Integer(created_at_ms), SqlValue::Blob(id)] = row.as_slice() else {
+            return Err(Error::Command("invalid pending transaction boundary"));
+        };
+        Ok(Json(Some(PendingTransactionCursor {
+            created_at_ms: *created_at_ms,
+            transaction_id: id
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::Command("invalid transaction ID"))?,
+        })))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReadPendingCrossCellTransactionsInput {
     pub after: Option<PendingTransactionCursor>,

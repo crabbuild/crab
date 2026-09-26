@@ -37,7 +37,11 @@ split sources absent from the current table route. Participant payloads are
 stored separately, so target discovery does not read item images.
 The private peer listener is available during resolution so recovering nodes
 can reach one another; the public DynamoDB listener starts after recovery.
-Changed-endpoint coordinator takeover and continuous recovery remain to be built.
+After startup, a supervised serving worker revisits coordinators admitted or
+restored by the local provisioner, including shards created after the worker
+starts. It resumes BEGIN using the same immutable driver as requests and
+finishes COMMIT/ABORT resolution. Changed-endpoint coordinator takeover remains
+unimplemented.
 
 The ExtendDB `DataEngine` contract requires all writes, the account-scoped
 client token, and stream capture to commit together. Its engine validates up
@@ -217,7 +221,7 @@ These range barriers are conservative: they check the remaining range before
 applying the page limit, and compound RANGE predicates may fence extra keys
 within the same HASH group. Unrelated keyed reads and disjoint indexed query
 ranges remain available. Read-triggered decision lookup/resolution is not
-implemented; retry success currently depends on the transaction driver or
+implemented; retry success depends on the request driver, serving worker, or
 startup recovery completing resolution. An outage never permits an old-value
 fallback. This is an internal safety prerequisite, not full DynamoDB read
 availability or cross-Cell snapshot support.
@@ -285,7 +289,7 @@ mismatch; and retries a canceled token after its condition becomes satisfiable.
 different data Cells through the serving binary against RustFS, then checks
 replay and both values after a hard kill and restart. The two-owner mTLS test
 also checks a transaction and token replay through a replacement frontend.
-These tests do not establish continuous recovery or fleet-scale qualification.
+These tests do not establish fleet-scale qualification.
 
 Coordinator token tests restore historical BEGIN, partially resolved COMMIT,
 and completed COMMIT snapshots. They verify indefinite pinning of unresolved
@@ -295,6 +299,46 @@ The owner-restart test discovers the pending token, then verifies its release
 after fenced recovery resolves every abort.
 SQL query plans use the token and transaction-ID indexes rather than scanning
 coordinator history.
+
+## Serving-time recovery
+
+`CellInitialPartitionProvisioner::install_transaction_recovery_loop` installs
+one retained task after startup recovery and before the public listener. The
+provisioner's successful admission, restoration, and takeover paths register
+local coordinator targets. The worker does not scan every account or data Cell
+on each tick. Startup rebuilds this in-memory schedule from the durable account
+registry; the transaction records remain the recovery authority.
+
+Every 250 ms, with missed ticks skipped, the worker selects the next coordinator
+by Cell ID and reads at most one pending record through the existing indexed
+cursor query. An indexed reverse lookup captures the highest pending
+`(created_at_ms, transaction_id)` at the start of each pass. The worker advances
+before attempting resolution, so failed participants do not monopolize a shard.
+Empty pages or records beyond that fixed boundary restart the pass, allowing
+earlier failures to retry despite new arrivals. The boundary comes from durable
+records, so a Cell's logical clock being ahead of wall time cannot hide work. Each selected request
+is bounded by the protocol's 100-operation/participant limit; its wall time
+still depends on the normal Cell invocation deadlines and participant latency.
+
+Serving-time recovery resumes BEGIN rather than inferring an abort from age.
+It may race the original request; prepare identity, terminal decisions, and
+participant resolution remain idempotent. Startup's fenced recovery retains
+its explicit abort policy. Cancellation drops the worker's current driver
+future before the node drains its Cell owners; already-accepted commands
+remain governed by durable transaction state.
+
+`tests/elastic_cells/transaction_recovery.rs` exercises an unavailable participant
+before a partially prepared healthy transaction in the same shard. The worker
+finishes healthy work, retains the unavailable BEGIN, then completes it when
+connectivity returns without a client retry. A newly admitted shard's prepared
+ABORT is also resolved without exposing its staged image. The two-owner mTLS
+test abandons a published COMMIT after one apply, then verifies worker completion
+and signed SDK reads across owner replacement.
+
+This is one serial worker per serving node. Its backlog drain rate and worst-case
+latency at 10,000 Cells remain unmeasured. Coordinator residency/passivation,
+fleet-wide discovery and unattended owner replacement, data-only-node startup,
+and history collection remain separate requirements.
 
 ## Account participant boundary
 
@@ -360,7 +404,7 @@ gates remain necessary.
 
 ## Remaining implementation and proof
 
-1. Add bounded continuous recovery, coordinator passivation and activation,
+1. Add coordinator passivation and activation,
    fleet placement, and changed-endpoint coordinator takeover. The serving
    binary admits 64 active Cells per node, while token routing can select 4,096
    coordinator shards per account. Current shards remain resident; ordinary

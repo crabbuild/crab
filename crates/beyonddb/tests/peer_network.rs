@@ -1,5 +1,11 @@
 #![cfg(unix)]
 
+mod peer_network {
+    pub(super) mod recovery;
+}
+
+use peer_network::recovery;
+
 use std::{
     collections::HashMap,
     process::Command,
@@ -16,7 +22,7 @@ use beyonddb::{
     account_target, build_http_state, build_peer_client, peer_router,
 };
 use crab_cell_app::CellApplication;
-use crab_cell_host::{CellNode, CellNodeBuilder};
+use crab_cell_host::{CellNode, CellNodeBuilder, CellNodeTaskGroup};
 use crab_cell_peer_http::{LoadedPeerTls, PeerHttpRoundTrip, PeerTlsIdentity};
 use crab_cell_runtime::client::CellClient;
 use crab_cell_runtime::control::authority::CellAuthority;
@@ -134,7 +140,7 @@ async fn start_node(
     signing_key: SigningKey,
     node_byte: u8,
     cancellation: CancellationToken,
-) -> CellNode {
+) -> (CellNode, Arc<CellNodeTaskGroup>) {
     let node = CellNodeBuilder::new(Arc::clone(&application))
         .with_runtime(SqlWorkerPool::new(1, 8).unwrap(), 16 * 1024 * 1024)
         .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
@@ -179,7 +185,7 @@ async fn start_node(
         .spawn(async move { published.run(&cancellation).await })
         .unwrap();
     node.start().unwrap();
-    node
+    (node, tasks)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -215,7 +221,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     );
     let owner_session = SessionId::from_bytes([93; 16]);
     let owner_lease = CancellationToken::new();
-    let owner = start_node(
+    let (owner, _owner_tasks) = start_node(
         Arc::clone(&application),
         peer_directory.clone(),
         owner_session,
@@ -255,7 +261,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     let remote_session = SessionId::from_bytes([96; 16]);
     let remote_signing_key = client_tls.signing_key().clone();
     let remote_lease = CancellationToken::new();
-    let remote = start_node(
+    let (remote, remote_tasks) = start_node(
         Arc::clone(&application),
         peer_directory.clone(),
         remote_session,
@@ -443,7 +449,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     let public_endpoint = format!("http://{}", public_listener.local_addr().unwrap());
     let state = build_http_state(
         &remote,
-        client,
+        client.clone(),
         layout.clone(),
         Arc::clone(&remote_provisioner),
         ENCRYPTION_KEY,
@@ -508,6 +514,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .await
         .unwrap();
     assert_eq!(read.item(), Some(&item));
+    recovery::assert_abandoned_commit(&remote_provisioner, &remote_tasks, &client, &sdk).await;
     let transaction_items = ["NetworkData", "RemoteTable"]
         .into_iter()
         .map(|table| {
@@ -553,7 +560,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     let replacement_tls =
         LoadedPeerTls::load(&owner_certificate, &owner_key, &ca, "localhost").unwrap();
     let replacement_session = SessionId::from_bytes([100; 16]);
-    let replacement = start_node(
+    let (replacement, _replacement_tasks) = start_node(
         Arc::clone(&application),
         peer_directory.clone(),
         replacement_session,
@@ -718,6 +725,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .await
         .unwrap();
     assert_eq!(cross_owner_read.item(), Some(&item));
+    recovery::assert_recovered_images(&replacement_sdk).await;
     assert!(
         replacement_provisioner
             .takeover_expired_partition(

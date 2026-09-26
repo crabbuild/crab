@@ -34,12 +34,13 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
 }];
 static COMMANDS: [OperationDescriptor; 4] =
     [operation(1), operation(2), operation(3), operation(4)];
-static QUERIES: [OperationDescriptor; 5] = [
+static QUERIES: [OperationDescriptor; 6] = [
     operation(1),
     operation(2),
     operation(3),
     operation(4),
     operation(5),
+    operation(6),
 ];
 
 const fn operation(id: u32) -> OperationDescriptor {
@@ -97,6 +98,7 @@ impl crab_cell_runtime::registry::CellModule for CoordinatorModule {
         registry.bind_query::<ReadCoordinatorParticipant>()?;
         registry.bind_query::<ReadPendingCrossCellTransactions>()?;
         registry.bind_query::<ReadUnresolvedCoordinatorParticipants>()?;
+        registry.bind_query::<ReadPendingTransactionBoundary>()?;
         registry.bind_query::<ReadCoordinatorToken>()
     }
 }

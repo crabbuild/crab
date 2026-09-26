@@ -65,6 +65,7 @@ pub struct CellInitialPartitionProvisioner {
     endpoint: String,
     directory: PathBuf,
     initial_partition_count: u16,
+    transaction_recovery: transactions::CoordinatorRecovery,
 }
 
 impl CellInitialPartitionProvisioner {
@@ -90,6 +91,7 @@ impl CellInitialPartitionProvisioner {
             endpoint,
             directory,
             initial_partition_count: 1,
+            transaction_recovery: Default::default(),
         })
     }
 
@@ -461,7 +463,8 @@ impl CellInitialPartitionProvisioner {
             "{}.sqlite",
             blake3::Hash::from_bytes(*target.cell_id().as_bytes()).to_hex()
         ));
-        self.runtime
+        let handle = self
+            .runtime
             .takeover_restored(
                 proof,
                 replica,
@@ -477,7 +480,9 @@ impl CellInitialPartitionProvisioner {
                 },
             )
             .await
-            .map_err(provision_error)
+            .map_err(provision_error)?;
+        self.track_coordinator(target)?;
+        Ok(handle)
     }
 
     async fn cataloged(
@@ -1173,6 +1178,7 @@ impl CellInitialPartitionProvisioner {
             .await
             .map_err(provision_error)?
         {
+            self.track_coordinator(target)?;
             return Ok(handle);
         }
         let replica = CellReplica::new(
@@ -1186,7 +1192,7 @@ impl CellInitialPartitionProvisioner {
             "{}.sqlite",
             blake3::Hash::from_bytes(*target.cell_id().as_bytes()).to_hex()
         ));
-        match observed.value().state {
+        let handle = match observed.value().state {
             ControlState::Recovering
                 if observed.value().root.is_none()
                     && observed.value().owner.as_ref().map(|owner| owner.session)
@@ -1205,7 +1211,9 @@ impl CellInitialPartitionProvisioner {
             _ => Err(StorageError::Transient(
                 "Cell has another owner or is still activating".into(),
             )),
-        }
+        }?;
+        self.track_coordinator(target)?;
+        Ok(handle)
     }
 }
 

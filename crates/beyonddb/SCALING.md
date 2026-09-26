@@ -20,9 +20,13 @@ coordinator publishes one decision and the driver resolves every participant
 before returning. Successful tokens replay for ten minutes after completion;
 canceled tokens are released only after all abort resolutions publish.
 The signed SDK process test writes two keys in distinct Cells and verifies
-replay and values after an unclean server exit. Cross-Cell TransactGetItems,
-continuous recovery scheduling, and read-triggered decision resolution still
-need implementation. Reads fail retryably on unresolved intents; same-Cell
+replay and values after an unclean server exit. A serving recovery worker now
+visits one locally admitted coordinator and at most one pending transaction per
+tick, including coordinators admitted after it starts. It resumes unfinished
+requests, advances past failures, and bounds each pass by an indexed durable cursor so new
+arrivals cannot starve earlier retries. Its backlog rate remains unqualified.
+Cross-Cell TransactGetItems and read-triggered decision resolution still need
+implementation. Reads fail retryably on unresolved intents; same-Cell
 transactional reads return ordered cancellation reasons. A
 host-backed provisioner can create 1–256
 independent, evenly spaced initial data Cells during CreateTable and retry
@@ -219,7 +223,7 @@ specified in [the cross-Cell transaction protocol](CROSS_CELL_TRANSACTIONS.md).
 
 Low-level local transactions use one Cell command. All public transactional
 writes use the coordinator protocol; the full target also requires read
-coordination and continuous recovery:
+coordination and fleet recovery:
 
 1. Order participants by Cell ID; each prepares its writes and locks the
    affected keys under a transaction ID, routing epoch, and deadline. Prepared
