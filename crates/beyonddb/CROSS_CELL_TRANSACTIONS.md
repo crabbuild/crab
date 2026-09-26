@@ -13,10 +13,14 @@ lock, and resolution commands. Sharded coordinator Cells store immutable
 participant sets and terminal decisions. The ExtendDB adapter does not yet
 drive this protocol or enforce its cross-Cell read rules, so the API remains
 unsupported.
+
 Each coordinator now indexes records with unresolved participants and exposes
 bounded cursor pages. A new owner can discover both undecided and decided
-work after restoring its published Cell state. Discovery alone does not drive
-resolution; the owner recovery worker and adapter path remain to be built.
+work after restoring its published Cell state. An internal resolver can now
+finish a terminal decision across data Cell participants, using participant
+state after an ambiguous reply and recording each resolution durably. It
+does not handle account Cell participants or undecided `BEGIN` records yet;
+the owner recovery worker and adapter path remain to be built.
 
 The ExtendDB `DataEngine` contract requires all writes, the account-scoped
 client token, and stream capture to commit together. Its engine validates up
