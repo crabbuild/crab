@@ -39,6 +39,9 @@ def main():
     for service in config["services"].values():
         if service.get("image") == old_image:
             service["image"] = image
+    # Public per-node listeners belong to the proxy, which must start without
+    # admitting another potential owner before node 5 claims the first read.
+    config["services"]["gateway"]["depends_on"] = {"node-05": {"condition": "service_healthy"}}
     path = args.report.with_suffix(".compose.json")
     if path.exists():
         raise RuntimeError("preserve the previous derived Compose file")
@@ -47,10 +50,7 @@ def main():
     # Hold physical ownership constant across images as well as within pairs.
     # Clean drain preserves the fixture; only node 5 can claim its first read.
     compose(path, ("five",), "stop", "gateway", *nodes)
-    compose(path, ("five",), "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300", "node-05")
-    # The retained fixture's public per-node ports are gateway proxy listeners.
-    # Bypass its node-01 startup dependency until node 5 has claimed the Cell.
-    compose(path, ("five",), "up", "--detach", "--no-build", "--no-deps", "gateway")
+    compose(path, ("five",), "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300", "node-05", "gateway")
     expected = {"title": "Cell issue on node 1", "body": previous["acknowledged_body"]}
     current = request_json("GET", node_url(5, args.node_port_base) + issue_path(1) + "/1")
     if any(current.get(key) != value for key, value in expected.items()):
