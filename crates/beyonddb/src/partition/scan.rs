@@ -171,8 +171,8 @@ fn scan_page(
             let [SqlValue::Blob(key)] = row.as_slice() else {
                 return Err(Error::Command("invalid partition scan key row"));
             };
-            let Some(item) =
-                crate::item_storage::StoredItem::Partition(key).read(|batch| context.sql(batch))?
+            let Some(item) = crate::item_storage::StoredValue::Partition(key)
+                .read(|batch| context.sql(batch))?
             else {
                 return Err(Error::Command("partition scan key has no item"));
             };

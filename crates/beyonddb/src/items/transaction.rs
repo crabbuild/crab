@@ -95,6 +95,7 @@ fn stage(
                 Err(reason) => return Ok(Err(invalid(&reason))),
             }
         }
+        let old_bytes = crate::global_index::outbox::old_bytes(&table, old.as_ref())?;
         let (image, effect) = match operation {
             TransactionOperation::Put(input) => (Some(input.item), StagedEffect::Write),
             TransactionOperation::Delete(_) => (None, StagedEffect::Write),
@@ -120,7 +121,9 @@ fn stage(
             }
         }
         let index_capacity = if effect == StagedEffect::Write {
-            crate::secondary_index::capacity(&table, image.as_ref())?
+            let mut capacity = crate::secondary_index::capacity(&table, image.as_ref())?;
+            crate::global_index::outbox::reserve(&mut capacity, &table, old_bytes, image.as_ref())?;
+            capacity
         } else {
             crate::secondary_index::Capacity::default()
         };
@@ -150,11 +153,7 @@ fn apply(context: &mut CommandContext<'_, '_>, staged: Vec<StagedImage>) -> Resu
         if let Some(item) = image.image {
             write_item(context, &table, &image.key, &item)?;
         } else {
-            crate::secondary_index::delete(context, &table, &image.key)?;
-            context.sql(&statement(
-                "DELETE FROM ddb_items WHERE table_id = ?1 AND item_key = ?2",
-                vec![SqlValue::Text(image.table_id), SqlValue::Blob(image.key)],
-            ))?;
+            delete_item(context, &table, &image.key)?;
         }
     }
     Ok(())

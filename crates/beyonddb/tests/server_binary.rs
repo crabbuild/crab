@@ -3,6 +3,7 @@
 mod support;
 
 mod server_binary {
+    pub(super) mod global_indexes;
     pub(super) mod local_indexes;
 }
 
@@ -308,6 +309,7 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         .await;
     let sdk = aws_sdk_dynamodb::Client::new(&sdk_config);
     server_binary::local_indexes::create(&sdk).await;
+    server_binary::global_indexes::create(&sdk).await;
     let created = sdk
         .create_table()
         .table_name("ProcessData")
@@ -778,6 +780,7 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         assert!(deleted.item().is_none());
     }
     server_binary::local_indexes::assert_recovered(&sdk).await;
+    server_binary::global_indexes::assert_recovered(&sdk).await;
     large.assert_recovered(&sdk).await;
     large_read.assert_recovered(&sdk).await;
     sdk.transact_write_items()

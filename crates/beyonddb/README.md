@@ -384,7 +384,7 @@ including account participants before route activation. All transactional reads
 use durable shared locks and captured participant images, retrieved individually
 to avoid an aggregate Cell response limit. Same-Cell reads now pay the same
 coordinator protocol cost. Account-local
-base-table sort-key Query, global indexes, non-ALL local index projections,
+base-table sort-key Query, online global-index changes, non-ALL local index projections,
 and streamed writes remain unsupported. Local secondary indexes with ALL
 projection support account/routed Query and Scan, strong reads, numeric sort
 ordering with base-sort tie-breakers, and base-plus-index continuation keys.
@@ -394,6 +394,11 @@ same Cell command as base items. Indexed Query fences the HASH group's prepared
 write intents, including absent creates and sort-key moves; account-local Query
 conservatively fences the table. See [the remaining LSI read contract](LSI_CONTRACT.md)
 for KEYS_ONLY/INCLUDE, base-fetch capacity accounting, and scale limits.
+Global indexes created with a table have independently owned ranges, durable
+asynchronous maintenance, and ALL/KEYS_ONLY/INCLUDE projected Query and Scan.
+See [global-index implementation and limits](GLOBAL_INDEXES.md) for journal
+replay, transaction boundaries, restart evidence, and unfinished index splitting
+and collection.
 `tests/account_cell.rs` exercises them through a real
 `CellNodeBuilder` and in-memory object store, including request replay,
 receipt-based reads, conditional writes, update expressions, scan pagination, rollback of a
@@ -462,7 +467,7 @@ unreleased roots with application-only catalog heads require reprovisioning;
 there is no fallback reader. This does not enable multi-tenant backup or garbage
 collection. See [the recovery finding](CROSS_CELL_TRANSACTIONS.md#tenant-catalog-collision-found-during-recovery-qualification).
 
-Local-index schemas, required table/participant metadata, and settled-root
+Global-index journals and metadata, local-index schemas, required table/participant metadata, and settled-root
 observations in the coordinator registry also change the unreleased Cell format.
 Reprovision development roots created before these changes; there is no in-place
 upgrade reader.

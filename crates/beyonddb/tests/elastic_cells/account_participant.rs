@@ -86,6 +86,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
                 mutation(),
                 Json(TableSpec {
                     local_secondary_indexes: Vec::new(),
+                    global_secondary_indexes: Vec::new(),
                     table_name: name.into(),
                     key_schema: vec![KeySchemaElement {
                         attribute_name: "id".into(),

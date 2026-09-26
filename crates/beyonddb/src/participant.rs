@@ -196,7 +196,7 @@ pub(crate) fn record_prepare<'a>(
             vec![SqlValue::Blob(transaction_id.to_vec()), SqlValue::Integer(position), if item.is_some() { SqlValue::Blob(Vec::new()) } else { SqlValue::Null }],
         ))?;
         if let Some(item) = item {
-            crate::item_storage::StoredItem::TransactionRead {
+            crate::item_storage::StoredValue::TransactionRead {
                 transaction_id: &transaction_id,
                 position,
             }
@@ -388,7 +388,7 @@ pub(crate) fn read_result(
     if rows[0].rows.is_empty() {
         return Ok(Json(TransactionReadResult::Unavailable));
     }
-    let item = crate::item_storage::StoredItem::TransactionRead {
+    let item = crate::item_storage::StoredValue::TransactionRead {
         transaction_id: &input.transaction.transaction_id,
         position: i64::from(input.position),
     }

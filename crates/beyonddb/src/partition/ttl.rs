@@ -304,7 +304,7 @@ impl Command for BackfillPartitionTtl {
                 let [SqlValue::Blob(key)] = row.as_slice() else {
                     return Err(Error::Command("invalid TTL backfill item"));
                 };
-                let item = crate::item_storage::StoredItem::Partition(key)
+                let item = crate::item_storage::StoredValue::Partition(key)
                     .read(|batch| context.sql(batch))?
                     .ok_or(Error::Command("TTL key has no item"))?;
                 let epoch = item_epoch(&item, state.attribute.as_deref());
@@ -395,7 +395,7 @@ impl Query for ReadExpiredPartition {
             let [SqlValue::Blob(key)] = row.as_slice() else {
                 return Err(Error::Command("invalid expired item row"));
             };
-            let item = crate::item_storage::StoredItem::Partition(key)
+            let item = crate::item_storage::StoredValue::Partition(key)
                 .read(|batch| context.sql(batch))?
                 .ok_or(Error::Command("expired key has no item"))?;
             let encoded = serde_json::to_vec(&item)?.len();

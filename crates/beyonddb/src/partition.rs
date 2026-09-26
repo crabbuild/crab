@@ -33,10 +33,11 @@ use key::index_key;
 
 pub(crate) static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
-        "{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}",
         crab_cell_runtime::primitives::capacity::SCHEMA,
         crate::participant::SCHEMA,
         crate::secondary_index::SCHEMA,
+        crate::global_index::outbox::SCHEMA,
         include_str!("partition_schema.sql")
     )
 });
@@ -49,7 +50,7 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     effect_targets: &[],
     dead_letter: None,
 }];
-static COMMANDS: [OperationDescriptor; 14] = [
+static COMMANDS: [OperationDescriptor; 15] = [
     operation(1),
     operation(2),
     operation(3),
@@ -64,8 +65,9 @@ static COMMANDS: [OperationDescriptor; 14] = [
     operation(12),
     crate::participant::phase_operation(13),
     crate::transaction_transport::upload_operation(14),
+    crate::participant::phase_operation(15),
 ];
-static QUERIES: [OperationDescriptor; 10] = [
+static QUERIES: [OperationDescriptor; 12] = [
     operation(1),
     operation(2),
     operation(3),
@@ -76,6 +78,8 @@ static QUERIES: [OperationDescriptor; 10] = [
     operation(9),
     crate::participant::phase_operation(10),
     operation(11),
+    crate::participant::phase_operation(12),
+    crate::global_index::outbox::chunk_operation(13),
 ];
 
 const fn operation(id: u32) -> OperationDescriptor {
@@ -116,6 +120,8 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
                 source.update(include_bytes!("transaction_payload.rs"));
                 source.update(include_bytes!("transaction_transport.rs"));
                 source.update(include_bytes!("table.rs"));
+                source.update(include_bytes!("global_index.rs"));
+                source.update(include_bytes!("global_index/outbox.rs"));
                 source.update(include_bytes!("expression_wire.rs"));
                 Digest::from_bytes(*source.finalize().as_bytes())
             },
@@ -150,6 +156,7 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
         registry.bind_command::<crate::UploadTransactionPayload<PreparePartitionTransaction>>()?;
         registry.bind_command::<PreparePartitionTransaction>()?;
         registry.bind_command::<ResolvePartitionTransaction>()?;
+        registry.bind_command::<crate::AckPartitionIndexChange>()?;
         registry.bind_query::<PartitionGet>()?;
         registry.bind_query::<PartitionScan>()?;
         registry.bind_query::<PartitionExport>()?;
@@ -159,6 +166,8 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
         registry.bind_query::<ReadExpiredPartition>()?;
         registry.bind_query::<ReadPartitionTtl>()?;
         registry.bind_query::<ReadPartitionTransaction>()?;
+        registry.bind_query::<crate::ReadPartitionIndexChange>()?;
+        registry.bind_query::<crate::ReadPartitionIndexChangeChunk>()?;
         registry.bind_query::<ReadPartitionTransactionResult>()
     }
 }
@@ -524,6 +533,8 @@ pub enum SealPartitionOutcome {
     Conflict,
     /// Prepared item intents must resolve before this source can be copied.
     InFlightTransaction,
+    /// Index projections must be durable before their source journal is retired.
+    PendingIndexChanges,
 }
 
 /// Permanently fence ordinary reads and writes on a split source.
@@ -580,6 +591,13 @@ impl Command for SealPartition {
         if transaction::has_transaction_locks(context)? {
             return Ok(CommandResult::Rejected(Json(
                 SealPartitionOutcome::InFlightTransaction,
+            )));
+        }
+        // Children do not replay imported images into GSIs. Drain the original
+        // journal first so moving the route cannot strand unprojected changes.
+        if crate::global_index::outbox::pending(context)? {
+            return Ok(CommandResult::Rejected(Json(
+                SealPartitionOutcome::PendingIndexChanges,
             )));
         }
         update_state(context, &PartitionState::Sealed(seal))?;
@@ -677,7 +695,7 @@ impl Command for ImportPartitionItem {
             });
         }
         summary.include(&input.item, &spec.table.key_schema)?;
-        write_item(context, key, &input.item, &spec.table)?;
+        write_item(context, key, &input.item, &spec.table, None)?;
         update_state(context, &PartitionState::Importing { source, summary })?;
         Ok(CommandResult::Success(Json(
             PartitionImportOutcome::Imported,
@@ -947,7 +965,7 @@ impl Command for PartitionPut {
                 }
             }
         }
-        write_item(context, key, &input.item, &spec.table)?;
+        write_item(context, key, &input.item, &spec.table, Some(spec.epoch))?;
         Ok(CommandResult::Success(Json(PartitionPutOutcome::Applied(
             old,
         ))))
@@ -1072,11 +1090,7 @@ impl Command for PartitionDelete {
                 }
             }
         }
-        crate::secondary_index::delete(context, &spec.table, &key)?;
-        context.sql(&statement(
-            "DELETE FROM ddb_partition_items WHERE item_key = ?1",
-            vec![SqlValue::Blob(key)],
-        ))?;
+        delete_item(context, &spec.table, &key, spec.epoch)?;
         Ok(CommandResult::Success(Json(
             PartitionDeleteOutcome::Applied(if input.return_old { old } else { None }),
         )))
@@ -1233,7 +1247,7 @@ impl Command for PartitionUpdate {
                 PartitionUpdateOutcome::InvalidItem,
             )));
         }
-        write_item(context, key, &new, &spec.table)?;
+        write_item(context, key, &new, &spec.table, Some(spec.epoch))?;
         Ok(CommandResult::Success(Json(
             PartitionUpdateOutcome::Applied { old, new },
         )))
@@ -1315,7 +1329,7 @@ impl Query for PartitionGet {
             return Ok(Json(PartitionGetOutcome::Conflict(conflict)));
         }
         Ok(Json(PartitionGetOutcome::Found(
-            crate::item_storage::StoredItem::Partition(&key).read(|batch| context.sql(batch))?,
+            crate::item_storage::StoredValue::Partition(&key).read(|batch| context.sql(batch))?,
         )))
     }
 }
@@ -1393,7 +1407,7 @@ pub(super) fn query_access(context: &mut QueryContext<'_>) -> Result<AccessState
 }
 
 fn command_item(context: &mut CommandContext<'_, '_>, key: &[u8]) -> Result<Option<Item>> {
-    crate::item_storage::StoredItem::Partition(key).read(|batch| context.sql(batch))
+    crate::item_storage::StoredValue::Partition(key).read(|batch| context.sql(batch))
 }
 
 fn write_item(
@@ -1401,7 +1415,14 @@ fn write_item(
     key: Vec<u8>,
     item: &Item,
     table: &TableRecord,
+    projection_epoch: Option<u64>,
 ) -> Result<()> {
+    if let Some(epoch) = projection_epoch
+        && !table.global_secondary_indexes.is_empty()
+    {
+        let old = command_item(context, &key)?;
+        crate::global_index::outbox::enqueue(context, table, &key, epoch, old, Some(item.clone()))?;
+    }
     let (partition_key, sort_key) = index_key(item, &table.key_schema)?;
     let (ttl_generation, ttl_epoch) = ttl::write_values(context, item)?;
     context.sql(&statement(
@@ -1419,6 +1440,24 @@ fn write_item(
             ttl_epoch,
         ],
     ))?;
-    crate::item_storage::StoredItem::Partition(&key).write(context, item)?;
+    crate::item_storage::StoredValue::Partition(&key).write(context, item)?;
     crate::secondary_index::write(context, table, &key, item)
+}
+
+fn delete_item(
+    context: &mut CommandContext<'_, '_>,
+    table: &TableRecord,
+    key: &[u8],
+    epoch: u64,
+) -> Result<()> {
+    if !table.global_secondary_indexes.is_empty() {
+        let old = command_item(context, key)?;
+        crate::global_index::outbox::enqueue(context, table, key, epoch, old, None)?;
+    }
+    crate::secondary_index::delete(context, table, key)?;
+    context.sql(&statement(
+        "DELETE FROM ddb_partition_items WHERE item_key = ?1",
+        vec![SqlValue::Blob(key.to_vec())],
+    ))?;
+    Ok(())
 }

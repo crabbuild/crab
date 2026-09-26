@@ -4,7 +4,7 @@
 
 Initially reviewed against implementation `b68e6486620`, the pinned ExtendDB
 storage contract, and the AWS transaction references below; the bounded
-resolution, local-index, and settled-root changes documented below update the
+resolution, local/global-index, and settled-root changes documented below update the
 scheduling and recovery assessment.
 The foundation is durable
 two-phase commit with shared/exclusive item locks. It implements cross-Cell
@@ -114,7 +114,7 @@ decision evidence tied to the transaction, participant set, and fenced authority
 | Latency | Sequential prepare; up to four terminal resolutions in flight per call; at least `5P + 3` durable commands for single-chunk inputs | Measure publication and RPC time by participant count. Evaluate prepare parallelism and batched coordinator progress with renewed crash/concurrency proof before changing those phases. |
 | Fleet recovery | 4,096 fixed coordinator shards per account; the worker selects one shard per 250-ms tick | Integrate placement and recovery scheduling with bounded concurrency and backlog metrics. A nominal pass over 4,096 known shards already takes about 17 minutes before slow work; this is arithmetic, not measured RTO. |
 | Data distribution | HASH-key siblings share one Cell with a finite database budget | Qualify skew, hot keys, split headroom, and oversized item collections. More Cells do not distribute one key's lock or split a single HASH group in the current layout. |
-| API completion | ALL-projection LSIs now share participant resolution; other index projections, GSIs, and Streams remain incomplete; aggregate evaluated Update-size semantics remain unqualified | Complete the engine read contract, local stream effects, and durable asynchronous projections; qualify size/error semantics against AWS before claiming compatibility. |
+| API completion | ALL-projection LSIs share participant resolution; initial GSIs use a durable asynchronous journal; non-ALL LSIs, online GSI lifecycle/splitting, and Streams remain incomplete; aggregate evaluated Update-size semantics remain unqualified | Complete the engine read contract, local stream effects, and index lifecycle; qualify size/error semantics against AWS before claiming compatibility. |
 
 With 10,000 data Cells at a 256-MiB live-data split target, the arithmetic storage
 envelope is about 2.44 TiB. This excludes metadata, retained history, claims,
@@ -2121,3 +2121,26 @@ graceful restart, local-index contents, transaction replay, and TTL recovery.
 That total duration is functional evidence, not a before/after readiness or
 fleet benchmark. The earlier default-parallel and readiness failures documented
 above remain unqualified at those load conditions.
+
+## Global index transaction boundary
+
+Initial global indexes now have independent range Cells and a durable source
+journal. Participant PREPARE reserves the journal's old/new image storage;
+COMMIT writes the base image, local indexes, journal entry, and terminal marker
+in one Cell command. ABORT produces no journal entry. Source acknowledgement
+follows durable application of every index mutation, with retained versions
+and tombstones making replay safe. Base split sealing refuses pending journals.
+
+This does not extend the transaction's atomic read boundary to GSIs. Index
+propagation is asynchronous, so a GSI reader can observe a subset of a committed
+transaction's projections. Atomic multi-key reads continue through
+TransactGetItems on base keys. See [global index implementation and limits](GLOBAL_INDEXES.md).
+
+Before rebasing onto the runtime read-replica change, the signed SDK/RustFS
+process smoke passed in 330.55 seconds, including all three GSI projections,
+transaction key moves/deletes, and replay after hard restart. The account test,
+28 elastic-Cell tests, and peer-owner test also passed (3.41, 86.28, and 99.12
+seconds). The elastic suite includes interrupted partial GSI application with
+large chunked old/new images, split fencing, and delayed-version suppression.
+These runs qualify selected paths, not sustained projection capacity, automatic
+index splitting, history collection, or the 10,000-Cell/multi-TB target.

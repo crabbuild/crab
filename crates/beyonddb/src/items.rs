@@ -155,11 +155,7 @@ impl Command for DeleteItem {
                 }
             }
         }
-        crate::secondary_index::delete(context, &table, &key)?;
-        context.sql(&statement(
-            "DELETE FROM ddb_items WHERE table_id = ?1 AND item_key = ?2",
-            vec![SqlValue::Text(table.id), SqlValue::Blob(key)],
-        ))?;
+        delete_item(context, &table, &key)?;
         Ok(CommandResult::Success(Json(ItemMutationOutcome::Applied(
             if input.return_old { old } else { None },
         ))))
@@ -314,7 +310,7 @@ impl Query for GetItem {
             return Ok(Json(GetItemOutcome::Conflict(conflict)));
         }
         Ok(Json(GetItemOutcome::Found(
-            crate::item_storage::StoredItem::Account {
+            crate::item_storage::StoredValue::Account {
                 table_id: &table.id,
                 key: &key,
             }
@@ -436,7 +432,7 @@ fn command_item(
     table_id: &str,
     key: &[u8],
 ) -> Result<Option<Item>> {
-    crate::item_storage::StoredItem::Account { table_id, key }.read(|batch| context.sql(batch))
+    crate::item_storage::StoredValue::Account { table_id, key }.read(|batch| context.sql(batch))
 }
 
 fn write_item(
@@ -446,12 +442,32 @@ fn write_item(
     item: &Item,
 ) -> Result<()> {
     let table_id = table.id.as_str();
+    if !table.global_secondary_indexes.is_empty() {
+        let old = command_item(context, table_id, key)?;
+        crate::global_index::outbox::enqueue(context, table, key, 0, old, Some(item.clone()))?;
+    }
     context.sql(&statement(
         "INSERT INTO ddb_items (table_id, item_key, item) VALUES (?1, ?2, X'') ON CONFLICT(table_id, item_key) DO UPDATE SET item = excluded.item",
         vec![SqlValue::Text(table_id.into()), SqlValue::Blob(key.to_vec())],
     ))?;
-    crate::item_storage::StoredItem::Account { table_id, key }.write(context, item)?;
+    crate::item_storage::StoredValue::Account { table_id, key }.write(context, item)?;
     crate::secondary_index::write(context, table, key, item)
+}
+
+fn delete_item(context: &CommandContext<'_, '_>, table: &TableRecord, key: &[u8]) -> Result<()> {
+    if !table.global_secondary_indexes.is_empty() {
+        let old = command_item(context, &table.id, key)?;
+        crate::global_index::outbox::enqueue(context, table, key, 0, old, None)?;
+    }
+    crate::secondary_index::delete(context, table, key)?;
+    context.sql(&statement(
+        "DELETE FROM ddb_items WHERE table_id = ?1 AND item_key = ?2",
+        vec![
+            SqlValue::Text(table.id.clone()),
+            SqlValue::Blob(key.to_vec()),
+        ],
+    ))?;
+    Ok(())
 }
 
 pub(crate) fn item_key(item: &Item, key_schema: &[KeySchemaElement]) -> Result<Vec<u8>> {

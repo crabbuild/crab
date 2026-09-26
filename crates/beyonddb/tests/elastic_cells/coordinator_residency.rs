@@ -137,6 +137,7 @@ async fn coordinator_history_outgrows_residency_and_released_read_recovers() {
             identity(245),
             Json(TableSpec {
                 local_secondary_indexes: Vec::new(),
+                global_secondary_indexes: Vec::new(),
                 table_name: "Residency".into(),
                 key_schema: vec![KeySchemaElement {
                     attribute_name: "id".into(),

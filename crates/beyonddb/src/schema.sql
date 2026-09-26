@@ -76,3 +76,20 @@ CREATE TABLE ddb_account_transaction_locks (
 CREATE INDEX ddb_account_transaction_locks_owner ON ddb_account_transaction_locks (transaction_id);
 CREATE INDEX ddb_account_write_locks ON ddb_account_transaction_locks (table_id, item_key)
     WHERE write_lock = 1;
+
+CREATE TABLE ddb_global_index_routes (
+    table_id TEXT PRIMARY KEY,
+    base_table_id TEXT NOT NULL REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
+    route_epoch TEXT NOT NULL
+);
+
+CREATE TABLE ddb_global_index_partitions (
+    table_id TEXT NOT NULL REFERENCES ddb_global_index_routes(table_id) ON DELETE CASCADE,
+    partition_id BLOB NOT NULL,
+    lower_bound BLOB NOT NULL,
+    upper_bound BLOB NOT NULL,
+    epoch TEXT NOT NULL,
+    PRIMARY KEY (table_id, partition_id)
+);
+CREATE UNIQUE INDEX ddb_global_index_partition_lookup
+    ON ddb_global_index_partitions (table_id, lower_bound);

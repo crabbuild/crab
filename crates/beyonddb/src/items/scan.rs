@@ -114,7 +114,7 @@ impl Query for ScanItems {
                 let [SqlValue::Blob(key)] = row.as_slice() else {
                     return Err(Error::Command("invalid scan key row"));
                 };
-                let Some(item) = crate::item_storage::StoredItem::Account {
+                let Some(item) = crate::item_storage::StoredValue::Account {
                     table_id: &table.id,
                     key,
                 }

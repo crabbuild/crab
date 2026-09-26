@@ -2,6 +2,7 @@
 
 mod admission;
 mod data;
+mod global_index;
 mod recovery;
 mod remaining;
 mod transaction;
@@ -42,6 +43,14 @@ pub trait InitialPartitionProvisioner: Send + Sync {
         account_id: &'a str,
         table: &'a TableRecord,
     ) -> BoxedFuture<'a, Result<Vec<PartitionSpec>, StorageError>>;
+
+    /// Install a new global index's independently owned initial ranges.
+    fn provision_global_index<'a>(
+        &'a self,
+        account_id: &'a str,
+        table: &'a TableRecord,
+        index: &'a crate::GlobalIndexRecord,
+    ) -> BoxedFuture<'a, Result<Vec<crate::GlobalIndexPartitionSpec>, StorageError>>;
 }
 
 /// Admits a discoverable coordinator before any transaction record is written.
@@ -112,18 +121,14 @@ impl TableEngine for CellStorage {
         Box::pin(async move {
             input.resolve_table_throughput_mode();
             if input
-                .global_secondary_indexes
+                .local_secondary_indexes
                 .as_ref()
-                .is_some_and(|v| !v.is_empty())
-                || input
-                    .local_secondary_indexes
-                    .as_ref()
-                    .is_some_and(|indexes| {
-                        indexes.iter().any(|index| {
-                            index.projection.projection_type
-                                != extenddb_core::types::ProjectionType::All
-                        })
+                .is_some_and(|indexes| {
+                    indexes.iter().any(|index| {
+                        index.projection.projection_type
+                            != extenddb_core::types::ProjectionType::All
                     })
+                })
                 || input.vector_indexes.as_ref().is_some_and(|v| !v.is_empty())
                 || input.stream_specification.is_some()
                 || input.sse_specification.is_some()
@@ -131,8 +136,16 @@ impl TableEngine for CellStorage {
                 || input.on_demand_throughput.is_some()
             {
                 return Err(unsupported(
-                    "global/vector indexes, non-ALL local index projections, streams, SSE, class, or on-demand ceilings",
+                    "vector indexes, non-ALL local index projections, streams, SSE, class, or on-demand ceilings",
                 ));
+            }
+            if self.initial_partitions.is_none()
+                && input
+                    .global_secondary_indexes
+                    .as_ref()
+                    .is_some_and(|indexes| !indexes.is_empty())
+            {
+                return Err(unsupported("global indexes require data Cell provisioning"));
             }
             extenddb_core::validation::validate_create_table(&input, &LimitsConfig::default())
                 .map_err(|error| StorageError::Validation(error.to_string()))?;
@@ -143,6 +156,7 @@ impl TableEngine for CellStorage {
                 key_schema: input.key_schema,
                 attribute_definitions: input.attribute_definitions,
                 local_secondary_indexes: input.local_secondary_indexes.unwrap_or_default(),
+                global_secondary_indexes: input.global_secondary_indexes.unwrap_or_default(),
                 billing_mode: input.billing_mode.unwrap_or(BillingMode::Provisioned),
                 provisioned_throughput: input.provisioned_throughput,
                 deletion_protection_enabled: input.deletion_protection_enabled.unwrap_or(false),
@@ -192,6 +206,31 @@ impl TableEngine for CellStorage {
                 Err(error) => return Err(cell_error(error)),
             };
             if let Some(provisioner) = &self.initial_partitions {
+                for index in &record.global_secondary_indexes {
+                    let partitions = provisioner
+                        .provision_global_index(&account_id, &record, index)
+                        .await?
+                        .into_iter()
+                        .map(|range| crate::RoutePagePartition {
+                            partition_id: range.partition_id,
+                            lower: range.lower.unwrap_or([0; 16]),
+                            upper: range.upper,
+                            epoch: range.epoch,
+                        })
+                        .collect();
+                    self.client
+                        .command::<crate::ActivateGlobalIndexRoute>(
+                            &target,
+                            mutation_identity()?,
+                            Json(crate::GlobalIndexRoute {
+                                table: record.clone(),
+                                index: index.clone(),
+                                partitions,
+                            }),
+                        )
+                        .await
+                        .map_err(cell_error)?;
+                }
                 let partitions = provisioner.provision(&account_id, &record).await?;
                 let route = TableRoute {
                     table_id: record.id.clone(),
@@ -220,6 +259,9 @@ impl TableEngine for CellStorage {
                             ),
                             ActivateTableRouteOutcome::TransactionConflict => {
                                 StorageError::Transient("table has prepared transactions".into())
+                            }
+                            ActivateTableRouteOutcome::IndexesNotReady => {
+                                StorageError::Transient("global index routes are not ready".into())
                             }
                             ActivateTableRouteOutcome::TableNotEmpty => {
                                 StorageError::TableNotActive(record.table_name.clone())
@@ -439,6 +481,11 @@ impl TableEngine for CellStorage {
                     .iter()
                     .map(|index| local_index_info(&record.id, index))
                     .collect(),
+                global_secondary_indexes: record
+                    .global_secondary_indexes
+                    .iter()
+                    .map(global_index_info)
+                    .collect(),
                 table_name: record.table_name,
                 account_id,
                 table_id: record.id,
@@ -466,6 +513,13 @@ impl TableEngine for CellStorage {
                 .iter()
                 .find(|index| index.index_name == index_name)
                 .map(|index| local_index_info(&record.id, index))
+                .or_else(|| {
+                    record
+                        .global_secondary_indexes
+                        .iter()
+                        .find(|index| index.specification.index_name == index_name)
+                        .map(global_index_info)
+                })
                 .ok_or(StorageError::IndexNotFound(index_name))
         })
     }
@@ -493,6 +547,13 @@ impl TableEngine for CellStorage {
                 .iter()
                 .find(|index| index.index_name == index_name)
                 .map(|index| local_index_info(&record.id, index))
+                .or_else(|| {
+                    record
+                        .global_secondary_indexes
+                        .iter()
+                        .find(|index| index.specification.index_name == index_name)
+                        .map(global_index_info)
+                })
                 .ok_or(StorageError::IndexNotFound(index_name))
         })
     }
@@ -561,6 +622,44 @@ fn description(
             last_update_to_pay_per_request_date_time: Some(since as f64 / 1_000.0),
         });
     TableDescription {
+        global_secondary_indexes: (!record.global_secondary_indexes.is_empty()).then(|| {
+            record
+                .global_secondary_indexes
+                .iter()
+                .map(|record_index| {
+                    let index = &record_index.specification;
+                    extenddb_core::types::GsiDescription {
+                        index_name: index.index_name.clone(),
+                        key_schema: index.key_schema.clone(),
+                        projection: index.projection.clone(),
+                        index_status: if status == TableStatus::Active {
+                            "ACTIVE"
+                        } else {
+                            "CREATING"
+                        }
+                        .into(),
+                        provisioned_throughput: index.provisioned_throughput.as_ref().map(
+                            |throughput| ProvisionedThroughputDescription {
+                                read_capacity_units: throughput.read_capacity_units,
+                                write_capacity_units: throughput.write_capacity_units,
+                                ..Default::default()
+                            },
+                        ),
+                        index_size_bytes: 0,
+                        item_count: 0,
+                        index_arn: format!(
+                            "{}/index/{}",
+                            extenddb_storage::util::table_arn(
+                                region,
+                                account_id,
+                                &record.table_name
+                            ),
+                            index.index_name
+                        ),
+                    }
+                })
+                .collect()
+        }),
         local_secondary_indexes: (!record.local_secondary_indexes.is_empty()).then(|| {
             record
                 .local_secondary_indexes
@@ -650,5 +749,15 @@ fn local_index_info(table_id: &str, index: &extenddb_core::types::LsiInput) -> I
         index_type: extenddb_core::types::IndexType::Lsi,
         key_schema: index.key_schema.clone(),
         projection: index.projection.clone(),
+    }
+}
+
+fn global_index_info(index: &crate::GlobalIndexRecord) -> IndexInfo {
+    IndexInfo {
+        index_name: index.specification.index_name.clone(),
+        index_id: index.id.clone(),
+        index_type: extenddb_core::types::IndexType::Gsi,
+        key_schema: index.specification.key_schema.clone(),
+        projection: index.specification.projection.clone(),
     }
 }

@@ -183,7 +183,7 @@ impl Command for ResolvePartitionTransaction {
                 if prepared.table_id != spec.table.id || prepared.epoch != spec.epoch {
                     return Err(Error::Command("prepared partition identity changed"));
                 }
-                apply_staged(context, &spec.table, prepared.images)?;
+                apply_staged(context, &spec.table, spec.epoch, prepared.images)?;
             }
             context.sql(&statement(
                 "DELETE FROM ddb_partition_transaction_locks WHERE transaction_id = ?1",

@@ -245,7 +245,7 @@ impl Query for PartitionQuery {
                 let [SqlValue::Blob(key), SqlValue::Blob(sort)] = row.as_slice() else {
                     return Err(Error::Command("invalid partition query row"));
                 };
-                let item = crate::item_storage::StoredItem::Partition(key)
+                let item = crate::item_storage::StoredValue::Partition(key)
                     .read(|batch| context.sql(batch))?
                     .ok_or(Error::Command("query key has no item"))?;
                 if matches_item(&input, &item)? {

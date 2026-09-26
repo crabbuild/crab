@@ -3,7 +3,7 @@
 use crab_cell_runtime::registry::{Query, QueryContext};
 use extenddb_core::types::{KeyType, extract_key, item_size_bytes};
 
-use crate::item_storage::StoredItem;
+use crate::item_storage::StoredValue;
 use crate::partition::key::{index_key, partition_key_bytes};
 use crate::partition::query::index_bounds;
 use crate::table::{TableRecord, decode_table, statement};
@@ -150,9 +150,9 @@ pub(crate) fn query(
                 return Err(Error::Command("invalid local index row"));
             };
             let source = if routed {
-                StoredItem::Partition(key)
+                StoredValue::Partition(key)
             } else {
-                StoredItem::Account {
+                StoredValue::Account {
                     table_id: &table.id,
                     key,
                 }

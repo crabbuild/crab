@@ -321,8 +321,19 @@ impl CellInitialPartitionProvisioner {
                 else {
                     continue;
                 };
-                self.recover_routed_table(account_id, &account, &client, &table.id, nodes)
+                self.recover_routed_table(account_id, &account, &client, &table.id, nodes, None)
                     .await?;
+                for index in &table.global_secondary_indexes {
+                    self.recover_routed_table(
+                        account_id,
+                        &account,
+                        &client,
+                        &table.id,
+                        nodes,
+                        Some(index),
+                    )
+                    .await?;
+                }
             }
             let Some(next) = page.last_evaluated else {
                 return Ok(());
@@ -338,25 +349,28 @@ impl CellInitialPartitionProvisioner {
         client: &CellClient,
         table_id: &str,
         nodes: &NodeDirectory,
+        index: Option<&crate::GlobalIndexRecord>,
     ) -> Result<(), StorageError> {
+        let table_id = index.map_or(table_id, |index| index.id.as_str());
         let mut after_lower = None;
         let mut expected_epoch = None;
         loop {
-            let page = client
-                .query::<ReadRoutePage>(
-                    account,
-                    None,
-                    Json(RoutePageInput {
-                        table_id: table_id.to_owned(),
-                        start_hash: None,
-                        after_lower,
-                        expected_epoch,
-                    }),
-                )
-                .await
-                .map_err(cell_error)?
-                .output
-                .0;
+            let input = Json(RoutePageInput {
+                table_id: table_id.to_owned(),
+                start_hash: None,
+                after_lower,
+                expected_epoch,
+            });
+            let page = if index.is_some() {
+                client
+                    .query::<crate::ReadGlobalIndexRoutePage>(account, None, input)
+                    .await
+            } else {
+                client.query::<ReadRoutePage>(account, None, input).await
+            }
+            .map_err(cell_error)?
+            .output
+            .0;
             let (epoch, partitions, has_more) = match page {
                 RoutePageOutcome::Unrouted => return Ok(()),
                 RoutePageOutcome::Changed => {
@@ -372,10 +386,28 @@ impl CellInitialPartitionProvisioner {
             };
             after_lower = partitions.last().map(|partition| partition.lower);
             for partition in partitions {
-                let target = data_target(account_id, table_id, &partition.partition_id)
-                    .map_err(provision_error)?;
-                self.recover_discovered_owner(&target, DATA_MODULE, initialize_partition, nodes)
+                if index.is_some() {
+                    let target =
+                        crate::global_index_target(account_id, table_id, &partition.partition_id)
+                            .map_err(provision_error)?;
+                    self.recover_discovered_owner(
+                        &target,
+                        crate::global_index::MODULE,
+                        crate::initialize_global_index,
+                        nodes,
+                    )
                     .await?;
+                } else {
+                    let target = data_target(account_id, table_id, &partition.partition_id)
+                        .map_err(provision_error)?;
+                    self.recover_discovered_owner(
+                        &target,
+                        DATA_MODULE,
+                        initialize_partition,
+                        nodes,
+                    )
+                    .await?;
+                }
             }
             if !has_more {
                 return Ok(());
@@ -1346,6 +1378,55 @@ fn split_plan(source: &PartitionSpec, route_epoch: u64) -> Result<SplitPlan, Sto
 }
 
 impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
+    fn provision_global_index<'a>(
+        &'a self,
+        account_id: &'a str,
+        table: &'a TableRecord,
+        index: &'a crate::GlobalIndexRecord,
+    ) -> BoxedFuture<'a, Result<Vec<crate::GlobalIndexPartitionSpec>, StorageError>> {
+        Box::pin(async move {
+            let mut partitions = Vec::with_capacity(usize::from(self.initial_partition_count));
+            for ordinal in 0..self.initial_partition_count {
+                let range = initial_partition(table, self.initial_partition_count, ordinal)?;
+                let spec = crate::GlobalIndexPartitionSpec {
+                    table: table.clone(),
+                    index: index.clone(),
+                    partition_id: range.partition_id,
+                    lower: range.lower,
+                    upper: range.upper,
+                    epoch: range.epoch,
+                };
+                let target = crate::global_index_target(account_id, &index.id, &spec.partition_id)
+                    .map_err(provision_error)?;
+                let handle = self
+                    .admit_module(
+                        &target,
+                        crate::global_index::MODULE,
+                        crate::initialize_global_index,
+                    )
+                    .await?;
+                let client = CellClient::local(self.application.registry(), handle);
+                match client
+                    .command::<crate::InstallGlobalIndexPartition>(
+                        &target,
+                        mutation_identity()?,
+                        Json(spec.clone()),
+                    )
+                    .await
+                {
+                    Ok(result) if result.output.0 => partitions.push(spec),
+                    Ok(_) | Err(InvocationError::Rejected(_)) => {
+                        return Err(StorageError::Internal(
+                            "global-index range installation rejected".into(),
+                        ));
+                    }
+                    Err(error) => return Err(cell_error(error)),
+                }
+            }
+            Ok(partitions)
+        })
+    }
+
     fn provision<'a>(
         &'a self,
         account_id: &'a str,

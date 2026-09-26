@@ -12,6 +12,8 @@ pub struct TableSpec {
     pub attribute_definitions: Vec<AttributeDefinition>,
     /// Immutable local secondary indexes maintained with each base item.
     pub local_secondary_indexes: Vec<LsiInput>,
+    /// Global index definitions requested at table creation.
+    pub global_secondary_indexes: Vec<extenddb_core::types::GsiInput>,
     /// Table billing mode.
     pub billing_mode: BillingMode,
     /// Capacity units for provisioned billing.
@@ -30,6 +32,10 @@ impl TableSpec {
             && self.key_schema == record.key_schema
             && self.attribute_definitions == record.attribute_definitions
             && self.local_secondary_indexes == record.local_secondary_indexes
+            && self.global_secondary_indexes.iter().eq(record
+                .global_secondary_indexes
+                .iter()
+                .map(|index| &index.specification))
             && self.billing_mode == record.billing_mode
             && self.provisioned_throughput == record.provisioned_throughput
             && self.deletion_protection_enabled == record.deletion_protection_enabled
@@ -62,6 +68,8 @@ pub struct TableRecord {
     pub attribute_definitions: Vec<AttributeDefinition>,
     /// Immutable local secondary indexes maintained with each base item.
     pub local_secondary_indexes: Vec<LsiInput>,
+    /// Immutable global-index generations owned by this table.
+    pub global_secondary_indexes: Vec<crate::GlobalIndexRecord>,
     /// Persisted table billing mode.
     pub billing_mode: BillingMode,
     /// Persisted provisioned capacity, if applicable.
@@ -127,6 +135,12 @@ impl Command for CreateTable {
             key_schema: input.key_schema.clone(),
             attribute_definitions: input.attribute_definitions.clone(),
             local_secondary_indexes: input.local_secondary_indexes.clone(),
+            global_secondary_indexes: input
+                .global_secondary_indexes
+                .iter()
+                .cloned()
+                .map(|spec| crate::GlobalIndexRecord::create(&table_id, spec, context.sequence()))
+                .collect::<Result<Vec<_>>>()?,
             billing_mode: input.billing_mode,
             provisioned_throughput: input.provisioned_throughput,
             deletion_protection_enabled: input.deletion_protection_enabled,
@@ -310,6 +324,11 @@ impl Command for UpdateTable {
             key_schema: table.key_schema.clone(),
             attribute_definitions: table.attribute_definitions.clone(),
             local_secondary_indexes: table.local_secondary_indexes.clone(),
+            global_secondary_indexes: table
+                .global_secondary_indexes
+                .iter()
+                .map(|index| index.specification.clone())
+                .collect(),
             billing_mode: table.billing_mode,
             provisioned_throughput: table.provisioned_throughput.clone(),
             deletion_protection_enabled: table.deletion_protection_enabled,
@@ -523,6 +542,7 @@ fn valid_table_spec(spec: &TableSpec) -> bool {
         key_schema: spec.key_schema.clone(),
         attribute_definitions: spec.attribute_definitions.clone(),
         local_secondary_indexes: Some(spec.local_secondary_indexes.clone()),
+        global_secondary_indexes: Some(spec.global_secondary_indexes.clone()),
         billing_mode: Some(spec.billing_mode),
         provisioned_throughput: spec.provisioned_throughput.clone(),
         deletion_protection_enabled: Some(spec.deletion_protection_enabled),

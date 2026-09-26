@@ -92,7 +92,7 @@ impl Command for PartitionTransactWrite {
             Ok(staged) => staged,
             Err(reason) => return Ok(rejected(reason.single_outcome())),
         };
-        apply_staged(context, &spec.table, staged)?;
+        apply_staged(context, &spec.table, spec.epoch, staged)?;
         Ok(CommandResult::Success(Json(
             PartitionTransactWriteOutcome::Applied,
         )))
@@ -219,6 +219,7 @@ fn stage_operations(
             }
         }
         let (partition_key, sort_key) = super::key::index_key(item, &spec.table.key_schema)?;
+        let old_bytes = crate::global_index::outbox::old_bytes(&spec.table, old.as_ref())?;
         let (image, effect) = match operation {
             TransactionOperation::Put(input) => (Some(input.item), StagedEffect::Write),
             TransactionOperation::Delete(_) => (None, StagedEffect::Write),
@@ -251,7 +252,14 @@ fn stage_operations(
             }
         }
         let index_capacity = if effect == StagedEffect::Write {
-            crate::secondary_index::capacity(&spec.table, image.as_ref())?
+            let mut capacity = crate::secondary_index::capacity(&spec.table, image.as_ref())?;
+            crate::global_index::outbox::reserve(
+                &mut capacity,
+                &spec.table,
+                old_bytes,
+                image.as_ref(),
+            )?;
+            capacity
         } else {
             crate::secondary_index::Capacity::default()
         };
@@ -277,6 +285,7 @@ fn stage_validation(index: usize, message: &str) -> StageError {
 fn apply_staged(
     context: &mut CommandContext<'_, '_>,
     table: &crate::TableRecord,
+    epoch: u64,
     staged: Vec<StagedImage>,
 ) -> Result<()> {
     for image in staged {
@@ -284,13 +293,9 @@ fn apply_staged(
             continue;
         }
         if let Some(item) = image.image {
-            write_item(context, image.key, &item, table)?;
+            write_item(context, image.key, &item, table, Some(epoch))?;
         } else {
-            crate::secondary_index::delete(context, table, &image.key)?;
-            context.sql(&statement(
-                "DELETE FROM ddb_partition_items WHERE item_key = ?1",
-                vec![SqlValue::Blob(image.key)],
-            ))?;
+            super::delete_item(context, table, &image.key, epoch)?;
         }
     }
     Ok(())

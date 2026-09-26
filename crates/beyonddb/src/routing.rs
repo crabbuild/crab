@@ -328,6 +328,8 @@ pub enum ActivateTableRouteOutcome {
     AlreadyActive,
     /// Account-local items must be migrated before partition activation.
     TableNotEmpty,
+    /// Global index ranges must be published before base writes are admitted.
+    IndexesNotReady,
     /// The ranges are invalid or do not cover the table's key space.
     InvalidRoute,
 }
@@ -359,6 +361,22 @@ impl Command for ActivateTableRoute {
             return Ok(CommandResult::Rejected(Json(
                 ActivateTableRouteOutcome::InvalidRoute,
             )));
+        }
+        for index in &table.global_secondary_indexes {
+            if context.sql(&statement(
+                "SELECT 1 FROM ddb_global_index_routes WHERE table_id = ?1 AND base_table_id = ?2",
+                vec![
+                    SqlValue::Text(index.id.clone()),
+                    SqlValue::Text(table.id.clone()),
+                ],
+            ))?[0]
+                .rows
+                .is_empty()
+            {
+                return Ok(CommandResult::Rejected(Json(
+                    ActivateTableRouteOutcome::IndexesNotReady,
+                )));
+            }
         }
         // A prepared create has no live row yet, but its destination is fixed.
         if crate::items::transaction::table_locked(context, &table.id)? {
@@ -632,95 +650,110 @@ impl Query for ReadRoutePage {
     type Output = Json<RoutePageOutcome>;
 
     fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
-        if input.start_hash.is_some() && input.after_lower.is_some() {
-            return Err(crate::Error::Command("invalid route page cursor"));
-        }
-        let epoch_rows = context.sql(&statement(
-            "SELECT route_epoch FROM ddb_routes WHERE table_id = ?1",
-            vec![SqlValue::Text(input.table_id.clone())],
-        ))?;
-        let Some(row) = epoch_rows[0].rows.first() else {
-            return Ok(Json(RoutePageOutcome::Unrouted));
-        };
-        let [SqlValue::Text(epoch)] = row.as_slice() else {
-            return Err(crate::Error::Command("invalid route epoch row"));
-        };
-        let epoch = parse_epoch(epoch)?;
-        if input
-            .expected_epoch
-            .is_some_and(|expected| expected != epoch)
-        {
-            return Ok(Json(RoutePageOutcome::Changed));
-        }
-        let page = match (input.start_hash, input.after_lower) {
-            (Some(hash), None) => statement(
-                "SELECT partition_id, lower_bound, upper_bound, epoch \
-                 FROM ddb_route_partitions WHERE table_id = ?1 AND lower_bound >= \
-                 (SELECT MAX(lower_bound) FROM ddb_route_partitions \
-                  WHERE table_id = ?1 AND lower_bound <= ?2) \
-                 ORDER BY lower_bound LIMIT 65",
-                vec![
-                    SqlValue::Text(input.table_id),
-                    SqlValue::Blob(hash.to_vec()),
-                ],
-            ),
-            (None, Some(lower)) => statement(
-                "SELECT partition_id, lower_bound, upper_bound, epoch \
-                 FROM ddb_route_partitions WHERE table_id = ?1 AND lower_bound > ?2 \
-                 ORDER BY lower_bound LIMIT 65",
-                vec![
-                    SqlValue::Text(input.table_id),
-                    SqlValue::Blob(lower.to_vec()),
-                ],
-            ),
-            (None, None) => statement(
-                "SELECT partition_id, lower_bound, upper_bound, epoch \
-                 FROM ddb_route_partitions WHERE table_id = ?1 \
-                 ORDER BY lower_bound LIMIT 65",
-                vec![SqlValue::Text(input.table_id)],
-            ),
-            (Some(_), Some(_)) => return Err(crate::Error::Command("invalid route page cursor")),
-        };
-        let rows = context.sql(&page)?;
-        let has_more = rows[0].rows.len() > 64;
-        let partitions = rows[0]
-            .rows
-            .iter()
-            .take(64)
-            .map(decode_page_partition)
-            .collect::<Result<Vec<_>>>()?;
-        if input.after_lower.is_none() && partitions.is_empty() {
-            return Err(crate::Error::Command("published route has no partitions"));
-        }
-        if input.start_hash.is_none()
-            && input.after_lower.is_none()
-            && partitions
-                .first()
-                .is_some_and(|first| first.lower != [0; 16])
-        {
-            return Err(crate::Error::Command("route page misses hash-space start"));
-        }
-        if !has_more && partitions.last().is_some_and(|last| last.upper.is_some()) {
-            return Err(crate::Error::Command("route page misses hash-space end"));
-        }
-        for pair in partitions.windows(2) {
-            if pair[0].upper != Some(pair[1].lower) {
-                return Err(crate::Error::Command("route page has a gap or overlap"));
-            }
-        }
-        if input.start_hash.is_some_and(|hash| {
-            partitions.first().is_none_or(|first| {
-                hash < first.lower || first.upper.is_some_and(|upper| hash >= upper)
-            })
-        }) {
-            return Err(crate::Error::Command("route page misses start hash"));
-        }
-        Ok(Json(RoutePageOutcome::Page {
-            epoch,
-            partitions,
-            has_more,
-        }))
+        read_route_page(context, input, "ddb_routes", "ddb_route_partitions")
     }
+}
+
+pub(crate) fn read_route_page(
+    context: &QueryContext<'_>,
+    input: RoutePageInput,
+    routes_table: &'static str,
+    partitions_table: &'static str,
+) -> Result<Json<RoutePageOutcome>> {
+    if input.start_hash.is_some() && input.after_lower.is_some() {
+        return Err(crate::Error::Command("invalid route page cursor"));
+    }
+    let epoch_rows = context.sql(&statement(
+        &format!("SELECT route_epoch FROM {routes_table} WHERE table_id = ?1"),
+        vec![SqlValue::Text(input.table_id.clone())],
+    ))?;
+    let Some(row) = epoch_rows[0].rows.first() else {
+        return Ok(Json(RoutePageOutcome::Unrouted));
+    };
+    let [SqlValue::Text(epoch)] = row.as_slice() else {
+        return Err(crate::Error::Command("invalid route epoch row"));
+    };
+    let epoch = parse_epoch(epoch)?;
+    if input
+        .expected_epoch
+        .is_some_and(|expected| expected != epoch)
+    {
+        return Ok(Json(RoutePageOutcome::Changed));
+    }
+    let page = match (input.start_hash, input.after_lower) {
+        (Some(hash), None) => statement(
+            &format!(
+                "SELECT partition_id, lower_bound, upper_bound, epoch \
+             FROM {partitions_table} WHERE table_id = ?1 AND lower_bound >= \
+             (SELECT MAX(lower_bound) FROM {partitions_table} \
+              WHERE table_id = ?1 AND lower_bound <= ?2) \
+             ORDER BY lower_bound LIMIT 65"
+            ),
+            vec![
+                SqlValue::Text(input.table_id),
+                SqlValue::Blob(hash.to_vec()),
+            ],
+        ),
+        (None, Some(lower)) => statement(
+            &format!(
+                "SELECT partition_id, lower_bound, upper_bound, epoch \
+             FROM {partitions_table} WHERE table_id = ?1 AND lower_bound > ?2 \
+             ORDER BY lower_bound LIMIT 65"
+            ),
+            vec![
+                SqlValue::Text(input.table_id),
+                SqlValue::Blob(lower.to_vec()),
+            ],
+        ),
+        (None, None) => statement(
+            &format!(
+                "SELECT partition_id, lower_bound, upper_bound, epoch \
+             FROM {partitions_table} WHERE table_id = ?1 \
+             ORDER BY lower_bound LIMIT 65"
+            ),
+            vec![SqlValue::Text(input.table_id)],
+        ),
+        (Some(_), Some(_)) => return Err(crate::Error::Command("invalid route page cursor")),
+    };
+    let rows = context.sql(&page)?;
+    let has_more = rows[0].rows.len() > 64;
+    let partitions = rows[0]
+        .rows
+        .iter()
+        .take(64)
+        .map(decode_page_partition)
+        .collect::<Result<Vec<_>>>()?;
+    if input.after_lower.is_none() && partitions.is_empty() {
+        return Err(crate::Error::Command("published route has no partitions"));
+    }
+    if input.start_hash.is_none()
+        && input.after_lower.is_none()
+        && partitions
+            .first()
+            .is_some_and(|first| first.lower != [0; 16])
+    {
+        return Err(crate::Error::Command("route page misses hash-space start"));
+    }
+    if !has_more && partitions.last().is_some_and(|last| last.upper.is_some()) {
+        return Err(crate::Error::Command("route page misses hash-space end"));
+    }
+    for pair in partitions.windows(2) {
+        if pair[0].upper != Some(pair[1].lower) {
+            return Err(crate::Error::Command("route page has a gap or overlap"));
+        }
+    }
+    if input.start_hash.is_some_and(|hash| {
+        partitions.first().is_none_or(|first| {
+            hash < first.lower || first.upper.is_some_and(|upper| hash >= upper)
+        })
+    }) {
+        return Err(crate::Error::Command("route page misses start hash"));
+    }
+    Ok(Json(RoutePageOutcome::Page {
+        epoch,
+        partitions,
+        has_more,
+    }))
 }
 
 fn decode_page_partition(row: &Vec<SqlValue>) -> Result<RoutePagePartition> {

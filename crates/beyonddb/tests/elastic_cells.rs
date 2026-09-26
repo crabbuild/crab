@@ -5,6 +5,7 @@ mod elastic_cells {
     mod coordinator_checkpoints;
     mod coordinator_residency;
     mod coordinator_tokens;
+    mod global_indexes;
     mod local_indexes;
     mod public_transactions;
     mod read_resolution;
@@ -153,6 +154,15 @@ struct FailOnceProvisioner {
 }
 
 impl InitialPartitionProvisioner for FailOnceProvisioner {
+    fn provision_global_index<'a>(
+        &'a self,
+        account_id: &'a str,
+        table: &'a beyonddb::TableRecord,
+        index: &'a beyonddb::GlobalIndexRecord,
+    ) -> BoxedFuture<'a, Result<Vec<beyonddb::GlobalIndexPartitionSpec>, StorageError>> {
+        self.inner.provision_global_index(account_id, table, index)
+    }
+
     fn provision<'a>(
         &'a self,
         account_id: &'a str,
@@ -469,6 +479,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
             identity(77),
             Json(TableSpec {
                 local_secondary_indexes: Vec::new(),
+                global_secondary_indexes: Vec::new(),
                 table_name: "ManyRanges".into(),
                 key_schema: vec![KeySchemaElement {
                     attribute_name: "id".into(),
@@ -778,6 +789,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
                 identity(200 + index),
                 Json(TableSpec {
                     local_secondary_indexes: Vec::new(),
+                    global_secondary_indexes: Vec::new(),
                     table_name: name.clone(),
                     key_schema: table.key_schema.clone(),
                     attribute_definitions: table.attribute_definitions.clone(),
@@ -820,6 +832,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
             identity(79),
             Json(TableSpec {
                 local_secondary_indexes: Vec::new(),
+                global_secondary_indexes: Vec::new(),
                 table_name: "MoreRanges".into(),
                 key_schema: table.key_schema.clone(),
                 attribute_definitions: table.attribute_definitions.clone(),
@@ -2358,6 +2371,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             identity(13),
             Json(TableSpec {
                 local_secondary_indexes: Vec::new(),
+                global_secondary_indexes: Vec::new(),
                 table_name: "Books".into(),
                 key_schema: vec![KeySchemaElement {
                     attribute_name: "id".into(),

@@ -51,6 +51,9 @@ impl PeerCellResolver for LocalResolver {
             let module = match target.namespace() {
                 NAMESPACE => MODULE,
                 DATA_NAMESPACE => DATA_MODULE,
+                namespace if namespace == crate::global_index::NAMESPACE => {
+                    crate::global_index::MODULE
+                }
                 namespace if namespace == credentials::NAMESPACE => credentials::MODULE,
                 namespace if namespace == transaction_coordinator::NAMESPACE => {
                     transaction_coordinator::MODULE

@@ -113,6 +113,12 @@ pub(crate) fn valid_item(item: &Item, table: &TableRecord) -> bool {
             index_name: &index.index_name,
             key_schema: &index.key_schema,
         })
+        .chain(table.global_secondary_indexes.iter().map(|index| {
+            extenddb_core::validation::IndexKeyRef {
+                index_name: &index.specification.index_name,
+                key_schema: &index.specification.key_schema,
+            }
+        }))
         .collect();
     // DynamoDB's item limit includes every corresponding LSI projection. ALL
     // is the only admitted projection until the engine can plan base-table fetches.
@@ -133,10 +139,10 @@ pub(crate) fn valid_item(item: &Item, table: &TableRecord) -> bool {
     }
     extenddb_core::validation::validate_index_keys(item, &indexes, &table.attribute_definitions)
         .is_ok()
-        && table.local_secondary_indexes.iter().all(|index| {
+        && indexes.iter().all(|index| {
             extenddb_core::validation::validate_key_sizes(
                 item,
-                &index.key_schema,
+                index.key_schema,
                 &extenddb_core::limits::LimitsConfig::default(),
             )
             .is_ok()

@@ -1,5 +1,10 @@
 # BeyondDB elastic Cell topology
 
+Global indexes now use independent initial ranges and a durable projection
+journal. Automatic index range splitting, bounded tombstone retention, projection
+throughput, and index-owner fleet recovery remain open scale gates. See
+[global indexes](GLOBAL_INDEXES.md).
+
 ## Scope and present boundary
 
 "Unlimited" is not a literal capacity promise. DynamoDB requests, items, one

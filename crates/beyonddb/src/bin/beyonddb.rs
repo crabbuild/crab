@@ -366,6 +366,8 @@ async fn serve_ready(
                 Duration::from_secs(3),
             )?;
         }
+        CellStorage::new(client.clone(), config.region.clone())
+            .install_global_index_loop(&tasks, config.owned_accounts.clone())?;
         provisioner.install_transaction_recovery_loop(
             &tasks,
             storage,

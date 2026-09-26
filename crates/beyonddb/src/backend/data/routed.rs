@@ -68,6 +68,14 @@ impl CellStorage {
         segment: Option<(u64, u64)>,
         index_name: Option<&str>,
     ) -> Result<Option<(Vec<Item>, Option<Item>)>, StorageError> {
+        let global = key_info
+            .global_secondary_indexes
+            .iter()
+            .find(|index| Some(index.index_name.as_str()) == index_name);
+        let (route_id, route_schema) = global
+            .map_or((&key_info.table_id, &key_info.base_key_schema), |index| {
+                (&index.index_id, &index.key_schema)
+            });
         let mut key_schema = key_info.base_key_schema.clone();
         if index_name.is_some() {
             for key in &key_info.key_schema {
@@ -87,7 +95,7 @@ impl CellStorage {
         }
         let start_hash = exclusive_start_key
             .as_ref()
-            .map(|key| data_key_hash(&key_info.table_id, key, &key_info.base_key_schema))
+            .map(|key| data_key_hash(route_id, key, route_schema))
             .transpose()
             .map_err(|error| StorageError::Validation(error.to_string()))?;
         let bounds = segment.map(|(segment, total)| segment_bounds(segment, total));
@@ -99,7 +107,7 @@ impl CellStorage {
         };
         let account = target(&key_info.account_id)?;
         let mut route_page = RoutePageInput {
-            table_id: key_info.table_id.clone(),
+            table_id: route_id.clone(),
             start_hash,
             after_lower: None,
             expected_epoch: None,
@@ -110,11 +118,20 @@ impl CellStorage {
         let mut bytes = 0_usize;
         let mut expected_lower = None;
         loop {
-            let response = self
-                .client
-                .query::<ReadRoutePage>(&account, None, Json(route_page.clone()))
-                .await
-                .map_err(cell_error)?;
+            let response = if global.is_some() {
+                self.client
+                    .query::<crate::ReadGlobalIndexRoutePage>(
+                        &account,
+                        None,
+                        Json(route_page.clone()),
+                    )
+                    .await
+            } else {
+                self.client
+                    .query::<ReadRoutePage>(&account, None, Json(route_page.clone()))
+                    .await
+            }
+            .map_err(cell_error)?;
             let (epoch, partitions, has_more) = match response.output.0 {
                 RoutePageOutcome::Unrouted if route_page.expected_epoch.is_none() => {
                     return if self.initial_partitions.is_some() {
@@ -155,26 +172,33 @@ impl CellStorage {
                         return Ok(Some((items, None)));
                     }
                 }
-                let owner = data_target(
-                    &key_info.account_id,
-                    &key_info.table_id,
-                    &partition.partition_id,
-                )
+                let owner = if global.is_some() {
+                    crate::global_index_target(
+                        &key_info.account_id,
+                        route_id,
+                        &partition.partition_id,
+                    )
+                } else {
+                    data_target(&key_info.account_id, route_id, &partition.partition_id)
+                }
                 .map_err(|error| StorageError::Internal(error.to_string()))?;
                 loop {
-                    let response = self
-                        .query_resolving::<PartitionScan>(
-                            &owner,
-                            &key_info.account_id,
-                            Json(PartitionScanInput {
-                                index_name: index_name.map(str::to_owned),
-                                table_id: key_info.table_id.clone(),
-                                epoch: partition.epoch,
-                                limit: Some(remaining),
-                                exclusive_start_key: cursor.clone(),
-                            }),
-                        )
-                        .await?;
+                    let input = Json(PartitionScanInput {
+                        index_name: index_name.map(str::to_owned),
+                        table_id: route_id.clone(),
+                        epoch: partition.epoch,
+                        limit: Some(remaining),
+                        exclusive_start_key: cursor.clone(),
+                    });
+                    let response = if global.is_some() {
+                        self.client
+                            .query::<crate::GlobalIndexScan>(&owner, None, input)
+                            .await
+                            .map_err(cell_error)?
+                    } else {
+                        self.query_resolving::<PartitionScan>(&owner, &key_info.account_id, input)
+                            .await?
+                    };
                     let (page, next) = match response.output.0 {
                         PartitionScanOutcome::Page {
                             items,

@@ -5,6 +5,7 @@ mod backend;
 mod catalog;
 mod credentials;
 mod expression_wire;
+mod global_index;
 mod item_storage;
 mod items;
 mod participant;
@@ -23,6 +24,7 @@ mod transaction_transport;
 mod ttl;
 
 pub use expression_wire::WireCondition;
+pub use global_index::*;
 pub use items::*;
 pub use participant::{
     ParticipantTransactionState, PrepareTransactionOutcome, ReadTransactionInput,
@@ -80,10 +82,11 @@ const APPLICATION: ApplicationId = ApplicationId::from_bytes([0x42; 16]);
 pub const APPLICATION_ID: ApplicationId = APPLICATION;
 static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
-        "{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}",
         crab_cell_runtime::primitives::capacity::SCHEMA,
         participant::SCHEMA,
         secondary_index::SCHEMA,
+        global_index::outbox::SCHEMA,
         include_str!("schema.sql")
     )
 });
@@ -109,7 +112,7 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 21] = [
+static COMMANDS: [OperationDescriptor; 23] = [
     operation(1),
     operation(2),
     operation(3),
@@ -131,8 +134,10 @@ static COMMANDS: [OperationDescriptor; 21] = [
     participant::phase_operation(22),
     crate::transaction_transport::upload_operation(23),
     participant::phase_operation(24),
+    operation(25),
+    participant::phase_operation(26),
 ];
-static QUERIES: [OperationDescriptor; 22] = [
+static QUERIES: [OperationDescriptor; 25] = [
     operation(4),
     operation(7),
     operation(8),
@@ -155,6 +160,9 @@ static QUERIES: [OperationDescriptor; 22] = [
     operation(26),
     operation(27),
     operation(28),
+    operation(29),
+    participant::phase_operation(30),
+    global_index::outbox::chunk_operation(31),
 ];
 
 /// Statically linked account application.
@@ -166,6 +174,7 @@ impl CellApplication for Beyonddb {
     fn register(builder: &mut ApplicationBuilder) -> Result<()> {
         builder.register(AccountModule)?;
         builder.register(partition::DataModule)?;
+        builder.register(global_index::GlobalIndexModule)?;
         builder.register(transaction_coordinator::CoordinatorModule)?;
         builder.register(credentials::CredentialModule)?;
         builder.cell_type(
@@ -173,6 +182,7 @@ impl CellApplication for Beyonddb {
                 .with_limits(512 * 1024 * 1024, 64 * 1024 * 1024)?,
         )?;
         builder.cell_type(data_cell_type()?)?;
+        builder.cell_type(global_index::cell_type()?)?;
         builder.cell_type(transaction_coordinator::cell_type()?)?;
         builder.cell_type(credentials::cell_type()?)
     }
@@ -266,6 +276,9 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
                 let mut source = blake3::Hasher::new();
                 source.update(include_bytes!("lib.rs"));
                 source.update(include_bytes!("table.rs"));
+                source.update(include_bytes!("global_index.rs"));
+                source.update(include_bytes!("global_index/outbox.rs"));
+                source.update(include_bytes!("global_index/routing.rs"));
                 source.update(include_bytes!("items.rs"));
                 source.update(include_bytes!("secondary_index.rs"));
                 source.update(include_bytes!("secondary_index/read.rs"));
@@ -326,6 +339,8 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<ttl::AdvanceTtlSchedule>()?;
         registry.bind_command::<RegisterCoordinatorShard>()?;
         registry.bind_command::<transaction_coordinator::RecordSettledCoordinator>()?;
+        registry.bind_command::<ActivateGlobalIndexRoute>()?;
+        registry.bind_command::<AckAccountIndexChange>()?;
         registry.bind_query::<GetItem>()?;
         registry.bind_query::<ReadAccountTransaction>()?;
         registry.bind_query::<ReadAccountTransactionResult>()?;
@@ -347,6 +362,9 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<ttl::ReadTtlSweep>()?;
         registry.bind_query::<ttl::ReadTtlSchedule>()?;
         registry.bind_query::<ReadCoordinatorRegistration>()?;
+        registry.bind_query::<ReadGlobalIndexRoutePage>()?;
+        registry.bind_query::<ReadAccountIndexChange>()?;
+        registry.bind_query::<ReadAccountIndexChangeChunk>()?;
         registry.bind_query::<ListCoordinatorShards>()
     }
 }

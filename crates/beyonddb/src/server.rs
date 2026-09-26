@@ -39,6 +39,7 @@ impl PeerTargetScope for BeyonddbPeerScope {
             || ![
                 NAMESPACE,
                 DATA_NAMESPACE,
+                crate::global_index::NAMESPACE,
                 credentials::NAMESPACE,
                 transaction_coordinator::NAMESPACE,
             ]

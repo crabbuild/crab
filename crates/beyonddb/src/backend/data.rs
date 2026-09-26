@@ -356,12 +356,29 @@ impl DataEngine for CellStorage {
                 sort,
                 extra_range_equals,
             } = prepared?;
-            if key_info
-                .key_schema
+            let global = key_info
+                .global_secondary_indexes
                 .iter()
-                .any(|key| key.key_type == KeyType::Range)
+                .find(|index| Some(index.index_name.as_str()) == index_name.as_deref());
+            if global.is_some()
+                || key_info
+                    .key_schema
+                    .iter()
+                    .any(|key| key.key_type == KeyType::Range)
             {
-                let owner = self.routed_owner(&key_info, &partition_key).await?;
+                let owner = if let Some(index) = global {
+                    Some(
+                        self.index_owner(
+                            &key_info.account_id,
+                            &index.index_id,
+                            &index.key_schema,
+                            &partition_key,
+                        )
+                        .await?,
+                    )
+                } else {
+                    self.routed_owner(&key_info, &partition_key).await?
+                };
                 if owner.is_none() && index_name.is_none() {
                     return Err(unsupported("sort-key Query on an account-local table"));
                 }
@@ -378,7 +395,9 @@ impl DataEngine for CellStorage {
                     .unwrap_or(10_000);
                 let input = Json(PartitionQueryInput {
                     index_name,
-                    table_id: key_info.table_id.clone(),
+                    table_id: global
+                        .map_or(&key_info.table_id, |index| &index.index_id)
+                        .clone(),
                     epoch,
                     partition_key,
                     sort,
@@ -388,8 +407,15 @@ impl DataEngine for CellStorage {
                     exclusive_start_key,
                 });
                 let output = if let Some((owner, _)) = owner {
-                    self.query_resolving::<PartitionQuery>(&owner, &key_info.account_id, input)
-                        .await?
+                    if global.is_some() {
+                        self.client
+                            .query::<crate::GlobalIndexQuery>(&owner, None, input)
+                            .await
+                            .map_err(cell_error)?
+                    } else {
+                        self.query_resolving::<PartitionQuery>(&owner, &key_info.account_id, input)
+                            .await?
+                    }
                 } else {
                     let account = target(&key_info.account_id)?;
                     self.query_resolving::<crate::secondary_index::QueryAccountIndex>(
@@ -477,7 +503,10 @@ impl DataEngine for CellStorage {
                 .await?
             {
                 // Retain the unfiltered cursor so empty segment pages still advance.
-                return Ok((scan_segment(items, &key_info, segment)?, last_evaluated_key));
+                return Ok((
+                    scan_segment(items, &key_info, segment, index_name.as_deref())?,
+                    last_evaluated_key,
+                ));
             }
             let target = target(&key_info.account_id)?;
             let output = self
@@ -485,7 +514,7 @@ impl DataEngine for CellStorage {
                     &target,
                     &key_info.account_id,
                     Json(ScanItemsInput {
-                        index_name,
+                        index_name: index_name.clone(),
                         table_name: key_info.table_name.clone(),
                         table_id: key_info.table_id.clone(),
                         limit,
@@ -497,7 +526,10 @@ impl DataEngine for CellStorage {
                 ScanItemsOutcome::Page {
                     items,
                     last_evaluated_key,
-                } => Ok((scan_segment(items, &key_info, segment)?, last_evaluated_key)),
+                } => Ok((
+                    scan_segment(items, &key_info, segment, index_name.as_deref())?,
+                    last_evaluated_key,
+                )),
                 ScanItemsOutcome::Conflict(_) => Err(StorageError::Transient(
                     "scan range is locked by a transaction".into(),
                 )),
@@ -620,6 +652,7 @@ fn scan_segment(
     items: Vec<Item>,
     key_info: &TableKeyInfo,
     segment: Option<(u64, u64)>,
+    index_name: Option<&str>,
 ) -> Result<Vec<Item>, StorageError> {
     let Some((segment, total)) = segment else {
         return Ok(items);
@@ -627,8 +660,16 @@ fn scan_segment(
     items
         .into_iter()
         .filter_map(|item| {
-            let key = extract_key(&item, &key_info.base_key_schema);
-            match data_key_hash(&key_info.table_id, &key, &key_info.base_key_schema) {
+            let global = key_info
+                .global_secondary_indexes
+                .iter()
+                .find(|index| Some(index.index_name.as_str()) == index_name);
+            let (id, schema) = global
+                .map_or((&key_info.table_id, &key_info.base_key_schema), |index| {
+                    (&index.index_id, &index.key_schema)
+                });
+            let key = extract_key(&item, schema);
+            match data_key_hash(id, &key, schema) {
                 Ok(hash) if segment_for_hash(hash, total) == segment => Some(Ok(item)),
                 Ok(_) => None,
                 Err(error) => Some(Err(StorageError::Internal(error.to_string()))),

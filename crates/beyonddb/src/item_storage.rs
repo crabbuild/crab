@@ -1,25 +1,27 @@
 //! Item images transferred through bounded SQL parameters and results.
 
 use crab_cell_runtime::registry::CommandContext;
-use extenddb_core::types::Item;
+use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{Error, Result, SqlBatch, SqlResultSet, SqlValue, table::statement};
 
 const CHUNK_BYTES: usize = 256 * 1024;
 
-pub(crate) enum StoredItem<'a> {
+pub(crate) enum StoredValue<'a> {
     Account {
         table_id: &'a str,
         key: &'a [u8],
     },
     Partition(&'a [u8]),
+    GlobalIndex(&'a [u8]),
+    IndexChange(&'a [u8; 32]),
     TransactionRead {
         transaction_id: &'a [u8; 16],
         position: i64,
     },
 }
 
-impl StoredItem<'_> {
+impl StoredValue<'_> {
     fn address(&self) -> (&'static str, &'static str, Vec<SqlValue>) {
         match self {
             Self::Account { table_id, key } => (
@@ -36,6 +38,16 @@ impl StoredItem<'_> {
                 "item_key = ?2",
                 vec![SqlValue::Null, SqlValue::Blob(key.to_vec())],
             ),
+            Self::GlobalIndex(key) => (
+                "ddb_global_index_items",
+                "item_key = ?2",
+                vec![SqlValue::Null, SqlValue::Blob(key.to_vec())],
+            ),
+            Self::IndexChange(id) => (
+                "ddb_index_changes",
+                "id = ?2",
+                vec![SqlValue::Null, SqlValue::Blob(id.to_vec())],
+            ),
             Self::TransactionRead {
                 transaction_id,
                 position,
@@ -51,10 +63,10 @@ impl StoredItem<'_> {
         }
     }
 
-    pub(crate) fn read(
+    pub(crate) fn read<T: DeserializeOwned>(
         &self,
         mut sql: impl FnMut(&SqlBatch) -> Result<Vec<SqlResultSet>>,
-    ) -> Result<Option<Item>> {
+    ) -> Result<Option<T>> {
         let (table, predicate, mut parameters) = self.address();
         let query =
             format!("SELECT substr(item, ?1, {CHUNK_BYTES}) FROM {table} WHERE {predicate}");
@@ -79,7 +91,11 @@ impl StoredItem<'_> {
     // Preallocate once so growing JSON never needs two complete live BLOBs.
     // The caller resets the previous image first; allocation, bounded writes,
     // and index changes share the command savepoint and publish together.
-    pub(crate) fn write(&self, context: &CommandContext<'_, '_>, item: &Item) -> Result<()> {
+    pub(crate) fn write<T: Serialize>(
+        &self,
+        context: &CommandContext<'_, '_>,
+        item: &T,
+    ) -> Result<()> {
         let (table, predicate, mut parameters) = self.address();
         let bytes = serde_json::to_vec(item)?;
         parameters[0] = SqlValue::Integer(
