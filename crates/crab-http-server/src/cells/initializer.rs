@@ -72,21 +72,10 @@ pub(crate) async fn initialize_repository_at(
         REPOSITORY_NAMESPACE,
         repository.as_bytes(),
     )?;
-    let (proof, authority) = provision_repository(layout, identity, registry, &target).await?;
     let session = SessionId::from_bytes(Uuid::now_v7().into_bytes());
     let owner = Owner { session, endpoint };
-    let observed = match authority.load(target.cell_id()).await? {
-        Some(observed) => observed,
-        None => {
-            authority
-                .create_initial(
-                    &proof,
-                    IncarnationId::from_bytes(Uuid::now_v7().into_bytes()),
-                    owner.clone(),
-                )
-                .await?
-        }
-    };
+    // An offline initializer cannot fence a previous unleased owner. Admit its
+    // local resources before publishing ownership so setup failures remain retryable.
     std::fs::create_dir_all(data_dir)?;
     let directory = tempfile::Builder::new()
         .prefix("crab-cell-repository-init-")
@@ -102,15 +91,28 @@ pub(crate) async fn initialize_repository_at(
         .with_session(session)
         .build_unleased_for_maintenance()?;
     let runtime = cell_node.runtime();
-    let replica = CellReplica::new(
-        layout.clone(),
-        *target.cell_id().as_bytes(),
-        *observed.value().incarnation.as_bytes(),
-        repository_replica_limits(),
-    )
-    .map_err(crab_cell_runtime::Error::from)?;
-    let destination = directory.path().join(format!("{}.sqlite", Uuid::now_v7()));
     let result: Result<()> = async {
+        let (proof, authority) = provision_repository(layout, identity, registry, &target).await?;
+        let observed = match authority.load(target.cell_id()).await? {
+            Some(observed) => observed,
+            None => {
+                authority
+                    .create_initial(
+                        &proof,
+                        IncarnationId::from_bytes(Uuid::now_v7().into_bytes()),
+                        owner.clone(),
+                    )
+                    .await?
+            }
+        };
+        let replica = CellReplica::new(
+            layout.clone(),
+            *target.cell_id().as_bytes(),
+            *observed.value().incarnation.as_bytes(),
+            repository_replica_limits(),
+        )
+        .map_err(crab_cell_runtime::Error::from)?;
+        let destination = directory.path().join(format!("{}.sqlite", Uuid::now_v7()));
         let handle = match (observed.value().state, observed.value().root.is_some()) {
             (ControlState::Recovering, false) => {
                 let repository_bytes = repository.into_bytes();
@@ -297,6 +299,71 @@ mod tests {
     use object_store::{memory::InMemory, path::Path as ObjectPath};
 
     use super::*;
+
+    #[tokio::test]
+    async fn local_preflight_failure_leaves_repository_retryable() {
+        let identity = ApplicationIdentity::new(
+            TenantId::from_bytes([41; 16]),
+            ApplicationId::from_bytes([42; 16]),
+        );
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("repository-preflight"),
+            *identity.application().as_bytes(),
+        );
+        let registry = super::super::compiled_registry().unwrap();
+        super::super::bootstrap_release_at(
+            &layout,
+            identity,
+            &registry,
+            &format!("sha256:{}", "a".repeat(64)),
+        )
+        .await
+        .unwrap();
+        let application = super::super::compiled_application().unwrap();
+        let local = tempfile::TempDir::new().unwrap();
+        let blocked_directory = local.path().join("file");
+        std::fs::write(&blocked_directory, b"occupied").unwrap();
+
+        for (id, failed_path, disk_limit) in [
+            (43, local.path(), 1024),
+            (44, blocked_directory.as_path(), 32 * 1024 * 1024 * 1024),
+        ] {
+            let repository = Uuid::from_bytes([id; 16]);
+            let failed = initialize_repository_at(
+                &layout,
+                identity,
+                &registry,
+                &application,
+                failed_path,
+                disk_limit,
+                "https://initializer.internal:8081".into(),
+                repository,
+            )
+            .await;
+            assert!(matches!(failed, Err(Error::Config(_) | Error::Io(_))));
+
+            initialize_repository_at(
+                &layout,
+                identity,
+                &registry,
+                &application,
+                local.path(),
+                32 * 1024 * 1024 * 1024,
+                "https://initializer.internal:8081".into(),
+                repository,
+            )
+            .await
+            .unwrap();
+            verify_repository_cells(
+                &layout,
+                identity,
+                [(repository, RepositoryApplicationState::CellReady)],
+            )
+            .await
+            .unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn publishes_and_verifies_an_exact_retry() {

@@ -206,6 +206,12 @@ the same catalog UUID. Adopt validates an existing layout and manifest, records
 `empty_cell_pending`, publishes a new empty application Cell and never converts
 arbitrary object prefixes. Old collaboration application data is not imported.
 
+The initializer prepares its local directory, checks resource admission, and
+builds its private maintenance host before publishing Cell ownership. After a
+local setup failure, correct the directory or available resources and retry
+the same create/adopt command. This does not authorize taking over an existing
+unpublished owner after a crash or a storage failure during initialization.
+
 ```sh
 SERVER="$HOME/Workspace/crabbuild-target/crab-http-server-dev/release/crab-http-server"
 "$SERVER" --config /secure/server.toml repository create \

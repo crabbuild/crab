@@ -171,6 +171,23 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     .unwrap();
     let initialize_dir = tempfile::TempDir::new().unwrap();
     let application = crate::cells::compiled_application().unwrap();
+    let rejected = crate::cells::initialize_repository_at(
+        &cell_layout,
+        identity,
+        &registry,
+        &application,
+        initialize_dir.path(),
+        1024,
+        "https://localhost:1".into(),
+        repository_id,
+    )
+    .await;
+    assert!(matches!(
+        rejected,
+        Err(crate::Error::Config(
+            "Cell runtime requires at least 20 GiB usable local disk"
+        ))
+    ));
     crate::cells::initialize_repository_at(
         &cell_layout,
         identity,
