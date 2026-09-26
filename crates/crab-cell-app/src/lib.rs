@@ -47,7 +47,9 @@ const DESCRIPTOR_MAGIC: &[u8] = b"crab.application.v1\0";
 const MAX_APPLICATION_NAME_BYTES: usize = 128;
 const MAX_CELL_TYPES: usize = 128;
 const MAX_DESCRIPTOR_BYTES: usize = 256 * 1024;
-const MAX_PARTITION_VERSION: u32 = 1;
+const MAX_PARTITION_VERSION: u32 = 2;
+const ENTITY_PARTITION_VERSION: u32 = 2;
+const ENTITY_PARTITION_PREFIX: u8 = 1;
 
 /// One application-owned Cell topology declaration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +105,16 @@ impl CellType {
         Ok(self)
     }
 
+    /// Selects stable entity partitions instead of fixed shards.
+    ///
+    /// The namespace descriptor must declare one shard. The application
+    /// derives one target per entity with [`Self::entity_partition`].
+    pub fn with_entity_partitions(mut self) -> Result<Self> {
+        self.partition_version = ENTITY_PARTITION_VERSION;
+        self.validate()?;
+        Ok(self)
+    }
+
     /// Replaces the schema range while retaining the stable Cell identity.
     pub fn with_schema_range(mut self, schema_min: u32, schema_max: u32) -> Result<Self> {
         self.schema_min = schema_min;
@@ -135,7 +147,7 @@ impl CellType {
         self.role
     }
 
-    /// Returns the fixed shard count.
+    /// Returns the fixed shard count, or one for an entity Cell type.
     #[must_use]
     pub const fn shards(&self) -> u32 {
         self.shards
@@ -153,16 +165,52 @@ impl CellType {
         self.capture_limit_bytes
     }
 
-    /// Maps one bounded application scope to its stable shard number.
+    /// Maps one bounded application scope to its stable fixed shard number.
     pub fn shard_for_scope(&self, scope: &[u8]) -> Result<u32> {
+        if self.partition_version == ENTITY_PARTITION_VERSION {
+            return Err(Error::Identity("entity Cell type has no fixed shard"));
+        }
         crab_cell_runtime::shard_for_scope(self.namespace, scope, self.shards)
     }
 
-    /// Returns the canonical partition bytes for one application scope.
+    /// Returns the canonical fixed-shard partition for one application scope.
     pub fn partition_for_scope(&self, scope: &[u8]) -> Result<[u8; 4]> {
         Ok(crab_cell_runtime::partition_for_shard(
             self.shard_for_scope(scope)?,
         ))
+    }
+
+    /// Derives the canonical partition bytes for one entity identity.
+    ///
+    /// The scope must be nonempty and at most 1,024 bytes. Its digest, not the
+    /// raw identity, enters the catalog partition key.
+    pub fn entity_partition(&self, scope: &[u8]) -> Result<[u8; 33]> {
+        if self.partition_version != ENTITY_PARTITION_VERSION {
+            return Err(Error::Identity("Cell type uses fixed shards"));
+        }
+        if scope.is_empty() || scope.len() > 1_024 {
+            return Err(Error::Identity("invalid entity scope length"));
+        }
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"crab.entity.partition.v1\0");
+        hasher.update(self.namespace.as_bytes());
+        hasher.update(&(scope.len() as u32).to_be_bytes());
+        hasher.update(scope);
+        let mut partition = [0_u8; 33];
+        partition[0] = ENTITY_PARTITION_PREFIX;
+        partition[1..].copy_from_slice(hasher.finalize().as_bytes());
+        Ok(partition)
+    }
+
+    fn valid_partition(&self, partition: &[u8]) -> bool {
+        if self.partition_version == ENTITY_PARTITION_VERSION {
+            return partition.len() == 33 && partition[0] == ENTITY_PARTITION_PREFIX;
+        }
+        let Ok(shard) = <[u8; 4]>::try_from(partition) else {
+            return false;
+        };
+        let shard = u32::from_be_bytes(shard);
+        shard < self.shards && partition_for_shard(shard).as_slice() == partition
     }
 
     fn validate(&self) -> Result<()> {
@@ -173,6 +221,7 @@ impl CellType {
             || !self.shards.is_power_of_two()
             || self.partition_version == 0
             || self.partition_version > MAX_PARTITION_VERSION
+            || (self.partition_version == ENTITY_PARTITION_VERSION && self.shards != 1)
             || self.schema_min == 0
             || self.schema_min > self.schema_max
             || self.database_limit_bytes < 512
@@ -562,15 +611,9 @@ impl<A: CellApplication> ApplicationHandle<A> {
         else {
             return Err(Error::Registry("namespace is not declared by application"));
         };
-        let shard = target
-            .partition()
-            .try_into()
-            .map(u32::from_be_bytes)
-            .map_err(|_| Error::Identity("Cell target partition is not canonical"))?;
-        if shard >= cell_type.shards || partition_for_shard(shard).as_slice() != target.partition()
-        {
+        if !cell_type.valid_partition(target.partition()) {
             return Err(Error::Identity(
-                "Cell target partition is outside the declared shard range",
+                "Cell target partition is outside the declared topology",
             ));
         }
         Ok(())

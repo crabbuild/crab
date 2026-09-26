@@ -554,7 +554,7 @@ pub(crate) async fn repository_status(config: &Config, owner: &str, name: &str) 
         .ok_or(Error::Config("cataloged repository Cell has no control"))?;
     let control = control.value();
     let observed_at_ms = unix_now_ms()?;
-    let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
+    let peer_tls = crate::peer_tls::load_peer_tls(&config.cells)?;
     let directory = NodeDirectory::new(
         startup.layout,
         peer_tls.fleet(),
@@ -672,7 +672,7 @@ struct NodeRecoveryStatus {
 pub(crate) async fn node_status(config: &Config, session: &str) -> Result<Vec<u8>> {
     let session = decode_session(session)?;
     let startup = verify_startup_release(config).await?;
-    let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
+    let peer_tls = crate::peer_tls::load_peer_tls(&config.cells)?;
     let directory = NodeDirectory::new(
         startup.layout,
         peer_tls.fleet(),
@@ -773,7 +773,7 @@ struct BackupRestoreStatus {
 pub(crate) async fn create_backup(config: &Config, pin: &str) -> Result<Vec<u8>> {
     let pin = decode_backup_pin(pin)?;
     let startup = verify_startup_release(config).await?;
-    let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
+    let peer_tls = crate::peer_tls::load_peer_tls(&config.cells)?;
     let directory = NodeDirectory::new(
         startup.layout.clone(),
         peer_tls.fleet(),
@@ -1362,7 +1362,7 @@ pub(crate) async fn activate_release(
     let directory = if observed.record().state() == ReleaseState::Ready {
         None
     } else {
-        let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
+        let peer_tls = crate::peer_tls::load_peer_tls(&config.cells)?;
         Some(NodeDirectory::new(
             layout.clone(),
             peer_tls.fleet(),
@@ -1408,7 +1408,7 @@ pub(crate) async fn enter_maintenance(
     let layout = identities.layout(identity).await?;
     let application = crate::cells::compiled_application()?;
     let registry = Arc::new((*application.registry()).clone());
-    let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
+    let peer_tls = crate::peer_tls::load_peer_tls(&config.cells)?;
     let releases = ReleaseStore::new(layout.clone(), identity)?;
     let observed = releases
         .load()

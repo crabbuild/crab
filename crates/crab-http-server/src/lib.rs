@@ -186,12 +186,8 @@ pub enum Error {
     Coordination(#[from] crab_coordination::CoordinationError),
     #[error("embedded Cell runtime initialization failed")]
     Cell(#[from] crab_cell_runtime::Error),
-    #[error("private Cell TLS setup failed: {context}")]
-    PeerTls {
-        context: &'static str,
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
+    #[error("private Cell TLS setup failed")]
+    PeerTls(#[from] crab_cell_peer_http::TlsError),
     #[error("peer address discovery failed: {context}")]
     PeerDiscovery {
         context: &'static str,

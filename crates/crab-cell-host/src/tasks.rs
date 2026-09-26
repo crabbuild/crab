@@ -62,6 +62,12 @@ impl CellNodeTaskGroup {
         }
     }
 
+    /// Returns the cancellation signal that stops owned tasks during node drain.
+    #[must_use]
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation.clone()
+    }
+
     pub(super) fn is_healthy(&self) -> bool {
         if self.failed.load(Ordering::Acquire) || self.draining.load(Ordering::Acquire) {
             return false;

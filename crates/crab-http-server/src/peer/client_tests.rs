@@ -22,7 +22,7 @@ use object_store::{memory::InMemory, path::Path as ObjectPath};
 use super::{PROTOBUF_MEDIA_TYPE, PeerHttpRoundTrip};
 use crate::{
     peer::now_ms,
-    peer_tls::{LoadedPeerTls, PeerTlsIdentity, tests::IdentityFiles},
+    peer_tls::{PeerTlsIdentity, load_peer_tls, tests::IdentityFiles},
 };
 
 #[tokio::test]
@@ -38,8 +38,7 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
         "https://localhost:{}",
         second_listener.local_addr().unwrap().port()
     );
-    let loaded =
-        LoadedPeerTls::load(&files.config(url::Url::parse(&first_endpoint).unwrap())).unwrap();
+    let loaded = load_peer_tls(&files.config(url::Url::parse(&first_endpoint).unwrap())).unwrap();
     let store = Store::new(Arc::new(InMemory::new()));
     let layout = CellStorageLayout::new(store, ObjectPath::from("root"), [21; 16]);
     let image = Digest::from_bytes([22; 32]);
@@ -193,13 +192,13 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
         .await
     });
     let round_trip = PeerHttpRoundTrip::new(
-        ApplicationIdentity::new(
+        Arc::new(ApplicationIdentity::new(
             TenantId::from_bytes([27; 16]),
             ApplicationId::from_bytes([21; 16]),
-        ),
+        )),
         CellAuthority::new(layout),
         directory,
-        loaded.client_identity(),
+        Arc::new(loaded.client_identity()),
         SessionId::from_bytes([31; 16]),
     );
 

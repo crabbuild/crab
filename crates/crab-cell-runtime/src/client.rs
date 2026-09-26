@@ -36,6 +36,7 @@ const MAX_STATE_STREAM_CHUNKS: usize = 1_024;
 mod tests;
 
 mod local;
+mod runtime;
 
 pub use local::command_operation_digest;
 pub(crate) use local::{
@@ -43,6 +44,7 @@ pub(crate) use local::{
     receipt, validate_description,
 };
 use local::{decode_output, unix_time_ms, validate_minimum};
+use runtime::RuntimeCellTransport;
 
 /// Immutable owner metadata used to fence a routed invocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -569,6 +571,46 @@ impl CellClient {
                 telemetry,
             }),
         ))
+    }
+
+    /// Routes to any Cell currently owned by this local runtime.
+    ///
+    /// The catalog and authority are checked for each invocation. This does
+    /// not acquire an idle Cell or forward to another node; callers must
+    /// arrange ownership before sending an operation.
+    #[must_use]
+    pub fn local_runtime(
+        registry: Arc<Registry>,
+        runtime: crate::cell::actor::CellRuntime,
+        layout: crate::ltx::CellStorageLayout,
+    ) -> Self {
+        let transport = Arc::new(RuntimeCellTransport::new(registry.clone(), runtime, layout));
+        Self::new(registry, transport)
+    }
+
+    /// Routes a target to its current local owner or an authenticated peer.
+    ///
+    /// Every invocation rechecks catalog and authority state. The peer round
+    /// trip must resolve the current remote owner and verify its enrollment;
+    /// this constructor does not acquire an idle Cell.
+    #[must_use]
+    pub fn runtime_with_peer(
+        registry: Arc<Registry>,
+        runtime: crate::cell::actor::CellRuntime,
+        layout: crate::ltx::CellStorageLayout,
+        signer: Arc<crate::peer::PeerSigner>,
+        principal: crate::peer::PeerPrincipal,
+        round_trip: Arc<dyn crate::peer::PeerRoundTrip>,
+    ) -> Self {
+        let transport = Arc::new(RuntimeCellTransport::with_peer(
+            registry.clone(),
+            runtime,
+            layout,
+            signer,
+            principal,
+            round_trip,
+        ));
+        Self::new(registry, transport)
     }
 
     /// Builds a typed capability over authenticated private peer routing.

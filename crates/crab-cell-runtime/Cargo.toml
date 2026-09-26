@@ -28,7 +28,7 @@ fs4 = { version = "0.13", optional = true }
 futures-util.workspace = true
 object_store.workspace = true
 prost.workspace = true
-rusqlite = { workspace = true, features = ["hooks"] }
+rusqlite = { workspace = true, features = ["hooks", "blob"] }
 rand = "0.9"
 serde.workspace = true
 serde_json.workspace = true

@@ -15,6 +15,7 @@ crab-read = { workspace = true }
 crab-cell-runtime = { workspace = true }
 crab-cell-app = { workspace = true }
 crab-cell-host = { workspace = true }
+crab-cell-peer-http = { workspace = true }
 crab-lfs = { workspace = true }
 crab-git = { workspace = true }
 gix-hash = { workspace = true }
@@ -42,8 +43,6 @@ object_store = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls", "stream"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
-rustls = "0.23"
-rustls-pemfile = "2"
 url = { version = "2", features = ["serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -52,13 +51,11 @@ sysinfo = "0.38.4"
 thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-rustls = "0.26"
 tokio-util = { workspace = true, features = ["io", "rt"] }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { workspace = true }
-x509-cert = "0.2.5"
 zip = { version = "6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]

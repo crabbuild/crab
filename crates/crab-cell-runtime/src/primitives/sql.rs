@@ -80,6 +80,37 @@ pub fn sql_query_batch(connection: &Connection, batch: &SqlBatch) -> Result<Vec<
     execute_batch(connection, batch, AccessMode::ReadOnly)
 }
 
+pub(crate) fn write_blob(
+    transaction: &Transaction<'_>,
+    table: &str,
+    column: &str,
+    row_id: i64,
+    offset: usize,
+    bytes: &[u8],
+) -> Result<()> {
+    // SQLite incremental I/O bypasses the SQL authorizer. Check the literal
+    // table name here; no raw handle or database selector escapes this call.
+    if is_protected_name(table) || starts_with_ignore_ascii_case(table, "sqlite_") {
+        return Err(Error::Command("SQL blob targets a protected table"));
+    }
+    let mut size = 16;
+    for len in [table.len(), column.len(), bytes.len()] {
+        add_size(
+            &mut size,
+            encoded_bytes(len),
+            MAX_OPERATION_BYTES,
+            "SQL blob write exceeds 1 MiB",
+        )?;
+    }
+    let mut blob =
+        transaction.blob_open(rusqlite::DatabaseName::Main, table, column, row_id, false)?;
+    let written = blob.write_at(bytes, offset);
+    let closed = blob.close();
+    written?;
+    closed?;
+    Ok(())
+}
+
 fn execute_batch(
     connection: &Connection,
     batch: &SqlBatch,
@@ -323,9 +354,17 @@ fn authorize(context: AuthContext<'_>, mode: AccessMode) -> Authorization {
 }
 
 fn is_protected_name(name: &str) -> bool {
-    ["sys_", "kv_", "queue_", "workflow_", "blob_", "cron_"]
-        .iter()
-        .any(|prefix| starts_with_ignore_ascii_case(name, prefix))
+    [
+        "sys_",
+        "kv_",
+        "queue_",
+        "workflow_",
+        "blob_",
+        "cron_",
+        "capacity_",
+    ]
+    .iter()
+    .any(|prefix| starts_with_ignore_ascii_case(name, prefix))
 }
 
 fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {

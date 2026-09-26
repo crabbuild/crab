@@ -37,6 +37,13 @@ The reference suite also runs three `CellNode` hosts to test ambiguous results,
 duplicate delivery, owner loss, and overlap between two release IDs with
 unchanged module contracts through the public APIs.
 
+`CellType::new` declares a fixed-shard namespace. For independently addressed
+entity Cells, declare one namespace shard and call
+`CellType::with_entity_partitions`. Derive each 33-byte partition with
+`CellType::entity_partition`; the application handle validates that encoding.
+The entity mode is part of the immutable application descriptor. It does not
+split SQLite state or remove Cell catalog and host admission bounds.
+
 ```sh
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/<checkout> \
   cargo test -p crab-cell-app --locked

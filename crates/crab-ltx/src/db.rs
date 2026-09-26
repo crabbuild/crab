@@ -371,7 +371,16 @@ impl Db {
         let value = match operation(&tx) {
             Ok(value) => value,
             Err(error) => {
-                if let Err(rollback) = tx.rollback() {
+                // FULL, interrupt, and ROLLBACK constraints can end the whole
+                // transaction. A second rollback would falsely fence the writer;
+                // autocommit proves rollback only if no WAL commit was observed.
+                let rollback = if tx.is_autocommit() && self.observer.frames() == 0 {
+                    drop(tx);
+                    Ok(())
+                } else {
+                    tx.rollback()
+                };
+                if let Err(rollback) = rollback {
                     self.fenced = true;
                     return Err(crate::TransactionError::Sqlite(rollback));
                 }

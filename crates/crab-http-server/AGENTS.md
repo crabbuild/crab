@@ -6,6 +6,9 @@ Root `AGENTS.md` and `crates/AGENTS.md` apply. Read
 ## Purpose and ownership
 
 Owns the repository HTTP application, native Git endpoints, authentication, and embedded React assets. It composes remote-git/read/write/storage APIs; shared Git and storage mechanics remain in their owner crates.
+Private peer owner resolution, HTTP retries, and pinned mTLS transport live in
+`crab-cell-peer-http`; this crate configures TLS files and name and owns the
+authenticated receiver and repository authorization.
 
 ## Read first
 

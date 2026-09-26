@@ -305,6 +305,7 @@ impl CellExecutor {
         let initialized = db.transaction_with(|transaction| {
             crate::cell::schema::install_runtime_schema_in(transaction, cell, incarnation, schema)?;
             initialize(transaction)?;
+            crate::primitives::capacity::validate(transaction)?;
             crate::fleet::scheduler::scheduler_next_due_ms(transaction, 0)
         });
         let next_due_ms = match initialized {
@@ -499,6 +500,7 @@ impl CellExecutor {
             {
                 return Err(Error::Command("runtime metadata row missing"));
             }
+            crate::primitives::capacity::validate(transaction)?;
             let next_due_ms = crate::fleet::scheduler::scheduler_next_due_ms(transaction, logical_time_ms)?;
             Ok(TransactionResult::Committed {
                 outcome: stored_outcome(outcome, result, sequence)?,
@@ -586,6 +588,7 @@ impl CellExecutor {
             {
                 return Err(Error::Command("runtime metadata row missing"));
             }
+            crate::primitives::capacity::validate(transaction)?;
             let next_due_ms = crate::fleet::scheduler::scheduler_next_due_ms(transaction, logical_time_ms)?;
             Ok(TransactionResult::Committed {
                 outcome,
@@ -922,6 +925,7 @@ impl CellExecutor {
             if metadata != (sequence, logical_time_ms) {
                 return Err(Error::Control("migration metadata did not validate"));
             }
+            crate::primitives::capacity::validate(transaction)?;
             let next_due_ms = crate::fleet::scheduler::scheduler_next_due_ms(transaction, logical_time_ms)?;
             Ok((sequence, next_due_ms))
         });

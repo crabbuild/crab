@@ -183,7 +183,13 @@ queries the recovered row.
 Use `transaction_with` when the callback can reject a mutation for an
 application reason. `TransactionError::Operation` means the callback failed and
 the SQLite transaction was rolled back; commit ambiguity or capture failures
-use different variants and may fence the session.
+use different variants and may fence the session. SQLite can automatically roll
+back the entire transaction on `SQLITE_FULL`, interruption, or a ROLLBACK
+constraint. The managed writer recognizes that state only when autocommit is
+restored and its WAL observer recorded no commit. It preserves the original
+operation error, prior committed capture boundary, and disk admission; a
+redundant ROLLBACK must not turn a capacity refusal into a fenced session.
+See SQLite's [automatic rollback contract](https://www.sqlite.org/c3ref/get_autocommit.html).
 
 ```rust,no_run
 use std::io;

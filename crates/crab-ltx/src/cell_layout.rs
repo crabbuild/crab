@@ -151,10 +151,20 @@ impl CellStorageLayout {
         ))
     }
 
-    /// Returns the catalog head path for one shard.
+    /// Returns the prefix containing all tenant catalog heads.
     #[must_use]
-    pub fn catalog_head_path(&self, shard: u8) -> Path {
-        self.application_path(&format!("catalog/{shard:02x}/head.json"))
+    pub fn catalog_tenants_prefix(&self) -> Path {
+        self.application_path("catalog/tenants")
+    }
+
+    /// Returns the catalog head path for one tenant and shard.
+    #[must_use]
+    pub fn catalog_head_path(&self, tenant: &[u8; 16], shard: u8) -> Path {
+        Path::from(format!(
+            "{}/{}/{shard:02x}/head.json",
+            self.catalog_tenants_prefix(),
+            encode_hex(tenant)
+        ))
     }
 
     /// Returns the due-hint prefix for one minute bucket.

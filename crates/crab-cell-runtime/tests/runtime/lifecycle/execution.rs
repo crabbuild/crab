@@ -3,6 +3,7 @@
 use super::*;
 
 mod admission;
+mod capacity;
 mod dispatcher;
 mod handlers;
 mod resolve;

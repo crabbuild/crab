@@ -3,6 +3,98 @@
 use super::*;
 
 #[tokio::test]
+async fn sqlite_full_preserves_local_cause_and_peer_not_started_outcome() {
+    let fixture = fixture_with_limits(Limits {
+        max_database_bytes: 512 * 1024,
+        ..Limits::default()
+    })
+    .await;
+    let local = CellClient::local(fixture.registry.clone(), fixture.handle().clone());
+    let signer = PeerSigner::new(
+        SessionId::from_bytes([12; 16]),
+        fixture.registry.release_digest(),
+        ed25519_dalek::SigningKey::from_bytes(&[13; 32]),
+    );
+    let transport = LoopbackRoundTrip {
+        verifier: Arc::new(PeerVerifier::new(
+            SessionId::from_bytes([12; 16]),
+            fixture.registry.release_digest(),
+            signer.verifying_key(),
+        )),
+        dispatcher: Arc::new(PeerDispatcher::new(
+            fixture.registry.clone(),
+            Arc::new(LocalResolver {
+                target: fixture.target.clone(),
+                handle: fixture.handle().clone(),
+            }),
+            Arc::new(RepositoryAuthorizer),
+        )),
+    };
+    let peer = CellClient::peer(
+        fixture.registry.clone(),
+        Arc::new(signer),
+        PeerPrincipal {
+            issuer: "https://identity.example".into(),
+            subject: "alice".into(),
+            actions: vec!["repository.issue.create".into()],
+        },
+        Arc::new(transport),
+    );
+    for (index, client) in [&local, &peer].into_iter().enumerate() {
+        let error = client
+            .command::<AllocateComment>(
+                &fixture.target,
+                mutation_identity(80 + index as u8),
+                1024 * 1024,
+            )
+            .await
+            .unwrap_err();
+        if index == 0 {
+            assert!(
+                matches!(error, InvocationError::NotStarted(crab_cell_runtime::Error::Sqlite(ref cause))
+                if cause.sqlite_error_code() == Some(crab_ltx::rusqlite::ErrorCode::DiskFull)),
+                "{error:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    error,
+                    InvocationError::NotStarted(crab_cell_runtime::Error::Capacity(_))
+                ),
+                "{error:?}"
+            );
+        }
+        assert_eq!(
+            client
+                .query::<CountComments>(&fixture.target, None, ())
+                .await
+                .unwrap()
+                .output,
+            0
+        );
+    }
+    // Both refused transactions rolled back; the same owner can still publish.
+    let saved = peer
+        .command::<CreateComment>(
+            &fixture.target,
+            mutation_identity(82),
+            b"after-full".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved.receipt.commit_sequence, 1);
+    assert_eq!(
+        local
+            .query::<CountComments>(&fixture.target, None, ())
+            .await
+            .unwrap()
+            .output,
+        1
+    );
+    fixture.handle().drain().await.unwrap();
+}
+
+#[tokio::test]
 async fn typed_client_publishes_replays_rejections_and_receipted_reads() {
     let fixture = fixture().await;
     let client = CellClient::local(Arc::clone(&fixture.registry), fixture.handle().clone());
@@ -120,6 +212,88 @@ async fn local_and_peer_command_share_digest_dedup_and_query_state() {
     assert_eq!(observed.output, 1);
     assert_eq!(observed.receipt.commit_sequence, 1);
 
+    fixture.handle().drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn runtime_client_forwards_to_the_remote_owner() {
+    let fixture = fixture().await;
+    let caller = CellRuntime::new(
+        SqlWorkerPool::new(1, 4).unwrap(),
+        4 * 1024 * 1024,
+        SessionId::from_bytes([6; 16]),
+    )
+    .unwrap();
+    let signer = PeerSigner::new(
+        SessionId::from_bytes([12; 16]),
+        fixture.registry.release_digest(),
+        ed25519_dalek::SigningKey::from_bytes(&[13; 32]),
+    );
+    let verifier = Arc::new(PeerVerifier::new(
+        SessionId::from_bytes([12; 16]),
+        fixture.registry.release_digest(),
+        signer.verifying_key(),
+    ));
+    let dispatcher = Arc::new(PeerDispatcher::new(
+        Arc::clone(&fixture.registry),
+        Arc::new(LocalResolver {
+            target: fixture.target.clone(),
+            handle: fixture.handle().clone(),
+        }),
+        Arc::new(RepositoryAuthorizer),
+    ));
+    let round_trip: Arc<dyn PeerRoundTrip> = Arc::new(LoopbackRoundTrip {
+        verifier,
+        dispatcher,
+    });
+    let client = CellClient::runtime_with_peer(
+        Arc::clone(&fixture.registry),
+        caller.clone(),
+        fixture.layout.clone(),
+        Arc::new(signer),
+        PeerPrincipal {
+            issuer: "https://identity.example".into(),
+            subject: "alice".into(),
+            actions: vec!["repository.issue.create".into()],
+        },
+        Arc::clone(&round_trip),
+    );
+    let committed = client
+        .command::<CreateComment>(&fixture.target, mutation_identity(70), b"remote".to_vec())
+        .await
+        .unwrap();
+    let observed = client
+        .query::<CountComments>(&fixture.target, Some(committed.receipt), ())
+        .await
+        .unwrap();
+    assert_eq!(observed.output, 1);
+    let local = CellClient::runtime_with_peer(
+        Arc::clone(&fixture.registry),
+        fixture.runtime.as_ref().unwrap().clone(),
+        fixture.layout.clone(),
+        Arc::new(PeerSigner::new(
+            SessionId::from_bytes([22; 16]),
+            fixture.registry.release_digest(),
+            ed25519_dalek::SigningKey::from_bytes(&[23; 32]),
+        )),
+        PeerPrincipal {
+            issuer: "https://identity.example".into(),
+            subject: "alice".into(),
+            actions: vec!["repository.issue.create".into()],
+        },
+        round_trip,
+    );
+    // The signer is not enrolled in the loopback verifier; this succeeds only
+    // when the current local owner is selected before the peer transport.
+    assert_eq!(
+        local
+            .query::<CountComments>(&fixture.target, None, ())
+            .await
+            .unwrap()
+            .output,
+        1
+    );
+    caller.shutdown().await.unwrap();
     fixture.handle().drain().await.unwrap();
 }
 #[tokio::test]

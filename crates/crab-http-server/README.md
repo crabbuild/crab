@@ -26,7 +26,10 @@ Browser                    Native Git / Git LFS
 ```
 
 The server owns HTTP policy and application workflows. Shared crates own Git
-reading, validation, publication, Cell execution, and storage mechanics. Issues,
+reading, validation, publication, Cell execution, and storage mechanics. The
+owner-resolving peer HTTP client and pinned mTLS listener live in
+`crab-cell-peer-http`; this server supplies TLS configuration and its private
+authenticated receiver. Issues,
 comments, Labels, commit statuses, check runs, branch protections, repository
 lifecycle, Pull requests, reviews, and Release metadata use typed Rust commands
 against one SQLite/LTX Cell per repository. The remote-owner path is verified
