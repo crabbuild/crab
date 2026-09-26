@@ -7,6 +7,81 @@
 use super::*;
 
 impl NodeDirectory {
+    /// Selects advisory read-replica destinations from signed live nodes.
+    ///
+    /// A destination must still reserve its own resources and verify Cell
+    /// authority before opening a snapshot; this selection grants no read or
+    /// ownership capability.
+    pub async fn select_readers(
+        &self,
+        cell: crate::CellId,
+        owner: SessionId,
+        code: Digest,
+        desired: usize,
+        now_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<NodeAdvertisement>> {
+        let live = self.live(now_ms, limit).await?;
+        let owner = live
+            .iter()
+            .find(|candidate| candidate.session() == owner)
+            .ok_or(Error::Node("read-replica owner is not live"))?;
+        let owner_node = owner.node();
+        let mut zones = owner
+            .failure_domain()
+            .zone()
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let mut hosts = owner
+            .failure_domain()
+            .host()
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let mut eligible = live
+            .into_iter()
+            .filter(|candidate| {
+                let capacity = candidate.capacity();
+                candidate.node() != owner_node
+                    && candidate.module_digests().contains(&code)
+                    && capacity.free_memory_bytes > 0
+                    && capacity.free_disk_bytes > 0
+                    && capacity.job_credits > 0
+            })
+            .collect::<Vec<_>>();
+        let mut selected = Vec::with_capacity(desired.min(eligible.len()));
+        while selected.len() < desired && !eligible.is_empty() {
+            let index = eligible
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, candidate)| {
+                    let zone = candidate.failure_domain().zone();
+                    let host = candidate.failure_domain().host();
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.update(b"crab-cell-read-replica-placement-v1");
+                    hasher.update(cell.as_bytes());
+                    hasher.update(candidate.node().as_bytes());
+                    (
+                        u8::from(zone.is_some_and(|value| !zones.contains(value))),
+                        u8::from(host.is_some_and(|value| !hosts.contains(value))),
+                        *hasher.finalize().as_bytes(),
+                    )
+                })
+                .map(|(index, _)| index)
+                .ok_or(Error::Node("read-replica placement lost its candidate"))?;
+            let candidate = eligible.swap_remove(index);
+            if let Some(zone) = candidate.failure_domain().zone() {
+                zones.insert(zone.to_owned());
+            }
+            if let Some(host) = candidate.failure_domain().host() {
+                hosts.insert(host.to_owned());
+            }
+            selected.push(candidate);
+        }
+        Ok(selected)
+    }
+
     /// Streams and verifies every currently live boot-session advertisement.
     ///
     /// Expired records do not count against `limit`; malformed, misplaced, or

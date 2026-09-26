@@ -251,8 +251,9 @@ record, mutable LTX head, or owner-to-owner database copy.
 
 Current slice state (local proof only): 0 partially reconciled in docs; 1 open;
 2 full-restore read-only opener, atomic refresh, and exact-root tests pass, but
-sparse view, node-wide admission, and provider fault cases remain; 3 policy record passes CAS tests but
-placement/reconciliation is open; 4 local typed query and authority gate pass,
+sparse view, node-wide admission, and provider fault cases remain; 3 policy
+record passes CAS tests and signed live-node advisory selection replaces an
+expired member, but activation/reconciliation is open; 4 local typed query and authority gate pass,
 but peer/product routing is open; 5 and 6 open. The code is not enabled on the
 HTTP server's request path.
 
@@ -265,6 +266,11 @@ The local in-memory and RustFS tests now also prove that a failed refresh
 leaves the old value readable and that an in-flight query returns its old
 snapshot after a newer view is installed. Runtime Clippy passed with warnings
 denied. These are local library checks, not an admitted product replica route.
+`desired_readers_follow_live_distinct_nodes_and_replace_a_lost_member` proves
+the advisory directory selection at targets 0, 1, 2, and 4, with distinct
+physical nodes, failure-domain preference, an expired reader, and a new live
+replacement. This selection still does not activate a reader or reserve its
+node resources.
 
 | Slice | Change owner | Implementation and focused gate | Completion evidence |
 | --- | --- | --- | --- |

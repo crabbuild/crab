@@ -5,5 +5,6 @@ mod fleet {
     pub mod placement_properties;
     pub mod pressure;
     pub mod pressure_properties;
+    pub mod read_placement;
     pub mod read_policy;
 }

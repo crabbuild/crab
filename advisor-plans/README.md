@@ -845,10 +845,11 @@ discard acknowledged state. A replacement reader restores from S3, and a
 successor becomes the only writer through the existing new-epoch takeover CAS.
 The current server still routes reads only to owners. The library now has a
 full-restore read-only snapshot opener, atomic refresh for in-flight queries,
-a gated typed query path, and an S3 desired-count record. Placement, routing,
+a gated typed query path, an S3 desired-count record, and signed live-node
+advisory selection. Reader activation, reconciliation, routing,
 an S3-only acknowledgement profile,
 and production qualification remain open.
 
 | Plan | Priority | Effort | Depends on | Status |
 | --- | --- | --- | --- | --- |
-| [036](036-cell-read-replicas-and-fenced-promotion.md) | P1 read scaling / P0 safety | XL | 032 and 035 recovery implementation; their protected gates before production enablement | PARTIAL — atomic local snapshot refresh, query, and desired-count store; product wiring and qualification TODO |
+| [036](036-cell-read-replicas-and-fenced-promotion.md) | P1 read scaling / P0 safety | XL | 032 and 035 recovery implementation; their protected gates before production enablement | PARTIAL — atomic local snapshot refresh, query, desired-count store, and advisory reader selection; product wiring and qualification TODO |
