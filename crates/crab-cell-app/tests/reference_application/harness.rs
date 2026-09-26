@@ -51,6 +51,7 @@ where
             },
         )
         .await?;
+    let limits = reference_limits(namespace)?;
     runtime
         .bootstrap(
             proof,
@@ -58,7 +59,7 @@ where
                 layout.clone(),
                 *target.cell_id().as_bytes(),
                 *incarnation.as_bytes(),
-                Limits::default(),
+                limits,
             )?,
             authority,
             observed,
@@ -66,6 +67,20 @@ where
             initialize,
         )
         .await
+}
+
+pub(crate) fn reference_limits(namespace: NamespaceId) -> Result<Limits> {
+    let application = compiled();
+    let cell_type = application
+        .cell_types()
+        .iter()
+        .find(|cell_type| cell_type.namespace() == namespace)
+        .ok_or(Error::Registry("reference Cell type is missing"))?;
+    Ok(Limits {
+        max_database_bytes: cell_type.database_limit_bytes(),
+        max_capture_bytes: cell_type.capture_limit_bytes(),
+        ..Limits::default()
+    })
 }
 
 pub(crate) fn reference_host() -> Host {
