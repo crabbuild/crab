@@ -26,7 +26,9 @@ use extenddb_storage::{
 use crate::Json;
 use crate::tags::{ReadTags, TagChange, TagRequest, UpdateTags, UpdateTagsInput, parse_table_arn};
 use crate::ttl::{
-    ListTtlTables, ReadTtl, ReadTtlOutcome, UpdateTtl, UpdateTtlInput, UpdateTtlOutcome,
+    AdvanceTtlSchedule, AdvanceTtlScheduleInput, AdvanceTtlSweep, AdvanceTtlSweepInput,
+    ListTtlTables, ReadTtl, ReadTtlOutcome, ReadTtlSchedule, ReadTtlSweep, TtlSweepState,
+    UpdateTtl, UpdateTtlInput, UpdateTtlOutcome,
 };
 use crate::{
     BackfillPartitionTtl, BackfillPartitionTtlOutcome, ConfigurePartitionTtl,
@@ -38,32 +40,185 @@ use crate::{
 
 use super::{CellStorage, cell_error, mutation_identity, target, unsupported};
 
+const TTL_TABLES_PER_SWEEP: usize = 16;
+
 impl CellStorage {
     /// Sweep bounded expired items for TTL tables owned by one account.
     pub async fn sweep_account_ttl(&self, account_id: &str) -> Result<u64, StorageError> {
-        let tables = self.tables_with_ttl(account_id).await?;
+        let account = target(account_id)?;
+        let after = self
+            .client
+            .query::<ReadTtlSchedule>(&account, None, Json(()))
+            .await
+            .map_err(cell_error)?
+            .output
+            .0;
+        let mut start = after.clone();
+        let page = loop {
+            let page = self
+                .client
+                .query::<ListTtlTables>(&account, None, Json(start.clone()))
+                .await
+                .map_err(cell_error)?
+                .output
+                .0;
+            if page.tables.is_empty() && start.is_some() {
+                start = None;
+                continue;
+            }
+            break page;
+        };
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| StorageError::Internal("system clock predates epoch".into()))?
             .as_secs();
         let mut deleted = 0_u64;
-        for (table_name, attribute) in tables {
+        let has_more = page.tables.len() > TTL_TABLES_PER_SWEEP || page.last_evaluated.is_some();
+        let tables: Vec<_> = page.tables.into_iter().take(TTL_TABLES_PER_SWEEP).collect();
+        for (table_name, attribute) in &tables {
+            let state = self
+                .client
+                .query::<ReadTtlSweep>(&account, None, Json(table_name.clone()))
+                .await
+                .map_err(cell_error)?
+                .output
+                .0;
+            let Some(state) = state.filter(|state| state.attribute_name.as_str() == attribute)
+            else {
+                continue;
+            };
             match self
-                .create_ttl_index(account_id, &table_name, &attribute)
+                .sweep_ttl_table(account_id, table_name, &account, state, now)
                 .await
             {
-                Ok(()) => {}
+                Ok(count) => deleted += count,
                 Err(StorageError::Transient(_)) => continue,
                 Err(error) => return Err(error),
             }
-            let items = self
-                .find_expired_items_indexed(account_id, &table_name, &attribute, 100)
-                .await?;
-            if items.is_empty() {
+        }
+        let next_last = if has_more {
+            tables.last().map(|(name, _)| name.clone())
+        } else {
+            None
+        };
+        // A crash before this command replays the same table batch instead of skipping it.
+        if next_last != after {
+            match self
+                .client
+                .command::<AdvanceTtlSchedule>(
+                    &account,
+                    mutation_identity()?,
+                    Json(AdvanceTtlScheduleInput {
+                        expected_last: after,
+                        next_last,
+                    }),
+                )
+                .await
+            {
+                Ok(committed) if committed.output.0 => {}
+                Ok(_) | Err(InvocationError::Rejected(_)) => {
+                    return Err(StorageError::Transient("TTL table schedule changed".into()));
+                }
+                Err(error) => return Err(cell_error(error)),
+            }
+        }
+        Ok(deleted)
+    }
+
+    async fn sweep_ttl_table(
+        &self,
+        account_id: &str,
+        table_name: &str,
+        account: &CellTarget,
+        state: TtlSweepState,
+        now: u64,
+    ) -> Result<u64, StorageError> {
+        let page = self
+            .client
+            .query::<ReadRoutePage>(
+                account,
+                None,
+                Json(RoutePageInput {
+                    table_id: state.table_id.clone(),
+                    start_hash: None,
+                    after_lower: state.after_lower,
+                    expected_epoch: None,
+                }),
+            )
+            .await
+            .map_err(cell_error)?
+            .output
+            .0;
+        let (partitions, has_more) = match page {
+            RoutePageOutcome::Page {
+                partitions,
+                has_more,
+                ..
+            } => (partitions, has_more),
+            RoutePageOutcome::Unrouted | RoutePageOutcome::Changed => {
+                return Err(StorageError::Transient("TTL route changed".into()));
+            }
+        };
+        let cutoff_epoch =
+            i64::try_from(now).map_err(|_| StorageError::Internal("TTL clock overflow".into()))?;
+        let key_info = self.table_key_info(account_id, table_name).await?;
+        if key_info.table_id != state.table_id {
+            return Err(StorageError::Transient("TTL table changed".into()));
+        }
+        let (condition, maps) = ttl_condition(&state.attribute_name, now);
+        let mut deleted = 0;
+        let mut deferred = 0_u32;
+        for partition in &partitions {
+            let owner = data_target(account_id, &state.table_id, &partition.partition_id)
+                .map_err(|error| StorageError::Internal(error.to_string()))?;
+            // A temporarily unavailable Cell must not starve later ranges; the
+            // skipped range is revisited when this table's cursor wraps.
+            let ready = match self
+                .configure_ttl_partition(
+                    &owner,
+                    &state.table_id,
+                    partition.epoch,
+                    Some(&state.attribute_name),
+                )
+                .await
+            {
+                Ok(ready) => ready,
+                Err(StorageError::Transient(_)) => {
+                    deferred += 1;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if !ready {
                 continue;
             }
-            let key_info = self.table_key_info(account_id, &table_name).await?;
-            let (condition, maps) = ttl_condition(&attribute, now);
+            let outcome = match self
+                .client
+                .query::<ReadExpiredPartition>(
+                    &owner,
+                    None,
+                    Json(ExpiredPartitionInput {
+                        table_id: state.table_id.clone(),
+                        epoch: partition.epoch,
+                        attribute_name: state.attribute_name.clone(),
+                        cutoff_epoch,
+                    }),
+                )
+                .await
+            {
+                Ok(query) => query.output.0,
+                Err(error) => match cell_error(error) {
+                    StorageError::Transient(_) => {
+                        deferred += 1;
+                        continue;
+                    }
+                    error => return Err(error),
+                },
+            };
+            let ExpiredPartitionOutcome::Items(items) = outcome else {
+                deferred += 1;
+                continue;
+            };
             for item in items {
                 let key = extract_key(&item, &key_info.key_schema);
                 match self
@@ -72,11 +227,53 @@ impl CellStorage {
                 {
                     Ok(_) => deleted += 1,
                     Err(StorageError::ConditionFailed(_)) => {}
+                    Err(StorageError::Transient(_)) => {
+                        deferred += 1;
+                        continue;
+                    }
                     Err(error) => return Err(error),
                 }
             }
         }
-        Ok(deleted)
+        if deferred > 0 {
+            tracing::warn!(
+                table_name,
+                deferred,
+                "TTL sweep deferred partition operations"
+            );
+        }
+        let next_after = if has_more {
+            Some(
+                partitions
+                    .last()
+                    .ok_or_else(|| StorageError::Internal("empty TTL route page".into()))?
+                    .lower,
+            )
+        } else {
+            None
+        };
+        // A crash before this command replays the same route page and its conditional deletes.
+        match self
+            .client
+            .command::<AdvanceTtlSweep>(
+                account,
+                mutation_identity()?,
+                Json(AdvanceTtlSweepInput {
+                    table_name: table_name.to_owned(),
+                    table_id: state.table_id,
+                    attribute_name: state.attribute_name,
+                    expected_after: state.after_lower,
+                    next_after,
+                }),
+            )
+            .await
+        {
+            Ok(committed) if committed.output.0 => Ok(deleted),
+            Ok(_) | Err(InvocationError::Rejected(_)) => {
+                Err(StorageError::Transient("TTL sweep position changed".into()))
+            }
+            Err(error) => Err(cell_error(error)),
+        }
     }
 
     async fn ttl_partitions(
@@ -449,14 +646,48 @@ impl MetadataEngine for CellStorage {
         let table_name = table_name.to_owned();
         let ttl_attribute = ttl_attribute.to_owned();
         Box::pin(async move {
-            let (table_id, partitions) = self.ttl_partitions(&account_id, &table_name).await?;
+            let table = self.record(&account_id, &table_name).await?;
+            let account = target(&account_id)?;
+            let page = self
+                .client
+                .query::<ReadRoutePage>(
+                    &account,
+                    None,
+                    Json(RoutePageInput {
+                        table_id: table.id.clone(),
+                        start_hash: None,
+                        after_lower: None,
+                        expected_epoch: None,
+                    }),
+                )
+                .await
+                .map_err(cell_error)?
+                .output
+                .0;
+            let (partitions, has_more) = match page {
+                RoutePageOutcome::Page {
+                    partitions,
+                    has_more,
+                    ..
+                } => (partitions, has_more),
+                RoutePageOutcome::Unrouted | RoutePageOutcome::Changed => {
+                    return Err(StorageError::Transient("TTL route is not ready".into()));
+                }
+            };
             let mut ready = true;
-            for (owner, epoch) in partitions {
+            for partition in partitions {
+                let owner = data_target(&account_id, &table.id, &partition.partition_id)
+                    .map_err(|error| StorageError::Internal(error.to_string()))?;
                 ready &= self
-                    .configure_ttl_partition(&owner, &table_id, epoch, Some(&ttl_attribute))
+                    .configure_ttl_partition(
+                        &owner,
+                        &table.id,
+                        partition.epoch,
+                        Some(&ttl_attribute),
+                    )
                     .await?;
             }
-            if ready {
+            if ready && !has_more {
                 Ok(())
             } else {
                 Err(StorageError::Transient("TTL backfill in progress".into()))
@@ -466,20 +697,13 @@ impl MetadataEngine for CellStorage {
 
     fn drop_ttl_index(
         &self,
-        account_id: &str,
-        table_name: &str,
+        _account_id: &str,
+        _table_name: &str,
         _ttl_attribute: &str,
     ) -> BoxedFuture<'_, Result<(), StorageError>> {
-        let account_id = account_id.to_owned();
-        let table_name = table_name.to_owned();
-        Box::pin(async move {
-            let (table_id, partitions) = self.ttl_partitions(&account_id, &table_name).await?;
-            for (owner, epoch) in partitions {
-                self.configure_ttl_partition(&owner, &table_id, epoch, None)
-                    .await?;
-            }
-            Ok(())
-        })
+        // The expiry index is fixed in every data Cell. Disabled account metadata
+        // stops sweeps; a later enable changes the partition generation as needed.
+        Box::pin(async { Ok(()) })
     }
 
     fn find_expired_items_indexed(

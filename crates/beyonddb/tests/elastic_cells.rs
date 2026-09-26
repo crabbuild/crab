@@ -24,10 +24,11 @@ use beyonddb::{
     PartitionScanInput, PartitionScanOutcome, PartitionSeal, PartitionSpec, PartitionState,
     PartitionUpdate, PartitionUpdateInput, PartitionUpdateOutcome, PartitionUsage,
     PublishedNodeLease, PutItem, PutItemInput, ReadPartitionRoute, ReadPartitionState,
-    ReadRoutePage, ReadSplitPlan, ReadSplitRoute, ReadTableRoute, RoutePageInput, RoutePageOutcome,
-    SealPartition, SealPartitionOutcome, SplitPlan, SplitRouteState, TableRoute, TableSpec,
-    account_target, build_http_state, credential_target, data_key_hash, data_target,
-    initialize_account, initialize_partition,
+    ReadRoutePage, ReadSplitPlan, ReadSplitRoute, ReadTableRoute, ReadTtlSchedule, ReadTtlSweep,
+    RoutePageInput, RoutePageOutcome, SealPartition, SealPartitionOutcome, SplitPlan,
+    SplitRouteState, TableRoute, TableSpec, UpdateTtl, UpdateTtlInput, account_target,
+    build_http_state, credential_target, data_key_hash, data_target, initialize_account,
+    initialize_partition,
 };
 use crab_cell_app::CellApplication;
 use crab_cell_host::CellNodeBuilder;
@@ -64,8 +65,8 @@ use extenddb_engine::OperationContext;
 use extenddb_storage::authorization_store::AuthorizationStore;
 use extenddb_storage::management_store::OpError;
 use extenddb_storage::{
-    BoxedFuture, DataEngine, IdempotencyKey, TableEngine, TransactGetOp, TransactWriteOp,
-    error::StorageError,
+    BoxedFuture, DataEngine, IdempotencyKey, MetadataEngine, TableEngine, TransactGetOp,
+    TransactWriteOp, error::StorageError,
 };
 use object_store::memory::InMemory;
 use tokio_util::sync::CancellationToken;
@@ -637,13 +638,131 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
         .scan(&key_info, Some(1), None, None, None, None)
         .await
         .unwrap();
-    assert_eq!(first_scan, vec![first_item]);
+    assert_eq!(first_scan, vec![first_item.clone()]);
     let (last_scan, end) = storage
         .scan(&key_info, Some(1), continuation.as_ref(), None, None, None)
         .await
         .unwrap();
-    assert_eq!(last_scan, vec![last_item]);
+    assert_eq!(last_scan, vec![last_item.clone()]);
     assert_eq!(end, None);
+    for key in [&first_item, &last_item] {
+        let mut item = key.clone();
+        item.insert("expires".into(), AttributeValue::N("1".into()));
+        storage
+            .put_item(
+                &key_info,
+                item,
+                false,
+                None,
+                &ExpressionMaps::default(),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    storage
+        .update_ttl("123456789012", "ManyRanges", "expires", true)
+        .await
+        .unwrap();
+    assert!(matches!(
+        storage
+            .create_ttl_index("123456789012", "ManyRanges", "expires")
+            .await,
+        Err(StorageError::Transient(_))
+    ));
+    assert_eq!(storage.sweep_account_ttl("123456789012").await.unwrap(), 1);
+    assert_eq!(
+        storage.get_item(&key_info, &first_item).await.unwrap(),
+        None
+    );
+    assert!(
+        storage
+            .get_item(&key_info, &last_item)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let sweep = client
+        .query::<ReadTtlSweep>(&account, None, Json("ManyRanges".into()))
+        .await
+        .unwrap();
+    assert_eq!(sweep.output.0.unwrap().after_lower, Some(first[63].lower));
+    assert_eq!(storage.sweep_account_ttl("123456789012").await.unwrap(), 1);
+    assert_eq!(storage.get_item(&key_info, &last_item).await.unwrap(), None);
+    let sweep = client
+        .query::<ReadTtlSweep>(&account, None, Json("ManyRanges".into()))
+        .await
+        .unwrap();
+    assert_eq!(sweep.output.0.unwrap().after_lower, None);
+    storage
+        .update_ttl("123456789012", "ManyRanges", "expires", false)
+        .await
+        .unwrap();
+    storage
+        .drop_ttl_index("123456789012", "ManyRanges", "expires")
+        .await
+        .unwrap();
+    let mut retained = first_item.clone();
+    retained.insert("expires".into(), AttributeValue::N("1".into()));
+    storage
+        .put_item(
+            &key_info,
+            retained.clone(),
+            false,
+            None,
+            &ExpressionMaps::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(storage.sweep_account_ttl("123456789012").await.unwrap(), 0);
+    assert_eq!(
+        storage.get_item(&key_info, &first_item).await.unwrap(),
+        Some(retained)
+    );
+    for index in 0_u8..17 {
+        let name = format!("A{index:02}");
+        client
+            .command::<CreateTable>(
+                &account,
+                identity(200 + index),
+                Json(TableSpec {
+                    table_name: name.clone(),
+                    key_schema: table.key_schema.clone(),
+                    attribute_definitions: table.attribute_definitions.clone(),
+                    billing_mode: BillingMode::PayPerRequest,
+                    provisioned_throughput: None,
+                    deletion_protection_enabled: false,
+                    initial_tags: Vec::new(),
+                    resource_arn: None,
+                }),
+            )
+            .await
+            .unwrap();
+        client
+            .command::<UpdateTtl>(
+                &account,
+                identity(220 + index),
+                Json(UpdateTtlInput {
+                    table_name: name,
+                    attribute_name: Some("expires".into()),
+                }),
+            )
+            .await
+            .unwrap();
+    }
+    storage.sweep_account_ttl("123456789012").await.unwrap();
+    let schedule = client
+        .query::<ReadTtlSchedule>(&account, None, Json(()))
+        .await
+        .unwrap();
+    assert_eq!(schedule.output.0.as_deref(), Some("A15"));
+    storage.sweep_account_ttl("123456789012").await.unwrap();
+    let schedule = client
+        .query::<ReadTtlSchedule>(&account, None, Json(()))
+        .await
+        .unwrap();
+    assert_eq!(schedule.output.0, None);
     let large_table = match client
         .command::<CreateTable>(
             &account,

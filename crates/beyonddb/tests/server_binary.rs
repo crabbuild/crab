@@ -672,6 +672,33 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
     assert_eq!(recovered_tags.tags()[0].value(), "yes");
     assert_eq!(recovered_tags.tags()[1].key(), "team");
     assert_eq!(recovered_tags.tags()[1].value(), "elastic");
+    sdk.update_time_to_live()
+        .table_name("ProcessData")
+        .time_to_live_specification(
+            TimeToLiveSpecification::builder()
+                .attribute_name("expires")
+                .enabled(false)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    stop(&mut restarted, &log);
+    let mut drained = start(&config, &log, false, s3);
+    wait_healthy(&mut drained, public, &log);
+    let disabled_ttl = sdk
+        .describe_time_to_live()
+        .table_name("ProcessData")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        disabled_ttl
+            .time_to_live_description()
+            .and_then(|description| description.attribute_name())
+            .is_none()
+    );
     sdk.delete_table()
         .table_name("ProcessData")
         .send()
@@ -716,9 +743,6 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
             .and_then(|description| description.attribute_name())
             .is_none()
     );
-    stop(&mut restarted, &log);
-    let mut drained = start(&config, &log, false, s3);
-    wait_healthy(&mut drained, public, &log);
     sdk.describe_table()
         .table_name("ProcessData")
         .send()
