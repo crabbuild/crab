@@ -59,8 +59,9 @@ the placement preference; the existing cold recovery path retains every
 session, old-log, and authority gate.
 
 On shutdown, the host cancels work producers and closes reader admission,
-then drains accepted runtime work and seals the covered node log. Heartbeat
-maintenance remains live through that barrier. Session withdrawal follows
+then drains accepted runtime work and seals the covered node log. This includes
+admitted replica SQL and snapshot-open jobs whose callers were cancelled.
+Heartbeat maintenance remains live through that barrier. Session withdrawal follows
 runtime drain; withdrawing earlier fences the log authority and prevents a
 clean fleet-to-object transition. Every phase uses the same absolute shutdown
 deadline. A failed drain must not authorize a durability-mode change.

@@ -262,7 +262,7 @@ impl CellReadReplica {
             .await
             .map_err(|_| Error::Deadline)??;
         let interrupt = snapshot.view.connection()?.get_interrupt_handle();
-        let view = Arc::clone(&snapshot.view);
+        let active_snapshot = snapshot.clone();
         let registry = Arc::clone(&self.registry);
         let cell = self.expected.cell;
         let schema = self.expected.schema;
@@ -271,6 +271,11 @@ impl CellReadReplica {
         let mut task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let _job = job;
+            // Caller cancellation can drop the reader while SQL is running.
+            // Keep its view and admission together, releasing them before the
+            // job charge that node drain waits on.
+            let snapshot = active_snapshot;
+            let view = &snapshot.view;
             let connection = view.connection()?;
             view.take_io_error();
             crab_ltx::with_paged_io_deadline(deadline, || {

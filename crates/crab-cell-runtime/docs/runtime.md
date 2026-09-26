@@ -323,6 +323,11 @@ through Cell publication and the node-log close barrier; early withdrawal
 fences that authority and makes the drain fail. Work and lease tasks share one
 bounded supervisor and one absolute shutdown deadline. Remaining runtime,
 pool, or handle clones stay permanently closed after shutdown.
+The SQL pool also waits for admitted immutable-reader queries and snapshot
+opens running on blocking tasks. Closing reader admission and joining the
+dedicated SQL threads alone does not drain those tasks. Their existing job
+charges remain held until execution exits, including after caller cancellation;
+offline retention cannot proceed through a successful node drain before then.
 
 ## Preserve these invariants
 

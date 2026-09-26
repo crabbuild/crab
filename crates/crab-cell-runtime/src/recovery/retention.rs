@@ -132,7 +132,8 @@ impl GarbageCollectionReport {
 ///
 /// The caller must own the exclusive maintenance advertisement associated with
 /// `maintenance` until this future returns, and that drain must include every
-/// backup-pin publisher. The collector independently checks the exact release
+/// read replica, in-flight snapshot query, and backup-pin publisher.
+/// The collector independently checks the exact release
 /// record and rejects every owned control before sweeping.
 #[derive(Clone)]
 pub struct CellGarbageCollector {

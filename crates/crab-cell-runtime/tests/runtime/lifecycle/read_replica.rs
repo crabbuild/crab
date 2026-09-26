@@ -16,11 +16,15 @@ use crab_cell_runtime::peer::{
 use crab_cell_runtime::primitives::sql::{SqlBatch, SqlStatement, SqlValue};
 use crab_cell_runtime::registry::{
     BuildDescriptor, CellModule, MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor,
-    OperationDescriptor, Query, QueryContext, RegistryBuilder, RetainedCodeDescriptor,
+    OperationDescriptor, Query, QueryContext, Registry, RegistryBuilder, RetainedCodeDescriptor,
 };
+
+mod lifecycle;
 
 const MODULE: &str = "replica-counter";
 const SCHEMA: &str = "CREATE TABLE counter(value INTEGER NOT NULL)";
+const MIGRATED_SCHEMA: &str =
+    "ALTER TABLE counter ADD COLUMN label TEXT; UPDATE counter SET value = value + 10";
 const CODE: Digest = Digest::from_bytes([5; 32]);
 const NAMESPACE: NamespaceId = NamespaceId::from_bytes([6; 16]);
 static QUERY_BARRIERS: OnceLock<(Barrier, Barrier)> = OnceLock::new();
@@ -134,21 +138,30 @@ impl CellModule for CounterModule {
             retained_codes: &[RetainedCodeDescriptor {
                 code: CODE,
                 schema_min: 1,
-                schema_max: 1,
+                schema_max: 2,
             }],
             schema_min: 1,
-            schema_max: 1,
-            migrations: Box::leak(Box::new([MigrationDescriptor {
-                version: 1,
-                sql: SCHEMA,
-                digest: Digest::from_bytes(*blake3::hash(SCHEMA.as_bytes()).as_bytes()),
-            }])),
+            schema_max: 2,
+            migrations: Box::leak(Box::new([
+                MigrationDescriptor {
+                    version: 1,
+                    sql: SCHEMA,
+                    digest: Digest::from_bytes(*blake3::hash(SCHEMA.as_bytes()).as_bytes()),
+                },
+                MigrationDescriptor {
+                    version: 2,
+                    sql: MIGRATED_SCHEMA,
+                    digest: Digest::from_bytes(
+                        *blake3::hash(MIGRATED_SCHEMA.as_bytes()).as_bytes(),
+                    ),
+                },
+            ])),
             commands: &[],
             queries: &[OperationDescriptor {
                 id: 1,
                 codec_version: 1,
                 schema_min: 1,
-                schema_max: 1,
+                schema_max: 2,
                 input_limit: 16,
                 output_limit: 16,
             }],
@@ -185,6 +198,10 @@ impl Query for ReadCounter {
     ) -> crab_cell_runtime::Result<Self::Output> {
         if input == 99 {
             let (entered, release) = query_barriers();
+            entered.wait();
+            release.wait();
+        } else if input == 98 {
+            let (entered, release) = lifecycle::migration_query_barriers();
             entered.wait();
             release.wait();
         }
@@ -229,11 +246,12 @@ async fn rustfs_replica_reads_exact_root_and_policy_cas() {
         true,
     )
     .unwrap();
+    let prefix = Path::from(required("CRAB_CELL_TEST_PREFIX"));
     let fixture = fixture_with_limits_and_store_at_prefix(
         b"read-replica",
         Limits::default(),
-        store,
-        Path::from(required("CRAB_CELL_TEST_PREFIX")),
+        store.clone(),
+        prefix.clone(),
     );
     exercise_replica_read(&fixture).await;
     let policy = crab_cell_runtime::read_policy::ReadPolicyStore::new(fixture.layout.clone());
@@ -251,30 +269,29 @@ async fn rustfs_replica_reads_exact_root_and_policy_cas() {
             .desired_readers(),
         2
     );
+    lifecycle::exercise_schema_change(fixture_with_limits_and_store_at_prefix(
+        b"read-replica-migration",
+        Limits::default(),
+        store,
+        prefix,
+    ))
+    .await;
 }
 
-async fn exercise_replica_read(fixture: &Fixture) {
-    let session = SessionId::from_bytes([4; 16]);
-    let runtime = CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 << 20, session).unwrap();
-    // Hold one old-view query while a second admitted SQL job opens its replacement.
-    let reader_runtime = CellRuntime::new_with_replica_host(
-        SqlWorkerPool::new(2, 512).unwrap(),
-        8 << 20,
-        SessionId::from_bytes([14; 16]),
-        crab_ltx::Host::default().with_local_disk_budget(crab_ltx::DiskBudget::new(8 << 20)),
-    )
-    .unwrap();
-    let handle = bootstrap_on(&runtime, fixture, session).await;
-    let active = runtime.active_catalog_entries().await.unwrap();
-    assert_eq!(active.len(), 1);
-    assert_eq!(active[0].cell(), fixture.target.cell_id());
-
+fn compiled_reader_registry() -> Arc<Registry> {
     let mut builder = RegistryBuilder::new(BuildDescriptor {
         source_revision: "replica-test".into(),
         cargo_lock_digest: Digest::from_bytes([8; 32]),
     });
     builder.register(CounterModule).unwrap();
-    let registry = Arc::new(builder.finish().unwrap());
+    Arc::new(builder.finish().unwrap())
+}
+
+async fn owner_directory(
+    fixture: &Fixture,
+    session: SessionId,
+    registry: &Registry,
+) -> NodeDirectory {
     let fleet = Digest::from_bytes([9; 32]);
     let image = Digest::from_bytes([10; 32]);
     let release = registry.release_digest();
@@ -294,7 +311,7 @@ async fn exercise_replica_read(fixture: &Fixture) {
                 1,
                 now,
                 now + 15_000,
-                vec![CODE],
+                registry.module_digests(),
                 vec![1],
                 NodeFailureDomain::default(),
                 NodeCapacity {
@@ -309,6 +326,31 @@ async fn exercise_replica_read(fixture: &Fixture) {
         )
         .await
         .unwrap();
+
+    directory
+}
+
+async fn exercise_replica_read(fixture: &Fixture) {
+    let session = SessionId::from_bytes([4; 16]);
+    let runtime = CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 << 20, session).unwrap();
+    // Hold one old-view query while a second admitted SQL job opens its replacement.
+    let reader_runtime = CellRuntime::new_with_replica_host(
+        SqlWorkerPool::new(2, 512).unwrap(),
+        8 << 20,
+        SessionId::from_bytes([14; 16]),
+        crab_ltx::Host::default().with_local_disk_budget(crab_ltx::DiskBudget::new(8 << 20)),
+    )
+    .unwrap();
+    let handle = bootstrap_on(&runtime, fixture, session).await;
+    let active = runtime.active_catalog_entries().await.unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].cell(), fixture.target.cell_id());
+
+    let registry = compiled_reader_registry();
+    let fleet = Digest::from_bytes([9; 32]);
+    let image = Digest::from_bytes([10; 32]);
+    let release = registry.release_digest();
+    let directory = owner_directory(fixture, session, &registry).await;
 
     let reader_path = fixture._directory.path().join("reader.sqlite");
     let constrained = CellRuntime::new(
@@ -599,6 +641,8 @@ async fn exercise_replica_read(fixture: &Fixture) {
             .output,
         1
     );
+
+    lifecycle::drain_waits_for_replica_sql(fixture, &registry, &directory).await;
 
     let advertised = directory.load(session, now_ms()).await.unwrap().unwrap();
     directory.withdraw(&advertised, now_ms()).await.unwrap();
