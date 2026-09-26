@@ -9,10 +9,11 @@ const CHECKSUM_READ_BYTES: usize = 64 * 1024;
 /// Buffered page-checksum writes keep a dense copy off the syscall path.
 #[cfg(feature = "replica")]
 const DENSE_WRITE_BYTES: usize = 64 * 1024;
+const CHECKSUM_BLOCK_BYTES: usize = 4096;
 
 #[derive(Clone)]
 enum ChecksumBase {
-    Memory(Arc<[u64]>),
+    Memory(Arc<Vec<u64>>),
     #[cfg(feature = "replica")]
     File(Arc<FileChecksumBase>),
 }
@@ -59,13 +60,39 @@ pub(crate) struct PageChecksumApply<'a> {
     previous_count: u32,
     previous: u32,
     next_required: u32,
-    base_file: Option<crate::HostFile>,
+    base_file: Option<ChecksumReader>,
+}
+
+struct ChecksumReader {
+    file: crate::HostFile,
+    first: u32,
+    bytes: Vec<u8>,
+}
+
+impl ChecksumReader {
+    fn value(&mut self, page: u32, count: u32) -> Result<u64> {
+        // Capture supplies increasing pages. One local window amortizes nearby
+        // overwrites without retaining a database-sized checksum cache.
+        let per_block = (CHECKSUM_BLOCK_BYTES / 8) as u32;
+        let first = (page - 1) / per_block * per_block;
+        if self.bytes.is_empty() || self.first != first {
+            let length = (count - first).min(per_block) as usize * 8;
+            self.bytes = self.file.read_exact_at(u64::from(first) * 8, length)?;
+            self.first = first;
+        }
+        let offset = (page - 1 - self.first) as usize * 8;
+        Ok(u64::from_be_bytes(
+            self.bytes[offset..offset + 8]
+                .try_into()
+                .map_err(|_| CrabError::LTXCorrupted)?,
+        ))
+    }
 }
 
 impl Default for PageChecksums {
     fn default() -> Self {
         Self {
-            base: ChecksumBase::Memory(Arc::from([])),
+            base: ChecksumBase::Memory(Arc::new(Vec::new())),
             base_count: 0,
             count: 0,
             changes: HashMap::new(),
@@ -102,7 +129,7 @@ impl PageChecksums {
         })
     }
 
-    #[cfg_attr(any(not(test), all(test, not(feature = "replica"))), expect(dead_code))]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub fn apply(
         &mut self,
         page_size: u32,
@@ -146,7 +173,11 @@ impl PageChecksums {
             #[cfg(feature = "replica")]
             {
                 match &self.base {
-                    ChecksumBase::File(base) => Some(base.open()?),
+                    ChecksumBase::File(base) => Some(ChecksumReader {
+                        file: base.open()?,
+                        first: 0,
+                        bytes: Vec::new(),
+                    }),
                     ChecksumBase::Memory(_) => None,
                 }
             }
@@ -184,19 +215,26 @@ impl PageChecksums {
         })
     }
 
-    /// Persists a successful candidate after its LTX cut is sealed.
-    pub(crate) fn persist(&mut self) -> Result<()> {
-        match self.base.clone() {
+    /// Adopts a sealed candidate; a failure requires fencing the capture session.
+    pub(crate) fn commit(&mut self, candidate: Self) -> Result<()> {
+        // Retire the predecessor only after sealing. Its Arc otherwise forces
+        // a complete memory-base copy even when only one checksum changed.
+        *self = candidate;
+        match &mut self.base {
             ChecksumBase::Memory(base) => {
-                let mut dense = vec![0; self.count as usize];
-                let retained = dense.len().min(base.len()).min(self.base_count as usize);
-                dense[..retained].copy_from_slice(&base[..retained]);
+                let dense = Arc::make_mut(base);
+                dense.truncate(self.base_count as usize);
+                dense.resize(self.count as usize, 0);
                 for (&page, &checksum) in &self.changes {
                     if page <= self.count {
                         dense[page as usize - 1] = checksum;
                     }
                 }
-                self.base = ChecksumBase::Memory(Arc::from(dense));
+                // A large truncation must release historical capacity. Small
+                // changes retain it so the next append need not copy the base.
+                if dense.capacity() > dense.len().saturating_mul(2) {
+                    dense.shrink_to_fit();
+                }
                 self.base_count = self.count;
                 self.changes.clear();
             }
@@ -363,7 +401,7 @@ impl PageChecksums {
         &mut self,
         commit: u32,
         previous_count: u32,
-        file: Option<&mut crate::HostFile>,
+        file: Option<&mut ChecksumReader>,
     ) -> Result<()> {
         let file = file.ok_or(CrabError::InvalidState("checksum file not open"))?;
         let mut page = commit.checked_add(1).ok_or(CrabError::LTXCorrupted)?;
@@ -372,7 +410,9 @@ impl PageChecksums {
             let count = usize::try_from(file_end - page + 1)
                 .map_err(|_| CrabError::LTXCorrupted)?
                 .min(CHECKSUM_READ_BYTES / 8);
-            let bytes = file.read_exact_at(u64::from(page - 1) * 8, count * 8)?;
+            let bytes = file
+                .file
+                .read_exact_at(u64::from(page - 1) * 8, count * 8)?;
             for checksum in bytes.as_chunks::<8>().0 {
                 let stored = u64::from_be_bytes(*checksum);
                 let old = self.changes.get(&page).copied().unwrap_or(stored);
@@ -394,7 +434,7 @@ impl PageChecksums {
         Ok(())
     }
 
-    fn value(&self, page: u32, _file: Option<&mut crate::HostFile>) -> Result<u64> {
+    fn value(&self, page: u32, file: Option<&mut ChecksumReader>) -> Result<u64> {
         if page == 0 || page > self.count {
             return Err(CrabError::LTXCorrupted);
         }
@@ -404,15 +444,17 @@ impl PageChecksums {
         if page > self.base_count {
             return Ok(0);
         }
-        let checksum = match &self.base {
-            ChecksumBase::Memory(pages) => *pages
-                .get(page as usize - 1)
-                .ok_or(CrabError::LTXCorrupted)?,
-            #[cfg(feature = "replica")]
-            ChecksumBase::File(_) => {
-                let file = _file.ok_or(CrabError::InvalidState("checksum file not open"))?;
-                let bytes = file.read_exact_at(u64::from(page - 1) * 8, 8)?;
-                u64::from_be_bytes(bytes.try_into().map_err(|_| CrabError::LTXCorrupted)?)
+        let checksum = if let Some(file) = file {
+            file.value(page, self.base_count)?
+        } else {
+            match &self.base {
+                ChecksumBase::Memory(pages) => *pages
+                    .get(page as usize - 1)
+                    .ok_or(CrabError::LTXCorrupted)?,
+                #[cfg(feature = "replica")]
+                ChecksumBase::File(_) => {
+                    return Err(CrabError::InvalidState("checksum file not open"));
+                }
             }
         };
         if checksum != 0 && checksum & CHECKSUM_FLAG == 0 {
@@ -475,10 +517,85 @@ impl PageChecksumApply<'_> {
     }
 }
 
-#[cfg(all(test, feature = "replica"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn fixed_size_memory_updates_reuse_the_owned_base() {
+        let allocation = |index: &PageChecksums| match &index.base {
+            ChecksumBase::Memory(base) => base.as_ptr(),
+            #[cfg(feature = "replica")]
+            ChecksumBase::File(_) => panic!("expected a memory base"),
+        };
+        for count in [1024, 32_768] {
+            let mut owner = PageChecksums::default();
+            owner
+                .apply_iter(
+                    512,
+                    count,
+                    (1..=count).map(|n| Ok((n, vec![n as u8; 512]))),
+                    32 << 20,
+                )
+                .unwrap();
+            owner.commit(owner.clone()).unwrap();
+            let before = allocation(&owner);
+            let expected_before = owner.checksum();
+            let mut candidate = owner.clone();
+            candidate
+                .apply(512, count, &[(7, vec![91; 512])], 32 << 20)
+                .unwrap();
+            assert_eq!(owner.checksum(), expected_before);
+            // Sealing retires the predecessor before merging the isolated overlay.
+            owner.commit(candidate).unwrap();
+            assert_eq!(allocation(&owner), before, "{count} pages");
+            assert_eq!(
+                owner.value(7, None).unwrap(),
+                ltx::checksum_page(7, &[91; 512])
+            );
+        }
+    }
+
+    #[test]
+    fn memory_candidates_preserve_snapshots_through_truncation_and_regrowth() {
+        for page_size in [512, 4096] {
+            let original = (1..=1025)
+                .map(|number| (number, vec![number as u8; page_size as usize]))
+                .collect::<Vec<_>>();
+            let mut owner = PageChecksums::default();
+            owner.apply(page_size, 1025, &original, 8 << 20).unwrap();
+            owner.commit(owner.clone()).unwrap();
+            let snapshot = owner.clone();
+            let mut candidate = owner.clone();
+            let changed = (2, vec![90; page_size as usize]);
+            candidate
+                .apply(page_size, 100, std::slice::from_ref(&changed), 8 << 20)
+                .unwrap();
+            owner.commit(candidate).unwrap();
+            assert_eq!(
+                snapshot.value(2, None).unwrap(),
+                ltx::checksum_page(2, &original[1].1)
+            );
+
+            let mut candidate = owner.clone();
+            let regrown = (101..=1027)
+                .map(|number| (number, vec![91; page_size as usize]))
+                .collect::<Vec<_>>();
+            candidate.apply(page_size, 1027, &regrown, 8 << 20).unwrap();
+            owner.commit(candidate).unwrap();
+            let expected = original[..100]
+                .iter()
+                .map(|page| if page.0 == 2 { &changed } else { page })
+                .chain(&regrown)
+                .fold(CHECKSUM_FLAG, |sum, (number, bytes)| {
+                    CHECKSUM_FLAG | (sum ^ ltx::checksum_page(*number, bytes))
+                });
+            assert_eq!(owner.checksum(), expected);
+            assert_eq!(snapshot.checksum(), checksum(&original));
+        }
+    }
+
+    #[cfg(feature = "replica")]
     fn page(number: u32, byte: u8) -> (u32, Vec<u8>) {
         (number, vec![byte; 4096])
     }
@@ -489,6 +606,7 @@ mod tests {
         })
     }
 
+    #[cfg(feature = "replica")]
     #[test]
     fn file_backed_overlay_matches_full_scan_across_update_truncate_and_regrowth() {
         let directory = tempfile::TempDir::new().unwrap();
@@ -514,7 +632,7 @@ mod tests {
         index.apply(4096, 3, &[pages[1].clone()], 1 << 20).unwrap();
         assert_eq!(index.changes.len(), 1);
         assert_eq!(index.checksum(), checksum(&pages));
-        index.persist().unwrap();
+        index.commit(index.clone()).unwrap();
         assert!(index.changes.is_empty());
         assert_eq!(
             std::fs::read(&path).unwrap(),
@@ -536,7 +654,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(index.checksum(), checksum(&pages));
-        index.persist().unwrap();
+        index.commit(index.clone()).unwrap();
         assert_eq!(
             std::fs::read(path).unwrap(),
             pages
@@ -546,6 +664,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "replica")]
     #[test]
     fn file_backed_truncation_reduces_multiple_checksum_chunks_with_overlay_updates() {
         let directory = tempfile::TempDir::new().unwrap();

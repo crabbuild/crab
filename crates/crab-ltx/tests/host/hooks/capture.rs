@@ -321,8 +321,38 @@ fn checksum_capture_batches_adjacent_updates() {
         .unwrap();
     faults.write_calls.store(0, Ordering::Relaxed);
     faults.largest_write.store(0, Ordering::Relaxed);
+    faults.checksum_reads.store(0, Ordering::Relaxed);
+    faults.checksum_read_bytes.store(0, Ordering::Relaxed);
+    faults.largest_checksum_read.store(0, Ordering::Relaxed);
 
     let captured = resumed.capture_deferred().unwrap();
+
+    // Checkpoint maintenance can seal another cut. Each cut must read the
+    // preceding cut's merged sidecar through a fresh bounded window.
+    let checksum_bytes = captured
+        .segments
+        .iter()
+        .map(|cut| cut.info().database_pages as usize * 8)
+        .sum::<usize>();
+    let checksum_blocks = captured
+        .segments
+        .iter()
+        .map(|cut| (cut.info().database_pages as usize * 8).div_ceil(4096))
+        .sum::<usize>();
+    assert!(
+        faults.checksum_reads.load(Ordering::Relaxed) <= checksum_blocks,
+        "capture made {} checksum reads for {checksum_bytes} sidecar bytes",
+        faults.checksum_reads.load(Ordering::Relaxed),
+    );
+    assert!(faults.checksum_read_bytes.load(Ordering::Relaxed) <= checksum_bytes);
+    assert!(faults.largest_checksum_read.load(Ordering::Relaxed) <= 4096);
+    eprintln!(
+        "checksum capture: {} reads, {} bytes, {} maximum transfer, {} cuts",
+        faults.checksum_reads.load(Ordering::Relaxed),
+        faults.checksum_read_bytes.load(Ordering::Relaxed),
+        faults.largest_checksum_read.load(Ordering::Relaxed),
+        captured.segments.len(),
+    );
 
     assert!(
         faults.write_calls.load(Ordering::Relaxed) < 1024,
@@ -335,6 +365,31 @@ fn checksum_capture_batches_adjacent_updates() {
             .sum::<u64>()
     );
     assert!(faults.largest_write.load(Ordering::Relaxed) <= 64 * 1024);
+    // Updating the same small row in successive cuts must reread its block;
+    // retaining a window across the sidecar merge would use stale checksums.
+    for value in [17, 23] {
+        resumed
+            .transaction(|tx| tx.execute("UPDATE t SET v=? WHERE rowid=1", [value]))
+            .unwrap();
+        faults.checksum_reads.store(0, Ordering::Relaxed);
+        faults.checksum_read_bytes.store(0, Ordering::Relaxed);
+        let small = resumed.capture_deferred().unwrap();
+        let changed = small
+            .segments
+            .iter()
+            .map(|cut| {
+                crab_ltx::internal::inspect_ltx(&std::fs::read(cut.path()).unwrap())
+                    .unwrap()
+                    .pages as usize
+            })
+            .sum::<usize>();
+        assert!(
+            changed < 8,
+            "a point edit unexpectedly captured {changed} pages"
+        );
+        assert!(faults.checksum_reads.load(Ordering::Relaxed) <= changed);
+        assert!(faults.checksum_read_bytes.load(Ordering::Relaxed) <= changed * 4096);
+    }
     // Re-read and fold the persisted blocks before allowing a clean handoff.
     resumed.persist_continuation().unwrap();
     resumed.close().unwrap();
