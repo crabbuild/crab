@@ -98,6 +98,7 @@ def compose(state: Path, project: str, gateway_port: int, node_port_base: int) -
                 "RUSTFS_OBS_LOG_DIRECTORY": "/data/logs",
             },
             "volumes": ["rustfs-data:/data"],
+            "ulimits": {"nofile": {"soft": 65536, "hard": 65536}},
             "healthcheck": {
                 "test": ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:9000/health/ready"],
                 "interval": "2s",
