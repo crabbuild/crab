@@ -19,6 +19,8 @@ pub struct PutItemInput {
 /// Outcome of a keyed item mutation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ItemMutationOutcome {
+    /// An unresolved transaction holds this item's lock.
+    Conflict,
     /// The mutation committed; this is the previous item if present.
     Applied(Option<Item>),
     /// The table does not exist.
@@ -61,6 +63,9 @@ impl Command for PutItem {
             )));
         }
         let key = item_key(&input.item, &table.key_schema)?;
+        if transaction::key_locked(context, &table.id, &key)? {
+            return Ok(CommandResult::Rejected(Json(ItemMutationOutcome::Conflict)));
+        }
         let old = command_item(context, &table.id, &key)?;
         if let Some(condition) = input.condition {
             let empty = Item::new();
@@ -136,6 +141,9 @@ impl Command for DeleteItem {
             )));
         }
         let key = item_key(&input.key, &table.key_schema)?;
+        if transaction::key_locked(context, &table.id, &key)? {
+            return Ok(CommandResult::Rejected(Json(ItemMutationOutcome::Conflict)));
+        }
         let old = command_item(context, &table.id, &key)?;
         if let Some(condition) = input.condition {
             let empty = Item::new();
@@ -179,6 +187,8 @@ pub struct UpdateItemInput {
 /// Result of applying an item update.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum UpdateItemOutcome {
+    /// An unresolved transaction holds this item's lock.
+    Conflict,
     /// The update committed with both item images.
     Applied { old: Option<Item>, new: Item },
     /// The table does not exist.
@@ -221,6 +231,9 @@ impl Command for UpdateItem {
             )));
         }
         let key = item_key(&input.key, &table.key_schema)?;
+        if transaction::key_locked(context, &table.id, &key)? {
+            return Ok(CommandResult::Rejected(Json(UpdateItemOutcome::Conflict)));
+        }
         let old = command_item(context, &table.id, &key)?;
         if let Some(condition) = input.condition {
             let empty = Item::new();
@@ -279,6 +292,8 @@ pub struct GetItemInput {
 /// Result of reading an item.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum GetItemOutcome {
+    /// An unresolved transaction holds this item's lock.
+    Conflict,
     /// The table exists; the item may be absent.
     Found(Option<Item>),
     /// The table does not exist.
@@ -308,6 +323,9 @@ impl Query for GetItem {
             return Ok(Json(GetItemOutcome::InvalidKey));
         }
         let key = item_key(&input.key, &table.key_schema)?;
+        if transaction::read_key_locked(context, &table.id, &key)? {
+            return Ok(Json(GetItemOutcome::Conflict));
+        }
         let rows = context.sql(&statement(
             "SELECT item FROM ddb_items WHERE table_id = ?1 AND item_key = ?2",
             vec![SqlValue::Text(table.id), SqlValue::Blob(key)],
@@ -409,151 +427,9 @@ impl Command for TransactWrite {
                 }
             }
         }
-        if input.operations.is_empty() || input.operations.len() > 100 {
-            return Ok(CommandResult::Rejected(Json(
-                TransactionOutcome::Rejected {
-                    index: 0,
-                    reason: TransactionFailure::Validation(
-                        "transaction operation count is outside 1..=100".into(),
-                    ),
-                },
-            )));
-        }
-        let mut touched = HashSet::with_capacity(input.operations.len());
-        for (index, operation) in input.operations.into_iter().enumerate() {
-            let (name, table_id, item, condition) = match &operation {
-                TransactionWrite::Put(input) => (
-                    &input.table_name,
-                    &input.table_id,
-                    &input.item,
-                    input.condition.as_ref(),
-                ),
-                TransactionWrite::Delete(input) => (
-                    &input.table_name,
-                    &input.table_id,
-                    &input.key,
-                    input.condition.as_ref(),
-                ),
-                TransactionWrite::Update(input) => (
-                    &input.table_name,
-                    &input.table_id,
-                    &input.key,
-                    input.condition.as_ref(),
-                ),
-                TransactionWrite::ConditionCheck(input) => (
-                    &input.table_name,
-                    &input.table_id,
-                    &input.key,
-                    Some(&input.condition),
-                ),
-            };
-            let Some(table) = command_unrouted_table(context, name)? else {
-                return Ok(CommandResult::Rejected(Json(
-                    TransactionOutcome::Rejected {
-                        index,
-                        reason: TransactionFailure::Validation("table does not exist".into()),
-                    },
-                )));
-            };
-            if table.id != *table_id {
-                return Ok(CommandResult::Rejected(Json(
-                    TransactionOutcome::Rejected {
-                        index,
-                        reason: TransactionFailure::Validation("table identity is stale".into()),
-                    },
-                )));
-            }
-            let valid = match operation {
-                TransactionWrite::Put(_) => valid_item(item, &table),
-                _ => valid_key(item, &table),
-            };
-            if !valid {
-                return Ok(CommandResult::Rejected(Json(
-                    TransactionOutcome::Rejected {
-                        index,
-                        reason: TransactionFailure::Validation("item violates table schema".into()),
-                    },
-                )));
-            }
-            let key = item_key(item, &table.key_schema)?;
-            if !touched.insert((table.id.clone(), key.clone())) {
-                return Ok(CommandResult::Rejected(Json(
-                    TransactionOutcome::Rejected {
-                        index,
-                        reason: TransactionFailure::Validation(
-                            "more than one operation addresses the same item".into(),
-                        ),
-                    },
-                )));
-            }
-            if let Some(condition) = condition {
-                let old = command_item(context, &table.id, &key)?;
-                let empty = Item::new();
-                match condition.evaluate(old.as_ref().unwrap_or(&empty)) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        return Ok(CommandResult::Rejected(Json(
-                            TransactionOutcome::Rejected {
-                                index,
-                                reason: TransactionFailure::ConditionFailed(old),
-                            },
-                        )));
-                    }
-                    Err(reason) => {
-                        return Ok(CommandResult::Rejected(Json(
-                            TransactionOutcome::Rejected {
-                                index,
-                                reason: TransactionFailure::Validation(reason),
-                            },
-                        )));
-                    }
-                }
-            }
-            let next = match operation {
-                TransactionWrite::Put(input) => Some(input.item),
-                TransactionWrite::Delete(_) => None,
-                TransactionWrite::Update(input) => {
-                    let old = command_item(context, &table.id, &key)?;
-                    let mut new = old.unwrap_or(input.key);
-                    if let Err(reason) = input.update.apply(&mut new, &table.attribute_definitions)
-                    {
-                        return Ok(CommandResult::Rejected(Json(
-                            TransactionOutcome::Rejected {
-                                index,
-                                reason: TransactionFailure::Validation(reason),
-                            },
-                        )));
-                    }
-                    if !valid_item(&new, &table) || item_key(&new, &table.key_schema)? != key {
-                        return Ok(CommandResult::Rejected(Json(
-                            TransactionOutcome::Rejected {
-                                index,
-                                reason: TransactionFailure::Validation(
-                                    "item violates table schema".into(),
-                                ),
-                            },
-                        )));
-                    }
-                    Some(new)
-                }
-                TransactionWrite::ConditionCheck(_) => continue,
-            };
-            if let Some(next) = next {
-                context.sql(&statement(
-                    "INSERT INTO ddb_items (table_id, item_key, item) VALUES (?1, ?2, ?3) \
-                     ON CONFLICT(table_id, item_key) DO UPDATE SET item = excluded.item",
-                    vec![
-                        SqlValue::Text(table.id),
-                        SqlValue::Blob(key),
-                        SqlValue::Blob(serde_json::to_vec(&next)?),
-                    ],
-                ))?;
-            } else {
-                context.sql(&statement(
-                    "DELETE FROM ddb_items WHERE table_id = ?1 AND item_key = ?2",
-                    vec![SqlValue::Text(table.id), SqlValue::Blob(key)],
-                ))?;
-            }
+        let outcome = transaction::write(context, input.operations)?;
+        if outcome != TransactionOutcome::Applied {
+            return Ok(CommandResult::Rejected(Json(outcome)));
         }
         if let Some(token) = input.idempotency.as_ref() {
             crate::transaction_token::record_applied_token(context, token)?;
@@ -561,6 +437,12 @@ impl Command for TransactWrite {
         Ok(CommandResult::Success(Json(TransactionOutcome::Applied)))
     }
 }
+
+pub(crate) mod transaction;
+pub use transaction::{
+    PrepareAccountTransaction, PrepareAccountTransactionInput, ReadAccountTransaction,
+    ResolveAccountTransaction,
+};
 
 mod scan;
 pub use scan::*;
@@ -571,6 +453,8 @@ pub struct TransactGet;
 /// Result of one all-or-error transactional read.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TransactionGetOutcome {
+    /// An unresolved transaction holds one requested key.
+    Conflict { index: usize },
     /// All requested keys were valid and read from one Cell snapshot.
     Found(Vec<Option<Item>>),
     /// The request must contain between one and one hundred keys.
@@ -604,6 +488,9 @@ impl Query for TransactGet {
                 return Ok(Json(TransactionGetOutcome::InvalidKey { index }));
             }
             let key = item_key(&request.key, &table.key_schema)?;
+            if transaction::read_key_locked(context, &table.id, &key)? {
+                return Ok(Json(TransactionGetOutcome::Conflict { index }));
+            }
             let rows = context.sql(&statement(
                 "SELECT item FROM ddb_items WHERE table_id = ?1 AND item_key = ?2",
                 vec![SqlValue::Text(table.id), SqlValue::Blob(key)],

@@ -4,17 +4,16 @@ use crab_cell_runtime::client::{InvocationError, Receipt};
 use crab_cell_runtime::identity::CellTarget;
 use extenddb_storage::error::StorageError;
 
-use super::{CellStorage, cell_error, mutation_identity, unsupported};
+use super::{CellStorage, cell_error, mutation_identity};
 use crate::{
     CoordinatorDecision, CoordinatorParticipantTarget, CoordinatorPhaseInput,
     CoordinatorPhaseOutcome, CrossCellTransactionStatus, DecideCrossCellTransaction,
     DecideCrossCellTransactionInput, DecideCrossCellTransactionOutcome, Json,
-    PreparePartitionTransaction, PreparePartitionTransactionInput,
-    PreparePartitionTransactionOutcome, ReadCoordinatorParticipant,
-    ReadCoordinatorParticipantInput, ReadCrossCellTransaction, ReadCrossCellTransactionInput,
-    ReadPartitionTransaction, ReadPartitionTransactionInput, ReadPartitionTransactionOutcome,
-    ReadUnresolvedCoordinatorParticipants, RecordParticipantPrepare, TransactionFailure,
-    coordinator_target, data_target,
+    ParticipantTransactionState, PrepareAccountTransaction, PrepareAccountTransactionInput,
+    PreparePartitionTransaction, PreparePartitionTransactionInput, PrepareTransactionOutcome,
+    ReadCoordinatorParticipant, ReadCoordinatorParticipantInput, ReadCrossCellTransaction,
+    ReadCrossCellTransactionInput, ReadTransactionInput, ReadUnresolvedCoordinatorParticipants,
+    RecordParticipantPrepare, TransactionFailure, account_target, coordinator_target, data_target,
 };
 
 impl CellStorage {
@@ -48,13 +47,6 @@ impl CellStorage {
             .map_err(cell_error)?
             .output
             .0;
-        // Reject unsupported participants before acquiring any new locks.
-        if participants
-            .iter()
-            .any(|participant| participant.target == CoordinatorParticipantTarget::Account)
-        {
-            return Err(unsupported("account Cell cross-Cell participant prepare"));
-        }
         for participant in participants {
             let payload = self
                 .client
@@ -75,50 +67,54 @@ impl CellStorage {
                 .ok_or_else(|| {
                     StorageError::Internal("transaction participant payload is missing".into())
                 })?;
-            let CoordinatorParticipantTarget::Data {
-                table_id,
-                partition_id,
-                epoch,
-            } = &payload.target
-            else {
-                return Err(StorageError::Internal(
-                    "transaction participant target changed".into(),
-                ));
+            let operations = payload
+                .operations
+                .iter()
+                .map(|operation| operation.operation.clone())
+                .collect();
+            let coordinator_cell = *coordinator.cell_id().as_bytes();
+            let (target, input) = match &payload.target {
+                CoordinatorParticipantTarget::Account => (
+                    account_target(account_id),
+                    ParticipantPrepare::Account(PrepareAccountTransactionInput {
+                        transaction_id,
+                        coordinator_cell,
+                        operations,
+                    }),
+                ),
+                CoordinatorParticipantTarget::Data {
+                    table_id,
+                    partition_id,
+                    epoch,
+                } => (
+                    data_target(account_id, table_id, partition_id),
+                    ParticipantPrepare::Data(PreparePartitionTransactionInput {
+                        table_id: table_id.clone(),
+                        epoch: *epoch,
+                        transaction_id,
+                        coordinator_cell,
+                        operations,
+                    }),
+                ),
             };
-            let target = data_target(account_id, table_id, partition_id)
-                .map_err(|error| StorageError::Internal(error.to_string()))?;
-            let input = PreparePartitionTransactionInput {
-                table_id: table_id.clone(),
-                epoch: *epoch,
-                transaction_id,
-                coordinator_cell: *coordinator.cell_id().as_bytes(),
-                operations: payload
-                    .operations
-                    .iter()
-                    .map(|operation| operation.operation.clone())
-                    .collect(),
-            };
+            let target = target.map_err(|error| StorageError::Internal(error.to_string()))?;
             let (outcome, receipt) = self.prepare_transaction_participant(&target, input).await?;
             let rejection = match outcome {
-                PreparePartitionTransactionOutcome::Prepared
-                | PreparePartitionTransactionOutcome::Replay => None,
-                PreparePartitionTransactionOutcome::Rejected { index, reason } => {
-                    Some((index, reason))
-                }
-                PreparePartitionTransactionOutcome::NotInstalled
-                | PreparePartitionTransactionOutcome::StaleRoute
-                | PreparePartitionTransactionOutcome::Sealed
-                | PreparePartitionTransactionOutcome::NotReady
-                | PreparePartitionTransactionOutcome::WrongPartition => {
+                PrepareTransactionOutcome::Prepared | PrepareTransactionOutcome::Replay => None,
+                PrepareTransactionOutcome::Rejected { index, reason } => Some((index, reason)),
+                PrepareTransactionOutcome::NotInstalled
+                | PrepareTransactionOutcome::StaleRoute
+                | PrepareTransactionOutcome::Sealed
+                | PrepareTransactionOutcome::NotReady
+                | PrepareTransactionOutcome::WrongPartition => {
                     Some((0, TransactionFailure::Conflict))
                 }
-                PreparePartitionTransactionOutcome::Committed
-                | PreparePartitionTransactionOutcome::Aborted => {
+                PrepareTransactionOutcome::Committed | PrepareTransactionOutcome::Aborted => {
                     // A concurrent driver/recovery owner may have finished. Only
                     // the coordinator can decide which terminal outcome to return.
                     return self.finish_transaction(&coordinator, &read).await;
                 }
-                PreparePartitionTransactionOutcome::Mismatch => {
+                PrepareTransactionOutcome::Mismatch => {
                     return Err(StorageError::Internal(
                         "participant transaction identity mismatch".into(),
                     ));
@@ -248,59 +244,59 @@ impl CellStorage {
     async fn prepare_transaction_participant(
         &self,
         target: &CellTarget,
-        input: PreparePartitionTransactionInput,
-    ) -> Result<(PreparePartitionTransactionOutcome, Receipt), StorageError> {
-        let read = ReadPartitionTransactionInput {
-            transaction_id: input.transaction_id,
-            coordinator_cell: input.coordinator_cell,
+        input: ParticipantPrepare,
+    ) -> Result<(PrepareTransactionOutcome, Receipt), StorageError> {
+        let read = match &input {
+            ParticipantPrepare::Account(input) => ReadTransactionInput {
+                transaction_id: input.transaction_id,
+                coordinator_cell: input.coordinator_cell,
+            },
+            ParticipantPrepare::Data(input) => ReadTransactionInput {
+                transaction_id: input.transaction_id,
+                coordinator_cell: input.coordinator_cell,
+            },
         };
-        let prior = self
-            .client
-            .query::<ReadPartitionTransaction>(target, None, Json(read.clone()))
-            .await
-            .map_err(cell_error)?;
+        let prior = self.participant_state(target, read.clone()).await?;
         match prior.output.0 {
-            ReadPartitionTransactionOutcome::Committed => {
-                return Ok((PreparePartitionTransactionOutcome::Committed, prior.receipt));
+            ParticipantTransactionState::Committed => {
+                return Ok((PrepareTransactionOutcome::Committed, prior.receipt));
             }
-            ReadPartitionTransactionOutcome::Aborted => {
-                return Ok((PreparePartitionTransactionOutcome::Aborted, prior.receipt));
+            ParticipantTransactionState::Aborted => {
+                return Ok((PrepareTransactionOutcome::Aborted, prior.receipt));
             }
-            ReadPartitionTransactionOutcome::CoordinatorMismatch => {
-                return Ok((PreparePartitionTransactionOutcome::Mismatch, prior.receipt));
+            ParticipantTransactionState::CoordinatorMismatch => {
+                return Ok((PrepareTransactionOutcome::Mismatch, prior.receipt));
             }
             // Re-submit prepared payloads to verify their immutable digest. The
             // application record supplies idempotency beyond the runtime ledger.
-            ReadPartitionTransactionOutcome::Prepared
-            | ReadPartitionTransactionOutcome::Missing => {}
+            ParticipantTransactionState::Prepared | ParticipantTransactionState::Missing => {}
         }
-        match self
-            .client
-            .command::<PreparePartitionTransaction>(target, mutation_identity()?, Json(input))
-            .await
-        {
+        let identity = mutation_identity()?;
+        let result = match input {
+            ParticipantPrepare::Account(input) => {
+                self.client
+                    .command::<PrepareAccountTransaction>(target, identity, Json(input))
+                    .await
+            }
+            ParticipantPrepare::Data(input) => {
+                self.client
+                    .command::<PreparePartitionTransaction>(target, identity, Json(input))
+                    .await
+            }
+        };
+        match result {
             Ok(result) => Ok((result.output.0, result.receipt)),
             Err(InvocationError::Rejected(result)) => Ok((result.output.0, result.receipt)),
             Err(InvocationError::Pending(_)) => {
-                let observed = self
-                    .client
-                    .query::<ReadPartitionTransaction>(target, None, Json(read))
-                    .await
-                    .map_err(cell_error)?;
+                let observed = self.participant_state(target, read).await?;
                 let outcome = match observed.output.0 {
-                    ReadPartitionTransactionOutcome::Prepared => {
-                        PreparePartitionTransactionOutcome::Replay
+                    ParticipantTransactionState::Prepared => PrepareTransactionOutcome::Replay,
+                    ParticipantTransactionState::Committed => PrepareTransactionOutcome::Committed,
+                    ParticipantTransactionState::Aborted => PrepareTransactionOutcome::Aborted,
+                    ParticipantTransactionState::CoordinatorMismatch => {
+                        PrepareTransactionOutcome::Mismatch
                     }
-                    ReadPartitionTransactionOutcome::Committed => {
-                        PreparePartitionTransactionOutcome::Committed
-                    }
-                    ReadPartitionTransactionOutcome::Aborted => {
-                        PreparePartitionTransactionOutcome::Aborted
-                    }
-                    ReadPartitionTransactionOutcome::CoordinatorMismatch => {
-                        PreparePartitionTransactionOutcome::Mismatch
-                    }
-                    ReadPartitionTransactionOutcome::Missing => {
+                    ParticipantTransactionState::Missing => {
                         return Err(StorageError::Transient(
                             "participant prepare outcome remains pending".into(),
                         ));
@@ -311,4 +307,9 @@ impl CellStorage {
             Err(error) => Err(cell_error(error)),
         }
     }
+}
+
+enum ParticipantPrepare {
+    Account(PrepareAccountTransactionInput),
+    Data(PreparePartitionTransactionInput),
 }

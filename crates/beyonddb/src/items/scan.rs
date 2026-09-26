@@ -19,6 +19,8 @@ pub struct ScanItemsInput {
 /// Result of a bounded base-table scan.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ScanItemsOutcome {
+    /// An unresolved intent intersects the unvisited scan range.
+    Conflict,
     /// Items in stable storage order and a key to resume if more remain.
     Page {
         /// Returned items.
@@ -59,6 +61,15 @@ impl Query for ScanItems {
             Some(_) => return Ok(Json(ScanItemsOutcome::InvalidKey)),
             None => Vec::new(),
         };
+        // Missing live rows can still have prepared creates. Probe locks first
+        // so Scan cannot skip those intents just because their live rows are absent.
+        let locked = context.sql(&statement(
+            "SELECT 1 FROM ddb_account_transaction_locks WHERE table_id = ?1 AND item_key > ?2 LIMIT 1",
+            vec![SqlValue::Text(table.id.clone()), SqlValue::Blob(cursor.clone())],
+        ))?;
+        if !locked[0].rows.is_empty() {
+            return Ok(Json(ScanItemsOutcome::Conflict));
+        }
         let max_items = input.limit.unwrap_or(u32::MAX).min(10_000) as usize;
         let mut items = Vec::new();
         let mut bytes = 0_usize;

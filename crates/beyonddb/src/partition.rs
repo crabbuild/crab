@@ -31,7 +31,13 @@ use crate::{
 };
 use key::index_key;
 
-const SCHEMA: &str = include_str!("partition_schema.sql");
+pub(crate) static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "{}\n{}",
+        crate::participant::SCHEMA,
+        include_str!("partition_schema.sql")
+    )
+});
 
 static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     id: DATA_NAMESPACE,
@@ -100,6 +106,7 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
                 source.update(include_bytes!("partition/transaction/participant.rs"));
                 source.update(include_bytes!("partition/ttl.rs"));
                 source.update(include_bytes!("items.rs"));
+                source.update(include_bytes!("participant.rs"));
                 source.update(include_bytes!("table.rs"));
                 source.update(include_bytes!("expression_wire.rs"));
                 Digest::from_bytes(*source.finalize().as_bytes())
@@ -109,7 +116,7 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
             schema_max: 1,
             migrations: Box::leak(Box::new([MigrationDescriptor {
                 version: 1,
-                sql: SCHEMA,
+                sql: &SCHEMA,
                 digest: Digest::from_bytes(*blake3::hash(SCHEMA.as_bytes()).as_bytes()),
             }])),
             commands: &COMMANDS,

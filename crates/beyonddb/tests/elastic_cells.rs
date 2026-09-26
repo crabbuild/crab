@@ -1,4 +1,5 @@
 mod elastic_cells {
+    mod account_participant;
     mod coordinator_tokens;
     mod transaction_driver;
     pub(crate) mod transaction_visibility;
@@ -27,27 +28,27 @@ use beyonddb::{
     DeleteItem, DeleteItemInput, DeleteTable, DeleteTableOutcome, DescribeTable, GetItem,
     GetItemInput, GetItemOutcome, ImportPartitionItem, ImportSummary, IndexedTransactionWrite,
     InitialPartitionProvisioner, InstallPartition, InstallPartitionOutcome, ItemMutationOutcome,
-    Json, ListCoordinatorShards, ListCoordinatorShardsInput, NodeLeasePublisher, PartitionDelete,
-    PartitionDeleteInput, PartitionDeleteOutcome, PartitionExport, PartitionGet, PartitionGetInput,
-    PartitionGetOutcome, PartitionImportInput, PartitionImportOutcome, PartitionInstall,
-    PartitionLookupInput, PartitionLookupOutcome, PartitionPut, PartitionPutInput,
-    PartitionPutOutcome, PartitionScan, PartitionScanInput, PartitionScanOutcome, PartitionSeal,
-    PartitionSpec, PartitionState, PartitionTransactWrite, PartitionTransactWriteInput,
-    PartitionTransactWriteOutcome, PartitionUpdate, PartitionUpdateInput, PartitionUpdateOutcome,
-    PartitionUsage, PendingTransactionState, PreparePartitionTransaction,
-    PreparePartitionTransactionInput, PreparePartitionTransactionOutcome, PublishedNodeLease,
-    PutItem, PutItemInput, ReadCoordinatorParticipant, ReadCoordinatorParticipantInput,
-    ReadCrossCellTransaction, ReadCrossCellTransactionInput, ReadPartitionRoute,
-    ReadPartitionState, ReadPartitionTransaction, ReadPartitionTransactionInput,
-    ReadPartitionTransactionOutcome, ReadPendingCrossCellTransactions,
-    ReadPendingCrossCellTransactionsInput, ReadRoutePage, ReadSplitPlan, ReadSplitRoute,
-    ReadTableRoute, ReadTtlSchedule, ReadTtlSweep, ReadUnresolvedCoordinatorParticipants,
-    RecordParticipantPrepare, RecordParticipantResolution, ResolvePartitionTransaction,
-    ResolvePartitionTransactionInput, ResolvePartitionTransactionOutcome, RoutePageInput,
-    RoutePageOutcome, SealPartition, SealPartitionOutcome, SplitPlan, SplitRouteState, TableRoute,
-    TableSpec, TransactionToken, TransactionWrite, UpdateTtl, UpdateTtlInput, account_target,
-    build_http_state, coordinator_target, credential_target, data_key_hash, data_target,
-    initialize_account, initialize_coordinator, initialize_partition,
+    Json, ListCoordinatorShards, ListCoordinatorShardsInput, NodeLeasePublisher,
+    ParticipantTransactionState, PartitionDelete, PartitionDeleteInput, PartitionDeleteOutcome,
+    PartitionExport, PartitionGet, PartitionGetInput, PartitionGetOutcome, PartitionImportInput,
+    PartitionImportOutcome, PartitionInstall, PartitionLookupInput, PartitionLookupOutcome,
+    PartitionPut, PartitionPutInput, PartitionPutOutcome, PartitionScan, PartitionScanInput,
+    PartitionScanOutcome, PartitionSeal, PartitionSpec, PartitionState, PartitionTransactWrite,
+    PartitionTransactWriteInput, PartitionTransactWriteOutcome, PartitionUpdate,
+    PartitionUpdateInput, PartitionUpdateOutcome, PartitionUsage, PendingTransactionState,
+    PreparePartitionTransaction, PreparePartitionTransactionInput, PrepareTransactionOutcome,
+    PublishedNodeLease, PutItem, PutItemInput, ReadCoordinatorParticipant,
+    ReadCoordinatorParticipantInput, ReadCrossCellTransaction, ReadCrossCellTransactionInput,
+    ReadPartitionRoute, ReadPartitionState, ReadPartitionTransaction,
+    ReadPendingCrossCellTransactions, ReadPendingCrossCellTransactionsInput, ReadRoutePage,
+    ReadSplitPlan, ReadSplitRoute, ReadTableRoute, ReadTransactionInput, ReadTtlSchedule,
+    ReadTtlSweep, ReadUnresolvedCoordinatorParticipants, RecordParticipantPrepare,
+    RecordParticipantResolution, ResolvePartitionTransaction, ResolveTransactionInput,
+    ResolveTransactionOutcome, RoutePageInput, RoutePageOutcome, SealPartition,
+    SealPartitionOutcome, SplitPlan, SplitRouteState, TableRoute, TableSpec, TransactionToken,
+    TransactionWrite, UpdateTtl, UpdateTtlInput, account_target, build_http_state,
+    coordinator_target, credential_target, data_key_hash, data_target, initialize_account,
+    initialize_coordinator, initialize_partition,
 };
 use crab_cell_app::CellApplication;
 use crab_cell_host::CellNodeBuilder;
@@ -2685,10 +2686,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             )
             .await
             .unwrap();
-        assert_eq!(
-            prepared.output.0,
-            PreparePartitionTransactionOutcome::Prepared
-        );
+        assert_eq!(prepared.output.0, PrepareTransactionOutcome::Prepared);
         let recorded = client
             .command::<RecordParticipantPrepare>(
                 &coordinator_target,
@@ -2782,7 +2780,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             .command::<ResolvePartitionTransaction>(
                 &side.0,
                 identity(117 + u8::try_from(position).unwrap()),
-                Json(ResolvePartitionTransactionInput {
+                Json(ResolveTransactionInput {
                     transaction_id,
                     coordinator_cell: *coordinator_target.cell_id().as_bytes(),
                     commit: true,
@@ -2790,10 +2788,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             )
             .await
             .unwrap();
-        assert_eq!(
-            applied.output.0,
-            ResolvePartitionTransactionOutcome::Committed
-        );
+        assert_eq!(applied.output.0, ResolveTransactionOutcome::Committed);
         let recorded = client
             .command::<RecordParticipantResolution>(
                 &coordinator_target,
@@ -3523,15 +3518,12 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        prepared.output.0,
-        PreparePartitionTransactionOutcome::Prepared
-    );
+    assert_eq!(prepared.output.0, PrepareTransactionOutcome::Prepared);
     let prepared_state = client
         .query::<ReadPartitionTransaction>(
             &left_target,
             Some(prepared.receipt),
-            Json(ReadPartitionTransactionInput {
+            Json(ReadTransactionInput {
                 transaction_id: prepare_input.transaction_id,
                 coordinator_cell: prepare_input.coordinator_cell,
             }),
@@ -3540,7 +3532,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .unwrap();
     assert_eq!(
         prepared_state.output.0,
-        ReadPartitionTransactionOutcome::Prepared
+        ParticipantTransactionState::Prepared
     );
     let hidden = client
         .query::<PartitionGet>(
@@ -3601,7 +3593,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .command::<ResolvePartitionTransaction>(
             &left_target,
             identity(93),
-            Json(ResolvePartitionTransactionInput {
+            Json(ResolveTransactionInput {
                 transaction_id: prepare_input.transaction_id,
                 coordinator_cell: prepare_input.coordinator_cell,
                 commit: false,
@@ -3609,14 +3601,14 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         )
         .await
         .unwrap();
-    assert_eq!(abort.output.0, ResolvePartitionTransactionOutcome::Aborted);
+    assert_eq!(abort.output.0, ResolveTransactionOutcome::Aborted);
     let retry_after_abort = client
         .command::<PreparePartitionTransaction>(&left_target, identity(94), Json(prepare_input))
         .await;
     assert!(matches!(
         retry_after_abort,
         Err(InvocationError::Rejected(result))
-            if result.output.0 == PreparePartitionTransactionOutcome::Aborted
+            if result.output.0 == PrepareTransactionOutcome::Aborted
     ));
     let late_prepare = PreparePartitionTransactionInput {
         table_id: table.id.clone(),
@@ -3634,7 +3626,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .command::<ResolvePartitionTransaction>(
             &left_target,
             identity(98),
-            Json(ResolvePartitionTransactionInput {
+            Json(ResolveTransactionInput {
                 transaction_id: late_prepare.transaction_id,
                 coordinator_cell: late_prepare.coordinator_cell,
                 commit: false,
@@ -3648,7 +3640,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     assert!(matches!(
         fenced_late_prepare,
         Err(InvocationError::Rejected(result))
-            if result.output.0 == PreparePartitionTransactionOutcome::Aborted
+            if result.output.0 == PrepareTransactionOutcome::Aborted
     ));
     let committed_input = PreparePartitionTransactionInput {
         table_id: table.id.clone(),
@@ -3674,7 +3666,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .command::<ResolvePartitionTransaction>(
             &left_target,
             identity(96),
-            Json(ResolvePartitionTransactionInput {
+            Json(ResolveTransactionInput {
                 transaction_id: committed_input.transaction_id,
                 coordinator_cell: committed_input.coordinator_cell,
                 commit: true,
@@ -3682,10 +3674,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        commit.output.0,
-        ResolvePartitionTransactionOutcome::Committed
-    );
+    assert_eq!(commit.output.0, ResolveTransactionOutcome::Committed);
     let visible = client
         .query::<PartitionGet>(
             &left_target,
@@ -4233,7 +4222,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .unwrap();
     assert_eq!(
         recovery_prepare.output.0,
-        PreparePartitionTransactionOutcome::Prepared
+        PrepareTransactionOutcome::Prepared
     );
     let mut recovery_participant = participants
         .iter()
@@ -4623,14 +4612,14 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .query::<ReadPartitionTransaction>(
             &left_target,
             None,
-            Json(ReadPartitionTransactionInput {
+            Json(ReadTransactionInput {
                 transaction_id: abort_id,
                 coordinator_cell: *coordinator_target.cell_id().as_bytes(),
             }),
         )
         .await
         .unwrap();
-    assert_eq!(aborted.output.0, ReadPartitionTransactionOutcome::Aborted);
+    assert_eq!(aborted.output.0, ParticipantTransactionState::Aborted);
     let abort_status = restored_client
         .query::<ReadCrossCellTransaction>(
             &coordinator_target,
@@ -4704,7 +4693,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .query::<ReadPartitionTransaction>(
             restored_child_target,
             None,
-            Json(ReadPartitionTransactionInput {
+            Json(ReadTransactionInput {
                 transaction_id: [101; 16],
                 coordinator_cell: *account.cell_id().as_bytes(),
             }),
@@ -4713,7 +4702,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .unwrap();
     assert_eq!(
         recovered_intent.output.0,
-        ReadPartitionTransactionOutcome::Prepared
+        ParticipantTransactionState::Prepared
     );
     let recovered_read = restored_client
         .query::<PartitionGet>(
@@ -4763,7 +4752,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .command::<ResolvePartitionTransaction>(
             restored_child_target,
             identity(103),
-            Json(ResolvePartitionTransactionInput {
+            Json(ResolveTransactionInput {
                 transaction_id: [101; 16],
                 coordinator_cell: *account.cell_id().as_bytes(),
                 commit: false,
@@ -4771,15 +4760,12 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        recovered_abort.output.0,
-        ResolvePartitionTransactionOutcome::Aborted
-    );
+    assert_eq!(recovered_abort.output.0, ResolveTransactionOutcome::Aborted);
     let restored_transaction = restored_client
         .query::<ReadPartitionTransaction>(
             &left_target,
             None,
-            Json(ReadPartitionTransactionInput {
+            Json(ReadTransactionInput {
                 transaction_id: [95; 16],
                 coordinator_cell: *account.cell_id().as_bytes(),
             }),
@@ -4788,7 +4774,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .unwrap();
     assert_eq!(
         restored_transaction.output.0,
-        ReadPartitionTransactionOutcome::Committed
+        ParticipantTransactionState::Committed
     );
     let persisted = restored_client
         .query::<PartitionGet>(

@@ -158,6 +158,8 @@ impl Command for CreateTable {
 /// Result of removing a table and all its items.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DeleteTableOutcome {
+    /// Prepared account transactions still reference this table.
+    TransactionConflict,
     /// The removed table's last description.
     Deleted(TableRecord),
     /// No table has this name.
@@ -188,6 +190,12 @@ impl Command for DeleteTable {
         if table.deletion_protection_enabled {
             return Ok(CommandResult::Rejected(Json(
                 DeleteTableOutcome::DeletionProtected,
+            )));
+        }
+        // Deletion must not discard the table required to apply a durable COMMIT.
+        if crate::items::transaction::table_locked(context, &table.id)? {
+            return Ok(CommandResult::Rejected(Json(
+                DeleteTableOutcome::TransactionConflict,
             )));
         }
         context.sql(&SqlBatch {
