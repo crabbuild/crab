@@ -149,6 +149,7 @@ message ReadRequest {
     CellQuery cell_query = 15;
     bool replica_activate = 16; // Advisory; receiver verifies policy and current owner.
     CellQuery replica_query = 17; // Explicit snapshot-consistent read.
+    bool replica_reconcile = 18; // Advisory owner wake-up after policy CAS.
   }
   reserved 11 to 14;
 }
@@ -165,6 +166,7 @@ message ReadReply {
     bytes command_output = 6;
     Error error = 7;
     bool replica_ready = 8; // Receipt names the exact local snapshot.
+    bool replica_reconciled = 9; // Owner accepted a reconciliation hint.
   }
   reserved 3 to 5;
 }

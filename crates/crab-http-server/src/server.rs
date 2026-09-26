@@ -1861,6 +1861,7 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
         .merge(crate::members::routes())
         .merge(assignees::routes(Arc::clone(&server)))
         .merge(branches::routes())
+        .merge(crate::cell_readers::routes())
         .merge(checks::routes(Arc::clone(&server)))
         .merge(contents::routes())
         .merge(issues::routes(Arc::clone(&server)))

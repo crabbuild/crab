@@ -1,8 +1,8 @@
 # Plan 036: S3-durable Cell read replicas and fenced promotion
 
 Status: PARTIAL IMPLEMENTATION — exact-root views, S3 desired-count policy,
-private peer activation/query, and object-mode reconciliation exist; no public
-product replica route or production qualification
+private peer activation/query, object-mode reconciliation, and an operator
+target API exist; no public product replica route or production qualification
 Base: `origin/main` at `de0bb234abc` (2026-09-25); Cell/LTX source compared with the planning checkout at `fa182c94c7e`
 Priority: P1 read scaling; P0 safety for any enabled deployment. Effort: XL. Risk: HIGH.
 Depends on: the recovery implementations tracked by plans 032 and 035;
@@ -58,8 +58,10 @@ retain their exact old view until completion.
 The S3 desired-count object supports conditional create/update. In object
 durability mode, the server now reconciles active owner Cells, sends authenticated
 activation hints to selected nodes, refreshes their admitted read views, and
-accepts explicit authenticated private replica queries. No public product route,
-operator target API, sparse read view, warm-reader promotion preference, or
+accepts explicit authenticated private replica queries. An administrator may
+CAS the target count through the product API, which sends an authenticated
+owner wake-up hint. No public product route, verified ready-count status,
+sparse read view, warm-reader promotion preference, or
 production qualification is enabled.
 The server can select the existing object proof path with `[cells]
 durability = "object"` for a fresh deployment; fleet remains the default and
@@ -258,8 +260,9 @@ record, mutable LTX head, or owner-to-owner database copy.
 Current slice state (local proof only): 0 partially reconciled in docs; 1 open;
 2 full-restore read-only opener, atomic refresh, and exact-root tests pass, but
 sparse view and provider fault cases remain; 3 policy CAS, signed selection,
-owner reconciliation, private activation, and node admission exist, but target
-status and churn qualification remain; 4 typed local and peer queries, position
+owner reconciliation, private activation, node admission, and administrator
+target CAS with owner hint exist, but verified ready status and churn qualification
+remain; 4 typed local and peer queries, position
 errors, receipt checks, and authority gates exist, but public product routing
 remains open; 5 and 6 open. Private peer replica requests are accepted only in
 the object-durability server profile.

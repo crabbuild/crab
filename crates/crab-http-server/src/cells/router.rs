@@ -141,58 +141,109 @@ impl RepositoryCellRouter {
             *cursor = 0;
             return Ok(());
         }
-        let now_ms = super::unix_now_ms()?;
-        let policy = ReadPolicyStore::new(self.layout.clone());
         let count = entries.len().min(READ_RECONCILE_BATCH);
         for offset in 0..count {
             let entry = &entries[(*cursor + offset) % entries.len()];
-            let Some(target_policy) = policy.load(entry.cell()).await? else {
-                continue;
-            };
-            let target_policy = target_policy.value();
-            if target_policy.desired_readers() == 0 {
-                continue;
-            }
-            let Some(control) = self.authority.load(entry.cell()).await? else {
-                continue;
-            };
-            let control = control.value();
-            if control.state != ControlState::Serving
-                || control.owner.as_ref() != Some(&self.peer.owner)
-                || target_policy.incarnation() != control.incarnation
-            {
-                continue;
-            }
             let target = CellTarget::new(
                 self.identity.tenant(),
                 self.identity.application(),
                 entry.namespace(),
                 entry.partition(),
             )?;
-            let selected = self
-                .peer
-                .directory
-                .select_readers(
-                    entry.cell(),
-                    self.peer.owner.session,
-                    control.code,
-                    usize::from(target_policy.desired_readers()),
-                    now_ms,
-                    10_000,
-                )
-                .await?;
-            for node in selected {
-                if let Err(error) = self
-                    .peer
-                    .activate_read_replica(target.clone(), node, now_ms)
-                    .await
-                {
-                    tracing::warn!(cell = ?entry.cell(), error = %error, "Cell read replica activation hint failed");
-                }
-            }
+            self.reconcile_reader_target(target).await?;
         }
         *cursor = (*cursor + count) % entries.len();
         Ok(())
+    }
+
+    pub(crate) async fn reconcile_reader_target(&self, target: CellTarget) -> crate::Result<()> {
+        if target.tenant() != self.identity.tenant()
+            || target.application() != self.identity.application()
+            || target.namespace() != REPOSITORY_NAMESPACE
+        {
+            return Err(crab_cell_runtime::Error::PeerAuthorization(
+                "read-replica target is outside the repository application",
+            )
+            .into());
+        }
+        let cell = target.cell_id();
+        let policy = ReadPolicyStore::new(self.layout.clone());
+        let Some(target_policy) = policy.load(cell).await? else {
+            return Ok(());
+        };
+        let target_policy = target_policy.value();
+        if target_policy.desired_readers() == 0 {
+            return Ok(());
+        }
+        let Some(control) = self.authority.load(cell).await? else {
+            return Ok(());
+        };
+        let control = control.value();
+        if control.state != ControlState::Serving
+            || control.owner.as_ref() != Some(&self.peer.owner)
+            || target_policy.incarnation() != control.incarnation
+        {
+            return Ok(());
+        }
+        let now_ms = super::unix_now_ms()?;
+        let selected = self
+            .peer
+            .directory
+            .select_readers(
+                cell,
+                self.peer.owner.session,
+                control.code,
+                usize::from(target_policy.desired_readers()),
+                now_ms,
+                10_000,
+            )
+            .await?;
+        for node in selected {
+            if let Err(error) = self
+                .peer
+                .activate_read_replica(target.clone(), node, now_ms)
+                .await
+            {
+                tracing::warn!(?cell, error = %error, "Cell read replica activation hint failed");
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn hint_read_replica_target(&self, target: CellTarget) -> crate::Result<()> {
+        let Some(control) = self.authority.load(target.cell_id()).await? else {
+            return Ok(());
+        };
+        let Some(owner) = control.value().owner.as_ref() else {
+            return Ok(());
+        };
+        if owner.session == self.peer.owner.session {
+            return self.reconcile_reader_target(target).await;
+        }
+        let now_ms = super::unix_now_ms()?;
+        let request = self.peer.signer.sign(
+            self.runtime_principal(&["cell.replica.reconcile"]),
+            now_ms,
+            now_ms.saturating_add(60_000),
+            30_000,
+            PeerOperation::Read(peer_wire::ReadRequest {
+                target: Some(peer_target(&target)),
+                timeout_ms: 30_000,
+                minimum: None,
+                operation: Some(peer_wire::read_request::Operation::ReplicaReconcile(true)),
+            }),
+        )?;
+        let reply = self.peer.round_trip.send(target, request, 30_000).await?;
+        let reply = crab_cell_runtime::peer::decode_peer_reply(&reply)?;
+        match reply.outcome {
+            Some(peer_wire::peer_reply::Outcome::Read(peer_wire::ReadReply {
+                receipt: None,
+                result: Some(peer_wire::read_reply::Result::ReplicaReconciled(true)),
+            })) => Ok(()),
+            _ => Err(
+                crab_cell_runtime::Error::Peer("owner rejected read-replica reconciliation").into(),
+            ),
+        }
     }
 
     pub(crate) fn new(
@@ -426,12 +477,7 @@ impl RepositoryCellRouter {
         action: &'static str,
     ) -> crate::Result<RepositoryCell> {
         validate_action(action)?;
-        let target = CellTarget::new(
-            self.identity.tenant(),
-            self.identity.application(),
-            REPOSITORY_NAMESPACE,
-            repository.as_bytes(),
-        )?;
+        let target = self.repository_target(repository)?;
         self.route_target(
             target,
             PeerPrincipal {
@@ -442,6 +488,18 @@ impl RepositoryCellRouter {
         )
         .await
         .map(|scheduled| scheduled.cell)
+    }
+
+    pub(crate) fn repository_target(
+        &self,
+        repository: Uuid,
+    ) -> crab_cell_runtime::Result<CellTarget> {
+        CellTarget::new(
+            self.identity.tenant(),
+            self.identity.application(),
+            REPOSITORY_NAMESPACE,
+            repository.as_bytes(),
+        )
     }
 
     pub(crate) async fn route_scheduler_target(

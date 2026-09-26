@@ -14,11 +14,11 @@ use crab_cell_runtime::{
     cell::actor::CellRuntime,
     client::{CellReadReplica, Receipt},
     control::{Control, ControlState, authority::CellAuthority},
-    identity::{CellId, CellTarget, SessionId},
+    identity::{CellId, CellTarget, IncarnationId, SessionId},
     ltx::{CellReplica, CellStorageLayout},
     node::NodeDirectory,
     peer::PeerReplicaResolver,
-    read_policy::ReadPolicyStore,
+    read_policy::{ReadPolicy, ReadPolicyStore},
     registry::Registry,
 };
 use tokio::sync::{Mutex, RwLock};
@@ -66,6 +66,76 @@ impl ReadReplicaManager {
             activation: Arc::new(Mutex::new(())),
             active: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    pub(crate) async fn target(
+        &self,
+        target: &CellTarget,
+    ) -> Result<(IncarnationId, Option<ReadPolicy>)> {
+        let control = self
+            .authority
+            .load(target.cell_id())
+            .await?
+            .ok_or(Error::CellNotActive)?;
+        if control.value().state == ControlState::Tombstoned {
+            return Err(Error::CellNotActive);
+        }
+        let policy = self
+            .policy
+            .load(target.cell_id())
+            .await?
+            .map(|observed| observed.value());
+        Ok((control.value().incarnation, policy))
+    }
+
+    pub(crate) async fn set_target(
+        &self,
+        target: &CellTarget,
+        expected_revision: u64,
+        desired_readers: u16,
+    ) -> Result<Option<ReadPolicy>> {
+        let control = self
+            .authority
+            .load(target.cell_id())
+            .await?
+            .ok_or(Error::CellNotActive)?;
+        if control.value().state == ControlState::Tombstoned {
+            return Err(Error::CellNotActive);
+        }
+        let incarnation = control.value().incarnation;
+        let observed = self.policy.load(target.cell_id()).await?;
+        let updated = match observed {
+            None if expected_revision == 0 => {
+                self.policy
+                    .create(target.cell_id(), incarnation, desired_readers)
+                    .await?
+            }
+            Some(observed) if observed.value().revision() == expected_revision => {
+                if observed.value().incarnation() == incarnation {
+                    if observed.value().desired_readers() == desired_readers {
+                        observed
+                    } else {
+                        self.policy.update(&observed, desired_readers).await?
+                    }
+                } else {
+                    self.policy
+                        .replace_incarnation(&observed, incarnation, desired_readers)
+                        .await?
+                }
+            }
+            _ => return Ok(None),
+        };
+        let current = self
+            .authority
+            .load(target.cell_id())
+            .await?
+            .ok_or(Error::Fenced)?;
+        if current.value().incarnation != incarnation
+            || current.value().state == ControlState::Tombstoned
+        {
+            return Err(Error::Fenced);
+        }
+        Ok(Some(updated.value()))
     }
 
     pub(crate) async fn activate(&self, target: CellTarget, origin: SessionId) -> Result<Receipt> {

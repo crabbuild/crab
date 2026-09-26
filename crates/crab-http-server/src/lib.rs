@@ -7,6 +7,7 @@ mod assignees;
 mod auth;
 mod branches;
 pub mod catalog;
+mod cell_readers;
 mod cells;
 mod checks;
 mod config;

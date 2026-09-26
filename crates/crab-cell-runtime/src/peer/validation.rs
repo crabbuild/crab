@@ -79,6 +79,12 @@ pub(super) fn validate_read_reply(reply: &wire::ReadReply) -> Result<()> {
         Some(wire::read_reply::Result::ReplicaReady(false)) => {
             Err(Error::Peer("replica-ready selector must be true"))
         }
+        Some(wire::read_reply::Result::ReplicaReconciled(true)) if reply.receipt.is_none() => {
+            Ok(())
+        }
+        Some(wire::read_reply::Result::ReplicaReconciled(_)) => {
+            Err(Error::Peer("invalid replica reconciliation reply"))
+        }
         Some(wire::read_reply::Result::Error(error)) => validate_error(error),
         None => Err(Error::Peer("read reply result is missing")),
     }
@@ -288,6 +294,11 @@ pub(super) fn validate_read(request: &wire::ReadRequest) -> Result<()> {
         Some(wire::read_request::Operation::ReplicaActivate(true)) if request.minimum.is_none() => {
             Ok(())
         }
+        Some(wire::read_request::Operation::ReplicaReconcile(true))
+            if request.minimum.is_none() =>
+        {
+            Ok(())
+        }
         Some(wire::read_request::Operation::ReplicaQuery(query))
             if query.query_id != 0 && query.codec_version != 0 =>
         {
@@ -301,6 +312,9 @@ pub(super) fn validate_read(request: &wire::ReadRequest) -> Result<()> {
         }
         Some(wire::read_request::Operation::ReplicaActivate(_)) => {
             Err(Error::Peer("invalid replica activation request"))
+        }
+        Some(wire::read_request::Operation::ReplicaReconcile(_)) => {
+            Err(Error::Peer("invalid replica reconciliation request"))
         }
         None => Err(Error::Peer("read operation is missing")),
     }

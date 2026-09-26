@@ -96,6 +96,10 @@ impl PeerReceiver {
             read_replicas,
         }
     }
+
+    pub(crate) fn read_replicas(&self) -> Option<crate::cells::ReadReplicaManager> {
+        self.read_replicas.clone()
+    }
 }
 
 pub(crate) struct NodePublisher {
@@ -822,6 +826,9 @@ fn runtime_cell_action(registry: &Registry, request: &VerifiedPeerRequest) -> Op
             Some(peer_wire::read_request::Operation::ReplicaActivate(true)) => {
                 Some("cell.replica.activate")
             }
+            Some(peer_wire::read_request::Operation::ReplicaReconcile(true)) => {
+                Some("cell.replica.reconcile")
+            }
             _ => None,
         },
         Some(peer_wire::peer_request::Operation::Resolve(_)) => runtime_principal_action(request),
@@ -885,6 +892,39 @@ pub(crate) async fn forward(
     if let Err(error) = server.authorize(&request) {
         tracing::warn!(error = %error, "peer request authorization failed");
         return peer_http_error(StatusCode::UNAUTHORIZED);
+    }
+    if matches!(
+        request.operation(),
+        Some(peer_wire::peer_request::Operation::Read(
+            peer_wire::ReadRequest {
+                operation: Some(peer_wire::read_request::Operation::ReplicaReconcile(true)),
+                ..
+            }
+        ))
+    ) {
+        if receiver.read_replicas.is_none() {
+            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        let Some(router) = server.repository_cells() else {
+            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+        };
+        if let Err(error) = router
+            .reconcile_reader_target(request.target().clone())
+            .await
+        {
+            tracing::warn!(error = %error, "read replica reconciliation hint failed");
+            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        let reply = peer_wire::PeerReply {
+            outcome: Some(peer_wire::peer_reply::Outcome::Read(peer_wire::ReadReply {
+                receipt: None,
+                result: Some(peer_wire::read_reply::Result::ReplicaReconciled(true)),
+            })),
+        };
+        return match encode_peer_reply(&reply) {
+            Ok(body) => peer_http_reply(body),
+            Err(_) => peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
+        };
     }
     if matches!(
         request.operation(),

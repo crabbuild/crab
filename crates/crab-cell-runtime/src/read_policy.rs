@@ -9,7 +9,8 @@ use crate::identity::{CellId, IncarnationId, decode_hex, encode_hex};
 use crate::{Error, Result};
 
 const MAX_POLICY_BYTES: u64 = 512;
-const MAX_READERS: u16 = 10_000;
+/// Highest operator-requested reader count accepted by the policy codec.
+pub const MAX_READERS: u16 = 10_000;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

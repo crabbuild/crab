@@ -9,7 +9,6 @@ use crab_cell_runtime::identity::{ApplicationId, Digest, SessionId, TenantId};
 use crab_cell_runtime::ltx::CellStorageLayout;
 use crab_cell_runtime::node::NodeDirectory;
 use crab_cell_runtime::peer::{PeerPrincipal, PeerReplicaResolver, ReplicaPeerClient};
-use crab_cell_runtime::read_policy::ReadPolicyStore;
 use crab_storage::{ObjectStoreCredentials, build_explicit_store};
 use object_store::{memory::InMemory, path::Path as ObjectPath};
 use serde_json::Value;
@@ -213,7 +212,13 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
                 registry.release_digest(),
                 peer_tls.signing_key().clone(),
             )),
-            Arc::new(UnavailablePeer),
+            Arc::new(PeerHttpRoundTrip::new(
+                identity,
+                CellAuthority::new(cell_layout.clone()),
+                directory.clone(),
+                peer_tls.client_identity(),
+                owner_session,
+            )),
             crab_cell_runtime::control::Owner {
                 session: owner_session,
                 endpoint: management_endpoint,
@@ -249,11 +254,20 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .root
         .clone();
 
+    let owner_read_replicas = crate::cells::ReadReplicaManager::new(
+        owner_runtime.clone(),
+        Arc::clone(&registry),
+        cell_layout.clone(),
+        directory.clone(),
+        owner_session,
+        owner_dir.path().join("read-replicas"),
+    );
+
     let owner_server = server(
         Arc::clone(&repository),
         store.clone(),
         owner_runtime.clone(),
-        None,
+        Some(owner_router.clone()),
         Some(PeerReceiver::new(
             owner_node,
             owner_session,
@@ -268,7 +282,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             ),
             LocalCellResolver::new(cell_layout.clone(), identity, owner_runtime.clone()),
             Arc::new(UnavailablePeer),
-            None,
+            Some(owner_read_replicas),
         )),
     );
     let owner_heartbeat_stop = CancellationToken::new();
@@ -648,15 +662,25 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     assert_ne!(root_after, root_before);
 
     let current = authority.load(target.cell_id()).await.unwrap().unwrap();
-    let policy = ReadPolicyStore::new(cell_layout.clone());
-    let one_reader = policy
-        .create(target.cell_id(), current.value().incarnation, 1)
-        .await
-        .unwrap();
+    let readers_url = format!("{public_origin}/api/repos/team/repo/settings/read-replicas");
+    let initial_target = json_get(&client, readers_url.as_str()).await;
+    assert_eq!(initial_target.0, StatusCode::OK);
+    assert_eq!(initial_target.1["desired_readers"], 0);
+    let one_reader = json_request(
+        &client,
+        reqwest::Method::PUT,
+        readers_url.as_str(),
+        serde_json::json!({"expected_revision":0,"desired_readers":1}),
+    )
+    .await;
+    assert_eq!(one_reader.0, StatusCode::ACCEPTED);
+    assert_eq!(one_reader.1["revision"], 1);
     let ready = reader
-        .activate(target.clone(), owner_session)
+        .resolve(target.clone())
         .await
-        .unwrap();
+        .unwrap()
+        .receipt()
+        .await;
     let observed = reader
         .resolve(target.clone())
         .await
@@ -710,7 +734,22 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .unwrap();
     assert_eq!(remote.output.unwrap().title, "Remote Cell");
 
-    let zero_readers = policy.update(&one_reader, 0).await.unwrap();
+    let stale_update = json_request(
+        &client,
+        reqwest::Method::PUT,
+        readers_url.as_str(),
+        serde_json::json!({"expected_revision":0,"desired_readers":0}),
+    )
+    .await;
+    assert_eq!(stale_update.0, StatusCode::CONFLICT);
+    let zero_readers = json_request(
+        &client,
+        reqwest::Method::PUT,
+        readers_url.as_str(),
+        serde_json::json!({"expected_revision":1,"desired_readers":0}),
+    )
+    .await;
+    assert_eq!(zero_readers.0, StatusCode::ACCEPTED);
     let stop_readers = CancellationToken::new();
     let running_reader = reader.clone();
     let running_stop = stop_readers.clone();
@@ -728,11 +767,15 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     stop_readers.cancel();
     reader_task.await.unwrap().unwrap();
     assert_eq!(ingress_runtime.stats().file_descriptors(), 0);
-    policy.update(&zero_readers, 1).await.unwrap();
-    reader
-        .activate(target.clone(), owner_session)
-        .await
-        .unwrap();
+    let restored_target = json_request(
+        &client,
+        reqwest::Method::PUT,
+        readers_url.as_str(),
+        serde_json::json!({"expected_revision":2,"desired_readers":1}),
+    )
+    .await;
+    assert_eq!(restored_target.0, StatusCode::ACCEPTED);
+    assert!(reader.resolve(target.clone()).await.is_ok());
 
     management_stop.send(()).unwrap();
     management_task.await.unwrap();

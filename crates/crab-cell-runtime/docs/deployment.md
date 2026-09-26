@@ -25,6 +25,16 @@ snapshot API and policy described in
 are not yet a public product route or a qualified deployment. Fleet-only
 acknowledgements do not provide the plan's all-secondary-loss guarantee.
 
+An administrator can set a repository Cell's desired read-replica count with
+`PUT /api/repos/{owner}/{name}/settings/read-replicas`, sending
+`{"expected_revision":0,"desired_readers":1}` for the first policy and the
+returned revision for later changes. `GET` on the same path returns the current
+target and revision. A successful update means the S3 policy CAS completed;
+the `convergence` field remains `pending` until independently checked reader
+readiness is available. The server sends an authenticated owner hint after the
+CAS and also reconciles owned Cells periodically. A stale revision returns
+HTTP 409. This API is available only in the object durability profile.
+
 ## Configure one process per node
 
 The existing HTTP server owns Cell runtime construction. Configuration supplies the authoritative object store, local volume, public listener, management listener, and peer identity.
