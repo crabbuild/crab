@@ -1,4 +1,4 @@
-//! Resume write transactions from immutable coordinator records.
+//! Resume read and write transactions from immutable coordinator records.
 
 use crab_cell_runtime::client::{InvocationError, Receipt};
 use crab_cell_runtime::identity::CellTarget;
@@ -17,7 +17,7 @@ use crate::{
 };
 
 impl CellStorage {
-    /// Drive an admitted write transaction using its durable participant payloads.
+    /// Drive an admitted transaction using its durable participant payloads.
     ///
     /// The coordinator must already contain a published BEGIN. Returns its
     /// terminal decision only after every participant resolution is published.

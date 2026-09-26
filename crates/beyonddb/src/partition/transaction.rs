@@ -1,5 +1,6 @@
 //! Atomic reads and writes within one routed data Cell.
 
+use crate::participant::StagedEffect;
 use std::collections::HashSet;
 
 use crab_cell_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
@@ -12,7 +13,7 @@ use super::{
     valid_item, valid_key, write_item,
 };
 use crate::PrepareTransactionOutcome;
-use crate::items::{TransactionFailure, TransactionWrite, decode_item};
+use crate::items::{TransactionFailure, TransactionOperation, decode_item};
 
 /// Ordered writes that must all address the same installed data Cell.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -22,7 +23,7 @@ pub struct PartitionTransactWriteInput {
     /// Data Cell epoch observed at routing time.
     pub epoch: u64,
     /// Item writes and condition checks in request order.
-    pub operations: Vec<TransactionWrite>,
+    pub operations: Vec<TransactionOperation>,
 }
 
 /// Result of one partition-local transactional write.
@@ -118,7 +119,7 @@ struct StagedImage {
     partition_key: Vec<u8>,
     sort_key: Vec<u8>,
     image: Option<Item>,
-    write: bool,
+    effect: StagedEffect,
 }
 
 enum StageError {
@@ -155,22 +156,25 @@ impl StageError {
 fn stage_operations(
     context: &mut CommandContext<'_, '_>,
     spec: &PartitionSpec,
-    operations: Vec<TransactionWrite>,
+    operations: Vec<TransactionOperation>,
 ) -> Result<std::result::Result<Vec<StagedImage>, StageError>> {
     let mut touched = HashSet::with_capacity(operations.len());
     let mut staged = Vec::with_capacity(operations.len());
+    let mut read_bytes = 0;
     for (index, operation) in operations.into_iter().enumerate() {
+        let shared = matches!(operation, TransactionOperation::Read(_));
         let (table_id, item, condition) = match &operation {
-            TransactionWrite::Put(input) => {
+            TransactionOperation::Read(input) => (&input.table_id, &input.key, None),
+            TransactionOperation::Put(input) => {
                 (&input.table_id, &input.item, input.condition.as_ref())
             }
-            TransactionWrite::Delete(input) => {
+            TransactionOperation::Delete(input) => {
                 (&input.table_id, &input.key, input.condition.as_ref())
             }
-            TransactionWrite::Update(input) => {
+            TransactionOperation::Update(input) => {
                 (&input.table_id, &input.key, input.condition.as_ref())
             }
-            TransactionWrite::ConditionCheck(input) => {
+            TransactionOperation::ConditionCheck(input) => {
                 (&input.table_id, &input.key, Some(&input.condition))
             }
         };
@@ -178,7 +182,7 @@ fn stage_operations(
             return Ok(Err(StageError::StaleRoute));
         }
         let valid = match operation {
-            TransactionWrite::Put(_) => valid_item(item, &spec.table),
+            TransactionOperation::Put(_) => valid_item(item, &spec.table),
             _ => valid_key(item, &spec.table),
         };
         if !valid {
@@ -188,13 +192,13 @@ fn stage_operations(
         if !spec.contains(data_key_hash(&spec.table.id, item, &spec.table.key_schema)?) {
             return Ok(Err(StageError::WrongPartition));
         }
-        if !touched.insert(key.clone()) {
+        if !touched.insert(key.clone()) && !shared {
             return Ok(Err(stage_validation(
                 index,
                 "more than one operation addresses the same item",
             )));
         }
-        if key_locked(context, &key)? {
+        if !context.sql(&lock_query(&key, shared))?[0].rows.is_empty() {
             return Ok(Err(StageError::Rejected {
                 index,
                 reason: TransactionFailure::Conflict,
@@ -215,10 +219,10 @@ fn stage_operations(
             }
         }
         let (partition_key, sort_key) = super::key::index_key(item, &spec.table.key_schema)?;
-        let (image, write) = match operation {
-            TransactionWrite::Put(input) => (Some(input.item), true),
-            TransactionWrite::Delete(_) => (None, true),
-            TransactionWrite::Update(input) => {
+        let (image, effect) = match operation {
+            TransactionOperation::Put(input) => (Some(input.item), StagedEffect::Write),
+            TransactionOperation::Delete(_) => (None, StagedEffect::Write),
+            TransactionOperation::Update(input) => {
                 let mut new = old.unwrap_or(input.key);
                 if let Err(reason) = input
                     .update
@@ -230,16 +234,28 @@ fn stage_operations(
                 {
                     return Ok(Err(stage_validation(index, "item violates table schema")));
                 }
-                (Some(new), true)
+                (Some(new), StagedEffect::Write)
             }
-            TransactionWrite::ConditionCheck(_) => (None, false),
+            TransactionOperation::ConditionCheck(_) => (None, StagedEffect::Check),
+            TransactionOperation::Read(_) => (old, StagedEffect::Read),
         };
+        if effect == StagedEffect::Read {
+            read_bytes += image
+                .as_ref()
+                .map_or(0, extenddb_core::types::item_size_bytes);
+            if read_bytes > 4 * 1024 * 1024 {
+                return Ok(Err(stage_validation(
+                    index,
+                    "transaction read exceeds 4 MiB",
+                )));
+            }
+        }
         staged.push(StagedImage {
             key,
             partition_key,
             sort_key,
             image,
-            write,
+            effect,
         });
     }
     Ok(Ok(staged))
@@ -258,7 +274,7 @@ fn apply_staged(
     staged: Vec<StagedImage>,
 ) -> Result<()> {
     for image in staged {
-        if !image.write {
+        if image.effect != StagedEffect::Write {
             continue;
         }
         if let Some(item) = image.image {
@@ -277,11 +293,18 @@ mod participant;
 pub use participant::*;
 
 pub(super) fn key_locked(context: &mut CommandContext<'_, '_>, key: &[u8]) -> Result<bool> {
-    let rows = context.sql(&statement(
-        "SELECT 1 FROM ddb_partition_transaction_locks WHERE item_key = ?1",
+    Ok(!context.sql(&lock_query(key, false))?[0].rows.is_empty())
+}
+
+fn lock_query(key: &[u8], write_only: bool) -> crate::SqlBatch {
+    statement(
+        if write_only {
+            "SELECT 1 FROM ddb_partition_transaction_locks WHERE item_key = ?1 AND write_lock = 1"
+        } else {
+            "SELECT 1 FROM ddb_partition_transaction_locks WHERE item_key = ?1"
+        },
         vec![SqlValue::Blob(key.to_vec())],
-    ))?;
-    Ok(!rows[0].rows.is_empty())
+    )
 }
 
 pub(super) fn has_transaction_locks(context: &mut CommandContext<'_, '_>) -> Result<bool> {
@@ -293,11 +316,7 @@ pub(super) fn has_transaction_locks(context: &mut CommandContext<'_, '_>) -> Res
 }
 
 pub(super) fn read_key_locked(context: &QueryContext<'_>, key: &[u8]) -> Result<bool> {
-    let rows = context.sql(&statement(
-        "SELECT 1 FROM ddb_partition_transaction_locks WHERE item_key = ?1",
-        vec![SqlValue::Blob(key.to_vec())],
-    ))?;
-    Ok(!rows[0].rows.is_empty())
+    Ok(!context.sql(&lock_query(key, true))?[0].rows.is_empty())
 }
 
 /// Result of one consistent read from a routed data Cell.

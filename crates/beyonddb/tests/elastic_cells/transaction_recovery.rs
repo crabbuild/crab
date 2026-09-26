@@ -40,7 +40,7 @@ pub(super) async fn assert_background_recovery(
         .unwrap();
     let isolated_partition = [231; 16];
     let isolated_target = data_target(account_id, &table.id, &isolated_partition).unwrap();
-    let TransactionWrite::Put(original) = &participants[0].1.operations[0].operation else {
+    let TransactionOperation::Put(original) = &participants[0].1.operations[0].operation else {
         unreachable!()
     };
     let mut isolated = participants[0].1.clone();
@@ -66,7 +66,7 @@ pub(super) async fn assert_background_recovery(
     let good_id = [232; 16];
     let mut request: Vec<_> = participants.iter().map(|(_, part)| part.clone()).collect();
     for participant in &mut request {
-        let TransactionWrite::Put(input) = &mut participant.operations[0].operation else {
+        let TransactionOperation::Put(input) = &mut participant.operations[0].operation else {
             unreachable!()
         };
         input
@@ -208,7 +208,7 @@ pub(super) async fn assert_background_recovery(
         CoordinatorDecision::Commit
     );
     for ((target, _), participant) in participants.iter().zip(&request) {
-        let TransactionWrite::Put(input) = &participant.operations[0].operation else {
+        let TransactionOperation::Put(input) = &participant.operations[0].operation else {
             unreachable!()
         };
         assert_eq!(
@@ -284,9 +284,9 @@ pub(super) async fn assert_background_recovery(
                         partition_id: isolated_partition,
                         epoch: 1,
                     },
-                    operations: vec![IndexedTransactionWrite {
+                    operations: vec![IndexedTransactionOperation {
                         index: 0,
-                        operation: TransactionWrite::Put(aborted_put.clone()),
+                        operation: TransactionOperation::Put(aborted_put.clone()),
                     }],
                 }],
             }),
@@ -302,7 +302,7 @@ pub(super) async fn assert_background_recovery(
                 epoch: 1,
                 transaction_id: abort_id,
                 coordinator_cell: *abort_coordinator.cell_id().as_bytes(),
-                operations: vec![TransactionWrite::Put(aborted_put)],
+                operations: vec![TransactionOperation::Put(aborted_put)],
             }),
         )
         .await

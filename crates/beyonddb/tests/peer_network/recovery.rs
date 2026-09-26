@@ -3,9 +3,9 @@ use beyonddb::{
     BeginCrossCellTransaction, BeginCrossCellTransactionInput, CellStorage, CoordinatorDecision,
     CoordinatorParticipant, CoordinatorParticipantTarget, CoordinatorPhaseInput,
     CoordinatorProvisioner, DecideCrossCellTransaction, DecideCrossCellTransactionInput,
-    IndexedTransactionWrite, PreparePartitionTransaction, PreparePartitionTransactionInput,
+    IndexedTransactionOperation, PreparePartitionTransaction, PreparePartitionTransactionInput,
     PutItemInput, RecordParticipantPrepare, ResolvePartitionTransaction, ResolveTransactionInput,
-    TransactionWrite, coordinator_target, data_target,
+    TransactionOperation, coordinator_target, data_target,
 };
 use extenddb_core::types::{AttributeValue, Item};
 
@@ -50,9 +50,9 @@ pub(crate) async fn assert_abandoned_commit(
                     partition_id: partition.partition_id,
                     epoch: partition.epoch,
                 },
-                operations: vec![IndexedTransactionWrite {
+                operations: vec![IndexedTransactionOperation {
                     index: u8::try_from(index).unwrap(),
-                    operation: TransactionWrite::Put(PutItemInput {
+                    operation: TransactionOperation::Put(PutItemInput {
                         table_name: name.into(),
                         table_id: table.id,
                         item: Item::from([
@@ -183,6 +183,35 @@ pub(crate) async fn assert_abandoned_commit(
 }
 
 pub(crate) async fn assert_recovered_images(sdk: &aws_sdk_dynamodb::Client) {
+    let read = sdk
+        .transact_get_items()
+        .set_transact_items(Some(
+            ["RemoteTable", "NetworkData"]
+                .into_iter()
+                .map(|table| {
+                    aws_sdk_dynamodb::types::TransactGetItem::builder()
+                        .get(
+                            aws_sdk_dynamodb::types::Get::builder()
+                                .table_name(table)
+                                .key("id", AwsAttributeValue::S("abandoned".into()))
+                                .build()
+                                .unwrap(),
+                        )
+                        .build()
+                })
+                .collect(),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read.responses().len(), 2);
+    assert!(
+        read.responses()
+            .iter()
+            .all(|response| response.item().unwrap().get("value")
+                == Some(&AwsAttributeValue::S("recovered".into())))
+    );
+
     for table in ["NetworkData", "RemoteTable"] {
         let result = sdk
             .get_item()

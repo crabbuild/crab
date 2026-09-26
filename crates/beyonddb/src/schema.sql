@@ -69,6 +69,9 @@ CREATE TABLE ddb_account_transaction_locks (
     table_id TEXT NOT NULL REFERENCES ddb_tables(table_id),
     item_key BLOB NOT NULL,
     transaction_id BLOB NOT NULL REFERENCES ddb_transactions(transaction_id),
-    PRIMARY KEY (table_id, item_key)
+    write_lock INTEGER NOT NULL CHECK (write_lock IN (0, 1)),
+    PRIMARY KEY (table_id, item_key, transaction_id)
 );
 CREATE INDEX ddb_account_transaction_locks_owner ON ddb_account_transaction_locks (transaction_id);
+CREATE INDEX ddb_account_write_locks ON ddb_account_transaction_locks (table_id, item_key)
+    WHERE write_lock = 1;

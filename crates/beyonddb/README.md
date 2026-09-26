@@ -113,7 +113,9 @@ routes. Successful tokens replay for ten minutes after all participants
 resolve; canceled tokens are released only after every abort resolves.
 The signed SDK process test writes two primary keys in distinct data Cells,
 checks replay, mismatch and rollback, then verifies replay and both values
-after a hard kill and restart. Cross-Cell TransactGetItems remains unsupported.
+after a hard kill and restart. Cross-Cell TransactGetItems uses shared key
+locks and durable captured images; the same process test checks projected
+results and missing items before and after restart.
 Once a table's initial route is published, keyed CRUD and Scan use its data
 Cells; unactivated tables
 still use the account Cell unless a provisioner is configured. The host-backed
@@ -219,7 +221,8 @@ one request. Query reads the HASH key's owner Cell through a local ordered
 RANGE-key index, including numeric sort keys and page continuation.
 Public transactional writes share the coordinator protocol for single-Cell and
 cross-Cell requests. Transactional reads confined to one Cell use one snapshot;
-cross-Cell transactional reads fail explicitly. Split
+cross-Cell transactional reads capture a consistent set of images under
+shared locks through the same coordinator. Split
 plans persist only the source range, two children, and expected epoch; route
 publication does not rewrite a route-sized blob. Host split selection,
 publication checks, and results use indexed rows and compact plans. The account Cell's
@@ -233,9 +236,9 @@ protocol cannot implement `TransactWriteItems`. See [the elastic topology
 design](SCALING.md) for split, routing, recovery, and validation requirements.
 The [cross-Cell transaction protocol](CROSS_CELL_TRANSACTIONS.md) specifies
 the decision, lock, visibility, and failure-recovery contract.
-Account and data Cells now persist prepared item images and exclusive key
-locks using one shared participant state machine. Ordinary reads and writes
-respect those locks. Data Cells refuse split sealing; account Cells refuse
+Account and data Cells persist prepared write images, immutable read images,
+and exclusive write/shared read locks using one participant state machine.
+Ordinary reads respect write locks; writes respect both lock modes. Data Cells refuse split sealing; account Cells refuse
 table deletion and route activation while prepared intents remain. Sharded coordinator Cells can durably
 record a participant set, prepare receipts, one commit or abort decision, and
 resolution progress. The public write driver resumes published BEGIN records from
@@ -253,8 +256,8 @@ fail closed and do not yet resolve decisions on demand.
 A supervised serving worker now rotates through locally admitted coordinator
 shards, resumes abandoned BEGIN records, and finishes terminal decisions. It
 processes at most one pending transaction per tick, advances past failures,
-and revisits them on a bounded pass. Cross-Cell read snapshots, coordinator
-passivation, and fleet placement remain incomplete. Production currently admits 64 active Cells
+and revisits them on a bounded pass. Coordinator passivation, bounded
+transaction/read-image retention, and fleet placement remain incomplete. Production currently admits 64 active Cells
 per node; distinct coordinator shards can exhaust that pool. See SCALING.md
 for the unqualified 10,000-Cell, multi-TB target.
 
@@ -317,7 +320,8 @@ and sort-key tables once their initial data route is published.
 Low-level account and partition commands support local atomic transactions.
 The public adapter routes all transactional writes through the coordinator,
 including account participants before route activation. Same-Cell transactional
-reads use a local snapshot; cross-Cell reads remain unsupported. Account-local
+reads use a local snapshot; cross-Cell reads use durable shared locks and
+captured participant images. Account-local
 sort-key Query, index operations, and streamed writes remain unsupported.
 `tests/account_cell.rs` exercises them through a real
 `CellNodeBuilder` and in-memory object store, including request replay,
@@ -326,7 +330,7 @@ multi-table write, and restoration from the published object-store root on a
 new host. `tests/elastic_cells.rs` exercises two distinct data Cells through a
 real host, range and epoch rejection, route validation and publication,
 partitioned adapter CRUD, Scan, same-Cell and cross-Cell writes, rollback and
-cross-Cell read rejection, account write fencing, and restoration of
+cross-Cell snapshots, shared-read/write conflicts, account write fencing, and restoration of
 both a data Cell and the route's account Cell from object storage. These tests
 do not prove live repartitioning, complete IAM, secondary indexes, Streams, or backups. The
 elastic test also verifies

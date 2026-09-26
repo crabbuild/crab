@@ -49,7 +49,8 @@ pub(super) async fn assert_lost_replies_and_canceled_token_reuse(
         },
         Arc::new(transport),
     );
-    let storage = CellStorage::new(client, "us-east-1").with_transaction_coordinators(provisioner);
+    let storage = CellStorage::new(client.clone(), "us-east-1")
+        .with_transaction_coordinators(provisioner.clone());
     let maps = ExpressionMaps::default();
     let item = Item::from([("id".into(), AttributeValue::S("lost-admission".into()))]);
     let ops = infos
@@ -138,11 +139,47 @@ pub(super) async fn assert_lost_replies_and_canceled_token_reuse(
         .unwrap();
     assert_eq!(
         storage.get_item(&infos[0], &new_item).await.unwrap(),
-        Some(new_item)
+        Some(new_item.clone())
     );
     assert_eq!(
         storage.get_item(&infos[1], &item).await.unwrap(),
-        Some(item)
+        Some(item.clone())
     );
+    let absent = Item::from([("id".into(), AttributeValue::S("absent-read".into()))]);
+    lost.store(0, Ordering::SeqCst);
+    let read = storage
+        .transact_get_items(&[
+            TransactGetOp {
+                key_info: &infos[1],
+                key: &item,
+            },
+            TransactGetOp {
+                key_info: &infos[0],
+                key: &new_item,
+            },
+            TransactGetOp {
+                key_info: &infos[0],
+                key: &absent,
+            },
+            TransactGetOp {
+                key_info: &infos[1],
+                key: &item,
+            },
+        ])
+        .await
+        .unwrap();
+    assert_eq!(
+        read,
+        vec![Some(item.clone()), Some(new_item), None, Some(item.clone())]
+    );
+    assert_eq!(lost.load(Ordering::SeqCst), 15);
+    super::transaction_reads::assert_shared_snapshots(
+        &client,
+        &storage,
+        &provisioner,
+        &infos,
+        &item,
+    )
+    .await;
     runtime.shutdown().await.unwrap();
 }

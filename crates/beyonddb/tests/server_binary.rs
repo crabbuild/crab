@@ -635,6 +635,37 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
             .await
             .is_err()
     );
+    let transaction_reads = ["process", second_write_key.as_str(), condition_key.as_str()]
+        .into_iter()
+        .map(|id| {
+            aws_sdk_dynamodb::types::TransactGetItem::builder()
+                .get(
+                    aws_sdk_dynamodb::types::Get::builder()
+                        .table_name("ProcessData")
+                        .key("id", AttributeValue::S(id.into()))
+                        .projection_expression("#v")
+                        .expression_attribute_names("#v", "value")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+        })
+        .collect::<Vec<_>>();
+    let snapshot = sdk
+        .transact_get_items()
+        .set_transact_items(Some(transaction_reads.clone()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.responses()[0].item().unwrap().get("value"),
+        Some(&AttributeValue::S("updated".into()))
+    );
+    assert_eq!(
+        snapshot.responses()[1].item().unwrap().get("value"),
+        Some(&AttributeValue::S("updated".into()))
+    );
+    assert!(snapshot.responses()[2].item().is_none());
     child.kill().unwrap();
     child.wait().unwrap();
     let mut restarted = start(&config, &log, false, s3);
@@ -655,6 +686,13 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         .await
         .unwrap();
     assert_eq!(read.item(), Some(&updated));
+    let recovered_snapshot = sdk
+        .transact_get_items()
+        .set_transact_items(Some(transaction_reads))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(recovered_snapshot.responses(), snapshot.responses());
     let second = sdk
         .get_item()
         .table_name("ProcessData")

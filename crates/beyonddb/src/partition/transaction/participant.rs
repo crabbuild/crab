@@ -7,6 +7,7 @@ use super::super::{
     AccessState, DATA_MODULE, Error, Json, Result, SqlValue, command_access, decode_spec, statement,
 };
 use super::{StagedImage, apply_staged, stage_operations};
+use crate::participant::StagedEffect;
 use crate::participant::{
     ParticipantTransactionState, PrepareTransactionOutcome, ReadTransactionInput,
     ResolveTransactionInput, ResolveTransactionOutcome,
@@ -18,7 +19,7 @@ struct PreparedPartition {
     epoch: u64,
     images: Vec<StagedImage>,
 }
-use crate::items::{TransactionFailure, TransactionWrite};
+use crate::items::{TransactionFailure, TransactionOperation};
 
 /// Prepare a local subset of a cross-Cell transaction without exposing writes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -27,10 +28,10 @@ pub struct PreparePartitionTransactionInput {
     pub epoch: u64,
     pub transaction_id: [u8; 16],
     pub coordinator_cell: [u8; 32],
-    pub operations: Vec<TransactionWrite>,
+    pub operations: Vec<TransactionOperation>,
 }
 
-/// Persist staged images and exclusive item locks in one published command.
+/// Persist staged images and shared or exclusive locks in one published command.
 pub struct PreparePartitionTransaction;
 
 impl Command for PreparePartitionTransaction {
@@ -93,16 +94,22 @@ impl Command for PreparePartitionTransaction {
             input.coordinator_cell,
             digest,
             serde_json::to_vec(&prepared)?,
+            prepared
+                .images
+                .iter()
+                .filter(|image| image.effect == StagedEffect::Read)
+                .map(|image| image.image.as_ref()),
         )?;
         for image in prepared.images {
             context.sql(&statement(
-                "INSERT INTO ddb_partition_transaction_locks \
-                 (item_key, partition_key, sort_key, transaction_id) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT OR IGNORE INTO ddb_partition_transaction_locks \
+                 (item_key, partition_key, sort_key, transaction_id, write_lock) VALUES (?1, ?2, ?3, ?4, ?5)",
                 vec![
                     SqlValue::Blob(image.key),
                     SqlValue::Blob(image.partition_key),
                     SqlValue::Blob(image.sort_key),
                     SqlValue::Blob(input.transaction_id.to_vec()),
+                    SqlValue::Integer(i64::from(image.effect != StagedEffect::Read)),
                 ],
             ))?;
         }
@@ -178,5 +185,18 @@ impl Query for ReadPartitionTransaction {
 
     fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
         crate::participant::read(context, input)
+    }
+}
+
+/// Read one committed immutable image after a transactional read releases locks.
+pub struct ReadPartitionTransactionResult;
+impl Query for ReadPartitionTransactionResult {
+    const MODULE: &'static str = DATA_MODULE;
+    const ID: u32 = 11;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<crate::ReadTransactionResultInput>;
+    type Output = Json<crate::TransactionReadResult>;
+    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
+        crate::participant::read_result(context, input)
     }
 }

@@ -22,7 +22,8 @@ pub use expression_wire::WireCondition;
 pub use items::*;
 pub use participant::{
     ParticipantTransactionState, PrepareTransactionOutcome, ReadTransactionInput,
-    ResolveTransactionInput, ResolveTransactionOutcome,
+    ReadTransactionResultInput, ResolveTransactionInput, ResolveTransactionOutcome,
+    TransactionReadResult,
 };
 pub use partition::*;
 pub use provision::*;
@@ -114,7 +115,7 @@ static COMMANDS: [OperationDescriptor; 19] = [
     operation(21),
     operation(22),
 ];
-static QUERIES: [OperationDescriptor; 21] = [
+static QUERIES: [OperationDescriptor; 22] = [
     operation(4),
     operation(6),
     operation(7),
@@ -136,6 +137,7 @@ static QUERIES: [OperationDescriptor; 21] = [
     operation(24),
     operation(25),
     operation(26),
+    operation(27),
 ];
 
 /// Statically linked account application.
@@ -301,6 +303,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<GetItem>()?;
         registry.bind_query::<TransactGet>()?;
         registry.bind_query::<ReadAccountTransaction>()?;
+        registry.bind_query::<ReadAccountTransactionResult>()?;
         registry.bind_query::<DescribeTable>()?;
         registry.bind_query::<ListTables>()?;
         registry.bind_query::<DescribeTableById>()?;

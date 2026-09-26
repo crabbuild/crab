@@ -213,7 +213,7 @@ impl Query for PartitionQuery {
         let (predicate, parameters) =
             range_predicate(&partition_key, &bounds, &cursor, input.forward);
         let locks = context.sql(&statement(
-            &format!("SELECT 1 FROM ddb_partition_transaction_locks {predicate} LIMIT 1"),
+            &format!("SELECT 1 FROM ddb_partition_transaction_locks {predicate} AND write_lock = 1 LIMIT 1"),
             parameters,
         ))?;
         if !locks[0].rows.is_empty() {

@@ -1,6 +1,7 @@
 //! Account participant staging and the same-Cell transaction path.
 
 use super::*;
+use crate::participant::StagedEffect;
 use crate::participant::{
     self, ParticipantTransactionState, PrepareTransactionOutcome, ReadTransactionInput,
     ResolveTransactionInput, ResolveTransactionOutcome,
@@ -11,12 +12,12 @@ struct StagedImage {
     table_id: String,
     key: Vec<u8>,
     image: Option<Item>,
-    write: bool,
+    effect: StagedEffect,
 }
 
 fn stage(
     context: &mut CommandContext<'_, '_>,
-    operations: Vec<TransactionWrite>,
+    operations: Vec<TransactionOperation>,
 ) -> Result<std::result::Result<Vec<StagedImage>, (usize, TransactionFailure)>> {
     if operations.is_empty() || operations.len() > 100 {
         return Ok(Err((
@@ -26,28 +27,33 @@ fn stage(
     }
     let mut touched = HashSet::with_capacity(operations.len());
     let mut staged = Vec::with_capacity(operations.len());
+    let mut read_bytes = 0;
     for (index, operation) in operations.into_iter().enumerate() {
         let invalid = |message: &str| (index, TransactionFailure::Validation(message.into()));
+        let shared = matches!(operation, TransactionOperation::Read(_));
         let (name, table_id, item, condition) = match &operation {
-            TransactionWrite::Put(input) => (
+            TransactionOperation::Read(input) => {
+                (&input.table_name, &input.table_id, &input.key, None)
+            }
+            TransactionOperation::Put(input) => (
                 &input.table_name,
                 &input.table_id,
                 &input.item,
                 input.condition.as_ref(),
             ),
-            TransactionWrite::Delete(input) => (
+            TransactionOperation::Delete(input) => (
                 &input.table_name,
                 &input.table_id,
                 &input.key,
                 input.condition.as_ref(),
             ),
-            TransactionWrite::Update(input) => (
+            TransactionOperation::Update(input) => (
                 &input.table_name,
                 &input.table_id,
                 &input.key,
                 input.condition.as_ref(),
             ),
-            TransactionWrite::ConditionCheck(input) => (
+            TransactionOperation::ConditionCheck(input) => (
                 &input.table_name,
                 &input.table_id,
                 &input.key,
@@ -61,19 +67,22 @@ fn stage(
             return Ok(Err(invalid("table identity is stale")));
         }
         let valid = match operation {
-            TransactionWrite::Put(_) => valid_item(item, &table),
+            TransactionOperation::Put(_) => valid_item(item, &table),
             _ => valid_key(item, &table),
         };
         if !valid {
             return Ok(Err(invalid("item violates table schema")));
         }
         let key = item_key(item, &table.key_schema)?;
-        if !touched.insert((table.id.clone(), key.clone())) {
+        if !touched.insert((table.id.clone(), key.clone())) && !shared {
             return Ok(Err(invalid(
                 "more than one operation addresses the same item",
             )));
         }
-        if key_locked(context, &table.id, &key)? {
+        if !context.sql(&lock_query(&table.id, &key, shared))?[0]
+            .rows
+            .is_empty()
+        {
             return Ok(Err((index, TransactionFailure::Conflict)));
         }
         let old = command_item(context, &table.id, &key)?;
@@ -85,10 +94,10 @@ fn stage(
                 Err(reason) => return Ok(Err(invalid(&reason))),
             }
         }
-        let (image, write) = match operation {
-            TransactionWrite::Put(input) => (Some(input.item), true),
-            TransactionWrite::Delete(_) => (None, true),
-            TransactionWrite::Update(input) => {
+        let (image, effect) = match operation {
+            TransactionOperation::Put(input) => (Some(input.item), StagedEffect::Write),
+            TransactionOperation::Delete(_) => (None, StagedEffect::Write),
+            TransactionOperation::Update(input) => {
                 let mut new = old.unwrap_or(input.key);
                 if let Err(reason) = input.update.apply(&mut new, &table.attribute_definitions) {
                     return Ok(Err(invalid(&reason)));
@@ -96,15 +105,24 @@ fn stage(
                 if !valid_item(&new, &table) || item_key(&new, &table.key_schema)? != key {
                     return Ok(Err(invalid("item violates table schema")));
                 }
-                (Some(new), true)
+                (Some(new), StagedEffect::Write)
             }
-            TransactionWrite::ConditionCheck(_) => (None, false),
+            TransactionOperation::ConditionCheck(_) => (None, StagedEffect::Check),
+            TransactionOperation::Read(_) => (old, StagedEffect::Read),
         };
+        if effect == StagedEffect::Read {
+            read_bytes += image
+                .as_ref()
+                .map_or(0, extenddb_core::types::item_size_bytes);
+            if read_bytes > 4 * 1024 * 1024 {
+                return Ok(Err(invalid("transaction read exceeds 4 MiB")));
+            }
+        }
         staged.push(StagedImage {
             table_id: table.id,
             key,
             image,
-            write,
+            effect,
         });
     }
     Ok(Ok(staged))
@@ -112,7 +130,7 @@ fn stage(
 
 fn apply(context: &mut CommandContext<'_, '_>, staged: Vec<StagedImage>) -> Result<()> {
     for image in staged {
-        if !image.write {
+        if image.effect != StagedEffect::Write {
             continue;
         }
         if let Some(item) = image.image {
@@ -137,7 +155,7 @@ fn apply(context: &mut CommandContext<'_, '_>, staged: Vec<StagedImage>) -> Resu
 
 pub(super) fn write(
     context: &mut CommandContext<'_, '_>,
-    operations: Vec<TransactionWrite>,
+    operations: Vec<TransactionOperation>,
 ) -> Result<TransactionOutcome> {
     let staged = match stage(context, operations)? {
         Ok(staged) => staged,
@@ -147,12 +165,12 @@ pub(super) fn write(
     Ok(TransactionOutcome::Applied)
 }
 
-/// Prepare writes to unrouted tables in one account Cell.
+/// Prepare read or write operations on unrouted tables in one account Cell.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PrepareAccountTransactionInput {
     pub transaction_id: [u8; 16],
     pub coordinator_cell: [u8; 32],
-    pub operations: Vec<TransactionWrite>,
+    pub operations: Vec<TransactionOperation>,
 }
 
 /// Persist account item images and locks without exposing any writes.
@@ -192,10 +210,14 @@ impl Command for PrepareAccountTransaction {
             input.coordinator_cell,
             digest,
             serde_json::to_vec(&staged)?,
+            staged
+                .iter()
+                .filter(|image| image.effect == StagedEffect::Read)
+                .map(|image| image.image.as_ref()),
         )?;
         for image in staged {
-            context.sql(&statement("INSERT INTO ddb_account_transaction_locks (table_id, item_key, transaction_id) VALUES (?1, ?2, ?3)",
-                vec![SqlValue::Text(image.table_id), SqlValue::Blob(image.key), SqlValue::Blob(input.transaction_id.to_vec())]))?;
+            context.sql(&statement("INSERT OR IGNORE INTO ddb_account_transaction_locks (table_id, item_key, transaction_id, write_lock) VALUES (?1, ?2, ?3, ?4)",
+                vec![SqlValue::Text(image.table_id), SqlValue::Blob(image.key), SqlValue::Blob(input.transaction_id.to_vec()), SqlValue::Integer(i64::from(image.effect != StagedEffect::Read))]))?;
         }
         Ok(CommandResult::Success(Json(
             PrepareTransactionOutcome::Prepared,
@@ -250,7 +272,9 @@ pub(super) fn key_locked(
     table_id: &str,
     key: &[u8],
 ) -> Result<bool> {
-    Ok(!context.sql(&lock_query(table_id, key))?[0].rows.is_empty())
+    Ok(!context.sql(&lock_query(table_id, key, false))?[0]
+        .rows
+        .is_empty())
 }
 
 pub(super) fn read_key_locked(
@@ -258,12 +282,18 @@ pub(super) fn read_key_locked(
     table_id: &str,
     key: &[u8],
 ) -> Result<bool> {
-    Ok(!context.sql(&lock_query(table_id, key))?[0].rows.is_empty())
+    Ok(!context.sql(&lock_query(table_id, key, true))?[0]
+        .rows
+        .is_empty())
 }
 
-fn lock_query(table_id: &str, key: &[u8]) -> SqlBatch {
+fn lock_query(table_id: &str, key: &[u8], write_only: bool) -> SqlBatch {
     statement(
-        "SELECT 1 FROM ddb_account_transaction_locks WHERE table_id = ?1 AND item_key = ?2",
+        if write_only {
+            "SELECT 1 FROM ddb_account_transaction_locks WHERE table_id = ?1 AND item_key = ?2 AND write_lock = 1"
+        } else {
+            "SELECT 1 FROM ddb_account_transaction_locks WHERE table_id = ?1 AND item_key = ?2"
+        },
         vec![
             SqlValue::Text(table_id.to_owned()),
             SqlValue::Blob(key.to_vec()),
@@ -278,4 +308,17 @@ pub(crate) fn table_locked(context: &CommandContext<'_, '_>, table_id: &str) -> 
     ))?[0]
         .rows
         .is_empty())
+}
+
+/// Read one committed immutable image after a transactional read releases locks.
+pub struct ReadAccountTransactionResult;
+impl Query for ReadAccountTransactionResult {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 27;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<crate::ReadTransactionResultInput>;
+    type Output = Json<crate::TransactionReadResult>;
+    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
+        crate::participant::read_result(context, input)
+    }
 }

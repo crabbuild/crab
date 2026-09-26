@@ -17,9 +17,9 @@ fn request() -> BeginCrossCellTransactionInput {
                 partition_id: [id; 16],
                 epoch: 1,
             },
-            operations: vec![IndexedTransactionWrite {
+            operations: vec![IndexedTransactionOperation {
                 index: id - 1,
-                operation: TransactionWrite::Put(PutItemInput {
+                operation: TransactionOperation::Put(PutItemInput {
                     table_name: "Tokens".into(),
                     table_id: table_id.clone(),
                     item: Item::from([("id".into(), AttributeValue::S(id.to_string()))]),
@@ -176,7 +176,8 @@ async fn tokens_pin_unfinished_work_and_replay_original_routes_until_completion_
         }
         if expired {
             retry.token.as_mut().unwrap().fingerprint = "replacement".into();
-            let TransactionWrite::Put(input) = &mut retry.participants[0].operations[0].operation
+            let TransactionOperation::Put(input) =
+                &mut retry.participants[0].operations[0].operation
             else {
                 unreachable!()
             };
