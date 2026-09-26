@@ -365,3 +365,120 @@ async fn sparse_hydration_coalesces_contiguous_cell_frames() {
     assert!(hydrated >= 256);
     assert!(reads < u64::from(hydrated));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn immutable_reader_faults_only_needed_pages_and_preserves_provider_errors() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let source = directory.path().join("source.sqlite");
+    let mut writer = Db::open(&source, Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE counter(value INTEGER); INSERT INTO counter VALUES(7);\
+         CREATE TABLE payload(value BLOB); INSERT INTO payload VALUES(randomblob(2000000))",
+            )
+        })
+        .unwrap();
+    let expected: Vec<u8> = writer
+        .query_with(|connection| {
+            connection.query_row("SELECT value FROM payload", [], |row| row.get(0))
+        })
+        .unwrap();
+    let batch = writer.capture().unwrap();
+    let info = batch.segments[0].info().clone();
+    let original = std::fs::read(batch.segments[0].path()).unwrap();
+    let backend = Arc::new(InMemory::new());
+    let read_bytes = Arc::new(AtomicU64::new(0));
+    let observed = Arc::clone(&read_bytes);
+    let store = Store::new(backend.clone()).with_read_byte_observer(Arc::new(move |bytes| {
+        observed.fetch_add(bytes, Ordering::SeqCst);
+    }));
+    let layout = CellStorageLayout::new(store, Path::from("sparse-reader"), [3; 16]);
+    let cell = [83; 32];
+    let incarnation = [84; 16];
+    let replica = CellReplica::new(layout.clone(), cell, incarnation, Limits::default()).unwrap();
+    let root = replica.prepare(None, &batch, 1, 1).await.unwrap().root();
+    writer.close().unwrap();
+    std::fs::remove_file(source).unwrap();
+
+    // One LTX job slot must remain sufficient: SQLite opening cannot hold the
+    // same slot that a cold directory-cache lookup needs to complete its fault.
+    let host = Host::default()
+        .with_job_slots(Arc::new(tokio::sync::Semaphore::new(1)))
+        .with_directory_cache(directory.path().join("directory-cache"));
+    let verified = replica.with_host(host).open_root(&root).await.unwrap();
+    read_bytes.store(0, Ordering::SeqCst);
+    let destination = directory.path().join("reader.sqlite");
+    let view = verified.open_read_only(&destination).unwrap();
+    {
+        let connection = view.connection().unwrap();
+        let value: i64 = connection
+            .query_row("SELECT value FROM counter", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, 7);
+        assert!(read_bytes.load(Ordering::SeqCst) < 512_000);
+        assert_eq!(std::fs::metadata(&destination).unwrap().len(), 0);
+
+        let expired = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        assert!(
+            crab_ltx::with_paged_io_deadline(expired, || {
+                connection.query_row("SELECT value FROM payload", [], |row| {
+                    row.get::<_, Vec<u8>>(0)
+                })
+            })
+            .is_err()
+        );
+        assert!(matches!(
+            view.take_io_error(),
+            Some(crab_ltx::CrabError::Deadline)
+        ));
+    }
+
+    let object =
+        layout.incarnation_object_path(&cell, &incarnation, &info.blake3, CellObjectKind::Ltx);
+    backend.delete(&object).await.unwrap();
+    {
+        let connection = view.connection().unwrap();
+        assert!(
+            connection
+                .query_row("SELECT value FROM payload", [], |row| row
+                    .get::<_, Vec<u8>>(0))
+                .is_err()
+        );
+        assert!(matches!(
+            view.take_io_error(),
+            Some(crab_ltx::CrabError::Storage(_))
+        ));
+    }
+    let damaged: Vec<_> = original.iter().map(|byte| byte ^ 1).collect();
+    backend
+        .put(&object, Bytes::from(damaged).into())
+        .await
+        .unwrap();
+    {
+        let connection = view.connection().unwrap();
+        assert!(
+            connection
+                .query_row("SELECT value FROM payload", [], |row| row
+                    .get::<_, Vec<u8>>(0))
+                .is_err()
+        );
+        assert!(matches!(
+            view.take_io_error(),
+            Some(crab_ltx::CrabError::ChecksumMismatch)
+        ));
+    }
+    backend
+        .put(&object, Bytes::from(original).into())
+        .await
+        .unwrap();
+    let actual: Vec<u8> = view
+        .connection()
+        .unwrap()
+        .query_row("SELECT value FROM payload", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(std::fs::metadata(&destination).unwrap().len(), 0);
+    drop(view);
+    assert!(!destination.exists());
+}

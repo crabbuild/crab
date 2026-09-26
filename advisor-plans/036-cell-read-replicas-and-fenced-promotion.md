@@ -53,8 +53,8 @@ those contracts. Slice 0 must reconcile those documents before code changes.
 The existing nine-profile protected release gate remains independent; local
 Compose or RustFS receipts never satisfy it.
 
-Implementation status at this revision: `crab-ltx` can fully restore a verified
-root into a private read-only SQLite view, and `crab-cell-runtime` can execute a
+Implementation status at this revision: `crab-ltx` opens a verified root as
+a sparse immutable SQLite view over authenticated pages, and `crab-cell-runtime` can execute a
 typed query against that view with a fresh authority/session response gate.
 `CellReadReplica::refresh` serializes refreshes, verifies the replacement root,
 and switches a shared snapshot after a fresh authority check; in-flight queries
@@ -76,8 +76,7 @@ and authors explicitly choose `ReadPolicy::Replica` on an `ApplicationHandle`
 before constructing generated clients. Commands, resolution, streams, and
 primitive lease validation remain owner-ordered. Compiled SQL and primitive
 namespaces may open snapshots through the same registry/code/schema checks;
-the former repository-role restriction is removed. No general product read route,
-sparse read view or production qualification is enabled. Warm-reader
+the former repository-role restriction is removed. General product reads remain owner-only; production qualification remains open. Warm-reader
 preference now probes verified snapshots after owner death, closes read admission,
 and enters the existing fenced takeover and fresh writable restore path.
 The server can select the existing object proof path with `[cells]
@@ -280,8 +279,9 @@ record, mutable LTX head, or owner-to-owner database copy.
 Current slice state (local proof only): 0 partially reconciled in docs; 1 has
 the existing object-proof path and a verified offline fleet-to-object rollout,
 with fault injection during rollout still open;
-2 full-restore read-only opener, atomic refresh, and exact-root tests pass, but
-sparse view and provider fault cases remain; 3 policy CAS, signed selection,
+2 sparse immutable opener, atomic refresh, exact-root isolation, bounded page
+cache, cancellation cleanup, and provider fault tests pass locally; runtime
+and product mTLS tests pass on local RustFS; 3 policy CAS, signed selection,
 owner reconciliation, private activation, node admission, and administrator
 target CAS with owner hint and bounded readiness status exist; broader churn qualification
 remains; 4 typed local and peer queries, position
@@ -309,8 +309,10 @@ wait within a deadline on the existing primitive-job ledger; S3 enrollment
 lookup no longer holds that CPU reservation. The live concurrency regression
 reproduced immediate 503 rejection before this correction.
 The reader now takes a node runtime on open. Each live snapshot reserves a
-provisional 4 MiB of resident memory and four descriptors in that runtime's
-ledger, and its restored SQLite file uses the runtime's local disk admission.
+provisional 12 MiB of resident memory and four descriptors in that runtime's
+ledger. The memory charge conservatively includes the entire shared 8 MiB
+page cache and 4 MiB of view/fetch overhead. Its local placeholder is empty;
+page bodies are not restored to disk.
 Refresh reserves a second view until old in-flight queries finish. Local and
 RustFS tests cover capacity rejection, concurrent charges, and full release;
 the Compose receipt below samples resources under 1 GiB/1 vCPU limits.
@@ -318,11 +320,12 @@ Peak-resource and sustained-capacity qualification remain open.
 An explicit local or peer replica query whose view is behind a caller's minimum
 returns `ReplicaBehind` with both sequence numbers. The private peer wire has
 an explicit read operation and distinct behind/unavailable error codes.
-The LTX restore install now removes a destination that its blocking worker
-successfully installed after the async read-view opener was cancelled;
-`cancelled_read_view_install_removes_its_unclaimed_destination` pauses at that
-exact seam and checks both destination and scratch cleanup. A filesystem error
-after a no-clobber install remains ambiguous and cannot authorize deletion.
+The sparse opener runs under SQL-job admission independently of LTX's blocking
+I/O pool; otherwise a cold directory-cache read can deadlock an opening view.
+Admission and cleanup stay with dispatched work after waiter cancellation.
+`cancelled_read_view_install_removes_its_unclaimed_destination` pauses after
+fresh placeholder creation and proves removal after cancellation. The separate
+full-restore path retains its exact no-clobber install contract.
 Read-only views now apply the same 64 KiB page-cache target and disabled
 lookaside allocation as managed LTX connections; the exact-root view test
 checks the SQLite cache setting.

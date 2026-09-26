@@ -851,7 +851,8 @@ replica policy through the shared runtime router; primitive lease validation
 retains owner ordering. Warm readers may be preferred after owner death,
 with existing session fencing, old-log recovery, and ownership CAS intact.
 Local RustFS and multi-container qualification are recorded in the plan;
-the offline fleet-to-object rollout also passes. Sparse views, storage-cost
+the offline fleet-to-object rollout also passes. Read views now fault
+authenticated pages through an immutable VFS with bounded caching. Storage-cost
 measurements, broader faults, platform rolling upgrades, and production
 qualification remain open.
 

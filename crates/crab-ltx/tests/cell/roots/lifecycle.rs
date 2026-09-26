@@ -3,7 +3,7 @@
 use super::*;
 
 #[tokio::test]
-async fn read_only_roots_keep_exact_snapshots_and_release_local_disk() {
+async fn read_only_roots_keep_exact_snapshots_without_materializing_pages() {
     let directory = tempfile::TempDir::new().unwrap();
     let mut writer = Db::open(&directory.path().join("source.sqlite"), Limits::default()).unwrap();
     writer
@@ -23,17 +23,16 @@ async fn read_only_roots_keep_exact_snapshots_and_release_local_disk() {
         .await
         .unwrap()
         .open_read_only(&first_path)
-        .await
         .unwrap();
     assert_eq!(first_view.root(), first_root);
-    assert!(disk.used() > 0);
+    assert_eq!(disk.used(), 0);
+    assert_eq!(std::fs::metadata(&first_path).unwrap().len(), 0);
     assert!(
         replica
             .open_root(&first_root)
             .await
             .unwrap()
             .open_read_only(&first_path)
-            .await
             .is_err()
     );
     assert!(first_path.exists());
@@ -49,6 +48,12 @@ async fn read_only_roots_keep_exact_snapshots_and_release_local_disk() {
             .query_row("SELECT value FROM counter", [], |row| row.get(0))
             .unwrap();
         assert_eq!(value, 1);
+        connection.pragma_update(None, "query_only", false).unwrap();
+        assert!(
+            connection
+                .is_readonly(rusqlite::DatabaseName::Main)
+                .unwrap()
+        );
         assert!(
             connection
                 .execute("UPDATE counter SET value=99", [])
@@ -71,7 +76,6 @@ async fn read_only_roots_keep_exact_snapshots_and_release_local_disk() {
         .await
         .unwrap()
         .open_read_only(&second_path)
-        .await
         .unwrap();
     let old: i64 = first_view
         .connection()
@@ -85,6 +89,12 @@ async fn read_only_roots_keep_exact_snapshots_and_release_local_disk() {
         .unwrap();
     assert_eq!((old, current), (1, 2));
 
+    for path in [&first_path, &second_path] {
+        assert_eq!(std::fs::metadata(path).unwrap().len(), 0);
+        for suffix in ["-wal", "-shm", "-journal", ".crab-ltx"] {
+            assert!(!std::path::PathBuf::from(format!("{}{suffix}", path.display())).exists());
+        }
+    }
     drop(first_view);
     drop(second_view);
     assert!(!first_path.exists());

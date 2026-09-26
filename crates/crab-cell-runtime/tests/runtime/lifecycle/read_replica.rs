@@ -247,10 +247,12 @@ async fn rustfs_replica_reads_exact_root_and_policy_cas() {
 async fn exercise_replica_read(fixture: &Fixture) {
     let session = SessionId::from_bytes([4; 16]);
     let runtime = CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 << 20, session).unwrap();
-    let reader_runtime = CellRuntime::new(
-        SqlWorkerPool::new(1, 200).unwrap(),
+    // Hold one old-view query while a second admitted SQL job opens its replacement.
+    let reader_runtime = CellRuntime::new_with_replica_host(
+        SqlWorkerPool::new(2, 512).unwrap(),
         8 << 20,
         SessionId::from_bytes([14; 16]),
+        crab_ltx::Host::default().with_local_disk_budget(crab_ltx::DiskBudget::new(8 << 20)),
     )
     .unwrap();
     let handle = bootstrap_on(&runtime, fixture, session).await;
@@ -333,9 +335,9 @@ async fn exercise_replica_read(fixture: &Fixture) {
     .await
     .unwrap();
     assert_eq!(reader_runtime.stats().file_descriptors(), 4);
-    assert_eq!(reader_runtime.stats().resident_bytes(), 4 << 20);
+    assert_eq!(reader_runtime.stats().resident_bytes(), 12 << 20);
     let disk_bytes = reader_runtime.stats().local_disk_reserved_bytes();
-    assert!(disk_bytes > 0);
+    assert_eq!(disk_bytes, 0);
     assert_eq!(
         reader.query::<ReadCounter>(None, 0).await.unwrap().output,
         0
@@ -394,7 +396,7 @@ async fn exercise_replica_read(fixture: &Fixture) {
         vec![1],
         NodeFailureDomain::default(),
         NodeCapacity {
-            free_memory_bytes: 8 << 20,
+            free_memory_bytes: 32 << 20,
             free_disk_bytes: 1 << 20,
             job_credits: 1,
             ..NodeCapacity::default()
@@ -566,7 +568,8 @@ async fn exercise_replica_read(fixture: &Fixture) {
     assert!(old.receipt.commit_sequence < refreshed.receipt().await.commit_sequence);
     assert!(!reader_path.exists());
     assert_eq!(reader_runtime.stats().file_descriptors(), 4);
-    assert!(during_refresh.local_disk_reserved_bytes() > disk_bytes);
+    assert_eq!(during_refresh.local_disk_reserved_bytes(), disk_bytes);
+    assert_eq!(during_refresh.resident_bytes(), 24 << 20);
     assert_eq!(
         reader.query::<ReadCounter>(None, 0).await.unwrap().output,
         1

@@ -73,7 +73,7 @@ struct Faults {
     parent_syncs: Arc<AtomicUsize>,
     track_all: Arc<AtomicBool>,
     #[cfg(feature = "replica")]
-    install_pause: Arc<OnceLock<Arc<InstallPause>>>,
+    create_pause: Arc<OnceLock<Arc<InstallPause>>>,
 }
 
 #[cfg(feature = "replica")]
@@ -204,8 +204,14 @@ impl FileSystem for Faults {
     }
     fn create(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
         self.check("create")?;
+        let inner = DirectFileSystem.create(path)?;
+        #[cfg(feature = "replica")]
+        if let Some(pause) = self.create_pause.get() {
+            pause.entered.wait();
+            pause.release.wait();
+        }
         Ok(Box::new(File {
-            inner: DirectFileSystem.create(path)?,
+            inner,
             faults: self.clone(),
             track: self.track_all.load(Ordering::Relaxed)
                 || path.to_string_lossy().contains(".ltx"),
@@ -231,11 +237,6 @@ impl FileSystem for Faults {
     fn persist_file_new(&self, source: &Path, destination: &Path) -> io::Result<()> {
         self.check("persist_file_new")?;
         DirectFileSystem.persist_file_new(source, destination)?;
-        #[cfg(feature = "replica")]
-        if let Some(pause) = self.install_pause.get() {
-            pause.entered.wait();
-            pause.release.wait();
-        }
         Ok(())
     }
 }

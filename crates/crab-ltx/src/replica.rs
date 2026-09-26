@@ -297,12 +297,13 @@ impl VerifiedRoot {
         restore::run(&self.pages, destination).await
     }
 
-    /// Restores this exact root into a fresh, owned read-only SQLite view.
+    /// Opens this exact root as an authenticated, sparse read-only SQLite view.
     ///
     /// The destination and its sidecars must not exist. The view removes its
-    /// local file and releases its disk reservation when the last owner drops.
-    pub async fn open_read_only(&self, destination: &Path) -> Result<ReadOnlyRoot> {
-        ReadOnlyRoot::open(self, destination).await
+    /// empty placeholder when the last owner drops; page bodies use a bounded cache.
+    /// Call on a SQLite worker: opening can block on authenticated page faults.
+    pub fn open_read_only(&self, destination: &Path) -> Result<ReadOnlyRoot> {
+        ReadOnlyRoot::open(self, destination)
     }
 }
 
@@ -364,6 +365,14 @@ pub struct CellWritableDatabase {
 }
 
 impl CellPagedDatabase {
+    pub(crate) fn host(&self) -> Host {
+        self.replica.host.clone()
+    }
+
+    pub(crate) fn limits(&self) -> Limits {
+        self.replica.limits
+    }
+
     /// Returns the position this root publishes.
     #[must_use]
     pub fn position(&self) -> Position {
@@ -503,7 +512,7 @@ impl CellPagedDatabase {
         Ok(bytes)
     }
 
-    async fn read_run(
+    pub(crate) async fn read_run(
         &self,
         first: u32,
         max_pages: u32,

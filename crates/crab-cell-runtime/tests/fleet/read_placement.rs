@@ -59,7 +59,7 @@ async fn desired_readers_follow_live_distinct_nodes_and_replace_a_lost_member() 
         Digest::from_bytes([8; 32]),
         Digest::from_bytes([9; 32]),
     );
-    advertise(&directory, 1, 1, "zone-a", code, 8 << 20, 1_000, 16_000).await;
+    advertise(&directory, 1, 1, "zone-a", code, 32 << 20, 1_000, 16_000).await;
     for (node, zone) in [(2, "zone-b"), (3, "zone-c"), (4, "zone-d"), (5, "zone-a")] {
         let expires_at_ms = if node == 2 { 8_000 } else { 16_000 };
         advertise(
@@ -68,7 +68,7 @@ async fn desired_readers_follow_live_distinct_nodes_and_replace_a_lost_member() 
             node,
             zone,
             code,
-            8 << 20,
+            32 << 20,
             1_000,
             expires_at_ms,
         )
@@ -80,7 +80,7 @@ async fn desired_readers_follow_live_distinct_nodes_and_replace_a_lost_member() 
         7,
         "zone-e",
         Digest::from_bytes([11; 32]),
-        8 << 20,
+        32 << 20,
         1_000,
         16_000,
     )
@@ -130,7 +130,7 @@ async fn desired_readers_follow_live_distinct_nodes_and_replace_a_lost_member() 
         .await
         .unwrap();
     assert_eq!(short.len(), 3);
-    advertise(&directory, 6, 6, "zone-b", code, 8 << 20, 9_000, 16_000).await;
+    advertise(&directory, 6, 6, "zone-b", code, 32 << 20, 9_000, 16_000).await;
     let replacement = directory
         .select_readers(cell, owner, code, 4, 9_000, 16)
         .await

@@ -1,62 +1,48 @@
 //! Owned read-only SQLite view of one verified immutable Cell root.
 
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Mutex, MutexGuard},
 };
 
 use rusqlite::{Connection, OpenFlags};
 
 use super::{RootRef, VerifiedRoot};
-use crate::{CrabError, DiskReservation, Host, Result};
+use crate::{CrabError, Result, writable_vfs::Registration};
 
-/// A verified root restored to a private SQLite file opened without write access.
+/// A read-only SQLite view backed by authenticated pages of one immutable root.
 ///
-/// Queries hold the connection lock through execution. The file is disposable;
-/// Cell ownership and root freshness remain the caller's responsibility.
+/// Queries hold the connection lock through execution. Page bodies use the
+/// host's bounded cache; Cell ownership and freshness remain the caller's duty.
 pub struct ReadOnlyRoot {
     root: RootRef,
     connection: Option<Mutex<Connection>>,
-    destination: PathBuf,
-    host: Host,
-    installed: bool,
-    _disk: DiskReservation,
+    registration: Registration,
 }
 
 impl ReadOnlyRoot {
-    pub(super) async fn open(root: &VerifiedRoot, destination: &Path) -> Result<Self> {
-        let host = root.pages.replica.host.clone();
-        crate::recovery::reject_sidecars(destination, &host)?;
-        if host.filesystem.exists(destination)? {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "read-only root destination already exists",
-            )
-            .into());
-        }
-        let bytes = u64::from(root.database_pages)
-            .checked_mul(u64::from(root.page_size))
-            .ok_or(CrabError::LTXCorrupted)?;
-        let disk = host.reserve_local_disk(bytes)?;
-        let mut view = Self {
-            root: root.root,
-            connection: None,
-            destination: destination.to_owned(),
-            host,
-            installed: false,
-            _disk: disk,
-        };
-        root.restore(destination).await?;
-        view.installed = true;
+    pub(super) fn open(root: &VerifiedRoot, destination: &Path) -> Result<Self> {
+        let database = crate::paged_io::Database::Snapshot(root.pages.clone());
+        let registration = Registration::new(database, destination)?;
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let connection = match view.host.sqlite_vfs.as_deref() {
-            Some(vfs) => Connection::open_with_flags_and_vfs(destination, flags, vfs)?,
-            None => Connection::open_with_flags(destination, flags)?,
-        };
-        crate::db::configure_managed_connection(&connection)?;
-        connection.pragma_update(None, "query_only", true)?;
-        view.connection = Some(Mutex::new(connection));
-        Ok(view)
+        let connection = (|| -> Result<Connection> {
+            let connection =
+                Connection::open_with_flags_and_vfs(destination, flags, registration.vfs())?;
+            crate::db::configure_managed_connection(&connection)?;
+            connection.pragma_update(None, "query_only", true)?;
+            Ok(connection)
+        })()
+        .map_err(|error| registration.take_error().unwrap_or(error))?;
+        Ok(Self {
+            root: root.root,
+            connection: Some(Mutex::new(connection)),
+            registration,
+        })
+    }
+
+    /// Takes the provider/checksum source behind a sparse SQLite I/O error.
+    pub fn take_io_error(&self) -> Option<CrabError> {
+        self.registration.take_error()
     }
 
     /// Returns the immutable root this view reads.
@@ -77,12 +63,7 @@ impl ReadOnlyRoot {
 
 impl Drop for ReadOnlyRoot {
     fn drop(&mut self) {
-        // SQLite must release its handle before the private file is removed.
+        // SQLite must release its handle before registration removes the placeholder.
         self.connection.take();
-        // A failed restore may have raced with another installer; only remove
-        // a destination after this view installed it successfully.
-        if self.installed {
-            let _ = self.host.filesystem.remove_file(&self.destination);
-        }
     }
 }

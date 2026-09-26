@@ -69,7 +69,7 @@ were moved behind Crab-owned APIs:
 | `ltx.rs`, `codec.rs`, `lz4_block.rs` | Strict LTX parsing, dual decoding, sized-block encoding, and checked LZ4 helpers |
 | `compactor.rs` | Exact-input local and Cell compaction with endpoint verification |
 | `host.rs` | Injectable filesystem, clock, SQLite VFS, disk admission, telemetry, executor, and worker contracts in `environment.rs` |
-| `paged.rs`, `paged_vfs.rs` | Private authenticated page access plus the writable sparse Cell VFS |
+| `paged.rs`, `paged_vfs.rs` | Private authenticated page access plus writable sparse and immutable read-only Cell VFS modes |
 | `bundle.rs`, `client/bundle.rs` | Checked CRB1 bundles and exact Cell-scoped recovery overlays |
 | `replica.rs`, `replica_compactor.rs` | Design reference only; the standalone epoch-head API was removed |
 | `client/epochs.rs`, `client/mod.rs`, `client/object_store.rs` | Replaced by exact Cell roots and existing `crab-storage` transport |

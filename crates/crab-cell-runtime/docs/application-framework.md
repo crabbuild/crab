@@ -311,7 +311,11 @@ Blob queries hydrate content-addressed parts with digest and length checks;
 missing or reclaimed parts fail instead of returning unverified bytes.
 The object durability profile supplies the all-node-loss contract;
 [Plan 036](../../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md)
-tracks remaining sparse-view and qualification work.
+tracks remaining qualification work. Replica views now fault authenticated
+pages from their exact root, with no full local database restore. Each view
+provisionally reserves 12 MiB and four descriptors, including a conservative
+charge for the shared page cache; refresh retains both views until old queries
+finish. Sparse I/O uses the query deadline and preserves its source error.
 
 ## Generate an application client
 

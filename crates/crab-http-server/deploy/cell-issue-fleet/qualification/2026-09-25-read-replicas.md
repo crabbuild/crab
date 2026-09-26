@@ -146,11 +146,53 @@ minimum-position rejection, 32 concurrent routed mTLS reads, target withdrawal,
 and fenced takeover. That test has one reader; it validates route integration
 and authority behavior, not multi-reader load distribution.
 
+## Sparse snapshot follow-up
+
+The change introducing this section replaces full reader restores with an
+immutable SQLite VFS over the existing authenticated page resolver. A view
+keeps an empty private placeholder; page bodies use the shared bounded 8 MiB
+cache and SQLite's managed 64 KiB page cache. No capture session, WAL, or
+checksum sidecar is constructed. Disabling `query_only` still cannot write.
+The synchronous opener uses SQL-worker admission in the runtime, independently
+of LTX's blocking-I/O admission, and retains resources through cancellation.
+Sparse query faults inherit the query deadline and preserve provider errors.
+
+Each runtime view now reserves a provisional 12 MiB and four descriptors.
+The charge conservatively covers the complete shared page cache plus view
+and fetch overhead. It is an admission reservation, not a measured RSS result.
+Refresh charges both old and new views until old queries finish. Library and
+product test fixtures were sized to admit both views; production capacity
+rejection remains enabled. The prior 8 MiB product fixture correctly returned
+pending readiness rather than bypassing the new 12 MiB admission charge.
+
+Local evidence for this change:
+
+- All 25 existing Cell-root tests passed, including sparse writable publication,
+  hydration, compaction, and process-kill recovery.
+- A new 2 MB payload test fetched fewer than 512 KB for opening and a small
+  query, without materializing database pages. It also proved a one-slot LTX
+  directory-cache pool can progress, deadline rejection, missing-object and
+  checksum-error propagation, and byte-identical reads after provider repair.
+- Exact-root A/B isolation, write rejection, placeholder cleanup, and cancelled
+  installation tests passed.
+- Runtime snapshot/refresh/fencing tests passed in memory and on local RustFS,
+  using prefix `plan036-sparse-reader-20260926`. Reader placement and five
+  generated-client tests passed.
+- The real mTLS product test passed on local RustFS under prefix
+  `plan036-sparse-http-ready-20260926`, including 32 concurrent routed replica
+  queries, policy withdrawal, and takeover recovery.
+- LTX/runtime/application/HTTP all-target Clippy passed with warnings denied;
+  formatting, crate layout, and 66 documented Rust snippet checks passed.
+
+The earlier container images and throughput measurements predate this sparse
+implementation. This follow-up is local library and one-process mTLS evidence;
+it does not establish new multi-container throughput or peak-resource results.
+
 ## Scope still open
 
 The container runs do not measure per-query S3 calls or refresh bytes, sustained
 hot Cell throughput, peak resources, retention/release fault combinations, or
-1k/5k/10k Cell admission. Sparse readers remain unimplemented; distribution
-under uneven load across multiple ingress nodes remains unqualified.
+1k/5k/10k Cell admission. Sparse-reader performance and distribution under
+uneven load across multiple ingress nodes remain unqualified.
 Protected S3 and multi-host release gates remain outside the requested local
 RustFS execution scope. See [Plan 036](../../../../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md).

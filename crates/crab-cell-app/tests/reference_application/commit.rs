@@ -200,7 +200,7 @@ async fn generated_queries_report_snapshot_position_while_commands_advance_owner
                     vec![1],
                     NodeFailureDomain::default(),
                     NodeCapacity {
-                        free_memory_bytes: 8 << 20,
+                        free_memory_bytes: 32 << 20,
                         free_disk_bytes: 1 << 20,
                         job_credits: 2,
                         ..NodeCapacity::default()
@@ -223,7 +223,7 @@ async fn generated_queries_report_snapshot_position_while_commands_advance_owner
         .await
         .unwrap();
     let reader_runtime = CellRuntime::new_with_replica_host(
-        SqlWorkerPool::new(1, 200).unwrap(),
+        SqlWorkerPool::new(1, 512).unwrap(),
         16 << 20,
         reader_session,
         reference_host(),

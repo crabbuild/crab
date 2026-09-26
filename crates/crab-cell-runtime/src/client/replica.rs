@@ -50,7 +50,7 @@ impl CellReadReplica {
         self.expected
     }
 
-    /// Restores the exact S3 root currently named by one live serving owner.
+    /// Opens the exact S3 root currently named by one live serving owner.
     ///
     /// The caller supplies a fresh private destination and an admitting node
     /// runtime. Source Cell control must stay serving under the same owner
@@ -93,7 +93,7 @@ impl CellReadReplica {
             code: control.code,
             schema: control.schema,
         };
-        let view = Arc::new(verified.open_read_only(destination).await?);
+        let view = open_view(&runtime, verified, destination, Arc::clone(&admission)).await?;
         let snapshot = ReplicaSnapshot {
             owner,
             epoch: control.epoch,
@@ -176,7 +176,7 @@ impl CellReadReplica {
         let replacement = ReplicaSnapshot {
             owner: current.owner.clone(),
             epoch: current.epoch,
-            view: Arc::new(verified.open_read_only(destination).await?),
+            view: open_view(&self.runtime, verified, destination, Arc::clone(&admission)).await?,
             _admission: admission,
         };
         self.confirm_authority(&replacement).await?;
@@ -272,22 +272,30 @@ impl CellReadReplica {
             let _permit = permit;
             let _job = job;
             let connection = view.connection()?;
-            if local::current_sequence(&connection)? != sequence {
-                return Err(Error::Fenced);
-            }
-            registry.execute_query(
-                &connection,
-                QueryInvocation {
-                    module,
-                    operation_id: query.operation_id,
-                    codec_version: query.codec_version,
-                    schema,
-                    cell,
-                    commit_sequence: sequence,
-                    now_ms,
-                    input: &input,
-                },
-            )
+            view.take_io_error();
+            crab_ltx::with_paged_io_deadline(deadline, || {
+                if local::current_sequence(&connection)? != sequence {
+                    return Err(Error::Fenced);
+                }
+                registry.execute_query(
+                    &connection,
+                    QueryInvocation {
+                        module,
+                        operation_id: query.operation_id,
+                        codec_version: query.codec_version,
+                        schema,
+                        cell,
+                        commit_sequence: sequence,
+                        now_ms,
+                        input: &input,
+                    },
+                )
+            })
+            .map_err(|error| match view.take_io_error() {
+                Some(crab_ltx::CrabError::Deadline) => Error::Deadline,
+                Some(source) => Error::from(source),
+                None => error,
+            })
         });
         let result = match tokio::time::timeout_at(deadline.into(), &mut task).await {
             Ok(result) => result.map_err(Error::WorkerJoin)?,
@@ -351,4 +359,26 @@ impl CellReadReplica {
                 .as_ref()
                 .is_some_and(|root| root.commit_sequence >= snapshot.view.root().commit_sequence)
     }
+}
+
+async fn open_view(
+    runtime: &CellRuntime,
+    verified: crab_ltx::VerifiedRoot,
+    destination: &Path,
+    admission: Arc<ResourceReservation>,
+) -> Result<Arc<ReadOnlyRoot>> {
+    let job = runtime.reserve_sql_job().await?;
+    let destination = destination.to_owned();
+    // VFS faults need LTX's blocking pool for directory-cache I/O. SQLite must
+    // use separate SQL admission, retaining both charges if its waiter cancels.
+    tokio::task::spawn_blocking(move || {
+        let _job = job;
+        let _admission = admission;
+        crab_ltx::with_paged_io_deadline(Instant::now() + QUERY_DEADLINE, || {
+            verified.open_read_only(&destination).map(Arc::new)
+        })
+    })
+    .await
+    .map_err(Error::WorkerJoin)?
+    .map_err(Error::from)
 }

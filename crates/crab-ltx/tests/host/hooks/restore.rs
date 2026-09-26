@@ -41,10 +41,12 @@ async fn cancelled_read_view_install_removes_its_unclaimed_destination() {
     writer.close().unwrap();
     let verified = replica.open_root(&root).await.unwrap();
     let pause = Arc::new(InstallPause::new());
-    assert!(faults.install_pause.set(Arc::clone(&pause)).is_ok());
+    assert!(faults.create_pause.set(Arc::clone(&pause)).is_ok());
     let destination = directory.path().join("reader.sqlite");
     let open_destination = destination.clone();
-    let open = tokio::spawn(async move { verified.open_read_only(&open_destination).await });
+    let open = tokio::spawn(async move {
+        tokio::task::spawn_blocking(move || verified.open_read_only(&open_destination)).await
+    });
     let entered = Arc::clone(&pause);
     tokio::time::timeout(
         Duration::from_secs(3),

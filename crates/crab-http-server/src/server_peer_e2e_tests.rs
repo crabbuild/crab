@@ -306,7 +306,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     });
 
     let ingress_runtime = CellRuntime::new(
-        SqlWorkerPool::new(1, 128).unwrap(),
+        SqlWorkerPool::new(1, 512).unwrap(),
         16 * 1024 * 1024,
         ingress_session,
     )

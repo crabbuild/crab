@@ -6,9 +6,10 @@ use crate::{Error, Result};
 pub(crate) const ACTIVE_CELL_NATIVE_BYTES: usize = 64 * 1024;
 /// Persistent database, WAL, SHM and capture descriptors reserved per active Cell.
 pub const ACTIVE_CELL_FILE_DESCRIPTORS: usize = 8;
-// These reserve the full restored SQLite view and one open connection until
-// measured per-node costs can replace the provisional admission charge.
-pub(crate) const READ_REPLICA_NATIVE_BYTES: usize = 4 * 1024 * 1024;
+// Conservatively cover the entire 8 MiB shared page cache plus 4 MiB for
+// SQLite, fetch/decode buffers and view metadata. Do not assume another view
+// or writer pays for the cache; measured sharing may reduce this charge later.
+pub(crate) const READ_REPLICA_NATIVE_BYTES: usize = 12 * 1024 * 1024;
 pub(crate) const READ_REPLICA_FILE_DESCRIPTORS: usize = 4;
 pub(crate) const HYDRATION_JOB_CAPACITY: usize = 2;
 
