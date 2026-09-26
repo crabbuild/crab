@@ -8,7 +8,6 @@ use std::{
 };
 
 use crab_cell_host::CellNodeTaskGroup;
-use crab_cell_runtime::cell::actor::CellHandle;
 use crab_cell_runtime::client::CellClient;
 use crab_cell_runtime::control::authority::CellAuthority;
 use crab_cell_runtime::identity::CellTarget;
@@ -56,6 +55,106 @@ impl CellInitialPartitionProvisioner {
                 through: None,
             });
         Ok(())
+    }
+
+    pub(super) async fn reclaim_coordinator_capacity(&self) -> Result<(), StorageError> {
+        let stats = self.runtime.stats();
+        if stats.active_cells() < stats.active_cell_capacity() {
+            return Ok(());
+        }
+        let mut candidates = self
+            .runtime
+            .idle_transfer_candidates()
+            .await
+            .map_err(provision_error)?;
+        candidates.sort_by_key(|(_, _, last_used, _)| *last_used);
+        let candidates = {
+            let shards =
+                self.transaction_recovery.shards.read().map_err(|_| {
+                    StorageError::Internal("coordinator recovery lock poisoned".into())
+                })?;
+            candidates
+                .into_iter()
+                .filter_map(|(cell, generation, _, _)| {
+                    shards
+                        .get(cell.as_bytes())
+                        .map(|shard| (cell, generation, shard.target.clone()))
+                })
+                .collect::<Vec<_>>()
+        };
+        let client = CellClient::local_runtime(
+            self.application.registry(),
+            self.runtime.clone(),
+            self.layout.clone(),
+        );
+        for (cell, generation, target) in candidates {
+            let pending = client
+                .query::<crate::ReadPendingTransactionBoundary>(&target, None, Json(()))
+                .await
+                .map_err(cell_error)?;
+            if pending.output.0.is_some() {
+                continue;
+            }
+            // Runtime rechecks the generation and settled-work gate, closes SQLite,
+            // and publishes Idle before returning capacity. A BEGIN racing the query
+            // stays recoverable unless the released root proves nothing changed.
+            self.runtime
+                .release_idle_cell(cell, self.session, generation)
+                .await
+                .map_err(|error| match error {
+                    crab_cell_runtime::Error::Capacity(_) => {
+                        StorageError::Transient(error.to_string())
+                    }
+                    _ => provision_error(error),
+                })?;
+            let released = CellAuthority::new(self.layout.clone())
+                .load(cell)
+                .await
+                .map_err(provision_error)?;
+            if released.as_ref().is_some_and(|record| {
+                let control = record.value();
+                control.owner.is_none()
+                    && control.incarnation == pending.receipt.incarnation
+                    && control
+                        .root
+                        .as_ref()
+                        .is_some_and(|root| root.commit_sequence == pending.receipt.commit_sequence)
+            }) {
+                // The admission mutex excludes a local reactivation until this
+                // retirement finishes. A later admission tracks the shard again.
+                self.transaction_recovery
+                    .shards
+                    .write()
+                    .map_err(|_| {
+                        StorageError::Internal("coordinator recovery lock poisoned".into())
+                    })?
+                    .remove(cell.as_bytes());
+            }
+            return Ok(());
+        }
+        Err(StorageError::Transient(
+            "no settled coordinator can release capacity".into(),
+        ))
+    }
+
+    async fn activate_tracked_coordinator(
+        &self,
+        target: &CellTarget,
+    ) -> Result<bool, StorageError> {
+        let observed = CellAuthority::new(self.layout.clone())
+            .load(target.cell_id())
+            .await
+            .map_err(provision_error)?
+            .ok_or_else(|| StorageError::Transient("coordinator has no authority".into()))?;
+        if let Some(owner) = &observed.value().owner {
+            return Ok(owner.session == self.session);
+        }
+        let proof = self
+            .cataloged(target, crate::transaction_coordinator::MODULE)
+            .await?;
+        self.admit_initialized(target, proof, initialize_coordinator)
+            .await?;
+        Ok(true)
     }
 
     /// Supervise recovery of abandoned transactions on locally admitted coordinators.
@@ -113,6 +212,14 @@ impl CellInitialPartitionProvisioner {
         // Advance even on failure: an unreachable shard or participant must not
         // prevent unrelated transactions from releasing their locks.
         *after = Some(cell);
+        if !self.activate_tracked_coordinator(&shard.target).await? {
+            self.transaction_recovery
+                .shards
+                .write()
+                .map_err(|_| StorageError::Internal("coordinator recovery lock poisoned".into()))?
+                .remove(&cell);
+            return Ok(());
+        }
         let pending = storage
             .pending_coordinator_transaction(
                 &shard.target,
@@ -145,15 +252,16 @@ impl CellInitialPartitionProvisioner {
     ///
     /// Call during startup before accepting transaction requests. Idle shards
     /// can be acquired; active shards require the former owner's expired lease.
+    /// Resolve each shard before admitting the next; private peer routing must
+    /// already be available, while public transaction admission remains stopped.
     pub async fn recover_registered_coordinators(
         &self,
         account_id: &str,
-        account_handle: CellHandle,
+        client: &CellClient,
+        storage: &CellStorage,
         nodes: &NodeDirectory,
-    ) -> Result<Vec<CellTarget>, StorageError> {
+    ) -> Result<(), StorageError> {
         let account = account_target(account_id).map_err(provision_error)?;
-        let client = CellClient::local(self.application.registry(), account_handle);
-        let mut recovered = Vec::new();
         let mut after = None;
         loop {
             let page = client
@@ -171,7 +279,7 @@ impl CellInitialPartitionProvisioner {
                 .output
                 .0;
             if page.is_empty() {
-                return Ok(recovered);
+                return Ok(());
             }
             for shard in page {
                 after = Some(shard);
@@ -182,16 +290,31 @@ impl CellInitialPartitionProvisioner {
                     &partition_for_shard(shard),
                 )
                 .map_err(provision_error)?;
-                if self
-                    .recover_local_transaction_owner(
-                        &target,
-                        crate::transaction_coordinator::MODULE,
-                        initialize_coordinator,
-                        nodes,
-                    )
-                    .await?
-                {
-                    recovered.push(target);
+                // Complete each shard before admitting the next. Registry size
+                // must not require all historical coordinators to be resident.
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                let local = loop {
+                    let result = self
+                        .recover_local_transaction_owner(
+                            &target,
+                            crate::transaction_coordinator::MODULE,
+                            initialize_coordinator,
+                            nodes,
+                        )
+                        .await;
+                    match result {
+                        Err(StorageError::Transient(_))
+                            if tokio::time::Instant::now() < deadline =>
+                        {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                        result => break result?,
+                    }
+                };
+                if local {
+                    self.recover_transaction_participants(&target, client, nodes)
+                        .await?;
+                    storage.recover_fenced_coordinator(&target).await?;
                 }
             }
         }
@@ -324,19 +447,27 @@ impl crate::CoordinatorProvisioner for CellInitialPartitionProvisioner {
                 account_id: account_id.into(),
                 shard,
             };
-            if client
+            let registered = client
                 .query::<crate::ReadCoordinatorRegistration>(&account, None, Json(input.clone()))
                 .await
                 .map_err(cell_error)?
                 .output
-                .0
-            {
-                return Ok(());
-            }
+                .0;
+            // Registration is discovery, not residency. A released shard must
+            // restore its published root before token lookup or a new BEGIN.
             let observed = CellAuthority::new(self.layout.clone())
                 .load(target.cell_id())
                 .await
                 .map_err(provision_error)?;
+            if registered
+                && observed
+                    .as_ref()
+                    .is_none_or(|record| record.value().root.is_none())
+            {
+                return Err(StorageError::Transient(
+                    "registered coordinator has no published authority".into(),
+                ));
+            }
             if observed.as_ref().is_some_and(|record| {
                 record.value().owner.is_some() && record.value().root.is_some()
             }) {
@@ -344,6 +475,13 @@ impl crate::CoordinatorProvisioner for CellInitialPartitionProvisioner {
                 // Keep its authority; the routed client will reach that owner.
                 self.cataloged(&target, crate::transaction_coordinator::MODULE)
                     .await?;
+                if observed
+                    .as_ref()
+                    .and_then(|record| record.value().owner.as_ref())
+                    .is_some_and(|owner| owner.session == self.session)
+                {
+                    self.track_coordinator(&target)?;
+                }
             } else {
                 self.admit_module(
                     &target,
@@ -351,6 +489,9 @@ impl crate::CoordinatorProvisioner for CellInitialPartitionProvisioner {
                     initialize_coordinator,
                 )
                 .await?;
+            }
+            if registered {
+                return Ok(());
             }
             client
                 .command::<crate::RegisterCoordinatorShard>(

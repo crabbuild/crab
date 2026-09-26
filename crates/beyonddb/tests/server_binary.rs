@@ -666,6 +666,30 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         Some(&AttributeValue::S("updated".into()))
     );
     assert!(snapshot.responses()[2].item().is_none());
+    // Historical coordinator count exceeds the binary's 64 active-Cell slots.
+    // Every request still follows the signed SDK path and touches two data Cells.
+    let mut shards = std::collections::HashSet::new();
+    let resident_tokens = (0..10_000)
+        .map(|n| format!("resident-{n}"))
+        .filter(|token| {
+            shards.insert(
+                beyonddb::coordinator_target("123456789012", token.as_bytes())
+                    .unwrap()
+                    .cell_id(),
+            )
+        })
+        .take(70)
+        .collect::<Vec<_>>();
+    assert_eq!(resident_tokens.len(), 70);
+    for token in &resident_tokens {
+        sdk.transact_write_items()
+            .client_request_token(token)
+            .transact_items(update("process", "updated"))
+            .transact_items(update(&second_write_key, "updated"))
+            .send()
+            .await
+            .unwrap();
+    }
     child.kill().unwrap();
     child.wait().unwrap();
     let mut restarted = start(&config, &log, false, s3);
@@ -675,6 +699,13 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         .transact_items(update("process", "updated"))
         .transact_items(update(&second_write_key, "updated"))
         .transact_items(check("attribute_not_exists(id)"))
+        .send()
+        .await
+        .unwrap();
+    sdk.transact_write_items()
+        .client_request_token(&resident_tokens[0])
+        .transact_items(update("process", "updated"))
+        .transact_items(update(&second_write_key, "updated"))
         .send()
         .await
         .unwrap();
@@ -781,7 +812,13 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         .billing_mode(aws_sdk_dynamodb::types::BillingMode::PayPerRequest)
         .send()
         .await
-        .unwrap();
+        .unwrap_or_else(|error| {
+            panic!(
+                "table recreation failed: {error:?}; status {:?}; log {}",
+                drained.try_wait(),
+                fs::read_to_string(&log).unwrap()
+            )
+        });
     let recreated_tags = sdk
         .list_tags_of_resource()
         .resource_arn(arn)

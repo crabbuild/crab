@@ -38,6 +38,8 @@ opened child: admit children, seal the source, copy and verify items, publish
 the replacement route, and open the children. A host-invoked, cancellable
 account loop inspects one table range per tick, resumes pending splits,
 and splits at most one range above a SQLite database-image threshold. The
+loop retains its cursor and split plan across transient admission or movement
+pressure, retrying on the next tick without terminating node readiness. The
 ordinary sweep selects the next range by indexed lower boundary and checks
 ownership by partition ID without loading the full route. The
 measurement includes indexes and runtime tables but excludes WAL/LTX files.
@@ -106,13 +108,28 @@ shards selected by client token or transaction ID. Only used shards are
 admitted. This is another finite per-account writer budget; shard expansion
 needs a versioned routing and token-replay migration before saturation.
 
-The serving binary configures only 64 active Cells per node, shared by data,
-account, credential, and coordinator Cells. Coordinator shards currently stay
-resident, with no passivation or fleet placement. Distinct transaction tokens
-can therefore exhaust this pool even without table growth. Startup also
-restores every registered shard assigned to its endpoint. Bounded residency,
-on-demand recovery, history collection, and distributed placement are required
-before this path can sustain the stated scale target.
+The serving binary configures 64 active Cells per node, shared by data,
+account, credential, and coordinator Cells. Cell admission now reclaims
+one settled local coordinator when the pool is full, preferring least-recently
+used candidates without pending transactions. Runtime generation checks,
+worker close, and authoritative owner release complete before capacity is
+reused. Busy Cells and the runtime movement budget apply retryable backpressure.
+Registration is discovery rather than residency: token lookup restores an idle
+shard's published root, while another active owner remains authoritative.
+
+After release, matching incarnation and commit sequence prove that no BEGIN
+raced the empty-work query; only then does admission retire the local recovery
+entry. Unproven releases stay scheduled, and the worker reactivates them. Startup resolves registered coordinators one at a
+time after private peer routing starts. It no longer needs every historical
+coordinator simultaneously resident. Per-Cell directories and fresh activation
+paths honor the runtime's resume/restore contract.
+
+This establishes bounded coordinator residency, not elastic fleet placement.
+Startup still inspects historical shards, and unproven releases remain in
+the recovery schedule. Active requests can encounter release and retry from
+durable state. General
+data/account/credential activation, distributed placement, retained-history
+collection, and measured overload/recovery behavior remain scale gates.
 
 ## Target ownership
 

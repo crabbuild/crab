@@ -81,6 +81,29 @@ disappear by adding Cells. Coordinator sharding spreads independent requests,
 but activation, placement, retained history, and recovery throughput must also
 scale before 10,000 Cells is a service-level claim.
 
+### Cost of a transaction
+
+Let `P` be the number of participant Cells, rather than the number of keys.
+In an uncontended first attempt, the current driver issues `4P + 2` successful
+durable commands: one BEGIN, `P` prepares, `P` prepare-receipt records, one
+decision, `P` resolutions, and `P` resolution-receipt records. Registration,
+queries, activation, retries, and concurrent recovery add work. This is a
+command count, not an object-store request count; the runtime owns publication.
+
+The coordinator itself serializes `2P + 2` of those commands. Two participant
+Cells therefore need ten durable commands; 100 participants need 402. Multiple
+keys in one Cell share one prepare and resolution, so partition distribution
+matters as much as item count. Independent transactions can use different
+coordinator shards, but participant phases within one transaction currently
+run sequentially. Adding nodes cannot remove that per-request latency.
+
+Cross-Cell reads pay the same phase cost and persist their captured images;
+assembly additionally queries each saved item. Same-Cell reads use one local
+snapshot. Before optimizing the protocol, measure publication latency,
+participant count, hot-key conflicts, recovery competition, and retained bytes.
+Batching coordinator progress or parallelizing participant work requires new
+failure/concurrency proof; neither optimization is implemented here.
+
 ## Ownership and durable records
 
 Use a deterministic, account-scoped coordinator Cell chosen from the client
@@ -408,9 +431,54 @@ test abandons a published COMMIT after one apply, then verifies worker completio
 and signed SDK reads across owner replacement.
 
 This is one serial worker per serving node. Its backlog drain rate and worst-case
-latency at 10,000 Cells remain unmeasured. Coordinator residency/passivation,
-fleet-wide discovery and unattended owner replacement, data-only-node startup,
+latency at 10,000 Cells remain unmeasured. Fleet-wide discovery and unattended owner replacement, data-only-node startup,
 and history collection remain separate requirements.
+
+## Coordinator residency
+
+Registration records that a shard exists; it does not promise a resident
+actor. Public admission now checks current authority even for registered
+shards, restores Idle roots, and preserves any active remote owner. A registered
+shard without published authority fails closed rather than bootstrapping an
+empty transaction history.
+
+When local Cell activation reaches the active-Cell limit, admission
+inspects runtime-settled candidates in least-recently-used order, checks the
+indexed pending-transaction boundary, and requests release of at most one
+coordinator with no observed pending work. Account, data, and credential Cells
+are never selected for reclamation. The runtime rechecks the exact generation and
+settled-work gate, closes SQLite, publishes Idle ownership, and releases its
+reservation. Local Cell activations are serialized; cross-node ownership
+still uses authority CAS. Movement-budget or busy-owner failures are retryable.
+The account capacity worker retains its cursor and durable split plan on
+transient pressure and retries on its next tick, preserving node readiness.
+Other task failures still stop serving; shutdown exposes their source error.
+
+The pending-work check is not a distributed transaction lease: a BEGIN can
+race it. After release, admission compares the published root with the empty-work
+query receipt. Only an Idle owner with matching incarnation and commit
+sequence proves that no intervening BEGIN appeared; that shard leaves the
+local recovery schedule. The admission mutex protects retirement against
+local reactivation, which registers the shard again. Unproven releases stay
+scheduled. The worker reactivates an Idle shard before scanning, then resumes
+any durable work. It drops local scheduling when another node has acquired the shard. A request
+interrupted by release can retry; no timeout or release implies ABORT.
+
+Startup pages the registry and completes each local shard's fenced recovery
+before moving to the next. The private peer listener is already available;
+public admission remains closed. Runtime activation receives a fresh database
+path inside a Cell-specific directory, so resume lookup cannot consume another
+Cell's saved image.
+
+`coordinator_residency.rs` runs twelve distinct shards through a three-slot
+host, admits a new data Cell by reclaiming completed coordinators, verifies
+concurrent replay without reverting a newer value, and recovers a prepared
+shared read after coordinator release. The serving-process test exercises seventy distinct shards through signed SDK
+writes, then hard restart and token replay. These tests bound residency;
+they do not establish fleet throughput. Startup still visits the historical
+registry. Its cost, movement limits, data-owner activation, and history collection remain production work.
+A two-slot host regression also exhausts split admission and checks that the
+capacity worker preserves readiness and its pending split across retries.
 
 ## Account participant boundary
 
@@ -476,12 +544,10 @@ gates remain necessary.
 
 ## Remaining implementation and proof
 
-1. Add coordinator passivation and activation,
-   fleet placement, and changed-endpoint coordinator takeover. The serving
-   binary admits 64 active Cells per node, while token routing can select 4,096
-   coordinator shards per account. Current shards remain resident; ordinary
-   transaction traffic can exhaust that pool. Startup registry recovery alone
-   is insufficient for the 10,000-Cell, multi-TB target.
+1. Add fleet placement, general data-owner activation, and changed-endpoint
+   coordinator takeover. Measure historical startup scans and the
+   movement/admission backlog. Coordinator reclamation now lets history exceed
+   active slots, but does not qualify the 10,000-Cell, multi-TB target.
 2. Add read-triggered write resolution. Qualify pending read-owner recovery
    and concurrent read/write histories across each failure boundary; shared
    lock and saved-image tests do not establish the full distributed matrix.
