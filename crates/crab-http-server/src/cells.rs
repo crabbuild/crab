@@ -232,6 +232,7 @@ const REPOSITORY_QUERIES: &[OperationDescriptor] = &[
         128 * 1024,
     ),
     operation(REPOSITORY_EFFECT_STATUS_QUERY_ID, 36, 1024 * 1024),
+    operation(36, 8, 464 * 1024),
 ];
 
 pub(super) fn repository_replica_limits() -> ReplicaLimits {

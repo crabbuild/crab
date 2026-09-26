@@ -322,7 +322,10 @@ published root on a surviving node. It then observed two replacement readers.
 This receipt uses image `sha256:d46b4d06971a608da9fd326fe6e7c482919e0313cd2d1efe798124990ba664bf`;
 the raw report is outside the checkout under
 `$HOME/.codex/cell-issue-fleet/plan036-local-1/read-replica-report.json`.
-It predates the later change that also routes issue label metadata to readers.
+It predates the compound issue-detail query that also reads label metadata
+from the same snapshot. A later live run exposed cursor aliasing when issue
+and label reads each advanced one shared round-robin cursor; the compound
+query removes that second routing decision.
 It proves a local functional slice, not a production capacity or protected-provider gate.
 
 | Slice | Change owner | Implementation and focused gate | Completion evidence |

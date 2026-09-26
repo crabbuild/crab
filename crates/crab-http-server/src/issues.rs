@@ -24,8 +24,8 @@ use crate::{
         repository::{
             CommentKey, CommentPage, CommentRecord, CreateComment, CreateCommentInput,
             CreateCommentOutcome, CreateIssue, CreateIssueInput, CreateIssueOutcome, GetComment,
-            GetIssue, IssueRecord, IssueSummary, ListComments, ListCommentsInput, ListIssues,
-            ListIssuesInput, ListLabels, RepositoryAuthor, UpdateComment, UpdateCommentInput,
+            GetIssueDetail, IssueRecord, IssueSummary, ListComments, ListCommentsInput, ListIssues,
+            ListIssuesInput, RepositoryAuthor, UpdateComment, UpdateCommentInput,
             UpdateCommentOutcome, UpdateIssue, UpdateIssueInput, UpdateIssueOutcome,
         },
     },
@@ -301,15 +301,10 @@ async fn detail(
             let issue = query_output(
                 routed
                     .client
-                    .query::<GetIssue>(&routed.target, None, number(id)?)
+                    .query::<GetIssueDetail>(&routed.target, None, number(id)?)
                     .await,
             )?;
-            (
-                issue,
-                None,
-                None,
-                labels::catalog(&server, &repo, &author).await?,
-            )
+            (issue.issue, None, None, issue.labels.labels)
         }
         Some("replica") => {
             let router = server.repository_cells().ok_or(Error::CellUnavailable)?;
@@ -346,21 +341,14 @@ async fn detail(
                 .and_then(|receiver| receiver.read_replicas())
                 .ok_or(Error::Cell(crab_cell_runtime::Error::ReplicaUnavailable))?;
             let (observed, reader_node) = router
-                .query_replica::<GetIssue>(repo.id, &author, &local, minimum, number(id)?)
+                .query_replica::<GetIssueDetail>(repo.id, &author, &local, minimum, number(id)?)
                 .await
                 .map_err(Error::Cell)?;
-            let labels = router
-                .query_replica::<ListLabels>(repo.id, &author, &local, Some(observed.receipt), ())
-                .await
-                .map_err(Error::Cell)?
-                .0
-                .output
-                .labels;
             (
-                observed.output,
+                observed.output.issue,
                 Some(observed.receipt),
                 Some(reader_node),
-                labels,
+                observed.output.labels.labels,
             )
         }
         Some(_) => return Err(Error::Invalid("Read mode must be owner or replica")),
