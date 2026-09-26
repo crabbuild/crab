@@ -33,6 +33,7 @@ their separate performance gates.
 | Priority | Gap | Next decision and proof |
 | --- | --- | --- |
 | Highest, fixed in focused tests; fleet open | An inactive-log node claim blocked other successors restoring that node's Cells (30) | Permanent fencing evidence now permits independent Cell CAS; active-tail recovery stays exclusive. The two-Cell RustFS regression passes. Re-run the failed fleet point. |
+| High, observed setup race | A newly provisioned repository reached an entry node before its peer's catalog refresh; the latest fleet stopped with HTTP 403 before timing (32) | Provision benchmark fixtures before serving nodes. Dynamic creation still needs a version-aware readiness contract; do not convert authorization errors into retries. |
 | High, measured application round trip | Covered repository mutations pay an archive-state query before their command; saturated ten-node p99 is 1,448.518 ms (31) | Evaluate checking writable state in the same command transaction. Cover archive/unarchive ordering, retries, all mutation siblings and external-write policy before removing the HTTP check. |
 | Implemented and fixed-load verified | Rounding the receiver margin up prevented donation at a one-Cell target; a batch could also overfill its preferred receiver (26) | Whole-Cell margins and projected receiver room pass both regressions. The latest 3/5/10/20-node run uses every execution owner; skew, sustained load and the combined source remain unqualified. |
 | High, implemented mechanism; latency unqualified | The baseline empty checksum overlay retained its largest allocation and cloned that capacity (25) | Sealed merges now consume the overlay. Compare large-cut → repeated one-page-cut allocation and latency for both bases, retaining failure fencing and recovery-plan clone semantics. |
@@ -2909,11 +2910,12 @@ unpublished follower state, but does not replace the failed multi-Cell rate
 point or establish sustained capacity.
 
 Uniform [fleet run 36274405084](https://github.com/crabbuild/crab/actions/runs/36274405084)
-is running with that image: image and stage source `ce02ac2e0f7`, job/fault
-harness `4741628d0db`. It must complete the original 3/5/10/20-node arrival,
-full-body readback, publication drain and owner-loss gates. The stage source
-predates publication-attribution summaries; retain and rejoin its raw logs
-with the collector as described above. A dispatch is not a qualification result.
+failed during initial repository provisioning with that image: image and stage
+source `ce02ac2e0f7`, job/fault harness `4741628d0db`. All three nodes were
+healthy; a request raced catalog propagation and returned HTTP 403 (finding 32).
+The report has no completed stages or timed load points. This run does not
+retest the multi-Cell recovery fix or supply capacity evidence. The full
+3/5/10/20-node arrival and recovery gates remain open.
 
 ### 31. The archive check adds a serialized Cell invocation before mutations
 
@@ -2951,6 +2953,55 @@ their current archive checks need their own ordering contract. Count provider
 reads and local/forwarded invocations per action as well as latency. Preserve
 authorization, idempotency, durable rejection behavior and the current public
 error mapping. No archive behavior is changed by this audit.
+
+### 32. Catalog propagation can reject a newly created Cell before load starts
+
+**Observed:** run 36274405084 created repositories while three serving nodes
+polled their catalogs independently. The initial `work-10` mutation first
+returned four 404s. Node 01 installed catalog version 20 at
+`21:54:58.104046Z`; its forwarded lifecycle query then reached node 03, which
+rejected repository authorization at `21:54:58.181447Z`. Node 03 installed
+version 20 at `21:54:58.183932Z`, 2.485 ms later. The final entry response was
+HTTP 403. The report retained the error with `stages: []`; the workload and
+unpublished-tail fault never ran. This is setup availability evidence, not a
+latency or throughput measurement.
+
+**Source:** [server startup and refresh](../../crab-http-server/src/server.rs)
+materialize a local catalog before serving, then replace it on a five-second
+poll. [Peer authorization](../../crab-http-server/src/peer.rs) looks up the
+repository in that local snapshot before resolving or executing its Cell.
+A missing repository fails closed with the observed error. The entry node's
+catalog visibility does not prove its peer's visibility. The same local
+authorization and polling boundaries exist at `origin/main` `396e0ab1b40`.
+The timing supports stale catalog as the cause; the generic denial alone
+would not distinguish it from a principal/action mismatch.
+
+**Fixture change:** [run_stage](../../crab-http-server/deploy/cell-issue-fleet/qualify.py)
+now completes release bootstrap and provisions the full fixed Cell population
+before starting traffic nodes. The CLI initializes, publishes and drains each
+Cell through [the maintenance initializer](../../crab-http-server/src/cells/initializer.rs),
+then marks it ready. Nodes load that completed catalog on startup. The existing
+Compose dependency chain waits for RustFS health and successful release setup
+before the repository initialization command; these are the documented
+[Compose startup conditions](https://docs.docker.com/compose/how-tos/startup-order/).
+Subsequent scale stages reuse those repositories. All 403s remain fatal.
+Startup-order and provisioning-failure regressions fail before this change and
+pass after it; all 65 deterministic fleet harness tests pass. An exact-source
+image and full fleet rerun are still required.
+
+**Product opportunity:** dynamic repository creation needs explicit readiness
+across candidate execution nodes, or an authenticated catalog-version contract
+with bounded refresh before policy evaluation. Preserve immediate denial for
+actually unauthorized principals and revoked membership. Do not add blind
+403 retries, cache an allow decision, or shorten the poll without measuring
+catalog/provider load. Test create → forwarded first mutation with one lagging
+peer, and membership revocation under the same conditions. The fixture change
+does not implement or qualify that product contract.
+
+The same stage helper serves reader-replica and mode-rollout qualification, so
+they inherit the startup ordering. Those sibling drivers still compare old
+`Cell issue on node N` fixture titles in several paths; reconcile them with
+`initial_issue` and exercise their readback before claiming those suites pass.
 
 ## Safety and proof retained by the audit
 

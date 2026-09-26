@@ -232,6 +232,13 @@ def object_count(path: Path, profiles: tuple[str, ...]) -> int:
 def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, gateway_port: int, node_port_base: int, cells: int) -> dict:
     print(f"Starting {size} Cell nodes", flush=True)
     started = time.monotonic()
+    initial_cells = range(1, cells + 1) if previous == 0 else ()
+    if previous == 0:
+        # Provision before serving peers snapshot the catalog. Creating between
+        # requests races their independent catalog polls and can fail peer auth.
+        compose(path, profiles, "run", "--rm", "repository-init")
+        for index in initial_cells:
+            create_repository(path, profiles, index)
     compose(path, profiles, "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300")
     gateway = f"http://127.0.0.1:{gateway_port}"
     request_json("GET", gateway + "/livez")
@@ -246,9 +253,7 @@ def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, g
     if len(sessions) != size:
         raise RuntimeError("nodes did not publish distinct boot sessions")
 
-    initial_cells = range(1, cells + 1) if previous == 0 else ()
     for index in initial_cells:
-        create_repository(path, profiles, index)
         expected_issue = initial_issue(index)
         issue = request_json(
             "POST",
