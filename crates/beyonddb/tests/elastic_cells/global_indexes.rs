@@ -86,9 +86,15 @@ async fn journal(
     Some(serde_json::from_slice(&bytes).unwrap())
 }
 
-async fn indexed_items(storage: &CellStorage, base: &TableKeyInfo) -> Vec<Item> {
+async fn indexed_items(storage: &CellStorage, base: &TableKeyInfo, index: &str) -> Vec<Item> {
     let info = TableKeyInfo {
-        key_schema: base.global_secondary_indexes[0].key_schema.clone(),
+        key_schema: base
+            .global_secondary_indexes
+            .iter()
+            .find(|entry| entry.index_name == index)
+            .unwrap()
+            .key_schema
+            .clone(),
         ..base.clone()
     };
     let condition = KeyCondition {
@@ -103,7 +109,7 @@ async fn indexed_items(storage: &CellStorage, base: &TableKeyInfo) -> Vec<Item> 
         HashMap::from([("g".into(), AttributeValue::S("same".into()))]),
     );
     storage
-        .query(&info, &condition, &maps, true, None, None, Some("ByGroup"))
+        .query(&info, &condition, &maps, true, None, None, Some(index))
         .await
         .unwrap()
         .0
@@ -183,7 +189,7 @@ async fn journal_recovers_partial_projection_and_fences_delayed_images() {
         .await
         .unwrap();
     assert!(
-        indexed_items(&storage, &base).await.is_empty(),
+        indexed_items(&storage, &base, "ByGroup").await.is_empty(),
         "base commit must enqueue durable asynchronous work"
     );
     let first = journal(&client, &source, &base.table_id).await.unwrap();
@@ -267,7 +273,7 @@ async fn journal_recovers_partial_projection_and_fences_delayed_images() {
         .command::<ApplyGlobalIndexMutation>(&destination, mutation(), Json(tombstone))
         .await
         .unwrap();
-    assert!(indexed_items(&storage, &base).await.is_empty());
+    assert!(indexed_items(&storage, &base, "ByGroup").await.is_empty());
     let lower = u128::from_be_bytes(range.lower.unwrap_or([0; 16]));
     let upper = range.upper.map(u128::from_be_bytes).unwrap_or(u128::MAX);
     let seal = PartitionSeal {
@@ -307,7 +313,10 @@ async fn journal_recovers_partial_projection_and_fences_delayed_images() {
             .unwrap()
     );
     assert!(journal(&client, &source, &base.table_id).await.is_none());
-    assert_eq!(indexed_items(&storage, &base).await, vec![changed.clone()]);
+    assert_eq!(
+        indexed_items(&storage, &base, "ByGroup").await,
+        vec![changed.clone()]
+    );
     assert_eq!(
         client
             .command::<ApplyGlobalIndexMutation>(&destination, mutation(), Json(first_mutation))
@@ -317,7 +326,10 @@ async fn journal_recovers_partial_projection_and_fences_delayed_images() {
             .0,
         GlobalIndexApplyOutcome::Superseded
     );
-    assert_eq!(indexed_items(&storage, &base).await, vec![changed.clone()]);
+    assert_eq!(
+        indexed_items(&storage, &base, "ByGroup").await,
+        vec![changed.clone()]
+    );
     let binary = TableKeyInfo {
         key_schema: base.global_secondary_indexes[1].key_schema.clone(),
         ..base.clone()
@@ -354,5 +366,213 @@ async fn journal_recovers_partial_projection_and_fences_delayed_images() {
             .unwrap();
         assert_eq!(items, vec![changed.clone()]);
     }
+    host.shutdown().await.unwrap();
+}
+
+async fn release_range(host: &crab_cell_host::CellNode, session: SessionId, target: &CellTarget) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some((cell, generation, _, _)) = host
+            .runtime()
+            .idle_transfer_candidates()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|(cell, _, _, _)| *cell == target.cell_id())
+        {
+            match host
+                .runtime()
+                .release_idle_cell(cell, session, generation)
+                .await
+            {
+                Ok(()) => return,
+                Err(
+                    crab_cell_runtime::Error::Capacity(_) | crab_cell_runtime::Error::CellDraining,
+                ) => {}
+                Err(error) => panic!("index fixture release failed: {error}"),
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "range did not settle for release"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serving_worker_recovers_released_ranges_and_keeps_healthy_indexes_progressing() {
+    let application = Arc::new(
+        Beyonddb::compile(BuildDescriptor {
+            source_revision: "index-serving-recovery".into(),
+            cargo_lock_digest: Digest::from_bytes([1; 32]),
+        })
+        .unwrap(),
+    );
+    let account = account_target(ACCOUNT).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let layout = CellStorageLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        object_store::path::Path::from("index-serving-recovery"),
+        *account.application().as_bytes(),
+    );
+    let session = SessionId::from_bytes([93; 16]);
+    let (host, provisioner, client, storage) =
+        owner(&application, &layout, session, directory.path());
+    provisioner.admit_account(ACCOUNT).await.unwrap();
+    storage.create_table(ACCOUNT, serde_json::from_value(serde_json::json!({
+        "TableName":"ServingIndexes", "BillingMode":"PAY_PER_REQUEST",
+        "KeySchema":[{"AttributeName":"id","KeyType":"HASH"}],
+        "AttributeDefinitions":[{"AttributeName":"id","AttributeType":"S"},{"AttributeName":"group","AttributeType":"S"}],
+        "GlobalSecondaryIndexes":[
+            {"IndexName":"ByGroup","KeySchema":[{"AttributeName":"group","KeyType":"HASH"}],"Projection":{"ProjectionType":"ALL"}},
+            {"IndexName":"OtherGroup","KeySchema":[{"AttributeName":"group","KeyType":"HASH"}],"Projection":{"ProjectionType":"ALL"}}
+        ]
+    })).unwrap()).await.unwrap();
+    let base = storage
+        .table_key_info(ACCOUNT, "ServingIndexes")
+        .await
+        .unwrap();
+    let route = client
+        .query::<ReadTableRoute>(&account, None, Json(base.table_id.clone()))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    let item = Item::from([
+        ("id".into(), AttributeValue::S("a".into())),
+        ("group".into(), AttributeValue::S("same".into())),
+    ]);
+    let hash = data_key_hash(&base.table_id, &item, &base.base_key_schema).unwrap();
+    let source = route
+        .partitions
+        .iter()
+        .find(|range| {
+            range.lower.is_none_or(|lower| hash >= lower)
+                && range.upper.is_none_or(|upper| hash < upper)
+        })
+        .unwrap();
+    let source_target = data_target(ACCOUNT, &base.table_id, &source.partition_id).unwrap();
+    let first = &source.table.global_secondary_indexes[0];
+    let hash = data_key_hash(&first.id, &item, &first.specification.key_schema).unwrap();
+    let page = client
+        .query::<beyonddb::ReadGlobalIndexRoutePage>(
+            &account,
+            None,
+            Json(RoutePageInput {
+                table_id: first.id.clone(),
+                start_hash: Some(hash),
+                after_lower: None,
+                expected_epoch: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .output
+        .0;
+    let RoutePageOutcome::Page { partitions, .. } = page else {
+        panic!("index route missing")
+    };
+    let destination = global_index_target(ACCOUNT, &first.id, &partitions[0].partition_id).unwrap();
+    storage
+        .put_item(
+            &base,
+            item.clone(),
+            false,
+            None,
+            &ExpressionMaps::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    let authority = CellAuthority::new(layout.clone());
+    let before = authority
+        .load(destination.cell_id())
+        .await
+        .unwrap()
+        .unwrap()
+        .value()
+        .epoch;
+    release_range(&host, session, &destination).await;
+    assert!(
+        storage
+            .project_index_changes(ACCOUNT, &source_target, &base.table_id)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        indexed_items(&storage, &base, "OtherGroup").await,
+        vec![item.clone()],
+        "a failed first index must not suppress the healthy second index"
+    );
+    assert!(
+        journal(&client, &source_target, &base.table_id)
+            .await
+            .is_some(),
+        "partial projection cannot acknowledge the source journal"
+    );
+    release_range(&host, session, &source_target).await;
+    let tasks = host
+        .install_task_group(CancellationToken::new(), CancellationToken::new())
+        .unwrap();
+    let nodes = NodeDirectory::new(
+        layout,
+        Digest::from_bytes([71; 32]),
+        Digest::from_bytes([72; 32]),
+        application.registry().release_digest(),
+    );
+    CellStorage::new(client.clone(), "us-east-1")
+        .install_global_index_loop(&tasks, vec![ACCOUNT.into()], provisioner, nodes)
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Ok(result) = client
+                .query::<ReadPartitionIndexChange>(
+                    &source_target,
+                    None,
+                    Json(base.table_id.clone()),
+                )
+                .await
+                && result.output.0.is_none()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("serving worker must recover source and index owners and finish the journal");
+    assert_eq!(
+        indexed_items(&storage, &base, "ByGroup").await,
+        vec![item.clone()]
+    );
+    let restored = authority
+        .load(destination.cell_id())
+        .await
+        .unwrap()
+        .unwrap()
+        .value()
+        .epoch;
+    assert!(restored > before);
+    // An index can lose its owner without a new base write. Discovery must
+    // restore read availability even when every source journal is empty.
+    release_range(&host, session, &destination).await;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let current = authority
+                .load(destination.cell_id())
+                .await
+                .unwrap()
+                .unwrap();
+            if current.value().owner.is_some() && current.value().epoch > restored {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("idle index with no journal must be rediscovered");
+    assert_eq!(indexed_items(&storage, &base, "ByGroup").await, vec![item]);
     host.shutdown().await.unwrap();
 }

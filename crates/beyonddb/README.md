@@ -471,3 +471,13 @@ Global-index journals and metadata, local-index schemas, required table/particip
 observations in the coordinator registry also change the unreleased Cell format.
 Reprovision development roots created before these changes; there is no in-place
 upgrade reader.
+
+## Serving global-index recovery
+
+The supervised projection worker discovers base and global-index ranges for
+configured accounts. It restores Idle owners and uses fenced takeover after
+remote leases expire, including indexes with no pending journal. A failed
+index does not prevent healthy indexes from applying the same source change;
+the journal remains until all have applied. See [global index recovery and
+qualification](GLOBAL_INDEXES.md#splits-and-recovery). This does not establish
+fleet placement, bounded recovery time, or 10,000-Cell capacity.

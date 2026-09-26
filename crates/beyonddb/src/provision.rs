@@ -281,6 +281,29 @@ impl CellInitialPartitionProvisioner {
         Ok(true)
     }
 
+    pub(crate) async fn recover_projection_owner(
+        &self,
+        target: &CellTarget,
+        nodes: &NodeDirectory,
+    ) -> Result<(), StorageError> {
+        type Initialize = for<'a> fn(&rusqlite::Transaction<'a>) -> crab_cell_runtime::Result<()>;
+        let (module, initialize): (&'static str, Initialize) = match target.namespace() {
+            crate::NAMESPACE => (crate::MODULE, initialize_account),
+            crate::DATA_NAMESPACE => (DATA_MODULE, initialize_partition),
+            crate::global_index::NAMESPACE => {
+                (crate::global_index::MODULE, crate::initialize_global_index)
+            }
+            _ => {
+                return Err(StorageError::Validation(
+                    "invalid projection owner namespace".into(),
+                ));
+            }
+        };
+        self.recover_discovered_owner(target, module, initialize, nodes)
+            .await?;
+        Ok(())
+    }
+
     /// Recover idle or expired routed ranges for a configured account.
     ///
     /// The caller selects this node as the account's recovery owner. Live remote

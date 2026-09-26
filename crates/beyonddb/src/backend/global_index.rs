@@ -93,10 +93,10 @@ impl CellStorage {
             .map_err(cell_error)?
             .output
             .0;
+        let mut failure = None;
         if let Some(current) = current {
             for index in &change.table.global_secondary_indexes {
-                // Dropped table/index generations are unreachable. A replacement
-                // has a different ID and must never receive the retired journal.
+                // A retired generation cannot receive new projection work.
                 if !current
                     .global_secondary_indexes
                     .iter()
@@ -104,41 +104,15 @@ impl CellStorage {
                 {
                     continue;
                 }
-                let old = change
-                    .old
-                    .as_ref()
-                    .and_then(|item| index.project(&change.table, item));
-                let new = change
-                    .new
-                    .as_ref()
-                    .and_then(|item| index.project(&change.table, item));
-                if old == new {
-                    continue;
-                }
-                let schema = index.key_schema(&change.table);
-                let old_key = old
-                    .as_ref()
-                    .map(|item| crate::items::item_key(item, &schema))
-                    .transpose()
-                    .map_err(|error| StorageError::Internal(error.to_string()))?;
-                let new_key = new
-                    .as_ref()
-                    .map(|item| crate::items::item_key(item, &schema))
-                    .transpose()
-                    .map_err(|error| StorageError::Internal(error.to_string()))?;
-                if old_key != new_key
-                    && let Some(old) = old
-                {
-                    let key = extract_key(&old, &schema);
-                    self.apply_index_change(account_id, index, key, None, change.version)
-                        .await?;
-                }
-                if let Some(new) = new {
-                    let key = extract_key(&new, &schema);
-                    self.apply_index_change(account_id, index, key, Some(new), change.version)
-                        .await?;
+                if let Err(error) = self.project_to_index(account_id, index, &change).await {
+                    failure.get_or_insert(error);
                 }
             }
+        }
+        // Indexes propagate independently. A failed owner must not suppress
+        // healthy indexes, but the source journal stays until all have applied.
+        if let Some(error) = failure {
+            return Err(error);
         }
         let identity = mutation_identity()?;
         if source.namespace() == crate::NAMESPACE {
@@ -152,6 +126,45 @@ impl CellStorage {
         }
         .map_err(cell_error)?;
         Ok(true)
+    }
+
+    async fn project_to_index(
+        &self,
+        account_id: &str,
+        index: &GlobalIndexRecord,
+        change: &IndexChange,
+    ) -> Result<(), StorageError> {
+        let old = change
+            .old
+            .as_ref()
+            .and_then(|item| index.project(&change.table, item));
+        let new = change
+            .new
+            .as_ref()
+            .and_then(|item| index.project(&change.table, item));
+        if old == new {
+            return Ok(());
+        }
+        let schema = index.key_schema(&change.table);
+        let key_bytes = |item: &Item| {
+            crate::items::item_key(item, &schema)
+                .map_err(|error| StorageError::Internal(error.to_string()))
+        };
+        let old_key = old.as_ref().map(key_bytes).transpose()?;
+        let new_key = new.as_ref().map(key_bytes).transpose()?;
+        if old_key != new_key
+            && let Some(old) = old
+        {
+            let key = extract_key(&old, &schema);
+            self.apply_index_change(account_id, index, key, None, change.version)
+                .await?;
+        }
+        if let Some(new) = new {
+            let key = extract_key(&new, &schema);
+            self.apply_index_change(account_id, index, key, Some(new), change.version)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn apply_index_change(
@@ -250,6 +263,7 @@ struct ProjectionCursor {
     table: Option<TableRecord>,
     after_range: Option<[u8; 16]>,
     epoch: Option<u64>,
+    index: Option<usize>,
 }
 
 impl CellStorage {
@@ -258,6 +272,8 @@ impl CellStorage {
         self,
         tasks: &crab_cell_host::CellNodeTaskGroup,
         accounts: Vec<String>,
+        provisioner: std::sync::Arc<crate::CellInitialPartitionProvisioner>,
+        nodes: crab_cell_runtime::node::NodeDirectory,
     ) -> Result<(), StorageError> {
         use std::time::Duration;
         let mut accounts: std::collections::VecDeque<_> = accounts
@@ -276,7 +292,7 @@ impl CellStorage {
                 let Some((account, mut cursor)) = accounts.pop_front() else { return Ok(()); };
                 let result = tokio::select! {
                     () = cancellation.cancelled() => return Ok(()),
-                    result = self.project_account_page(&account, &mut cursor) => result,
+                    result = self.project_account_page(&account, &mut cursor, &provisioner, &nodes) => result,
                 };
                 accounts.push_back((account, cursor));
                 if let Err(error) = result { tracing::warn!(%error, "global index projection deferred"); }
@@ -288,6 +304,8 @@ impl CellStorage {
         &self,
         account: &str,
         cursor: &mut ProjectionCursor,
+        provisioner: &crate::CellInitialPartitionProvisioner,
+        nodes: &crab_cell_runtime::node::NodeDirectory,
     ) -> Result<(), StorageError> {
         use futures_util::{StreamExt, stream};
         if cursor.table.is_none() {
@@ -325,22 +343,30 @@ impl CellStorage {
             return Ok(());
         };
         let table_id = table.id.clone();
-        let page = self
-            .client
-            .query::<crate::ReadRoutePage>(
-                &target(account)?,
-                None,
-                Json(RoutePageInput {
-                    table_id: table_id.clone(),
-                    start_hash: None,
-                    after_lower: cursor.after_range,
-                    expected_epoch: cursor.epoch,
-                }),
-            )
-            .await
-            .map_err(cell_error)?
-            .output
-            .0;
+        let index = cursor
+            .index
+            .map(|position| &table.global_secondary_indexes[position]);
+        let index_id = index.map(|index| index.id.as_str());
+        let index_count = table.global_secondary_indexes.len();
+        let input = Json(RoutePageInput {
+            table_id: index_id.unwrap_or(&table_id).to_owned(),
+            start_hash: None,
+            after_lower: cursor.after_range,
+            expected_epoch: cursor.epoch,
+        });
+        let account_target = target(account)?;
+        let page = if index.is_some() {
+            self.client
+                .query::<ReadGlobalIndexRoutePage>(&account_target, None, input)
+                .await
+        } else {
+            self.client
+                .query::<crate::ReadRoutePage>(&account_target, None, input)
+                .await
+        }
+        .map_err(cell_error)?
+        .output
+        .0;
         let mut sources = Vec::new();
         match page {
             RoutePageOutcome::Changed => {
@@ -348,7 +374,12 @@ impl CellStorage {
                 cursor.after_range = None;
                 return Ok(());
             }
-            RoutePageOutcome::Unrouted => sources.push(target(account)?),
+            RoutePageOutcome::Unrouted => {
+                cursor.after_range = None;
+                if index.is_none() {
+                    sources.push(account_target);
+                }
+            }
             RoutePageOutcome::Page {
                 epoch,
                 partitions,
@@ -360,27 +391,43 @@ impl CellStorage {
                     None
                 };
                 for range in partitions {
-                    sources.push(
+                    let target = if let Some(id) = index_id {
+                        global_index_target(account, id, &range.partition_id)
+                    } else {
                         crate::data_target(account, &table_id, &range.partition_id)
-                            .map_err(|error| StorageError::Internal(error.to_string()))?,
-                    );
+                    }
+                    .map_err(|error| StorageError::Internal(error.to_string()))?;
+                    sources.push(target);
                 }
                 cursor.epoch = Some(epoch);
             }
         }
+        let project = index.is_none();
         if cursor.after_range.is_none() {
-            cursor.table = None;
             cursor.epoch = None;
+            let next = cursor.index.map_or(0, |position| position + 1);
+            if next < index_count {
+                cursor.index = Some(next);
+            } else {
+                cursor.index = None;
+                cursor.table = None;
+            }
         }
-        // Advance the bounded sweep even after a refusal. Durable entries remain
-        // for the next pass, while another table or owner can make progress.
+        // Visit index owners even without pending base writes. Advance before
+        // admission so a failed range cannot pin the account's entire sweep.
         let table_id = table_id.as_str();
-        let mut jobs =
-            stream::iter(sources)
-                .map(|source| async move {
-                    self.project_index_changes(account, &source, table_id).await
-                })
-                .buffer_unordered(4);
+        let mut jobs = stream::iter(sources)
+            .map(|source| async move {
+                provisioner.recover_projection_owner(&source, nodes).await?;
+                if project {
+                    self.project_index_changes(account, &source, table_id)
+                        .await
+                        .map(|_| ())
+                } else {
+                    Ok(())
+                }
+            })
+            .buffer_unordered(4);
         let mut failure = None;
         while let Some(result) = jobs.next().await {
             if let Err(error) = result {

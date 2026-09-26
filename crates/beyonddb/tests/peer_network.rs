@@ -4,6 +4,7 @@ mod support;
 
 mod peer_network {
     pub(super) mod capacity;
+    pub(super) mod global_indexes;
     pub(super) mod recovery;
 }
 
@@ -478,7 +479,12 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
                 "Statement": [{
                     "Effect": "Allow",
                     "Action": "dynamodb:*",
-                    "Resource": ["arn:aws:dynamodb:us-east-1:123456789012:table/NetworkData", "arn:aws:dynamodb:us-east-1:123456789012:table/RemoteTable"]
+                    "Resource": [
+                        "arn:aws:dynamodb:us-east-1:123456789012:table/NetworkData",
+                        "arn:aws:dynamodb:us-east-1:123456789012:table/RemoteTable",
+                        "arn:aws:dynamodb:us-east-1:123456789012:table/ServingIndexFailover",
+                        "arn:aws:dynamodb:us-east-1:123456789012:table/ServingIndexFailover/index/ByBucket"
+                    ]
                 }]
             })
             .to_string(),
@@ -883,6 +889,21 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
             .await
             .is_err()
     );
+    let index_recovery = peer_network::global_indexes::IndexRecovery::create(&sdk, &client).await;
+    beyonddb::CellStorage::new(replacement_client.clone(), "us-east-1")
+        .install_global_index_loop(
+            &replacement_tasks,
+            vec!["123456789012".into()],
+            replacement_provisioner.clone(),
+            peer_directory.clone(),
+        )
+        .unwrap();
+    index_recovery
+        .assert_settled(&replacement_sdk, &replacement_client, "before")
+        .await;
+    index_recovery
+        .assert_owner(&CellAuthority::new(layout.clone()), remote_session)
+        .await;
     // Install before this shard exists. Discovery must see later registrations
     // without taking a live owner, then recover after that owner stops renewing.
     replacement_provisioner
@@ -962,6 +983,18 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
             Some(&AwsAttributeValue::S("recovered".into()))
         );
     }
+    // Recovery runs on the already-serving replacement. Empty journals must
+    // not hide the failed index owner; its old image must survive takeover.
+    index_recovery
+        .assert_settled(&replacement_sdk, &replacement_client, "before")
+        .await;
+    index_recovery
+        .assert_owner(&CellAuthority::new(layout.clone()), replacement_session)
+        .await;
+    peer_network::global_indexes::IndexRecovery::write(&replacement_sdk, "after").await;
+    index_recovery
+        .assert_settled(&replacement_sdk, &replacement_client, "after")
+        .await;
     let moved_owner_read = replacement_sdk
         .get_item()
         .table_name("NetworkData")

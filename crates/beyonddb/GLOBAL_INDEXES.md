@@ -53,8 +53,9 @@ For each index, the worker removes the old entry when the canonical key changes,
 then writes the new projected entry. A same-key replacement writes only the new
 image. The source acknowledges the journal entry only after every required
 mutation has a durable successful result. A lost reply, failed index owner, or
-interrupted worker leaves the entry available for retry. Concurrent workers may
-process the same entry safely.
+interrupted worker leaves the entry available for retry. A failed index does
+not suppress projection to later healthy indexes; acknowledgement still waits
+for all indexes. Concurrent workers may process the same entry safely.
 
 Each index row retains a lexicographically ordered `(source_epoch, sequence)`
 version, a content digest, and either its projected image or a tombstone.
@@ -81,15 +82,22 @@ owners through the same fenced admission machinery as data ranges. The private
 peer receiver accepts the index namespace. The supervised projection worker
 then resumes the durable source journals.
 
-The worker rotates configured accounts, pages table names, and visits at most
-one base route page per iteration, with four source entries in flight. It
-advances past failed sources so healthy sources can progress; failed entries
-remain for a later sweep. Sweep cursors are transient and restart from the
-beginning. Projection versions and journal contents are durable.
+The worker rotates configured accounts and pages table names. For each indexed
+table it visits base route pages to replay journals, then each index's route
+pages to restore read availability even without pending writes. Each iteration
+visits at most one page (64 ranges), with four range attempts in flight. It
+advances before admission so a failed range is revisited on a later sweep.
+Sweep cursors are transient; projection versions and journal contents are durable.
 
-There is no independent index placement scheduler or serving-time index-owner
-failure recovery guarantee. Startup restoration does not qualify fleet RTO.
-A sustained write rate above projection capacity eventually consumes the finite
+Serving discovery uses the existing provisioner's fenced owner recovery for
+both sources and index ranges. Idle Cells restore from published roots. Live
+remote owners remain in place; expired sessions require NodeDirectory takeover
+proof and authority CAS. Local capacity, active node-log recovery, and competing
+ownership still gate admission. The same-endpoint restart path may wait up to
+30 seconds for its previous session to expire, as in existing recovery.
+
+There is no independent index placement scheduler or measured fleet RTO. A
+sustained write rate above projection capacity eventually consumes the finite
 base Cell budget; steady-state throughput and journal admission need further
 qualification.
 
@@ -101,10 +109,12 @@ qualification.
 | Base mutation and transaction apply | `src/items.rs`, `src/items/transaction.rs`, `src/partition.rs`, `src/partition/transaction.rs` |
 | Durable source journal | `src/global_index/outbox.rs`, `src/global_index_outbox_schema.sql`, `src/item_storage.rs` |
 | Routed replay and acknowledgement | `src/backend/global_index.rs` |
+| Serving owner recovery | `src/provision.rs` → existing `recover_discovered_owner`, NodeDirectory proof, and runtime authority CAS |
 | Versioned index storage and reads | `src/global_index.rs`, `src/global_index/read.rs`, `src/global_index_schema.sql` |
 | Index directory | `src/global_index/routing.rs`, `src/routing.rs`, `src/schema.sql` |
 | Server worker and peer reachability | `src/bin/beyonddb.rs`, `src/server/peer_receiver.rs` |
 | Focused recovery fixture | `tests/elastic_cells/global_indexes.rs` |
+| Signed peer-owner recovery | `tests/peer_network/global_indexes.rs`, `tests/peer_network.rs` |
 | Signed SDK process fixture | `tests/server_binary/global_indexes.rs` |
 
 The focused fixture interrupts a key move after the old index entry is removed,
@@ -130,3 +140,35 @@ recovery, and transaction-token replay after hard restart.
 The new index metadata, journal schemas, and Cell namespace change the unreleased
 storage format. Development roots from earlier builds require reprovisioning.
 No dependency pin, override, or lockfile changes are required.
+
+## Serving recovery regression
+
+The focused fixture releases the first index owner, checks that a healthy
+second index advances while the source journal remains, then releases the
+source too. The supervised serving worker must restore both and acknowledge
+the completed projection. It releases the index again with empty journals to
+prove index discovery restores reads independently of new writes. This fixture
+passed in 1.70 seconds.
+
+The signed peer fixture creates an indexed table on a live remote owner and
+checks that the already-serving recovery node leaves it there. After the old
+node stops renewing its lease, the worker must restore the base and index,
+preserve the old projected image, and propagate a subsequent signed SDK write
+without restarting the recovery node. It passed in 92.47 seconds. The initial
+attempt failed because the new fixture table was absent from its IAM policy;
+the fixture now grants only that table and index alongside its existing tables.
+
+**Is this the best fix?** Use the existing projection sweep to discover index
+owners and the existing provisioner to recover them. The server supplies its
+provisioner and NodeDirectory; transaction recovery and startup retain their
+current authority boundary. This adds no second ownership or lease mechanism.
+Before this change, serving projection visited only base routes and stopped at
+the first failed index. Startup could restore indexes, but an empty journal
+provided no serving-time discovery. `origin/main` has no BeyondDB subtree;
+these comparisons are against the preceding draft PR revision.
+
+The account and elastic suites passed all 30 tests (3.39 and 82.11 seconds,
+two test threads), and strict all-target BeyondDB Clippy passed in 8.84 seconds.
+The compiled-server signed SDK/RustFS smoke passed in 317.32 seconds, including
+unclean restart, recovered index state, and transaction-token replay.
+These results cover selected recovery schedules, not a fleet-scale bound.
