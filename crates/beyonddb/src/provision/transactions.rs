@@ -98,15 +98,24 @@ impl CellInitialPartitionProvisioner {
             // Runtime rechecks the generation and settled-work gate, closes SQLite,
             // and publishes Idle before returning capacity. A BEGIN racing the query
             // stays recoverable unless the released root proves nothing changed.
-            self.runtime
+            let mut release = self
+                .runtime
                 .release_idle_cell(cell, self.session, generation)
-                .await
-                .map_err(|error| match error {
-                    crab_cell_runtime::Error::Capacity(_) => {
-                        StorageError::Transient(error.to_string())
-                    }
-                    _ => provision_error(error),
-                })?;
+                .await;
+            if matches!(release, Err(crab_cell_runtime::Error::Capacity(_))) {
+                // Runtime movement admission replenishes once per second. Let
+                // one window pass before failing a foreground multi-Cell admission;
+                // the retry still checks generation and settled work atomically.
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                release = self
+                    .runtime
+                    .release_idle_cell(cell, self.session, generation)
+                    .await;
+            }
+            release.map_err(|error| match error {
+                crab_cell_runtime::Error::Capacity(_) => StorageError::Transient(error.to_string()),
+                _ => provision_error(error),
+            })?;
             let released = CellAuthority::new(self.layout.clone())
                 .load(cell)
                 .await

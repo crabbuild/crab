@@ -132,8 +132,10 @@ paths honor the runtime's resume/restore contract.
 
 This establishes bounded coordinator residency, not elastic fleet placement.
 Startup still inspects historical shards, and unproven releases remain in
-the recovery schedule. Active requests can encounter release and retry from
-durable state. General
+the recovery schedule. A capacity-refused coordinator release waits one runtime movement window and
+retries once, preserving generation/settled-work checks. This lets a foreground
+multi-range admission span the two-per-second movement budget. Active requests
+can still encounter release or sustained pressure and retry from durable state. General
 data/account/credential activation, distributed placement, retained-history
 collection, and measured overload/recovery behavior remain scale gates.
 

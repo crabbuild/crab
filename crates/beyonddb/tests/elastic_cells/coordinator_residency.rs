@@ -376,3 +376,85 @@ async fn write(storage: &CellStorage, info: &TableKeyInfo, token: &str, version:
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn table_creation_waits_for_coordinator_movement_capacity() {
+    let application = Arc::new(
+        Beyonddb::compile(BuildDescriptor {
+            source_revision: "table-admission-pressure".into(),
+            cargo_lock_digest: Digest::from_bytes([1; 32]),
+        })
+        .unwrap(),
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let account = account_target(ACCOUNT).unwrap();
+    let layout = CellStorageLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        object_store::path::Path::from("table-admission-pressure"),
+        *account.application().as_bytes(),
+    );
+    let session = SessionId::from_bytes([248; 16]);
+    let host = CellNodeBuilder::new(application.clone())
+        .with_runtime(SqlWorkerPool::new(1, 8).unwrap(), 16 * 1024 * 1024)
+        .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
+        .with_session(session)
+        .build_unleased_for_maintenance()
+        .unwrap();
+    let provisioner = Arc::new(
+        CellInitialPartitionProvisioner::new(
+            host.runtime(),
+            application.clone(),
+            layout.clone(),
+            session,
+            "https://table-admission.internal".into(),
+            directory.path().into(),
+        )
+        .unwrap()
+        .with_initial_partition_count(4)
+        .unwrap(),
+    );
+    provisioner.admit_account(ACCOUNT).await.unwrap();
+    let mut seen = std::collections::HashSet::new();
+    for n in 0_u64..100 {
+        let key = n.to_be_bytes();
+        if seen.insert(
+            *coordinator_target(ACCOUNT, &key)
+                .unwrap()
+                .cell_id()
+                .as_bytes(),
+        ) {
+            provisioner.admit_coordinator(ACCOUNT, &key).await.unwrap();
+        }
+        if seen.len() == 7 {
+            break;
+        }
+    }
+    assert_eq!(host.runtime().stats().active_cells(), 8);
+    let client = CellClient::local_runtime(application.registry(), host.runtime(), layout);
+    let storage =
+        CellStorage::new(client.clone(), "us-east-1").with_initial_partitions(provisioner);
+    // Four ranges require four coordinator releases. The runtime permits two
+    // movements per second; ordinary admission must let that budget replenish.
+    let table = storage
+        .create_table(
+            ACCOUNT,
+            serde_json::from_value(serde_json::json!({
+                "TableName": "AfterHistory",
+                "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+                "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
+                "BillingMode": "PAY_PER_REQUEST"
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let route = client
+        .query::<ReadTableRoute>(&account, None, Json(table.table_id))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    assert_eq!(route.partitions.len(), 4);
+    host.shutdown().await.unwrap();
+}
