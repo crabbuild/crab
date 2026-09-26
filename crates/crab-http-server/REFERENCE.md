@@ -1619,6 +1619,25 @@ Use the following interpretation:
 | Browser regression | Rendered behavior and automated accessibility rules | Storage durability or manual assistive technology |
 | Container CI | Reproducible image/runtime metadata, one in-flight `SIGKILL` outcome, and one isolated complete-root cold restore | Cloud orchestration, version-selected provider recovery, every crash phase, or upgrade safety |
 
+The Compose cluster qualifier requires Bash, Docker Compose, curl, jq, and
+Python 3. Its recovery-work counters describe the surviving processes during
+each fault interval. The recovery claimant can differ from the Cell's elected
+successor: sealing a failed node log authorizes subsequent ownership election.
+The first owner-loss interval therefore samples every running survivor; the
+replacement-follower and fallback intervals each leave one eligible process.
+Each process is compared with its own pre-fault snapshot before deltas are
+summed. Missing metrics, counter resets, or a changed container boot fail the
+gate. Raw snapshots remain in `metrics.recovery` in the receipt. Aggregate work
+can include concurrent recovery attempts; exact recovered data and serving
+ownership are proved separately by the existing control and HTTP assertions.
+
+The deterministic evidence tests run without Docker:
+
+```sh
+python3 -B -m unittest discover \
+  -s crates/crab-http-server/tests -p test_recovery_work.py -v
+```
+
 ## Completion requirements
 
 The server is complete only when a real account can perform the workflow and observe its durable result. A green component test or visible placeholder does not satisfy that bar.

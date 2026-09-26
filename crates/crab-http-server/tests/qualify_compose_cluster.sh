@@ -15,7 +15,7 @@ if [[ ! "$project" =~ ^crab-http-cluster-qualification-[A-Za-z0-9_-]+$ ]]; then
   exit 2
 fi
 
-for dependency in curl docker jq; do
+for dependency in curl docker jq python3; do
   command -v "$dependency" >/dev/null || {
     echo "Missing required command: ${dependency}" >&2
     exit 2
@@ -285,84 +285,27 @@ post_json_eventually() {
   return 1
 }
 
-metric_value() {
-  local metrics="$1"
-  local name="$2"
-  local value
-  value="$(awk -v name="$name" '$1 == name { print $2; exit }' <<<"$metrics")"
-  printf '%s\n' "${value:-0}"
-}
-
-metric_counter() {
-  local metrics="$1"
-  local kind="$2"
-  metric_value "$metrics" "crab_cell_node_log_recovery_work_total{kind=\"${kind}\"}"
-}
-
-metric_phase_count() {
-  local metrics="$1"
-  local phase="$2"
-  metric_value "$metrics" "crab_cell_node_log_recovery_phase_seconds_count{phase=\"${phase}\"}"
-}
-
-metric_phase_sum() {
-  local metrics="$1"
-  local phase="$2"
-  metric_value "$metrics" "crab_cell_node_log_recovery_phase_seconds_sum{phase=\"${phase}\"}"
-}
-
-counter_delta() {
-  awk -v before="$1" -v after="$2" \
-    'BEGIN { if (after < before) exit 1; printf "%.0f\n", after - before }'
-}
-
-duration_delta_ms() {
-  awk -v before="$1" -v after="$2" \
-    'BEGIN { if (after < before) exit 1; printf "%.0f\n", (after - before) * 1000 }'
+recovery_metrics() {
+  local service container process metrics result='{}'
+  for service in "$@"; do
+    container="$(compose_container_id "$service")"
+    process="$(docker inspect --format '{{.Id}}/{{.State.StartedAt}}' "$container")"
+    metrics="$("${compose[@]}" exec -T "$service" crab-http-server \
+      --config /etc/crab/server.toml cells metrics | awk \
+      '$1 ~ /^crab_cell_node_log_recovery_(work_total|phase_seconds_(count|sum))\{/ { print }')"
+    if [ "$process" != "$(docker inspect --format '{{.Id}}/{{.State.StartedAt}}' "$container")" ]; then
+      echo "${service} restarted while collecting recovery metrics." >&2
+      return 1
+    fi
+    result="$(jq --arg service "$service" --arg process "$process" --arg metrics "$metrics" \
+      '. + {($service): {process: $process, metrics: $metrics}}' <<<"$result")"
+  done
+  printf '%s\n' "$result"
 }
 
 recovery_work_evidence() {
-  local before="$1"
-  local after="$2"
-  local -a args=(--argjson candidate_count "$(counter_delta \
-    "$(metric_counter "$before" candidate_count)" \
-    "$(metric_counter "$after" candidate_count)")")
-  for kind in \
-    affected_cells catalog_shards catalog_pages control_reads follower_pages \
-    follower_frames follower_bytes peer_requests bundle_bytes object_reads object_writes; do
-    args+=(--argjson "$kind" "$(counter_delta \
-      "$(metric_counter "$before" "$kind")" \
-      "$(metric_counter "$after" "$kind")")")
-  done
-  for phase in claim witness scope_validation pin_attach seal; do
-    args+=(--argjson "${phase}_count" "$(counter_delta \
-      "$(metric_phase_count "$before" "$phase")" \
-      "$(metric_phase_count "$after" "$phase")")")
-    args+=(--argjson "${phase}_duration_ms" "$(duration_delta_ms \
-      "$(metric_phase_sum "$before" "$phase")" \
-      "$(metric_phase_sum "$after" "$phase")")")
-  done
-  jq -n "${args[@]}" '{
-    candidate_count: $candidate_count,
-    affected_cells: $affected_cells,
-    catalog_shards: $catalog_shards,
-    catalog_pages: $catalog_pages,
-    control_reads: $control_reads,
-    follower_pages: $follower_pages,
-    follower_frames: $follower_frames,
-    follower_bytes: $follower_bytes,
-    peer_requests: $peer_requests,
-    bundle_bytes: $bundle_bytes,
-    object_reads: $object_reads,
-    object_writes: $object_writes,
-    phases: {
-      claim: {count: $claim_count, duration_ms: $claim_duration_ms},
-      witness: {count: $witness_count, duration_ms: $witness_duration_ms},
-      scope_validation: {count: $scope_validation_count, duration_ms: $scope_validation_duration_ms},
-      pin_attach: {count: $pin_attach_count, duration_ms: $pin_attach_duration_ms},
-      seal: {count: $seal_count, duration_ms: $seal_duration_ms}
-    }
-  }'
+  jq -n --argjson before "$1" --argjson after "$2" \
+    '{before: $before, after: $after}' | python3 "${script_dir}/recovery_work.py"
 }
 
 up_mode=(--no-build)
@@ -520,11 +463,9 @@ assert_placement_parity "$capacity_b" "$metrics_b" "$node_b"
 assert_placement_parity "$capacity_c" "$metrics_c" "$node_c"
 assert_placement_parity "$capacity_d" "$metrics_d" "$node_d"
 
-# Keep the owner's two-follower log deterministic: with the spare node frozen
-# and its old lease expired, the owner can enroll only the two follower roles,
-# so the "A" role is the only member left to expire immediately before the
-# owner crash and "C" is the surviving original follower. Freezing alone is not
-# enough because the signed advertisement remains live until its lease expires.
+# Exclude the spare from the first failover's live executor set. Both enrolled
+# followers survive the owner crash; a recovery claimant can differ from the
+# deterministic Cell successor. A freeze takes effect after its lease expires.
 freeze_service server-d
 d_advertisement_expired=false
 for _ in $(seq 1 45); do
@@ -586,9 +527,8 @@ fi
 # receives the first request is not guaranteed to own the result: any live node
 # can win the signed-placement ballot. Derive the failover roles from the
 # observed owner instead of assuming one. "B" is the node that now owns the
-# Cell, "C" is the member that takes it over, and "A" is the member this
-# scenario expires first. The spare node D is already paused, so every role is
-# one of the three remaining nodes.
+# Cell, and "C" initially supplies a surviving member's ingress. The actual
+# successor is read from control after recovery. Node D is already paused.
 b_endpoint="$(jq --raw-output '.owner.endpoint' <<<"$control_before")"
 b_service="$(cluster_service_for_endpoint "$b_endpoint")"
 b_origin="$(cluster_origin_for_service "$b_service")"
@@ -635,33 +575,16 @@ if [ "${#member_services[@]}" -lt 1 ] || [ "${#member_services[@]}" -gt 2 ]; the
   echo "The owner's log did not name one or two followers." >&2
   exit 1
 fi
-# The product elects the surviving original follower by node id, and this
-# scenario expires the other member immediately before killing the owner.
-# Expiring the smaller node id first therefore leaves the larger one as the
-# deterministic successor. A single-member lane leaves nothing to expire: that
-# member is the successor on its own.
-if [ "${#member_services[@]}" -eq 1 ]; then
-  a_service=""
-  c_service="${member_services[0]}"
-elif [[ "$(jq --raw-output '.advertisement.node' <<<"$(service_node "${member_services[0]}")")" \
-  < "$(jq --raw-output '.advertisement.node' <<<"$(service_node "${member_services[1]}")")" ]]; then
-  a_service="${member_services[0]}"
-  c_service="${member_services[1]}"
-else
-  a_service="${member_services[1]}"
-  c_service="${member_services[0]}"
-fi
-a_origin=""
-if [ -n "$a_service" ]; then
-  a_origin="$(cluster_origin_for_service "$a_service")"
-fi
+# Pick one enrolled member's ingress. Reads can forward; this choice does not
+# predict which process seals the log or which member later owns the Cell.
+c_service="${member_services[0]}"
 c_origin="$(cluster_origin_for_service "$c_service")"
 c_endpoint="$(cluster_endpoint_for_service "$c_service")"
 
-read_origins=("$c_origin" "$cluster_origin")
-if [ -n "$a_origin" ]; then
-  read_origins+=("$a_origin")
-fi
+read_origins=("$cluster_origin")
+for service in "${member_services[@]}"; do
+  read_origins+=("$(cluster_origin_for_service "$service")")
+done
 for origin in "${read_origins[@]}"; do
   assert_json_eventually \
     "$origin" \
@@ -788,6 +711,13 @@ awk '$1 == "crab_cell_follower_retained_bytes" && $2 + 0 > 0 { found = 1 }
 # that already happened during the takeover.
 # Record the signed expiry, not when polling noticed it; recovery may seal
 # before that later observation, and dead-node status hides the advertisement.
+first_recovery_services=()
+for service in server server-b server-c; do
+  if [ "$service" != "$b_service" ]; then
+    first_recovery_services+=("$service")
+  fi
+done
+metrics_first_before="$(recovery_metrics "${first_recovery_services[@]}")"
 owner_advertisement="$("${compose[@]}" exec -T "$c_service" crab-http-server \
   --config /etc/crab/server.toml cells node \
   --session "$session_before" --json)"
@@ -905,22 +835,23 @@ first_served_ms="$(unix_millis)"
 session_after="$(jq --raw-output '.owner.session' <<<"$control_after")"
 epoch_after="$(jq --raw-output '.epoch' <<<"$control_after")"
 root_after_state="$(jq --compact-output '.root' <<<"$control_after")"
-metrics_first=""
+work_first=""
 for _ in $(seq 1 45); do
-  candidate_metrics="$("${compose[@]}" exec -T "$c_service" crab-http-server \
-    --config /etc/crab/server.toml cells metrics 2>/dev/null || true)"
-  if [ "$(metric_counter "$candidate_metrics" candidate_count)" -gt \
-    "$(metric_counter "$metrics_c" candidate_count)" ]; then
-    metrics_first="$candidate_metrics"
+  metrics_first_after="$(recovery_metrics "${first_recovery_services[@]}")"
+  candidate_work="$(recovery_work_evidence "$metrics_first_before" "$metrics_first_after")"
+  if jq --exit-status '.candidate_count > 0 and .phases.seal.count > 0' \
+    <<<"$candidate_work" >/dev/null; then
+    work_first="$candidate_work"
     break
   fi
   sleep 1
 done
-if [ -z "$metrics_first" ]; then
-  echo "Node C did not export recovery work after the first owner loss." >&2
+if [ -z "$work_first" ]; then
+  echo "Surviving processes did not export recovery work after the first owner loss." >&2
+  jq -n --argjson before "$metrics_first_before" --argjson after "$metrics_first_after" \
+    --argjson control "$control_after" '{before: $before, after: $after, control: $control}' >&2
   exit 1
 fi
-work_first="$(recovery_work_evidence "$metrics_c" "$metrics_first")"
 
 for _ in $(seq 1 6); do
   assert_json_eventually \
@@ -1067,8 +998,6 @@ if [[ ! "$node_b_id" =~ ^[0-9a-f]{32}$ ]]; then
   echo "Rejoined node B did not expose a canonical local node identity." >&2
   exit 1
 fi
-metrics_second_before="$("${compose[@]}" exec -T "$b_service" crab-http-server \
-  --config /etc/crab/server.toml cells metrics)"
 log_epoch_before_follower_loss="$(jq --raw-output \
   '.advertisement.log.epoch' <<<"$node_before_follower_loss")"
 jq --exit-status \
@@ -1163,6 +1092,9 @@ owner_advertisement="$("${compose[@]}" exec -T "$b_service" crab-http-server \
 second_advertisement_expired_ms="$(jq --exit-status --raw-output \
   'select(.live == true) | .advertisement.expires_at_ms | select(type == "number" and . > 0)' \
   <<<"$owner_advertisement")"
+# The second fault leaves only the replacement follower eligible. Use the same
+# process-matched measurement as the first fault, with a one-process cohort.
+metrics_second_before="$(recovery_metrics "$b_service")"
 second_owner_killed_ms="$(unix_millis)"
 kill_service "$c_service"
 remove_stopped_service "$c_service"
@@ -1245,22 +1177,21 @@ epoch_after_second_loss="$(jq --raw-output '.epoch' \
   <<<"$control_after_second_loss")"
 root_after_second_loss="$(jq --compact-output '.root' \
   <<<"$control_after_second_loss")"
-metrics_second=""
+work_second=""
 for _ in $(seq 1 45); do
-  candidate_metrics="$("${compose[@]}" exec -T "$b_service" crab-http-server \
-    --config /etc/crab/server.toml cells metrics 2>/dev/null || true)"
-  if [ "$(metric_counter "$candidate_metrics" candidate_count)" -gt \
-    "$(metric_counter "$metrics_second_before" candidate_count)" ]; then
-    metrics_second="$candidate_metrics"
+  metrics_second_after="$(recovery_metrics "$b_service")"
+  candidate_work="$(recovery_work_evidence "$metrics_second_before" "$metrics_second_after")"
+  if jq --exit-status '.candidate_count > 0 and .phases.seal.count > 0' \
+    <<<"$candidate_work" >/dev/null; then
+    work_second="$candidate_work"
     break
   fi
   sleep 1
 done
-if [ -z "$metrics_second" ]; then
+if [ -z "$work_second" ]; then
   echo "Node B did not export recovery work after the second owner loss." >&2
   exit 1
 fi
-work_second="$(recovery_work_evidence "$metrics_second_before" "$metrics_second")"
 
 service_cli() {
   local service="$1"
@@ -1457,7 +1388,7 @@ if [ -z "$fallback_candidate_service" ]; then
   echo "No live non-member fallback candidate remained." >&2
   exit 1
 fi
-fallback_metrics_before="$(service_cli "$fallback_candidate_service" cells metrics)"
+fallback_metrics_before="$(recovery_metrics "$fallback_candidate_service")"
 
 # Remove every live node except the owner and the recorded candidate, so the
 # bounded any-node recovery can only elect the candidate the receipt names, and
@@ -1571,7 +1502,7 @@ fallback_epoch_before="$(jq --raw-output '.epoch' <<<"$control_before_fallback")
 fallback_epoch_after="$(jq --raw-output '.epoch' <<<"$fallback_control_after")"
 fallback_root_after="$(jq --compact-output '.root' <<<"$fallback_control_after")"
 fallback_node_log_before="$(jq -c '.advertisement.log' <<<"$node_b_before_fallback")"
-fallback_metrics_after="$(service_cli "$fallback_candidate_service" cells metrics)"
+fallback_metrics_after="$(recovery_metrics "$fallback_candidate_service")"
 fallback_work="$(recovery_work_evidence \
   "$fallback_metrics_before" "$fallback_metrics_after")"
 
@@ -1706,6 +1637,12 @@ jq --null-input \
   --argjson selection "$selection" \
   --argjson work_first "$work_first" \
   --argjson work_second "$work_second" \
+  --argjson metrics_first_before "$metrics_first_before" \
+  --argjson metrics_first_after "$metrics_first_after" \
+  --argjson metrics_second_before "$metrics_second_before" \
+  --argjson metrics_second_after "$metrics_second_after" \
+  --argjson fallback_metrics_before "$fallback_metrics_before" \
+  --argjson fallback_metrics_after "$fallback_metrics_after" \
   '{
     version: 6,
     source_revision: $source_revision,
@@ -1802,7 +1739,14 @@ jq --null-input \
       node_c: $node_c,
       node_d: $node_d
     },
-    metrics: {node_a: $metrics_a, node_b: $metrics_b, node_c: $metrics_c, node_d: $metrics_d},
+    metrics: {
+      node_a: $metrics_a, node_b: $metrics_b, node_c: $metrics_c, node_d: $metrics_d,
+      recovery: {
+        owner_loss: {before: $metrics_first_before, after: $metrics_first_after},
+        second_owner_loss: {before: $metrics_second_before, after: $metrics_second_after},
+        fallback: {before: $fallback_metrics_before, after: $fallback_metrics_after}
+      }
+    },
     capacity_metric_parity: {
       local_disk: true,
       active_cells: true,
