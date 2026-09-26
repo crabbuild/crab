@@ -8,6 +8,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -155,7 +156,7 @@ def prove_warm_promotion(path: Path, profiles: tuple[str, ...], port: int) -> di
         if after["root"]["commit_sequence"] < before["root"]["commit_sequence"]:
             raise RuntimeError("warm promotion regressed the acknowledged root")
         comment = request_json("POST", node_url(observer, port) + issue_path(19) + "/1/comments",
-                               {"body": "written by the promoted warm reader"})
+                               {"request_id": str(uuid.uuid4()), "body": "written by the promoted warm reader"})
         if comment.get("body") != "written by the promoted warm reader":
             raise RuntimeError("promoted reader did not acknowledge a new mutation")
         return {"old_owner_session": before["owner"]["session"],

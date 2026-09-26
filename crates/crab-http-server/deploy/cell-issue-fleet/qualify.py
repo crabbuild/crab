@@ -39,6 +39,8 @@ def request_json(method: str, url: str, payload: dict | None = None) -> dict:
             with urllib.request.urlopen(request, timeout=15) as response:
                 return json.load(response)
         except (OSError, urllib.error.HTTPError, ValueError) as error:
+            if isinstance(error, urllib.error.HTTPError) and 400 <= error.code < 500 and error.code not in (404, 429):
+                raise RuntimeError(f"{method} {url} returned HTTP {error.code}") from error
             if attempt == 89:
                 raise RuntimeError(f"{method} {url} failed after 90 attempts") from error
             time.sleep(1)
