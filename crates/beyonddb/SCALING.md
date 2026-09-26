@@ -274,9 +274,11 @@ Cell. General fleet recovery remains incomplete:
    participants so it cannot see half of a committed transaction.
 
 Splits refuse to seal a source with prepared intents. TTL metadata commits
-with the base item. Stream records and local secondary indexes must eventually
-join that atomic boundary; they are not implemented. Global secondary indexes
-would require a durable per-partition outbox and idempotent projections with
+with the base item. Local secondary indexes with ALL projection now share the
+base command and prepare-capacity accounting; import rebuilds their ordered
+entries. KEYS_ONLY/INCLUDE require the engine read-contract work in
+[LSI_CONTRACT.md](LSI_CONTRACT.md). Stream records must still join the atomic
+boundary. Global secondary indexes would require a durable per-partition outbox and idempotent projections with
 eventually consistent reads; that path is also not implemented. Base-table
 Query reads the HASH key's owner Cell in sort-key order; Scan fans out over a
 pinned directory epoch and returns a bounded continuation token naming

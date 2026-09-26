@@ -163,6 +163,8 @@ pub(crate) fn prepared(
 pub(crate) struct PreparedPayload {
     pub bytes: Vec<u8>,
     pub operations: usize,
+    pub index_edits: u64,
+    pub index_overflow_bytes: u64,
 }
 
 pub(crate) fn record_prepare<'a>(
@@ -220,7 +222,8 @@ fn reserve_apply(
     // level, and reuses old pages; 44 covers root expansion too. Per key, 16
     // edits cover eight item edits, five lock edits, and two saved-read edits.
     let edits = (staged.operations as u64 * 16)
-        .checked_add(chunks)
+        .checked_add(staged.index_edits)
+        .and_then(|value| value.checked_add(chunks))
         .and_then(|value| value.checked_add(16))
         .ok_or_else(overflow)?;
     let page_size = u64::from(context.database_page_size()?);
@@ -235,6 +238,7 @@ fn reserve_apply(
     let bytes = payload
         .checked_mul(2)
         .and_then(|value| value.checked_add(tree_bytes))
+        .and_then(|value| value.checked_add(staged.index_overflow_bytes))
         .ok_or_else(overflow)?;
     context.reserve_database_capacity(&transaction_id, bytes)
 }

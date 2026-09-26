@@ -1,7 +1,7 @@
 //! Independently owned item range in one SQL Cell.
 
-mod key;
-mod query;
+pub(crate) mod key;
+pub(crate) mod query;
 mod scan;
 mod transaction;
 mod ttl;
@@ -33,9 +33,10 @@ use key::index_key;
 
 pub(crate) static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
-        "{}\n{}\n{}",
+        "{}\n{}\n{}\n{}",
         crab_cell_runtime::primitives::capacity::SCHEMA,
         crate::participant::SCHEMA,
+        crate::secondary_index::SCHEMA,
         include_str!("partition_schema.sql")
     )
 });
@@ -101,6 +102,8 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
                 let mut source = blake3::Hasher::new();
                 source.update(include_bytes!("lib.rs"));
                 source.update(include_bytes!("partition.rs"));
+                source.update(include_bytes!("secondary_index.rs"));
+                source.update(include_bytes!("secondary_index/read.rs"));
                 source.update(include_bytes!("partition/key.rs"));
                 source.update(include_bytes!("partition/query.rs"));
                 source.update(include_bytes!("partition/scan.rs"));
@@ -674,7 +677,7 @@ impl Command for ImportPartitionItem {
             });
         }
         summary.include(&input.item, &spec.table.key_schema)?;
-        write_item(context, key, &input.item, &spec.table.key_schema)?;
+        write_item(context, key, &input.item, &spec.table)?;
         update_state(context, &PartitionState::Importing { source, summary })?;
         Ok(CommandResult::Success(Json(
             PartitionImportOutcome::Imported,
@@ -944,7 +947,7 @@ impl Command for PartitionPut {
                 }
             }
         }
-        write_item(context, key, &input.item, &spec.table.key_schema)?;
+        write_item(context, key, &input.item, &spec.table)?;
         Ok(CommandResult::Success(Json(PartitionPutOutcome::Applied(
             old,
         ))))
@@ -1069,6 +1072,7 @@ impl Command for PartitionDelete {
                 }
             }
         }
+        crate::secondary_index::delete(context, &spec.table, &key)?;
         context.sql(&statement(
             "DELETE FROM ddb_partition_items WHERE item_key = ?1",
             vec![SqlValue::Blob(key)],
@@ -1229,7 +1233,7 @@ impl Command for PartitionUpdate {
                 PartitionUpdateOutcome::InvalidItem,
             )));
         }
-        write_item(context, key, &new, &spec.table.key_schema)?;
+        write_item(context, key, &new, &spec.table)?;
         Ok(CommandResult::Success(Json(
             PartitionUpdateOutcome::Applied { old, new },
         )))
@@ -1396,9 +1400,9 @@ fn write_item(
     context: &mut CommandContext<'_, '_>,
     key: Vec<u8>,
     item: &Item,
-    schema: &[KeySchemaElement],
+    table: &TableRecord,
 ) -> Result<()> {
-    let (partition_key, sort_key) = index_key(item, schema)?;
+    let (partition_key, sort_key) = index_key(item, &table.key_schema)?;
     let (ttl_generation, ttl_epoch) = ttl::write_values(context, item)?;
     context.sql(&statement(
         "INSERT INTO ddb_partition_items \
@@ -1415,5 +1419,6 @@ fn write_item(
             ttl_epoch,
         ],
     ))?;
-    crate::item_storage::StoredItem::Partition(&key).write(context, item)
+    crate::item_storage::StoredItem::Partition(&key).write(context, item)?;
+    crate::secondary_index::write(context, table, &key, item)
 }

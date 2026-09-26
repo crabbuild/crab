@@ -13,6 +13,7 @@ struct StagedImage {
     key: Vec<u8>,
     image: Option<Item>,
     effect: StagedEffect,
+    index_capacity: crate::secondary_index::Capacity,
 }
 
 fn stage(
@@ -118,7 +119,13 @@ fn stage(
                 return Ok(Err(invalid("transaction read exceeds 4 MiB")));
             }
         }
+        let index_capacity = if effect == StagedEffect::Write {
+            crate::secondary_index::capacity(&table, image.as_ref())?
+        } else {
+            crate::secondary_index::Capacity::default()
+        };
         staged.push(StagedImage {
+            index_capacity,
             table_id: table.id,
             key,
             image,
@@ -133,9 +140,17 @@ fn apply(context: &mut CommandContext<'_, '_>, staged: Vec<StagedImage>) -> Resu
         if image.effect != StagedEffect::Write {
             continue;
         }
+        let table = crate::table::decode_table(
+            &context.sql(&statement(
+                "SELECT record FROM ddb_tables WHERE table_id = ?1",
+                vec![SqlValue::Text(image.table_id.clone())],
+            ))?[0],
+        )?
+        .ok_or(Error::Command("prepared table is missing"))?;
         if let Some(item) = image.image {
-            write_item(context, &image.table_id, &image.key, &item)?;
+            write_item(context, &table, &image.key, &item)?;
         } else {
+            crate::secondary_index::delete(context, &table, &image.key)?;
             context.sql(&statement(
                 "DELETE FROM ddb_items WHERE table_id = ?1 AND item_key = ?2",
                 vec![SqlValue::Text(image.table_id), SqlValue::Blob(image.key)],
@@ -211,6 +226,11 @@ impl Command for PrepareAccountTransaction {
             crate::participant::PreparedPayload {
                 bytes: serde_json::to_vec(&staged)?,
                 operations: staged.len(),
+                index_edits: staged.iter().map(|image| image.index_capacity.edits).sum(),
+                index_overflow_bytes: staged
+                    .iter()
+                    .map(|image| image.index_capacity.overflow_bytes)
+                    .sum(),
             },
             &input.coordinator_key,
             staged

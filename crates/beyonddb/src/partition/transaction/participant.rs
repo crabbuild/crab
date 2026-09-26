@@ -103,6 +103,16 @@ impl Command for PreparePartitionTransaction {
             crate::participant::PreparedPayload {
                 bytes: serde_json::to_vec(&prepared)?,
                 operations: prepared.images.len(),
+                index_edits: prepared
+                    .images
+                    .iter()
+                    .map(|image| image.index_capacity.edits)
+                    .sum(),
+                index_overflow_bytes: prepared
+                    .images
+                    .iter()
+                    .map(|image| image.index_capacity.overflow_bytes)
+                    .sum(),
             },
             &input.coordinator_key,
             prepared
@@ -173,7 +183,7 @@ impl Command for ResolvePartitionTransaction {
                 if prepared.table_id != spec.table.id || prepared.epoch != spec.epoch {
                     return Err(Error::Command("prepared partition identity changed"));
                 }
-                apply_staged(context, &spec.table.key_schema, prepared.images)?;
+                apply_staged(context, &spec.table, prepared.images)?;
             }
             context.sql(&statement(
                 "DELETE FROM ddb_partition_transaction_locks WHERE transaction_id = ?1",

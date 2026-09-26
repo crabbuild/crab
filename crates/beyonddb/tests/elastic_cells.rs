@@ -4,6 +4,7 @@ mod elastic_cells {
     mod account_participant;
     mod coordinator_residency;
     mod coordinator_tokens;
+    mod local_indexes;
     mod public_transactions;
     mod read_resolution;
     mod recovery_admission;
@@ -466,6 +467,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
             &account,
             identity(77),
             Json(TableSpec {
+                local_secondary_indexes: Vec::new(),
                 table_name: "ManyRanges".into(),
                 key_schema: vec![KeySchemaElement {
                     attribute_name: "id".into(),
@@ -774,6 +776,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
                 &account,
                 identity(200 + index),
                 Json(TableSpec {
+                    local_secondary_indexes: Vec::new(),
                     table_name: name.clone(),
                     key_schema: table.key_schema.clone(),
                     attribute_definitions: table.attribute_definitions.clone(),
@@ -815,6 +818,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
             &account,
             identity(79),
             Json(TableSpec {
+                local_secondary_indexes: Vec::new(),
                 table_name: "MoreRanges".into(),
                 key_schema: table.key_schema.clone(),
                 attribute_definitions: table.attribute_definitions.clone(),
@@ -2352,6 +2356,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             &account,
             identity(13),
             Json(TableSpec {
+                local_secondary_indexes: Vec::new(),
                 table_name: "Books".into(),
                 key_schema: vec![KeySchemaElement {
                     attribute_name: "id".into(),
@@ -3092,6 +3097,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
                 target,
                 Some(written.receipt),
                 Json(PartitionScanInput {
+                    index_name: None,
                     table_id: table.id.clone(),
                     epoch,
                     limit: Some(1),
@@ -3127,6 +3133,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             &left_target,
             None,
             Json(PartitionScanInput {
+                index_name: None,
                 table_id: table.id.clone(),
                 epoch: 1,
                 limit: Some(1),
@@ -3147,6 +3154,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             &left_target,
             None,
             Json(PartitionScanInput {
+                index_name: None,
                 table_id: table.id.clone(),
                 epoch: 1,
                 limit: Some(1),
@@ -3538,6 +3546,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .unwrap();
     assert_eq!(absent.output.0, PartitionGetOutcome::Found(None));
     let export_input = || PartitionScanInput {
+        index_name: None,
         table_id: table.id.clone(),
         epoch: 1,
         limit: Some(1),
@@ -3995,6 +4004,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             &child_targets[first_child],
             None,
             Json(PartitionScanInput {
+                index_name: None,
                 table_id: table.id.clone(),
                 epoch: 3,
                 limit: Some(1),
@@ -4827,6 +4837,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             restored_child_target,
             None,
             Json(PartitionScanInput {
+                index_name: None,
                 table_id: table.id.clone(),
                 epoch: 3,
                 limit: None,
@@ -4901,6 +4912,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             &left_target,
             None,
             Json(PartitionScanInput {
+                index_name: None,
                 table_id: table.id.clone(),
                 epoch: 1,
                 limit: Some(10),

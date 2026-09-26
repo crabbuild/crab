@@ -83,7 +83,7 @@ impl Command for PutItem {
                 }
             }
         }
-        write_item(context, &table.id, &key, &input.item)?;
+        write_item(context, &table, &key, &input.item)?;
         Ok(CommandResult::Success(Json(ItemMutationOutcome::Applied(
             old,
         ))))
@@ -155,6 +155,7 @@ impl Command for DeleteItem {
                 }
             }
         }
+        crate::secondary_index::delete(context, &table, &key)?;
         context.sql(&statement(
             "DELETE FROM ddb_items WHERE table_id = ?1 AND item_key = ?2",
             vec![SqlValue::Text(table.id), SqlValue::Blob(key)],
@@ -256,7 +257,7 @@ impl Command for UpdateItem {
                 UpdateItemOutcome::InvalidItem,
             )));
         }
-        write_item(context, &table.id, &key, &new)?;
+        write_item(context, &table, &key, &new)?;
         Ok(CommandResult::Success(Json(UpdateItemOutcome::Applied {
             old,
             new,
@@ -422,6 +423,7 @@ pub(crate) fn valid_item(item: &Item, table: &TableRecord) -> bool {
         && validation::validate_item_nesting_depth(item).is_ok()
         && validation::validate_item_size(item, limits.max_item_size_bytes).is_ok()
         && validation::validate_key_sizes(item, &table.key_schema, &limits).is_ok()
+        && crate::secondary_index::valid_item(item, table)
 }
 
 pub(crate) fn valid_key(key: &Item, table: &TableRecord) -> bool {
@@ -439,15 +441,17 @@ fn command_item(
 
 fn write_item(
     context: &CommandContext<'_, '_>,
-    table_id: &str,
+    table: &TableRecord,
     key: &[u8],
     item: &Item,
 ) -> Result<()> {
+    let table_id = table.id.as_str();
     context.sql(&statement(
         "INSERT INTO ddb_items (table_id, item_key, item) VALUES (?1, ?2, X'') ON CONFLICT(table_id, item_key) DO UPDATE SET item = excluded.item",
         vec![SqlValue::Text(table_id.into()), SqlValue::Blob(key.to_vec())],
     ))?;
-    crate::item_storage::StoredItem::Account { table_id, key }.write(context, item)
+    crate::item_storage::StoredItem::Account { table_id, key }.write(context, item)?;
+    crate::secondary_index::write(context, table, key, item)
 }
 
 pub(crate) fn item_key(item: &Item, key_schema: &[KeySchemaElement]) -> Result<Vec<u8>> {

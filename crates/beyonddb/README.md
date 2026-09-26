@@ -382,7 +382,16 @@ including account participants before route activation. All transactional reads
 use durable shared locks and captured participant images, retrieved individually
 to avoid an aggregate Cell response limit. Same-Cell reads now pay the same
 coordinator protocol cost. Account-local
-sort-key Query, index operations, and streamed writes remain unsupported.
+base-table sort-key Query, global indexes, non-ALL local index projections,
+and streamed writes remain unsupported. Local secondary indexes with ALL
+projection support account/routed Query and Scan, strong reads, numeric sort
+ordering with base-sort tie-breakers, and base-plus-index continuation keys.
+Sparse entries are absent until their index key exists. Ordinary writes,
+transactions, TTL deletion, and split import maintain index entries in the
+same Cell command as base items. Indexed Query fences the HASH group's prepared
+write intents, including absent creates and sort-key moves; account-local Query
+conservatively fences the table. See [the remaining LSI read contract](LSI_CONTRACT.md)
+for KEYS_ONLY/INCLUDE, base-fetch capacity accounting, and scale limits.
 `tests/account_cell.rs` exercises them through a real
 `CellNodeBuilder` and in-memory object store, including request replay,
 receipt-based reads, conditional writes, update expressions, scan pagination, rollback of a
@@ -392,7 +401,8 @@ real host, range and epoch rejection, route validation and publication,
 partitioned adapter CRUD, Scan, same-Cell and cross-Cell writes, rollback and
 cross-Cell snapshots, shared-read/write conflicts, account write fencing, and restoration of
 both a data Cell and the route's account Cell from object storage. These tests
-do not prove live repartitioning, complete IAM, secondary indexes, Streams, or backups. The
+do not prove fleet-scale repartitioning, complete IAM, every index projection,
+Streams, or backups. The
 elastic test also verifies
 sealed-source export, two import-only children, activation by source-derived
 fingerprint, a delayed-copy fence, host-backed split resumption, atomic route
@@ -421,6 +431,14 @@ authorization but not a production management catalog. The SDK key is read
 from a credential Cell; revocation denies a signed request immediately and
 persists through recovery, and a wrong decryption key fails closed.
 
+The local-index integration fixture covers five ALL indexes on account and data
+Cells, tied numeric keys, forward/reverse and scan pagination, sparse removal,
+invalid/oversized images, mixed-participant commit/replay, prepared create/delete/
+sort-key-move read barriers, COMMIT/ABORT read helping, and split import. The
+server-process fixture additionally exercises signed SDK index metadata, Query
+projection/ranges, parallel Scan, transactional changes, and replay after an
+unclean restart. These cases do not qualify the full upstream protocol suite.
+
 ## Acceptance proof for a server claim
 
 Run ExtendDB's protocol suite against the BeyondDB endpoint, then exercise
@@ -441,3 +459,7 @@ This isolates account and credential catalogs sharing a BeyondDB store. Existing
 unreleased roots with application-only catalog heads require reprovisioning;
 there is no fallback reader. This does not enable multi-tenant backup or garbage
 collection. See [the recovery finding](CROSS_CELL_TRANSACTIONS.md#tenant-catalog-collision-found-during-recovery-qualification).
+
+Local-index schemas and required table/participant metadata also change the
+unreleased Cell format. Reprovision development roots created before local
+indexes; this change does not provide an in-place upgrade reader.
