@@ -418,6 +418,10 @@ The two probe routes answer different operator questions:
 
 Only the management listener serves probes. Every public request retains strict
 canonical `Host` validation.
+`crab_cell_owner_hint_total{outcome="hit|miss|stale|refused"}` counts the peer
+sender's bounded owner observations. A hit saves that sender's control and
+node-directory reads; the receiving node still verifies control and actor
+admission. Refusals clear the observed session before an authoritative retry.
 
 Before starting either listener, the process also claims and releases one of
 16 dedicated startup-probe slots in the shared transfer-admission namespace.

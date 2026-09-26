@@ -205,6 +205,17 @@ well as the entry router. Today `send_inner` reloads control and the node
 advertisement for every `Describe`, `Query`, and command; avoiding only the
 router's first lookup would leave most forwarded metadata reads unchanged.
 
+The first sender slice now retains a process-local observation for at most
+five seconds, never beyond the signed node lease minus one second, and caps it
+at 4,096 Cells. A newer control revision cannot be replaced by a delayed older
+read. A refused or ambiguous peer attempt invalidates only the session it
+used; the existing single authoritative retry retains the original deadline
+and signed request bytes. The mTLS typed-query test observes one sender control
+read for `Describe` plus `Query` on both in-memory storage and RustFS, then
+checks invalidation after owner loss. The entry router still reads catalog and
+control on each forwarded action, so this slice does not meet packet 3's
+zero-entry-read or p95 exit gate.
+
 Set a fixed maximum lifetime no longer than the observed node-session lease;
 do not add a public config option. Invalidate on peer refusal, stale session,
 target mismatch, release mismatch, and node-liveness loss. Retry the

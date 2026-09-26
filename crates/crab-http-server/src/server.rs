@@ -1145,13 +1145,19 @@ pub async fn serve(config: Config) -> Result<()> {
         cell_runtime.clone(),
         cell_runtime.telemetry_handle(),
     );
-    let peer_round_trip: Arc<dyn PeerRoundTrip> = Arc::new(crate::peer::PeerHttpRoundTrip::new(
-        startup.identity,
-        crab_cell_runtime::control::authority::CellAuthority::new(startup.layout.clone()),
-        directory.clone(),
-        peer_tls.client_identity(),
-        session,
-    ));
+    let peer_round_trip: Arc<dyn PeerRoundTrip> = Arc::new(
+        crate::peer::PeerHttpRoundTrip::new(
+            startup.identity,
+            crab_cell_runtime::control::authority::CellAuthority::with_telemetry(
+                startup.layout.clone(),
+                cell_runtime.telemetry_handle(),
+            ),
+            directory.clone(),
+            peer_tls.client_identity(),
+            session,
+        )
+        .with_metrics(metrics.clone()),
+    );
     let node_log_transport: Arc<dyn crab_cell_runtime::node::log_transport::NodeLogTransport> =
         Arc::new(
             crate::peer::NodeLogHttpTransport::new(
