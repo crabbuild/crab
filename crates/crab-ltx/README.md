@@ -526,6 +526,12 @@ The sparse database remains pinned to the selected root. New writes still use
 `Db::transaction`, `capture`, immutable preparation, and authority CAS
 in that order.
 
+Sparse opening claims its canonical path under a short registry lock. File
+creation, syncs, bridge startup and allocations happen outside that lock, so
+one slow activation does not hold up another Cell's registration or teardown.
+Failed setup releases its registry claim and leaves created local files
+quarantined; it never deletes or adopts an interrupted sparse database.
+
 ## Core API
 
 ### Local capture and recovery
@@ -715,6 +721,20 @@ It pauses a cache fsync with one origin permit, verifies a separate origin
 read and exact SQLite restore, and checks canceled-job admission. Each run
 uses a unique `crab-ltx-tests/cache-admission/` prefix and retains its objects.
 The pause/deadline assertions are concurrency proof, not latency percentiles.
+
+The sparse-activation isolation test uses the same environment:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-your-worktree" \
+  cargo test -p crab-ltx --features replica --locked --test host \
+  rustfs_sparse_activation_io -- --ignored --nocapture
+```
+
+It pauses file sync, parent sync and bridge startup in turn while a different
+Cell opens and another reads and closes. Each Cell must return its own value
+from the exact selected root. Each run retains objects under a unique
+`crab-ltx-tests/activation-registry/` prefix. The regular activation suite also
+covers conflicting path claims, setup failures and refusal of leftover files.
 
 The suite also ships the independent half of the format proof:
 

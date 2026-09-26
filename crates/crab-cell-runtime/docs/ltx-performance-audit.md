@@ -4,8 +4,8 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `2bf1967c7f3` and the asynchronous hydration implementation recorded below; each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
-| Status | Background hydration now releases the SQL worker and foreground Cell slot, reuses demand-prefetched pages, and defers retryable fetch failures. Activation lock scope, demand faults, installation latency, sustained publication and fleet performance remain open. |
+| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `3611a7895f6` and the activation registry change recorded below; each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
+| Status | Background hydration releases worker and foreground ownership, reuses prefetched pages and defers retryable fetch failures. Sparse registration no longer holds its global lock during local setup. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
 
@@ -24,7 +24,7 @@ harness separately.
 | Priority | Remaining gap | First experiment |
 | --- | --- | --- |
 | P1 | Hydration fetch isolation is implemented; service latency remains unqualified (19) | Measure same-Cell and sibling-Cell tails under arrivals, fragmented fetches and slow page installation |
-| P1 | Sparse activation holds a process-wide registry lock across disk I/O (20) | Pause one activation's file sync; open and close a different sparse Cell on another worker |
+| P1 | Sparse activation registry isolation is implemented; recovery-storm performance remains unqualified (20) | Concurrent activation under constrained disk IOPS; measure worker occupancy and shared bridge startup |
 | P1 | Peer admission changes still need load qualification (15) | Measure concurrent hint expiry, activation delay, retained request bytes, and accepted-command cancellation through HTTP |
 | P1 | Cross-Cell SQL worker blocking (9) | Background fetch passes the same-worker probe; qualify demand faults, installation, confirmation and cleanup separately |
 | P1 | Directory-cache fills still extend reads and occupy shared blocking jobs (18) | Measure remaining cache-install wait and sibling foreground interference after origin admission isolation |
@@ -1222,7 +1222,7 @@ This is end-to-end correctness evidence, not a service performance qualification
 
 ### 20. Sparse activation serializes unrelated Cells through a global registry lock
 
-**Confirmed:** [`Registration::new`](../../crab-ltx/src/writable_vfs.rs) locks
+**Confirmed at `3611a7895f6`:** [`Registration::new`](../../crab-ltx/src/writable_vfs.rs) locks
 the process-wide `views()` map before creating and sizing the sparse file,
 syncing it and its parent, constructing the paged I/O bridge, reserving local
 disk, and allocating the presence map. It releases the lock only after
@@ -1252,6 +1252,42 @@ claim or removal of another activation. Existing
 [`activation` hook tests](../../crab-ltx/tests/host/hooks/activation.rs) test
 checksum preparation and cancellation, but do not prove this global-lock
 isolation. A recovery storm with constrained disk IOPS is the service test.
+
+**Implementation:** the registry now reserves a canonical path under a short
+lock, represented by a private claim guard and an initially empty weak
+reference. The guard alone can publish or remove that entry. File creation,
+size, file/parent barriers, bridge startup, disk admission and presence-map
+allocation all run after releasing the lock. A completed activation publishes
+its weak discovery reference; `xOpen` upgrades it while holding the map lock,
+then retains the same strong file ownership as before. The registry cannot
+destroy an activation or join its bridge while locked. This uses Rust's
+[weak-reference ownership contract](https://doc.rust-lang.org/std/sync/struct.Weak.html).
+
+A failed setup drops its claim. Existing or partially created files remain
+quarantined under the exclusive-create contract; cleanup does not remove local
+files or another activation's claim. Canonical path resolution and WAL-sidecar
+refusal are unchanged, as are SQLite file callbacks and one-writer authority.
+The change adds 14 net production lines and no public API or configuration.
+
+The first public-API regression reproduced both unrelated open and close
+missing their one-second bound while a file sync was paused. The strengthened
+test pauses file sync, parent sync and bridge startup separately, and checks
+distinct selected-root values for all three Cells. See the
+[RustFS run command](../../crab-ltx/README.md#verification) for the same scenario
+with real objects. Failure cases cover file creation, sizing, both barriers,
+bridge startup, capture-directory creation and a pre-existing destination.
+Repeated conflicting opens must refuse promptly without releasing the first
+caller's claim. Per-activation disk/bridge waits still occupy its assigned SQL
+worker; this fix does not qualify aggregate cold-start latency or disk capacity.
+
+The seven activation tests pass, along with ten sparse LTX tests, eight
+minimal-feature integration tests and all 24 runtime residency tests.
+Both the new isolation test and the public HTTP/mTLS
+application/takeover test pass against local RustFS. Replica all-target Clippy
+passes with warnings denied. These checks cover registration, failure cleanup,
+hydration and restored application visibility; they do not establish a fleet
+latency percentile. Before/after and RustFS logs use the `activation-registry-`
+prefix in this checkout's external target directory.
 
 ### 21. The initial asynchronous draft lost demand-read cache reuse
 
@@ -1302,8 +1338,9 @@ memory accounting remain separate qualification work.
 **Is this the best fix for the reproduced waits?** Splitting remote fetch from
 owner installation and separating its effect from foreground ownership remove
 the worker and actor waits at their respective boundaries. Reusing the demand
-cache removes the demonstrated duplicate reads. Installation still occupies
-the worker, and the global activation lock requires an independent change.
+cache removes the demonstrated duplicate reads. Short registry claims also
+remove disk/setup waits from unrelated activation and teardown. Installation
+and individual activation still occupy their SQL worker.
 Demand SQLite VFS callbacks still return
 synchronously under the [SQLite I/O contract](https://www.sqlite.org/c3ref/io_methods.html).
 
