@@ -84,7 +84,7 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 15] = [
+static COMMANDS: [OperationDescriptor; 17] = [
     operation(1),
     operation(2),
     operation(3),
@@ -100,8 +100,10 @@ static COMMANDS: [OperationDescriptor; 15] = [
     operation(15),
     operation(16),
     operation(17),
+    operation(18),
+    operation(19),
 ];
-static QUERIES: [OperationDescriptor; 17] = [
+static QUERIES: [OperationDescriptor; 19] = [
     operation(4),
     operation(6),
     operation(7),
@@ -119,6 +121,8 @@ static QUERIES: [OperationDescriptor; 17] = [
     operation(19),
     operation(20),
     operation(21),
+    operation(22),
+    operation(23),
 ];
 
 /// Statically linked account application.
@@ -270,6 +274,8 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<authorization::DeleteUserPolicy>()?;
         registry.bind_command::<tags::UpdateTags>()?;
         registry.bind_command::<ttl::UpdateTtl>()?;
+        registry.bind_command::<ttl::AdvanceTtlSweep>()?;
+        registry.bind_command::<ttl::AdvanceTtlSchedule>()?;
         registry.bind_command::<transaction_token::ClaimTransactionToken>()?;
         registry.bind_query::<GetItem>()?;
         registry.bind_query::<TransactGet>()?;
@@ -287,6 +293,8 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<tags::ReadTags>()?;
         registry.bind_query::<ttl::ReadTtl>()?;
         registry.bind_query::<ttl::ListTtlTables>()?;
+        registry.bind_query::<ttl::ReadTtlSweep>()?;
+        registry.bind_query::<ttl::ReadTtlSchedule>()?;
         registry.bind_query::<transaction_token::ReadTransactionClaim>()
     }
 }

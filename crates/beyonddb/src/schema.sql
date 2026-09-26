@@ -51,8 +51,15 @@ CREATE TABLE ddb_table_tags (
 
 CREATE TABLE ddb_table_ttl (
     table_id TEXT PRIMARY KEY REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
-    attribute_name TEXT NOT NULL
+    attribute_name TEXT NOT NULL,
+    sweep_after BLOB
 );
+
+CREATE TABLE ddb_ttl_schedule (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    last_table TEXT
+);
+INSERT INTO ddb_ttl_schedule (singleton, last_table) VALUES (1, NULL);
 
 CREATE TABLE ddb_transaction_claims (
     token TEXT PRIMARY KEY,

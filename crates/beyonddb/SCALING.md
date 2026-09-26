@@ -33,10 +33,15 @@ measurement includes indexes and runtime tables but excludes WAL/LTX files.
 TTL has a separate per-account worker. Its fixed data Cell expiry index accepts
 new writes immediately and backfills existing items with a durable cursor in
 bounded Cell commands. It only deletes an item if its TTL attribute is still
-expired at deletion. Today each worker tick reads every TTL table's route and
-queries every partition, with at most two expiry candidates per partition.
-This needs a distributed scheduler, bounded per-tick partition budget, and
-measured catch-up rate before qualification at 10,000 Cells.
+expired at deletion. Each worker tick now visits one route page of at most 64
+Cells per enabled table and at most 16 tables per account, then commits both
+route and table cursors in the account Cell. The cursors survive owner restart.
+Enabling TTL primes one 64-Cell page in the request handler; the worker finishes
+the remaining pages. Disabling TTL removes the table from subsequent worker
+sweeps through account metadata and leaves the fixed data Cell index in place.
+Data Cells can continue indexing the old attribute until TTL is re-enabled
+or a future cleanup pass reconfigures them. A distributed scheduler and
+measured catch-up rate remain necessary for 10,000-Cell qualification.
 The provisioner can install this loop in a node task group, and the serving
 binary installs it for every locally admitted account. There is no merge controller, and the account
 directory remains bounded.

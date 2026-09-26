@@ -1,11 +1,12 @@
 use std::{collections::HashMap, sync::Arc, time::UNIX_EPOCH};
 
 use beyonddb::{
-    Beyonddb, CellStorage, CreateTable, CreateTableOutcome, DeleteItem, DeleteItemInput,
-    DescribeTable, GetItem, GetItemInput, GetItemOutcome, ItemMutationOutcome, Json, ListTables,
-    ListTablesInput, ListTablesOutcome, PutItem, PutItemInput, TableSpec, TransactGet,
-    TransactWrite, TransactWriteInput, TransactionGetOutcome, TransactionOutcome, TransactionWrite,
-    account_target, initialize_account,
+    AdvanceTtlSchedule, AdvanceTtlScheduleInput, AdvanceTtlSweep, AdvanceTtlSweepInput, Beyonddb,
+    CellStorage, CreateTable, CreateTableOutcome, DeleteItem, DeleteItemInput, DescribeTable,
+    GetItem, GetItemInput, GetItemOutcome, ItemMutationOutcome, Json, ListTables, ListTablesInput,
+    ListTablesOutcome, PutItem, PutItemInput, ReadTtlSchedule, ReadTtlSweep, TableSpec,
+    TransactGet, TransactWrite, TransactWriteInput, TransactionGetOutcome, TransactionOutcome,
+    TransactionWrite, UpdateTtl, UpdateTtlInput, account_target, initialize_account,
 };
 use crab_cell_app::CellApplication;
 use crab_cell_host::CellNodeBuilder;
@@ -143,6 +144,52 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         CreateTableOutcome::Created(record) => record.id,
         _ => panic!("expected table creation"),
     };
+    client
+        .command::<UpdateTtl>(
+            &target,
+            identity(20),
+            Json(UpdateTtlInput {
+                table_name: "Books".into(),
+                attribute_name: Some("expires".into()),
+            }),
+        )
+        .await
+        .unwrap();
+    let cursor = AdvanceTtlSweepInput {
+        table_name: "Books".into(),
+        table_id: book_table_id.clone(),
+        attribute_name: "expires".into(),
+        expected_after: None,
+        next_after: Some([7; 16]),
+    };
+    assert!(
+        client
+            .command::<AdvanceTtlSweep>(&target, identity(21), Json(cursor.clone()))
+            .await
+            .unwrap()
+            .output
+            .0
+    );
+    assert!(matches!(
+        client
+            .command::<AdvanceTtlSweep>(&target, identity(22), Json(cursor))
+            .await,
+        Err(InvocationError::Rejected(_))
+    ));
+    let schedule = AdvanceTtlScheduleInput {
+        expected_last: None,
+        next_last: Some("Books".into()),
+    };
+    client
+        .command::<AdvanceTtlSchedule>(&target, identity(23), Json(schedule.clone()))
+        .await
+        .unwrap();
+    assert!(matches!(
+        client
+            .command::<AdvanceTtlSchedule>(&target, identity(24), Json(schedule))
+            .await,
+        Err(InvocationError::Rejected(_))
+    ));
     let described = storage
         .describe_table(
             "123456789012",
@@ -815,6 +862,19 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             target.application(),
         )
         .unwrap();
+    let restored_sweep = restored_client
+        .query::<ReadTtlSweep>(&target, None, Json("Books".into()))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    assert_eq!(restored_sweep.after_lower, Some([7; 16]));
+    let restored_schedule = restored_client
+        .query::<ReadTtlSchedule>(&target, None, Json(()))
+        .await
+        .unwrap();
+    assert_eq!(restored_schedule.output.0.as_deref(), Some("Books"));
     let persisted = restored_client
         .query::<GetItem>(
             &target,

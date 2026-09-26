@@ -70,7 +70,8 @@ item requests, kills the server without draining it, then restarts it and reads
 the committed item after lease expiry and fenced Cell takeover. It also verifies
 BatchWriteItem, BatchGetItem, paginated parallel Scan, and TTL expiry across four
 initial data Cells before the crash. It checks batch reads and TTL configuration
-after recovery. Run it in a
+after recovery, then disables TTL and verifies that state through another
+restart. Run it in a
 dedicated environment with `rustfs`, `aws`, and `openssl` available:
 
 ```bash
@@ -93,9 +94,13 @@ The account Cell, independently owned data-range Cells, and a partial ExtendDB
 Cell paths; most remaining traits return explicit unsupported errors. TTL settings
 are committed in the account Cell. The serving binary sweeps enabled tables,
 configures a fixed expiry index in each routed data Cell, backfills old items in
-bounded commands, and conditionally deletes expired items. An owner restart
-restores the settings, backfill cursor, and index state. The global TTL listing
+bounded commands, and conditionally deletes expired items. Each tick processes
+at most one 64-Cell route page per table and 16 tables per account. An owner
+restart restores the settings, sweep and backfill cursors, and index state. The global TTL listing
 trait remains unsupported; the worker lists tables by locally owned account.
+UpdateTimeToLive primes at most one route page and returns while the worker
+reconciles the rest; disabling stops expiry sweeps without dropping the fixed
+data Cell index.
 The synchronous table-transition worker is also implemented. Table resource tags now have Cell-backed CreateTable, TagResource, UntagResource,
 and ListTagsOfResource paths; DeleteTable removes their rows. The RustFS
 process test verifies these requests through the AWS SDK across a server
@@ -307,6 +312,9 @@ controller can check split readiness across Cells before publication. The
 provisioning test retries after installing two data Cells but before route
 activation, writes more than 64 MiB of item payload across both ranges, and
 reacquires both Cells after restart with the same measured payload bytes.
+The 65-range host test checks TTL expiry in its first and last data Cells over
+two bounded sweep ticks, deferred index setup during enable, disabled expiry,
+and account-level cursor advance across 17 TTL tables.
 The numeric Query host test checks ordered pages, reverse order, a sort-key
 predicate, equivalent numeric key spellings, and two successive splits, the
 first triggered by the account capacity loop, while preserving Query results
