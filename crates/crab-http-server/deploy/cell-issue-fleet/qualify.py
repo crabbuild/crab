@@ -10,6 +10,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -25,6 +26,28 @@ def command(*args: str) -> str:
 def compose(path: Path, profiles: tuple[str, ...], *args: str) -> str:
     flags = [flag for profile in profiles for flag in ("--profile", profile)]
     return command("docker", "compose", "--file", str(path), *flags, *args)
+
+
+@contextmanager
+def restart_after_fault(receipt: dict, restart):
+    # Store proof before cleanup: restarting an old owner must neither erase a
+    # successful takeover nor replace an acknowledged-data failure in the report.
+    failed = False
+    try:
+        yield
+    except BaseException as error:
+        failed = True
+        receipt["error"] = f"{type(error).__name__}: {error}"
+        raise
+    finally:
+        try:
+            restart()
+        except Exception as error:
+            receipt["restart"] = {"passed": False, "error": f"{type(error).__name__}: {error}"}
+            if not failed:
+                raise
+        else:
+            receipt["restart"] = {"passed": True}
 
 
 def image_provenance(reference: str) -> dict:
@@ -278,7 +301,7 @@ def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, g
     }
 
 
-def prove_owner_loss(path: Path, profiles: tuple[str, ...], owner: str, gateway_port: int, cell: int) -> dict:
+def prove_owner_loss(path: Path, profiles: tuple[str, ...], owner: str, gateway_port: int, cell: int, receipt: dict) -> None:
     observer = "node-01" if owner != "node-01" else "node-02"
     status_args = ("exec", "-T", observer, "crab-http-server", "--config", CONFIG, "cells", "status", "--owner", "demo", "--name", f"work-{cell:02d}")
     for _ in range(60):
@@ -294,7 +317,8 @@ def prove_owner_loss(path: Path, profiles: tuple[str, ...], owner: str, gateway_
         raise RuntimeError("owner-loss Cell was not serving before SIGKILL")
     print(f"Killing {owner} and checking durable recovery", flush=True)
     started = time.monotonic()
-    try:
+    restart = lambda: compose(path, profiles, "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300", owner)
+    with restart_after_fault(receipt, restart):
         compose(path, profiles, "kill", "--signal", "SIGKILL", owner)
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
@@ -315,7 +339,7 @@ def prove_owner_loss(path: Path, profiles: tuple[str, ...], owner: str, gateway_
                 root = after.get("root") or {}
                 if root.get("commit_sequence", -1) < before["root"]["commit_sequence"] or root.get("txid", -1) < before["root"]["txid"]:
                     raise RuntimeError("successor regressed the published RustFS root")
-                return {
+                receipt.update({
                     "lost_node": owner,
                     "old_session": before["owner"]["session"],
                     "new_session": after["owner"]["session"],
@@ -323,12 +347,11 @@ def prove_owner_loss(path: Path, profiles: tuple[str, ...], owner: str, gateway_
                     "root_after": root,
                     "same_root": root == before["root"],
                     "recovery_seconds": round(time.monotonic() - started, 3),
-                }
+                })
+                return
             except (OSError, subprocess.CalledProcessError, KeyError, ValueError, TypeError):
                 time.sleep(1)
         raise RuntimeError("owner-loss recovery did not complete in 120 seconds")
-    finally:
-        compose(path, profiles, "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300", owner)
 
 
 def main() -> None:
@@ -376,40 +399,47 @@ def main() -> None:
         "node_cpu_limit": 1,
         "node_memory_limit_bytes": MEMORY_LIMIT,
         "stages": [],
+        "passed": False,
     }
     phases = [(3, ()), (5, ("five",)), (10, ("five", "ten")), (20, ("five", "ten", "twenty"))]
     previous = 0
     last_load = None
-    for size, profiles in phases:
-        stage = run_stage(path, profiles, previous, size, args.gateway_port, args.node_port_base, args.cells)
-        report["stages"].append(stage)
-        (path.parent / "report.json").write_text(json.dumps(report, indent=2) + "\n")
-        print(f"Verified {size} nodes and {args.cells} Cell-backed issue services", flush=True)
-        if args.load_stages:
-            output = path.parent / f"load-{size}-stage.json"
-            subprocess.run([
-                sys.executable,
-                str(Path(__file__).with_name("load.py")),
-                "--state", str(path.parent),
-                "--nodes", str(size),
-                "--gateway-port", str(args.gateway_port),
-                "--cells", str(args.cells),
-                "--rate", str(args.load_rate),
-                "--duration", str(args.load_duration),
-                "--max-in-flight", str(args.load_max_in_flight),
-                "--output", str(output),
-            ], check=True)
-            stage["load_report"] = output.name
-            last_load = output
+    try:
+        for size, profiles in phases:
+            stage = run_stage(path, profiles, previous, size, args.gateway_port, args.node_port_base, args.cells)
+            report["stages"].append(stage)
             (path.parent / "report.json").write_text(json.dumps(report, indent=2) + "\n")
-        previous = size
-    if last_load:
-        report["owner_loss"] = json.loads(last_load.read_text())["owner_loss"]
-        report["owner_loss_source"] = last_load.name
-    else:
-        report["owner_loss"] = prove_owner_loss(path, phases[-1][1], report["stages"][-1]["owners"][f"work-{args.cells:02d}"], args.gateway_port, args.cells)
-    (path.parent / "report.json").write_text(json.dumps(report, indent=2) + "\n")
-    print(path.parent / "report.json")
+            print(f"Verified {size} nodes and {args.cells} Cell-backed issue services", flush=True)
+            if args.load_stages:
+                output = path.parent / f"load-{size}-stage.json"
+                stage["load_report"] = output.name
+                subprocess.run([
+                    sys.executable,
+                    str(Path(__file__).with_name("load.py")),
+                    "--state", str(path.parent),
+                    "--nodes", str(size),
+                    "--gateway-port", str(args.gateway_port),
+                    "--cells", str(args.cells),
+                    "--rate", str(args.load_rate),
+                    "--duration", str(args.load_duration),
+                    "--max-in-flight", str(args.load_max_in_flight),
+                    "--output", str(output),
+                ], check=True)
+                last_load = output
+            previous = size
+        if last_load:
+            report["owner_loss"] = json.loads(last_load.read_text())["owner_loss"]
+            report["owner_loss_source"] = last_load.name
+        else:
+            report["owner_loss"] = {}
+            prove_owner_loss(path, phases[-1][1], report["stages"][-1]["owners"][f"work-{args.cells:02d}"], args.gateway_port, args.cells, report["owner_loss"])
+        report["passed"] = True
+    except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
+        report["error"] = str(error)
+        raise
+    finally:
+        (path.parent / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+        print(path.parent / "report.json")
 
 
 if __name__ == "__main__":

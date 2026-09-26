@@ -332,18 +332,24 @@ class LoadTests(unittest.TestCase):
                 else:
                     self.receipts[samples[0]["request_id"]] = {**first, "title": "changed"}
                 calls.clear()
+                recovered = {}
                 with patch.object(load, "status", return_value=before), \
                         patch.object(load, "compose", side_effect=compose), \
                         self.assertRaisesRegex(RuntimeError, samples[0]["request_id"]):
                     load.recover_owner(Path("fixture"), (), self.gateway, 3, "node-03",
-                                       before, samples[-1]["acknowledged"], 1, samples)
+                                       before, samples[-1]["acknowledged"], 1, samples, recovered)
+                self.assertEqual(recovered["new_session"], "new")
+                self.assertNotIn("acknowledgements", recovered)
+                self.assertEqual(recovered["restart"], {"passed": True})
                 self.assertIn("kill", calls[1])
                 self.assertIn("up", calls[-1])
+        recovered = {}
         with patch.object(load, "status", return_value=before), \
                 patch.object(load, "compose", side_effect=compose):
-            recovered = load.recover_owner(Path("fixture"), (), self.gateway, 3, "node-03",
-                                           before, samples[-1]["acknowledged"], 1, samples)
+            load.recover_owner(Path("fixture"), (), self.gateway, 3, "node-03",
+                               before, samples[-1]["acknowledged"], 1, samples, recovered)
         self.assertEqual(recovered["acknowledgements"]["verified"], 3)
+        self.assertEqual(recovered["restart"], {"passed": True})
 
     def test_missing_acknowledged_issue_stops_new_arrivals(self):
         self.read_status = 404
@@ -354,6 +360,105 @@ class LoadTests(unittest.TestCase):
         self.assertLess(summary["offered_pairs"], summary["planned_pairs"])
         self.assertEqual(samples[0]["error"], "acknowledged issue disappeared")
         self.assertIn("acknowledged", json.loads(self.raw.getvalue().splitlines()[0]))
+
+    def test_recovery_evidence_survives_a_failed_owner_restart(self):
+        samples = [load.load_pair(self.gateway, 3, 1, i, "failed-restart", time.monotonic()) for i in range(2)]
+        before = {"owner": {"session": "old"}, "root": {"commit_sequence": 2, "txid": 2}}
+        after = {**before, "owner": {"session": "new"}}
+        first = self.receipts[samples[0]["request_id"]]
+
+        def compose(*args):
+            if args[-1] == "metrics":
+                return "crab_cell_node_log_uncovered_bytes 0\n"
+            if "status" in args:
+                return json.dumps(after)
+            if "up" in args:
+                raise RuntimeError("restart has insufficient disk")
+            return ""
+
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                if missing:
+                    del self.receipts[samples[0]["request_id"]]
+                else:
+                    self.receipts[samples[0]["request_id"]] = first
+                recovered = {}
+                error = samples[0]["request_id"] if missing else "restart has insufficient disk"
+                with patch.object(load, "status", return_value=before), \
+                        patch.object(load, "compose", side_effect=compose), \
+                        self.assertRaisesRegex(RuntimeError, error):
+                    load.recover_owner(Path("fixture"), (), self.gateway, 3, "node-03",
+                                       before, samples[-1]["acknowledged"], 1, samples, recovered)
+                self.assertEqual(recovered["new_session"], "new")
+                self.assertFalse(recovered["restart"]["passed"])
+                self.assertIn("insufficient disk", recovered["restart"]["error"])
+                if missing:
+                    self.assertIn(error, recovered["error"])
+                    self.assertNotIn("acknowledgements", recovered)
+                else:
+                    self.assertNotIn("error", recovered)
+                    self.assertEqual(recovered["acknowledgements"]["verified"], 2)
+
+    def test_functional_recovery_also_preserves_restart_and_readback_outcomes(self):
+        before = {"state": "serving", "owner": {"session": "old"}, "root": {"commit_sequence": 2, "txid": 2}}
+        after = {**before, "owner": {"session": "new"}}
+        for valid, restart_ok in ((True, True), (True, False), (False, False)):
+            with self.subTest(valid=valid, restart_ok=restart_ok):
+                statuses = iter((before, after))
+                receipt = {}
+
+                def compose(*args):
+                    if args[-1] == "metrics":
+                        return "crab_cell_node_log_uncovered_bytes 0\n"
+                    if "status" in args:
+                        return json.dumps(next(statuses))
+                    if "up" in args and not restart_ok:
+                        raise RuntimeError("restart has insufficient disk")
+                    return ""
+
+                response = io.BytesIO(json.dumps({"title": "Cell issue 1" if valid else "wrong issue"}).encode())
+                with patch.object(qualify, "compose", side_effect=compose), \
+                        patch.object(qualify.urllib.request, "urlopen", return_value=response):
+                    if valid and restart_ok:
+                        qualify.prove_owner_loss(Path("fixture"), (), "node-03", 18880, 1, receipt)
+                    else:
+                        error = "restart has insufficient disk" if valid else "acknowledged issue"
+                        with self.assertRaisesRegex(RuntimeError, error):
+                            qualify.prove_owner_loss(Path("fixture"), (), "node-03", 18880, 1, receipt)
+                self.assertEqual(receipt["restart"]["passed"], restart_ok)
+                self.assertEqual("new_session" in receipt, valid)
+                self.assertEqual("error" in receipt, not valid)
+
+    def test_qualification_report_retains_failed_load_and_recovery_receipts(self):
+        for load_stages in (False, True):
+            with self.subTest(load_stages=load_stages), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "compose.yaml"
+                path.write_text("{}")
+                args = ["qualify.py", "--state", directory, "--project", "crab-cell-test", "--skip-build"]
+                if load_stages:
+                    args.append("--load-stages")
+
+                def recovery(*args):
+                    args[-1].update({"new_session": "new", "restart": {"passed": False}})
+                    raise RuntimeError("restart failed")
+
+                with patch.object(qualify.sys, "argv", args), \
+                        patch.object(qualify, "command", return_value=""), \
+                        patch.object(qualify, "compose", return_value=""), \
+                        patch.object(qualify, "render", return_value=path), \
+                        patch.object(qualify, "pin_image", return_value={}), \
+                        patch.object(qualify, "run_stage", side_effect=lambda *args: {"nodes": args[3], "owners": {"work-20": "node-03"}}), \
+                        patch.object(qualify, "prove_owner_loss", side_effect=recovery), \
+                        patch.object(qualify.subprocess, "run", side_effect=RuntimeError("load failed")), \
+                        self.assertRaisesRegex(RuntimeError, "load failed" if load_stages else "restart failed"):
+                    qualify.main()
+                report = json.loads((Path(directory) / "report.json").read_text())
+                self.assertFalse(report["passed"])
+                if load_stages:
+                    self.assertEqual(report["stages"][0]["load_report"], "load-3-stage.json")
+                else:
+                    self.assertEqual(report["owner_loss"]["new_session"], "new")
+                    self.assertFalse(report["owner_loss"]["restart"]["passed"])
 
     def test_late_scheduler_records_missed_arrivals_without_a_catchup_burst(self):
         clock = [0.0]
