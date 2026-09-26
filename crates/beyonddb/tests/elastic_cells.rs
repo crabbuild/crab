@@ -11,28 +11,35 @@ use aws_credential_types::Credentials;
 use aws_sdk_dynamodb::types::AttributeValue as AwsAttributeValue;
 use beyonddb::{
     ActivateImportedPartition, ActivateImportedPartitionInput, ActivateImportedPartitionOutcome,
-    ActivateTableRoute, ActivateTableRouteOutcome, BeginSplit, BeginSplitOutcome, Beyonddb,
-    BeyonddbPeerScope, CellAuthorizationStore, CellCredentialStore,
+    ActivateTableRoute, ActivateTableRouteOutcome, BeginCrossCellTransaction,
+    BeginCrossCellTransactionInput, BeginCrossCellTransactionOutcome, BeginSplit,
+    BeginSplitOutcome, Beyonddb, BeyonddbPeerScope, CellAuthorizationStore, CellCredentialStore,
     CellInitialPartitionProvisioner, CellSplitController, CellStorage, CommitSplit,
-    CommitSplitOutcome, CreateTable, CreateTableOutcome, DeleteItem, DeleteItemInput, DeleteTable,
-    DeleteTableOutcome, DescribeTable, GetItem, GetItemInput, GetItemOutcome, ImportPartitionItem,
-    ImportSummary, InitialPartitionProvisioner, InstallPartition, InstallPartitionOutcome,
-    ItemMutationOutcome, Json, NodeLeasePublisher, PartitionDelete, PartitionDeleteInput,
-    PartitionDeleteOutcome, PartitionExport, PartitionGet, PartitionGetInput, PartitionGetOutcome,
-    PartitionImportInput, PartitionImportOutcome, PartitionInstall, PartitionLookupInput,
-    PartitionLookupOutcome, PartitionPut, PartitionPutInput, PartitionPutOutcome, PartitionScan,
-    PartitionScanInput, PartitionScanOutcome, PartitionSeal, PartitionSpec, PartitionState,
-    PartitionTransactWrite, PartitionTransactWriteInput, PartitionTransactWriteOutcome,
-    PartitionUpdate, PartitionUpdateInput, PartitionUpdateOutcome, PartitionUsage,
-    PreparePartitionTransaction, PreparePartitionTransactionInput,
-    PreparePartitionTransactionOutcome, PublishedNodeLease, PutItem, PutItemInput,
-    ReadPartitionRoute, ReadPartitionState, ReadPartitionTransaction,
-    ReadPartitionTransactionInput, ReadPartitionTransactionOutcome, ReadRoutePage, ReadSplitPlan,
-    ReadSplitRoute, ReadTableRoute, ReadTtlSchedule, ReadTtlSweep, ResolvePartitionTransaction,
-    ResolvePartitionTransactionInput, ResolvePartitionTransactionOutcome, RoutePageInput,
-    RoutePageOutcome, SealPartition, SealPartitionOutcome, SplitPlan, SplitRouteState, TableRoute,
-    TableSpec, TransactionWrite, UpdateTtl, UpdateTtlInput, account_target, build_http_state,
-    credential_target, data_key_hash, data_target, initialize_account, initialize_partition,
+    CommitSplitOutcome, CoordinatorDecision, CoordinatorParticipant, CoordinatorParticipantTarget,
+    CoordinatorPhaseInput, CoordinatorPhaseOutcome, CreateTable, CreateTableOutcome,
+    DecideCrossCellTransaction, DecideCrossCellTransactionInput, DecideCrossCellTransactionOutcome,
+    DeleteItem, DeleteItemInput, DeleteTable, DeleteTableOutcome, DescribeTable, GetItem,
+    GetItemInput, GetItemOutcome, ImportPartitionItem, ImportSummary, IndexedTransactionWrite,
+    InitialPartitionProvisioner, InstallPartition, InstallPartitionOutcome, ItemMutationOutcome,
+    Json, NodeLeasePublisher, PartitionDelete, PartitionDeleteInput, PartitionDeleteOutcome,
+    PartitionExport, PartitionGet, PartitionGetInput, PartitionGetOutcome, PartitionImportInput,
+    PartitionImportOutcome, PartitionInstall, PartitionLookupInput, PartitionLookupOutcome,
+    PartitionPut, PartitionPutInput, PartitionPutOutcome, PartitionScan, PartitionScanInput,
+    PartitionScanOutcome, PartitionSeal, PartitionSpec, PartitionState, PartitionTransactWrite,
+    PartitionTransactWriteInput, PartitionTransactWriteOutcome, PartitionUpdate,
+    PartitionUpdateInput, PartitionUpdateOutcome, PartitionUsage, PreparePartitionTransaction,
+    PreparePartitionTransactionInput, PreparePartitionTransactionOutcome, PublishedNodeLease,
+    PutItem, PutItemInput, ReadCoordinatorParticipant, ReadCoordinatorParticipantInput,
+    ReadCrossCellTransaction, ReadCrossCellTransactionInput, ReadPartitionRoute,
+    ReadPartitionState, ReadPartitionTransaction, ReadPartitionTransactionInput,
+    ReadPartitionTransactionOutcome, ReadRoutePage, ReadSplitPlan, ReadSplitRoute, ReadTableRoute,
+    ReadTtlSchedule, ReadTtlSweep, RecordParticipantPrepare, RecordParticipantResolution,
+    ResolvePartitionTransaction, ResolvePartitionTransactionInput,
+    ResolvePartitionTransactionOutcome, RoutePageInput, RoutePageOutcome, SealPartition,
+    SealPartitionOutcome, SplitPlan, SplitRouteState, TableRoute, TableSpec, TransactionWrite,
+    UpdateTtl, UpdateTtlInput, account_target, build_http_state, coordinator_target,
+    credential_target, data_key_hash, data_target, initialize_account, initialize_coordinator,
+    initialize_partition,
 };
 use crab_cell_app::CellApplication;
 use crab_cell_host::CellNodeBuilder;
@@ -329,6 +336,8 @@ fn peer_scope_allows_account_and_credentials_but_rejects_foreign_cells() {
     assert!(scope.check_target(&account).is_ok());
     assert!(scope.check_target(&credential).is_ok());
     assert!(scope.check_target(&data).is_ok());
+    let coordinator = coordinator_target("123456789012", b"token").unwrap();
+    assert!(scope.check_target(&coordinator).is_ok());
     let foreign_application = CellTarget::new(
         account.tenant(),
         ApplicationId::from_bytes([99; 16]),
@@ -2315,12 +2324,24 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             initialize_partition,
         )
         .await;
+    let transaction_id = [110; 16];
+    let coordinator_target = coordinator_target("123456789012", &transaction_id).unwrap();
+    let coordinator_handle = bootstrap
+        .cell(
+            &coordinator_target,
+            "beyonddb-coordinator",
+            109,
+            &directory.path().join("coordinator.sqlite"),
+            initialize_coordinator,
+        )
+        .await;
     let cell_client = CellClient::local_many(
         Arc::clone(&registry),
         [
             account_handle.clone(),
             left_handle.clone(),
             right_handle.clone(),
+            coordinator_handle.clone(),
         ],
     )
     .unwrap();
@@ -2454,6 +2475,279 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
                 epoch,
             }
         );
+    }
+    let cross_left = key_in_range(&table.id, &table.key_schema, true, 600);
+    let cross_right = key_in_range(&table.id, &table.key_schema, false, 600);
+    let mut sides = [
+        (
+            left_target.clone(),
+            1_u64,
+            cross_left.clone(),
+            0_u8,
+            CoordinatorParticipantTarget::Data {
+                table_id: table.id.clone(),
+                partition_id: left_id,
+                epoch: 1,
+            },
+        ),
+        (
+            right_target.clone(),
+            2_u64,
+            cross_right.clone(),
+            1_u8,
+            CoordinatorParticipantTarget::Data {
+                table_id: table.id.clone(),
+                partition_id: right_id,
+                epoch: 2,
+            },
+        ),
+    ];
+    sides.sort_by_key(|side| *side.0.cell_id().as_bytes());
+    let participants: Vec<_> = sides
+        .iter()
+        .map(|side| CoordinatorParticipant {
+            target: side.4.clone(),
+            operations: vec![IndexedTransactionWrite {
+                index: side.3,
+                operation: TransactionWrite::Put(PutItemInput {
+                    table_name: table.table_name.clone(),
+                    table_id: table.id.clone(),
+                    item: side.2.clone(),
+                    condition: None,
+                }),
+            }],
+        })
+        .collect();
+    let mut reversed_participants = participants.clone();
+    reversed_participants.reverse();
+    let unordered_begin = client
+        .command::<BeginCrossCellTransaction>(
+            &coordinator_target,
+            identity(125),
+            Json(BeginCrossCellTransactionInput {
+                account_id: "123456789012".into(),
+                transaction_id,
+                token: None,
+                participants: reversed_participants,
+            }),
+        )
+        .await;
+    assert!(matches!(
+        unordered_begin,
+        Err(InvocationError::Rejected(result))
+            if result.output.0 == BeginCrossCellTransactionOutcome::InvalidParticipants
+    ));
+    let begun_transaction = client
+        .command::<BeginCrossCellTransaction>(
+            &coordinator_target,
+            identity(110),
+            Json(BeginCrossCellTransactionInput {
+                account_id: "123456789012".into(),
+                transaction_id,
+                token: None,
+                participants: participants.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        begun_transaction.output.0,
+        BeginCrossCellTransactionOutcome::Begun
+    );
+    let early_decision = client
+        .command::<DecideCrossCellTransaction>(
+            &coordinator_target,
+            identity(111),
+            Json(DecideCrossCellTransactionInput {
+                account_id: "123456789012".into(),
+                transaction_id,
+                routing_key: transaction_id.to_vec(),
+                decision: CoordinatorDecision::Commit,
+            }),
+        )
+        .await;
+    assert!(matches!(
+        early_decision,
+        Err(InvocationError::Rejected(result))
+            if result.output.0 == DecideCrossCellTransactionOutcome::NotPrepared
+    ));
+    for (position, side) in sides.iter().enumerate() {
+        let prepared = client
+            .command::<PreparePartitionTransaction>(
+                &side.0,
+                identity(112 + u8::try_from(position).unwrap()),
+                Json(PreparePartitionTransactionInput {
+                    table_id: table.id.clone(),
+                    epoch: side.1,
+                    transaction_id,
+                    coordinator_cell: *coordinator_target.cell_id().as_bytes(),
+                    operations: vec![participants[position].operations[0].operation.clone()],
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            prepared.output.0,
+            PreparePartitionTransactionOutcome::Prepared
+        );
+        let recorded = client
+            .command::<RecordParticipantPrepare>(
+                &coordinator_target,
+                identity(114 + u8::try_from(position).unwrap()),
+                Json(CoordinatorPhaseInput {
+                    account_id: "123456789012".into(),
+                    transaction_id,
+                    routing_key: transaction_id.to_vec(),
+                    position: u8::try_from(position).unwrap(),
+                    participant_cell: *side.0.cell_id().as_bytes(),
+                    sequence: prepared.receipt.commit_sequence,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recorded.output.0, CoordinatorPhaseOutcome::Recorded);
+    }
+    let decided = client
+        .command::<DecideCrossCellTransaction>(
+            &coordinator_target,
+            identity(116),
+            Json(DecideCrossCellTransactionInput {
+                account_id: "123456789012".into(),
+                transaction_id,
+                routing_key: transaction_id.to_vec(),
+                decision: CoordinatorDecision::Commit,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        decided.output.0,
+        DecideCrossCellTransactionOutcome::Decided(CoordinatorDecision::Commit)
+    );
+    let opposing_decision = client
+        .command::<DecideCrossCellTransaction>(
+            &coordinator_target,
+            identity(123),
+            Json(DecideCrossCellTransactionInput {
+                account_id: "123456789012".into(),
+                transaction_id,
+                routing_key: transaction_id.to_vec(),
+                decision: CoordinatorDecision::Abort {
+                    index: None,
+                    reason: None,
+                },
+            }),
+        )
+        .await;
+    assert!(matches!(
+        opposing_decision,
+        Err(InvocationError::Rejected(result))
+            if result.output.0 == DecideCrossCellTransactionOutcome::DecisionConflict
+    ));
+    let repeated_begin = client
+        .command::<BeginCrossCellTransaction>(
+            &coordinator_target,
+            identity(124),
+            Json(BeginCrossCellTransactionInput {
+                account_id: "123456789012".into(),
+                transaction_id,
+                token: None,
+                participants: participants.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        repeated_begin.output.0,
+        BeginCrossCellTransactionOutcome::Existing {
+            transaction_id,
+            decision: CoordinatorDecision::Commit,
+        }
+    );
+    for (position, side) in sides.iter().enumerate() {
+        let applied = client
+            .command::<ResolvePartitionTransaction>(
+                &side.0,
+                identity(117 + u8::try_from(position).unwrap()),
+                Json(ResolvePartitionTransactionInput {
+                    transaction_id,
+                    coordinator_cell: *coordinator_target.cell_id().as_bytes(),
+                    commit: true,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            applied.output.0,
+            ResolvePartitionTransactionOutcome::Committed
+        );
+        let recorded = client
+            .command::<RecordParticipantResolution>(
+                &coordinator_target,
+                identity(119 + u8::try_from(position).unwrap()),
+                Json(CoordinatorPhaseInput {
+                    account_id: "123456789012".into(),
+                    transaction_id,
+                    routing_key: transaction_id.to_vec(),
+                    position: u8::try_from(position).unwrap(),
+                    participant_cell: *side.0.cell_id().as_bytes(),
+                    sequence: applied.receipt.commit_sequence,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recorded.output.0, CoordinatorPhaseOutcome::Recorded);
+    }
+    let coordinator_state = client
+        .query::<ReadCrossCellTransaction>(
+            &coordinator_target,
+            None,
+            Json(ReadCrossCellTransactionInput {
+                account_id: "123456789012".into(),
+                transaction_id,
+                routing_key: transaction_id.to_vec(),
+            }),
+        )
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    assert_eq!(coordinator_state.decision, CoordinatorDecision::Commit);
+    assert_eq!(coordinator_state.prepared_count, 2);
+    assert_eq!(coordinator_state.resolved_count, 2);
+    let cross_key_info = storage
+        .table_key_info("123456789012", "Books")
+        .await
+        .unwrap();
+    assert_eq!(
+        storage
+            .get_item(&cross_key_info, &cross_left)
+            .await
+            .unwrap(),
+        Some(cross_left)
+    );
+    assert_eq!(
+        storage
+            .get_item(&cross_key_info, &cross_right)
+            .await
+            .unwrap(),
+        Some(cross_right)
+    );
+    for (position, side) in sides.into_iter().enumerate() {
+        client
+            .command::<PartitionDelete>(
+                &side.0,
+                identity(121 + u8::try_from(position).unwrap()),
+                Json(PartitionDeleteInput {
+                    table_id: table.id.clone(),
+                    epoch: side.1,
+                    key: side.2,
+                    condition: None,
+                }),
+            )
+            .await
+            .unwrap();
     }
     let boundary = [0x40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     let children = [
@@ -3774,6 +4068,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     for handle in child_handles {
         handle.drain().await.unwrap();
     }
+    coordinator_handle.drain().await.unwrap();
     left_handle.drain().await.unwrap();
     right_handle.drain().await.unwrap();
     account_handle.drain().await.unwrap();
@@ -3785,6 +4080,19 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
         .with_session(next_session)
         .build_unleased_for_maintenance()
+        .unwrap();
+    let restored_provisioner = CellInitialPartitionProvisioner::new(
+        restored_host.runtime(),
+        Arc::clone(&application),
+        layout.clone(),
+        next_session,
+        "https://restored-coordinator.internal:8081".into(),
+        directory.path().join("restored-coordinator"),
+    )
+    .unwrap();
+    let restored_coordinator = restored_provisioner
+        .admit_coordinator("123456789012", &transaction_id)
+        .await
         .unwrap();
     let proof = CellCatalog::new(layout.clone(), left_target.tenant())
         .lookup(left_target.cell_id())
@@ -3889,13 +4197,49 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .application_handle::<Beyonddb>(
             CellClient::local_many(
                 application.registry(),
-                [restored_data, restored_account, restored_child],
+                [
+                    restored_data,
+                    restored_account,
+                    restored_child,
+                    restored_coordinator,
+                ],
             )
             .unwrap(),
             left_target.tenant(),
             left_target.application(),
         )
         .unwrap();
+    let restored_decision = restored_client
+        .query::<ReadCrossCellTransaction>(
+            &coordinator_target,
+            None,
+            Json(ReadCrossCellTransactionInput {
+                account_id: "123456789012".into(),
+                transaction_id,
+                routing_key: transaction_id.to_vec(),
+            }),
+        )
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    assert_eq!(restored_decision.decision, CoordinatorDecision::Commit);
+    assert_eq!(restored_decision.resolved_count, 2);
+    let restored_participant = restored_client
+        .query::<ReadCoordinatorParticipant>(
+            &coordinator_target,
+            None,
+            Json(ReadCoordinatorParticipantInput {
+                account_id: "123456789012".into(),
+                transaction_id,
+                routing_key: transaction_id.to_vec(),
+                position: 0,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(restored_participant.output.0, Some(participants[0].clone()));
     let recovered_intent = restored_client
         .query::<ReadPartitionTransaction>(
             restored_child_target,

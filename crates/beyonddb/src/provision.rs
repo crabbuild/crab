@@ -31,8 +31,9 @@ use crate::{
     ListTablesOutcome, PartitionInstall, PartitionSpec, PartitionState, PartitionUsage,
     PublishedPartitionInput, PublishedPartitionOutcome, ReadPartitionState, ReadPublishedPartition,
     ReadRoutePage, ReadSplitPlan, ReadSplitRoute, RoutePageInput, RoutePageOutcome, SplitPlan,
-    SplitRouteState, TableRecord, account_target, credential_target, data_target,
-    initialize_account, initialize_credentials, initialize_partition,
+    SplitRouteState, TableRecord, account_target, coordinator_target, credential_target,
+    data_target, initialize_account, initialize_coordinator, initialize_credentials,
+    initialize_partition,
 };
 
 /// Position in an account capacity sweep.
@@ -121,6 +122,21 @@ impl CellInitialPartitionProvisioner {
             .await
     }
 
+    /// Provision or reacquire the account-scoped shard for one transaction key.
+    pub async fn admit_coordinator(
+        &self,
+        account_id: &str,
+        routing_key: &[u8],
+    ) -> Result<CellHandle, StorageError> {
+        let target = coordinator_target(account_id, routing_key).map_err(provision_error)?;
+        self.admit_module(
+            &target,
+            crate::transaction_coordinator::MODULE,
+            initialize_coordinator,
+        )
+        .await
+    }
+
     /// Admit a configured account or recover its published root after a crash.
     pub async fn recover_owned_account(
         &self,
@@ -144,6 +160,23 @@ impl CellInitialPartitionProvisioner {
             crate::credentials::MODULE,
             nodes,
             initialize_credentials,
+        )
+        .await
+    }
+
+    /// Recover a published coordinator shard after its former owner expires.
+    pub async fn recover_owned_coordinator(
+        &self,
+        account_id: &str,
+        routing_key: &[u8],
+        nodes: &NodeDirectory,
+    ) -> Result<CellHandle, StorageError> {
+        let target = coordinator_target(account_id, routing_key).map_err(provision_error)?;
+        self.recover_owned(
+            &target,
+            crate::transaction_coordinator::MODULE,
+            nodes,
+            initialize_coordinator,
         )
         .await
     }

@@ -234,9 +234,11 @@ The [cross-Cell transaction protocol](CROSS_CELL_TRANSACTIONS.md) specifies
 the decision, lock, visibility, and failure-recovery contract.
 Data Cells now persist prepared item images and exclusive key locks, apply or
 abort them idempotently, and refuse a split seal while locks remain. Ordinary
-data Cell writes check those locks. The coordinator decision, recovery worker,
-read isolation, and adapter routing are still absent, so cross-Cell requests
-continue to fail explicitly.
+data Cell writes check those locks. Sharded coordinator Cells can durably
+record a participant set, prepare receipts, one commit or abort decision, and
+resolution progress. The recovery worker, cross-Cell read isolation, and
+adapter routing are still absent, so cross-Cell requests continue to fail
+explicitly.
 
 The signed SDK host test uses `CellNodeBuilder::build`, a published node
 advertisement, a renewing lease guard, and a task group. The lease task keeps

@@ -19,10 +19,12 @@ receipt with the data mutation. A committed replay reads that claim before
 current routing, so a split cannot apply it in another Cell. A claimed request
 without an applied receipt still needs safe relocation if its source seals.
 Transactions across Cells remain rejected until
-a durable coordinator exists. Data Cells now have durable prepare, key-lock,
-commit, and abort commands. Those commands are not exposed through the
-ExtendDB adapter; coordinator decisions and post-decision reads still need
-implementation. A host-backed provisioner can create 1–256
+a durable coordinator driver exists. Data Cells now have durable prepare,
+key-lock, commit, and abort commands. Account-scoped coordinator shards can
+persist the participant set, prepare receipts, one decision, and resolution
+receipts. Those commands are not exposed through the ExtendDB adapter;
+recovery scheduling and post-decision reads still need implementation. A
+host-backed provisioner can create 1–256
 independent, evenly spaced initial data Cells during CreateTable and retry
 interrupted setup. This raises initial aggregate capacity and write parallelism.
 The host can plan a midpoint split of a serving range and repeat it on an
@@ -93,6 +95,10 @@ ID. This avoids one global credential writer but remains a finite directory;
 credential-shard expansion needs a versioned key-routing migration before any
 shard reaches its database or writer limit. Revocation is committed in the
 credential's Cell and remains effective after owner recovery.
+Cross-Cell transaction decisions use up to 4,096 account-scoped coordinator
+shards selected by client token or transaction ID. Only used shards are
+admitted. This is another finite per-account writer budget; shard expansion
+needs a versioned routing and token-replay migration before saturation.
 
 ## Target ownership
 

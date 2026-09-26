@@ -24,7 +24,7 @@ use extenddb_storage::error::StorageError;
 
 use crate::{
     APPLICATION, CellCatalogStore, CellCredentialStore, CellInitialPartitionProvisioner,
-    CellStorage, DATA_NAMESPACE, NAMESPACE, credentials,
+    CellStorage, DATA_NAMESPACE, NAMESPACE, credentials, transaction_coordinator,
 };
 
 /// Restricts peer forwarding to BeyondDB's compiled Cell namespaces.
@@ -36,7 +36,13 @@ pub struct BeyonddbPeerScope;
 impl PeerTargetScope for BeyonddbPeerScope {
     fn check_target(&self, target: &CellTarget) -> crab_cell_runtime::Result<()> {
         if target.application() != APPLICATION
-            || ![NAMESPACE, DATA_NAMESPACE, credentials::NAMESPACE].contains(&target.namespace())
+            || ![
+                NAMESPACE,
+                DATA_NAMESPACE,
+                credentials::NAMESPACE,
+                transaction_coordinator::NAMESPACE,
+            ]
+            .contains(&target.namespace())
         {
             return Err(crab_cell_runtime::Error::PeerAuthorization(
                 "Cell target is outside BeyondDB",

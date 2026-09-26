@@ -8,8 +8,11 @@ design, not a claim that the API works today. The adapter currently rejects
 cross-partition requests in `src/backend/data.rs`. A routed single-Cell write
 is one `PartitionTransactWrite` command and a single-Cell read is one
 `PartitionTransactGet` query. The account token claim records a retry
-destination, not a transaction outcome. No participant prepare, lock, or
-coordinator decision exists in either SQL schema.
+destination, not a transaction outcome. Data Cells now have internal prepare,
+lock, and resolution commands. Sharded coordinator Cells store immutable
+participant sets and terminal decisions. The ExtendDB adapter does not yet
+drive this protocol or enforce its cross-Cell read rules, so the API remains
+unsupported.
 
 The ExtendDB `DataEngine` contract requires all writes, the account-scoped
 client token, and stream capture to commit together. Its engine validates up
