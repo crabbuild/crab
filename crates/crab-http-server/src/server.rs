@@ -1143,6 +1143,7 @@ pub async fn serve(config: Config) -> Result<()> {
         startup.layout.clone(),
         startup.identity,
         cell_runtime.clone(),
+        cell_runtime.telemetry_handle(),
     );
     let peer_round_trip: Arc<dyn PeerRoundTrip> = Arc::new(crate::peer::PeerHttpRoundTrip::new(
         startup.identity,

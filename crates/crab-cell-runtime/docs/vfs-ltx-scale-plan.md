@@ -10,7 +10,7 @@ replication protocol.
 | --- | --- |
 | Content type | Technical design and executable delivery plan |
 | Audience | Runtime, HTTP, application, and qualification contributors |
-| Status | Proposed work; the baseline commands below run against the current tree |
+| Status | In progress; the stage-load harness and single-resolution peer receiver are implemented |
 | Decision | Fix owner routing first; change pager or durability policy only after phase-specific evidence |
 
 [Back to the Cell runtime index](README.md)
@@ -164,6 +164,32 @@ fencing. Do not add a second dispatch path for compatibility.
 **Exit:** identical results under owner loss and at least one fewer catalog
 head, catalog page, and control read per healthy forwarded request.
 
+The receiver now passes its verified local handle into the canonical dispatch
+path. The mTLS public-host test counts one catalog head, one page, and one
+control read for each peer operation, and continues through owner loss over
+both in-memory storage and local RustFS. A public comment read makes **two**
+peer operations: the typed client sends
+`Describe` before `Query`. It therefore makes two receiver resolutions even
+after this fix. The direct dispatcher test proves it does not resolve again
+when supplied a handle. This is a remaining request-path cost, not evidence
+of a second receiver lookup.
+
+The sender has a separate cost: `PeerHttpRoundTrip::send_inner` calls
+`owner()` for each operation, and `owner()` reads exact control and the signed
+node advertisement. A router-only hint would leave those reads in place.
+Count sender control/directory reads and peer round trips per public action
+before changing this path; the receiver counts above do not include them.
+
+Before adding an ingress owner hint, measure those two peer round trips and
+their metadata reads. A candidate is to pass the exact description already
+read from Cell control into the routed typed client. The owner must still
+compare expected incarnation, code, and schema at admission; a stale route
+must fail closed, and mutation digest/resolve behavior must stay stable.
+Keep the existing `Describe` path for clients without an authoritative route
+observation. Accept such a change only if the same public action removes one
+peer round trip and one receiver catalog/control read without increasing
+ambiguous outcomes or weakening rollout and takeover tests.
+
 ## Work packet 3: give ingress a bounded owner hint
 
 After packet 2, measure whether entry-node metadata remains the dominant
@@ -173,6 +199,11 @@ successful slow-path resolution and a live signed node advertisement. Use it
 only to choose the peer destination. The receiver still authorizes and admits
 the request; the Cell authority CAS remains decisive. A hint must never
 create, transfer, or renew ownership.
+
+The observation must be consumed by the outgoing `PeerHttpRoundTrip` path as
+well as the entry router. Today `send_inner` reloads control and the node
+advertisement for every `Describe`, `Query`, and command; avoiding only the
+router's first lookup would leave most forwarded metadata reads unchanged.
 
 Set a fixed maximum lifetime no longer than the observed node-session lease;
 do not add a public config option. Invalidate on peer refusal, stale session,

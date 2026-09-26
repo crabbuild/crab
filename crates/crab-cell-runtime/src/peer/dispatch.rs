@@ -73,10 +73,43 @@ impl PeerDispatcher {
         if let Err(error) = self.authorizer.authorize(request) {
             return error_reply(error);
         }
-        let handle = match self.resolver.resolve(request.target().clone()).await {
+        let resolved = self.resolver.resolve(request.target().clone()).await;
+        self.dispatch_authorized(request, now_ms, resolved).await
+    }
+
+    /// Dispatches with a receiver-resolved local handle after rechecking authorization.
+    ///
+    /// The handle must still match the exact target; actor admission fences a
+    /// handle whose owner changed after resolution.
+    pub async fn dispatch_resolved(
+        &self,
+        request: &VerifiedPeerRequest,
+        now_ms: i64,
+        resolved: Result<CellHandle>,
+    ) -> wire::PeerReply {
+        if let Err(error) = self.authorizer.authorize(request) {
+            return error_reply(error);
+        }
+        self.dispatch_authorized(request, now_ms, resolved).await
+    }
+
+    async fn dispatch_authorized(
+        &self,
+        request: &VerifiedPeerRequest,
+        now_ms: i64,
+        resolved: Result<CellHandle>,
+    ) -> wire::PeerReply {
+        let handle = match resolved {
             Ok(handle) => handle,
             Err(error) => return error_reply(error),
         };
+        let entry = handle.catalog().entry();
+        if handle.cell_id() != request.target().cell_id()
+            || entry.namespace() != request.target().namespace()
+            || entry.partition() != request.target().partition()
+        {
+            return error_reply(Error::CatalogCollision);
+        }
         let transport = LocalCellTransport {
             registry: Arc::clone(&self.registry),
             handles: Arc::new(HashMap::from([(handle.cell_id(), handle.clone())])),

@@ -3695,6 +3695,7 @@ mod tests {
             layout.clone(),
             ApplicationIdentity::new(tenant, application),
             first_runtime.clone(),
+            first_runtime.telemetry_handle(),
         );
         let peer_handle = peer_resolver.resolve(target.clone()).await.unwrap();
         assert_eq!(peer_handle.cell_id(), first_handle.cell_id());

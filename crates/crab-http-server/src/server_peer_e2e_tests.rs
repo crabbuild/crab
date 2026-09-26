@@ -10,6 +10,9 @@ use crab_cell_runtime::node::NodeDirectory;
 use crab_storage::{ObjectStoreCredentials, build_explicit_store};
 use object_store::{memory::InMemory, path::Path as ObjectPath};
 use serde_json::Value;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use crab_cell_runtime::fleet::telemetry::{CatalogReadKind, CellTelemetry, CellTelemetryHandle};
 
 use crate::{
     auth::Identity,
@@ -18,6 +21,37 @@ use crate::{
 };
 
 struct UnavailablePeer;
+
+#[derive(Default)]
+struct ReceiverReads {
+    heads: AtomicUsize,
+    pages: AtomicUsize,
+    controls: AtomicUsize,
+}
+
+impl ReceiverReads {
+    fn snapshot(&self) -> (usize, usize, usize) {
+        (
+            self.heads.load(Ordering::Relaxed),
+            self.pages.load(Ordering::Relaxed),
+            self.controls.load(Ordering::Relaxed),
+        )
+    }
+}
+
+impl CellTelemetry for ReceiverReads {
+    fn catalog_read(&self, kind: CatalogReadKind, _elapsed: Duration, _succeeded: bool) {
+        match kind {
+            CatalogReadKind::Head => &self.heads,
+            CatalogReadKind::Page => &self.pages,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn control_read(&self, _elapsed: Duration, _succeeded: bool) {
+        self.controls.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 async fn json_request(
     client: &reqwest::Client,
@@ -193,6 +227,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     let owner_session_dir = owner_publisher.session_dir();
 
     let owner_runtime = runtime(owner_session);
+    let receiver_reads = Arc::new(ReceiverReads::default());
     let owner_router = crate::cells::RepositoryCellRouter::new(
         identity,
         cell_layout.clone(),
@@ -258,7 +293,12 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
                 )
                 .unwrap(),
             ),
-            LocalCellResolver::new(cell_layout.clone(), identity, owner_runtime.clone()),
+            LocalCellResolver::new(
+                cell_layout.clone(),
+                identity,
+                owner_runtime.clone(),
+                CellTelemetryHandle::from_sink(receiver_reads.clone()),
+            ),
             Arc::new(UnavailablePeer),
         )),
     );
@@ -427,6 +467,25 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     assert_eq!(comment.0, StatusCode::CREATED);
     assert_eq!(comment.1["number"], 1);
     eprintln!("qualified issue comment mutation");
+    let reads_before = receiver_reads.snapshot();
+    let (comments_status, comments) = json_get(
+        &client,
+        format!("{public_origin}/api/repos/team/repo/issues/1/comments"),
+    )
+    .await;
+    assert_eq!(comments_status, StatusCode::OK);
+    assert_eq!(comments["items"][0]["body"], "Durable issue comment");
+    let reads_after = receiver_reads.snapshot();
+    // The typed client sends Describe and Query as separate peer operations.
+    // Each must resolve catalog and control once on the receiver.
+    assert_eq!(
+        (
+            reads_after.0 - reads_before.0,
+            reads_after.1 - reads_before.1,
+            reads_after.2 - reads_before.2,
+        ),
+        (2, 2, 2),
+    );
     let status = json_request(
         &client,
         reqwest::Method::POST,
