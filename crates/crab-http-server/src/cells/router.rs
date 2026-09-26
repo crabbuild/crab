@@ -1142,8 +1142,16 @@ impl RepositoryCellPeer {
         &self,
         target: CellTarget,
         node: crab_cell_runtime::node::NodeAdvertisement,
-        now_ms: i64,
     ) -> crate::Result<()> {
+        // A bounded fanout can queue longer than the discovery lease. Reload
+        // the exact session before dispatch; another boot cannot inherit it.
+        let observed = self
+            .directory
+            .load(node.session(), super::unix_now_ms()?)
+            .await?
+            .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+        let node = observed.advertisement().clone();
+        let now_ms = super::unix_now_ms()?;
         let principal = PeerPrincipal {
             issuer: format!(
                 "crab-runtime:{}",

@@ -546,6 +546,32 @@ Raw receipts remain under `$HOME/.codex/cell-issue-fleet/plan036-sparse-cost-1`:
   Interval `2026-09-26T15:26:49.114114+00:00` through
   `2026-09-26T15:33:21.056970+00:00`.
 
+## Reconciliation failure isolation follow-up — 2026-09-26
+
+The owner reconciler now continues after a Cell's policy/provider error and
+advances its cursor before awaiting that Cell. A thirty-second batch deadline
+and cancellation branch prevent provider or peer stalls from holding node
+shutdown or the same cursor indefinitely. Reader hints use sixteen concurrent
+attempts with a thirty-second fanout deadline. Each dispatched attempt reloads
+the exact signed boot session and uses a fresh authorization timestamp.
+
+The corrupt-policy, stalled-peer, and stale-advertisement regressions all failed
+against the preceding implementation and passed with the fix. A fourth test
+proves that an interrupted batch resumes at the next Cell. All ten router tests
+passed, including existing rebalance, restore, and takeover paths. The ignored
+`rustfs_public_collaboration_reaches_remote_owner_and_publishes_ltx` test passed
+against the existing local RustFS with an isolated prefix: public HTTP, private
+mTLS, explicit replica reads, target-count changes, and restored values after
+takeover. These changes affect reconciliation, not the measured query path;
+the performance figures above remain tied to their recorded images.
+
+At the preceding PR head, both `Multi-crate guardrails` and `Signed receipt and
+canonical contract checks` fail the same architecture policy: the existing
+`crab-cell-app` dev dependency on `crab-cell-host` is absent from its dependency
+inventory. Both the manifest and `check-architecture-gates.py` are unchanged
+from `origin/main`. This follow-up does not change the policy inventory to
+suppress that failure. Review readiness does not imply green merge gates.
+
 ## Scope still open
 
 The container runs do not establish complete per-query S3 costs, production

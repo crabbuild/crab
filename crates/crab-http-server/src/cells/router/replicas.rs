@@ -5,6 +5,11 @@ use futures_util::{StreamExt, stream};
 
 const READ_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 const READ_RECONCILE_BATCH: usize = 64;
+const READ_RECONCILE_DEADLINE: Duration = Duration::from_secs(30);
+const READ_ACTIVATION_CONCURRENCY: usize = 16;
+
+#[cfg(test)]
+mod tests;
 
 #[derive(serde::Serialize)]
 pub(crate) struct ReadReplicaStatus {
@@ -176,8 +181,16 @@ impl RepositoryCellRouter {
             tokio::select! {
                 () = cancellation.cancelled() => return Ok(()),
                 _ = tick.tick() => {
-                    if let Err(error) = self.reconcile_readers_once(&mut cursor).await {
-                        tracing::warn!(error = %error, "Cell read replica reconciliation failed");
+                    tokio::select! {
+                        () = cancellation.cancelled() => return Ok(()),
+                        result = tokio::time::timeout(
+                            READ_RECONCILE_DEADLINE,
+                            self.reconcile_readers_once(&mut cursor),
+                        ) => match result {
+                            Ok(Ok(())) => {},
+                            Ok(Err(error)) => tracing::warn!(error = %error, "Cell read replica reconciliation failed"),
+                            Err(_) => tracing::warn!("Cell read replica reconciliation deadline exceeded"),
+                        }
                     }
                 }
             }
@@ -193,17 +206,26 @@ impl RepositoryCellRouter {
             return Ok(());
         }
         let count = entries.len().min(READ_RECONCILE_BATCH);
-        for offset in 0..count {
-            let entry = &entries[(*cursor + offset) % entries.len()];
-            let target = CellTarget::new(
-                self.identity.tenant(),
-                self.identity.application(),
-                entry.namespace(),
-                entry.partition(),
-            )?;
-            self.reconcile_reader_target(target).await?;
+        for _ in 0..count {
+            let index = *cursor % entries.len();
+            let entry = &entries[index];
+            // Advance before I/O so a failing or timed-out Cell cannot hold
+            // later Cells behind the same batch cursor indefinitely.
+            *cursor = (index + 1) % entries.len();
+            let result = async {
+                let target = CellTarget::new(
+                    self.identity.tenant(),
+                    self.identity.application(),
+                    entry.namespace(),
+                    entry.partition(),
+                )?;
+                self.reconcile_reader_target(target).await
+            }
+            .await;
+            if let Err(error) = result {
+                tracing::warn!(cell = ?entry.cell(), error = %error, "Cell read replica reconciliation failed");
+            }
         }
-        *cursor = (*cursor + count) % entries.len();
         Ok(())
     }
 
@@ -249,15 +271,22 @@ impl RepositoryCellRouter {
                 10_000,
             )
             .await?;
-        for node in selected {
-            if let Err(error) = self
-                .peer
-                .activate_read_replica(target.clone(), node, now_ms)
-                .await
-            {
-                tracing::warn!(?cell, error = %error, "Cell read replica activation hint failed");
+        // Unresponsive peers must not serialize activation of healthy readers.
+        // Bound both fanout and total work, including provider reads and hints.
+        let activate = async {
+            let attempts = stream::iter(selected)
+                .map(|node| self.peer.activate_read_replica(target.clone(), node))
+                .buffer_unordered(READ_ACTIVATION_CONCURRENCY);
+            tokio::pin!(attempts);
+            while let Some(result) = attempts.next().await {
+                if let Err(error) = result {
+                    tracing::warn!(?cell, error = %error, "Cell read replica activation hint failed");
+                }
             }
-        }
+        };
+        tokio::time::timeout(READ_RECONCILE_DEADLINE, activate)
+            .await
+            .map_err(|_| crab_cell_runtime::Error::Deadline)?;
         Ok(())
     }
 

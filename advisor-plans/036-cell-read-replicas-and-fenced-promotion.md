@@ -86,7 +86,8 @@ remain unqualified. Issue-detail replica reads are explicit; other public
 product reads use the owner.
 The local Compose fault receipt proves recovery after all three Cell disks are
 lost in this object-mode fixture. It does not establish production durability
-or throughput scaling; measured replica throughput is below owner throughput.
+or production throughput scaling. The later fixed-ingress five-node measurement
+below qualifies replica throughput only for that local workload and image.
 
 Today the durability-log ensemble has one follower in a two-node fleet and
 two in a fleet of three or more. A failed member stops fleet proof for the
@@ -463,6 +464,17 @@ The linked receipt records the corrected baseline, exact images, per-ingress
 results, and raw-report hashes.
 
 ## Fault matrix and release gates
+
+Reconciliation isolates per-Cell policy/provider errors and advances its cursor
+before I/O. Each owner batch has a thirty-second deadline and responds to node
+cancellation; interrupted batches resume at the next Cell. Activation hints use
+at most sixteen concurrent attempts with a thirty-second fanout deadline.
+Each attempt reloads its exact signed boot-session advertisement and signs a
+fresh request at dispatch. The new router regressions cover corrupt policy
+isolation, interrupted-batch progress, a stalled peer beside a healthy reader,
+and expired discovery with a current advertisement. Ten focused router tests
+and the public HTTP/mTLS RustFS recovery test pass. See the qualification receipt
+for scope; these checks do not replace scale, provider, or rollout gates.
 
 The deterministic runtime/coordination suite must cover: target count changes
 during membership churn; two replicas race to refresh; root CAS response lost;
