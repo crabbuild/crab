@@ -9,13 +9,47 @@ use crate::{
     ReadCoordinatorParticipantInput, TransactionPayloadRef, UploadTransactionPayload,
 };
 
+// Preserve proven capacity refusal until the transaction driver can decide
+// ABORT. Pending outcomes stay retryable; they are never classified by source
+// text or by an error nested inside an unknown mutation result.
+pub(super) enum PhaseError {
+    Capacity(crab_cell_runtime::Error),
+    Other(StorageError),
+}
+
+impl<T> From<InvocationError<T>> for PhaseError {
+    fn from(error: InvocationError<T>) -> Self {
+        match error {
+            InvocationError::NotStarted(error @ crab_cell_runtime::Error::Capacity(_)) => {
+                Self::Capacity(error)
+            }
+            error => Self::Other(cell_error(error)),
+        }
+    }
+}
+
+impl From<StorageError> for PhaseError {
+    fn from(error: StorageError) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl From<PhaseError> for StorageError {
+    fn from(error: PhaseError) -> Self {
+        match error {
+            PhaseError::Capacity(error) => cell_error::<()>(InvocationError::NotStarted(error)),
+            PhaseError::Other(error) => error,
+        }
+    }
+}
+
 impl CellStorage {
     pub(super) async fn upload_transaction<C: MultipartTransactionCommand>(
         &self,
         target: &CellTarget,
         identity: MutationIdentity,
         input: &C::Payload,
-    ) -> Result<TransactionPayloadRef, StorageError> {
+    ) -> Result<TransactionPayloadRef, PhaseError> {
         let bytes =
             serde_json::to_vec(input).map_err(|error| StorageError::Internal(error.to_string()))?;
         let reference = TransactionPayloadRef::new(&bytes, identity.expires_at_ms)
@@ -30,10 +64,9 @@ impl CellStorage {
             if matches!(result, Err(InvocationError::Pending(_))) {
                 self.client
                     .command::<UploadTransactionPayload<C>>(target, mutation_identity()?, chunk)
-                    .await
-                    .map_err(cell_error)?;
+                    .await?;
             } else {
-                result.map_err(cell_error)?;
+                result?;
             }
         }
         Ok(reference)

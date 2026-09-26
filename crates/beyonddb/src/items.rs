@@ -373,6 +373,8 @@ pub enum TransactionOutcome {
 /// Why a transaction operation was rejected.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TransactionFailure {
+    /// Capacity admission refused the operation before it committed.
+    Throttled,
     /// Another transaction or ownership transition conflicts with this operation.
     Conflict,
     /// Invalid input or stale table metadata.

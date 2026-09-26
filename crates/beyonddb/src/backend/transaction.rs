@@ -4,6 +4,7 @@ use crab_cell_runtime::client::{InvocationError, Receipt};
 use crab_cell_runtime::identity::CellTarget;
 use extenddb_storage::error::StorageError;
 
+use super::transaction_transport::PhaseError;
 use super::{CellStorage, cell_error, mutation_identity};
 use crate::{
     CoordinatorDecision, CoordinatorParticipantTarget, CoordinatorPhaseInput,
@@ -93,7 +94,29 @@ impl CellStorage {
                 ),
             };
             let target = target.map_err(|error| StorageError::Internal(error.to_string()))?;
-            let (outcome, receipt) = self.prepare_transaction_participant(&target, input).await?;
+            let (outcome, receipt) =
+                match self.prepare_transaction_participant(&target, input).await {
+                    Ok(prepared) => prepared,
+                    Err(PhaseError::Capacity(_)) => {
+                        let operation = payload.operations.first().ok_or_else(|| {
+                            StorageError::Internal("participant has no operations".into())
+                        })?;
+                        // The refusal proves no mutation from this attempt committed.
+                        // Competing drivers may still win COMMIT; the coordinator CAS
+                        // decides, and all resolutions finish before cancellation returns.
+                        return self
+                            .decide_transaction(
+                                &coordinator,
+                                &read,
+                                CoordinatorDecision::Abort {
+                                    index: Some(operation.index),
+                                    reason: Some(TransactionFailure::Throttled),
+                                },
+                            )
+                            .await;
+                    }
+                    Err(error) => return Err(error.into()),
+                };
             let rejection = match outcome {
                 PrepareTransactionOutcome::Prepared | PrepareTransactionOutcome::Replay => None,
                 PrepareTransactionOutcome::Rejected { index, reason } => Some((index, reason)),
@@ -240,7 +263,7 @@ impl CellStorage {
         &self,
         target: &CellTarget,
         input: ParticipantPrepare,
-    ) -> Result<(PrepareTransactionOutcome, Receipt), StorageError> {
+    ) -> Result<(PrepareTransactionOutcome, Receipt), PhaseError> {
         let read = match &input {
             ParticipantPrepare::Account(input) => ReadTransactionInput {
                 transaction_id: input.transaction_id,
@@ -300,12 +323,13 @@ impl CellStorage {
                     ParticipantTransactionState::Missing => {
                         return Err(StorageError::Transient(
                             "participant prepare outcome remains pending".into(),
-                        ));
+                        )
+                        .into());
                     }
                 };
                 Ok((outcome, observed.receipt))
             }
-            Err(error) => Err(cell_error(error)),
+            Err(error) => Err(error.into()),
         }
     }
 }
