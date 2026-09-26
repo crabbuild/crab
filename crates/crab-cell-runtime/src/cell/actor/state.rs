@@ -254,6 +254,7 @@ pub(super) struct ActiveCell {
     pub(super) last_used_ms: i64,
     pub(super) last_work_at: std::time::Instant,
     pub(super) compaction_retry_at: std::time::Instant,
+    pub(super) hydration_retry_at: std::time::Instant,
     // The published head's due time and commit sequence, mirrored from the
     // authoritative control so a resident Cell can be ticked without a
     // metadata read. Both advance through the same publication that writes
@@ -348,7 +349,7 @@ pub(super) enum TaskResult {
         cell: CellId,
         generation: u64,
         effect_id: u64,
-        result: crate::Result<Option<crab_ltx::Hydration>>,
+        result: crate::Result<HydrationStep>,
     },
     InventoryRefreshed {
         cell: CellId,

@@ -229,15 +229,29 @@ fn run_worker_command(
             drop(reservation.take());
             let _ = reply.send(result);
         }
-        WorkerCommand::Hydrate {
+        WorkerCommand::PrepareHydration {
             cell,
             pages,
             deadline,
             reply,
         } => {
             let result = run_native_callback(cells, cell, deadline, move |active| {
-                active.executor.hydrate_step(pages)
+                active.executor.prepare_hydration(pages)
             });
+            drop(reservation.take());
+            let _ = reply.send(result);
+        }
+        WorkerCommand::InstallHydration {
+            cell,
+            batch,
+            retained,
+            deadline,
+            reply,
+        } => {
+            let result = run_native_callback(cells, cell, deadline, move |active| {
+                active.executor.install_hydration(batch)
+            });
+            drop(retained);
             drop(reservation.take());
             let _ = reply.send(result);
         }

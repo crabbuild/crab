@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-type Pages = Vec<(u32, Vec<u8>)>;
+pub(crate) type Pages = Vec<(u32, Vec<u8>)>;
 pub(crate) type DriverSlot = Arc<Mutex<Weak<Driver>>>;
 const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
 
@@ -252,6 +252,42 @@ pub(crate) struct Io {
 }
 
 impl Io {
+    pub(crate) async fn hydration_pages(&self, first: u32, count: u32) -> Result<Pages> {
+        self.database
+            .host()
+            .observe_ltx_logical_read(crate::LtxReadOrigin::Hydrating);
+        let missing = {
+            let cache = self
+                .driver
+                .cache
+                .lock()
+                .map_err(|_| CrabError::InvalidState("paged cache poisoned"))?;
+            let mut cached = Vec::new();
+            for offset in 0..count {
+                let page = first.checked_add(offset).ok_or(CrabError::LTXCorrupted)?;
+                let Some(bytes) = cache.pages.get(&(self.view, page)) else {
+                    break;
+                };
+                cached.push((page, bytes.clone()));
+            }
+            if !cached.is_empty() {
+                return Ok(cached);
+            }
+            // A SQL fault may have prefetched a later part of this batch.
+            // Stop the missing prefix before it instead of downloading it twice.
+            (1..count)
+                .find(|offset| {
+                    first
+                        .checked_add(*offset)
+                        .is_some_and(|page| cache.pages.contains_key(&(self.view, page)))
+                })
+                .unwrap_or(count)
+        };
+        self.database
+            .read_run(first, missing, crate::LtxReadOrigin::Hydrating)
+            .await
+    }
+
     pub(crate) fn new(database: Database) -> Result<Self> {
         let host = database.host();
         let mut slot = host

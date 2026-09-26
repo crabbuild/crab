@@ -365,3 +365,223 @@ async fn sparse_hydration_coalesces_contiguous_cell_frames() {
     assert!(hydrated >= 256);
     assert!(reads < u64::from(hydrated));
 }
+
+async fn hydration_writer(store: Store) -> (tempfile::TempDir, Db, CellReplica, RootRef) {
+    let directory = tempfile::TempDir::new().unwrap();
+    let source_path = directory.path().join("source.sqlite");
+    let initial = crab_ltx::rusqlite::Connection::open(&source_path).unwrap();
+    initial
+        .execute_batch("PRAGMA auto_vacuum=FULL; VACUUM;")
+        .unwrap();
+    drop(initial);
+    let mut source = Db::open(&source_path, Limits::default()).unwrap();
+    source.transaction(|tx| tx.execute_batch(
+        "CREATE TABLE payload(value BLOB NOT NULL); INSERT INTO payload VALUES(randomblob(2000000))",
+    )).unwrap();
+    let replica = replica(store, [91; 32], [92; 16]);
+    let root = replica
+        .prepare(None, &source.capture().unwrap(), 1, 1)
+        .await
+        .unwrap()
+        .root();
+    source.close().unwrap();
+    let destination = directory.path().join("active.sqlite");
+    let writable = replica
+        .open_root(&root)
+        .await
+        .unwrap()
+        .paged()
+        .prepare_writable(&destination)
+        .await
+        .unwrap();
+    let writer = tokio::task::spawn_blocking(move || writable.open_writable(&destination))
+        .await
+        .unwrap()
+        .unwrap();
+    (directory, writer, replica, root)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn asynchronous_hydration_reuses_pages_prefetched_by_sqlite() {
+    let ranges = Arc::new(AtomicU64::new(0));
+    let observed = ranges.clone();
+    let store =
+        Store::new(Arc::new(InMemory::new())).with_read_request_observer(Arc::new(move |kind| {
+            if kind == StorageReadKind::Range {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+    let (_directory, mut writer, _, _) = hydration_writer(store).await;
+    let before = writer.hydration().unwrap().unwrap();
+    let opening_reads = ranges.swap(0, Ordering::SeqCst);
+    assert!(
+        opening_reads > 0,
+        "SQLite opening must have prefetched inherited pages"
+    );
+    let batch = writer
+        .prepare_hydration(8)
+        .unwrap()
+        .unwrap()
+        .fetch()
+        .await
+        .unwrap();
+    let after = writer.install_hydration(batch).unwrap();
+    writer.close().unwrap();
+    assert_eq!(after.resolved - before.resolved, 8);
+    assert_eq!(
+        ranges.load(Ordering::SeqCst),
+        0,
+        "hydration fetched pages already in the demand cache"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn asynchronous_hydration_does_not_advance_until_installation() {
+    let (_directory, mut writer, _, _) =
+        hydration_writer(Store::new(Arc::new(InMemory::new()))).await;
+    let before = writer.hydration().unwrap().unwrap();
+    let read = writer.prepare_hydration(64).unwrap().unwrap();
+    assert!(read.retained_bytes() <= 64 * 65_536);
+    drop(read.fetch().await.unwrap());
+    assert_eq!(writer.hydration().unwrap().unwrap(), before);
+    let batch = writer
+        .prepare_hydration(64)
+        .unwrap()
+        .unwrap()
+        .fetch()
+        .await
+        .unwrap();
+    let after = writer.install_hydration(batch).unwrap();
+    assert_eq!(after.resolved - before.resolved, 64);
+    while !writer.hydration().unwrap().unwrap().complete() {
+        let batch = writer
+            .prepare_hydration(64)
+            .unwrap()
+            .unwrap()
+            .fetch()
+            .await
+            .unwrap();
+        writer.install_hydration(batch).unwrap();
+    }
+    writer
+        .query_with(|connection| -> crab_ltx::rusqlite::Result<()> {
+            let integrity: String =
+                connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+            assert_eq!(integrity, "ok");
+            Ok(())
+        })
+        .unwrap();
+    writer.close().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn asynchronous_hydration_preserves_pages_superseded_by_checkpoint() {
+    let (directory, mut writer, replica, root) =
+        hydration_writer(Store::new(Arc::new(InMemory::new()))).await;
+    let batch = writer
+        .prepare_hydration(64)
+        .unwrap()
+        .unwrap()
+        .fetch()
+        .await
+        .unwrap();
+    writer
+        .transaction(|tx| tx.execute_batch("UPDATE payload SET value = zeroblob(2000000)"))
+        .unwrap();
+    let cut = writer
+        .checkpoint(crab_ltx::CheckpointMode::Truncate)
+        .unwrap();
+    writer.install_hydration(batch).unwrap();
+    let next = replica
+        .prepare(Some(&root), &cut, 2, 1)
+        .await
+        .unwrap()
+        .root();
+    writer
+        .query_with(|connection| -> crab_ltx::rusqlite::Result<()> {
+            let value: Vec<u8> =
+                connection.query_row("SELECT value FROM payload", [], |row| row.get(0))?;
+            assert_eq!(value, vec![0; 2_000_000]);
+            Ok(())
+        })
+        .unwrap();
+    writer.close().unwrap();
+    let restored = directory.path().join("restored.sqlite");
+    replica
+        .open_root(&next)
+        .await
+        .unwrap()
+        .restore(&restored)
+        .await
+        .unwrap();
+    let connection = crab_ltx::rusqlite::Connection::open(restored).unwrap();
+    let value: Vec<u8> = connection
+        .query_row("SELECT value FROM payload", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(value, vec![0; 2_000_000]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn asynchronous_hydration_rejects_a_different_activation() {
+    let (_directory, writer, _, _) = hydration_writer(Store::new(Arc::new(InMemory::new()))).await;
+    let (_other_directory, mut other, _, _) =
+        hydration_writer(Store::new(Arc::new(InMemory::new()))).await;
+    let batch = writer
+        .prepare_hydration(64)
+        .unwrap()
+        .unwrap()
+        .fetch()
+        .await
+        .unwrap();
+    let before = std::fs::read(other.path()).unwrap();
+    assert!(matches!(
+        other.install_hydration(batch),
+        Err(crab_ltx::CrabError::InvalidState(_))
+    ));
+    assert_eq!(std::fs::read(other.path()).unwrap(), before);
+    writer.close().unwrap();
+    other.close().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn asynchronous_hydration_never_resurrects_truncated_pages_after_regrowth() {
+    let (_directory, mut writer, replica, root) =
+        hydration_writer(Store::new(Arc::new(InMemory::new()))).await;
+    let batch = writer
+        .prepare_hydration(64)
+        .unwrap()
+        .unwrap()
+        .fetch()
+        .await
+        .unwrap();
+    let original_bytes = std::fs::metadata(writer.path()).unwrap().len();
+    writer
+        .transaction(|tx| tx.execute_batch("DELETE FROM payload"))
+        .unwrap();
+    let cut = writer
+        .checkpoint(crab_ltx::CheckpointMode::Truncate)
+        .unwrap();
+    assert!(std::fs::metadata(writer.path()).unwrap().len() < original_bytes);
+    let smaller = replica
+        .prepare(Some(&root), &cut, 2, 1)
+        .await
+        .unwrap()
+        .root();
+    writer
+        .transaction(|tx| tx.execute_batch("INSERT INTO payload VALUES(zeroblob(2000000))"))
+        .unwrap();
+    let cut = writer
+        .checkpoint(crab_ltx::CheckpointMode::Truncate)
+        .unwrap();
+    writer.install_hydration(batch).unwrap();
+    replica.prepare(Some(&smaller), &cut, 3, 1).await.unwrap();
+    writer
+        .query_with(|connection| -> crab_ltx::rusqlite::Result<()> {
+            let value: Vec<u8> =
+                connection.query_row("SELECT value FROM payload", [], |row| row.get(0))?;
+            assert_eq!(value, vec![0; 2_000_000]);
+            Ok(())
+        })
+        .unwrap();
+    writer.close().unwrap();
+}

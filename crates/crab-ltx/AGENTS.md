@@ -36,6 +36,7 @@ concern each. Module files sit beside their root (`foo.rs` + `foo/`).
 - Environment: `environment.rs` +
   `environment/{directory_cache,executor,host,resources,telemetry,tests}.rs`.
 - Storage and IO: `pages.rs`, `paged.rs`, `paged_io.rs`, `writable_vfs.rs`,
+  `writable_vfs/hydration.rs` (asynchronous fetch and owner-thread installation),
   `wal.rs`, `bundle.rs`, `codec.rs`, `lz4_block.rs`, `node_frame.rs`,
   `cell_layout.rs`.
 - Top level: `host.rs`, `types.rs`, `error.rs`, `commit.rs`, `format_tests.rs`.

@@ -117,6 +117,7 @@ async fn sparse_fault_pool_progresses_under_saturated_sql_workers() {
     backend.config_mut(|config| config.wait_get_per_call = Duration::from_millis(100));
 
     let pool = SqlWorkerPool::new(2, 2).unwrap();
+    pool.configure_retained_capacity(1 << 20).unwrap();
     let first_reservation = pool.reserve_activation().unwrap();
     let second_reservation = pool.reserve_activation().unwrap();
     let activation = tokio::time::timeout(Duration::from_secs(5), async {
@@ -148,19 +149,24 @@ async fn sparse_fault_pool_progresses_under_saturated_sql_workers() {
     assert!(read_bytes.load(Ordering::Relaxed) > 0);
 
     let initial = pool.hydration(first.cell).await.unwrap().unwrap();
-    let progressed = pool
+    let HydrationStep::Progress(Some(progressed)) = pool
         .hydrate(first.cell, 64, Instant::now() + Duration::from_secs(5))
         .await
         .unwrap()
-        .unwrap();
+    else {
+        panic!("hydration unexpectedly deferred")
+    };
     assert!(progressed.resolved >= initial.resolved);
     let mut progress = progressed;
     while !progress.complete() {
-        progress = pool
+        let HydrationStep::Progress(Some(next)) = pool
             .hydrate(first.cell, 64, Instant::now() + Duration::from_secs(5))
             .await
             .unwrap()
-            .unwrap();
+        else {
+            panic!("hydration unexpectedly deferred")
+        };
+        progress = next;
     }
     read_bytes.store(0, Ordering::Relaxed);
     let length = pool
@@ -186,7 +192,7 @@ async fn sparse_fault_pool_progresses_under_saturated_sql_workers() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_slow_sparse_shard_leaves_the_other_workers_query_admission_available() {
+async fn background_hydration_leaves_both_workers_query_admission_available() {
     let backend = Arc::new(ThrottledStore::new(
         InMemory::new(),
         ThrottleConfig::default(),
@@ -204,6 +210,7 @@ async fn a_slow_sparse_shard_leaves_the_other_workers_query_admission_available(
     let resident = sparse_activation(1, Store::new(Arc::new(InMemory::new())), 262_144).await;
     let queued = sparse_activation(2, Store::new(Arc::new(InMemory::new())), 262_144).await;
     let pool = SqlWorkerPool::new(2, 3).unwrap();
+    pool.configure_retained_capacity(1 << 20).unwrap();
     let cells = [cold.cell, resident.cell, queued.cell];
     for activation in [&cold, &resident, &queued] {
         pool.activate_restored(
@@ -218,59 +225,292 @@ async fn a_slow_sparse_shard_leaves_the_other_workers_query_admission_available(
         .await
         .unwrap();
     }
-    while !pool
-        .hydration(resident.cell)
-        .await
-        .unwrap()
-        .unwrap()
-        .complete()
-    {
-        pool.hydrate(resident.cell, 64, Instant::now() + Duration::from_secs(5))
-            .await
-            .unwrap();
+    for cell in [resident.cell, queued.cell] {
+        while !pool.hydration(cell).await.unwrap().unwrap().complete() {
+            pool.hydrate(cell, 64, Instant::now() + Duration::from_secs(5))
+                .await
+                .unwrap();
+        }
     }
 
     backend.config_mut(|config| config.wait_get_per_call = Duration::from_secs(3));
     armed.store(true, Ordering::Release);
-    let mut hydration =
-        Box::pin(pool.hydrate(cold.cell, 64, Instant::now() + Duration::from_secs(10)));
-    assert!(futures_util::poll!(&mut hydration).is_pending());
+    let hydration = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            pool.hydrate(cold.cell, 64, Instant::now() + Duration::from_secs(10))
+                .await
+        })
+    };
     tokio::time::timeout(Duration::from_secs(2), started.notified())
         .await
         .expect("hydration must reach a delayed origin read");
-    let mut waiting = Box::pin(pool.query(
-        queued.cell,
-        8,
-        Instant::now() + Duration::from_secs(10),
-        Box::new(|_| Ok(Vec::new())),
-    ));
-    assert!(futures_util::poll!(&mut waiting).is_pending());
-    let independent = tokio::time::timeout(
-        Duration::from_secs(1),
-        pool.query(
-            resident.cell,
-            8,
-            Instant::now() + Duration::from_secs(10),
-            Box::new(|connection| {
-                let length: i64 =
-                    connection
-                        .query_row("SELECT length(value) FROM payload", [], |row| row.get(0))?;
-                Ok(length.to_le_bytes().to_vec())
-            }),
-        ),
-    )
-    .await;
-    drop(waiting);
+    let query = |cell| {
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            pool.query(
+                cell,
+                8,
+                Instant::now() + Duration::from_secs(10),
+                Box::new(|connection| {
+                    let length: i64 =
+                        connection
+                            .query_row("SELECT length(value) FROM payload", [], |row| row.get(0))?;
+                    Ok(length.to_le_bytes().to_vec())
+                }),
+            ),
+        )
+    };
+    let (same_worker, other_worker) = tokio::join!(query(queued.cell), query(resident.cell));
     backend.config_mut(|config| config.wait_get_per_call = Duration::ZERO);
-    hydration.await.unwrap();
+    hydration.await.unwrap().unwrap();
     for cell in cells {
         pool.deactivate(cell).await.unwrap();
     }
     pool.shutdown().await.unwrap();
+    for result in [same_worker, other_worker] {
+        assert_eq!(
+            result
+                .expect("background hydration blocked a resident query")
+                .unwrap(),
+            262_144_i64.to_le_bytes()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires isolated RustFS credentials; reports injected-delay worker interference"]
+async fn rustfs_hydration_reports_same_and_other_worker_latency() {
+    let required = |name| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
+    let endpoint = required("CRAB_LTX_TEST_ENDPOINT");
+    let store = crab_storage::build_explicit_store(
+        &required("CRAB_LTX_TEST_BUCKET"),
+        crab_storage::ObjectStoreCredentials::Aws {
+            access_key_id: required("AWS_ACCESS_KEY_ID"),
+            secret_access_key: required("AWS_SECRET_ACCESS_KEY"),
+            session_token: None,
+            region: "us-east-1".into(),
+        },
+        Some(&endpoint),
+        endpoint.starts_with("http://"),
+    )
+    .unwrap();
+    let run = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let prefix = format!("crab-runtime-tests/worker-interference/{run}");
+    let backend = Arc::new(ThrottledStore::new(
+        object_store::prefix::PrefixStore::new(store.inner().clone(), Path::from(prefix.clone())),
+        ThrottleConfig::default(),
+    ));
+    let armed = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let notify = started.clone();
+    let watching = armed.clone();
+    let requests = Arc::new(AtomicU64::new(0));
+    let observed = requests.clone();
+    let store = Store::new(backend.clone()).with_read_request_observer(Arc::new(move |_| {
+        observed.fetch_add(1, Ordering::Relaxed);
+        if watching.load(Ordering::Acquire) {
+            notify.notify_one();
+        }
+    }));
+    let cold = sparse_activation(0, store.clone(), 4 << 20).await;
+    let same = sparse_activation(2, store.clone(), 262_144).await;
+    let other = sparse_activation(1, store, 262_144).await;
+    let pool = SqlWorkerPool::new(2, 3).unwrap();
+    pool.configure_retained_capacity(1 << 20).unwrap();
+    assert_eq!(worker_index(cold.cell, 2), worker_index(same.cell, 2));
+    assert_ne!(worker_index(cold.cell, 2), worker_index(other.cell, 2));
+    for activation in [&cold, &same, &other] {
+        pool.activate_restored(
+            activation.cell,
+            RestoredDatabase::Paged(Box::new(activation.database.clone())),
+            activation.destination.clone(),
+            activation.incarnation,
+            1,
+            activation.root,
+            pool.reserve_activation().unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+    for cell in [same.cell, other.cell] {
+        while !pool.hydration(cell).await.unwrap().unwrap().complete() {
+            pool.hydrate(cell, 64, Instant::now() + Duration::from_secs(10))
+                .await
+                .unwrap();
+        }
+    }
+    let query = |cell| {
+        let pool = pool.clone();
+        async move {
+            let started = Instant::now();
+            let output = pool
+                .query(
+                    cell,
+                    8,
+                    started + Duration::from_secs(10),
+                    Box::new(|connection| {
+                        let length: i64 = connection.query_row(
+                            "SELECT length(value) FROM payload",
+                            [],
+                            |row| row.get(0),
+                        )?;
+                        Ok(length.to_le_bytes().to_vec())
+                    }),
+                )
+                .await
+                .unwrap();
+            assert_eq!(output, 262_144_i64.to_le_bytes());
+            started.elapsed()
+        }
+    };
+    let before = requests.load(Ordering::Relaxed);
+    let (same_baseline, other_baseline) = tokio::join!(query(same.cell), query(other.cell));
     assert_eq!(
-        independent
-            .expect("idle worker was starved by another shard")
-            .unwrap(),
-        262_144_i64.to_le_bytes(),
+        requests.load(Ordering::Relaxed),
+        before,
+        "resident queries must use no origin reads"
     );
+
+    backend.config_mut(|config| config.wait_get_per_call = Duration::from_millis(500));
+    armed.store(true, Ordering::Release);
+    let hydration_started = Instant::now();
+    let hydration = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            pool.hydrate(cold.cell, 64, hydration_started + Duration::from_secs(10))
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("hydration must reach the real RustFS path");
+    let (hydrated, same_wait, other_wait) =
+        tokio::join!(hydration, query(same.cell), query(other.cell));
+    let hydration_and_queries = hydration_started.elapsed();
+    assert!(matches!(
+        hydrated.unwrap().unwrap(),
+        HydrationStep::Progress(Some(_))
+    ));
+    armed.store(false, Ordering::Release);
+    backend.config_mut(|config| config.wait_get_per_call = Duration::ZERO);
+    for cell in [cold.cell, same.cell, other.cell] {
+        pool.deactivate(cell).await.unwrap();
+    }
+    pool.shutdown().await.unwrap();
+    eprintln!(
+        "worker-interference {}",
+        serde_json::json!({
+            "prefix": prefix,
+            "injected_get_delay_ms": 500,
+            "same_worker_baseline_us": same_baseline.as_micros(),
+            "other_worker_baseline_us": other_baseline.as_micros(),
+            "same_worker_during_hydration_us": same_wait.as_micros(),
+            "other_worker_during_hydration_us": other_wait.as_micros(),
+            "hydration_and_queries_us": hydration_and_queries.as_micros(),
+            "origin_requests_during_hydration": requests.load(Ordering::Relaxed) - before,
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_hydration_releases_fetch_bytes_without_installing_pages() {
+    let backend = Arc::new(ThrottledStore::new(
+        InMemory::new(),
+        ThrottleConfig::default(),
+    ));
+    let armed = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let watching = armed.clone();
+    let notify = started.clone();
+    let store = Store::new(backend.clone()).with_read_request_observer(Arc::new(move |_| {
+        if watching.load(Ordering::Acquire) {
+            notify.notify_one();
+        }
+    }));
+    let cold = sparse_activation(4, store, 4 << 20).await;
+    let pool = SqlWorkerPool::new(1, 1).unwrap();
+    pool.configure_retained_capacity(1 << 20).unwrap();
+    pool.activate_restored(
+        cold.cell,
+        RestoredDatabase::Paged(Box::new(cold.database)),
+        cold.destination,
+        cold.incarnation,
+        1,
+        cold.root,
+        pool.reserve_activation().unwrap(),
+    )
+    .await
+    .unwrap();
+    let before = pool.hydration(cold.cell).await.unwrap();
+    backend.config_mut(|config| config.wait_get_per_call = Duration::from_secs(3));
+    armed.store(true, Ordering::Release);
+    let hydration = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            pool.hydrate(cold.cell, 64, Instant::now() + Duration::from_secs(10))
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .unwrap();
+    let used = pool.resource_ledger().snapshot().unwrap().used;
+    assert!(used.retained_bytes() > 0);
+    assert_eq!(
+        used.worker_jobs(),
+        0,
+        "fetch must release SQL worker admission"
+    );
+    hydration.abort();
+    assert!(hydration.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        pool.resource_ledger()
+            .snapshot()
+            .unwrap()
+            .used
+            .retained_bytes(),
+        0
+    );
+    assert_eq!(pool.hydration(cold.cell).await.unwrap(), before);
+    let deadline = pool
+        .hydrate(cold.cell, 64, Instant::now() + Duration::from_millis(20))
+        .await
+        .unwrap();
+    assert!(matches!(deadline, HydrationStep::Deferred(_)));
+    assert_eq!(pool.hydration(cold.cell).await.unwrap(), before);
+    assert_eq!(
+        pool.resource_ledger()
+            .snapshot()
+            .unwrap()
+            .used
+            .retained_bytes(),
+        0
+    );
+    let foreground_bytes = pool
+        .resource_ledger()
+        .try_reserve(ResourceCost::zero().with_retained_bytes(1 << 20))
+        .unwrap();
+    let pressure = pool
+        .hydrate(cold.cell, 64, Instant::now() + Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert!(matches!(pressure, HydrationStep::Deferred(_)));
+    assert_eq!(pool.hydration(cold.cell).await.unwrap(), before);
+    drop(foreground_bytes);
+    armed.store(false, Ordering::Release);
+    backend.config_mut(|config| config.wait_get_per_call = Duration::ZERO);
+    let HydrationStep::Progress(Some(after)) = pool
+        .hydrate(cold.cell, 64, Instant::now() + Duration::from_secs(10))
+        .await
+        .unwrap()
+    else {
+        panic!("hydration unexpectedly deferred")
+    };
+    assert!(after.resolved > before.unwrap().resolved);
+    pool.deactivate(cold.cell).await.unwrap();
+    pool.shutdown().await.unwrap();
 }

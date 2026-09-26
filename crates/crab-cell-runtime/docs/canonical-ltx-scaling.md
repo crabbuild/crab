@@ -130,7 +130,7 @@ the path should be replaced.
 | Gap | Current Crab evidence | Target architecture | Required proof |
 | --- | --- | --- | --- |
 | Protocol assurance | `Control` retains pure persistent transitions. The runtime now has a private coordination state machine, deterministic simulator, and pinned TLA+ model; async adapters carry activation generations and typed per-effect intents/IDs while parity coverage is still expanding. | One private sans-I/O coordination kernel used by production and simulation, a replayable adversarial scheduler, and a TLA+ model of the same durable state machine. | Pinned seeds find deliberately broken variants; model configurations check single-writer and acknowledged-durability invariants; remaining work is full decision extraction/parity, not a second policy path. |
-| Warm request latency | `RepositoryCellRouter::route_existing` first asks the actor-owned resident lookup; sparse activation receives bounded background `Db::hydrate_step` work on the existing SQL worker. The zero-origin post-promotion qualification is still outstanding. | Actor-owned resident lookup before remote metadata, plus bounded background hydration. A fully hydrated local read performs zero object-store operations from route through SQL result. | An instrumented store observes zero calls for qualified resident reads; cold, sparse, hydrating, resident, local-write, fleet-proof, and object-proof latency are reported separately. |
+| Warm request latency | `RepositoryCellRouter::route_existing` first asks the actor-owned resident lookup; sparse activation selects and installs bounded background page batches on the SQL worker while fetching asynchronously outside it. The zero-origin post-promotion qualification is still outstanding. | Actor-owned resident lookup before remote metadata, plus bounded background hydration. A fully hydrated local read performs zero object-store operations from route through SQL result. | An instrumented store observes zero calls for qualified resident reads; cold, sparse, hydrating, resident, local-write, fleet-proof, and object-proof latency are reported separately. |
 | Fleet balancing | Signed versioned placement observations carry measured node headroom, Cell/job counts, and three backlog counters. The private server loop plans bounded transfers, the actor confirms exact settled releases, and the receiver restores through ordinary authority acquisition. Ownership counts now balance by weighted share beside the material headroom-gain path: one elected donor per complete snapshot, a two-percent receiver deadband, and batch, surplus, and room bounds. Cold activation also sends one authenticated hint to a preferred live node. Local, planner, and process race tests cover exact-root preservation, stale-owner fencing/recovery, donation without headroom gain, refusal to mix pre-batch counts, convergence at target, and failed receiver rollback; protected multi-process movement proof remains. | Deterministic weighted placement over signed live capacity, actor-approved quiescent release, idle eviction, cgroup-aware pressure tiers, hysteresis, and paced drains. Placement remains advisory; existing control CAS remains authoritative. | Skew, membership change, stale samples, pressure, receiver death, rolling drain, and oscillation tests preserve authority and converge within declared movement and latency bounds. |
 
 The Celld comparison is pinned to upstream commit `10cb1303dac710dcb3b557e318e08c855261f68b`.
@@ -156,7 +156,7 @@ shared authenticated mechanics remain private to Cell roots.
 | Request entry | [`RepositoryCellRouter::route_target`](../../crab-http-server/src/cells/router.rs) calls `route_existing` twice around an activation lock, then repeats catalog and control loads for activation. |
 | Metadata lookup | [`CellCatalog::lookup`](../src/cell/catalog.rs) loads the shard head and every referenced immutable catalog page; [`CellAuthority::load`](../src/control/authority.rs) separately reads exact control. |
 | Local residency | [`CellRuntime::resident_handle`](../src/cell/actor.rs) asks the actor for a fully resident owner before remote metadata; [`local_handle`](../src/cell/actor.rs) remains the verified slow-path lookup for sparse or activation callers. Fenced, draining, and non-resident actors miss safely. |
-| Sparse hydration | [`Db::hydration` and `hydrate_step`](../../crab-ltx/src/db.rs) are driven by the actor's bounded hydration tick through the existing SQL worker; cancellation/restart and post-promotion zero-I/O qualification remain. |
+| Sparse hydration | [`Db::prepare_hydration` and `install_hydration`](../../crab-ltx/src/db.rs) bracket asynchronous fetch; a separate hydration effect permits foreground work and retains drain obligations. Cancellation, overwrite and takeover tests cover the split; fleet latency qualification remains. |
 | Fleet observation | [`NodePublisher`](../../crab-http-server/src/peer.rs) signs short-lived measured capacity and backlog observations; `NodeAdvertisement` carries a versioned placement signature. [`RepositoryCellRouter`](../../crab-http-server/src/cells/router.rs) plans movement from live signed samples and actor-settled candidates, then records confirmed release and receiver activation separately. Advertised disk headroom is clamped by the runtime ledger, server memory resolves nested cgroup-v1/v2 membership, and cold activation sends a bounded direct-node hint before normal authority acquisition. The test-only process race covers one shared-control winner; unified process-wide probe parity and protected multi-process movement proof remain. |
 | Existing rendezvous | [`preferred_scanner`](../src/fleet/scheduler.rs) elects a catalog scheduler scanner. It does not rank or move Cell owners. |
 | Transition safety | [`Control`](../src/control.rs) validates named single-record transitions; [`coordination.rs`](../src/coordination.rs) allocates and retires typed per-effect intents/IDs, while the actor fences completions by activation generation and effect family, drains the kernel-owned pending-effect set before fenced deactivation, and keeps effect timing coupled to the production publisher. Background hydration, renewal, persisted-work inventory refresh, drain, and shutdown pass queue/publisher/lease observations through the same kernel schedule transition before an adapter starts work. |
@@ -219,7 +219,8 @@ predicates; the simulator's movement release also passes queue/publisher
 observations through the same deactivation gate; resident-only lookup is
 actor-owned and attempted before
 catalog/control I/O; sparse restored Cells receive bounded
-`Db::hydrate_step` work on the existing SQL worker; active-cell admission
+page selection and installation on the existing SQL worker with asynchronous
+fetch outside it; active-cell admission
 uses an exact RAII resource ledger (including resident native bytes, active-Cell
 file-descriptor reservations, bounded SQL-worker, hydration-job, and primitive
 activity/effect reservations, with runtime metrics for hydration and descriptor
@@ -491,18 +492,27 @@ owner endpoints and cold Cells are never served from this local index.
 ### Finish bounded background hydration
 
 Sparse activation remains legal and may begin serving after exact-root
-verification. It is called `ActiveSparse`, not fully resident. Wire
-`Db::hydration` and `hydrate_step` through bounded SQL-worker jobs so an
-active sparse Cell progressively resolves inherited pages while foreground
-work remains prioritized.
+verification. It is called `ActiveSparse`, not fully resident. The actor
+selects up to 64 pages with `Db::prepare_hydration` on its SQL worker,
+fetches authenticated pages asynchronously, then dispatches
+`Db::install_hydration` to that activation. Foreground queries and mutations
+can run while fetch is in flight. Hydration owns a separate effect identity
+that still prevents drain or transfer from releasing an unfinished activation;
+its completion cannot clear another command's foreground slot.
 
 Hydration:
 
 - Reserves incremental local disk before each page batch.
 - Uses existing page-I/O, object-I/O, and job admission.
+- Reserves fetched payload bytes before origin work and carries the reservation
+  through queued installation; canceled callers cannot release live worker bytes.
 - Verifies every directory node, frame, page checksum, and final hydration
   count.
-- Pauses under foreground queue, disk, or object-store pressure.
+- Starts batches only while the Cell's foreground queue and publication are idle.
+- Defers preparation/fetch timeouts and retryable fetch errors for at least one
+  second, honoring longer provider delays. Permanent fetch errors and uncertain
+  or failed installation still fence the owner. Demand reads retain their
+  synchronous VFS contract; shared-worker installation latency remains to qualify.
 - Is cancel-safe on fence and eviction; partial verified pages remain only as
   disposable local state.
 - Promotes the actor to `ActiveResident` only after every inherited allocated

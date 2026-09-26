@@ -488,8 +488,19 @@ async fn objects_to_pin(
 A verified root can become writable without first downloading every page.
 `prepare_writable` fetches the authenticated checksum directory asynchronously;
 `open_writable` must then run on the Cell's dedicated SQLite worker. Page faults
-fetch and verify missing pages, while `hydrate_step` resolves a bounded amount
-of remaining work proactively.
+fetch and verify missing pages. Direct synchronous embedders can use
+`hydrate_step` on their database worker. The Cell runtime instead uses
+`prepare_hydration` to select at most 64 missing pages, fetches through
+`db::HydrationRead::fetch` outside its SQL worker, then returns the resulting
+`db::HydrationBatch` to `install_hydration` on the owning activation.
+
+The caller admits retained page bytes before fetching and retains that
+reservation through installation, including canceled installation waiters.
+Demand-prefetched pages are reused. Installation verifies activation identity
+and skips pages superseded by checkpointed writes or truncation. Abandoning a
+fetch does not advance progress; an installation error fences the database.
+SQLite demand faults remain synchronous, and local page installation can
+still delay the worker on a slow disk.
 
 ```rust,ignore
 use std::path::Path;
@@ -547,6 +558,7 @@ in that order.
 | `VerifiedRoot::paged` | Opens authenticated page and page-run reads |
 | `CellPagedDatabase::prepare_writable` | Seeds a fresh sparse writable activation at the root's exact position |
 | `Db::hydrate_step` | Resolves a bounded number of missing sparse pages on the owner-controlled database worker |
+| `Db::prepare_hydration` / `db::HydrationRead::fetch` / `Db::install_hydration` | Splits bounded page selection and owner installation from asynchronous authenticated fetch; caller owns memory admission and scheduling |
 | `CellReplica::reachable_objects` | Returns `RootObjectRef` values for the verified immutable dependency set |
 | `CellReplica::open_resumed` | Moves a resumable local image onto a fresh path and continues its capture session |
 | `CellReplica::discard_resumed` | Removes a local image and its resume sidecars that the caller refused |

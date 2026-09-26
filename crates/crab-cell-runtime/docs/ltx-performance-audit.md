@@ -4,8 +4,8 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `7d3dd9232b0`; each diagnostic below identifies its revision separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
-| Status | Small uploads, cache admission, streaming cleanup, decoder metadata, checksum I/O batching, and cross-worker admission improved; acknowledged-write attribution implemented; same-worker isolation, publication capacity, public latency, and fault-under-load qualification remain open |
+| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `2bf1967c7f3` and the asynchronous hydration implementation recorded below; each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
+| Status | Background hydration now releases the SQL worker and foreground Cell slot, reuses demand-prefetched pages, and defers retryable fetch failures. Activation lock scope, demand faults, installation latency, sustained publication and fleet performance remain open. |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
 
@@ -23,8 +23,10 @@ harness separately.
 
 | Priority | Remaining gap | First experiment |
 | --- | --- | --- |
+| P1 | Hydration fetch isolation is implemented; service latency remains unqualified (19) | Measure same-Cell and sibling-Cell tails under arrivals, fragmented fetches and slow page installation |
+| P1 | Sparse activation holds a process-wide registry lock across disk I/O (20) | Pause one activation's file sync; open and close a different sparse Cell on another worker |
 | P1 | Peer admission changes still need load qualification (15) | Measure concurrent hint expiry, activation delay, retained request bytes, and accepted-command cancellation through HTTP |
-| P1 | Cross-Cell SQL worker blocking (9) | Slow one sparse Cell while reading a resident Cell on the same worker; repeat on different workers |
+| P1 | Cross-Cell SQL worker blocking (9) | Background fetch passes the same-worker probe; qualify demand faults, installation, confirmation and cleanup separately |
 | P1 | Directory-cache fills still extend reads and occupy shared blocking jobs (18) | Measure remaining cache-install wait and sibling foreground interference after origin admission isolation |
 | P1 | Whole-graph compaction and serial publication debt (4–5) | Sustained updates through repeated debt thresholds; compare response rate with publication rate |
 | P1 | Buffered compaction still needs sustained-load qualification (17) | Measure async task progress, foreground interference, and publisher drain through repeated compaction boundaries |
@@ -32,6 +34,7 @@ harness separately.
 | P1 | Execution load is not proven balanced (12) | Record owner/execution distribution and fixed offered load at every scale stage |
 | P1 | Capacity runs do not fault outstanding follower-only acknowledgements (16) | Kill an owner during sustained arrivals with a proven unpublished tail; verify every acknowledged request after takeover |
 | P2 | Eager checksum metadata and demand read amplification (3, 8) | First query **and first mutation**, point/random/scan workloads, cold and churned caches |
+| P2 | Hydration cache reuse is restored; fragmentation and concurrent duplicate fetches remain (21) | Fixed-root random/scan workloads; count duplicate range bytes, fetch waves and total hydration time |
 | P2 | Checksum maintenance differs between fresh and restored Cells (14) | Hold database and changed-page count fixed; compare capture, clean handoff, host I/O calls, and allocations in both states |
 | P2 | Checkpoint tail cost and shared maintenance resources (6, 11) | Long update runs with checkpoint, hydration, and compaction interference |
 
@@ -557,8 +560,42 @@ pass, as does runtime all-target Clippy. The real RustFS HTTP regression also
 passes through remote execution, owner loss, restored collaboration state, and
 Git clone/tag reads. These checks protect behavior; they do not replace the
 current-source fleet curves.
-The same-worker origin wait, foreground-aware maintenance, asynchronous
-hydration, and proof-to-confirmation latency gates remain open.
+
+**Asynchronous hydration implementation:** preparation selects at most 64
+missing pages on the owner worker; fetch releases worker admission; installation
+returns authenticated bytes and their retained-byte reservation to that worker.
+Installation checks activation identity and skips pages superseded by owner
+writes or truncation. Dropping a fetched batch cannot advance the cursor.
+
+The strengthened worker regression fails with the committed synchronous
+hydration path and passes with the initial draft. A real RustFS diagnostic adds 500 ms
+to each GET and queries fully resident Cells on the same and another worker:
+
+| Diagnostic | Synchronous runtime | Asynchronous draft |
+| --- | ---: | ---: |
+| Same-worker resident query | 1,026.685 ms | 0.053 ms |
+| Other-worker resident query | 0.163 ms | 0.060 ms |
+| Hydration plus queries | 1,027.172 ms | 1,526.698 ms |
+| Origin read operations during hydration | 2 | 3 |
+
+These are single debug-build, injected-delay diagnostics against the local
+RustFS fixture, not p95/p99 or a service SLO. The before run temporarily used
+the committed executor/worker dispatch with the same current test fixture;
+the draft source was restored afterwards. They establish the sibling-Cell
+wait and its removal, not faster hydration: the draft makes an additional
+origin read in this fixture (finding 21). The workload creates a fresh random
+database each run, so byte-for-byte traffic attribution needs a fixed-root
+comparison. Raw logs are `worker-interference-rustfs-before-matched.log` and
+`audit-hydration-rustfs.log` beneath the checkout's external target directory.
+
+Demand faults remain synchronous, and installation, confirmation and cleanup
+still execute on the worker. The initial split needed additional same-Cell
+isolation and cache reuse; findings 19 and 21 record those follow-ups and their
+tests. The final RustFS diagnostic (`hydration-rustfs-final.log`) measured
+0.129 ms for the same-worker resident query, 0.119 ms on the other worker,
+and 1,010.155 ms for hydration plus queries, with two origin reads. This remains
+a single injected-delay diagnostic. It does not establish service percentiles
+or a throughput change across different random database fixtures.
 
 ### 10. Published-cut cleanup occupies the SQL worker after durability
 
@@ -1119,7 +1156,191 @@ Disk-cache lookups also use the shared blocking pool. Host-owned write-behind,
 foreground isolation, cache-fill hit-rate effects and public action latency
 remain open; this change does not claim those gates.
 
+### 19. The initial asynchronous draft still blocked its own Cell and treated every error as stale
+
+**Confirmed in committed coordination and the hydration draft:**
+[`BeginHydration`](../src/coordination.rs) sets `busy = true`, and `Schedule`
+will not start queued work until `FinishHydration` clears it. The
+[background task](../src/cell/actor/lifecycle/background.rs) holds this state
+across preparation, asynchronous fetch and installation. Releasing the SQL
+worker therefore helps sibling Cells, while a new request to the hydrating
+Cell still waits for remote I/O, even when its required pages are resident.
+An empty queue when hydration begins does not bound the latency of later
+arrivals. This coordination behavior also exists in the compared main snapshot.
+
+The same task fences on every returned error, and
+[`handle_hydrated`](../src/cell/actor/tasks/activation.rs) maps every error to
+`stale: true`. The draft defers retained-byte admission pressure, but a remote
+timeout before installation still follows the fencing path. The previous
+synchronous VFS path could have partially installed pages before failing;
+the new fetch stage has a stronger no-local-mutation boundary. Its error policy
+has not yet taken advantage of that distinction.
+
+**Change to evaluate:** track in-flight hydration separately from exclusive
+foreground work in the pure coordination state. Keep the effect alive for
+drain, shutdown and ownership checks; reserve the worker only for preparation
+and installation. Prefer foreground work between bounded installation batches.
+Classify a retryable pre-install fetch failure as deferred maintenance only
+while the owner remains valid and no local installation occurred. Retain
+fencing for lease loss, integrity failure, uncertain partial installation and
+stale activation. Simply clearing `busy` without changing completion handling
+can let a hydration completion clear a concurrent command's state; it is not
+a sufficient fix.
+
+**Gate:** use a public Cell handle to read a resident row and perform a mutation
+while a different inherited range is stalled. Prove queue progress, the exact
+captured successor root, and no stale overwrite after checkpoint/truncate.
+Repeat for owner loss, drain, canceled fetch, transient transport failure,
+corruption and installation failure. Existing
+[`residency` tests](../tests/runtime/lifecycle/residency.rs) cover shutdown,
+origin failure, disk exhaustion, lease loss and takeover; the worker-only
+probe does not exercise this actor boundary. Preserve those failure guarantees
+while adding the distinct safe-to-defer outcome.
+
+**Implementation:** hydration now owns a separate effect without retaining
+the foreground `busy` slot. Completion updates only residency, preserving any
+concurrent command's busy state. Pending effects still prevent early drain or
+transfer. Preparation/fetch timeouts, retryable fetch failures and pre-install
+capacity refusal return a deferred outcome; the actor waits at least one second
+and honors longer provider delays. An installation timeout remains ambiguous
+and fences the owner, as do permanent failures. The worker owns these phase
+deadlines; the actor no longer wraps all phases in an indistinguishable timeout.
+
+The public-handle regression first failed its one-second foreground deadline.
+It now queries and mutates a resident row while a different hydration GET is
+paused, then restores the exact published root and reads the mutation. A
+second public test exposes one transient provider failure with storage retries
+disabled, proves the owner remains serving, and waits for hydration to resume.
+Seven lifecycle tests retain shutdown, permanent-origin failure, disk exhaustion,
+lease-loss and takeover coverage. Forty-six coordination/simulator cases pass,
+including hydration completion while a command owns the foreground slot.
+Four worker tests also cover fetch cancellation, deadline deferral, retained-byte
+pressure and progress on both workers. The public HTTP/mTLS RustFS collaboration
+test passes with the split enabled: a forwarded application mutation is
+acknowledged, publishes LTX and remains visible through the application query.
+This is end-to-end correctness evidence, not a service performance qualification.
+
+### 20. Sparse activation serializes unrelated Cells through a global registry lock
+
+**Confirmed:** [`Registration::new`](../../crab-ltx/src/writable_vfs.rs) locks
+the process-wide `views()` map before creating and sizing the sparse file,
+syncing it and its parent, constructing the paged I/O bridge, reserving local
+disk, and allocating the presence map. It releases the lock only after
+inserting the activation. `x_open` and registration teardown use the same map.
+Consequently a slow local sync can delay another sparse activation or its
+teardown on a different SQL worker. Already open SQLite reads do not acquire
+this registry lock; the risk concerns activation and lifecycle concurrency.
+
+The entry path is `CellWritableDatabase::open_writable` from
+[`ActivateRestored`](../src/cell/worker/run.rs); eager checksum preparation is
+earlier and asynchronous. Moving checksum I/O to `Host::run` therefore does
+not fix this separate critical section. The compared main snapshot has the
+same lock scope. Its fleet latency contribution is unmeasured.
+
+**Change to evaluate:** keep path claiming and registration publication atomic
+under short map operations; perform filesystem barriers, bridge startup and
+allocations outside the global lock. Preserve exclusive fresh-destination
+ownership and remove only the failed activation's own claim. Ensure teardown
+drops resource owners after releasing the map lock, including a last bridge
+reference whose destruction joins its I/O worker. Avoid one thread or one
+registry per Cell.
+
+**Gate:** pause activation A's `sync_all` or `sync_parent`; activation B on a
+distinct path and teardown C must finish independently. Attempt the same path
+twice and require one winner; inject each setup failure and prove no stranded
+claim or removal of another activation. Existing
+[`activation` hook tests](../../crab-ltx/tests/host/hooks/activation.rs) test
+checksum preparation and cancellation, but do not prove this global-lock
+isolation. A recovery storm with constrained disk IOPS is the service test.
+
+### 21. The initial asynchronous draft lost demand-read cache reuse
+
+**Confirmed in the draft, absent as a separate path on main:**
+[`Io::page`](../../crab-ltx/src/paged_io.rs) reads the shared view-keyed page
+cache and fetches ahead on a miss. `Io::hydration_pages` instead calls the
+database's `read_run` directly, without consulting or filling that cache.
+The VFS presence map records installed pages, not all prefetched pages.
+Hydration can consequently download and decode pages already fetched by an
+earlier SQL fault. The two-versus-three operation diagnostic in finding 9 is
+consistent with this path difference; it does not isolate bytes, cache hits,
+or a general throughput regression.
+
+Both paths still authenticate through the same replica reader. That reader
+also computes a window's spans and consumes its first span (finding 8).
+Fragmented roots make the draft fetch several spans serially. Sixty-four
+pages bound payload, not network round trips or wall time; enough slow spans
+can consume the five-second hydration deadline and trigger finding 19.
+
+**Change to evaluate:** share authenticated range/cache access between demand
+reads and background fetch without reacquiring a synchronous SQL-worker wait.
+Use exact view/root identity, bounded cache ownership and single-flight work
+where useful. Evaluate bounded multi-span fetching for bulk hydration and
+smaller/adaptive demand read-ahead separately. Account for encoded frames,
+decoded payload and queued installation bytes together; the draft's retained
+reservation covers page payload, not every transient allocation.
+
+**Gate:** reuse one fixed immutable root for before/after runs. Warm a known
+range through SQL, then hydrate it under cold, warm and churned caches.
+Measure useful prefetched pages, duplicate range bytes, fetch waves, decode
+CPU, peak retained/RSS bytes, hydration completion and sibling/own-Cell p99.
+Repeat with alternating-object page locators, cancellation and a full retained
+budget. Preserve no cursor advancement on an abandoned batch and exact-root
+verification; never treat cache content as recovery authority.
+
+**Implementation:** the asynchronous fetch now consults the same view-keyed
+demand cache. It returns a cached prefix directly and stops a missing fetch
+before a cached suffix. Fetched pages destined for immediate installation do
+not create another cache. The regression warms one immutable activation through
+SQLite opening, then installs eight missing pages: the initial draft made two
+range calls; the changed path makes zero. Ten sparse LTX tests pass, including
+checkpoint supersession, truncate/regrow, foreign activation and exact restore.
+Concurrent demand/fetch single-flight, fragmented multi-span fetching and total
+memory accounting remain separate qualification work.
+
+### Re-audit decision and proof gaps
+
+**Is this the best fix for the reproduced waits?** Splitting remote fetch from
+owner installation and separating its effect from foreground ownership remove
+the worker and actor waits at their respective boundaries. Reusing the demand
+cache removes the demonstrated duplicate reads. Installation still occupies
+the worker, and the global activation lock requires an independent change.
+Demand SQLite VFS callbacks still return
+synchronously under the [SQLite I/O contract](https://www.sqlite.org/c3ref/io_methods.html).
+
+The highest remaining sustained-write opportunity is still range-proportional
+compaction and publication drain (4–5), followed by bounded root coalescing if
+measured debt justifies it. The highest recovery-size opportunity is bounded
+authenticated checksum blocks (3, 14). These changes preserve one fenced writer,
+one ordered root publisher and each command's stable receipt. Raising queues,
+worker counts or provider concurrency alone does not remove the underlying work.
+
+The public application qualification must exercise Entity, Shard, Workflow and
+read models through CellNode/application handles. Require fixed offered load,
+actual execution distribution, local/forwarded and read/write action traces,
+published-versus-acknowledged rates, and faults during an unpublished acknowledged
+tail at 3/5/10/20 nodes. One shared Compose host cannot qualify independent-host
+failure or aggregate dedicated CPU capacity.
+
+The staged reference-suite relocation still fails its old suite inventory
+entry and remains outside this implementation. Root rules require approval for
+that inventory change. Hydration's new public types live under `crab_ltx::db`,
+beside their owning `Db` API; the frozen root prelude is unchanged. No inventory
+was edited to suppress a failure. Full-plan completion remains unproven.
+
 ## Safety and proof retained by the audit
+
+The hydration follow-up passes 67 focused worker, coordination, sparse LTX and
+public lifecycle tests, plus all eight minimal-feature LTX integration tests.
+Runtime and replica-enabled LTX all-target Clippy pass with warnings denied;
+workspace formatting and runtime documentation validation pass. The real RustFS
+worker diagnostic and public HTTP/mTLS application test also pass. These checks
+cover the implementation recorded in findings 9, 19 and 21; they do not close
+the installation-latency, recovery-storm or sustained fleet gates.
+
+The action-tracing source `2bf1967c7f3` subsequently passed both the
+[ARM64 image and Compose run](https://github.com/crabbuild/crab/actions/runs/36235888087)
+and the [AMD64 image and Compose run](https://github.com/crabbuild/crab/actions/runs/36235876451).
+Those receipts predate the hydration follow-up and must not be attributed to it.
 
 The action-tracing change passes the real RustFS HTTP/mTLS application test and
 replays its formatter output through the same join CLI used by the fleet

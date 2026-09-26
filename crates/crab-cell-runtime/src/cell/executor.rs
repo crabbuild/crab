@@ -631,20 +631,28 @@ impl CellExecutor {
         }
     }
 
-    /// Resolves a bounded number of sparse pages without publishing or
-    /// competing with the actor's foreground SQL admission.
-    pub(crate) fn hydrate_step(&mut self, pages: u32) -> Result<Option<crab_ltx::Hydration>> {
+    pub(crate) fn prepare_hydration(
+        &self,
+        pages: u32,
+    ) -> Result<Option<crab_ltx::db::HydrationRead>> {
         if self.fenced {
             return Err(Error::Fenced);
         }
-        if pages == 0 {
+        if !(1..=64).contains(&pages) {
             return Err(Error::Capacity("hydration pages"));
         }
-        let Some(_) = self.db.hydration()? else {
-            return Ok(None);
-        };
-        match self.db.hydrate_step(pages) {
-            Ok(hydration) => Ok(Some(hydration)),
+        self.db.prepare_hydration(pages).map_err(Into::into)
+    }
+
+    pub(crate) fn install_hydration(
+        &mut self,
+        batch: crab_ltx::db::HydrationBatch,
+    ) -> Result<crab_ltx::Hydration> {
+        if self.fenced {
+            return Err(Error::Fenced);
+        }
+        match self.db.install_hydration(batch) {
+            Ok(hydration) => Ok(hydration),
             Err(error) => {
                 self.fenced = true;
                 Err(error.into())

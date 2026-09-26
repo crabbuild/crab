@@ -10,6 +10,10 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
+mod hydration;
+
+pub use hydration::{HydrationBatch, HydrationRead};
+
 /// Progress resolving an inherited cut: locally materialized or superseded pages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Hydration {
@@ -211,32 +215,42 @@ unsafe fn hydrate(file: *mut File, first: u32, last: u32) -> Result<()> {
                 }
             }
             let bytes = app.io.page(page)?;
-            let mut state = app
-                .state
-                .lock()
-                .map_err(|_| CrabError::InvalidState("sparse state poisoned"))?;
-            state.faults += 1;
-            // A checkpoint or truncate may have won while the fetch ran. Keep
-            // the recheck and local write under the same gate as xWrite/xTruncate.
-            if page > state.ceiling || state.present[page as usize - 1] {
-                continue;
-            }
-            if bytes.len() != app.page_size as usize {
-                return Err(CrabError::LTXCorrupted);
-            }
-            app.local_disk.try_grow(u64::from(app.page_size))?;
-            let base = (*file).base;
-            let write = (*(*base).pMethods)
-                .xWrite
-                .ok_or(CrabError::InvalidState("base VFS lacks xWrite"))?;
-            sqlite(write(
-                base,
-                bytes.as_ptr().cast(),
-                bytes.len() as c_int,
-                i64::from(page - 1) * i64::from(app.page_size),
-            ))?;
-            mark(app, &mut state, page);
+            install_page(file, page, &bytes)?;
         }
+        Ok(())
+    }
+}
+
+unsafe fn install_page(file: *mut File, page: u32, bytes: &[u8]) -> Result<()> {
+    // SAFETY: the caller retains the live wrapper and its activation Arc while
+    // exclusively borrowing the owning SQLite connection.
+    unsafe {
+        let app = &*(*file).app;
+        let mut state = app
+            .state
+            .lock()
+            .map_err(|_| CrabError::InvalidState("sparse state poisoned"))?;
+        state.faults += 1;
+        // Owner writes and truncation can supersede pages while async fetch runs.
+        // Use the same gate as xWrite/xTruncate so inherited bytes never win.
+        if page > state.ceiling || state.present[page as usize - 1] {
+            return Ok(());
+        }
+        if bytes.len() != app.page_size as usize {
+            return Err(CrabError::LTXCorrupted);
+        }
+        app.local_disk.try_grow(u64::from(app.page_size))?;
+        let base = (*file).base;
+        let write = (*(*base).pMethods)
+            .xWrite
+            .ok_or(CrabError::InvalidState("base VFS lacks xWrite"))?;
+        sqlite(write(
+            base,
+            bytes.as_ptr().cast(),
+            bytes.len() as c_int,
+            i64::from(page - 1) * i64::from(app.page_size),
+        ))?;
+        mark(app, &mut state, page);
         Ok(())
     }
 }

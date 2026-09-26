@@ -123,6 +123,7 @@ pub(super) fn handle_activated(
                     last_used_ms: unix_millis(),
                     last_work_at: std::time::Instant::now(),
                     compaction_retry_at: std::time::Instant::now(),
+                    hydration_retry_at: std::time::Instant::now(),
                     next_due_ms,
                     published_sequence,
                 },
@@ -146,7 +147,7 @@ pub(super) fn handle_hydrated(
     cell: CellId,
     generation: u64,
     effect_id: u64,
-    result: crate::Result<Option<crab_ltx::Hydration>>,
+    result: crate::Result<HydrationStep>,
 ) {
     let TaskContext {
         pool,
@@ -168,7 +169,7 @@ pub(super) fn handle_hydrated(
     }
     active.finish_task(effect_id, CoordinationEffect::Hydration);
     match result {
-        Ok(Some(progress)) => {
+        Ok(HydrationStep::Progress(Some(progress))) => {
             active
                 .coordination
                 .step(CoordinationInput::FinishHydration {
@@ -176,13 +177,27 @@ pub(super) fn handle_hydrated(
                     stale: false,
                 });
         }
-        Ok(None) => {
+        Ok(HydrationStep::Progress(None)) => {
             active
                 .coordination
                 .step(CoordinationInput::FinishHydration {
                     complete: true,
                     stale: false,
                 });
+        }
+        Ok(HydrationStep::Deferred(after)) => {
+            active
+                .coordination
+                .step(CoordinationInput::FinishHydration {
+                    complete: false,
+                    stale: false,
+                });
+            // Respect provider backoff and avoid retrying resource pressure on
+            // every tick. An unrepresentable delay cannot be retried safely.
+            match std::time::Instant::now().checked_add(after.max(HYDRATION_RETRY)) {
+                Some(at) => active.hydration_retry_at = at,
+                None => fence_active(active),
+            }
         }
         Err(_) => {
             let decision = active

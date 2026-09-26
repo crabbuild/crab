@@ -69,6 +69,12 @@ pub(crate) enum WorkerState {
     Fenced,
 }
 
+#[derive(Debug)]
+pub(crate) enum HydrationStep {
+    Progress(Option<crab_ltx::Hydration>),
+    Deferred(Duration),
+}
+
 /// Result returned by one SQL worker without releasing pending command output.
 #[derive(Clone)]
 pub enum WorkerExecution {
@@ -378,25 +384,81 @@ impl SqlWorkerPool {
         receive(response).await
     }
 
-    /// Resolves a bounded sparse-page batch on the Cell's assigned worker.
+    /// Fetches a bounded sparse batch asynchronously, then installs it on its worker.
     pub(crate) async fn hydrate(
         &self,
         cell: CellId,
         pages: u32,
         deadline: Instant,
-    ) -> Result<Option<crab_ltx::Hydration>> {
+    ) -> Result<HydrationStep> {
         let (reply, response) = oneshot::channel();
-        self.send_worker_job(
-            cell,
-            WorkerCommand::Hydrate {
+        let preparation = async {
+            self.send_worker_job(
                 cell,
-                pages,
-                deadline,
-                reply,
+                WorkerCommand::PrepareHydration {
+                    cell,
+                    pages,
+                    deadline,
+                    reply,
+                },
+            )
+            .await?;
+            receive(response).await
+        };
+        // Preparation only selects pages. Abandoning its waiter cannot install
+        // bytes or release foreground ownership, even if it was dispatched.
+        let read = match tokio::time::timeout_at(deadline.into(), preparation).await {
+            Ok(result) => result?,
+            Err(_) => return Ok(HydrationStep::Deferred(Duration::ZERO)),
+        };
+        let Some(read) = read else {
+            return Ok(HydrationStep::Progress(None));
+        };
+        let retained = match self
+            .inner
+            .resources
+            .try_reserve(ResourceCost::zero().with_retained_bytes(read.retained_bytes()))
+        {
+            Ok(retained) => retained,
+            // Background work yields to retained foreground bytes. No page was
+            // fetched or installed, so retry later without fencing the owner.
+            Err(Error::Capacity(_)) => return Ok(HydrationStep::Deferred(Duration::ZERO)),
+            Err(error) => return Err(error),
+        };
+        let batch = match tokio::time::timeout_at(deadline.into(), read.fetch()).await {
+            Ok(Ok(batch)) => batch,
+            Ok(Err(error)) => match error.classify() {
+                crab_ltx::FailureClass::Retryable { after } => {
+                    return Ok(HydrationStep::Deferred(after.unwrap_or_default()));
+                }
+                crab_ltx::FailureClass::Capacity => {
+                    return Ok(HydrationStep::Deferred(Duration::ZERO));
+                }
+                _ => return Err(error.into()),
             },
-        )
-        .await?;
-        receive(response).await
+            Err(_) => return Ok(HydrationStep::Deferred(Duration::ZERO)),
+        };
+        let (reply, response) = oneshot::channel();
+        // Move the payload's reservation into the dispatched install: dropping
+        // its waiter cannot release bytes still owned by the worker queue.
+        let installation = async {
+            self.send_worker_job(
+                cell,
+                WorkerCommand::InstallHydration {
+                    cell,
+                    batch,
+                    retained,
+                    deadline,
+                    reply,
+                },
+            )
+            .await?;
+            receive(response).await
+        };
+        let progress = tokio::time::timeout_at(deadline.into(), installation)
+            .await
+            .map_err(|_| Error::Deadline)??;
+        Ok(HydrationStep::Progress(Some(progress)))
     }
 
     pub(crate) async fn hydration(&self, cell: CellId) -> Result<Option<crab_ltx::Hydration>> {
@@ -877,11 +939,18 @@ enum WorkerCommand {
         handler: QueryHandler,
         reply: oneshot::Sender<Result<Vec<u8>>>,
     },
-    Hydrate {
+    PrepareHydration {
         cell: CellId,
         pages: u32,
         deadline: Instant,
-        reply: oneshot::Sender<Result<Option<crab_ltx::Hydration>>>,
+        reply: oneshot::Sender<Result<Option<crab_ltx::db::HydrationRead>>>,
+    },
+    InstallHydration {
+        cell: CellId,
+        batch: crab_ltx::db::HydrationBatch,
+        retained: ResourceReservation,
+        deadline: Instant,
+        reply: oneshot::Sender<Result<crab_ltx::Hydration>>,
     },
     Hydration {
         cell: CellId,
