@@ -10,6 +10,15 @@ fn mutation() -> MutationIdentity {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn committed_participants_reuse_staged_space_after_unrelated_writes() {
+    capacity_case(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn committed_participants_resolve_after_unrelated_writes_exhaust_capacity() {
+    capacity_case(true).await;
+}
+
+async fn capacity_case(exhaust: bool) {
     let application = Arc::new(
         Beyonddb::compile(BuildDescriptor {
             source_revision: "transaction-capacity".into(),
@@ -264,6 +273,39 @@ async fn committed_participants_reuse_staged_space_after_unrelated_writes() {
             )
             .await
             .unwrap();
+    }
+    if exhaust {
+        for table in &tables {
+            let info = storage
+                .table_key_info(account_id, &table.table_name)
+                .await
+                .unwrap();
+            let mut refused = false;
+            for i in 0..128 {
+                let result = storage
+                    .put_item(
+                        &info,
+                        Item::from([
+                            ("id".into(), AttributeValue::S(format!("fill-{i}"))),
+                            ("payload".into(), AttributeValue::S("z".repeat(8 * 1024))),
+                        ]),
+                        false,
+                        None,
+                        &ExpressionMaps::default(),
+                        None,
+                    )
+                    .await;
+                if let Err(error) = result {
+                    assert!(
+                        matches!(error, StorageError::Transient(_)),
+                        "capacity refusal must be retryable: {error:?}"
+                    );
+                    refused = true;
+                    break;
+                }
+            }
+            assert!(refused, "fixture must exhaust the Cell budget");
+        }
     }
     client
         .command::<DecideCrossCellTransaction>(

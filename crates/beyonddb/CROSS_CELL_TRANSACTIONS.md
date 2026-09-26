@@ -1047,8 +1047,9 @@ of which bytes the public API counts.
 
 - **Blocking decision authority.** An unreachable coordinator preserves safety
   by retaining locks. Startup now recovers configured accounts at a changed
-  endpoint. Recurring discovery of failed remote owners, placement, and bounded
-  recovery latency remain required for service availability.
+  endpoint, and serving discovery recovers transaction owners through configured
+  accounts. General fleet placement and bounded recovery latency remain required
+  for service availability.
 - **Recovery throughput.** One worker selects one coordinator and at most one
   pending transaction per 250-ms tick. With negligible work this is nominally
   four selections per second. A pass over 4,096 tracked local shards takes
@@ -1100,9 +1101,9 @@ failures; it does not justify production readiness or unlimited scaling.
 
 ## Remaining implementation and proof
 
-1. Add fleet placement, general data-owner activation, and recurring remote-owner
-   failure discovery. Changed-endpoint startup takeover is implemented for
-   configured accounts. Measure historical startup scans and the
+1. Add fleet placement and general data-owner activation. Changed-endpoint
+   startup takeover and recurring transaction-owner discovery are implemented
+   for configured accounts. Measure historical startup scans and the
    movement/admission backlog. Coordinator reclamation now lets history exceed
    active slots, but does not qualify the 10,000-Cell, multi-TB target.
 2. Qualify pending read-owner recovery and concurrent read/write histories
@@ -1171,3 +1172,57 @@ This closes configured-account transaction discovery during serving. It does
 not qualify 10,000 Cells, multi-TB storage, fleet placement, or bounded recovery
 time. General apply-space reservation and transaction/read-history collection
 also remain required before a production transaction guarantee.
+
+
+## Capacity refusal must leave prepared participants recoverable
+
+The exhausted-capacity regression prepares four 380-KiB writes in each of an
+account Cell and a data Cell with 2-MiB database budgets. It then submits
+unrelated 8-KiB writes until each Cell refuses more, publishes the coordinator's
+COMMIT, resolves it, and verifies all committed item bytes. The original
+near-full regression remains as a separate workload.
+
+Before the fix, the account stopped serving after 26 accepted filler writes.
+SQLite had automatically rolled back the full transaction, but LTX issued a
+second ROLLBACK. Its failure (`no transaction is active`) replaced the original
+SQLITE_FULL error and fenced the writer. The test could no longer look up the
+second table, even though the previous published root was intact.
+
+The correction belongs in `crab-ltx::Db::transaction_with`: on callback error,
+an active transaction still requires explicit rollback. If SQLite already
+restored autocommit and the WAL observer saw no commit, rollback is proven and
+the original error is returned as `TransactionError::Operation`. An observed
+commit or rollback failure retains the fencing path. The source contract was
+checked against pinned rusqlite 0.34 and bundled SQLite, and SQLite's
+[autocommit documentation](https://www.sqlite.org/c3ref/get_autocommit.html).
+No dependency version, public API, or storage format changes are needed.
+
+**Is this the best fix here?** All managed writes cross this LTX boundary,
+including Cell commands, effect delivery, bootstrap, and migrations. Handling
+SQLite's completed rollback once preserves the existing proven-rollback
+contract for every caller. A BeyondDB retry or synthetic takeover would mask
+the false fencing and leave sibling users broken.
+
+Tests cover FULL and ROLLBACK-constraint failures, preservation of a previous
+uncaptured commit, exact LTX restore before and after a later successful write,
+refund of disk admission, and fencing if a callback illegally commits before
+returning an error. The runtime test verifies a refused write leaves the same
+owner usable and the next successful command advances sequence from zero to
+one. The account/data regression now refuses filler writes, finishes the
+irrevocable COMMIT, and reads every item successfully.
+
+Verification: 21 BeyondDB account/elastic/signed-peer tests, five runtime
+handler lifecycle tests, ten minimal LTX capture tests, and fourteen replica
+capture tests passed. The updated disk-accounting assertions also passed in the
+minimal build. Strict all-target Clippy passed for LTX, Cell runtime, and
+BeyondDB with production replica features. The separate SDK/RustFS process smoke
+passed in 402.83 seconds, including changed-address hard restart, large
+transactions, token replay across 70 historical shards, and graceful restart.
+The binary stayed fixed during the smoke. Format, diff, and Cell/LTX layout
+checks passed. Minimal LTX builds retain existing dead-code warnings in unchanged
+capture/pages methods; this change adds no warning suppression.
+
+This removes a concrete capacity-triggered loss of the participant owner. It
+does not supply a universal prepare-time reservation for B-tree/index growth,
+request receipts, retained history, WAL, or peak memory. Those requirements and
+the 10,000-Cell/multi-TB qualification remain open.

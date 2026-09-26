@@ -5,5 +5,6 @@ mod ltx {
     pub mod node_frame;
     pub mod pinned;
     pub mod properties;
+    pub mod transactions;
     pub mod vectors;
 }

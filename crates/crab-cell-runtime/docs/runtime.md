@@ -91,6 +91,13 @@ The worker transaction applies this procedure:
 
 Handler errors roll back the application savepoint. Runtime ledger updates still commit when the error is a durable business rejection. Every registered call reports its owning module, kind, outcome, and duration to the installed `CellTelemetry` sink from the thread that executed the handler, so the server can chart one primitive module without knowing its operations.
 
+SQLite may automatically roll back the whole command on capacity or interruption
+errors. The managed LTX writer recognizes completed rollback using autocommit
+and its WAL commit observer, preserves the original error, and keeps the Cell
+servable. No request receipt or commit sequence advances for that failed
+command. An observed commit or failed rollback still requires fencing; an
+unreachable result must never be reported as a proven rollback.
+
 ### Bounded application BLOB writes
 
 `CommandContext::write_sql_blob` fills an already allocated BLOB at a byte offset,
