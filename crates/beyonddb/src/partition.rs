@@ -61,7 +61,7 @@ static COMMANDS: [OperationDescriptor; 14] = [
     operation(10),
     operation(11),
     operation(12),
-    operation(13),
+    crate::participant::phase_operation(13),
     crate::transaction_transport::upload_operation(14),
 ];
 static QUERIES: [OperationDescriptor; 10] = [
@@ -73,7 +73,7 @@ static QUERIES: [OperationDescriptor; 10] = [
     operation(7),
     operation(8),
     operation(9),
-    operation(10),
+    crate::participant::phase_operation(10),
     operation(11),
 ];
 

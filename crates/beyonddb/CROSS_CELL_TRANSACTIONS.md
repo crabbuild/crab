@@ -2,8 +2,10 @@
 
 ## Foundation assessment for multiple primary keys
 
-Reviewed against implementation `b68e6486620`, the pinned ExtendDB storage
-contract, and the AWS transaction references below. The foundation is durable
+Initially reviewed against implementation `b68e6486620`, the pinned ExtendDB
+storage contract, and the AWS transaction references below; the bounded
+resolution change documented at the end updates the scheduling assessment.
+The foundation is durable
 two-phase commit with shared/exclusive item locks. It implements cross-Cell
 transactions; production compatibility, bounded resource use, and the
 10,000-Cell, multi-TB target remain qualification gates.
@@ -85,7 +87,7 @@ decision evidence tied to the transaction, participant set, and fenced authority
 | Safety qualification | Deterministic failure tests cover selected schedules | Exercise concurrent transfers, conditional write skew, read transactions, owner replacement, and lost replies with a recorded-history checker. Check conservation, serializability, and no duplicate effects at every injected phase cut. |
 | Bounded history | Completed decisions, participant markers, and committed read images are retained | Design an acknowledged retirement boundary that rejects late phase messages before deleting tombstones; include split/backup pins and outstanding read fetches. Ten-minute client token expiry alone cannot authorize deletion. Prove storage reaches a steady state under a soak workload. |
 | Admission | A 100-operation participant reserves about 278 MiB at 4-KiB pages, plus payload allowance | Qualify the allocation bound and contention cost; add WAL, disk, and heap admission. Coordinator progress also needs capacity to record decisions and receipts. Never reclaim an unresolved participant's claim on timeout. |
-| Latency | Sequential participant phases; at least `5P + 3` durable commands for single-chunk inputs | Measure publication and RPC time by participant count. Evaluate bounded parallel phases and batched coordinator progress with renewed crash/concurrency proof before changing the protocol. |
+| Latency | Sequential prepare; up to four terminal resolutions in flight per call; at least `5P + 3` durable commands for single-chunk inputs | Measure publication and RPC time by participant count. Evaluate prepare parallelism and batched coordinator progress with renewed crash/concurrency proof before changing those phases. |
 | Fleet recovery | 4,096 fixed coordinator shards per account; the worker selects one shard per 250-ms tick | Integrate placement and recovery scheduling with bounded concurrency and backlog metrics. A nominal pass over 4,096 known shards already takes about 17 minutes before slow work; this is arithmetic, not measured RTO. |
 | Data distribution | HASH-key siblings share one Cell with a finite database budget | Qualify skew, hot keys, split headroom, and oversized item collections. More Cells do not distribute one key's lock or split a single HASH group in the current layout. |
 | API completion | Secondary indexes and Streams remain unsupported; aggregate evaluated Update-size semantics remain unqualified | Maintain local index and stream effects within participant resolution, use durable asynchronous propagation where the contract permits it, and qualify size/error semantics against AWS before claiming compatibility. |
@@ -189,9 +191,10 @@ provide. It remains a future architectural option if measured contention
 justifies that cost.
 
 The tradeoffs are explicit: this is blocking two-phase commit. An unavailable
-decision owner can hold affected keys until recovery. Prepare and resolution
-currently visit participants sequentially, so latency grows with participant
-count and publication/network latency. A shared read also publishes durable
+decision owner can hold affected keys until recovery. Prepare visits participants
+sequentially; terminal resolution keeps up to four participants in flight per
+call and replenishes the window as any attempt finishes. Latency still depends
+on participant count and publication/network latency. A shared read also publishes durable
 state; it costs more than independent Get calls. Hot-key contention does not
 disappear by adding Cells. Coordinator sharding spreads independent requests,
 but activation, placement, retained history, and recovery throughput must also
@@ -216,14 +219,16 @@ The coordinator itself serializes `2P + 2` of those commands. Two participant
 Cells therefore need ten phase commands; 100 participants need 402. Multiple
 keys in one Cell share one prepare and resolution, so partition distribution
 matters as much as item count. Independent transactions can use different
-coordinator shards, but participant phases within one transaction currently
-run sequentially. Adding nodes cannot remove that per-request latency.
+coordinator shards. Within one transaction, prepare remains sequential and
+terminal resolution has a four-participant window. Coordinator progress writes
+remain serialized by their Cell owner.
 
 All transactional reads pay the same phase cost and persist their captured
 images; assembly additionally queries each saved item. A same-Cell read therefore
 requires six phase commands, at least two upload commands, and result queries. Before optimizing the protocol, measure publication latency,
 participant count, hot-key conflicts, recovery competition, and retained bytes.
-Batching coordinator progress or parallelizing participant work requires new
+Terminal resolution now overlaps independent participants after a durable
+decision. Batching coordinator progress or parallelizing prepare requires new
 failure/concurrency proof; neither optimization is implemented here.
 
 ## Ownership and durable records
@@ -482,7 +487,7 @@ sequenceDiagram
         Driver->>Coordinator: Record prepare receipt
     end
     Driver->>Coordinator: Publish COMMIT or ABORT
-    loop Every participant, including unprepared on ABORT
+    loop Every participant, at most four in flight, including unprepared on ABORT
         Driver->>Cells: Resolve the authoritative decision
         Cells-->>Driver: Durable apply or cleanup receipt
         Driver->>Coordinator: Record resolution receipt
@@ -1226,7 +1231,7 @@ of which bytes the public API counts.
    TransactGet, no double apply, no opposing terminal decisions, and eventual
    lock release after recoverable failures.
 4. Add bounded history collection and recurring fleet-wide failover. Then
-   parallelize participant/recovery work with explicit concurrency limits and
+   parallelize prepare/recovery work with explicit concurrency limits and
    the same failure tests; preserve one durable decision authority.
 5. Measure p50/p95/p99 latency by participant count, conflict rate, retained
    bytes, recovery backlog age/drain rate, and owner-replacement time at 1,000
@@ -1782,12 +1787,13 @@ protocol or changing the public completion contract. The production change
 adds 23 net lines, primarily separating one participant's apply/receipt attempt
 from the loop's progress policy.
 
-The loop remains sequential and visits at most 100 participants. Progress
-requires a failed attempt to return and the caller to remain alive; cancellation
-or a slow owner can still interrupt the pass. The next section addresses
-owner-admission progress. Bounded parallelism, persistent history collection,
-and 10,000-Cell/multi-TB qualification remain separate work. No API, schema, wire format, dependency,
-or lockfile changes are required for this fix.
+At this revision the loop remained sequential and visited at most 100
+participants. Progress required a failed attempt to return and the caller to
+remain alive. The admission change below addressed owner discovery, and the
+later bounded-resolution change removes waiting behind one slow RPC. Persistent
+history collection and 10,000-Cell/multi-TB qualification remain separate work.
+This earlier fix required no API, schema, wire format, dependency, or lockfile
+changes.
 
 Verification: 24 tests passed across the account, elastic-Cell, and signed
 peer-network suites (22 elastic tests in 67.41 seconds; two-owner network test
@@ -1874,3 +1880,80 @@ binary in 358.24 seconds, including hard restart, replay, and TTL recovery.
 The process smoke does not inject the control-store outage; that cut is covered
 by the shared-entry-point fixture. Strict all-target Clippy, formatting, diff,
 and Cell/LTX layout checks passed. API coverage and fleet scale remain unqualified.
+
+## Bounded terminal resolution after a durable decision
+
+The preceding fixes continued after returned errors, but a pending first RPC
+still prevented every later participant from resolving. At `3320adc3186`, a
+six-participant regression held that RPC open and observed no healthy progress
+before its ten-second test deadline. The coordinator already contained COMMIT;
+the other five participants had no reason to retain their locks behind that RPC.
+
+`finish_decided_cross_cell_transaction` now polls up to four independent
+participant resolutions concurrently. Each attempt still reads the participant,
+applies or recognizes its terminal record, and records its coordinator receipt
+in that order. As any attempt finishes, the window admits the next participant;
+it does not wait for a whole batch. Returned errors are retained while other
+attempts continue. The first observed error can depend on completion order;
+the stored ABORT reason and its original operation index remain authoritative.
+Overall success still requires every durable receipt.
+Preparation and selection of the terminal decision keep their existing path.
+
+This exposed a second admission problem: prepare and resolution receipts used
+the global 4-MiB-plus-64-KiB output ceiling even though their result is a small
+enum. Four simultaneous receipts exceeded the runtime's 16-MiB per-Cell mailbox.
+Participant state queries and resolution commands had the same inflated
+reservation, which also exhausted the node budget in the existing concurrent
+driver regressions. All six small phase operations now share 4-KiB input/output
+ceilings. Their input is bounded identity, position, and sequence: account and
+routing key are each at most 128 bytes; even escaped JSON and integer arrays fit
+within that ceiling. BEGIN, prepare, decision, and coordinator-status operations
+retain their larger results because cancellation can carry an old item.
+Runtime mailbox and node budgets are unchanged.
+
+| Boundary | Evidence |
+| --- | --- |
+| Caller | Request/replay, read helping, startup recovery, and serving recovery all reach the same terminal resolver. |
+| Decision owner | The resolver reads COMMIT/ABORT before constructing participant futures; `DecideCrossCellTransaction` still rejects opposing terminal decisions. |
+| Callee and sibling participants | Account and data wrappers use `participant::resolve`; their state-query and resolve descriptors use the same small bounds. Shared transactional reads also use this loop and retain their immutable result images. |
+| Coordinator receipt owner | `RecordParticipantResolution` serializes updates in one Cell command, marks each participant once, and decrements unresolved count only on its first receipt. Prepare receipts share the narrowed wire descriptor shape. |
+| Dependency contract | Existing workspace `futures-util` 0.3.32 `buffer_unordered` caps its owned future queue and replenishes it on completion. Dropping that queue drops its futures; the implementation spawns no detached resolver tasks. |
+| Regression | `tests/elastic_cells/transaction_resolution.rs` tests returned errors with two mixed account/data participants and paused RPCs with six participants, for COMMIT and ABORT at state-read, apply, and coordinator-receipt cuts. |
+| Cancellation | At the paused receipt cut, the test writes newer images after healthy completion, cancels the caller, and resumes the original transaction. Its participant markers prevent duplicate apply or abort cleanup over newer data. |
+| Baseline | Main has no BeyondDB. The previous draft waited sequentially; the paused-RPC test failed before the change. |
+
+The tests inspect raw participant and coordinator state before public reads can
+help recovery. All five healthy participants must finish while the first RPC
+remains paused, which also proves progress beyond the initial four-attempt
+window. New writes prove their locks were released, and retry preserves those
+new images. Both the original two-owner fixture and the six-owner fixture run
+with the original 16-MiB node budget. The binary defaults to 256 MiB. These tests
+establish functional progress under those budgets, not a fleet memory-admission
+guarantee.
+
+**Is this the best fix?** A durable terminal decision permits independent apply.
+Bounded futures reuse the existing idempotent resolution and receipt paths,
+including their error handling. Tight receipt limits belong in the application
+descriptor that knows their actual shape. No new worker, decision authority,
+runtime fallback, or configuration surface is needed. Cargo only adds a direct
+edge to the already locked workspace `futures-util`; no dependency version,
+checksum, patch, or override changes.
+
+The bound is per resolver call, not a node-wide concurrency quota. Four stalled
+attempts can still fill its window; readiness and completion still depend on
+deadlines, recovery, and available resources. A dropped request can leave an
+already dispatched command durable, so the next resolver must continue reading
+phase state before retrying. Owner admission and coordinator-shard scheduling
+remain sequential and can delay entry to the terminal resolver. This change
+does not reduce command count, parallelize prepare, collect history, or qualify
+the 10,000-Cell/multi-TB target.
+
+Verification: 27 account, elastic-Cell, and signed two-owner peer tests passed
+on the final implementation (25 elastic tests in 59.10 seconds; peer test in
+113.72 seconds). The explicitly enabled signed SDK/RustFS server-process smoke
+passed in 363.50 seconds, including transactional writes and reads, token replay,
+hard restart at a changed endpoint, and TTL recovery. The six-owner paused-RPC
+cuts run through signed loopback peers; the process smoke verifies the public
+API and persistence path without those injected pauses. Strict all-target
+Clippy, formatting, diff, and Cell/LTX layout checks passed. The source change
+adds 13 net production lines for bounded polling and the six shared descriptors.
