@@ -4,7 +4,8 @@ use crab_cell_runtime::registry::{Command, CommandContext, CommandResult, Query,
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CoordinatorDecision, CoordinatorParticipant, MODULE, coordinator_target, decode_decision,
+    CoordinatorDecision, CoordinatorParticipant, CoordinatorParticipantTarget, MODULE,
+    coordinator_target, decode_decision,
 };
 use crate::table::statement;
 use crate::{Error, Json, Result, SqlValue};
@@ -401,17 +402,73 @@ impl Query for ReadCoordinatorParticipant {
             ));
         }
         let rows = context.sql(&statement(
-            "SELECT participants FROM ddb_coordinator_transactions WHERE transaction_id = ?1 AND account_id = ?2",
-            vec![SqlValue::Blob(input.transaction_id.to_vec()), SqlValue::Text(input.account_id)],
+            "SELECT p.target, p.operations FROM ddb_coordinator_participants p \
+             JOIN ddb_coordinator_transactions t ON t.transaction_id = p.transaction_id \
+             WHERE t.transaction_id = ?1 AND t.account_id = ?2 AND p.position = ?3",
+            vec![
+                SqlValue::Blob(input.transaction_id.to_vec()),
+                SqlValue::Text(input.account_id),
+                SqlValue::Integer(i64::from(input.position)),
+            ],
         ))?;
         let Some(row) = rows[0].rows.first() else {
             return Ok(Json(None));
         };
-        let [SqlValue::Blob(bytes)] = row.as_slice() else {
+        let [SqlValue::Blob(target), SqlValue::Blob(operations)] = row.as_slice() else {
             return Err(Error::Command("invalid coordinator payload"));
         };
-        let participants: Vec<CoordinatorParticipant> = serde_json::from_slice(bytes)?;
-        Ok(Json(participants.get(usize::from(input.position)).cloned()))
+        Ok(Json(Some(CoordinatorParticipant {
+            target: serde_json::from_slice(target)?,
+            operations: serde_json::from_slice(operations)?,
+        })))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UnresolvedCoordinatorParticipant {
+    pub position: u8,
+    pub target: CoordinatorParticipantTarget,
+}
+
+/// Read unresolved participant targets without loading request images.
+pub struct ReadUnresolvedCoordinatorParticipants;
+
+impl Query for ReadUnresolvedCoordinatorParticipants {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 4;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<ReadCrossCellTransactionInput>;
+    type Output = Json<Vec<UnresolvedCoordinatorParticipant>>;
+
+    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
+        if coordinator_target(&input.account_id, &input.routing_key)?.cell_id() != context.cell_id()
+        {
+            return Err(Error::Identity(
+                "participant targets reached the wrong coordinator",
+            ));
+        }
+        let rows = context.sql(&statement(
+            "SELECT p.position, p.target FROM ddb_coordinator_participants p \
+             JOIN ddb_coordinator_transactions t ON t.transaction_id = p.transaction_id \
+             WHERE t.transaction_id = ?1 AND t.account_id = ?2 \
+             AND p.resolved_sequence IS NULL ORDER BY p.position",
+            vec![
+                SqlValue::Blob(input.transaction_id.to_vec()),
+                SqlValue::Text(input.account_id),
+            ],
+        ))?;
+        let mut targets = Vec::with_capacity(rows[0].rows.len());
+        for row in &rows[0].rows {
+            let [SqlValue::Integer(position), SqlValue::Blob(target)] = row.as_slice() else {
+                return Err(Error::Command("invalid coordinator participant target"));
+            };
+            targets.push(UnresolvedCoordinatorParticipant {
+                position: u8::try_from(*position)
+                    .map_err(|_| Error::Command("invalid participant position"))?,
+                target: serde_json::from_slice(target)?,
+            });
+        }
+        Ok(Json(targets))
     }
 }
 

@@ -35,13 +35,13 @@ use beyonddb::{
     ReadPartitionState, ReadPartitionTransaction, ReadPartitionTransactionInput,
     ReadPartitionTransactionOutcome, ReadPendingCrossCellTransactions,
     ReadPendingCrossCellTransactionsInput, ReadRoutePage, ReadSplitPlan, ReadSplitRoute,
-    ReadTableRoute, ReadTtlSchedule, ReadTtlSweep, RecordParticipantPrepare,
-    RecordParticipantResolution, ResolvePartitionTransaction, ResolvePartitionTransactionInput,
-    ResolvePartitionTransactionOutcome, RoutePageInput, RoutePageOutcome, SealPartition,
-    SealPartitionOutcome, SplitPlan, SplitRouteState, TableRoute, TableSpec, TransactionToken,
-    TransactionWrite, UpdateTtl, UpdateTtlInput, account_target, build_http_state,
-    coordinator_target, credential_target, data_key_hash, data_target, initialize_account,
-    initialize_coordinator, initialize_partition,
+    ReadTableRoute, ReadTtlSchedule, ReadTtlSweep, ReadUnresolvedCoordinatorParticipants,
+    RecordParticipantPrepare, RecordParticipantResolution, ResolvePartitionTransaction,
+    ResolvePartitionTransactionInput, ResolvePartitionTransactionOutcome, RoutePageInput,
+    RoutePageOutcome, SealPartition, SealPartitionOutcome, SplitPlan, SplitRouteState, TableRoute,
+    TableSpec, TransactionToken, TransactionWrite, UpdateTtl, UpdateTtlInput, account_target,
+    build_http_state, coordinator_target, credential_target, data_key_hash, data_target,
+    initialize_account, initialize_coordinator, initialize_partition,
 };
 use crab_cell_app::CellApplication;
 use crab_cell_host::CellNodeBuilder;
@@ -2776,6 +2776,22 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             .unwrap();
         assert_eq!(recorded.output.0, CoordinatorPhaseOutcome::Recorded);
     }
+    let unresolved = client
+        .query::<ReadUnresolvedCoordinatorParticipants>(
+            &coordinator_target,
+            None,
+            Json(ReadCrossCellTransactionInput {
+                account_id: "123456789012".into(),
+                transaction_id,
+                routing_key: transaction_id.to_vec(),
+            }),
+        )
+        .await
+        .unwrap()
+        .output
+        .0;
+    assert_eq!(unresolved.len(), 1);
+    assert_eq!(unresolved[0].position, 1);
     storage
         .finish_decided_cross_cell_transaction("123456789012", &transaction_id, transaction_id)
         .await
@@ -4277,39 +4293,6 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         directory.path().join("restored-coordinator"),
     )
     .unwrap();
-    let proof = CellCatalog::new(layout.clone(), left_target.tenant())
-        .lookup(left_target.cell_id())
-        .await
-        .unwrap()
-        .unwrap();
-    let authority = CellAuthority::new(layout.clone());
-    let idle = authority
-        .load(left_target.cell_id())
-        .await
-        .unwrap()
-        .unwrap();
-    let incarnation = IncarnationId::from_bytes([14; 16]);
-    let restored_data = restored_host
-        .runtime()
-        .acquire_idle_restored(
-            proof,
-            CellReplica::new(
-                layout.clone(),
-                *left_target.cell_id().as_bytes(),
-                *incarnation.as_bytes(),
-                Limits::default(),
-            )
-            .unwrap(),
-            authority,
-            idle,
-            directory.path().join("restored-left.sqlite"),
-            Owner {
-                session: next_session,
-                endpoint: "https://restored-data.internal:8081".into(),
-            },
-        )
-        .await
-        .unwrap();
     let account_proof = CellCatalog::new(layout.clone(), account.tenant())
         .lookup(account.cell_id())
         .await
@@ -4366,6 +4349,36 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     let restored_coordinator = restored_host
         .runtime()
         .local_handle(coordinator_proof, &coordinator_control)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        next_route
+            .partitions
+            .iter()
+            .all(|partition| partition.partition_id != left_id)
+    );
+    restored_provisioner
+        .recover_transaction_participants(
+            &coordinator_target,
+            &CellClient::local(application.registry(), restored_coordinator.clone()),
+            &recovery_nodes,
+        )
+        .await
+        .unwrap();
+    let source_proof = CellCatalog::new(layout.clone(), left_target.tenant())
+        .lookup(left_target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let source_control = CellAuthority::new(layout.clone())
+        .load(left_target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let restored_data = restored_host
+        .runtime()
+        .local_handle(source_proof, &source_control)
         .await
         .unwrap()
         .unwrap();
