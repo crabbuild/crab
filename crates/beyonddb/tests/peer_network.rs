@@ -30,7 +30,7 @@ use crab_cell_runtime::client::CellClient;
 use crab_cell_runtime::control::authority::CellAuthority;
 use crab_cell_runtime::ltx::{CellStorageLayout, DiskBudget, Host};
 use crab_cell_runtime::node::{NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain};
-use crab_cell_runtime::peer::{PeerPrincipal, PeerSigner};
+use crab_cell_runtime::peer::{PeerPrincipal, PeerRoundTrip, PeerSigner};
 use crab_cell_runtime::registry::BuildDescriptor;
 use crab_cell_runtime::{
     SqlWorkerPool,
@@ -38,7 +38,7 @@ use crab_cell_runtime::{
 };
 use crab_storage::Store;
 use ed25519_dalek::SigningKey;
-use extenddb_auth::StoredCredential;
+use extenddb_auth::{CredentialStore, StoredCredential};
 use extenddb_core::types::{
     AttributeDefinition, BillingMode, KeySchemaElement, KeyType, ScalarAttributeType,
 };
@@ -425,6 +425,41 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     )
     .await
     .unwrap();
+    let remote_credentials =
+        CellCredentialStore::new(client.clone(), layout.clone(), ENCRYPTION_KEY);
+    let peer_job = owner.runtime().try_reserve_worker_job().unwrap().unwrap();
+    let round_trip = PeerHttpRoundTrip::new(
+        Arc::new(BeyonddbPeerScope),
+        CellAuthority::new(layout.clone()),
+        peer_directory.clone(),
+        Arc::new(client_tls.client_identity()),
+        remote_session,
+    );
+    // Admission precedes envelope parsing, so a held slot cannot dispatch
+    // even this invalid input. A retry delay must not extend the deadline.
+    assert!(matches!(
+        round_trip.send(account.clone(), vec![0], 500).await,
+        Err(crab_cell_runtime::Error::Deadline)
+    ));
+    assert!(matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            round_trip.send(account.clone(), vec![0], 2_500),
+        )
+        .await
+        .unwrap(),
+        Err(crab_cell_runtime::Error::Capacity("peer HTTP admission"))
+    ));
+    let lookup = remote_credentials.lookup_credential(ACCESS_KEY);
+    tokio::pin!(lookup);
+    // A real peer admission slot is busy. The lookup must pace its retry,
+    // keeping authentication pending until capacity becomes available.
+    tokio::select! {
+        result = &mut lookup => panic!("credential lookup completed during peer overload: {}", result.is_ok()),
+        () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+    }
+    drop(peer_job);
+    assert_eq!(lookup.await.unwrap().unwrap().account_id, "123456789012");
     let authorization = CellAuthorizationStore::new(CellClient::local_runtime(
         application.registry(),
         owner.runtime(),

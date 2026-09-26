@@ -314,6 +314,18 @@ The two-node fixture has also exposed retryable coordinator movement-budget
 exhaustion under its eight-Cell admission cap; this is an availability boundary,
 not evidence of a conflicting transaction decision.
 
+Peer admission is another independent availability boundary. A reproduced
+large-transaction credential lookup failed after two immediate peer retries
+both encountered an occupied codec slot. The HTTP transport had reported these
+503 responses as `CellNotActive`. The receiver now supplies `Retry-After: 1`;
+the shared transport waits within the original deadline before its one retry,
+reloads ownership, and reports capacity if admission remains full. Unknown
+mutation outcomes are still never retried at this layer. A real-slot regression
+holds peer admission during a remote credential lookup and releases it before
+the paced retry. Separate assertions exercise deadline exhaustion and persistent
+capacity. This addresses transient admission contention; it does not provide
+owner activation or unlimited admission under sustained load.
+
 A second host regression publishes and resolves ABORT after both an account
 participant and a data participant receive their first input chunk. It then
 delivers the remaining chunks and delayed prepares. Both prepares reject with

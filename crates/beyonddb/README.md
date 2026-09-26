@@ -268,8 +268,10 @@ recovery discovers registered coordinators and their immutable participant owner
 public traffic starts. Keyed reads, Query, Scan, and same-Cell transactional
 reads now reject unresolved intents; range checks include pending creates.
 A mixed-participant host test restores account, data, and coordinator owners
-and finishes a pending transaction with concurrent drivers. These barriers
-fail closed and do not yet resolve decisions on demand.
+and finishes a pending transaction with concurrent drivers. The Cell barriers
+fail closed; the adapter helps resolve a blocking terminal decision before
+retrying Get, Query, or Scan. An undecided or unavailable coordinator remains
+a retryable error.
 A supervised serving worker now rotates through locally admitted coordinator
 shards, resumes abandoned BEGIN records, and finishes terminal decisions. It
 processes at most one pending transaction per tick, advances past failures,
