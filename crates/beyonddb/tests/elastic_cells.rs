@@ -8,6 +8,7 @@ mod elastic_cells {
     mod transaction_reads;
     mod transaction_recovery;
     pub(crate) mod transaction_visibility;
+    mod ttl_transactions;
 }
 
 use std::{
