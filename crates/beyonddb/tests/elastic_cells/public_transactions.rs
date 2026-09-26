@@ -97,6 +97,10 @@ pub(super) async fn assert_lost_replies_and_canceled_token_reuse(
         Err(StorageError::IdempotentMismatch)
     ));
 
+    lost.store(0, Ordering::SeqCst);
+    assert_large_participant_payloads(&storage, &infos).await;
+    assert_eq!(lost.load(Ordering::SeqCst), 15);
+
     let new_item = Item::from([("id".into(), AttributeValue::S("canceled-retry".into()))]);
     let not_exists = Expr::Function {
         name: "attribute_not_exists".into(),
@@ -189,4 +193,74 @@ pub(super) async fn assert_lost_replies_and_canceled_token_reuse(
     )
     .await;
     runtime.shutdown().await.unwrap();
+}
+
+async fn assert_large_participant_payloads(storage: &CellStorage, infos: &[TableKeyInfo; 2]) {
+    let keys: Vec<_> = (0..10)
+        .map(|i| Item::from([("id".into(), AttributeValue::S(format!("large-{i}")))]))
+        .collect();
+    let items: Vec<_> = keys
+        .iter()
+        .enumerate()
+        .map(|(i, key)| {
+            let mut item = key.clone();
+            let payload = if i == 0 {
+                format!("{}{}", "\0".repeat(160 * 1024), "🙂".repeat(20 * 1024))
+            } else {
+                "x".repeat(320 * 1024)
+            };
+            item.insert("payload".into(), AttributeValue::S(payload));
+            item
+        })
+        .collect();
+    let maps = ExpressionMaps::default();
+    let ops: Vec<_> = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| TransactWriteOp::Put {
+            key_info: &infos[i % 2],
+            item,
+            condition: None,
+            maps: &maps,
+            return_values_on_ccf: Default::default(),
+            stream: None,
+        })
+        .collect();
+    // Reuse a resident shard with a different token; payload tests should not
+    // depend on movement budget left by the surrounding owner-recovery fixture.
+    let existing = coordinator_target(&infos[0].account_id, b"lost-public-phases").unwrap();
+    let token = (0..100_000)
+        .map(|i| format!("large-payload-{i}"))
+        .find(|token| {
+            coordinator_target(&infos[0].account_id, token.as_bytes()).unwrap() == existing
+        })
+        .unwrap();
+    let identity = || IdempotencyKey {
+        account_id: &infos[0].account_id,
+        token: &token,
+        fingerprint: "large-put",
+    };
+    storage
+        .transact_write_items(&ops, Some(identity()))
+        .await
+        .unwrap();
+    for (i, key) in keys.iter().enumerate() {
+        assert_eq!(
+            storage.get_item(&infos[i % 2], key).await.unwrap(),
+            Some(items[i].clone())
+        );
+    }
+    for (i, key) in keys.iter().enumerate() {
+        storage
+            .delete_item(&infos[i % 2], key, false, None, &maps, None)
+            .await
+            .unwrap();
+    }
+    assert!(matches!(
+        storage.transact_write_items(&ops, Some(identity())).await,
+        Err(StorageError::IdempotentReplay)
+    ));
+    for (i, key) in keys.iter().enumerate() {
+        assert_eq!(storage.get_item(&infos[i % 2], key).await.unwrap(), None);
+    }
 }

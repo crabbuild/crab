@@ -4,7 +4,7 @@ CREATE TABLE ddb_transactions (
     coordinator_key BLOB,
     request_digest BLOB,
     state INTEGER NOT NULL CHECK (state IN (0, 1, 2)),
-    staged BLOB
+    staged_chunks INTEGER
 );
 
 CREATE TABLE ddb_transaction_reads (

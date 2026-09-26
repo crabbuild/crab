@@ -83,15 +83,7 @@ impl Command for PutItem {
                 }
             }
         }
-        context.sql(&statement(
-            "INSERT INTO ddb_items (table_id, item_key, item) VALUES (?1, ?2, ?3) \
-             ON CONFLICT(table_id, item_key) DO UPDATE SET item = excluded.item",
-            vec![
-                SqlValue::Text(table.id),
-                SqlValue::Blob(key),
-                SqlValue::Blob(serde_json::to_vec(&input.item)?),
-            ],
-        ))?;
+        write_item(context, &table.id, &key, &input.item)?;
         Ok(CommandResult::Success(Json(ItemMutationOutcome::Applied(
             old,
         ))))
@@ -262,15 +254,7 @@ impl Command for UpdateItem {
                 UpdateItemOutcome::InvalidItem,
             )));
         }
-        context.sql(&statement(
-            "INSERT INTO ddb_items (table_id, item_key, item) VALUES (?1, ?2, ?3) \
-             ON CONFLICT(table_id, item_key) DO UPDATE SET item = excluded.item",
-            vec![
-                SqlValue::Text(table.id),
-                SqlValue::Blob(key),
-                SqlValue::Blob(serde_json::to_vec(&new)?),
-            ],
-        ))?;
+        write_item(context, &table.id, &key, &new)?;
         Ok(CommandResult::Success(Json(UpdateItemOutcome::Applied {
             old,
             new,
@@ -326,11 +310,13 @@ impl Query for GetItem {
         if let Some(conflict) = transaction::read_key_conflict(context, &table.id, &key)? {
             return Ok(Json(GetItemOutcome::Conflict(conflict)));
         }
-        let rows = context.sql(&statement(
-            "SELECT item FROM ddb_items WHERE table_id = ?1 AND item_key = ?2",
-            vec![SqlValue::Text(table.id), SqlValue::Blob(key)],
-        ))?;
-        Ok(Json(GetItemOutcome::Found(decode_item(&rows[0])?)))
+        Ok(Json(GetItemOutcome::Found(
+            crate::item_storage::StoredItem::Account {
+                table_id: &table.id,
+                key: &key,
+            }
+            .read(|batch| context.sql(batch))?,
+        )))
     }
 }
 
@@ -468,11 +454,13 @@ impl Query for TransactGet {
             if transaction::read_key_conflict(context, &table.id, &key)?.is_some() {
                 return Ok(Json(TransactionGetOutcome::Conflict { index }));
             }
-            let rows = context.sql(&statement(
-                "SELECT item FROM ddb_items WHERE table_id = ?1 AND item_key = ?2",
-                vec![SqlValue::Text(table.id), SqlValue::Blob(key)],
-            ))?;
-            output.push(decode_item(&rows[0])?);
+            output.push(
+                crate::item_storage::StoredItem::Account {
+                    table_id: &table.id,
+                    key: &key,
+                }
+                .read(|batch| context.sql(batch))?,
+            );
         }
         Ok(Json(TransactionGetOutcome::Found(output)))
     }
@@ -498,24 +486,20 @@ fn command_item(
     table_id: &str,
     key: &[u8],
 ) -> Result<Option<Item>> {
-    let rows = context.sql(&statement(
-        "SELECT item FROM ddb_items WHERE table_id = ?1 AND item_key = ?2",
-        vec![
-            SqlValue::Text(table_id.to_owned()),
-            SqlValue::Blob(key.to_vec()),
-        ],
-    ))?;
-    decode_item(&rows[0])
+    crate::item_storage::StoredItem::Account { table_id, key }.read(|batch| context.sql(batch))
 }
 
-pub(crate) fn decode_item(result: &SqlResultSet) -> Result<Option<Item>> {
-    let Some(row) = result.rows.first() else {
-        return Ok(None);
-    };
-    let [SqlValue::Blob(item)] = row.as_slice() else {
-        return Err(Error::Command("invalid account item row"));
-    };
-    Ok(Some(serde_json::from_slice(item)?))
+fn write_item(
+    context: &CommandContext<'_, '_>,
+    table_id: &str,
+    key: &[u8],
+    item: &Item,
+) -> Result<()> {
+    context.sql(&statement(
+        "INSERT INTO ddb_items (table_id, item_key, item) VALUES (?1, ?2, X'') ON CONFLICT(table_id, item_key) DO UPDATE SET item = excluded.item",
+        vec![SqlValue::Text(table_id.into()), SqlValue::Blob(key.to_vec())],
+    ))?;
+    crate::item_storage::StoredItem::Account { table_id, key }.append(context, item)
 }
 
 pub(crate) fn item_key(item: &Item, key_schema: &[KeySchemaElement]) -> Result<Vec<u8>> {

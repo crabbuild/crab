@@ -91,14 +91,12 @@ impl Query for ScanItems {
                 let [SqlValue::Blob(key)] = row.as_slice() else {
                     return Err(Error::Command("invalid scan key row"));
                 };
-                let item_rows = context.sql(&statement(
-                    "SELECT item FROM ddb_items WHERE table_id = ?1 AND item_key = ?2",
-                    vec![
-                        SqlValue::Text(table.id.clone()),
-                        SqlValue::Blob(key.clone()),
-                    ],
-                ))?;
-                let Some(item) = decode_item(&item_rows[0])? else {
+                let Some(item) = crate::item_storage::StoredItem::Account {
+                    table_id: &table.id,
+                    key,
+                }
+                .read(|batch| context.sql(batch))?
+                else {
                     return Err(Error::Command("scan key has no item"));
                 };
                 let encoded_bytes = serde_json::to_vec(&item)?.len();

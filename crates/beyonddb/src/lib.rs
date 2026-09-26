@@ -5,6 +5,7 @@ mod backend;
 mod catalog;
 mod credentials;
 mod expression_wire;
+mod item_storage;
 mod items;
 mod participant;
 mod partition;
@@ -15,6 +16,7 @@ mod split;
 mod table;
 mod tags;
 mod transaction_coordinator;
+mod transaction_payload;
 mod transaction_token;
 mod ttl;
 
@@ -250,8 +252,10 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
                 source.update(include_bytes!("lib.rs"));
                 source.update(include_bytes!("table.rs"));
                 source.update(include_bytes!("items.rs"));
+                source.update(include_bytes!("item_storage.rs"));
                 source.update(include_bytes!("items/transaction.rs"));
                 source.update(include_bytes!("participant.rs"));
+                source.update(include_bytes!("transaction_payload.rs"));
                 source.update(include_bytes!("items/scan.rs"));
                 source.update(include_bytes!("expression_wire.rs"));
                 source.update(include_bytes!("routing.rs"));

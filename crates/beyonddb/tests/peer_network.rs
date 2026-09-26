@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+mod support;
+
 mod peer_network {
     pub(super) mod recovery;
 }
@@ -551,6 +553,18 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
             Some(&AwsAttributeValue::S("atomic".into()))
         );
     }
+    let large = support::LargeTransaction::write(
+        &sdk,
+        (0..10)
+            .map(|i| {
+                (
+                    ["NetworkData", "RemoteTable"][i % 2].into(),
+                    format!("large-{i}"),
+                )
+            })
+            .collect(),
+    )
+    .await;
     shutdown_tx.send(()).unwrap();
     server.await.unwrap().unwrap();
     owner_lease.cancel();
@@ -727,6 +741,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .unwrap();
     assert_eq!(cross_owner_read.item(), Some(&item));
     recovery::assert_recovered_images(&replacement_sdk).await;
+    large.assert_recovered(&replacement_sdk).await;
     assert!(
         replacement_provisioner
             .takeover_expired_partition(

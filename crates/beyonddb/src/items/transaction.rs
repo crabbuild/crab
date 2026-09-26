@@ -134,15 +134,7 @@ fn apply(context: &mut CommandContext<'_, '_>, staged: Vec<StagedImage>) -> Resu
             continue;
         }
         if let Some(item) = image.image {
-            context.sql(&statement(
-                "INSERT INTO ddb_items (table_id, item_key, item) VALUES (?1, ?2, ?3) \
-                 ON CONFLICT(table_id, item_key) DO UPDATE SET item = excluded.item",
-                vec![
-                    SqlValue::Text(image.table_id),
-                    SqlValue::Blob(image.key),
-                    SqlValue::Blob(serde_json::to_vec(&item)?),
-                ],
-            ))?;
+            write_item(context, &image.table_id, &image.key, &item)?;
         } else {
             context.sql(&statement(
                 "DELETE FROM ddb_items WHERE table_id = ?1 AND item_key = ?2",

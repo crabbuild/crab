@@ -237,6 +237,13 @@ intents, one authoritative decision record, idempotent resolution, and
 recovery after owner loss. Routing writes to several Cells without that
 protocol cannot implement `TransactWriteItems`. See [the elastic topology
 design](SCALING.md) for split, routing, recovery, and validation requirements.
+Transaction request/intent payloads use bounded SQL chunks while remaining in
+one local command. Item and saved-read images also use bounded BLOB transfers,
+including JSON images larger than 1 MiB after escaping. The signed SDK fixtures
+cover multi-MiB transactions and replay across owner/process restart. Aggregate
+evaluated Update limits and transactions exceeding the encoded Cell RPC limit
+remain qualification gaps.
+
 The [cross-Cell transaction protocol](CROSS_CELL_TRANSACTIONS.md) specifies
 the decision, lock, visibility, and failure-recovery contract.
 Account and data Cells persist prepared write images, immutable read images,
