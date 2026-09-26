@@ -1152,6 +1152,47 @@ not isolate the causes of the higher p99 from shared-host contention, observer
 overhead, peer forwarding or provider work. All but one write used object proof;
 peak in-flight pairs were 1, 1, 2, and 3. It was not a saturation experiment.
 
+**Retained action-phase audit:** the same run's joined write traces separate
+the following durations. Each stage contains 300 acknowledgements. Values
+below use nearest-rank percentiles of those individual observations; phases
+overlap and their percentiles must not be added or subtracted.
+
+| Measured interval | 3 nodes: p50 / p99, ms | 20 nodes: p50 / p99, ms |
+| --- | ---: | ---: |
+| Client HTTP write | 24.938 / 49.403 | 41.334 / 248.667 |
+| Typed command invocation | 16.723 / 34.959 | 23.578 / 127.108 |
+| Worker admission and queue | 0.023 / 0.178 | 0.031 / 1.990 |
+| Worker execution, including capture | 1.590 / 3.943 | 1.806 / 7.791 |
+| LTX capture within execution | 0.401 / 2.539 | 0.474 / 4.038 |
+| Proof task wait | 11.148 / 23.482 | 13.724 / 95.988 |
+| Durable confirmation | 0.265 / 1.288 | 0.259 / 7.501 |
+| HTTP boundary time outside typed invocation | 5.192 / 14.035 | 13.131 / 73.302 |
+
+The last row subtracts the nested invocation duration from response-ready
+duration **for each request first**, on the same entry node. It includes
+unattributed work before and after the invocation, not a measured routing or
+authentication phase. Proof wait starts when its task is polled and is not a
+complete object-store RPC timer. The worker queue includes admission before
+dispatch; the capture interval is nested inside worker execution.
+
+The slowest 20-node write, submission
+`5392fa77-b319-5b36-b0e4-7361d870b4cb`, took 431.292 ms at the client:
+429.190 ms to HTTP response readiness, 209.458 ms in the typed invocation,
+170.727 ms in proof wait, 4.134 ms executing on the worker, and 0.398 ms in
+capture. That request spent 219.732 ms outside the typed invocation. Its
+worker queue was 0.013 ms. This trace directs investigation toward the wider
+HTTP path and durability wait; it does not support attributing this particular
+tail to LTX encoding or the cold-read interference measured in finding 9.
+
+Retained inputs are `load-{3,5,10,20}-stage.traces/actions.jsonl` under the
+external `ci-fleet-36251209972/` evidence directory. The derived
+`derived-phase-audit.json` records input hashes, per-phase distributions and
+the five slowest writes at each stage. These are observations from the
+concentrated, lightly loaded `a3638ef7e55` fleet, not a current-source capacity
+result. Add separate timings for authorization/catalog work, client preparation,
+owner resolution, response enrichment and provider attempts before choosing
+the next service-latency fix; repeat after actual ownership convergence.
+
 The subsequent `6fc1bbc1ceb` fault driver refused to kill an owner because no
 Cell remained on an unaffected owner. Its failure is retained in `fault.log`;
 no fault report or during-arrivals recovery result was produced. Keep this
