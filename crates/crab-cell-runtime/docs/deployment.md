@@ -333,7 +333,11 @@ listed, candidate, reachable, grace, eligible, and deleted counts.
 If eligible objects exceed the selected deletion bound, the command returns an
 incomplete-retention error and deliberately leaves the release in
 `Maintenance`. Repeat the identical activation command and expected revision;
-the operation re-marks authority before deleting the next bounded batch. Start
+the operation re-marks authority before deleting the next bounded batch. Each
+retry selects the same next unused session identity as competing executors;
+conditional creation admits only one. It advances past permanently retired
+identities and never revives a withdrawn session. After advertising, it checks
+the exact maintenance release again before opening any Cell. Start
 the fleet only after the activation returns a `Ready` release.
 
 ## Deploy on Kubernetes

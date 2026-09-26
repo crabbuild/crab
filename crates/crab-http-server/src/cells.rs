@@ -1440,8 +1440,8 @@ pub(crate) async fn enter_maintenance(
         MAINTENANCE_DRAIN_TIMEOUT,
     )
     .await?;
+    let lease_session = maintenance_session(&directory, maintenance.operation()).await?;
     if maintenance.state() == ReleaseState::Ready {
-        let lease_session = SessionId::from_bytes(*maintenance.operation().as_bytes());
         if let Some(stale) = directory.load(lease_session, unix_now_ms()?).await? {
             directory.withdraw(&stale, unix_now_ms()?).await?;
         }
@@ -1488,7 +1488,7 @@ pub(crate) async fn enter_maintenance(
     let lease = OfflineAdvertisement::new(
         directory.clone(),
         peer_tls.signing_key().clone(),
-        SessionId::from_bytes(*maintenance.operation().as_bytes()),
+        lease_session,
         config.cells.peer_advertise.to_string(),
         peer_tls.fleet(),
         peer_tls.certificate(),
@@ -1529,6 +1529,22 @@ pub(crate) async fn enter_maintenance(
     }
 }
 
+async fn maintenance_session(directory: &NodeDirectory, operation: RequestId) -> Result<SessionId> {
+    let mut session = SessionId::from_bytes(*operation.as_bytes());
+    // Contenders choose the same unused slot and strict-create elects one.
+    // Advance only over permanent tombstones: retries must never revive a
+    // withdrawn session or bypass a still-advertised maintenance executor.
+    while directory.is_retired(session).await? {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"crab-offline-maintenance-session-v1");
+        hasher.update(session.as_bytes());
+        let mut next = [0; 16];
+        next.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+        session = SessionId::from_bytes(next);
+    }
+    Ok(session)
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "offline release, fleet and runtime authorities remain explicit"
@@ -1553,6 +1569,13 @@ async fn complete_maintenance_inventory(
     let lease_shutdown = CancellationToken::new();
     let mut heartbeat = tokio::spawn(lease.run(advertised, lease_shutdown.clone()));
     let operation = async {
+        // A delayed retry may publish its fresh slot after another executor
+        // completed the release. Prove the fence again before opening any Cell.
+        if releases.load().await?.as_ref().map(|value| value.record()) != Some(&maintenance) {
+            return Err(Error::Config(
+                "Cell maintenance release changed before execution",
+            ));
+        }
         let migrated =
             migrate_maintenance_inventory(layout, identity, router, inspect_persisted_work).await;
         let shutdown = runtime.shutdown().await;
@@ -2632,7 +2655,7 @@ mod tests {
             .await
             .unwrap();
         let directory = NodeDirectory::new(layout, fleet, image, registry.release_digest());
-        let session = SessionId::from_bytes([62; 16]);
+        let session = maintenance_session(&directory, operation).await.unwrap();
         let first = OfflineAdvertisement::new(
             directory.clone(),
             SigningKey::from_bytes(&[63; 32]),
@@ -2646,7 +2669,7 @@ mod tests {
             1,
         );
         let observed = first.publish_initial().await.unwrap();
-        let contender = OfflineAdvertisement::new(
+        let mut contender = OfflineAdvertisement::new(
             directory.clone(),
             SigningKey::from_bytes(&[63; 32]),
             session,
@@ -2689,6 +2712,27 @@ mod tests {
             .unwrap()
             .state(),
             ReleaseState::Maintenance
+        );
+        let next = maintenance_session(&directory, operation).await.unwrap();
+        assert_ne!(next, session);
+        assert!(directory.is_retired(session).await.unwrap());
+        contender.session = next;
+        let resumed = contender.publish_initial().await.unwrap();
+        assert_eq!(
+            maintenance_session(&directory, operation).await.unwrap(),
+            next
+        );
+        let mut duplicate = contender;
+        duplicate.progress += 1;
+        assert!(duplicate.publish_initial().await.is_err());
+        assert!(first.publish_initial().await.is_err());
+        directory
+            .withdraw(&resumed, unix_now_ms().unwrap())
+            .await
+            .unwrap();
+        assert_ne!(
+            maintenance_session(&directory, operation).await.unwrap(),
+            next
         );
     }
 

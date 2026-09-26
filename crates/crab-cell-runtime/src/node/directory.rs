@@ -129,6 +129,19 @@ impl NodeDirectory {
         Ok(advertisement.expires_at_ms > now_ms)
     }
 
+    /// Reports whether an exact session has a permanent canonical tombstone.
+    ///
+    /// Missing or advertised sessions return false. This does not grant ownership
+    /// or permit reuse of the retired identity.
+    pub async fn is_retired(&self, session: SessionId) -> Result<bool> {
+        let path = self.layout.node_path(session.as_bytes());
+        let Some((record, _)) = self.load_record_at(&path).await? else {
+            return Ok(false);
+        };
+        validate_record_path(&self.layout, record.session(), &path)?;
+        Ok(matches!(record, NodeRecord::Tombstone(_)))
+    }
+
     pub(super) fn validate(&self, advertisement: &NodeAdvertisement, now_ms: i64) -> Result<()> {
         advertisement.validate_at(now_ms)?;
         advertisement.verify_signature()?;

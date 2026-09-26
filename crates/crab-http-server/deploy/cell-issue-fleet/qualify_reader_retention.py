@@ -88,7 +88,7 @@ def main() -> None:
               "project": config["name"], "started_at": datetime.now(timezone.utc).isoformat()}
     if args.resume:
         previous = json.loads(output.read_text())
-        for key in ("runtime_source", "image", "original_report_sha256", "project"):
+        for key in ("original_report_sha256", "project"):
             if previous[key] != report[key]:
                 raise RuntimeError(f"resumed {key} does not match the original receipt")
         if (len(previous.get("passes", [])) != 1 or previous["passes"][0]["counts"]["complete"]
@@ -96,6 +96,8 @@ def main() -> None:
             raise RuntimeError("resume requires exactly one incomplete bounded sweep")
         previous["resumed_by"] = report["runner_source"]
         previous["resumed_at"] = report["started_at"]
+        previous["resume_runtime_source"] = report["runtime_source"]
+        previous["resume_image"] = image
         report = previous
 
     def save():
