@@ -23,8 +23,6 @@ pub struct PartitionTransactWriteInput {
     pub epoch: u64,
     /// Item writes and condition checks in request order.
     pub operations: Vec<TransactionWrite>,
-    /// Client request token committed with the item mutations.
-    pub idempotency: Option<crate::transaction_token::TransactionToken>,
 }
 
 /// Result of one partition-local transactional write.
@@ -32,10 +30,6 @@ pub struct PartitionTransactWriteInput {
 pub enum PartitionTransactWriteOutcome {
     /// Every write and its query index entry committed.
     Applied,
-    /// This token and payload already committed in this Cell.
-    Replay,
-    /// This token belongs to another request payload.
-    Mismatch,
     /// No operation committed.
     Rejected {
         /// Position of the failing operation.
@@ -79,22 +73,6 @@ impl Command for PartitionTransactWrite {
         if spec.table.id != input.table_id {
             return Ok(rejected(PartitionTransactWriteOutcome::StaleRoute));
         }
-        if let Some(token) = input.idempotency.as_ref() {
-            if crate::account_target(&token.account_id)?.tenant() != context.target().tenant() {
-                return Err(crate::Error::Identity(
-                    "transaction token reached the wrong tenant",
-                ));
-            }
-            match crate::transaction_token::applied_token(context, token)? {
-                crate::transaction_token::AppliedToken::Fresh => {}
-                crate::transaction_token::AppliedToken::Replay => {
-                    return Ok(rejected(PartitionTransactWriteOutcome::Replay));
-                }
-                crate::transaction_token::AppliedToken::Mismatch => {
-                    return Ok(rejected(PartitionTransactWriteOutcome::Mismatch));
-                }
-            }
-        }
         if spec.epoch != input.epoch {
             return Ok(rejected(PartitionTransactWriteOutcome::StaleRoute));
         }
@@ -115,9 +93,6 @@ impl Command for PartitionTransactWrite {
             Err(reason) => return Ok(rejected(reason.single_outcome())),
         };
         apply_staged(context, &spec.table.key_schema, staged)?;
-        if let Some(token) = input.idempotency.as_ref() {
-            crate::transaction_token::record_applied_token(context, token)?;
-        }
         Ok(CommandResult::Success(Json(
             PartitionTransactWriteOutcome::Applied,
         )))

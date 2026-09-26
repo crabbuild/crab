@@ -2,25 +2,27 @@
 
 ## Contract and current boundary
 
-This is the implementation contract for `TransactWriteItems` and
-`TransactGetItems` when their primary keys route to different Cells. It is a
-design, not a claim that the API works today. The adapter currently rejects
-cross-partition requests in `src/backend/data.rs`. A routed single-Cell write
-is one `PartitionTransactWrite` command and a single-Cell read is one
-`PartitionTransactGet` query. The account token claim records a retry
-destination, not a transaction outcome. Account and data Cells now have internal prepare,
-lock, and resolution commands. Sharded coordinator Cells store immutable
-participant sets and terminal decisions. The ExtendDB adapter does not yet
-drive this protocol or acquire a cross-Cell read snapshot, so the API remains
-unsupported. Account and data Cell reads reject unresolved intents instead of
-returning live images that could predate an already-published commit.
+This document distinguishes the implemented write protocol from the remaining
+read and recovery work. Public `TransactWriteItems` now routes Put, Delete,
+Update, and ConditionCheck through a durable coordinator, including requests
+confined to one Cell. Account and data Cells prepare, lock, and resolve their
+operations. The adapter returns success only after every participant apply is
+published. Token lookup precedes current table routing and uses that same
+coordinator authority. The earlier account claims and local token receipts
+have been removed.
+
+`TransactGetItems` still uses one local snapshot when all requested keys share
+a Cell; cross-Cell reads remain explicitly unsupported. Account and data
+reads reject unresolved intents instead of returning live images that could
+predate an already-published commit. This is write-path enablement, not full
+DynamoDB compatibility or fleet-scale qualification.
 
 Each coordinator now indexes records with unresolved participants and exposes
 bounded cursor pages. A new owner can discover both undecided and decided
 work after restoring its published Cell state. An internal resolver can now
 finish a terminal decision across account and data Cell participants, using participant
 state after an ambiguous reply and recording each resolution durably. An
-internal write driver can also resume a published `BEGIN`: it reads the
+write driver can also resume a published `BEGIN`: it reads the
 immutable participant payloads, prepares in Cell order, records receipts,
 publishes one decision, and finishes resolution before returning that decision.
 Concurrent resumes and lost prepare/decision replies use durable state as the
@@ -35,7 +37,7 @@ split sources absent from the current table route. Participant payloads are
 stored separately, so target discovery does not read item images.
 The private peer listener is available during resolution so recovering nodes
 can reach one another; the public DynamoDB listener starts after recovery.
-Changed-endpoint takeover and public adapter admission remain to be built.
+Changed-endpoint coordinator takeover and continuous recovery remain to be built.
 
 The ExtendDB `DataEngine` contract requires all writes, the account-scoped
 client token, and stream capture to commit together. Its engine validates up
@@ -167,7 +169,7 @@ Cell targets; its stored participant set is never rewritten. The fingerprint
 is supplied by ExtendDB, computed from `TransactItems` independently of data
 Cell routing. Replay reads the terminal decision and returns the existing
 outcome without reapplying writes. A mismatched fingerprint fails. Retain the
-token outcome for at least the external ten-minute replay window measured
+successful token outcome for the external ten-minute replay window measured
 from completion; retain undecided records and participant resolution evidence
 until every participant is resolved, regardless of age. After the replay
 window, safe garbage collection requires a terminal decision, all-resolution
@@ -175,16 +177,18 @@ proof, and no split or backup pin. Reuse after expiry starts a new transaction.
 
 The coordinator records `completed_at_ms` atomically when the last unresolved
 participant receipt is recorded. Repeated resolution receipts do not move it.
-Token lookup and admission retain every unresolved record, regardless of its
-creation or decision age. After ten minutes from completion, admission may
-unlink the old token slot and bind a new transaction/fingerprint. It keeps the
-old decision and participant rows so delayed phase requests retain their
-original identity; history garbage collection is still outstanding.
+Token lookup and admission retain every unresolved record, regardless of age.
+After ten minutes from successful completion, admission may unlink the old
+token slot and bind a new transaction/fingerprint. A fully resolved `ABORT`
+unlinks its token immediately: ExtendDB's SQLite backend rolls token storage
+back with canceled writes, so a corrected condition or released lock must
+allow the same request to retry. Releasing before all aborts resolve could
+leave two attempts competing with unfinished intents.
 
-The coordinator token path is not yet the public adapter's token path. The
-adapter still uses account claims and Cell-local receipts. Their migration to
-a common admission authority, and signed cross-Cell replay across splits,
-remain API enablement gates.
+Both cases keep the old decision and participant rows, so delayed phase
+requests retain their original identity. History garbage collection is still
+outstanding. Signed cross-Cell replay across a live split remains a qualification
+gate; host tests already verify route-independent token replay.
 
 ## Visibility and transactional reads
 
@@ -261,7 +265,7 @@ coordinator record. It never reroutes participant keys or reconstructs the
 request from an HTTP retry. It reads one participant payload at a time and
 prepares them in their persisted Cell-ID order. Participant-local failures
 map back to the original operation index before the abort decision is stored.
-The same indexed conflict outcome now feeds the one-Cell write path, which
+The same indexed conflict outcome feeds single-Cell public requests and
 returns `TransactionCanceled` with ordered reasons instead of the single-item
 `TransactionConflictException`.
 
@@ -273,16 +277,22 @@ driver still completes from durable state. Aborted transactions release their
 locks and preserve both original item images. The SDK test checks ordered
 write cancellation and rollback alongside transactional read cancellation.
 
-The driver is internal: public request admission, token lookup/replay across
-routing changes, coordinator provisioning, continuous recovery, and account
-participants still need integration. These tests do not constitute a signed
-cross-Cell `TransactWriteItems` acceptance test or a fleet-scale qualification.
+`tests/elastic_cells/public_transactions.rs` exercises the public storage
+adapter against mixed account/data participants. It drops replies after BEGIN,
+prepare, decision, and resolution; verifies durable recovery, token replay and
+mismatch; and retries a canceled token after its condition becomes satisfiable.
+`tests/server_binary.rs` sends signed AWS SDK writes to two primary keys in
+different data Cells through the serving binary against RustFS, then checks
+replay and both values after a hard kill and restart. The two-owner mTLS test
+also checks a transaction and token replay through a replacement frontend.
+These tests do not establish continuous recovery or fleet-scale qualification.
 
 Coordinator token tests restore historical BEGIN, partially resolved COMMIT,
 and completed COMMIT snapshots. They verify indefinite pinning of unresolved
 work, a fresh replay window after delayed completion, mismatch rejection,
 route-independent replay, and reuse with a new fingerprint after expiry.
-The owner-restart test discovers the token before and after fenced recovery.
+The owner-restart test discovers the pending token, then verifies its release
+after fenced recovery resolves every abort.
 SQL query plans use the token and transaction-ID indexes rather than scanning
 coordinator history.
 
@@ -339,7 +349,8 @@ by table ID and canonical item key. Account Scan conservatively fences the
 unvisited range, including pending creates without live rows. The account
 participant test checks these barriers and their persistence across owner
 restart; SQLite query plans use covering primary-key lookups for item, range,
-and table fences and an owner index for lock cleanup; cross-Cell API admission remains closed. TTL candidate reads are internal hints; deletion still uses the
+and table fences and an owner index for lock cleanup. Cross-Cell transactional
+reads remain unsupported. TTL candidate reads are internal hints; deletion still uses the
 lock-aware item command. Usage/statistics queries do not expose item images.
 
 The prior branch behavior returned live images without checking intents.
@@ -347,32 +358,29 @@ The prior branch behavior returned live images without checking intents.
 addresses that unsafe visibility path, while the following API and recovery
 gates remain necessary.
 
-## Required implementation and proof
+## Remaining implementation and proof
 
-1. Add coordinator schema/commands and a bounded recovery cursor. The
-   coordinator now records a per-transaction unresolved count, indexed cursor
-   pages, immutable `BEGIN`, and one terminal decision. The direct Cell test
-   covers discovery of unfinished work after owner restart. Fenced startup
-   recovery consumes those pages and resolves account and data participants; continuous
-   serving-time recovery and changed-endpoint takeover remain outstanding.
-2. Add participant prepare, resolution, and key-lock records. Wire all
-   mutation siblings and strong keyed reads through the conflict check before
-   allowing cross-Cell requests. Account and data Cell mutations and reads now check locks; account
-   table deletion and initial route publication also reject prepared intents. Preserve the one-Cell
-   fast path only if it obeys the same conflict and token rules.
-3. Make split seal reject outstanding intents, retain old owners until replay
-   and resolution are safe, and prove restart at every split boundary.
-4. Add the adapter coordinator driver, ambiguous-reply resolution, ordered
-   failures, transactional read locking, and the ExtendDB stream/index effects.
-5. Exercise a signed AWS SDK request across two primary keys on distinct
-   Cells, then restart coordinator and both participants from object storage.
-   Inject failure after each prepare, immediately before/after decision
-   publication, during each apply, and during split. Verify no partial
-   outcome through `GetItem`, `TransactGetItems`, `Query`, and `Scan`; verify
-   replay and mismatch across restart. Load-test coordinator distribution and
-   bounded recovery with the 10,000-Cell, multi-TB target.
+1. Add bounded continuous recovery, coordinator passivation and activation,
+   fleet placement, and changed-endpoint coordinator takeover. The serving
+   binary admits 64 active Cells per node, while token routing can select 4,096
+   coordinator shards per account. Current shards remain resident; ordinary
+   transaction traffic can exhaust that pool. Startup registry recovery alone
+   is insufficient for the 10,000-Cell, multi-TB target.
+2. Add cross-Cell transactional read locking and read-triggered write
+   resolution. Preserve the account and data read barriers while doing so.
+3. Integrate ExtendDB stream and index effects with participant commit. The
+   current public adapter rejects unsupported capture/index behavior.
+4. Qualify signed token replay across live splits, restart at each split
+   boundary, and coordinator loss before/after each decision and apply. Host
+   tests cover immutable participants, split fences, and dropped replies;
+   signed process tests cover two-Cell writes and hard restart. These are
+   complementary evidence, not the complete distributed failure matrix.
+5. Bound retained coordinator/participant history without removing evidence
+   needed by delayed invocations, splits, or backups. Measure distribution,
+   recovery backlog, throughput and latency at 1,000 and 10,000 active Cells
+   with multi-TB data.
 
-Until that proof passes, keep the explicit cross-Cell `Unsupported` response.
-Returning success after a coordinator decision alone would leave an SDK
-caller able to observe partial application, and returning cancellation after
-an ambiguous decision could hide a committed transaction.
+Keep cross-Cell `TransactGetItems` explicitly unsupported until its snapshot
+protocol is verified. Public writes must continue to wait for all participant
+resolutions: success after the decision alone could expose partial application;
+cancellation after an ambiguous decision could hide a committed transaction.

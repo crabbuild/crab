@@ -182,3 +182,65 @@ impl CellInitialPartitionProvisioner {
         Ok(true)
     }
 }
+
+impl crate::CoordinatorProvisioner for CellInitialPartitionProvisioner {
+    fn ensure<'a>(
+        &'a self,
+        client: &'a CellClient,
+        account_id: &'a str,
+        routing_key: &'a [u8],
+    ) -> extenddb_storage::BoxedFuture<'a, Result<(), StorageError>> {
+        Box::pin(async move {
+            let account = account_target(account_id).map_err(provision_error)?;
+            let target =
+                crate::coordinator_target(account_id, routing_key).map_err(provision_error)?;
+            let shard = u32::from_be_bytes(
+                target
+                    .partition()
+                    .try_into()
+                    .map_err(|_| StorageError::Internal("invalid coordinator partition".into()))?,
+            );
+            let input = crate::RegisterCoordinatorShardInput {
+                account_id: account_id.into(),
+                shard,
+            };
+            if client
+                .query::<crate::ReadCoordinatorRegistration>(&account, None, Json(input.clone()))
+                .await
+                .map_err(cell_error)?
+                .output
+                .0
+            {
+                return Ok(());
+            }
+            let observed = CellAuthority::new(self.layout.clone())
+                .load(target.cell_id())
+                .await
+                .map_err(provision_error)?;
+            if observed.as_ref().is_some_and(|record| {
+                record.value().owner.is_some() && record.value().root.is_some()
+            }) {
+                // Another node may have published this shard before registration.
+                // Keep its authority; the routed client will reach that owner.
+                self.cataloged(&target, crate::transaction_coordinator::MODULE)
+                    .await?;
+            } else {
+                self.admit_module(
+                    &target,
+                    crate::transaction_coordinator::MODULE,
+                    initialize_coordinator,
+                )
+                .await?;
+            }
+            client
+                .command::<crate::RegisterCoordinatorShard>(
+                    &account,
+                    crate::backend::mutation_identity()?,
+                    Json(input),
+                )
+                .await
+                .map_err(cell_error)?;
+            Ok(())
+        })
+    }
+}

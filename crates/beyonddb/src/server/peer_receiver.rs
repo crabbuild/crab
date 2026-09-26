@@ -25,7 +25,7 @@ use crab_cell_runtime::registry::Registry;
 use crab_cell_runtime::{Error, Result};
 
 use super::BeyonddbPeerScope;
-use crate::{DATA_MODULE, DATA_NAMESPACE, MODULE, NAMESPACE, credentials};
+use crate::{DATA_MODULE, DATA_NAMESPACE, MODULE, NAMESPACE, credentials, transaction_coordinator};
 
 const INVOKE_ACTION: &str = "beyonddb.cell.invoke";
 
@@ -52,6 +52,9 @@ impl PeerCellResolver for LocalResolver {
                 NAMESPACE => MODULE,
                 DATA_NAMESPACE => DATA_MODULE,
                 namespace if namespace == credentials::NAMESPACE => credentials::MODULE,
+                namespace if namespace == transaction_coordinator::NAMESPACE => {
+                    transaction_coordinator::MODULE
+                }
                 _ => return Err(Error::CatalogCollision),
             };
             let code = resolver

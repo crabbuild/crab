@@ -354,7 +354,11 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
     };
     let condition_key = (0..32)
         .map(|index| format!("condition-{index}"))
-        .find(|id| range(id) == range("process"))
+        .find(|id| range(id) != range("process"))
+        .unwrap();
+    let second_write_key = (0..32)
+        .map(|index| format!("transaction-{index}"))
+        .find(|id| range(id) != range("process"))
         .unwrap();
     let initial_tags = sdk
         .list_tags_of_resource()
@@ -570,12 +574,12 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         ("id".into(), AttributeValue::S("process".into())),
         ("value".into(), AttributeValue::S("updated".into())),
     ]);
-    let update = |value: &str| {
+    let update = |id: &str, value: &str| {
         TransactWriteItem::builder()
             .update(
                 Update::builder()
                     .table_name("ProcessData")
-                    .key("id", AttributeValue::S("process".into()))
+                    .key("id", AttributeValue::S(id.into()))
                     .update_expression("SET #v = :v")
                     .expression_attribute_names("#v", "value")
                     .expression_attribute_values(":v", AttributeValue::S(value.into()))
@@ -598,14 +602,16 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
     };
     sdk.transact_write_items()
         .client_request_token("process-update-check")
-        .transact_items(update("updated"))
+        .transact_items(update("process", "updated"))
+        .transact_items(update(&second_write_key, "updated"))
         .transact_items(check("attribute_not_exists(id)"))
         .send()
         .await
         .unwrap();
     sdk.transact_write_items()
         .client_request_token("process-update-check")
-        .transact_items(update("updated"))
+        .transact_items(update("process", "updated"))
+        .transact_items(update(&second_write_key, "updated"))
         .transact_items(check("attribute_not_exists(id)"))
         .send()
         .await
@@ -613,7 +619,8 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
     assert!(
         sdk.transact_write_items()
             .client_request_token("process-update-check")
-            .transact_items(update("different"))
+            .transact_items(update("process", "different"))
+            .transact_items(update(&second_write_key, "different"))
             .transact_items(check("attribute_not_exists(id)"))
             .send()
             .await
@@ -621,7 +628,8 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
     );
     assert!(
         sdk.transact_write_items()
-            .transact_items(update("rolled back"))
+            .transact_items(update("process", "rolled back"))
+            .transact_items(update(&second_write_key, "rolled back"))
             .transact_items(check("attribute_exists(id)"))
             .send()
             .await
@@ -633,7 +641,8 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
     wait_healthy(&mut restarted, public, &log);
     sdk.transact_write_items()
         .client_request_token("process-update-check")
-        .transact_items(update("updated"))
+        .transact_items(update("process", "updated"))
+        .transact_items(update(&second_write_key, "updated"))
         .transact_items(check("attribute_not_exists(id)"))
         .send()
         .await
@@ -646,6 +655,17 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         .await
         .unwrap();
     assert_eq!(read.item(), Some(&updated));
+    let second = sdk
+        .get_item()
+        .table_name("ProcessData")
+        .key("id", AttributeValue::S(second_write_key.clone()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        second.item().unwrap().get("value"),
+        Some(&AttributeValue::S("updated".into()))
+    );
     let recovered_batch = read_batch().send().await.unwrap();
     let recovered = &recovered_batch.responses().unwrap()["ProcessData"];
     assert!(batch_items.iter().all(|item| recovered.contains(item)));

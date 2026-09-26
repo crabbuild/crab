@@ -61,23 +61,6 @@ CREATE TABLE ddb_ttl_schedule (
 );
 INSERT INTO ddb_ttl_schedule (singleton, last_table) VALUES (1, NULL);
 
-CREATE TABLE ddb_transaction_claims (
-    token TEXT PRIMARY KEY,
-    fingerprint TEXT NOT NULL,
-    destination BLOB NOT NULL,
-    created_at_ms INTEGER NOT NULL
-);
-CREATE INDEX ddb_transaction_claims_age ON ddb_transaction_claims (created_at_ms);
-
-CREATE TABLE ddb_transaction_applied (
-    account_id TEXT NOT NULL,
-    token TEXT NOT NULL,
-    fingerprint TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (account_id, token)
-);
-CREATE INDEX ddb_transaction_applied_age ON ddb_transaction_applied (created_at_ms);
-
 CREATE TABLE ddb_coordinator_shards (
     shard INTEGER PRIMARY KEY CHECK (shard BETWEEN 0 AND 4095)
 );

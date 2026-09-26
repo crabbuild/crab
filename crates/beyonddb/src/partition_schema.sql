@@ -25,15 +25,6 @@ CREATE TABLE ddb_partition_ttl (
     ready INTEGER NOT NULL CHECK (ready IN (0, 1))
 );
 
-CREATE TABLE ddb_transaction_applied (
-    account_id TEXT NOT NULL,
-    token TEXT NOT NULL,
-    fingerprint TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (account_id, token)
-);
-CREATE INDEX ddb_transaction_applied_age ON ddb_transaction_applied (created_at_ms);
-
 CREATE TABLE ddb_partition_transaction_locks (
     item_key BLOB PRIMARY KEY,
     partition_key BLOB NOT NULL,

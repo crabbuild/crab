@@ -279,14 +279,20 @@ async fn tokens_pin_unfinished_work_and_replay_original_routes_until_completion_
                     .await
                     .unwrap();
             }
-            // Completion, rather than the ancient BEGIN/decision time, starts replay.
-            assert!(matches!(
-                read(token).await.unwrap().output.0,
-                ReadCoordinatorTokenOutcome::Found {
-                    transaction_id: [10, ..],
-                    ..
-                }
-            ));
+            // Successful completion starts replay; fully resolved aborts release
+            // the token slot like ExtendDB's rolled-back SQLite transaction.
+            let outcome = read(token).await.unwrap().output.0;
+            if original_decision == CoordinatorDecision::Begin {
+                assert_eq!(outcome, ReadCoordinatorTokenOutcome::Missing);
+            } else {
+                assert!(matches!(
+                    outcome,
+                    ReadCoordinatorTokenOutcome::Found {
+                        transaction_id: [10, ..],
+                        ..
+                    }
+                ));
+            }
         } else {
             assert_eq!(
                 read(active_token).await.unwrap().output.0,

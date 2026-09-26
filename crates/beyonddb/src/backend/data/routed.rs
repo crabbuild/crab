@@ -18,6 +18,21 @@ impl CellStorage {
         key_info: &TableKeyInfo,
         key: &Item,
     ) -> Result<Option<(CellTarget, u64)>, StorageError> {
+        self.routed_partition(key_info, key)
+            .await?
+            .map(|(partition_id, epoch)| {
+                data_target(&key_info.account_id, &key_info.table_id, &partition_id)
+                    .map(|target| (target, epoch))
+                    .map_err(|error| StorageError::Internal(error.to_string()))
+            })
+            .transpose()
+    }
+
+    pub(in crate::backend) async fn routed_partition(
+        &self,
+        key_info: &TableKeyInfo,
+        key: &Item,
+    ) -> Result<Option<([u8; 16], u64)>, StorageError> {
         let hash = data_key_hash(&key_info.table_id, key, &key_info.base_key_schema)
             .map_err(|error| StorageError::Validation(error.to_string()))?;
         let account = target(&key_info.account_id)?;
@@ -41,11 +56,7 @@ impl CellStorage {
             PartitionLookupOutcome::Routed {
                 partition_id,
                 epoch,
-            } => Ok(Some((
-                data_target(&key_info.account_id, &key_info.table_id, &partition_id)
-                    .map_err(|error| StorageError::Internal(error.to_string()))?,
-                epoch,
-            ))),
+            } => Ok(Some((partition_id, epoch))),
         }
     }
 
