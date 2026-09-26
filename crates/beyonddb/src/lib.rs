@@ -77,8 +77,14 @@ const DATA_NAMESPACE: NamespaceId = NamespaceId::from_bytes([0x43; 16]);
 const APPLICATION: ApplicationId = ApplicationId::from_bytes([0x42; 16]);
 /// Stable Cell application identity for BeyondDB storage layouts.
 pub const APPLICATION_ID: ApplicationId = APPLICATION;
-static SCHEMA: std::sync::LazyLock<String> =
-    std::sync::LazyLock::new(|| format!("{}\n{}", participant::SCHEMA, include_str!("schema.sql")));
+static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "{}\n{}\n{}",
+        crab_cell_runtime::primitives::capacity::SCHEMA,
+        participant::SCHEMA,
+        include_str!("schema.sql")
+    )
+});
 const OPERATION_BYTES: u32 = 4 * 1024 * 1024 + 64 * 1024;
 
 static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {

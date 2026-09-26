@@ -151,6 +151,8 @@ impl Command for WriteBlob {
                 "workflow_runs",
                 "blob_objects",
                 "cron_schedules",
+                "CaPaCiTy_total",
+                "capacity_reservations",
                 "sqlite_schema",
             ] {
                 assert!(
@@ -319,12 +321,19 @@ fn authorizer_blocks_runtime_tables_and_indirect_trigger_or_view_access() {
     let transaction = connection.transaction().unwrap();
     install_blob_schema(&transaction).unwrap();
     install_cron_schema(&transaction).unwrap();
+    transaction
+        .execute_batch(crab_cell_runtime::primitives::capacity::SCHEMA)
+        .unwrap();
     for sql in [
         "SELECT commit_sequence FROM sys_meta",
         "SELECT object_key FROM blob_objects",
         "SELECT schedule_id FROM cron_schedules",
         "DELETE FROM blob_objects",
         "DELETE FROM cron_schedules",
+        "SELECT pages FROM capacity_total",
+        "SELECT pages FROM capacity_reservations",
+        "UPDATE capacity_total SET pages = 0",
+        "DELETE FROM capacity_reservations",
         "SELECT commit_sequence FROM app_runtime_metadata",
         "INSERT INTO app_items(id, name) VALUES (1, 'blocked by trigger')",
         "PRAGMA user_version",

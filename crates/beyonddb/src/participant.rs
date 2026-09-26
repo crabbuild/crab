@@ -150,24 +150,30 @@ pub(crate) fn prepared(
     Ok(None)
 }
 
+pub(crate) struct PreparedPayload {
+    pub bytes: Vec<u8>,
+    pub operations: usize,
+}
+
 pub(crate) fn record_prepare<'a>(
     context: &mut CommandContext<'_, '_>,
     transaction_id: [u8; 16],
     coordinator_cell: [u8; 32],
     digest: blake3::Hash,
-    staged: Vec<u8>,
+    staged: PreparedPayload,
     coordinator_key: &[u8],
     read_result: impl Iterator<Item = Option<&'a Item>>,
 ) -> Result<()> {
     if coordinator_key.is_empty() || coordinator_key.len() > 128 {
         return Err(Error::Command("invalid coordinator routing key"));
     }
-    let chunks = crate::transaction_payload::write(context, transaction_id, 0, &staged)?;
+    let chunks = crate::transaction_payload::write(context, transaction_id, 0, &staged.bytes)?;
     context.sql(&statement(
         "INSERT INTO ddb_transactions (transaction_id, coordinator_cell, request_digest, state, staged_chunks, coordinator_key) VALUES (?1, ?2, ?3, 0, ?4, ?5)",
         vec![SqlValue::Blob(transaction_id.to_vec()), SqlValue::Blob(coordinator_cell.to_vec()),
              SqlValue::Blob(digest.as_bytes().to_vec()), SqlValue::Integer(chunks), SqlValue::Blob(coordinator_key.to_vec())],
     ))?;
+    reserve_apply(context, transaction_id, &staged, chunks)?;
     // Persist images with prepare so recovery never re-reads live rows. COMMIT
     // releases locks but keeps these images until the response can be fetched.
     for (position, item) in read_result.enumerate() {
@@ -186,6 +192,41 @@ pub(crate) fn record_prepare<'a>(
         }
     }
     Ok(())
+}
+
+fn reserve_apply(
+    context: &CommandContext<'_, '_>,
+    transaction_id: [u8; 16],
+    staged: &PreparedPayload,
+    chunks: i64,
+) -> Result<()> {
+    if !(1..=100).contains(&staged.operations) {
+        return Err(Error::Command("invalid reservation operation count"));
+    }
+    let overflow = || Error::Command("transaction reservation size overflow");
+    let chunks = u64::try_from(chunks).map_err(|_| overflow())?;
+    let payload = u64::try_from(staged.bytes.len()).map_err(|_| overflow())?;
+    // Pinned SQLite permits 20 B-tree levels, adds at most two siblings per
+    // level, and reuses old pages; 44 covers root expansion too. Per key, 16
+    // edits cover eight item edits, five lock edits, and two saved-read edits.
+    let edits = (staged.operations as u64 * 16)
+        .checked_add(chunks)
+        .and_then(|value| value.checked_add(16))
+        .ok_or_else(overflow)?;
+    let page_size = u64::from(context.database_page_size()?);
+    let tree_bytes = edits
+        .checked_mul(44)
+        .and_then(|value| value.checked_add(2))
+        .and_then(|value| value.checked_mul(page_size))
+        .ok_or_else(overflow)?;
+    // The payload allowance covers new image/key overflow pages independently
+    // of the staged pages reclaimed at resolution. Extra tree edits cover the
+    // reserve, total, phase record, runtime receipt, expiry index, and metadata.
+    let bytes = payload
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(tree_bytes))
+        .ok_or_else(overflow)?;
+    context.reserve_database_capacity(&transaction_id, bytes)
 }
 
 pub(crate) fn resolve(
@@ -262,6 +303,14 @@ pub(crate) fn resolve(
     } else {
         None
     };
+    // Release the participant's page claim inside this command, before
+    // any apply or cleanup allocations. A rollback restores the reserve too;
+    // other writers cannot interleave and consume these pages during resolve.
+    if !context.release_database_capacity(&input.transaction_id)? {
+        return Err(Error::Command(
+            "prepared transaction has no capacity reservation",
+        ));
+    }
     // Reuse staged payload pages for live images instead of requiring both
     // copies to fit. Deletion, apply, lock release, and the terminal marker
     // share the command savepoint, so a failed apply restores the payload.

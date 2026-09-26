@@ -887,7 +887,7 @@ impl CellInitialPartitionProvisioner {
         }
     }
 
-    /// Split a range once its SQLite database image exceeds `max_database_bytes`.
+    /// Split a range once its occupied SQLite pages exceed `max_database_bytes`.
     ///
     /// The caller must repeat this check as part of its capacity loop. A pending
     /// split is resumed even if its source no longer crosses the threshold.

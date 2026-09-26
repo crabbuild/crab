@@ -103,6 +103,30 @@ impl CommandContext<'_, '_> {
         sql_batch(self.transaction, batch)
     }
 
+    /// Reserves database bytes under a stable key for later commands in this Cell.
+    ///
+    /// Install the capacity primitive schema first. Reusing a key requires the
+    /// same rounded page count. Reservations persist until explicitly released;
+    /// every runtime commit protects them, including its own receipt writes.
+    pub fn reserve_database_capacity(&self, key: &[u8], bytes: u64) -> Result<()> {
+        crate::primitives::capacity::reserve(self.transaction, key, bytes)
+    }
+
+    /// Releases a reservation in this command, returning whether it existed.
+    ///
+    /// Release before applying deferred work. Failure of this command restores
+    /// the reservation with the rest of the transaction.
+    pub fn release_database_capacity(&self, key: &[u8]) -> Result<bool> {
+        crate::primitives::capacity::release(self.transaction, key)
+    }
+
+    /// Returns the SQLite page size for application allocation accounting.
+    pub fn database_page_size(&self) -> Result<u32> {
+        Ok(self
+            .transaction
+            .query_row("PRAGMA page_size", [], |row| row.get(0))?)
+    }
+
     /// Writes a bounded slice into an existing application BLOB in this command.
     ///
     /// Allocate its fixed size with SQL `zeroblob` first. Only main-database
@@ -161,14 +185,20 @@ impl QueryContext<'_> {
         sql_query_batch(self.connection, batch)
     }
 
-    /// Returns the current SQLite database image size, including runtime and indexes.
-    pub fn database_bytes(&self) -> Result<u64> {
+    /// Returns occupied SQLite page bytes, including runtime and indexes but excluding the freelist.
+    pub fn database_used_bytes(&self) -> Result<u64> {
         let pages: i64 = self
             .connection
             .query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let free_pages: i64 = self
+            .connection
+            .query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
         let page_size: i64 = self
             .connection
             .query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        let pages = pages
+            .checked_sub(free_pages)
+            .ok_or(Error::Command("invalid database freelist count"))?;
         let pages =
             u64::try_from(pages).map_err(|_| Error::Command("invalid database page count"))?;
         let page_size =

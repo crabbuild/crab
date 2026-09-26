@@ -99,10 +99,11 @@ The runtime applies these rules:
   LTX tails, but the owner's mutable SQLite files remain disposable caches
 - **Bounded work**: commands, results, queues, workers, memory, and disk have explicit limits
 
-An application query can use `QueryContext::database_bytes()` to inspect its
-Cell's SQLite database image, including indexes and runtime tables. The value
-does not include WAL or LTX files, so capacity control must consider those
-separately.
+An application query can use `QueryContext::database_used_bytes()` to inspect its
+Cell's occupied SQLite pages, including indexes and runtime tables. Reusable
+freelist pages, WAL, and LTX files are excluded. Capacity control must account
+for the latter resources separately. The optional capacity primitive protects
+durable page claims for deferred work; see [runtime.md](runtime.md).
 
 Read [runtime.md](runtime.md) for the actor and failure state machines. Read [storage.md](storage.md) for identity, control, root, and LTX formats.
 

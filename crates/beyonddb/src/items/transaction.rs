@@ -208,7 +208,10 @@ impl Command for PrepareAccountTransaction {
             input.transaction_id,
             input.coordinator_cell,
             digest,
-            serde_json::to_vec(&staged)?,
+            crate::participant::PreparedPayload {
+                bytes: serde_json::to_vec(&staged)?,
+                operations: staged.len(),
+            },
             &input.coordinator_key,
             staged
                 .iter()

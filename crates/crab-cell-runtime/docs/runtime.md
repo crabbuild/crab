@@ -87,7 +87,8 @@ The worker transaction applies this procedure:
 5. Execute the registered synchronous handler
 6. Store success or durable rejection in `sys_requests`
 7. Advance `sys_meta.sequence` and derive `next_due_ms`
-8. Commit SQLite and capture every unpublished cut
+8. Validate any durable database page reservations after all receipt and metadata writes
+9. Commit SQLite and capture every unpublished cut
 
 Handler errors roll back the application savepoint. Runtime ledger updates still commit when the error is a durable business rejection. Every registered call reports its owning module, kind, outcome, and duration to the installed `CellTelemetry` sink from the thread that executed the handler, so the server can chart one primitive module without knowing its operations.
 
@@ -114,6 +115,36 @@ must maintain their invariants explicitly in the same command. It cannot grow
 the BLOB. SQLite rejects unsupported table types and writable indexed columns.
 The SQL capability integration fixture covers bounds, protected names, rollback
 on rejection/error, and byte-for-byte recovery after publication.
+
+### Durable database capacity for deferred work
+
+A Cell can install `primitives::capacity::SCHEMA` and use
+`CommandContext::reserve_database_capacity(key, bytes)` during prepare. The
+primitive rounds bytes up to pages and records a durable claim under a stable
+key. Repeating the key requires the same rounded count. The claim remains until
+an explicit release; timeouts never reclaim it. No padding BLOB is written.
+
+Before committing commands, effect deliveries, bootstrap, or migrations, the
+executor checks `page_count - freelist_count + reserved_pages <= max_page_count`.
+This check includes runtime receipts and metadata. Refusal rolls back all writes,
+leaves no receipt, and keeps a proven-rollback owner usable. A running total makes
+the check independent of the number of claims. Cells without the primitive have
+no reservation check beyond their existing SQLite capacity limit.
+
+A resolver releases its own claim before applying deferred work within the same
+command. Success publishes both together; rejection or failure restores the
+claim. The final check still protects other claims. SQL and incremental BLOB
+access cannot modify the protected `capacity_` tables. Trusted migrations must
+preserve both tables and their accounting; they are not an untrusted SQL API.
+
+This reserves SQLite page capacity only. Applications must bound their own
+future page demand, including index changes and runtime receipts. WAL, capture,
+local disk, and memory admission remain independent. `database_used_bytes`
+reports occupied pages and excludes reusable freelist pages.
+
+The runtime lifecycle capacity tests cover receipt and effect refusal, failed
+release, changed-session/address root restore, bootstrap, and migration. SQL
+capability tests cover direct access and incremental BLOB protection.
 
 ## Publish before replying
 

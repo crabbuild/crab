@@ -354,9 +354,17 @@ fn authorize(context: AuthContext<'_>, mode: AccessMode) -> Authorization {
 }
 
 fn is_protected_name(name: &str) -> bool {
-    ["sys_", "kv_", "queue_", "workflow_", "blob_", "cron_"]
-        .iter()
-        .any(|prefix| starts_with_ignore_ascii_case(name, prefix))
+    [
+        "sys_",
+        "kv_",
+        "queue_",
+        "workflow_",
+        "blob_",
+        "cron_",
+        "capacity_",
+    ]
+    .iter()
+    .any(|prefix| starts_with_ignore_ascii_case(name, prefix))
 }
 
 fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {

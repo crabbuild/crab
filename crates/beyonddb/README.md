@@ -148,7 +148,7 @@ explicitly unsupported until their token and expiry contract is implemented.
 Revocation is a durable Cell command; an inactive key is rejected by ExtendDB
 authentication and stays inactive after owner recovery.
 The provisioner can inspect a table's active data Cells, resume a pending split,
-and split one range whose SQLite database image crosses a caller-supplied
+and split one range whose occupied SQLite pages cross a caller-supplied
 threshold. That measurement includes indexes and runtime tables, but excludes
 WAL and LTX files. The account loop checks one table range per tick and can
 trigger one split per tick. The provisioner can install it in the node's task
@@ -257,7 +257,10 @@ small Updates over more than 4 MiB of stored images. The protocol document and
 `scripts/probe-transaction-size.py` record this distinction. Transactions
 use bounded binary uploads for BEGIN and prepare inputs larger than one Cell
 RPC, plus bounded recovery queries. Temporary uploads are capped and expire;
-HTTP body limits, apply headroom, and history collection remain separate gaps.
+HTTP body limits, WAL/disk/memory headroom, and history collection remain separate
+gaps. Prepare now reserves SQLite page capacity for resolution; unrelated
+commands and runtime receipts cannot spend that claim. The conservative bound
+reduces admitted transaction concurrency and still needs scale qualification.
 
 The [cross-Cell transaction protocol](CROSS_CELL_TRANSACTIONS.md) specifies
 the decision, lock, visibility, and failure-recovery contract.

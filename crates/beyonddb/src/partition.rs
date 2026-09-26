@@ -33,7 +33,8 @@ use key::index_key;
 
 pub(crate) static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
+        crab_cell_runtime::primitives::capacity::SCHEMA,
         crate::participant::SCHEMA,
         include_str!("partition_schema.sql")
     )
@@ -294,14 +295,14 @@ impl Query for ReadPartitionState {
 /// Report durable item storage in one data Cell for capacity planning.
 pub struct PartitionUsage;
 
-/// Logical item bytes and physical SQLite image size in one data Cell.
+/// Logical item bytes and occupied SQLite pages in one data Cell.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartitionUsageReport {
     /// Number of committed items in this Cell.
     pub item_count: u64,
     /// Stored JSON and key bytes, excluding SQLite page and index overhead.
     pub item_bytes: u64,
-    /// SQLite pages including indexes and runtime tables; excludes WAL and LTX files.
+    /// Occupied SQLite pages including indexes and runtime tables; excludes freelist, WAL, and LTX bytes.
     pub database_bytes: u64,
 }
 
@@ -329,7 +330,7 @@ impl Query for PartitionUsage {
                 .map_err(|_| Error::Command("negative partition item count"))?,
             item_bytes: u64::try_from(*bytes)
                 .map_err(|_| Error::Command("negative partition item bytes"))?,
-            database_bytes: context.database_bytes()?,
+            database_bytes: context.database_used_bytes()?,
         }))
     }
 }
