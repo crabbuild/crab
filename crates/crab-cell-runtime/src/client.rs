@@ -36,6 +36,7 @@ const MAX_STATE_STREAM_CHUNKS: usize = 1_024;
 #[cfg(test)]
 mod tests;
 
+mod backpressure;
 mod local;
 mod replica;
 mod routing;
@@ -468,6 +469,7 @@ pub(super) struct EncodedCommand {
 }
 
 /// Owned encoded query accepted by a local or authenticated peer transport.
+#[derive(Clone)]
 pub(super) struct EncodedQuery {
     pub(super) target: CellTarget,
     pub(super) expected: CellDescription,
@@ -482,6 +484,7 @@ pub(super) struct EncodedQuery {
 }
 
 /// Owned request-ledger lookup accepted by a routed transport.
+#[derive(Clone)]
 pub(super) struct EncodedResolve {
     pub(super) target: CellTarget,
     pub(super) expected: CellDescription,
@@ -542,6 +545,30 @@ impl CellClient {
             read_policy: ReadPolicy::CurrentOwner,
             replicas: None,
         }
+    }
+
+    /// Returns a capability with bounded waiting for owner capacity refusals.
+    ///
+    /// Clones share request and retained-input limits. Full client admission
+    /// still fails immediately. Mailbox work queues in FIFO order per Cell;
+    /// Describe uses shared client bounds only. Cells remain independent.
+    /// Only capacity refusals are retried; ambiguous commands require resolution.
+    /// The wait bound never cancels an accepted attempt. Replica reads retain
+    /// separate admission.
+    pub fn with_admission_backpressure(
+        &self,
+        requests: usize,
+        bytes: usize,
+        max_wait: std::time::Duration,
+    ) -> Result<Self> {
+        let mut client = self.clone();
+        client.transport = Arc::new(backpressure::BackpressureTransport::new(
+            self.transport.clone(),
+            requests,
+            bytes,
+            max_wait,
+        )?);
+        Ok(client)
     }
 
     /// Wires replica placement and authenticated execution at the host boundary.

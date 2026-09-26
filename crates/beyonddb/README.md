@@ -315,6 +315,12 @@ placement/activation, bounded transaction/read-image retention, and fleet qualif
 active Cells per node; busy coordinators apply retryable backpressure. See
 SCALING.md for the unqualified 10,000-Cell, multi-TB target.
 
+HTTP Cell work uses bounded FIFO mailbox admission per Cell, with independent
+queues for different Cells. The client shares a 128-call/32-MiB encoded-input
+budget and permits 50 seconds of admission waiting per transport stage. Unknown
+write outcomes still require resolution. See [concurrent admission evidence and
+remaining overload limits](SCALING.md#concurrent-request-admission).
+
 The signed SDK host test uses `CellNodeBuilder::build`, a published node
 advertisement, a renewing lease guard, and a task group. The lease task keeps
 the authoritative advertisement fresh and fences the node on terminal failure;

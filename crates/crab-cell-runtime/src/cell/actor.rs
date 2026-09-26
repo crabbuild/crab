@@ -63,11 +63,11 @@ use crate::publication::{CellDurabilitySubmitter, NodeDurabilitySlot, PendingDur
 use crate::registry::MigrationPlan;
 
 const INGRESS_REQUESTS: usize = 1_024;
-const CELL_REQUESTS: usize = 64;
+pub(crate) const CELL_REQUESTS: usize = 64;
 // A repository attribution read may reserve a 1 MiB result plus its encoded
 // request. Allow a normal burst of concurrent reads; node-wide retained-byte
 // admission remains the aggregate safety ceiling.
-const CELL_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const CELL_BYTES: usize = 16 * 1024 * 1024;
 const RENEWAL_SCAN: std::time::Duration = std::time::Duration::from_millis(100);
 const MAX_RENEWALS_IN_FLIGHT: usize = 32;
 const SQL_WALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);

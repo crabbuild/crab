@@ -4,6 +4,7 @@ mod support;
 
 mod peer_network {
     pub(super) mod capacity;
+    pub(super) mod concurrency;
     pub(super) mod global_indexes;
     pub(super) mod recovery;
     pub(super) mod table_residency;
@@ -562,6 +563,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .await
         .unwrap();
     assert_eq!(read.item(), Some(&item));
+    peer_network::concurrency::increment_without_client_retries(&sdk).await;
     peer_network::table_residency::recreate_with_remote_account(&sdk).await;
     peer_network::capacity::assert_capacity_abort(&remote_provisioner, &client, &sdk).await;
     recovery::assert_read_triggered_commit(&remote_provisioner, &client, &sdk).await;
@@ -836,6 +838,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .load()
         .await;
     let replacement_sdk = aws_sdk_dynamodb::Client::new(&replacement_sdk_config);
+    peer_network::concurrency::assert_counter(&replacement_sdk).await;
     peer_network::capacity::assert_restored_retry(&replacement_sdk).await;
     // The restored account's registry leads a new frontend to the existing
     // coordinator on the other node, preserving the original token outcome.

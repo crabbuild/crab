@@ -418,3 +418,96 @@ Verification on 2026-09-26:
   passed with `SSL_CERT_FILE=/etc/ssl/cert.pem` (8.45 seconds).
 - Strict all-target Clippy, compiled server build, Rust formatting, Python Ruff,
   and diff checks passed. No fleet-scale or multi-TB qualification was performed.
+
+## Concurrent request admission
+
+HTTP composition opts into bounded Cell-client waiting. Clones used by storage,
+credentials, and catalog share a 128-call budget and a 32-MiB retained-input
+budget. Mailbox operations acquire FIFO weighted permits per Cell, reusing the
+runtime's 64-request and 16-MiB limits. Their charge is encoded input plus maximum
+result size. Routing and execution can overlap within those bounds; distinct
+Cells remain independent. Weak gate entries are pruned on admission, bounding
+memory by admitted calls rather than historical Cell count. Runtime admission
+remains authoritative when other clients contend.
+
+Describe shares client limits and capacity retries, but does not acquire owner
+mailbox permits. The peer dispatcher returns that metadata directly. A signed
+peer burst exposed HTTP admission errors when Describe bypassed all waiting;
+timing probes then exposed waits of up to 30 seconds when it incorrectly joined
+the write mailbox queue, followed by only milliseconds of metadata work. The
+full-mailbox/Describe regression failed before correcting that distinction.
+
+Known capacity refusals receive paced retries for at most 50 seconds per
+transport stage. Commands retain identity, digest, and expected incarnation and
+revalidate expiry before every attempt. The existing mutation lifetime is
+60 seconds. Describe and execution have separate budgets; this is not one HTTP
+request deadline. Fencing, durable rejections, and ambiguous outcomes are not
+retried, including unknown publication with a capacity cause. The wait bound
+never cancels accepted work. Caller cancellation releases client permits while
+accepted runtime work retains its lifecycle.
+
+Query and resolution calls share mailbox admission. Replica reads retain their
+separate router. Unconfigured clients, provisioning, and background workers keep
+existing admission. Owner mailbox, SQL, publication, and node-memory limits are
+unchanged. The input budget covers retry-layer encoded inputs and overhead,
+not HTTP bodies, caller-owned typed inputs, transport codecs, or result memory.
+
+### Admission evidence map
+
+| Surface | Evidence / ownership |
+| --- | --- |
+| Entry / caller | Signed ExtendDB handlers use the client shared by `build_http_state` storage, credentials, and catalog. |
+| Mechanism | CellClient wraps its encoded transport; clones share request and input-byte limits and per-Cell weighted gates. |
+| Callee | Runtime transport reloads catalog/authority; local handle and authenticated peer admission remain authoritative. Describe does not call mailbox admission. |
+| Mutation safety | Prepared identity/digest/incarnation survive known refusals; peer ambiguity remains `OutcomeUnknown` and requires resolution. |
+| Siblings | Commands, queries, and resolve share mailbox policy. Describe uses shared client policy. Replica/default/background clients retain their separate paths. |
+| Regressions | Full-mailbox Describe, overlapping calls and FIFO, shared-budget cleanup, wait expiry, exact pending-mutation evidence; signed SDK burst and restart. |
+| Baseline | `origin/main` has no BeyondDB subtree; its CellClient immediately returns owner capacity errors. The preceding draft failed 47 of 50 writes. |
+
+**Is this the best fix?** The encoded client boundary owns reusable waiting,
+while HTTP composition owns its budget. Matching each transport operation to
+its actual runtime resource avoids both unbounded buffering and an unrelated
+metadata queue. About 280 production lines provide this opt-in mechanism;
+authority, publication, and outcome resolution retain their canonical paths.
+This fixes tested bursts and the Describe admission mismatch. It does not yet
+satisfy sustained-load or fleet-scale qualification.
+
+### Qualification results
+
+On 2026-09-26:
+
+- Ten Cell-client tests passed, including the full-mailbox/Describe regression
+  that failed before the source correction.
+- Signed SDK peer/restart passed in 246.37 seconds: 50 increments with SDK
+  retries disabled, exact counter after owner replacement, and existing
+  cross-Cell transaction recovery assertions.
+- Strict all-target Clippy for both changed crates, compiled-server build,
+  formatting, Cell/LTX layout, and diff checks passed.
+- The final unchanged upstream concurrency run against a fresh compiled-server
+  and RustFS pair passed both 50-writer cases, but **55 of 1,000 updates returned
+  ServiceUnavailable**. Total: two passes and one failure in 898.35 seconds.
+  The final counter-value assertion and concurrent-delete test were not reached.
+  These error codes alone do not identify whether every failed call was refused
+  before execution or had an ambiguous outcome.
+- A prior attempt with the same binary stopped during conditional writes with
+  `node lease bounds are invalid`, followed by credential lookup failure. The
+  log does not distinguish delayed publication from a wall-clock change.
+  Lease duration and terminal fencing were not relaxed for the unchanged rerun.
+- Additional unchanged upstream batch, Query/Scan, and continuation suites
+  passed at the preceding commit: 68 tests in 225.85 seconds. The separate GSI
+  and composite-key selections were not reached during the failing load runs.
+
+Intermediate trials are retained as failed evidence: a five-second retry
+window failed 35 of 50 writes; 30-second retry-only waiting failed 291 counter
+updates; a one-call FIFO gate at 30 seconds failed 122 updates; its 50-second
+variant and the initial weighted gate both hit SDK read timeouts. The final
+Describe correction removes that reproduced mailbox dependency, but the latest
+55-error result still requires diagnosis rather than another claim of success.
+
+Remaining work includes request-stage timing for those errors, hot-key
+publication throughput, operation-specific result bounds, ingress memory
+admission, and fairness across independent clients. The pinned ExtendDB
+`OpError` has no transient variant, so exhausted authorization admission still
+maps to InternalServerError. Correct classification requires an upstream
+contract change; no dependency patch is included. No 10,000-Cell or multi-TB
+qualification was performed.

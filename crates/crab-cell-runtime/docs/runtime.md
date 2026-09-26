@@ -62,6 +62,32 @@ messages retain their bounded worker queue and do not need a job permit.
 
 Cancellation of a caller doesn't cancel accepted work. The actor still records and publishes the result, so a retry can resolve it.
 
+An embedding service can opt into `CellClient::with_admission_backpressure`
+when its request budget permits waiting for owner capacity. Client clones share
+finite call-count and encoded-input byte budgets; exhausting either still fails
+immediately. Mailbox operations acquire per-Cell FIFO semaphores using the
+runtime's request and byte limits.
+The byte charge is encoded input plus the operation's maximum result size, so
+routing and execution can overlap within the owner bounds. Weighted FIFO
+admission prevents small calls from starving older large waiters. Different
+Cells have independent gates, retained only by admitted calls. Known capacity
+refusals from other callers receive paced retries until the admission
+wait expires. Commands retain their request identity, digest, and expected
+incarnation, and revalidate expiry before each attempt. Fencing and ambiguous
+outcomes are returned unchanged, including ambiguity caused by capacity during
+publication. The wait limit never cancels an accepted attempt. Describe shares
+the client budgets and capacity retry, but skips the owner mailbox gate because
+metadata description does not enter that mailbox. Queries and resolution use
+the mailbox policy; replica queries retain their
+separate admission path. Unconfigured clients retain immediate refusal.
+Each transport stage has its own wait budget; an encompassing typed or HTTP
+operation can take longer. Command expiry is still rechecked before dispatch.
+
+The input budget charges the retained envelope, one attempted copy, and envelope
+overhead. Runtime result and mailbox reservations remain authoritative. This
+does not bound HTTP request bodies or caller-owned typed inputs; the embedding
+service must account for those separately.
+
 ## Execute commands in six phases
 
 The actor completes these phases in order:

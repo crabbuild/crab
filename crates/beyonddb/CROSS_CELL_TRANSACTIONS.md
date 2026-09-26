@@ -11,6 +11,12 @@ two-phase commit with shared/exclusive item locks. It implements cross-Cell
 transactions; production compatibility, bounded resource use, and the
 10,000-Cell, multi-TB target remain qualification gates.
 
+[Transport admission](SCALING.md#concurrent-request-admission) bounds waiting
+calls across the HTTP client's clones. Known capacity refusals retain the same
+mutation identity, digest, and expected incarnation; ambiguous outcomes still
+require resolution. Waiting for capacity never substitutes for a coordinator
+decision or cancels an accepted participant command.
+
 ### One transaction, three independent keys
 
 Consider a transfer that updates `Accounts/A`, updates `Accounts/B`, and

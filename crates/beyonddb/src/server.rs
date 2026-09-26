@@ -113,6 +113,11 @@ pub fn build_http_state(
             "BeyondDB Cell node is not ready to serve".into(),
         ));
     }
+    // Pace bursts through finite mailboxes without replaying unknown writes.
+    // Leave time within the 60-second mutation lifetime for owner admission.
+    let client = client
+        .with_admission_backpressure(128, 32 * 1024 * 1024, std::time::Duration::from_secs(50))
+        .map_err(|error| StorageError::Internal(error.to_string()))?;
     let storage: Arc<dyn StorageEngine> = Arc::new(
         CellStorage::new(client.clone(), region)
             .with_transaction_coordinators(provisioner.clone())
