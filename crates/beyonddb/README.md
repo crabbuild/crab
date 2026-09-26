@@ -238,8 +238,11 @@ data Cell writes check those locks. Sharded coordinator Cells can durably
 record a participant set, prepare receipts, one commit or abort decision, and
 resolution progress. An internal driver resumes published BEGIN records from
 stored participant payloads, handles prepare/decision ambiguity, and returns
-only after participant resolution. Fenced startup recovery discovers registered
-coordinators and their immutable participant owners, then resolves unfinished work before
+only after participant resolution. Coordinator token lookup preserves original
+participants across route changes and starts the ten-minute replay window only
+after all participants resolve. Public token admission still uses account
+claims and awaits integration with this coordinator path. Fenced startup
+recovery discovers registered coordinators and their immutable participant owners, then resolves unfinished work before
 public traffic starts. Keyed reads, Query, Scan, and same-Cell transactional
 reads now reject unresolved intents; range checks include pending creates.
 These barriers fail closed and do not yet resolve decisions on demand.

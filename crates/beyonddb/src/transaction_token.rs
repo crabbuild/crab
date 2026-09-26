@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::table::statement;
 use crate::{Error, Json, MODULE, Result, SqlValue, account_target};
 
-const TOKEN_LIFETIME_MS: i64 = 10 * 60 * 1_000;
+pub(crate) const TOKEN_LIFETIME_MS: i64 = 10 * 60 * 1_000;
 
 /// A client request token already validated by ExtendDB.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

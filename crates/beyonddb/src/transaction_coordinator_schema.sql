@@ -8,7 +8,8 @@ CREATE TABLE ddb_coordinator_transactions (
     unresolved_count INTEGER NOT NULL CHECK (unresolved_count BETWEEN 0 AND 100),
     abort_reason BLOB,
     created_at_ms INTEGER NOT NULL,
-    decided_at_ms INTEGER
+    decided_at_ms INTEGER,
+    completed_at_ms INTEGER
 );
 
 CREATE UNIQUE INDEX ddb_coordinator_token

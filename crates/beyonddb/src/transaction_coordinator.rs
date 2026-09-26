@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::items::{TransactionFailure, TransactionWrite};
 use crate::table::statement;
-use crate::transaction_token::TransactionToken;
+use crate::transaction_token::{TOKEN_LIFETIME_MS, TransactionToken};
 use crate::{
     APPLICATION, Error, Json, OPERATION_BYTES, Result, SqlValue, account_target, data_target,
 };
@@ -34,7 +34,13 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
 }];
 static COMMANDS: [OperationDescriptor; 4] =
     [operation(1), operation(2), operation(3), operation(4)];
-static QUERIES: [OperationDescriptor; 4] = [operation(1), operation(2), operation(3), operation(4)];
+static QUERIES: [OperationDescriptor; 5] = [
+    operation(1),
+    operation(2),
+    operation(3),
+    operation(4),
+    operation(5),
+];
 
 const fn operation(id: u32) -> OperationDescriptor {
     OperationDescriptor {
@@ -60,6 +66,8 @@ impl crab_cell_runtime::registry::CellModule for CoordinatorModule {
                 let mut source = blake3::Hasher::new();
                 source.update(include_bytes!("transaction_coordinator.rs"));
                 source.update(include_bytes!("transaction_coordinator/phase.rs"));
+                source.update(include_bytes!("transaction_coordinator/token.rs"));
+                source.update(include_bytes!("transaction_token.rs"));
                 source.update(include_bytes!("items.rs"));
                 source.update(include_bytes!("expression_wire.rs"));
                 Digest::from_bytes(*source.finalize().as_bytes())
@@ -88,7 +96,8 @@ impl crab_cell_runtime::registry::CellModule for CoordinatorModule {
         registry.bind_query::<ReadCrossCellTransaction>()?;
         registry.bind_query::<ReadCoordinatorParticipant>()?;
         registry.bind_query::<ReadPendingCrossCellTransactions>()?;
-        registry.bind_query::<ReadUnresolvedCoordinatorParticipants>()
+        registry.bind_query::<ReadUnresolvedCoordinatorParticipants>()?;
+        registry.bind_query::<ReadCoordinatorToken>()
     }
 }
 
@@ -217,15 +226,17 @@ impl Command for BeginCrossCellTransaction {
             |token| token.fingerprint.clone(),
         );
         let rows = context.sql(&statement(
-            "SELECT transaction_id, fingerprint, request_digest, state, abort_reason \
+            "SELECT transaction_id, fingerprint, request_digest, state, abort_reason, token \
              FROM ddb_coordinator_transactions \
-             WHERE transaction_id = ?1 OR (token IS NOT NULL AND token = ?2)",
+             WHERE transaction_id = ?1 OR (token = ?2 AND \
+             (completed_at_ms IS NULL OR completed_at_ms > ?3))",
             vec![
                 SqlValue::Blob(input.transaction_id.to_vec()),
                 input
                     .token
                     .as_ref()
                     .map_or(SqlValue::Null, |token| SqlValue::Text(token.token.clone())),
+                SqlValue::Integer(context.now_ms().saturating_sub(TOKEN_LIFETIME_MS)),
             ],
         ))?;
         if rows[0].rows.len() > 1 {
@@ -240,11 +251,20 @@ impl Command for BeginCrossCellTransaction {
                 SqlValue::Blob(old_digest),
                 SqlValue::Integer(state),
                 reason,
+                old_token,
             ] = row.as_slice()
             else {
                 return Err(Error::Command("invalid coordinator transaction record"));
             };
-            if old_fingerprint != &fingerprint || old_digest.as_slice() != digest.as_bytes() {
+            // Token retries use the engine's request fingerprint. A new proposal
+            // may observe split routes; the original participant set remains fixed.
+            let same_token = input
+                .token
+                .as_ref()
+                .is_some_and(|token| old_token == &SqlValue::Text(token.token.clone()));
+            if old_fingerprint != &fingerprint
+                || (!same_token && old_digest.as_slice() != digest.as_bytes())
+            {
                 return Ok(CommandResult::Rejected(Json(
                     BeginCrossCellTransactionOutcome::Mismatch,
                 )));
@@ -304,6 +324,18 @@ impl Command for BeginCrossCellTransaction {
                 BeginCrossCellTransactionOutcome::InvalidParticipants,
             )));
         }
+        if let Some(token) = &input.token {
+            // Release only a completed token's replay slot. Keep the old decision
+            // and participant records available to delayed phase invocations.
+            context.sql(&statement(
+                "UPDATE ddb_coordinator_transactions SET token = NULL WHERE token = ?1 \
+                 AND unresolved_count = 0 AND completed_at_ms <= ?2",
+                vec![
+                    SqlValue::Text(token.token.clone()),
+                    SqlValue::Integer(context.now_ms().saturating_sub(TOKEN_LIFETIME_MS)),
+                ],
+            ))?;
+        }
         context.sql(&statement(
             "INSERT INTO ddb_coordinator_transactions \
              (transaction_id, account_id, token, fingerprint, request_digest, state, unresolved_count, created_at_ms) \
@@ -359,5 +391,7 @@ fn decode_decision(state: i64, reason: &SqlValue) -> Result<CoordinatorDecision>
 
 mod phase;
 mod registry;
+mod token;
 pub use phase::*;
 pub use registry::*;
+pub use token::*;
