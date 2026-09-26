@@ -374,6 +374,14 @@ fn validate_owner_loss(value: &Value) -> Result<()> {
 
 fn validate_fleet_only_commit(value: &Value) -> Result<()> {
     let object = as_object(value, "fleet-only commit")?;
+    let log = as_object(object_value(object, "node_log_after")?, "node log after")?;
+    if string(log, "state")? != "open"
+        || number(log, "epoch")? == 0
+        || !boolean(log, "active")?
+        || array_len(log, "member_nodes")? == 0
+    {
+        return Err(Error::Control("fleet-only active log"));
+    }
     if number(object, "owner_uncovered_bytes")? == 0
         || number(object, "follower_retained_bytes")? == 0
         || !boolean(object, "immutable_object_put_rejected")?
@@ -599,8 +607,10 @@ fn validate_follower_affinity(
         return Err(Error::Control("successor reused failed owner node"));
     }
 
+    // A fully covered log may be replaced before the follower-only write.
+    // Affinity belongs to the active log that protected that acknowledgement.
     let node_log = as_object(
-        object_value(fleet_only_commit, "node_log_before")?,
+        object_value(fleet_only_commit, "node_log_after")?,
         "node log",
     )?;
     let members = object_value(node_log, "member_nodes")?
@@ -871,7 +881,7 @@ mod tests {
             "session_after": successor_session,
         });
         let fleet_only_commit = json!({
-            "node_log_before": {"member_nodes": [successor_node]}
+            "node_log_after": {"member_nodes": [successor_node]}
         });
         let placement = json!({
             "node_a_session": "e".repeat(32),
@@ -886,7 +896,7 @@ mod tests {
         assert!(validate_follower_affinity(&owner_loss, &fleet_only_commit, &placement).is_ok());
 
         let mut invalid_fleet = fleet_only_commit.clone();
-        invalid_fleet["node_log_before"]["member_nodes"] = json!([failed_node]);
+        invalid_fleet["node_log_after"]["member_nodes"] = json!([failed_node]);
         assert!(validate_follower_affinity(&owner_loss, &invalid_fleet, &placement).is_err());
 
         let mut mismatched_placement = placement.clone();

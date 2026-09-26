@@ -177,6 +177,7 @@ fn canonical_receipt() -> Value {
                 "root": first_root,
             },
             "node_log_before": {"member_nodes": first_members},
+            "node_log_after": {"state": "open", "epoch": 2, "active": true, "member_nodes": first_members},
             "response": {"id": 1},
             "restored_labels": {"items": ["owner-loss"]},
         },
@@ -305,6 +306,31 @@ fn canonical_failover_receipt_is_accepted() {
     ));
     let bytes = serde_json::to_vec(&published).unwrap();
     assert!(validate_cluster_receipt(&bytes, SOURCE_REVISION, IMAGE, true).is_ok());
+}
+
+#[test]
+fn follower_selection_uses_the_log_that_protected_the_acknowledged_commit() {
+    let mut receipt = canonical_receipt();
+    // A fully covered log can be replaced before the follower-only write.
+    // Its old members must not override the active log recorded after that write.
+    receipt["fleet_only_commit"]["node_log_before"] =
+        json!({"state": "open", "epoch": 1, "active": false, "member_nodes": [node(0xc3)]});
+    let bytes = serde_json::to_vec(&receipt).unwrap();
+    assert!(validate_cluster_receipt(&bytes, SOURCE_REVISION, IMAGE, false).is_ok());
+}
+
+#[test]
+fn follower_selection_requires_an_active_acknowledging_log() {
+    for (field, value) in [
+        ("state", json!("closed")),
+        ("epoch", json!(0)),
+        ("active", json!(false)),
+        ("member_nodes", json!([])),
+    ] {
+        let mut receipt = canonical_receipt();
+        receipt["fleet_only_commit"]["node_log_after"][field] = value;
+        expect_rejected(&receipt, false, "fleet-only active log");
+    }
 }
 
 #[test]
@@ -533,7 +559,7 @@ fn receipt_evidence_clauses_reject_tampering() {
             "successor was not an original follower",
             |receipt| {
                 let members = vec![node(0xa1), node(0xc3)];
-                receipt["fleet_only_commit"]["node_log_before"]["member_nodes"] = json!(members);
+                receipt["fleet_only_commit"]["node_log_after"]["member_nodes"] = json!(members);
             },
         ),
         (

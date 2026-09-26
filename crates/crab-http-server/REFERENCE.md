@@ -1723,6 +1723,16 @@ gate. Raw snapshots remain in `metrics.recovery` in the receipt. Aggregate work
 can include concurrent recovery attempts; exact recovered data and serving
 ownership are proved separately by the existing control and HTTP assertions.
 
+For the first fault, follower selection uses the active log sampled after the
+follower-only write. A fully covered startup log can be replaced before that
+write, so its membership is diagnostic evidence only. The collector requires
+the Cell owner and epoch to remain unchanged across the write, then checks the
+acknowledging log's epoch and membership again immediately before the kill.
+The receipt validator requires that active log and binds the successor and
+selection evidence to its members. The second fault already checks its sole
+replacement member after the write; the object-covered fallback separately
+requires a successor outside the failed log's members.
+
 The deterministic evidence tests run without Docker:
 
 ```sh
