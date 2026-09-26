@@ -5,6 +5,7 @@ use super::*;
 pub(super) struct RuntimeInner {
     pub(super) sender: mpsc::Sender<Message>,
     pub(super) resources: ResourceLedger,
+    pub(super) primitive_jobs: Arc<Semaphore>,
     pub(super) shutting_down: AtomicBool,
     pub(super) accepting_cells: AtomicBool,
     pub(super) session: SessionId,

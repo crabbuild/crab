@@ -4,8 +4,8 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; follow-up through `0360485311b` plus checksum batching below; compared with the fetched `origin/main` snapshot `de0bb234abc`. Peer-routing proof is recorded separately in the scaling plan. |
-| Status | Findings 1–2, streaming cleanup, and redundant decoder metadata removed; activation overlap, phase probes, and checksum I/O batching added; worker isolation, remaining checksum maintenance, memory qualification, checkpoint tails, and balanced execution qualification remain open |
+| Scope | Initial baseline `0f3f4f7617a`; committed follow-up through `3cd0bd1bfe6`, plus the routing/admission follow-up below; compared with `origin/main` snapshot `de0bb234abc`. |
+| Status | Small uploads, cache hits, streaming cleanup, decoder metadata, checksum I/O batching, and cross-worker admission improved; same-worker isolation, publication capacity, public latency, and fault-under-load qualification remain open |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
 
@@ -23,10 +23,12 @@ harness separately.
 
 | Priority | Remaining gap | First experiment |
 | --- | --- | --- |
+| P1 | Peer admission can turn provider delay into rejection or excessive waiting (15) | Concurrent hint expiry with delayed enrollment reads; bound request memory and the complete pre-dispatch wait |
 | P1 | Cross-Cell SQL worker blocking (9) | Slow one sparse Cell while reading a resident Cell on the same worker; repeat on different workers |
 | P1 | Whole-graph compaction and serial publication debt (4–5) | Sustained updates through repeated debt thresholds; compare response rate with publication rate |
 | P1 | Cleanup on the SQL worker and decoder memory (10, 13) | Body/footer buffering and unused replica indexes removed; measure remaining index, confirmation time, RSS, and sibling-Cell latency |
 | P1 | Execution load is not proven balanced (12) | Record owner/execution distribution and fixed offered load at every scale stage |
+| P1 | Capacity runs do not fault outstanding follower-only acknowledgements (16) | Kill an owner during sustained arrivals with a proven unpublished tail; verify every acknowledged request after takeover |
 | P2 | Eager checksum metadata and demand read amplification (3, 8) | First query **and first mutation**, point/random/scan workloads, cold and churned caches |
 | P2 | Checksum maintenance differs between fresh and restored Cells (14) | Hold database and changed-page count fixed; compare capture, clean handoff, host I/O calls, and allocations in both states |
 | P2 | Checkpoint tail cost and shared maintenance resources (6, 11) | Long update runs with checkpoint, hydration, and compaction interference |
@@ -37,6 +39,38 @@ phase measurements are still missing. The best next fix should remove work
 from a measured critical path while retaining the existing authority and
 durability contracts. Raising concurrency or queue capacity alone does not
 meet that criterion.
+
+## Architecture decision after this audit
+
+Keep one SQLite writer per Cell and immutable, verified LTX roots behind the
+authority CAS. The best next change is the smallest ownership change that
+removes a measured wait or repeated work while preserving those contracts.
+This is not yet a verdict that the current PR meets the performance plan.
+
+1. Complete peer admission and same-worker interference qualification first.
+   A low-latency local capture cannot compensate for an ingress rejection or
+   a worker waiting on another Cell's storage request.
+2. Make range compaction proportional to the affected metadata before adding
+   publication concurrency. Concurrent work must never create competing root
+   publishers for one Cell. If publication still cannot drain, evaluate a
+   bounded batch of consecutive cuts with one covering root and separate,
+   stable command receipts.
+3. Treat lazy checksum loading as a second design step after measuring the
+   existing eager walk. It needs authenticated old-checksum lookup and exact
+   aggregate validation; deferring validation alone is not an optimization.
+4. Give hydration an asynchronous fetch stage and a short owner-thread install
+   stage. Ordinary SQLite demand reads still use synchronous
+   [VFS callbacks](https://www.sqlite.org/c3ref/io_methods.html); an asynchronous
+   provider thread does not make an in-progress SQLite statement yield its
+   SQL worker. Worker reassignment can help idle executors but cannot move a
+   connection with an active call. Any broader scheduling change needs a
+   separate ownership design and the one-vCPU interference proof.
+
+At each step, compare the same public application action, database size,
+payload entropy, durability mode, offered arrivals, and resource profile.
+Record successful response latency, failed arrivals, publication drain, and
+recovery together. The service gate must include Entity, Shard, Workflow, and
+read-model operations through public handles, as well as the issue service.
 
 ## Findings in execution order
 
@@ -688,7 +722,117 @@ the shared SQL worker remain open. Multi-buffer overlays, disjoint writes, and
 truncate/regrow tests preserve byte equality. Public-action percentiles,
 allocation peak, and eviction interference still need qualification.
 
+### 15. Peer verification couples provider latency to scarce CPU admission
+
+**Confirmed at `3cd0bd1bfe6`:** the HTTP
+[forward handler](../../crab-http-server/src/peer.rs) reserves a primitive-job
+slot before awaiting `NodeDirectory::verify_peer_request`. That method loads
+the current signed node advertisement from storage. One slow enrollment read
+therefore holds the one-vCPU fixture's only primitive slot, and unrelated
+requests receive 503. The same coupling exists in the compared main snapshot.
+The node-log handlers load enrollment before acquiring their codec slot;
+their larger frame and follower-durability contracts need separate proof.
+
+**Follow-up fix and proof:** the public HTTP/mTLS regression sends five
+concurrent comments queries after owner-hint expiry. It reproduced 503s with
+both memory storage and RustFS; a temporary probe identified codec admission
+refusal. The receiver now decodes the bounded envelope once, releases codec
+admission during enrollment I/O, and rechecks the signed enrollment's lifetime
+before verifying the request. Request bytes remain reserved while waiting.
+The shared ingress hint removes the observed entry catalog/control reads on
+the warm path; receiving-owner authority checks remain in place.
+
+Queued codec admission uses the same resource limit as immediate admission.
+It explicitly checks the absolute deadline before waiting and after waking:
+the pinned Tokio 1.53.1 `Timeout::poll` polls a ready inner future first, so
+`timeout_at` alone admitted an already-expired request in the regression.
+Nine worker tests now pass, including expired/free-capacity admission, expiration
+when a slot opens, cancellation, timeout, shutdown, and resource accounting.
+The node-directory test separately rejects an expired enrollment even when its
+request signature remains valid. Twelve peer protocol tests preserve strict
+payload, unknown-field, duplicate-field, and signature validation.
+
+The HTTP receiver bounds enrollment, resolution, activation, dispatch waiting,
+and response encoding by the received transport budget. Initial structural
+admission uses the protocol's 60-second ceiling until the envelope's timeout
+is available; elapsed admission time still counts against that timeout. The
+budget starts after body ingress, and is distinct from the actor's five-second
+native-work deadline and the sending client's transport wait. Cancellation of
+an HTTP wait does not roll back accepted commands or change unknown-result
+resolution.
+
+The TLS regression delays enrollment GETs by one second, proves another codec
+job can run during that delay, and checks a 10 ms received budget returns 504.
+The public HTTP regression also delays only owner resolution by two seconds
+with a 500 ms received budget: it returns 504 without invoking the query
+handler, then the same signed query succeeds when the delay is removed.
+The full public application regression passes against memory storage and real
+RustFS: concurrent hint expiry, owner takeover, restored collaboration state,
+and Git clone/tag reads. These are functional proofs, not measured p95 gains.
+
+**Remaining gate:** exercise expiration during activation and accepted-command
+completion under HTTP cancellation; retain the runtime stable-identity
+cancellation regression.
+Measure admission wait, enrollment I/O, codec time, retries, 503s, and retained
+request bytes under the one-vCPU profile. Compare public p95/p99 at the same
+offered load before accepting the hint and queue changes as a performance win.
+
+### 16. Post-load recovery does not qualify acknowledged tails during load
+
+**Confirmed:** the scheduled
+[load runner](../../crab-http-server/deploy/cell-issue-fleet/load.py) waits for
+`drain_publication` before `recover_owner`, which again requires zero uncovered
+node-log bytes. It then kills one owner and verifies the latest acknowledged
+issue for one selected Cell. Every successful pair has an immediate readback,
+but the post-fault check does not revisit all successful request IDs. The
+existing README correctly labels this as published-root recovery. The separate
+[Compose cluster gate](../../crab-http-server/tests/qualify_compose_cluster.sh)
+exercises follower recovery, but it is not the scheduled capacity workload.
+
+**Impact:** the current runner cannot establish that low response latency
+remains sustainable while publication is delayed, or that every earlier
+follower-only acknowledgement survives failure during that backlog. This is
+a missing proof, not evidence of lost data. Earlier revisions of the runner
+have the same post-drain fault shape.
+
+**Change to evaluate:** add a fault phase while scheduled arrivals continue.
+Trigger from observed fleet response proof and a nonzero, position-attributed
+unpublished tail, then lose the owner's process and local data. Keep selected
+followers available for that case. Run separate follower-loss, delayed-origin,
+and ambiguous-publication cases with their declared fault budgets; a combined
+fault beyond the durability contract cannot be labeled a supported scenario.
+
+**Gate:** retain every acknowledged request ID and expected result, then query
+or resolve all of them through public handles after takeover. Count duplicate
+effects, unrecoverable results, interrupted arrivals, and recovery delay.
+Measure healthy Cells' p99 throughout the fault. The run must show that
+publication catches up after origin recovers without discarding accepted work.
+Repeat for uniform and hot/skewed workloads at 3, 5, 10, and 20 nodes, including
+compatible rollout. Record executing owners during load; a pre-load owner map
+cannot identify execution after migration.
+
 ## Safety and proof retained by the audit
+
+The follow-up audit's HTTP/mTLS test passes with both in-memory
+storage and real RustFS, including five concurrent calls after hint expiry,
+owner loss, restored collaboration state, and Git clone/tag reads. Both tests
+completed in 13.05 seconds together; that duration is not an action-latency
+sample. Focused admission, enrollment-expiry, and signature regressions pass.
+The runtime accepted-command cancellation test also passes. All-target Clippy
+with warnings denied passes for LTX, runtime, and HTTP, including the minimal
+LTX feature set. Replica-only continuation helpers now share their callers'
+feature gates. The decoder fixture helper lives in the existing test module;
+no test allow-list or warning baseline changed. Activation-delay injection,
+performance measurement, and broad CI remain open as described in finding 15.
+
+Committed-source ARM64
+[run 36224838843](https://github.com/crabbuild/crab/actions/runs/36224838843)
+built the `3cd0bd1bfe6` image but failed the Compose qualification at
+`assert_placement_parity` in `qualify_compose_cluster.sh:448`. The assertion
+compares a live advertisement's placement values with capacity and metrics
+observations. The log does not isolate which conjunct failed; do not classify
+this as an LTX latency regression, data loss, or a passing image qualification.
+Retain the failure and diagnose the snapshots before another capacity claim.
 
 The checksum batching follow-up passed 37 focused cases: two file-overlay
 cases, eleven capture/failure tests, seven modeled-crash cases, five resume
@@ -711,9 +855,8 @@ Those results prove the harness and published-root recovery, not a latency SLO.
 Streaming cleanup passed 44 host-hook tests, six bundle cases, two node-frame
 cases, ten independent format/restore cases, four minimal-feature codec cases,
 and the runtime published-root/local-prune-failure test. The LTX replica build
-passes all-target Clippy with warnings denied. The minimal-feature tests still
-emit the pre-existing unused capture/checksum warnings; no warning baseline or
-policy inventory changed. The cost runner built in release mode and completed
+passes all-target Clippy with warnings denied. At that revision the minimal-feature tests emitted unused capture/checksum
+warnings; no warning baseline or policy inventory changed. The cost runner built in release mode and completed
 the real RustFS comparison above. Remaining decoder memory and fleet latency
 gates are explicitly open.
 
@@ -721,7 +864,7 @@ The decoder follow-up passed 62 focused cases: seven replica codec, eleven
 independent format/restore, 26 sparse/exact-root, two external-vector replay,
 six minimal-feature codec, six bundle, two node-frame, and two public cleanup
 cases. Replica all-target Clippy with warnings denied and the release cost
-runner build passed; the same minimal-feature warnings remain. Deep decoder
+runner build passed; that revision retained the same minimal-feature warnings. Deep decoder
 fuzzing and the broader runtime paths are delegated to the existing CI gates.
 
 Current-source ARM64

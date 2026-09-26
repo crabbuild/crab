@@ -116,7 +116,9 @@ pub struct NodeByteReservation {
 /// Opaque node-wide worker-job reservation held until a primitive job exits.
 #[must_use = "dropping the reservation immediately releases its capacity"]
 pub struct NodeJobReservation {
+    // Return accounting before waking the next waiter on the admission gate.
     _reservation: ResourceReservation,
+    _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 /// Point-in-time node admission usage for one embedded Cell runtime.

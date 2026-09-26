@@ -213,7 +213,7 @@ fn signed_request_verifies_and_forward_preserves_payload() {
         )
         .unwrap();
     assert_eq!(
-        claimed_peer_session(&encoded).unwrap(),
+        UnverifiedPeerRequest::decode(&encoded).unwrap().session(),
         SessionId::from_bytes([1; 16])
     );
     let verifier = verifier(&signer);

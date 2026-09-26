@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU16, AtomicUsize, Ordering},
+};
 
 use axum::{
     Router,
@@ -24,6 +27,158 @@ use crate::{
     peer::now_ms,
     peer_tls::{LoadedPeerTls, PeerTlsIdentity, tests::IdentityFiles},
 };
+
+#[tokio::test]
+async fn enrollment_io_releases_codec_capacity_and_obeys_the_received_budget() {
+    use axum::extract::ConnectInfo;
+    use crab_cell_runtime::peer::{PeerOperation, PeerPrincipal, PeerSigner};
+    use crab_cell_runtime::{CellRuntime, SqlWorkerPool};
+    use object_store::throttle::{ThrottleConfig, ThrottledStore};
+    use std::time::{Duration, Instant};
+
+    let files = IdentityFiles::generate();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!(
+        "https://localhost:{}",
+        listener.local_addr().unwrap().port()
+    );
+    let loaded = LoadedPeerTls::load(&files.config(url::Url::parse(&endpoint).unwrap())).unwrap();
+    let provider = ThrottledStore::new(
+        InMemory::new(),
+        ThrottleConfig {
+            wait_get_per_call: Duration::from_secs(1),
+            ..ThrottleConfig::default()
+        },
+    );
+    let layout = CellStorageLayout::new(
+        Store::new(Arc::new(provider)),
+        ObjectPath::from("enrollment"),
+        [1; 16],
+    );
+    let release = Digest::from_bytes([2; 32]);
+    let image = Digest::from_bytes([3; 32]);
+    let session = SessionId::from_bytes([4; 16]);
+    let directory = NodeDirectory::new(layout, loaded.fleet(), image, release);
+    let now = now_ms().unwrap();
+    directory
+        .create(
+            NodeAdvertisement::sign(
+                crab_cell_runtime::identity::NodeId::from_bytes([5; 16]),
+                session,
+                endpoint.clone(),
+                loaded.fleet(),
+                loaded.certificate(),
+                image,
+                release,
+                loaded.signing_key(),
+                1,
+                now,
+                now + 15_000,
+                vec![Digest::from_bytes([6; 32])],
+                vec![1],
+                crab_cell_runtime::node::NodeFailureDomain::default(),
+                NodeCapacity::default(),
+            )
+            .unwrap(),
+            now,
+        )
+        .await
+        .unwrap();
+    let runtime = CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 1 << 20, session).unwrap();
+    let handler_runtime = runtime.clone();
+    let app = Router::new().route(
+        "/verify",
+        post(
+            move |ConnectInfo(identity): ConnectInfo<PeerTlsIdentity>, body: Bytes| {
+                let runtime = handler_runtime.clone();
+                let directory = directory.clone();
+                async move {
+                    let verification = crate::peer::verify_forwarded_request(
+                        &runtime,
+                        &directory,
+                        &identity,
+                        &body,
+                        Instant::now(),
+                    );
+                    tokio::pin!(verification);
+                    assert!(futures_util::poll!(&mut verification).is_pending());
+                    let available = runtime.try_reserve_worker_job().unwrap();
+                    assert!(
+                        available.is_some(),
+                        "provider I/O must not retain the only codec slot"
+                    );
+                    drop(available);
+                    match verification.await {
+                        Ok(_) => StatusCode::OK,
+                        Err(crate::Error::Cell(crab_cell_runtime::Error::Deadline)) => {
+                            StatusCode::GATEWAY_TIMEOUT
+                        }
+                        Err(error) => panic!("unexpected verification result: {error}"),
+                    }
+                }
+            },
+        ),
+    );
+    let tls = loaded.listener(listener);
+    let (stop, done) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            tls,
+            app.into_make_service_with_connect_info::<PeerTlsIdentity>(),
+        )
+        .with_graceful_shutdown(async {
+            let _ = done.await;
+        })
+        .await
+        .unwrap();
+    });
+    let client = loaded
+        .client_identity()
+        .client(
+            loaded.certificate(),
+            loaded.signing_key().verifying_key().to_bytes(),
+        )
+        .unwrap();
+    let signer = PeerSigner::new(session, release, loaded.signing_key().clone());
+    for (remaining, expected) in [(5_000, StatusCode::OK), (10, StatusCode::GATEWAY_TIMEOUT)] {
+        let now = now_ms().unwrap();
+        let request = signer
+            .sign(
+                PeerPrincipal {
+                    issuer: "https://identity.example".into(),
+                    subject: "caller".into(),
+                    actions: vec!["repository.read".into()],
+                },
+                now,
+                now + 10_000,
+                remaining,
+                PeerOperation::Read(peer_wire::ReadRequest {
+                    target: Some(peer_wire::Target {
+                        tenant_id: vec![7; 16],
+                        application_id: vec![1; 16],
+                        namespace_id: vec![8; 16],
+                        partition: b"repository".to_vec(),
+                    }),
+                    expected: None,
+                    timeout_ms: remaining,
+                    minimum: None,
+                    operation: Some(peer_wire::read_request::Operation::Describe(true)),
+                }),
+            )
+            .unwrap();
+        let response = client
+            .post(format!("{endpoint}/verify"))
+            .body(request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        assert_eq!(runtime.stats().primitive_jobs(), 0);
+    }
+    stop.send(()).unwrap();
+    server.await.unwrap();
+    runtime.shutdown().await.unwrap();
+}
 
 #[tokio::test]
 async fn reloads_a_stale_owner_and_pins_mtls_identity() {
@@ -149,15 +304,21 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
         })),
     })
     .unwrap();
+    let reply_status = Arc::new(AtomicU16::new(StatusCode::OK.as_u16()));
+    let attempts = Arc::new(AtomicUsize::new(0));
     let second_app = Router::new().route(
         "/internal/cells/v1/forward",
         post({
             let expected = expected.clone();
+            let reply_status = reply_status.clone();
+            let attempts = attempts.clone();
             move || {
                 let expected = expected.clone();
+                let status = StatusCode::from_u16(reply_status.load(Ordering::Relaxed)).unwrap();
+                attempts.fetch_add(1, Ordering::Relaxed);
                 async move {
                     (
-                        StatusCode::OK,
+                        status,
                         [
                             (header::CONTENT_TYPE, PROTOBUF_MEDIA_TYPE),
                             (header::CACHE_CONTROL, "no-store"),
@@ -193,6 +354,7 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
         .await
     });
     let round_trip = PeerHttpRoundTrip::new(
+        crate::peer::PeerOwnerHints::default(),
         ApplicationIdentity::new(
             TenantId::from_bytes([27; 16]),
             ApplicationId::from_bytes([21; 16]),
@@ -203,9 +365,43 @@ async fn reloads_a_stale_owner_and_pins_mtls_identity() {
         SessionId::from_bytes([31; 16]),
     );
 
-    let actual = round_trip.send(target, vec![1, 2, 3], 5_000).await.unwrap();
+    let actual = round_trip
+        .send(target.clone(), vec![1, 2, 3], 5_000)
+        .await
+        .unwrap();
 
     assert_eq!(actual, expected);
+    assert!(!round_trip.has_owner_hint(target.cell_id()));
+    for status in [
+        StatusCode::UNAUTHORIZED,
+        StatusCode::FORBIDDEN,
+        StatusCode::BAD_GATEWAY,
+        StatusCode::BAD_REQUEST,
+    ] {
+        round_trip.owner(&target, false).await.unwrap();
+        assert!(round_trip.has_owner_hint(target.cell_id()));
+        // This fixture's control is still recovering without a published root;
+        // it must not become a routable application description.
+        assert!(
+            round_trip
+                .owner_hints
+                .description(target.cell_id(), now_ms)
+                .is_none()
+        );
+        reply_status.store(status.as_u16(), Ordering::Relaxed);
+        let before = attempts.load(Ordering::Relaxed);
+        let result = round_trip.send(target.clone(), vec![1, 2, 3], 5_000).await;
+        if status == StatusCode::BAD_GATEWAY {
+            assert!(matches!(
+                result,
+                Err(crab_cell_runtime::Error::PeerTransportUnknown { .. })
+            ));
+        } else {
+            assert!(result.is_err());
+        }
+        assert_eq!(attempts.load(Ordering::Relaxed) - before, 1);
+        assert!(!round_trip.has_owner_hint(target.cell_id()), "{status}");
+    }
     first_stop.send(()).unwrap();
     second_stop.send(()).unwrap();
     first_server.await.unwrap().unwrap();

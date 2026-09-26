@@ -228,9 +228,20 @@ read. A refused or ambiguous peer attempt invalidates only the session it
 used; the existing single authoritative retry retains the original deadline
 and signed request bytes. The mTLS typed-query test observes one sender control
 read for `Describe` plus `Query` on both in-memory storage and RustFS, then
-checks invalidation after owner loss. The entry router still reads catalog and
-control on each forwarded action, so this slice does not meet packet 3's
-zero-entry-read or p95 exit gate.
+checks invalidation after owner loss. At that committed slice, the entry router
+still reads catalog and control on each forwarded action.
+
+The routing/admission follow-up shares the sender's observation with the
+entry router. Warm public reads now pass the zero-entry-catalog/control-read
+assertion while retaining receiver resolution. A five-caller expiry test
+exposed CPU admission held across enrollment I/O; splitting that I/O and
+waiting for codec capacity passes the functional regression in memory and
+against real RustFS. [Audit finding 15](ltx-performance-audit.md#15-peer-verification-couples-provider-latency-to-scarce-cpu-admission)
+records passing deadline, cancellation, shutdown, accounting, and enrollment-
+expiry tests. One received budget now covers resolution, activation, dispatch
+waiting, and reply encoding. Delayed owner resolution returns 504 without
+executing the query in memory and RustFS tests. Activation-delay injection and
+the p95 exit gate below remain open; this follow-up is not capacity qualification.
 
 Set a fixed maximum lifetime no longer than the observed node-session lease;
 do not add a public config option. Invalidate on peer refusal, stale session,
@@ -438,6 +449,15 @@ object-proof actions. A fixed 20-lane rate is not the maximum throughput.
 Every successful write must have a visible readback or durable receipt and
 survive owner loss. Reject duplicate effects and regressions in published
 root sequence.
+
+Keep the existing post-drain owner-loss smoke and add a fault during scheduled
+arrivals. The current runner drains publication before killing the owner, so
+it cannot qualify outstanding follower-only responses under load. Trigger the
+new fault from a recorded fleet acknowledgement and an uncovered tail, keep
+the required followers available, and verify every acknowledged request after
+takeover. Measure unaffected Cells during the failure as well. The exact fault
+budget and acceptance conditions are in
+[audit finding 16](ltx-performance-audit.md#16-post-load-recovery-does-not-qualify-acknowledged-tails-during-load).
 
 Verify executing-owner distribution independently of gateway distribution.
 Record owner/epoch changes, wait for the declared placement settling criterion,

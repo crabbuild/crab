@@ -29,6 +29,24 @@ pub struct NodeDirectory {
     reader_membership: Arc<RwLock<Option<advertisement::ReaderMembership>>>,
 }
 
+/// Request verifier bound to one mTLS-authenticated enrollment observation.
+pub struct EnrolledPeerVerifier {
+    advertisement: NodeAdvertisement,
+    verifier: crate::peer::PeerVerifier,
+}
+
+impl EnrolledPeerVerifier {
+    /// Verifies the signed request while rechecking the enrollment's lifetime.
+    pub fn verify(
+        &self,
+        request: crate::peer::UnverifiedPeerRequest,
+        now_ms: i64,
+    ) -> Result<crate::peer::VerifiedPeerRequest> {
+        self.advertisement.validate_at(now_ms)?;
+        self.verifier.verify_decoded(request, now_ms)
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum AdvertisementScan {
     LiveRelease,

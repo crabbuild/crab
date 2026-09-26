@@ -159,6 +159,7 @@ pub(super) async fn fixture() -> Arc<Server> {
         Arc::clone(&registry),
         cell_runtime.clone(),
         crate::cells::RepositoryCellPeer::new(
+            crate::peer::PeerOwnerHints::default(),
             crab_cell_runtime::node::NodeDirectory::new(
                 layout,
                 crab_cell_runtime::Digest::from_bytes([34; 32]),

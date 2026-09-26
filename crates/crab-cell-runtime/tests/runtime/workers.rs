@@ -16,6 +16,89 @@ use crate::support::fixtures::mutation_identity_window;
 
 const RESULT_LIMIT: usize = 1 << 20;
 
+#[tokio::test]
+async fn primitive_admission_refuses_expired_deadlines_even_with_free_capacity() {
+    use crab_cell_runtime::{CellRuntime, SessionId};
+    use std::time::{Duration, Instant};
+
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        1 << 20,
+        SessionId::from_bytes([91; 16]),
+    )
+    .unwrap();
+    let result = runtime
+        .reserve_worker_job(Instant::now() - Duration::from_millis(1))
+        .await;
+    let expired = matches!(result, Err(Error::Deadline));
+    drop(result);
+    runtime.shutdown().await.unwrap();
+    assert!(expired, "free capacity must not revive an expired request");
+}
+
+#[tokio::test]
+async fn primitive_admission_does_not_revive_an_expired_waiter_when_a_slot_opens() {
+    use crab_cell_runtime::{CellRuntime, SessionId};
+    use std::time::{Duration, Instant};
+
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        1 << 20,
+        SessionId::from_bytes([93; 16]),
+    )
+    .unwrap();
+    let held = runtime.try_reserve_worker_job().unwrap().unwrap();
+    let deadline = Instant::now() + Duration::from_millis(10);
+    let waiter = runtime.reserve_worker_job(deadline);
+    tokio::pin!(waiter);
+    assert!(futures_util::poll!(&mut waiter).is_pending());
+    tokio::time::sleep_until((deadline + Duration::from_millis(1)).into()).await;
+    drop(held);
+    assert!(matches!(waiter.await, Err(Error::Deadline)));
+    assert_eq!(runtime.stats().primitive_jobs(), 0);
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn primitive_waiters_release_accounting_on_cancel_timeout_and_shutdown() {
+    use crab_cell_runtime::{CellRuntime, SessionId};
+    use std::time::{Duration, Instant};
+
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        1 << 20,
+        SessionId::from_bytes([92; 16]),
+    )
+    .unwrap();
+    let held = runtime.try_reserve_worker_job().unwrap().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    {
+        let waiter = runtime.reserve_worker_job(deadline);
+        tokio::pin!(waiter);
+        assert!(futures_util::poll!(&mut waiter).is_pending());
+        assert_eq!(runtime.stats().primitive_jobs(), 1);
+    }
+    let timed_out = runtime
+        .reserve_worker_job(Instant::now() + Duration::from_millis(10))
+        .await;
+    assert!(matches!(timed_out, Err(Error::Deadline)));
+    assert_eq!(runtime.stats().primitive_jobs(), 1);
+    let waiter = runtime.reserve_worker_job(deadline);
+    tokio::pin!(waiter);
+    assert!(futures_util::poll!(&mut waiter).is_pending());
+    drop(held);
+    let admitted = waiter.await.unwrap();
+    assert!(runtime.try_reserve_worker_job().unwrap().is_none());
+    assert_eq!(runtime.stats().primitive_jobs(), 1);
+    let waiter = runtime.reserve_worker_job(deadline);
+    tokio::pin!(waiter);
+    assert!(futures_util::poll!(&mut waiter).is_pending());
+    runtime.shutdown().await.unwrap();
+    assert!(matches!(waiter.await, Err(Error::RuntimeClosed)));
+    drop(admitted);
+    assert_eq!(runtime.stats().primitive_jobs(), 0);
+}
+
 struct Fixture {
     _directory: tempfile::TempDir,
     cell: CellId,

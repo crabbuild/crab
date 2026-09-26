@@ -374,6 +374,7 @@ impl Harness {
             Arc::clone(&registry),
             cell_runtime.clone(),
             crate::cells::RepositoryCellPeer::new(
+                crate::peer::PeerOwnerHints::default(),
                 crab_cell_runtime::node::NodeDirectory::new(
                     cell_layout,
                     crab_cell_runtime::Digest::from_bytes([6; 32]),
