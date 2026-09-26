@@ -9,15 +9,14 @@ use beyonddb::{
 };
 use extenddb_core::types::{AttributeValue, Item};
 
-pub(crate) async fn assert_abandoned_commit(
+async fn abandon_commit(
     provisioner: &Arc<CellInitialPartitionProvisioner>,
-    tasks: &CellNodeTaskGroup,
     client: &CellClient,
-    sdk: &aws_sdk_dynamodb::Client,
-) {
+    transaction_id: [u8; 16],
+    key: &str,
+) -> (crab_cell_runtime::identity::CellTarget, String) {
     let account_id = "123456789012";
     let account = account_target(account_id).unwrap();
-    let transaction_id = [105; 16];
     provisioner
         .ensure(client, account_id, &transaction_id)
         .await
@@ -56,7 +55,7 @@ pub(crate) async fn assert_abandoned_commit(
                         table_name: name.into(),
                         table_id: table.id,
                         item: Item::from([
-                            ("id".into(), AttributeValue::S("abandoned".into())),
+                            ("id".into(), AttributeValue::S(key.into())),
                             ("value".into(), AttributeValue::S("recovered".into())),
                         ]),
                         condition: None,
@@ -98,6 +97,7 @@ pub(crate) async fn assert_abandoned_commit(
                     epoch: *epoch,
                     transaction_id,
                     coordinator_cell: *coordinator.cell_id().as_bytes(),
+                    coordinator_key: transaction_id.to_vec(),
                     operations: participant
                         .operations
                         .iter()
@@ -137,7 +137,7 @@ pub(crate) async fn assert_abandoned_commit(
         .await
         .unwrap();
     // The request disappears after one apply but before recording its receipt.
-    // Only the serving recovery loop can apply the remaining participant.
+    // The caller chooses whether a public read or the worker completes it.
     client
         .command::<ResolvePartitionTransaction>(
             &participants[0].0,
@@ -150,6 +150,22 @@ pub(crate) async fn assert_abandoned_commit(
         )
         .await
         .unwrap();
+    let pending_table = match &participants[1].1.operations[0].operation {
+        TransactionOperation::Put(input) => input.table_name.clone(),
+        _ => unreachable!(),
+    };
+    (coordinator, pending_table)
+}
+
+pub(crate) async fn assert_abandoned_commit(
+    provisioner: &Arc<CellInitialPartitionProvisioner>,
+    tasks: &CellNodeTaskGroup,
+    client: &CellClient,
+    sdk: &aws_sdk_dynamodb::Client,
+) {
+    let account_id = "123456789012";
+    let transaction_id = [105; 16];
+    let (coordinator, _) = abandon_commit(provisioner, client, transaction_id, "abandoned").await;
     provisioner
         .install_transaction_recovery_loop(tasks, CellStorage::new(client.clone(), "us-east-1"))
         .unwrap();
@@ -182,48 +198,90 @@ pub(crate) async fn assert_abandoned_commit(
     assert_recovered_images(sdk).await;
 }
 
-pub(crate) async fn assert_recovered_images(sdk: &aws_sdk_dynamodb::Client) {
-    let read = sdk
-        .transact_get_items()
-        .set_transact_items(Some(
-            ["RemoteTable", "NetworkData"]
-                .into_iter()
-                .map(|table| {
-                    aws_sdk_dynamodb::types::TransactGetItem::builder()
-                        .get(
-                            aws_sdk_dynamodb::types::Get::builder()
-                                .table_name(table)
-                                .key("id", AwsAttributeValue::S("abandoned".into()))
-                                .build()
-                                .unwrap(),
-                        )
-                        .build()
-                })
-                .collect(),
-        ))
+pub(crate) async fn assert_read_triggered_commit(
+    provisioner: &Arc<CellInitialPartitionProvisioner>,
+    client: &CellClient,
+    sdk: &aws_sdk_dynamodb::Client,
+) {
+    let transaction_id = [106; 16];
+    let (coordinator, pending_table) =
+        abandon_commit(provisioner, client, transaction_id, "read-help").await;
+    // No recovery worker is installed yet. This signed SDK read must resolve
+    // both participant receipts, including the first apply's missing receipt.
+    let result = sdk
+        .get_item()
+        .table_name(pending_table)
+        .key("id", AwsAttributeValue::S("read-help".into()))
+        .consistent_read(true)
         .send()
         .await
         .unwrap();
-    assert_eq!(read.responses().len(), 2);
-    assert!(
-        read.responses()
-            .iter()
-            .all(|response| response.item().unwrap().get("value")
-                == Some(&AwsAttributeValue::S("recovered".into())))
+    assert_eq!(
+        result.item().unwrap().get("value"),
+        Some(&AwsAttributeValue::S("recovered".into()))
     );
+    let status = client
+        .query::<beyonddb::ReadCrossCellTransaction>(
+            &coordinator,
+            None,
+            Json(beyonddb::ReadCrossCellTransactionInput {
+                account_id: "123456789012".into(),
+                transaction_id,
+                routing_key: transaction_id.to_vec(),
+            }),
+        )
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    assert_eq!(status.resolved_count, 2);
+}
 
-    for table in ["NetworkData", "RemoteTable"] {
-        let result = sdk
-            .get_item()
-            .table_name(table)
-            .key("id", AwsAttributeValue::S("abandoned".into()))
+pub(crate) async fn assert_recovered_images(sdk: &aws_sdk_dynamodb::Client) {
+    for key in ["abandoned", "read-help"] {
+        let read = sdk
+            .transact_get_items()
+            .set_transact_items(Some(
+                ["RemoteTable", "NetworkData"]
+                    .into_iter()
+                    .map(|table| {
+                        aws_sdk_dynamodb::types::TransactGetItem::builder()
+                            .get(
+                                aws_sdk_dynamodb::types::Get::builder()
+                                    .table_name(table)
+                                    .key("id", AwsAttributeValue::S(key.into()))
+                                    .build()
+                                    .unwrap(),
+                            )
+                            .build()
+                    })
+                    .collect(),
+            ))
             .send()
             .await
             .unwrap();
-        assert_eq!(
-            result.item().unwrap().get("value"),
-            Some(&AwsAttributeValue::S("recovered".into()))
+        assert_eq!(read.responses().len(), 2);
+        assert!(
+            read.responses()
+                .iter()
+                .all(|response| response.item().unwrap().get("value")
+                    == Some(&AwsAttributeValue::S("recovered".into())))
         );
+
+        for table in ["NetworkData", "RemoteTable"] {
+            let result = sdk
+                .get_item()
+                .table_name(table)
+                .key("id", AwsAttributeValue::S(key.into()))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                result.item().unwrap().get("value"),
+                Some(&AwsAttributeValue::S("recovered".into()))
+            );
+        }
     }
 }
 

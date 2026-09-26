@@ -170,6 +170,7 @@ pub(super) fn write(
 pub struct PrepareAccountTransactionInput {
     pub transaction_id: [u8; 16],
     pub coordinator_cell: [u8; 32],
+    pub coordinator_key: Vec<u8>,
     pub operations: Vec<TransactionOperation>,
 }
 
@@ -210,6 +211,7 @@ impl Command for PrepareAccountTransaction {
             input.coordinator_cell,
             digest,
             serde_json::to_vec(&staged)?,
+            &input.coordinator_key,
             staged
                 .iter()
                 .filter(|image| image.effect == StagedEffect::Read)
@@ -277,20 +279,18 @@ pub(super) fn key_locked(
         .is_empty())
 }
 
-pub(super) fn read_key_locked(
+pub(super) fn read_key_conflict(
     context: &QueryContext<'_>,
     table_id: &str,
     key: &[u8],
-) -> Result<bool> {
-    Ok(!context.sql(&lock_query(table_id, key, true))?[0]
-        .rows
-        .is_empty())
+) -> Result<Option<crate::TransactionReadConflict>> {
+    crate::participant::read_conflict(context, &context.sql(&lock_query(table_id, key, true))?[0])
 }
 
 fn lock_query(table_id: &str, key: &[u8], write_only: bool) -> SqlBatch {
     statement(
         if write_only {
-            "SELECT 1 FROM ddb_account_transaction_locks WHERE table_id = ?1 AND item_key = ?2 AND write_lock = 1"
+            "SELECT transaction_id FROM ddb_account_transaction_locks WHERE table_id = ?1 AND item_key = ?2 AND write_lock = 1 LIMIT 1"
         } else {
             "SELECT 1 FROM ddb_account_transaction_locks WHERE table_id = ?1 AND item_key = ?2"
         },

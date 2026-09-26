@@ -58,6 +58,46 @@ pub struct ReadTransactionInput {
     pub coordinator_cell: [u8; 32],
 }
 
+/// Durable identity of the exclusive intent blocking a read.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TransactionReadConflict {
+    pub transaction: ReadTransactionInput,
+    pub coordinator_key: Vec<u8>,
+}
+
+pub(crate) fn read_conflict(
+    context: &QueryContext<'_>,
+    locks: &crate::SqlResultSet,
+) -> Result<Option<TransactionReadConflict>> {
+    let Some(row) = locks.rows.first() else {
+        return Ok(None);
+    };
+    let [SqlValue::Blob(id)] = row.as_slice() else {
+        return Err(Error::Command("invalid transaction lock identity"));
+    };
+    let rows = context.sql(&statement(
+        "SELECT coordinator_cell, coordinator_key FROM ddb_transactions WHERE transaction_id = ?1 AND state = 0",
+        vec![SqlValue::Blob(id.clone())],
+    ))?;
+    let Some([SqlValue::Blob(cell), SqlValue::Blob(key)]) = rows[0].rows.first().map(Vec::as_slice)
+    else {
+        return Err(Error::Command("transaction lock has no prepared identity"));
+    };
+    Ok(Some(TransactionReadConflict {
+        transaction: ReadTransactionInput {
+            transaction_id: id
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::Command("invalid transaction ID"))?,
+            coordinator_cell: cell
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::Command("invalid coordinator Cell"))?,
+        },
+        coordinator_key: key.clone(),
+    }))
+}
+
 /// Published participant state observed after a phase invocation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ParticipantTransactionState {
@@ -112,12 +152,16 @@ pub(crate) fn record_prepare<'a>(
     coordinator_cell: [u8; 32],
     digest: blake3::Hash,
     staged: Vec<u8>,
+    coordinator_key: &[u8],
     read_result: impl Iterator<Item = Option<&'a Item>>,
 ) -> Result<()> {
+    if coordinator_key.is_empty() || coordinator_key.len() > 128 {
+        return Err(Error::Command("invalid coordinator routing key"));
+    }
     context.sql(&statement(
-        "INSERT INTO ddb_transactions (transaction_id, coordinator_cell, request_digest, state, staged) VALUES (?1, ?2, ?3, 0, ?4)",
+        "INSERT INTO ddb_transactions (transaction_id, coordinator_cell, request_digest, state, staged, coordinator_key) VALUES (?1, ?2, ?3, 0, ?4, ?5)",
         vec![SqlValue::Blob(transaction_id.to_vec()), SqlValue::Blob(coordinator_cell.to_vec()),
-             SqlValue::Blob(digest.as_bytes().to_vec()), SqlValue::Blob(staged)],
+             SqlValue::Blob(digest.as_bytes().to_vec()), SqlValue::Blob(staged), SqlValue::Blob(coordinator_key.to_vec())],
     ))?;
     // Persist images with prepare so recovery never re-reads live rows. COMMIT
     // releases locks but keeps these images until the response can be fetched.

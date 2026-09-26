@@ -181,5 +181,12 @@ pub(super) async fn assert_lost_replies_and_canceled_token_reuse(
         &item,
     )
     .await;
+    super::read_resolution::assert_reads_finish_terminal_decisions(
+        &client,
+        &storage,
+        &provisioner,
+        &infos,
+    )
+    .await;
     runtime.shutdown().await.unwrap();
 }

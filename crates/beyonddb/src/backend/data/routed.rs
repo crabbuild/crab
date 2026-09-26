@@ -151,10 +151,9 @@ impl CellStorage {
                 .map_err(|error| StorageError::Internal(error.to_string()))?;
                 loop {
                     let response = self
-                        .client
-                        .query::<PartitionScan>(
+                        .query_resolving::<PartitionScan>(
                             &owner,
-                            None,
+                            &key_info.account_id,
                             Json(PartitionScanInput {
                                 table_id: key_info.table_id.clone(),
                                 epoch: partition.epoch,
@@ -162,14 +161,13 @@ impl CellStorage {
                                 exclusive_start_key: cursor.clone(),
                             }),
                         )
-                        .await
-                        .map_err(cell_error)?;
+                        .await?;
                     let (page, next) = match response.output.0 {
                         PartitionScanOutcome::Page {
                             items,
                             last_evaluated_key,
                         } => (items, last_evaluated_key),
-                        PartitionScanOutcome::Conflict => {
+                        PartitionScanOutcome::Conflict(_) => {
                             return Err(StorageError::Transient(
                                 "scan is waiting for transaction resolution".into(),
                             ));

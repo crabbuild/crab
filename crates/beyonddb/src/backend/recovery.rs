@@ -323,3 +323,95 @@ impl CellStorage {
         result.map_err(cell_error)
     }
 }
+
+pub(super) trait ReadBarrier {
+    fn conflict(&self) -> Option<&crate::TransactionReadConflict>;
+}
+
+macro_rules! read_barrier {
+    ($($outcome:ident),+ $(,)?) => {$(
+        impl ReadBarrier for Json<crate::$outcome> {
+            fn conflict(&self) -> Option<&crate::TransactionReadConflict> {
+                match &self.0 {
+                    crate::$outcome::Conflict(conflict) => Some(conflict),
+                    _ => None,
+                }
+            }
+        }
+    )+};
+}
+
+read_barrier!(
+    GetItemOutcome,
+    PartitionGetOutcome,
+    ScanItemsOutcome,
+    PartitionScanOutcome,
+    PartitionQueryOutcome
+);
+
+impl CellStorage {
+    pub(super) async fn query_resolving<Q: crab_cell_runtime::registry::Query>(
+        &self,
+        target: &CellTarget,
+        account_id: &str,
+        input: Q::Input,
+    ) -> Result<Observed<Q::Output>, StorageError>
+    where
+        Q::Input: Clone,
+        Q::Output: ReadBarrier,
+    {
+        let observed = self
+            .client
+            .query::<Q>(target, None, input.clone())
+            .await
+            .map_err(cell_error)?;
+        let Some(conflict) = observed.output.conflict() else {
+            return Ok(observed);
+        };
+        let coordinator = coordinator_target(account_id, &conflict.coordinator_key)
+            .map_err(|error| StorageError::Internal(error.to_string()))?;
+        if coordinator.cell_id().as_bytes() != &conflict.transaction.coordinator_cell {
+            return Err(StorageError::Transient(
+                "blocking transaction coordinator identity is invalid".into(),
+            ));
+        }
+        if let Some(provisioner) = &self.coordinators {
+            provisioner
+                .ensure(&self.client, account_id, &conflict.coordinator_key)
+                .await?;
+        }
+        let status = self
+            .client
+            .query::<ReadCrossCellTransaction>(
+                &coordinator,
+                None,
+                Json(ReadCrossCellTransactionInput {
+                    account_id: account_id.into(),
+                    transaction_id: conflict.transaction.transaction_id,
+                    routing_key: conflict.coordinator_key.clone(),
+                }),
+            )
+            .await
+            .map_err(cell_error)?
+            .output
+            .0
+            .ok_or_else(|| {
+                StorageError::Transient("blocking transaction decision is unavailable".into())
+            })?;
+        if status.decision == CoordinatorDecision::Begin {
+            return Ok(observed);
+        }
+        self.finish_decided_cross_cell_transaction(
+            account_id,
+            &conflict.coordinator_key,
+            conflict.transaction.transaction_id,
+        )
+        .await?;
+        // Help at most one transaction per Cell query. Recheck the full query:
+        // resolving a decision is not a snapshot, and a new writer may hold locks.
+        self.client
+            .query::<Q>(target, None, input)
+            .await
+            .map_err(cell_error)
+    }
+}

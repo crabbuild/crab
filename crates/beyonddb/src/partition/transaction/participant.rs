@@ -28,6 +28,7 @@ pub struct PreparePartitionTransactionInput {
     pub epoch: u64,
     pub transaction_id: [u8; 16],
     pub coordinator_cell: [u8; 32],
+    pub coordinator_key: Vec<u8>,
     pub operations: Vec<TransactionOperation>,
 }
 
@@ -94,6 +95,7 @@ impl Command for PreparePartitionTransaction {
             input.coordinator_cell,
             digest,
             serde_json::to_vec(&prepared)?,
+            &input.coordinator_key,
             prepared
                 .images
                 .iter()

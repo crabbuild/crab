@@ -105,6 +105,7 @@ pub(super) async fn assert_shared_snapshots(
                             Json(beyonddb::PrepareAccountTransactionInput {
                                 transaction_id: id,
                                 coordinator_cell: *coordinator.cell_id().as_bytes(),
+                                coordinator_key: id.to_vec(),
                                 operations,
                             }),
                         )
@@ -122,6 +123,7 @@ pub(super) async fn assert_shared_snapshots(
                                 epoch: *epoch,
                                 transaction_id: id,
                                 coordinator_cell: *coordinator.cell_id().as_bytes(),
+                                coordinator_key: id.to_vec(),
                                 operations,
                             }),
                         )

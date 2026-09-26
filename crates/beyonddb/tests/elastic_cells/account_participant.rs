@@ -229,6 +229,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
     let prepare = PrepareAccountTransactionInput {
         transaction_id,
         coordinator_cell: *coordinator.cell_id().as_bytes(),
+        coordinator_key: transaction_id.to_vec(),
         operations,
     };
     assert_eq!(
@@ -586,6 +587,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
     let prepared_abort = PrepareAccountTransactionInput {
         transaction_id: [217; 16],
         coordinator_cell: *coordinator.cell_id().as_bytes(),
+        coordinator_key: vec![213; 16],
         operations: vec![
             put(table, "aborted-create"),
             TransactionOperation::Delete(DeleteItemInput {

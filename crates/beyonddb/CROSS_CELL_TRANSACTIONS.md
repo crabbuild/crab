@@ -274,10 +274,29 @@ read conflicts map through ExtendDB to retryable `ServiceUnavailable` errors.
 These range barriers are conservative: they check the remaining range before
 applying the page limit, and compound RANGE predicates may fence extra keys
 within the same HASH group. Unrelated keyed reads and disjoint indexed query
-ranges remain available. Read-triggered decision lookup/resolution is not
-implemented; retry success depends on the request driver, serving worker, or
-startup recovery completing resolution. An outage never permits an old-value
-fallback. Read-triggered resolution remains an availability improvement.
+ranges remain available. Get, Query, and Scan now return the blocking
+transaction identity and immutable coordinator routing key to the storage
+adapter. The adapter validates the coordinator identity, admits/restores it
+when provisioning is configured, and queries its durable decision. COMMIT or
+ABORT is finished through the same participant resolver before the full read
+is repeated. BEGIN remains a retryable conflict; a read does not decide an
+unfinished transaction. An unreachable or missing decision never permits an
+old-value fallback.
+
+Each Cell query helps at most one transaction, bounded by the existing
+100-participant limit. A routed Scan can help once per Cell query/page, so the
+whole request may resolve multiple transactions. Another blocker or a new concurrent writer remains a
+retryable conflict on the repeated read. BatchGet inherits the keyed path;
+same-Cell TransactGet and cross-Cell read prepares retain their ordered
+transaction-conflict cancellation behavior. They do not independently help
+blocking writes. Shared read locks do not block ordinary reads.
+
+The routing key is published with the participant prepare and included in its
+immutable request digest. It cannot be reconstructed from the transaction ID
+when a client token selected the shard. Conflict metadata is read with the
+lock in the same serialized Cell query, including absent prepared creates.
+Abort tombstones have no locks and do not need a routing key. These are
+unshipped schema/wire changes; there is no compatibility reader.
 Read barriers ignore shared read locks; writes, TTL deletion, table deletion,
 route activation, and split sealing continue to respect every lock.
 
@@ -384,7 +403,12 @@ replay and both values after a hard kill and restart. It also checks cross-Cell
 TransactGet with projections and a missing item before and after restart. The two-owner mTLS test
 also checks transactions, transactional reads, and token replay through a
 replacement frontend.
-These tests do not establish fleet-scale qualification.
+The read-resolution matrix checks account/data Get and Scan against BEGIN,
+COMMIT, and ABORT without a worker. Range Query resolves a committed create
+absent from live rows. The two-owner mTLS test also sends a signed Get against
+an abandoned partial commit before installing its serving recovery worker,
+then checks every participant resolution receipt. These tests do not establish
+fleet-scale qualification.
 
 Coordinator token tests restore historical BEGIN, partially resolved COMMIT,
 and completed COMMIT snapshots. They verify indefinite pinning of unresolved
@@ -548,8 +572,8 @@ gates remain necessary.
    coordinator takeover. Measure historical startup scans and the
    movement/admission backlog. Coordinator reclamation now lets history exceed
    active slots, but does not qualify the 10,000-Cell, multi-TB target.
-2. Add read-triggered write resolution. Qualify pending read-owner recovery
-   and concurrent read/write histories across each failure boundary; shared
+2. Qualify pending read-owner recovery and concurrent read/write histories
+   across each failure boundary; shared
    lock and saved-image tests do not establish the full distributed matrix.
 3. Integrate ExtendDB stream and index effects with participant commit. The
    current public adapter rejects unsupported capture/index behavior.

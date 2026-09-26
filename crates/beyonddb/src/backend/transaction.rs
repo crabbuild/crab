@@ -79,6 +79,7 @@ impl CellStorage {
                     ParticipantPrepare::Account(PrepareAccountTransactionInput {
                         transaction_id,
                         coordinator_cell,
+                        coordinator_key: read.routing_key.clone(),
                         operations,
                     }),
                 ),
@@ -93,6 +94,7 @@ impl CellStorage {
                         epoch: *epoch,
                         transaction_id,
                         coordinator_cell,
+                        coordinator_key: read.routing_key.clone(),
                         operations,
                     }),
                 ),

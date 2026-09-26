@@ -20,7 +20,7 @@ pub struct ScanItemsInput {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ScanItemsOutcome {
     /// An unresolved intent intersects the unvisited scan range.
-    Conflict,
+    Conflict(crate::TransactionReadConflict),
     /// Items in stable storage order and a key to resume if more remain.
     Page {
         /// Returned items.
@@ -64,11 +64,11 @@ impl Query for ScanItems {
         // Missing live rows can still have prepared creates. Probe locks first
         // so Scan cannot skip those intents just because their live rows are absent.
         let locked = context.sql(&statement(
-            "SELECT 1 FROM ddb_account_transaction_locks WHERE table_id = ?1 AND item_key > ?2 AND write_lock = 1 LIMIT 1",
+            "SELECT transaction_id FROM ddb_account_transaction_locks WHERE table_id = ?1 AND item_key > ?2 AND write_lock = 1 LIMIT 1",
             vec![SqlValue::Text(table.id.clone()), SqlValue::Blob(cursor.clone())],
         ))?;
-        if !locked[0].rows.is_empty() {
-            return Ok(Json(ScanItemsOutcome::Conflict));
+        if let Some(conflict) = crate::participant::read_conflict(context, &locked[0])? {
+            return Ok(Json(ScanItemsOutcome::Conflict(conflict)));
         }
         let max_items = input.limit.unwrap_or(u32::MAX).min(10_000) as usize;
         let mut items = Vec::new();

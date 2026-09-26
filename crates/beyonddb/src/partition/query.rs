@@ -110,7 +110,7 @@ pub enum PartitionQueryOutcome {
     InvalidCondition,
     InvalidLimit,
     /// A key in the requested range has an unresolved transaction intent.
-    Conflict,
+    Conflict(crate::TransactionReadConflict),
 }
 
 /// Read matching items in RANGE-key order from one data Cell.
@@ -213,11 +213,11 @@ impl Query for PartitionQuery {
         let (predicate, parameters) =
             range_predicate(&partition_key, &bounds, &cursor, input.forward);
         let locks = context.sql(&statement(
-            &format!("SELECT 1 FROM ddb_partition_transaction_locks {predicate} AND write_lock = 1 LIMIT 1"),
+            &format!("SELECT transaction_id FROM ddb_partition_transaction_locks {predicate} AND write_lock = 1 LIMIT 1"),
             parameters,
         ))?;
-        if !locks[0].rows.is_empty() {
-            return Ok(Json(PartitionQueryOutcome::Conflict));
+        if let Some(conflict) = crate::participant::read_conflict(context, &locks[0])? {
+            return Ok(Json(PartitionQueryOutcome::Conflict(conflict)));
         }
         loop {
             let (predicate, parameters) =

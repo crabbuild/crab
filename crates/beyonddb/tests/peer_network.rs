@@ -514,6 +514,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .await
         .unwrap();
     assert_eq!(read.item(), Some(&item));
+    recovery::assert_read_triggered_commit(&remote_provisioner, &client, &sdk).await;
     recovery::assert_abandoned_commit(&remote_provisioner, &remote_tasks, &client, &sdk).await;
     let transaction_items = ["NetworkData", "RemoteTable"]
         .into_iter()

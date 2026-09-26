@@ -49,7 +49,7 @@ pub enum PartitionScanOutcome {
     /// Limit must be positive.
     InvalidLimit,
     /// An unvisited key has an unresolved transaction intent.
-    Conflict,
+    Conflict(crate::TransactionReadConflict),
 }
 
 /// Scan a single range through a bounded Cell query.
@@ -116,11 +116,11 @@ fn scan_page(
     // unapplied creates. Sealed export is already fenced by SealPartition.
     if !export {
         let locks = context.sql(&statement(
-            "SELECT 1 FROM ddb_partition_transaction_locks WHERE item_key > ?1 AND write_lock = 1 LIMIT 1",
+            "SELECT transaction_id FROM ddb_partition_transaction_locks WHERE item_key > ?1 AND write_lock = 1 LIMIT 1",
             vec![SqlValue::Blob(cursor.clone())],
         ))?;
-        if !locks[0].rows.is_empty() {
-            return Ok(Json(PartitionScanOutcome::Conflict));
+        if let Some(conflict) = crate::participant::read_conflict(context, &locks[0])? {
+            return Ok(Json(PartitionScanOutcome::Conflict(conflict)));
         }
     }
     let max_items = input.limit.unwrap_or(u32::MAX).min(10_000) as usize;
