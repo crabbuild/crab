@@ -137,9 +137,20 @@ time after private peer routing starts. It no longer needs every historical
 coordinator simultaneously resident. Per-Cell directories and fresh activation
 paths honor the runtime's resume/restore contract.
 
+Startup and serving discovery now share durable settled-root observations in
+the account registry. A skip requires an authoritative Idle control with no owner
+or recovery overlay and matching root digest, incarnation, ownership epoch, code,
+and schema. Observations are recorded only when an empty-work query receipt
+matches the published root. Recovery uses its routed client to write the account
+metadata; capacity reclamation never requires a locally owned account. Missing
+or stale observations require ordinary recovery, and token lookup always restores
+the coordinator. A late older observation can cause extra recovery, not hide a
+changed root. The bounded registry has one optional observation per used shard,
+but its Cell command receipt history still needs the general retention solution.
+
 This establishes bounded coordinator residency, not elastic fleet placement.
-Startup still inspects historical shards, and unproven releases remain in
-the recovery schedule. A capacity-refused coordinator release waits one runtime movement window and
+Startup still checks historical shards against authority; settled roots can avoid
+restoration, while unproven releases remain in the recovery schedule. A capacity-refused coordinator release waits one runtime movement window and
 retries once, preserving generation/settled-work checks. This lets a foreground
 multi-range admission span the two-per-second movement budget. Active requests
 can still encounter release or sustained pressure and retry from durable state. General

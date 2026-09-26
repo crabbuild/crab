@@ -62,7 +62,8 @@ CREATE TABLE ddb_ttl_schedule (
 INSERT INTO ddb_ttl_schedule (singleton, last_table) VALUES (1, NULL);
 
 CREATE TABLE ddb_coordinator_shards (
-    shard INTEGER PRIMARY KEY CHECK (shard BETWEEN 0 AND 4095)
+    shard INTEGER PRIMARY KEY CHECK (shard BETWEEN 0 AND 4095),
+    settled BLOB
 );
 
 CREATE TABLE ddb_account_transaction_locks (

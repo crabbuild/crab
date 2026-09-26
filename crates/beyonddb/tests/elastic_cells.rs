@@ -2,6 +2,7 @@ include!("support/transaction_transport.rs");
 
 mod elastic_cells {
     mod account_participant;
+    mod coordinator_checkpoints;
     mod coordinator_residency;
     mod coordinator_tokens;
     mod local_indexes;
@@ -2451,7 +2452,13 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .unwrap()
         .output
         .0;
-    assert_eq!(registered, vec![shard]);
+    assert_eq!(
+        registered
+            .iter()
+            .map(|entry| entry.shard)
+            .collect::<Vec<_>>(),
+        vec![shard]
+    );
     let partitions = [
         PartitionSpec {
             table: table.clone(),
@@ -4486,9 +4493,8 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .unwrap()
         .output
         .0;
-    assert!(registered.contains(&u32::from_be_bytes(
-        coordinator_target.partition().try_into().unwrap()
-    )));
+    assert!(registered.iter().any(|entry| entry.shard
+        == u32::from_be_bytes(coordinator_target.partition().try_into().unwrap())));
     let coordinator_proof = CellCatalog::new(layout.clone(), account.tenant())
         .lookup(coordinator_target.cell_id())
         .await
@@ -5061,10 +5067,13 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         if page.is_empty() {
             break;
         }
-        after = page.last().copied();
-        actual_shards.extend(page);
+        after = page.last().map(|entry| entry.shard);
+        actual_shards.extend(page.into_iter().map(|entry| entry.shard));
     }
-    let mut expected_shards = registered;
+    let mut expected_shards = registered
+        .into_iter()
+        .map(|entry| entry.shard)
+        .collect::<Vec<_>>();
     expected_shards.push(u32::from_be_bytes(
         second_target.partition().try_into().unwrap(),
     ));

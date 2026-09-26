@@ -379,7 +379,12 @@ async fn coordinator_epochs(layout: &CellStorageLayout, tokens: &[String]) -> Ve
     epochs
 }
 
-async fn write(storage: &CellStorage, info: &TableKeyInfo, token: &str, version: usize) -> bool {
+pub(super) async fn write(
+    storage: &CellStorage,
+    info: &TableKeyInfo,
+    token: &str,
+    version: usize,
+) -> bool {
     let item = Item::from([
         ("id".into(), AttributeValue::S("shared".into())),
         ("version".into(), AttributeValue::N(version.to_string())),

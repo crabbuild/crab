@@ -8,15 +8,18 @@ use std::{
 };
 
 use crab_cell_host::CellNodeTaskGroup;
-use crab_cell_runtime::client::{CellClient, Receipt};
-use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::client::CellClient;
+use crab_cell_runtime::control::{ControlState, authority::CellAuthority};
 use crab_cell_runtime::identity::CellTarget;
 use crab_cell_runtime::node::NodeDirectory;
 use crab_cell_runtime::partition_for_shard;
 use extenddb_storage::error::StorageError;
 
 use super::{CellInitialPartitionProvisioner, provision_error};
-use crate::backend::cell_error;
+use crate::backend::{cell_error, mutation_identity};
+use crate::transaction_coordinator::{
+    CoordinatorShard, RecordSettledCoordinator, SettledCoordinatorRoot,
+};
 use crate::{
     CellStorage, CoordinatorParticipantTarget, Json, ListCoordinatorShards,
     ListCoordinatorShardsInput, PendingCrossCellTransaction, PendingTransactionCursor,
@@ -170,7 +173,6 @@ impl CellInitialPartitionProvisioner {
                 let mut ticks = tokio::time::interval(Duration::from_millis(250));
                 ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 let mut after = None;
-                let mut settled = BTreeMap::new();
                 loop {
                     tokio::select! {
                         () = cancellation.cancelled() => return Ok::<(), StorageError>(()),
@@ -180,7 +182,7 @@ impl CellInitialPartitionProvisioner {
                         let result = tokio::select! {
                             () = cancellation.cancelled() => return Ok(()),
                             result = provisioner.discover_coordinator(
-                                &account, storage.client(), &nodes, &mut cursor, &mut settled,
+                                &account, storage.client(), &nodes, &mut cursor,
                             ) => result,
                         };
                         // Rotate accounts even after a failed lookup. Discovery must
@@ -208,7 +210,6 @@ impl CellInitialPartitionProvisioner {
         client: &CellClient,
         nodes: &NodeDirectory,
         after: &mut Option<u32>,
-        settled: &mut BTreeMap<[u8; 32], Receipt>,
     ) -> Result<(), StorageError> {
         let account = account_target(account_id).map_err(provision_error)?;
         let page = client
@@ -227,37 +228,19 @@ impl CellInitialPartitionProvisioner {
             .0;
         // Advance before activation, including when capacity or takeover fails.
         // Wrapping an empty page also discovers later registrations behind us.
-        *after = page.first().copied();
-        let Some(shard) = *after else {
+        *after = page.first().map(|entry| entry.shard);
+        let Some(entry) = page.first() else {
             return Ok(());
         };
         let target = CellTarget::new(
             account.tenant(),
             crate::APPLICATION,
             crate::transaction_coordinator::NAMESPACE,
-            &partition_for_shard(shard),
+            &partition_for_shard(entry.shard),
         )
         .map_err(provision_error)?;
-        let cell = target.cell_id();
-        if let Some(receipt) = settled.get(cell.as_bytes()) {
-            let observed = CellAuthority::new(self.layout.clone())
-                .load(cell)
-                .await
-                .map_err(provision_error)?;
-            if observed.as_ref().is_some_and(|record| {
-                let control = record.value();
-                control.owner.is_none()
-                    && control.incarnation == receipt.incarnation
-                    && control
-                        .root
-                        .as_ref()
-                        .is_some_and(|root| root.commit_sequence == receipt.commit_sequence)
-            }) {
-                // Only the exact published empty root can skip reactivation.
-                // Unknown Idle roots may contain BEGIN or unfinished decisions;
-                // repeatedly acquiring completed history would churn scarce slots.
-                return Ok(());
-            }
+        if self.settled_coordinator_is_idle(&target, entry).await? {
+            return Ok(());
         }
         if self
             .recover_discovered_owner(
@@ -268,16 +251,104 @@ impl CellInitialPartitionProvisioner {
             )
             .await?
         {
-            let pending = client
-                .query::<crate::ReadPendingTransactionBoundary>(&target, None, Json(()))
-                .await
-                .map_err(cell_error)?;
-            if pending.output.0.is_none() {
-                settled.insert(*cell.as_bytes(), pending.receipt);
-            } else {
-                settled.remove(cell.as_bytes());
-            }
+            self.record_settled_coordinator(&account, &target, entry, client)
+                .await?;
         }
+        Ok(())
+    }
+
+    async fn settled_coordinator_is_idle(
+        &self,
+        target: &CellTarget,
+        entry: &CoordinatorShard,
+    ) -> Result<bool, StorageError> {
+        let Some(settled) = &entry.settled else {
+            return Ok(false);
+        };
+        let observed = CellAuthority::new(self.layout.clone())
+            .load(target.cell_id())
+            .await
+            .map_err(provision_error)?;
+        Ok(observed.as_ref().is_some_and(|record| {
+            let control = record.value();
+            // Serving owners may have a recoverable log tail beyond this root.
+            // Only an unchanged, fully published Idle generation can be skipped.
+            control.state == ControlState::Idle
+                && control.owner.is_none()
+                && self.settled_root(control).as_ref() == Some(settled)
+        }))
+    }
+
+    fn settled_root(
+        &self,
+        control: &crab_cell_runtime::control::Control,
+    ) -> Option<SettledCoordinatorRoot> {
+        let code = self
+            .application
+            .registry()
+            .module_code(crate::transaction_coordinator::MODULE)?;
+        if control.recovery.is_some() || control.code != code || control.schema != 1 {
+            return None;
+        }
+        Some(SettledCoordinatorRoot {
+            incarnation: *control.incarnation.as_bytes(),
+            epoch: control.epoch,
+            root: *control.root.as_ref()?.digest.as_bytes(),
+            code: *control.code.as_bytes(),
+            schema: control.schema,
+        })
+    }
+
+    async fn record_settled_coordinator(
+        &self,
+        account: &CellTarget,
+        target: &CellTarget,
+        entry: &CoordinatorShard,
+        client: &CellClient,
+    ) -> Result<(), StorageError> {
+        let pending = client
+            .query::<crate::ReadPendingTransactionBoundary>(target, None, Json(()))
+            .await
+            .map_err(cell_error)?;
+        if pending.output.0.is_some() {
+            return Ok(());
+        }
+        let observed = CellAuthority::new(self.layout.clone())
+            .load(target.cell_id())
+            .await
+            .map_err(provision_error)?;
+        let Some(control) = observed.as_ref().map(|record| record.value()) else {
+            return Ok(());
+        };
+        let receipt = pending.receipt;
+        if control.cell != receipt.cell
+            || control.incarnation != receipt.incarnation
+            || control
+                .root
+                .as_ref()
+                .is_none_or(|root| root.commit_sequence != receipt.commit_sequence)
+        {
+            return Ok(());
+        }
+        let Some(settled) = self.settled_root(control) else {
+            return Ok(());
+        };
+        if entry.settled.as_ref() == Some(&settled) {
+            return Ok(());
+        }
+        // A concurrent BEGIN or new owner makes this observation stale, never
+        // authoritative. Both discovery paths recheck the exact Idle root.
+        client
+            .command::<RecordSettledCoordinator>(
+                account,
+                mutation_identity()?,
+                Json(CoordinatorShard {
+                    shard: entry.shard,
+                    settled: Some(settled),
+                }),
+            )
+            .await
+            .map_err(cell_error)?;
         Ok(())
     }
 
@@ -426,15 +497,18 @@ impl CellInitialPartitionProvisioner {
             if page.is_empty() {
                 return Ok(());
             }
-            for shard in page {
-                after = Some(shard);
+            for entry in page {
+                after = Some(entry.shard);
                 let target = CellTarget::new(
                     account.tenant(),
                     crate::APPLICATION,
                     crate::transaction_coordinator::NAMESPACE,
-                    &partition_for_shard(shard),
+                    &partition_for_shard(entry.shard),
                 )
                 .map_err(provision_error)?;
+                if self.settled_coordinator_is_idle(&target, &entry).await? {
+                    continue;
+                }
                 // Complete each shard before admitting the next. Registry size
                 // must not require all historical coordinators to be resident.
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -465,6 +539,8 @@ impl CellInitialPartitionProvisioner {
                     // remaining admission or resolution error.
                     let resolution = storage.recover_fenced_coordinator(&target).await;
                     admission.and(resolution)?;
+                    self.record_settled_coordinator(&account, &target, &entry, client)
+                        .await?;
                 }
             }
         }
