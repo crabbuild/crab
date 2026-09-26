@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise every Cell through every load-balanced entry node."""
+"""Measure scheduled Cell actions through every load-balanced entry node."""
 
 import argparse
 import concurrent.futures
@@ -8,11 +8,13 @@ import math
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 import uuid
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +27,34 @@ class RequestFailure(RuntimeError):
     def __init__(self, status: int, detail: str):
         super().__init__(detail)
         self.status = status
+
+
+@dataclass(frozen=True)
+class Workload:
+    cells: int
+    rate: float
+    duration: float
+    max_in_flight: int
+    hot_share: float
+
+    def __post_init__(self):
+        if not 1 <= self.cells <= 1000 or not 1 <= self.max_in_flight <= 256:
+            raise ValueError("cells must be 1..1000 and max-in-flight must be 1..256")
+        if not all(math.isfinite(x) for x in (self.rate, self.duration, self.hot_share)):
+            raise ValueError("workload numbers must be finite")
+        if self.rate <= 0 or self.duration <= 0 or not 0 < self.rate * self.duration <= 100_000:
+            raise ValueError("rate and duration must be positive and schedule 1..100000 pairs")
+        if not 0 <= self.hot_share <= 1:
+            raise ValueError("hot-share must be 0..1")
+
+    def cell(self, index: int) -> int:
+        if self.cells == 1 or self.hot_share == 0:
+            return index % self.cells + 1
+        hot_before = math.floor(index * self.hot_share)
+        hot_after = math.floor((index + 1) * self.hot_share)
+        if hot_after > hot_before:
+            return 1
+        return 2 + (index - hot_before) % (self.cells - 1)
 
 
 def profiles_for(nodes: int) -> tuple[str, ...]:
@@ -68,8 +98,11 @@ def request(gateway: str, nodes: int, method: str, path: str, payload: dict | No
             if not 1 <= entry <= nodes:
                 raise RuntimeError(f"{method} {path} used an unexpected entry node: {upstream!r}")
             result = json.load(response)
+            if not isinstance(result, dict):
+                raise RuntimeError(f"{method} {path} returned a non-object JSON body")
     except urllib.error.HTTPError as error:
-        detail = error.read(512).decode(errors="replace")
+        with error:
+            detail = error.read(512).decode(errors="replace")
         raise RequestFailure(error.code, f"{method} {path} returned {error.code}: {detail}") from error
     return {
         "entry": node_name(entry),
@@ -87,34 +120,50 @@ def load_request(gateway: str, nodes: int, method: str, path: str, payload: dict
             sample["latency_ms"] = (time.monotonic() - started) * 1_000
             sample["retries"] = len(failures)
             sample["retry_reasons"] = failures
+            sample["outcome"] = "success"
             return sample
         except RequestFailure as error:
-            if error.status not in (429, 502, 503, 504) or attempt == 5:
-                raise
             failures.append(error.status)
-        except OSError:
-            if attempt == 5:
-                raise
+            detail = str(error)
+            retryable = error.status in (429, 502, 503, 504)
+        except OSError as error:
             failures.append("transport")
+            detail = str(error)
+            retryable = True
+        except (RuntimeError, ValueError) as error:
+            failures.append("contract")
+            detail = str(error)
+            retryable = False
+        if not retryable or attempt == 5:
+            return {
+                "outcome": "contract_error" if failures[-1] == "contract" else "failed",
+                "latency_ms": (time.monotonic() - started) * 1_000,
+                "retries": attempt,
+                "retry_reasons": failures,
+                "error": detail,
+            }
         time.sleep(0.1 * 2 ** attempt)
     raise RuntimeError("load request retry loop did not terminate")
 
 
 def percentiles(samples: list[float]) -> dict:
+    if not samples:
+        return {"count": 0}
     ordered = sorted(samples)
     result = {
         f"p{percentile}_ms": round(ordered[math.ceil(len(ordered) * percentile / 100) - 1], 3)
         for percentile in (50, 95, 99)
     }
     result["max_ms"] = round(ordered[-1], 3)
+    result["count"] = len(samples)
     return result
 
 
-def cover_routes(gateway: str, nodes: int) -> tuple[dict, list[dict]]:
+def cover_routes(gateway: str, nodes: int, cells: int) -> tuple[dict, list[dict]]:
     coverage = {}
     samples = []
     expected = {node_name(index) for index in range(1, nodes + 1)}
-    for cell in range(1, nodes + 1):
+    for cell in range(1, cells + 1):
         seen = set()
         for _ in range(nodes * 4):
             sample = request(gateway, nodes, "GET", issue_path(cell) + "/1")
@@ -130,41 +179,98 @@ def cover_routes(gateway: str, nodes: int) -> tuple[dict, list[dict]]:
     return coverage, samples
 
 
-def load_cell(gateway: str, nodes: int, cell: int, pairs: int, run_id: str) -> tuple[list[dict], dict]:
+def load_pair(gateway: str, nodes: int, cell: int, arrival: int, run_id: str, scheduled: float) -> dict:
+    title = f"fleet-load-{run_id}-{cell:02d}-{arrival:06d}"
+    request_id = str(uuid.uuid5(uuid.NAMESPACE_URL, title))
+    result = {
+        "cell": cell, "arrival": arrival, "request_id": request_id,
+        "dispatch_delay_ms": (time.monotonic() - scheduled) * 1_000,
+        "operations": [],
+    }
+    created = load_request(gateway, nodes, "POST", issue_path(cell), {
+        "request_id": request_id, "title": title, "body": "Load-balanced durable Cell issue",
+    })
+    body = created.pop("body", {})
+    result["operations"].append({"operation": "write", **created})
+    result["outcome"] = created["outcome"]
+    if created["outcome"] == "success":
+        number = body.get("number")
+        if type(number) is not int or number < 1 or body.get("title") != title:
+            result.update(outcome="contract_error", error="unexpected issue creation result")
+        else:
+            result["acknowledged"] = {"number": number, "title": title}
+            observed = load_request(gateway, nodes, "GET", issue_path(cell) + f"/{number}")
+            body = observed.pop("body", {})
+            result["operations"].append({"operation": "read", **observed})
+            result["outcome"] = observed["outcome"]
+            if observed["outcome"] == "success" and body.get("title") != title:
+                result.update(outcome="contract_error", error="acknowledged issue readback mismatch")
+            elif observed["outcome"] == "failed" and observed["retry_reasons"][-1] == 404:
+                result.update(outcome="contract_error", error="acknowledged issue disappeared")
+    result["scheduled_latency_ms"] = (time.monotonic() - scheduled) * 1_000
+    return result
+
+
+def scheduled_load(gateway: str, nodes: int, workload: Workload, run_id: str, raw) -> tuple[dict, list[dict]]:
+    count = math.ceil(workload.rate * workload.duration)
     samples = []
-    latest = {}
-    for pair in range(pairs):
-        title = f"fleet-load-{run_id}-{cell:02d}-{pair:03d}"
-        created = load_request(
-            gateway, nodes, "POST", issue_path(cell),
-            {
-                "request_id": str(uuid.uuid5(uuid.NAMESPACE_URL, title)),
-                "title": title,
-                "body": "Load-balanced durable Cell issue",
-            },
-        )
-        number = created["body"].get("number")
-        if not isinstance(number, int) or created["body"].get("title") != title:
-            raise RuntimeError(f"work-{cell:02d} returned an unexpected issue creation result")
-        observed = load_request(gateway, nodes, "GET", issue_path(cell) + f"/{number}")
-        if observed["body"].get("title") != title:
-            raise RuntimeError(f"work-{cell:02d} did not read back issue {number}")
-        for operation, sample in (("write", created), ("read", observed)):
-            samples.append({
-                "cell": cell, "operation": operation, "entry": sample["entry"],
-                "latency_ms": sample["latency_ms"], "retries": sample["retries"],
-                "retry_reasons": sample["retry_reasons"],
-            })
-        latest = {"number": number, "title": title}
-    return samples, latest
+    started = time.monotonic()
+    stopped = False
+    peak = 0
+
+    def record(sample):
+        nonlocal stopped
+        raw.write(json.dumps(sample) + "\n")
+        raw.flush()
+        samples.append(sample)
+        stopped |= sample["outcome"] == "contract_error"
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workload.max_in_flight) as executor:
+        pending = set()
+        for arrival in range(count):
+            scheduled = started + arrival / workload.rate
+            time.sleep(max(0, scheduled - time.monotonic()))
+            completed = {future for future in pending if future.done()}
+            pending -= completed
+            for future in completed:
+                record(future.result())
+            if stopped:
+                break
+            cell = workload.cell(arrival)
+            late = time.monotonic() - scheduled
+            # Never accumulate an executor queue or catch up by issuing a burst.
+            # Missed arrivals remain explicit, so overload cannot lower offered load.
+            outcome = "scheduler_late" if late >= 1 / workload.rate else "client_capacity"
+            if late >= 1 / workload.rate or len(pending) == workload.max_in_flight:
+                record({"arrival": arrival, "cell": cell, "outcome": outcome,
+                        "dispatch_delay_ms": late * 1_000, "operations": []})
+                continue
+            pending.add(executor.submit(load_pair, gateway, nodes, cell, arrival, run_id, scheduled))
+            peak = max(peak, len(pending))
+        for future in concurrent.futures.as_completed(pending):
+            record(future.result())
+    if not stopped:
+        time.sleep(max(0, started + workload.duration - time.monotonic()))
+    elapsed = time.monotonic() - started
+    return {
+        "planned_pairs": count,
+        "offered_pairs": len(samples),
+        "admitted_pairs": sum(sample["outcome"] not in ("client_capacity", "scheduler_late") for sample in samples),
+        "outcomes": dict(Counter(sample["outcome"] for sample in samples)),
+        "peak_in_flight": peak,
+        "arrival_seconds": workload.duration,
+        "elapsed_seconds": elapsed,
+        "drain_seconds": max(0, elapsed - workload.duration),
+        "stopped_on_invariant": stopped,
+    }, samples
 
 
-def owner_map(path: Path, profiles: tuple[str, ...], nodes: int) -> tuple[dict, dict]:
+def owner_map(path: Path, profiles: tuple[str, ...], nodes: int, cells: int) -> tuple[dict, dict]:
     sessions = {}
     for index in range(1, nodes + 1):
         session, _, _ = prove_node(path, profiles, index)
         sessions[session] = node_name(index)
-    statuses = {cell: status(path, profiles, cell) for cell in range(1, nodes + 1)}
+    statuses = {cell: status(path, profiles, cell) for cell in range(1, cells + 1)}
     owners = {}
     for cell, value in statuses.items():
         session = value.get("owner", {}).get("session")
@@ -174,9 +280,9 @@ def owner_map(path: Path, profiles: tuple[str, ...], nodes: int) -> tuple[dict, 
     return owners, statuses
 
 
-def verify_roots(path: Path, profiles: tuple[str, ...], before: dict, nodes: int) -> dict:
+def verify_roots(path: Path, profiles: tuple[str, ...], before: dict, cells) -> dict:
     after = {}
-    for cell in range(1, nodes + 1):
+    for cell in cells:
         baseline = before[cell]["root"]["commit_sequence"]
         deadline = time.monotonic() + 60
         while True:
@@ -190,12 +296,72 @@ def verify_roots(path: Path, profiles: tuple[str, ...], before: dict, nodes: int
     return after
 
 
+def drain_publication(path: Path, profiles: tuple[str, ...], nodes: int) -> dict:
+    started = time.monotonic()
+    samples = []
+    while True:
+        uncovered = {}
+        for index in range(1, nodes + 1):
+            node = node_name(index)
+            metrics = compose(path, profiles, "exec", "-T", node, "crab-http-server", "--config", CONFIG, "cells", "metrics")
+            value = next((line.split()[-1] for line in metrics.splitlines()
+                          if line.startswith("crab_cell_node_log_uncovered_bytes ")), None)
+            if value is None:
+                raise RuntimeError(f"{node} did not expose publication backlog")
+            count = float(value)
+            if not math.isfinite(count) or count < 0 or not count.is_integer():
+                raise RuntimeError(f"{node} exposed invalid publication backlog: {value}")
+            uncovered[node] = int(count)
+        elapsed = time.monotonic() - started
+        samples.append({"elapsed_seconds": elapsed, "uncovered_bytes": uncovered})
+        if all(value == 0 for value in uncovered.values()):
+            return {"drained": True, "elapsed_seconds": elapsed, "samples": samples}
+        if elapsed >= 120:
+            return {"drained": False, "elapsed_seconds": elapsed, "samples": samples}
+        time.sleep(1)
+
+
+def observe_nodes(path: Path, profiles: tuple[str, ...], nodes: int, stop, output) -> dict:
+    names = [node_name(index) for index in range(1, nodes + 1)]
+    flags = [flag for profile in profiles for flag in ("--profile", profile)]
+    prefix = ["docker", "compose", "--file", str(path), *flags]
+    count = 0
+    errors = []
+
+    def read(*args):
+        return subprocess.run(args, check=True, capture_output=True, text=True, timeout=15).stdout
+
+    def metrics(node):
+        return read(*prefix, "exec", "-T", node, "crab-http-server", "--config", CONFIG, "cells", "metrics")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, nodes)) as readers:
+        while True:
+            sample = {"started_at": datetime.now(timezone.utc).isoformat()}
+            started = time.monotonic()
+            try:
+                containers = read(*prefix, "ps", "--quiet", *names).split()
+                if len(containers) != nodes:
+                    raise RuntimeError("resource observation lost an expected node")
+                sample["containers"] = [json.loads(line) for line in read(
+                    "docker", "stats", "--no-stream", "--format", "{{json .}}", *containers,
+                ).splitlines()]
+                sample["metrics"] = dict(zip(names, readers.map(metrics, names)))
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                sample["error"] = str(error)
+                errors.append(str(error))
+            sample["elapsed_seconds"] = time.monotonic() - started
+            output.write(json.dumps(sample) + "\n")
+            output.flush()
+            count += 1
+            if stop.wait(5):
+                return {"samples": count, "errors": errors}
+
+
 def recover_owner(
     path: Path, profiles: tuple[str, ...], gateway: str, nodes: int,
-    owner: str, before: dict, latest: dict,
+    owner: str, before: dict, latest: dict, target: int,
 ) -> dict:
     observer = "node-01" if owner != "node-01" else "node-02"
-    target = nodes
     for _ in range(60):
         metrics = compose(path, profiles, "exec", "-T", owner, "crab-http-server", "--config", CONFIG, "cells", "metrics")
         uncovered = next(
@@ -254,50 +420,38 @@ def main() -> None:
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--nodes", type=int, choices=(3, 5, 10, 20), required=True)
     parser.add_argument("--gateway-port", type=int, default=18080)
-    parser.add_argument("--pairs-per-cell", type=int, default=10)
-    parser.add_argument("--output", type=Path, help="write the report to this path instead of a generated name")
+    parser.add_argument("--cells", type=int, default=20)
+    parser.add_argument("--rate", type=float, default=5, help="scheduled create/read pairs per second")
+    parser.add_argument("--duration", type=float, default=60)
+    parser.add_argument("--max-in-flight", type=int, default=64)
+    parser.add_argument("--hot-share", type=float, default=0, help="fraction directed to Cell 1; zero is uniform")
+    parser.add_argument("--output", type=Path, help="report path instead of a generated name")
     args = parser.parse_args()
-    if not 1 <= args.pairs_per_cell <= 100:
-        parser.error("--pairs-per-cell must be between 1 and 100")
+    try:
+        workload = Workload(args.cells, args.rate, args.duration, args.max_in_flight, args.hot_share)
+    except ValueError as error:
+        parser.error(str(error))
     path = args.state.expanduser().resolve() / "compose.yaml"
     deployment = json.loads(path.read_text())
     project = deployment["name"]
+    run_id = uuid.uuid4().hex[:12]
+    output = args.output.expanduser().resolve() if args.output else path.parent / f"load-{args.nodes}-{run_id}.json"
+    raw_path = output.with_suffix(".samples.jsonl")
+    nodes_path = output.with_suffix(".nodes.jsonl")
+    if any(candidate.exists() for candidate in (output, raw_path, nodes_path)):
+        raise RuntimeError(f"load report or samples already exist: {output}")
     expected_nodes = {node_name(index) for index in range(1, args.nodes + 1)}
     active_nodes = running_nodes(project)
     if active_nodes != expected_nodes:
         raise RuntimeError(f"expected exactly {args.nodes} running Cell nodes, found {sorted(active_nodes)}")
     profiles = profiles_for(args.nodes)
     gateway = f"http://127.0.0.1:{args.gateway_port}"
-    owners, before = owner_map(path, profiles, args.nodes)
-    coverage, coverage_samples = cover_routes(gateway, args.nodes)
-    run_id = uuid.uuid4().hex[:12]
-    started = time.monotonic()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.nodes) as executor:
-        futures = [
-            executor.submit(load_cell, gateway, args.nodes, cell, args.pairs_per_cell, run_id)
-            for cell in range(1, args.nodes + 1)
-        ]
-        results = [future.result() for future in futures]
-    elapsed = time.monotonic() - started
-    samples = [sample for cell_samples, _ in results for sample in cell_samples]
-    latest = {cell: result[1] for cell, result in enumerate(results, 1)}
-    entries = Counter(sample["entry"] for sample in samples)
-    expected = len(samples) / args.nodes
-    active_nodes = {node_name(index) for index in range(1, args.nodes + 1)}
-    if set(entries) != active_nodes or min(entries.values()) < expected * 0.7 or max(entries.values()) > expected * 1.3:
-        raise RuntimeError(f"load balancer did not distribute traffic evenly: {dict(entries)}")
-    for cell, issue in latest.items():
-        observed = request(gateway, args.nodes, "GET", issue_path(cell) + f"/{issue['number']}")
-        if observed["body"].get("title") != issue["title"]:
-            raise RuntimeError(f"work-{cell:02d} lost its last acknowledged issue")
-    after = verify_roots(path, profiles, before, args.nodes)
-    owners_at_recovery, recovery_baseline = owner_map(path, profiles, args.nodes)
-    recovery = recover_owner(
-        path, profiles, gateway, args.nodes,
-        owners_at_recovery[args.nodes], recovery_baseline[args.nodes], latest[args.nodes],
-    )
+    owners, before = owner_map(path, profiles, args.nodes, args.cells)
+    coverage, coverage_samples = cover_routes(gateway, args.nodes, args.cells)
     report = {
+        "schema": 2,
         "source": command("git", "-C", str(ROOT), "rev-parse", "HEAD"),
+        "source_role": "load_generator",
         "source_dirty": bool(command("git", "-C", str(ROOT), "status", "--porcelain")),
         "project": project,
         "server_image": command("docker", "image", "inspect", "--format", "{{.Id}}", deployment["services"]["node-01"]["image"]),
@@ -312,34 +466,85 @@ def main() -> None:
         "node_memory_limit_bytes": MEMORY_LIMIT,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "nodes": args.nodes,
-        "cells": args.nodes,
-        "pairs_per_cell": args.pairs_per_cell,
+        "workload": vars(workload),
+        "raw_samples": raw_path.name,
+        "node_samples": nodes_path.name,
         "coverage_requests": len(coverage_samples),
         "node_cell_coverage": coverage,
-        "load_requests": len(samples),
-        "load_elapsed_seconds": round(elapsed, 3),
-        "requests_per_second": round(len(samples) / elapsed, 2),
-        "entry_requests": dict(sorted(entries.items())),
-        "cell_requests": {f"work-{cell:02d}": args.pairs_per_cell * 2 for cell in range(1, args.nodes + 1)},
-        "forwarded_requests": sum(sample["entry"] != owners[sample["cell"]] for sample in samples),
-        "retried_requests": sum(sample["retries"] > 0 for sample in samples),
-        "total_retries": sum(sample["retries"] for sample in samples),
-        "retry_reasons": dict(sorted(Counter(
-            str(reason) for sample in samples for reason in sample["retry_reasons"]
-        ).items())),
-        "latency": {
-            operation: percentiles([sample["latency_ms"] for sample in samples if sample["operation"] == operation])
-            for operation in ("write", "read")
-        },
         "coverage_read_latency": percentiles([sample["latency_ms"] for sample in coverage_samples]),
-        "roots_advanced": all(after[cell]["root"]["commit_sequence"] > before[cell]["root"]["commit_sequence"] for cell in before),
-        "owner_loss": recovery,
+        "passed": False,
     }
-    output = args.output.expanduser().resolve() if args.output else path.parent / f"load-{args.nodes}-{run_id}.json"
-    if output.exists():
-        raise RuntimeError(f"load report already exists: {output}")
-    output.write_text(json.dumps(report, indent=2) + "\n")
-    print(output)
+    try:
+        with raw_path.open("x") as raw, nodes_path.open("x") as node_samples:
+            stop = threading.Event()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as observer:
+                observations = observer.submit(observe_nodes, path, profiles, args.nodes, stop, node_samples)
+                try:
+                    summary, samples = scheduled_load(gateway, args.nodes, workload, run_id, raw)
+                finally:
+                    stop.set()
+                    report["node_observations"] = observations.result()
+        operations = [{"cell": sample["cell"], **operation}
+                      for sample in samples for operation in sample["operations"]]
+        successes = [operation for operation in operations if operation["outcome"] == "success"]
+        entries = Counter(operation["entry"] for operation in successes)
+        acknowledged = {}
+        for sample in samples:
+            if "acknowledged" in sample:
+                cell = sample["cell"]
+                issue = sample["acknowledged"]
+                if cell not in acknowledged or issue["number"] > acknowledged[cell]["number"]:
+                    acknowledged[cell] = issue
+        expected = len(successes) / args.nodes
+        balanced = (set(entries) == expected_nodes and min(entries.values()) >= expected * 0.7
+                    and max(entries.values()) <= expected * 1.3)
+        report.update(
+            load=summary,
+            logical_requests=len(operations),
+            successful_requests=len(successes),
+            successful_requests_per_second=len(successes) / summary["elapsed_seconds"],
+            entry_requests=dict(sorted(entries.items())),
+            ingress_balanced=balanced,
+            cell_offered_pairs=dict(Counter(sample["cell"] for sample in samples)),
+            forwarded_requests=sum(operation["entry"] != owners[operation["cell"]] for operation in successes),
+            total_retries=sum(operation["retries"] for operation in operations),
+            attempt_failures=dict(Counter(str(reason) for operation in operations for reason in operation["retry_reasons"])),
+            latency={operation: percentiles([sample["latency_ms"] for sample in successes if sample["operation"] == operation])
+                     for operation in ("write", "read")},
+            scheduled_pair_latency=percentiles([sample["scheduled_latency_ms"] for sample in samples if "scheduled_latency_ms" in sample]),
+            dispatch_delay=percentiles([sample["dispatch_delay_ms"] for sample in samples]),
+        )
+        if summary["stopped_on_invariant"]:
+            raise RuntimeError("load stopped on an application or transport contract failure; inspect raw samples")
+        report["publication_drain"] = drain_publication(path, profiles, args.nodes)
+        if not report["publication_drain"]["drained"]:
+            raise RuntimeError("publication backlog did not drain; inspect retained backlog samples")
+        for cell, issue in acknowledged.items():
+            observed = request(gateway, args.nodes, "GET", issue_path(cell) + f"/{issue['number']}")
+            if observed["body"].get("title") != issue["title"]:
+                raise RuntimeError(f"work-{cell:02d} lost an acknowledged issue")
+        after = verify_roots(path, profiles, before, acknowledged)
+        report["roots_advanced"] = bool(after)
+        report["roots_before"] = {cell: value["root"] for cell, value in before.items()}
+        report["roots_after"] = {cell: value["root"] for cell, value in after.items()}
+        if acknowledged:
+            owners_at_recovery, recovery_baseline = owner_map(path, profiles, args.nodes, args.cells)
+            target = max(acknowledged)
+            report["owner_loss"] = recover_owner(
+                path, profiles, gateway, args.nodes, owners_at_recovery[target],
+                recovery_baseline[target], acknowledged[target], target,
+            )
+        report["passed"] = (balanced and not report["node_observations"]["errors"]
+                            and summary["outcomes"].get("success", 0) == summary["planned_pairs"]
+                            and bool(after))
+        if not report["passed"]:
+            raise RuntimeError("offered load was not fully served or ingress was uneven; inspect the retained report")
+    except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
+        report["error"] = str(error)
+        raise
+    finally:
+        output.write_text(json.dumps(report, indent=2) + "\n")
+        print(output)
 
 
 if __name__ == "__main__":

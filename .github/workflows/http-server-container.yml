@@ -94,6 +94,8 @@ jobs:
              | all(. as $name | $names | index($name)))
           ' crates/crab-http-server/deploy/ecs/task-definition.example.json >/dev/null
           docker compose --file crates/crab-http-server/deploy/compose.yaml config --quiet
+          python3 -B -W error::ResourceWarning -m unittest discover \
+            -s crates/crab-http-server/deploy/cell-issue-fleet -p test_load.py -v
           docker compose \
             --file crates/crab-http-server/deploy/compose.yaml \
             --file crates/crab-http-server/deploy/compose.cluster.yaml \

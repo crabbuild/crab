@@ -15,8 +15,9 @@ flowchart LR
     Nodes --> Local[Per-node local Cell volume]
 ```
 
-The reference workload creates one repository Cell per node, then writes an
-issue and label through that node. After each scale step it checks the issue
+The reference workload creates a fixed 20 repository Cells at the three-node
+stage, distributing initialization across those nodes. The same Cells remain
+in place as the fleet grows; `--cells` chooses another fixed count. After each scale step it checks the issue
 through the gateway, verifies every Cell has a live owner and durable root,
 and reads the original Cell through every newly added node. It also kills the
 owner of the last Cell, verifies a new owner serves the acknowledged issue
@@ -71,8 +72,10 @@ To run the gateway workload while each stage has exactly 3, 5, 10, or 20
 active nodes, add `--load-stages`. The functional checks remain the default
 when this option is omitted. Each loaded stage writes
 `load-<nodes>-stage.json` beside `report.json`; the latter links all four
-reports. Use `--load-pairs-per-cell` to change the default 10 create/read
-pairs per Cell.
+reports. The default offered rate is five create/read pairs per second for 60 seconds,
+with at most 64 pairs in flight. Use `--load-rate`, `--load-duration`, and
+`--load-max-in-flight` to choose the workload; keep them and `--cells` fixed
+when comparing node counts.
 
 ```sh
 python3 crates/crab-http-server/deploy/cell-issue-fleet/qualify.py \
@@ -153,34 +156,100 @@ cat "$state/report.json"
 ## Qualify gateway distribution and Cell actions
 
 Run this after the desired scale stage is healthy. Pass the number of active
-nodes: `3`, `5`, `10`, or `20`. The example below exercises the full 20-node
-fleet with one concurrent client lane per Cell and 10 create/read pairs per
-lane:
+nodes (`3`, `5`, `10`, or `20`) and the number of provisioned Cells. The load
+uses one fixed schedule independent of completion time:
 
 ```sh
 python3 crates/crab-http-server/deploy/cell-issue-fleet/load.py \
-  --state "$state" --nodes 20 --pairs-per-cell 10
+  --state "$state" --nodes 20 --cells 20 --rate 5 --duration 60 \
+  --max-in-flight 64
 ```
 
-The script first reads every Cell through every active entry node. It then
-sends the same number of writes and reads to each Cell, verifies each write's
-readback, checks that successful entry traffic is within 70–130% of an even
-split, and waits for a newer RustFS root for every Cell. Finally it kills one
-owner, reads its last acknowledged issue through the gateway after takeover,
-checks that the root did not regress, and restarts the killed node. Temporary
-busy or unavailable responses are retried a bounded number of times; writes
-reuse their original request ID. The JSON report includes retry counts and
-end-to-end latency, including retry waits. It records the active Compose
-profiles, source revision, server and RustFS images, node limits, workload
-size, and p50/p95/p99/max latency. It rejects a stage name that does not
-match the project's running node containers. A failed run exits nonzero.
+`--rate` is **create/read pairs per second**, not HTTP requests/s. Each arrival
+creates one issue with a stable request ID, then reads that exact issue. Uniform
+arrivals rotate through all Cells. `--hot-share 0.8` directs 80% to Cell 1 and
+spreads the rest across the remaining Cells; `--hot-share 1` measures a single
+hot Cell. Node and Cell counts vary independently. Repeat increasing rates at
+a fixed duration and resource envelope; use longer runs to observe repeated
+compaction and publication drain.
 
-Each run writes `load-<nodes>-<run-id>.json` under the state directory. The
-measurement is the throughput of this fixed client workload on one machine,
-not maximum fleet throughput or a production SLO. See the
-[gateway load qualification](qualification/2026-09-25-gateway-load.md) for
-one local run and its limits. The [stage-load qualification](qualification/2026-09-25-stage-load.md)
-records load while 3, 5, 10, and 20 nodes were each active.
+The scheduler admits at most `--max-in-flight` pairs. It records arrivals it
+cannot admit as `client_capacity`; arrivals delayed by a full scheduling
+interval are `scheduler_late` and are never issued as a catch-up burst. Both
+remain in the offered count. The executor has no unbounded submission queue.
+The workload is capped at 100,000 planned pairs and 256 in-flight pairs.
+Scheduled pair latency includes dispatch delay and bounded retries. Successful
+write/read latency is also reported separately, with sample counts. Failed
+requests retain their status/retry reasons; exhausted writes may have an
+ambiguous result and keep their original request ID in the raw evidence.
+
+Before load, every Cell must be reachable through every active entry node.
+After load, the script waits for every node's uncovered publication bytes to
+reach zero, verifies acknowledged issues and newer RustFS roots, kills one
+owner, checks its acknowledged issue after takeover without root regression,
+and restarts it. This checks published-root recovery; follower-only tail loss
+is a separate fault gate. Successful ingress counts must be within 70–130% of
+an even split. The owner map used for forwarded counts is the pre-load snapshot;
+these counts do not attribute owner movement during the load.
+
+Each run writes a summary and sibling `.samples.jsonl` and `.nodes.jsonl`
+files. Every admitted,
+rejected, late, or failed pair is retained with its arrival index, Cell,
+operation timing, and write receipt ID where applicable. A readback mismatch
+stops new arrivals after it is observed; already dispatched work is drained.
+The summary remains available when post-load verification fails. A missed or
+failed arrival, unbalanced ingress, undrained publication, or failed recovery
+exits nonzero. Inspect the report to distinguish generator capacity from
+service capacity; `passed` is a functional workload result, never a supported
+production limit. The report's source revision identifies the load generator;
+associate its server image ID with the CI image artifact's source proof.
+
+The node file records Docker CPU, memory, network/block I/O, and the complete
+runtime Prometheus output during load. Collection runs on a separate thread,
+with at most four metrics commands at once, 15-second command deadlines, and
+a five-second pause between snapshots. Each snapshot records its own time and
+collection duration; it is not an atomic fleet view. Observer failures fail the
+run. Monitoring itself consumes resources, so keep it enabled for comparisons.
+After load, the summary retains per-node uncovered-byte samples until drain or
+the 120-second failure deadline.
+
+Verify the scheduler locally with its controllable HTTP service:
+
+```sh
+python3 -B -W error::ResourceWarning -m unittest discover \
+  -s crates/crab-http-server/deploy/cell-issue-fleet -p test_load.py -v
+```
+
+The [gateway load qualification](qualification/2026-09-25-gateway-load.md) and
+[stage-load qualification](qualification/2026-09-25-stage-load.md) are historical
+closed-loop runs where Cell count equaled node count. Their rates and latency
+samples are not directly comparable with this scheduled, fixed-Cell workload.
+Sustained offered-rate sweeps, complete action-phase attribution, and multi-host
+faults remain necessary for capacity qualification.
+
+### Scheduled harness smoke (2026-09-26)
+
+Local Colima ARM64, real RustFS, 20 Cells, 1-vCPU/1-GiB node limits:
+
+| Check | Result |
+| --- | --- |
+| Three nodes, 5 pairs/s for 12 s, at most 8 in flight | All 60 pairs passed; 120 successful operations; one 503 retry; publication drained; acknowledged issue survived owner loss |
+| Scale the same Cells to five nodes | All nodes healthy; 20 issues and labels retained; owner counts 6/5/5/1/3 |
+| Five nodes, 100 pairs/s for 3 s, at most 1 in flight | Expected nonzero exit; all 300 arrival records retained: 14 successful pairs, 283 client-capacity rejections, 3 scheduler misses; publication drained and recovery passed |
+
+The overload case proves generator accounting, not a service throughput limit.
+The runner used the working tree based on `c61a3b1d550`; the server image was
+`sha256:4ecf6e3e6e83263dbc521fc759c4a877c7f6f5e75fd9c555d25a89ebc7e2555e`,
+an earlier local image without source-revision proof. These are harness
+functional results, not current-source performance results. The VM supplied
+8 CPUs and approximately 16 GiB total. Raw summaries, pair samples, node
+snapshots, and owner maps are retained under
+`$HOME/.codex/cell-vfs-ltx-scale/arrivals-c61/` as `uniform.*`,
+`overload.*`, `startup.json`, and `five-startup.json`.
+
+Healthy ingress does not imply even owner execution. See the
+[LTX audit](../../../crab-cell-runtime/docs/ltx-performance-audit.md) for the
+execution-distribution and shared-resource gates before scale comparisons.
 
 ## Measure public-host actions against RustFS
 
