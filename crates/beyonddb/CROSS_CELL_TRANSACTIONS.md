@@ -19,8 +19,14 @@ Each coordinator now indexes records with unresolved participants and exposes
 bounded cursor pages. A new owner can discover both undecided and decided
 work after restoring its published Cell state. An internal resolver can now
 finish a terminal decision across data Cell participants, using participant
-state after an ambiguous reply and recording each resolution durably. Shard
-admission now registers a fixed shard number in the account Cell before it
+state after an ambiguous reply and recording each resolution durably. An
+internal write driver can also resume a published `BEGIN`: it reads the
+immutable participant payloads, prepares in Cell order, records receipts,
+publishes one decision, and finishes resolution before returning that decision.
+Concurrent resumes and lost prepare/decision replies use durable state as the
+authority. Definitive condition, lock, or routing failures request an abort;
+an already-published terminal decision wins. Transport uncertainty leaves
+recoverable work and never becomes cancellation. Shard admission now registers a fixed shard number in the account Cell before it
 returns to a caller. On startup, the server pages that account-owned registry,
 recovers shards previously served at its endpoint, then aborts unfinished
 `BEGIN` records and completes terminal decisions before accepting traffic.
@@ -117,12 +123,16 @@ queries the coordinator when its intent is old. It may **never** infer abort
 from elapsed time or coordinator unavailability. The durable `BEGIN` record
 is the authority even after the original host is gone.
 
-Every phase uses a stable `MutationIdentity` and identical input across
-retries. `InvocationError::Pending` must be resolved, or the participant or
-coordinator state queried, before selecting a new mutation identity. The
-runtime request ledger is time-bounded; the transaction records, rather than
-that ledger, are the long-lived recovery evidence. Use generation-fenced
-coordinator ownership so two workers cannot change a `BEGIN` independently.
+Each dispatched command has a `MutationIdentity`; retrying that exact
+invocation must preserve its identity and input. `InvocationError::Pending`
+must be resolved, or the participant or coordinator state queried, before
+selecting a new mutation identity. The internal driver reads durable phase
+state before repeating prepare, and revalidates the immutable payload through
+the participant's stored request digest. The runtime request ledger is
+time-bounded; the transaction records, rather than
+that ledger, are the long-lived recovery evidence. Coordinator commands run
+through one generation-fenced Cell owner, so concurrent drivers compete for
+the same immutable decision.
 An uncertain decision must stop the request with a retryable error and leave
 the resolver running; it must never be reported as a clean cancellation.
 
@@ -226,6 +236,30 @@ all accounts or 10,000 data Cells per tick. Track prepared count, oldest
 intent age, decision-to-resolution lag, conflict rate, retries, and capacity
 rejections. A permanently unavailable coordinator is an availability issue,
 not permission to discard a prepared transaction.
+
+## Driver evidence and limits
+
+`CellStorage::resume_cross_cell_transaction` starts from an already-published
+coordinator record. It never reroutes participant keys or reconstructs the
+request from an HTTP retry. It reads one participant payload at a time and
+prepares them in their persisted Cell-ID order. Participant-local failures
+map back to the original operation index before the abort decision is stored.
+The same indexed conflict outcome now feeds the one-Cell write path, which
+returns `TransactionCanceled` with ordered reasons instead of the single-item
+`TransactionConflictException`.
+
+`tests/elastic_cells/transaction_driver.rs` drives two real data Cells through
+commit, replay, a prepare without a recorded receipt, concurrent resumes,
+condition failure, competing locks, and stale routing. The signed peer
+transport drops replies after a published prepare and commit decision; the
+driver still completes from durable state. Aborted transactions release their
+locks and preserve both original item images. The SDK test checks ordered
+write cancellation and rollback alongside transactional read cancellation.
+
+The driver is internal: public request admission, token lookup/replay across
+routing changes, coordinator provisioning, continuous recovery, and account
+participants still need integration. These tests do not constitute a signed
+cross-Cell `TransactWriteItems` acceptance test or a fleet-scale qualification.
 
 ## Read-barrier evidence and limits
 

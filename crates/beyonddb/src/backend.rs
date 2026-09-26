@@ -3,6 +3,7 @@
 mod data;
 mod recovery;
 mod remaining;
+mod transaction;
 
 use std::{
     sync::Arc,

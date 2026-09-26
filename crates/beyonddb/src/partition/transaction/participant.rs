@@ -25,7 +25,7 @@ pub enum PreparePartitionTransactionOutcome {
     Replay,
     Committed,
     Aborted,
-    Conflict,
+    Mismatch,
     Rejected {
         index: usize,
         reason: TransactionFailure,
@@ -68,7 +68,7 @@ impl Command for PreparePartitionTransaction {
             };
             if coordinator.as_slice() != input.coordinator_cell {
                 return Ok(prepare_rejected(
-                    PreparePartitionTransactionOutcome::Conflict,
+                    PreparePartitionTransactionOutcome::Mismatch,
                 ));
             }
             let outcome = match state {
@@ -79,7 +79,7 @@ impl Command for PreparePartitionTransaction {
                     PreparePartitionTransactionOutcome::Committed
                 }
                 2 => PreparePartitionTransactionOutcome::Aborted,
-                _ => PreparePartitionTransactionOutcome::Conflict,
+                _ => PreparePartitionTransactionOutcome::Mismatch,
             };
             return Ok(prepare_rejected(outcome));
         }

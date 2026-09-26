@@ -19,10 +19,13 @@ receipt with the data mutation. A committed replay reads that claim before
 current routing, so a split cannot apply it in another Cell. A claimed request
 without an applied receipt still needs safe relocation if its source seals.
 Transactions across Cells remain rejected until
-a durable coordinator driver exists. Data Cells now have durable prepare,
+the adapter admits requests through the durable coordinator driver. Data Cells
+now have durable prepare,
 key-lock, commit, and abort commands. Account-scoped coordinator shards can
 persist the participant set, prepare receipts, one decision, and resolution
-receipts. Those commands are not exposed through the ExtendDB adapter;
+receipts. An internal driver resumes published BEGIN records, prepares immutable
+participants, records one decision, and resolves all participants. Public
+transaction admission is not yet wired through the ExtendDB adapter;
 continuous recovery scheduling and read-triggered decision resolution still
 need implementation. Data Cell reads now fail retryably on unresolved intents;
 transactional reads return ordered cancellation reasons. A

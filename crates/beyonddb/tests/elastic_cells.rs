@@ -1,4 +1,5 @@
 mod elastic_cells {
+    mod transaction_driver;
     pub(crate) mod transaction_visibility;
 }
 
@@ -3585,7 +3586,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     assert!(matches!(
         conflicting_transaction,
         Err(InvocationError::Rejected(result))
-            if result.output.0 == PartitionTransactWriteOutcome::Conflict
+            if result.output.0 == (PartitionTransactWriteOutcome::Rejected { index: 0, reason: beyonddb::TransactionFailure::Conflict })
     ));
     let premature_seal = client
         .command::<SealPartition>(&left_target, identity(92), Json(seal.clone()))

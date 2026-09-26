@@ -60,6 +60,8 @@ impl crab_cell_runtime::registry::CellModule for CoordinatorModule {
                 let mut source = blake3::Hasher::new();
                 source.update(include_bytes!("transaction_coordinator.rs"));
                 source.update(include_bytes!("transaction_coordinator/phase.rs"));
+                source.update(include_bytes!("items.rs"));
+                source.update(include_bytes!("expression_wire.rs"));
                 Digest::from_bytes(*source.finalize().as_bytes())
             },
             retained_codes: &[],

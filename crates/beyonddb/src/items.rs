@@ -368,9 +368,11 @@ pub enum TransactionOutcome {
     },
 }
 
-/// Why an account-local transaction was rejected.
+/// Why a transaction operation was rejected.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TransactionFailure {
+    /// Another transaction or ownership transition conflicts with this operation.
+    Conflict,
     /// Invalid input or stale table metadata.
     Validation(String),
     /// Condition false against the old item in the same transaction.
