@@ -231,6 +231,61 @@ def node_inventory(path: Path, profiles: tuple[str, ...], size: int) -> dict:
     return sessions
 
 
+def prove_reader_targets(path: Path, profiles: tuple[str, ...], port: int) -> dict:
+    url = node_url(1, port) + "/api/repos/demo/work-01/settings/read-replicas"
+    initial = request_json("GET", url)
+    args = ("exec", "-T", "node-01", "crab-http-server", "--config", CONFIG,
+            "cells", "status", "--owner", "demo", "--name", "work-01")
+    before = json.loads(compose(path, profiles, *args))
+    phases = []
+    lost = None
+    try:
+        for desired in (0, 1, 2, 4, 1):
+            started = time.monotonic()
+            policy = set_reader_target(port, 1, desired)
+            deadline = time.monotonic() + 180
+            while True:
+                status = request_json("GET", url)
+                ready = status.get("readiness") or {}
+                if (status["desired_readers"] == desired and status["convergence"] == "ready"
+                        and ready.get("selected_readers") == desired
+                        and ready.get("ready_readers") == desired):
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f"reader target {desired} did not converge: {status}")
+                time.sleep(1)
+            if desired:
+                reads = prove_readers(port, 20, desired)
+            else:
+                try:
+                    replica_issue(node_url(1, port) + issue_path(1) + "/1?read=replica", 1)
+                except urllib.error.HTTPError as error:
+                    body = json.load(error)
+                    if error.code != 503 or body.get("error", {}).get("code") != "replica_unavailable":
+                        raise RuntimeError("withdrawn reader target returned the wrong error") from error
+                    reads = {"http_status": error.code, "error": body}
+                else:
+                    raise RuntimeError("zero-reader target still returned a replica value")
+            after = json.loads(compose(path, profiles, *args))
+            if (after["owner"] != before["owner"] or after["epoch"] != before["epoch"]
+                    or after["root"]["commit_sequence"] < before["root"]["commit_sequence"]):
+                raise RuntimeError("reader target change altered writer authority or regressed its root")
+            phases.append({"desired": desired, "revision": policy["revision"], "status": status,
+                           "reads": reads, "control": after,
+                           "convergence_seconds": round(time.monotonic() - started, 3)})
+            if desired == 4:
+                sessions = node_inventory(path, profiles, 20)
+                index, node = next((index, node) for index, node in sessions.values()
+                                   if index != 1 and node in reads["reader_counts"])
+                lost = node_name(index)
+                compose(path, profiles, "kill", "--signal", "SIGKILL", lost)
+        return {"initial_control": before, "phases": phases, "reader_killed_before_shrink": lost}
+    finally:
+        if lost is not None:
+            compose(path, profiles, "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300", lost)
+        set_reader_target(port, 1, initial["desired_readers"])
+
+
 def prove_reader_replacement(path: Path, profiles: tuple[str, ...], port: int) -> dict:
     set_reader_target(port, 18, 2)
     before_readers = prove_readers(port, 20, 2, 18)
@@ -475,6 +530,8 @@ def main() -> None:
         (path.parent / "read-replica-report.json").write_text(json.dumps(report, indent=2) + "\n")
         print(f"Verified {size} nodes and {target} distinct S3-rooted issue readers", flush=True)
         previous = size
+    report["reader_targets"] = prove_reader_targets(path, phases[-1][1], args.node_port_base)
+    (path.parent / "read-replica-report.json").write_text(json.dumps(report, indent=2) + "\n")
     report["reader_replacement"] = prove_reader_replacement(path, phases[-1][1], args.node_port_base)
     (path.parent / "read-replica-report.json").write_text(json.dumps(report, indent=2) + "\n")
     report["warm_promotion"] = prove_warm_promotion(path, phases[-1][1], args.node_port_base)
