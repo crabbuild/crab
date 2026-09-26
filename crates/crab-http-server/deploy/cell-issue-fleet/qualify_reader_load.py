@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure two minutes of owner/replica reads with unequal ingress concurrency."""
+"""Measure owner/replica reads with eight clients and an identical ingress request mix."""
 
 import argparse
 import hashlib
@@ -10,7 +10,9 @@ import urllib.request
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from itertools import cycle
 from pathlib import Path
+from threading import Lock
 
 from qualify import command, compose, issue_path, node_url, request_json
 from qualify_read_replicas import cost_delta, cost_snapshot, node_inventory, prove_readers, set_reader_target
@@ -33,16 +35,20 @@ def resources(path: Path) -> dict:
 def measure(port: int, mode: str, expected: dict) -> dict:
     start = time.monotonic()
     deadline = start + 60
+    destinations = cycle((1, 1, 1, 5))
+    dispatch = Lock()
 
-    def worker(ingress):
-        url = node_url(ingress, port) + issue_path(1) + "/1"
-        if mode == "replica":
-            url += "?read=replica"
-        latencies = []
-        readers = Counter()
-        errors = Counter()
-        sequences = []
+    def worker(_):
+        samples = {ingress: ([], Counter(), Counter(), []) for ingress in (1, 5)}
         while time.monotonic() < deadline:
+            # Fix request proportions, rather than client placement: a faster
+            # ingress must not silently dominate one mode's latency samples.
+            with dispatch:
+                ingress = next(destinations)
+            latencies, readers, errors, sequences = samples[ingress]
+            url = node_url(ingress, port) + issue_path(1) + "/1"
+            if mode == "replica":
+                url += "?read=replica"
             requested = time.monotonic()
             try:
                 with urllib.request.urlopen(url, timeout=10) as response:
@@ -62,10 +68,10 @@ def measure(port: int, mode: str, expected: dict) -> dict:
                 error.close()
             except OSError as error:
                 errors[type(error).__name__] += 1
-        return ingress, latencies, readers, errors, sequences
+        return [(ingress, *values) for ingress, values in samples.items()]
 
     with ThreadPoolExecutor(max_workers=8) as workers:
-        samples = list(workers.map(worker, [1] * 6 + [5] * 2))
+        samples = [sample for batch in workers.map(worker, range(8)) for sample in batch]
     elapsed = time.monotonic() - start
     latencies = sorted(value for _, values, _, _, _ in samples for value in values)
     ingress_results = {}
@@ -81,6 +87,7 @@ def measure(port: int, mode: str, expected: dict) -> dict:
         count = len(ingress_latencies)
         ingress_results[node_name(ingress)] = {
             "successful_reads": count, "requests_per_second": count / elapsed,
+            "requests_started": count + sum(errors.values()),
             "p50_ms": ingress_latencies[int((count - 1) * .50)] if count else None,
             "p99_ms": ingress_latencies[int((count - 1) * .99)] if count else None,
             "reader_counts": dict(readers), "errors": dict(errors),
@@ -89,7 +96,7 @@ def measure(port: int, mode: str, expected: dict) -> dict:
     if not latencies:
         raise RuntimeError("load run completed no successful queries")
     return {"mode": mode, "offered_seconds": 60, "elapsed_seconds": elapsed,
-            "ingress_concurrency": {"node-01": 6, "node-05": 2},
+            "concurrency": 8, "ingress_request_schedule": ["node-01"] * 3 + ["node-05"],
             "successful_reads": len(latencies), "requests_per_second": len(latencies) / elapsed,
             "p50_ms": latencies[int((len(latencies) - 1) * .50)],
             "p99_ms": latencies[int((len(latencies) - 1) * .99)],

@@ -279,8 +279,9 @@ cuts, the deleted local volumes, source/image identities, and recovery timing.
 
 `qualify_reader_load.py --state <same-state>` then resumes five nodes for a
 60-second owner workload and a 60-second replica workload. Eight closed-loop
-clients use unequal ingress concurrency (six on node 1, two on node 5), below
-the unchanged eight-request collaboration admission limit at each ingress.
+clients assign three requests to node 1 followed by one to node 5, repeating
+that schedule regardless of which ingress completes faster. The total
+concurrency stays within the eight-request admission limit at each ingress.
 The report records actual reader receipts/counts per ingress, throughput,
 latencies, control/LTX counter deltas, and process resources. `VmHWM` is the
 process-lifetime resident high-water mark; disk and descriptor counts are
@@ -294,9 +295,15 @@ images with the owner route. Pass `--state <same-state> --report <new-path>
 `org.opencontainers.image.revision` label. It verifies running image IDs and
 node limits, uses the same eight clients and sixty-second windows, and runs
 three pairs in alternating order. `--rounds 1` provides an initial experiment.
+Each run cleanly drains this disposable fixture, starts node 5 alone to claim
+the Cell, then starts the other nodes. This holds physical ownership constant
+between images: node 1 routes to a remote primary and node 5 serves it locally.
 The report records ownership before and after each pair and rejects a changed
 owner, epoch, or incarnation. Per-ingress latency and throughput expose local
-owner traffic that can dominate the aggregate closed-loop median.
+owner traffic separately. Reports also verify the fixed 3:1 request mix. Earlier
+reports using six clients pinned to node 1 and two to node 5 used a different
+driver: their completed request mix varied by mode, so aggregate percentiles
+from that driver cannot establish parity under identical ingress traffic.
 Every pair must have zero errors, correct values/receipts, all four readers,
 replica throughput at least 80% of owner throughput, and replica median/p99
 latency at most 120% of owner latency. Reports and derived Compose files are

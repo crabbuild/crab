@@ -44,6 +44,14 @@ def main():
         raise RuntimeError("preserve the previous derived Compose file")
     path.write_text(json.dumps(config, indent=2) + "\n")
     nodes = [node_name(index) for index in range(1, 6)]
+    # Hold physical ownership constant across images as well as within pairs.
+    # Clean drain preserves the fixture; only node 5 can claim its first read.
+    compose(path, ("five",), "stop", "gateway", *nodes)
+    compose(path, ("five",), "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300", "node-05")
+    expected = {"title": "Cell issue on node 1", "body": previous["acknowledged_body"]}
+    current = request_json("GET", node_url(5, args.node_port_base) + issue_path(1) + "/1")
+    if any(current.get(key) != value for key, value in expected.items()):
+        raise RuntimeError("fixture lost its acknowledged value")
     compose(path, ("five",), "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300",
             "gateway", *nodes)
     for node in nodes:
@@ -51,7 +59,6 @@ def main():
         if command("docker", "inspect", "--format", "{{.Image}}", container) != image:
             raise RuntimeError("running container differs from the selected image")
     set_reader_target(args.node_port_base, 1, 4)
-    expected = {"title": "Cell issue on node 1", "body": previous["acknowledged_body"]}
     current = request_json("GET", node_url(1, args.node_port_base) + issue_path(1) + "/1")
     if any(current.get(key) != value for key, value in expected.items()):
         raise RuntimeError("fixture lost its acknowledged value")
@@ -62,11 +69,14 @@ def main():
               "nodes": node_inventory(path, ("five",), 5),
               "ready_readers": prove_readers(args.node_port_base, 5, 4),
               "rounds": [], "scope": "single host; same retained fixture and 1 vCPU/1 GiB nodes; "
-              "8 closed-loop clients through two ingresses; 60 seconds per mode; alternating order"}
+              "8 closed-loop clients; fixed 3:1 request mix through node-01 and node-05; "
+              "60 seconds per mode; alternating order"}
     for index in range(args.rounds):
         status = ("exec", "-T", "node-01", "crab-http-server", "--config", CONFIG,
                   "cells", "status", "--owner", "demo", "--name", "work-01")
         control = json.loads(compose(path, ("five",), *status))
+        if report["nodes"].get(control["owner"]["session"], [None])[0] != 5:
+            raise RuntimeError("primary did not stay on node-05")
         pair = {"control_before": control}
         report["rounds"].append(pair)
         for mode in (("owner", "replica") if index % 2 == 0 else ("replica", "owner")):
@@ -78,6 +88,9 @@ def main():
             args.report.write_text(json.dumps(report, indent=2) + "\n")
             if any(result["errors"] for result in measured["ingress"].values()):
                 raise RuntimeError("workload returned errors; report retained")
+            ingress = measured["ingress"]
+            if not 0 <= ingress["node-01"]["requests_started"] - 3 * ingress["node-05"]["requests_started"] <= 3:
+                raise RuntimeError("workload changed the requested ingress mix; report retained")
             if mode == "replica":
                 if any(len(result["reader_counts"]) != 4 for result in measured["ingress"].values()):
                     raise RuntimeError("an ingress did not use all four readers")
