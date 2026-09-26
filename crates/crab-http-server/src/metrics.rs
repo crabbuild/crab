@@ -53,6 +53,15 @@ const APPEND_RESULT_LABELS: [&str; APPEND_RESULT_COUNT] = ["acked", "nacked"];
 const DURABILITY_SUBMISSION_LABELS: [&str; DURABILITY_SUBMISSION_COUNT] =
     ["fleet", "unsupported", "unavailable", "rejected"];
 const RESIDENT_ROUTE_LABELS: [&str; 3] = ["hit", "miss", "refused"];
+const OWNER_HINT_LABELS: [&str; 4] = ["hit", "miss", "stale", "refused"];
+
+#[derive(Clone, Copy)]
+pub(crate) enum OwnerHintOutcome {
+    Hit,
+    Miss,
+    Stale,
+    Refused,
+}
 const CATALOG_READ_LABELS: [&str; 2] = ["head", "page"];
 const CATALOG_READ_RESULT_LABELS: [&str; 2] = ["ok", "failed"];
 const CONTROL_READ_RESULT_LABELS: [&str; 2] = ["ok", "failed"];
@@ -182,6 +191,7 @@ struct MetricsInner {
     node_log_append_bytes: [Counter; APPEND_RESULT_COUNT],
     durability_submissions: [Counter; DURABILITY_SUBMISSION_COUNT],
     resident_routes: [Counter; 3],
+    owner_hints: [Counter; 4],
     catalog_reads: [[Counter; 2]; 2],
     catalog_read_duration: [Histogram; 2],
     control_reads: [Counter; 2],
@@ -584,6 +594,12 @@ impl Metrics {
                 resident_routes: RESIDENT_ROUTE_LABELS.map(|outcome| {
                     recorder.register_counter(
                         &key("crab_cell_resident_route_total", &[("outcome", outcome)]),
+                        &METADATA,
+                    )
+                }),
+                owner_hints: OWNER_HINT_LABELS.map(|outcome| {
+                    recorder.register_counter(
+                        &key("crab_cell_owner_hint_total", &[("outcome", outcome)]),
                         &METADATA,
                     )
                 }),
@@ -1050,6 +1066,10 @@ impl Metrics {
 
     fn record_request(&self, method: usize, outcome: usize) {
         self.inner.methods[method].requests[outcome].increment(1);
+    }
+
+    pub(crate) fn record_owner_hint(&self, outcome: OwnerHintOutcome) {
+        self.inner.owner_hints[outcome as usize].increment(1);
     }
 
     fn record_duration(&self, method: usize, started: Instant) {
@@ -1986,6 +2006,11 @@ fn describe_metrics(recorder: &impl Recorder) {
     );
     describe_counter(
         recorder,
+        "crab_cell_owner_hint_total",
+        "Peer sender owner-hint lookups and invalidations by bounded outcome.",
+    );
+    describe_counter(
+        recorder,
         "crab_cell_ltx_phase_total",
         "Completed LTX work by bounded phase and result.",
     );
@@ -2332,6 +2357,8 @@ mod tests {
     #[tokio::test]
     async fn completed_request_exports_bounded_full_body_metrics() {
         let metrics = Metrics::new(&[]).unwrap();
+        metrics.record_owner_hint(OwnerHintOutcome::Hit);
+        metrics.record_owner_hint(OwnerHintOutcome::Stale);
         metrics.record_transfer_admission_rejection(false);
         metrics.record_transfer_admission_rejection(true);
         <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::durability_proof(
@@ -2550,6 +2577,8 @@ mod tests {
         assert!(rendered.contains("crab_cell_node_log_append_bytes_total{result=\"nacked\"} 128"));
         assert!(rendered.contains("crab_cell_resident_route_total{outcome=\"hit\"} 1"));
         assert!(rendered.contains("crab_cell_resident_route_total{outcome=\"miss\"} 1"));
+        assert!(rendered.contains("crab_cell_owner_hint_total{outcome=\"hit\"} 1"));
+        assert!(rendered.contains("crab_cell_owner_hint_total{outcome=\"stale\"} 1"));
         // The metadata plane has its own counter: a page read that failed must
         // be visible even though no LTX phase ran for it.
         assert!(rendered.contains("crab_cell_catalog_reads_total{kind=\"head\",result=\"ok\"} 1"));

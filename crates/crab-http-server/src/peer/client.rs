@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -10,16 +10,20 @@ use axum::http::{StatusCode, header};
 use crab_cell_runtime::Error as CellError;
 use crab_cell_runtime::cell::application::ApplicationIdentity;
 use crab_cell_runtime::control::authority::CellAuthority;
-use crab_cell_runtime::identity::{CellTarget, Digest, SessionId};
+use crab_cell_runtime::identity::{CellId, CellTarget, Digest, SessionId};
 use crab_cell_runtime::node::{NodeAdvertisement, NodeDirectory};
 use crab_cell_runtime::peer::{PeerRoundTrip, wire as peer_wire};
 use futures_util::StreamExt;
 
 use super::{now_ms, remaining_timeout};
+use crate::metrics::{Metrics, OwnerHintOutcome};
 use crate::peer_tls::PeerTlsClient;
 
 const PEER_FORWARD_PATH: &str = "internal/cells/v1/forward";
 const MAX_PEER_CLIENTS: usize = 1_024;
+const MAX_OWNER_HINTS: usize = 4_096;
+const OWNER_HINT_LIFETIME_MS: i64 = 5_000;
+const OWNER_HINT_EXPIRY_MARGIN_MS: i64 = 1_000;
 const PROTOBUF_MEDIA_TYPE: &str = "application/x-protobuf";
 
 pub(crate) struct PeerHttpRoundTrip {
@@ -29,6 +33,8 @@ pub(crate) struct PeerHttpRoundTrip {
     tls: PeerTlsClient,
     session: SessionId,
     clients: Arc<Mutex<VecDeque<CachedPeerClient>>>,
+    owner_hints: Arc<Mutex<HashMap<CellId, CachedOwnerHint>>>,
+    metrics: Option<Metrics>,
 }
 
 impl PeerHttpRoundTrip {
@@ -46,7 +52,21 @@ impl PeerHttpRoundTrip {
             tls,
             session,
             clients: Arc::new(Mutex::new(VecDeque::new())),
+            owner_hints: Arc::new(Mutex::new(HashMap::new())),
+            metrics: None,
         }
+    }
+
+    pub(crate) fn with_metrics(mut self, metrics: Metrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_owner_hint(&self, cell: CellId) -> bool {
+        self.owner_hints
+            .lock()
+            .is_ok_and(|hints| hints.contains_key(&cell))
     }
 
     async fn send_inner(
@@ -60,19 +80,28 @@ impl PeerHttpRoundTrip {
         }
         let started = Instant::now();
         let mut last_retry = None;
-        for _ in 0..2 {
+        for attempt in 0..2 {
             let remaining_ms = remaining_timeout(started, timeout_ms)?;
             let owner = tokio::time::timeout(
                 Duration::from_millis(u64::from(remaining_ms)),
-                self.owner(&target),
+                self.owner(&target, attempt == 0),
             )
             .await
             .map_err(|_| CellError::Deadline)??;
             let remaining_ms = remaining_timeout(started, timeout_ms)?;
             match self.send_once(&owner, request.clone(), remaining_ms).await {
-                Ok(PeerHttpAttempt::Reply(reply)) => return Ok(reply),
-                Ok(PeerHttpAttempt::Retry(error)) => last_retry = Some(error),
+                Ok(PeerHttpAttempt::Reply(reply, rejected)) => {
+                    if rejected {
+                        self.invalidate_owner(target.cell_id(), owner.session);
+                    }
+                    return Ok(reply);
+                }
+                Ok(PeerHttpAttempt::Retry(error)) => {
+                    self.invalidate_owner(target.cell_id(), owner.session);
+                    last_retry = Some(error);
+                }
                 Ok(PeerHttpAttempt::Unknown(error)) => {
+                    self.invalidate_owner(target.cell_id(), owner.session);
                     return Err(CellError::PeerTransportUnknown {
                         context: "peer HTTP response was lost or invalid",
                         source: Box::new(error),
@@ -112,7 +141,7 @@ impl PeerHttpRoundTrip {
             public_key: node.verifying_key()?.to_bytes(),
         };
         match self.send_once(&owner, request, timeout_ms).await? {
-            PeerHttpAttempt::Reply(reply) => Ok(reply),
+            PeerHttpAttempt::Reply(reply, _) => Ok(reply),
             PeerHttpAttempt::Retry(error) => Err(error),
             PeerHttpAttempt::Unknown(error) => Err(CellError::PeerTransportUnknown {
                 context: "peer HTTP activation response was lost or invalid",
@@ -121,7 +150,11 @@ impl PeerHttpRoundTrip {
         }
     }
 
-    async fn owner(&self, target: &CellTarget) -> crab_cell_runtime::Result<RemotePeer> {
+    async fn owner(
+        &self,
+        target: &CellTarget,
+        allow_hint: bool,
+    ) -> crab_cell_runtime::Result<RemotePeer> {
         if target.tenant() != self.identity.tenant()
             || target.application() != self.identity.application()
         {
@@ -129,11 +162,31 @@ impl PeerHttpRoundTrip {
                 "Cell target is outside the routed application",
             ));
         }
+        let now_ms = now_ms().map_err(peer_transport)?;
+        // Cache failure cannot block the authoritative owner lookup.
+        if allow_hint && let Ok(hints) = self.owner_hints.lock() {
+            if let Some(hint) = hints.get(&target.cell_id())
+                && now_ms < hint.valid_until_ms
+            {
+                if let Some(metrics) = &self.metrics {
+                    metrics.record_owner_hint(OwnerHintOutcome::Hit);
+                }
+                return Ok(hint.owner.clone());
+            }
+            if let Some(metrics) = &self.metrics {
+                metrics.record_owner_hint(if hints.contains_key(&target.cell_id()) {
+                    OwnerHintOutcome::Stale
+                } else {
+                    OwnerHintOutcome::Miss
+                });
+            }
+        }
         let control = self
             .authority
             .load(target.cell_id())
             .await?
             .ok_or(CellError::CellNotActive)?;
+        let revision = control.value().revision;
         let owner = control
             .value()
             .owner
@@ -142,7 +195,6 @@ impl PeerHttpRoundTrip {
         if owner.session == self.session {
             return Err(CellError::CellNotActive);
         }
-        let now_ms = now_ms().map_err(peer_transport)?;
         let enrolled = self
             .directory
             .load(owner.session, now_ms)
@@ -154,12 +206,66 @@ impl PeerHttpRoundTrip {
                 "Cell owner endpoint is not enrolled",
             ));
         }
-        Ok(RemotePeer {
+        let peer = RemotePeer {
             session: owner.session,
             endpoint: url::Url::parse(advertisement.endpoint()).map_err(peer_transport)?,
             certificate: advertisement.certificate(),
             public_key: advertisement.verifying_key()?.to_bytes(),
-        })
+        };
+        let valid_until_ms = advertisement
+            .expires_at_ms()
+            .saturating_sub(OWNER_HINT_EXPIRY_MARGIN_MS)
+            .min(now_ms.saturating_add(OWNER_HINT_LIFETIME_MS));
+        if valid_until_ms > now_ms {
+            // A hint is advisory: if its lock failed, the verified authority
+            // result still serves this request without retaining a hint.
+            if let Ok(mut hints) = self.owner_hints.lock() {
+                if hints.len() >= MAX_OWNER_HINTS && !hints.contains_key(&target.cell_id()) {
+                    hints.retain(|_, hint| hint.valid_until_ms > now_ms);
+                    if hints.len() >= MAX_OWNER_HINTS
+                        && let Some(victim) = hints.keys().next().copied()
+                    {
+                        hints.remove(&victim);
+                    }
+                }
+                // A slower old authority read must not replace a newer owner hint.
+                if hints
+                    .get(&target.cell_id())
+                    .is_none_or(|hint| hint.revision <= revision)
+                {
+                    hints.insert(
+                        target.cell_id(),
+                        CachedOwnerHint {
+                            owner: peer.clone(),
+                            valid_until_ms,
+                            revision,
+                        },
+                    );
+                }
+            }
+        }
+        Ok(peer)
+    }
+
+    fn invalidate_owner(&self, cell: CellId, session: SessionId) {
+        let Ok(mut hints) = self.owner_hints.lock() else {
+            return;
+        };
+        // A concurrent route may have already observed a new owner.
+        let removed = if hints
+            .get(&cell)
+            .is_some_and(|hint| hint.owner.session == session)
+        {
+            hints.remove(&cell)
+        } else {
+            None
+        };
+        drop(hints);
+        if removed.is_some()
+            && let Some(metrics) = &self.metrics
+        {
+            metrics.record_owner_hint(OwnerHintOutcome::Refused);
+        }
     }
 
     fn client(&self, owner: &RemotePeer) -> crab_cell_runtime::Result<reqwest::Client> {
@@ -285,7 +391,13 @@ impl PeerHttpRoundTrip {
         ) {
             return Ok(PeerHttpAttempt::Retry(CellError::CellNotActive));
         }
-        Ok(PeerHttpAttempt::Reply(body))
+        Ok(PeerHttpAttempt::Reply(
+            body,
+            matches!(
+                decoded.outcome,
+                Some(peer_wire::peer_reply::Outcome::Error(_))
+            ),
+        ))
     }
 }
 
@@ -325,15 +437,24 @@ impl Clone for PeerHttpRoundTrip {
             tls: self.tls.clone(),
             session: self.session,
             clients: Arc::clone(&self.clients),
+            owner_hints: Arc::clone(&self.owner_hints),
+            metrics: self.metrics.clone(),
         }
     }
 }
 
+#[derive(Clone)]
 struct RemotePeer {
     session: SessionId,
     endpoint: url::Url,
     certificate: Digest,
     public_key: [u8; 32],
+}
+
+struct CachedOwnerHint {
+    owner: RemotePeer,
+    valid_until_ms: i64,
+    revision: u64,
 }
 
 struct CachedPeerClient {
@@ -352,7 +473,7 @@ impl CachedPeerClient {
 }
 
 enum PeerHttpAttempt {
-    Reply(Vec<u8>),
+    Reply(Vec<u8>, bool),
     Retry(CellError),
     Unknown(CellError),
 }

@@ -533,6 +533,48 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     assert_eq!(comment.0, StatusCode::CREATED);
     assert_eq!(comment.1["number"], 1);
     eprintln!("qualified issue comment mutation");
+    let sender_reads = Arc::new(ReceiverReads::default());
+    let sender = Arc::new(PeerHttpRoundTrip::new(
+        identity,
+        CellAuthority::with_telemetry(
+            cell_layout.clone(),
+            CellTelemetryHandle::from_sink(sender_reads.clone()),
+        ),
+        directory.clone(),
+        peer_tls.client_identity(),
+        ingress_session,
+    ));
+    let peer_client = crab_cell_runtime::client::CellClient::peer(
+        Arc::clone(&registry),
+        Arc::new(crab_cell_runtime::peer::PeerSigner::new(
+            ingress_session,
+            registry.release_digest(),
+            peer_tls.signing_key().clone(),
+        )),
+        crab_cell_runtime::peer::PeerPrincipal {
+            issuer: local_operator.issuer.clone(),
+            subject: local_operator.subject.clone(),
+            actions: vec!["repository.read".into()],
+        },
+        sender.clone(),
+    );
+    let observed = peer_client
+        .query::<crate::cells::repository::ListComments>(
+            &target,
+            None,
+            crate::cells::repository::ListCommentsInput {
+                issue: 1,
+                before: None,
+                limit: 30,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        observed.output,
+        crate::cells::repository::CommentPage::Found { .. }
+    ));
+    assert_eq!(sender_reads.snapshot().2, 1);
     let reads_before = receiver_reads.snapshot();
     let (comments_status, comments) = json_get(
         &client,
@@ -928,6 +970,19 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     .await;
     assert_eq!(restored_target.0, StatusCode::ACCEPTED);
     assert!(reader.resolve(target.clone()).await.is_ok());
+    peer_client
+        .query::<crate::cells::repository::ListComments>(
+            &target,
+            None,
+            crate::cells::repository::ListCommentsInput {
+                issue: 1,
+                before: None,
+                limit: 30,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(sender.has_owner_hint(target.cell_id()));
 
     management_stop.send(()).unwrap();
     management_task.await.unwrap();
@@ -944,6 +999,21 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             .await,
         Err(crab_cell_runtime::Error::Fenced)
     ));
+    assert!(
+        peer_client
+            .query::<crate::cells::repository::ListComments>(
+                &target,
+                None,
+                crate::cells::repository::ListCommentsInput {
+                    issue: 1,
+                    before: None,
+                    limit: 30,
+                },
+            )
+            .await
+            .is_err()
+    );
+    assert!(!sender.has_owner_hint(target.cell_id()));
     std::fs::remove_dir_all(owner_dir.path()).unwrap();
 
     let restored = client
