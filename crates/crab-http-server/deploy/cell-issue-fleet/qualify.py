@@ -127,6 +127,16 @@ def issue_path(index: int) -> str:
     return f"/api/repos/demo/work-{index:02d}/issues"
 
 
+def initial_issue(index: int) -> dict:
+    return {"number": 1, "title": f"Cell issue {index}",
+            "body": "Durable issue created through a constrained Cell node"}
+
+
+def issue_matches(observed: dict, expected: dict) -> bool:
+    return (type(observed.get("number")) is int
+            and all(observed.get(field) == expected[field] for field in ("number", "title", "body")))
+
+
 def create_repository(path: Path, profiles: tuple[str, ...], index: int) -> None:
     compose(
         path,
@@ -239,16 +249,17 @@ def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, g
     initial_cells = range(1, cells + 1) if previous == 0 else ()
     for index in initial_cells:
         create_repository(path, profiles, index)
+        expected_issue = initial_issue(index)
         issue = request_json(
             "POST",
             node_url((index - 1) % size + 1, node_port_base) + issue_path(index),
             {
                 "request_id": f"00000000-0000-4000-8000-{index:012x}",
-                "title": f"Cell issue {index}",
-                "body": "Durable issue created through a constrained Cell node",
+                "title": expected_issue["title"],
+                "body": expected_issue["body"],
             },
         )
-        if issue.get("number") != 1:
+        if not issue_matches(issue, expected_issue):
             raise RuntimeError(f"node {index} did not create the expected issue: {issue}")
         label = request_json(
             "POST",
@@ -266,7 +277,7 @@ def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, g
     owners = {}
     for index in range(1, cells + 1):
         visible = request_json("GET", gateway + issue_path(index) + "/1")
-        if visible.get("title") != f"Cell issue {index}":
+        if not issue_matches(visible, initial_issue(index)):
             raise RuntimeError(f"gateway did not read Cell {index} after stage {size}")
         labels = request_json("GET", gateway + f"/api/repos/demo/work-{index:02d}/labels")
         if len(labels.get("items", [])) != 1 or labels["items"][0]["name"] != "distributed":
@@ -280,7 +291,7 @@ def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, g
         owners[f"work-{index:02d}"] = sessions[owner]
     for index in range(previous + 1, size + 1):
         visible = request_json("GET", node_url(index, node_port_base) + issue_path(1) + "/1")
-        if visible.get("title") != "Cell issue 1":
+        if not issue_matches(visible, initial_issue(1)):
             raise RuntimeError(f"new node {index} could not route to the original Cell")
     stored_objects = object_count(path, profiles)
     if stored_objects < 1:
@@ -334,7 +345,7 @@ def prove_owner_loss(path: Path, profiles: tuple[str, ...], owner: str, gateway_
                 if session is None or session == before["owner"]["session"]:
                     time.sleep(1)
                     continue
-                if issues.get("title") != f"Cell issue {cell}":
+                if not issue_matches(issues, initial_issue(cell)):
                     raise RuntimeError("recovered owner did not return the acknowledged issue")
                 root = after.get("root") or {}
                 if root.get("commit_sequence", -1) < before["root"]["commit_sequence"] or root.get("txid", -1) < before["root"]["txid"]:

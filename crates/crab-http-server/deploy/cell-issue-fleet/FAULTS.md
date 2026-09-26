@@ -42,7 +42,8 @@ all failed, rejected and missed arrivals before comparing latency.
    commit. Arrivals must span recovery and continue afterward; Cells initially
    on other owners must make successful progress during recovery.
 6. Every received acknowledgement is read back while the failed owner remains
-   absent. Paginated public issue lists must show each run-specific title
+   absent, comparing issue number, title and complete body. Paginated public
+   issue lists omit bodies and must show each run-specific title
    once. Ambiguous writes may have one visible effect even without a received
    success; duplicate effects always fail the gate.
 7. The old node is recreated with a fresh Cell volume, and publication must
@@ -53,6 +54,9 @@ The driver saves `report.json`, every pair in `samples.jsonl`, resource samples
 in `nodes.jsonl`, joined acknowledged writes in `actions.jsonl`, node traces,
 and the removed owner's final log. Action summaries count actual execution
 owners, forwarded writes and response proofs before, during and after recovery.
+Fault report schema 2 uses the full-body checks and distinct scheduled payloads
+of load report schema 7. Earlier receipts establish only ID/title readback;
+they do not supply full-body recovery evidence.
 Phases use client dispatch time relative to the kill and verified-recovery
 observations. Pair and observation timestamps use the load process's monotonic
 clock; they are not comparable with server clocks.
@@ -109,5 +113,7 @@ gh workflow run http-server-container.yml --ref YOUR_BRANCH \
 The `cell-fleet-qualification-<run-id>` artifact retains reports, samples, action
 traces, final node logs and the image import receipt, including failed runs.
 The fresh worker still shares CPU, disk and network among its containers; this
-does not create independent machine failure domains. The fixed five-pair/s run
-is a reproducibility gate, not a saturation test.
+does not create independent machine failure domains. The current stage runner
+offers 5, 20, 50, then 5 pairs/s at each size before the separate five-pair/s
+fault run. A completed curve retains verified overload as failed capacity
+evidence; it does not establish that every offered rate was served.

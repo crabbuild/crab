@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 
-from qualify import BUCKET, CONFIG, MEMORY_LIMIT, ROOT, command, compose, image_provenance, issue_path, node_name, prove_node, restart_after_fault
+from qualify import BUCKET, CONFIG, MEMORY_LIMIT, ROOT, command, compose, image_provenance, initial_issue, issue_matches, issue_path, node_name, prove_node, restart_after_fault
 import action_traces
 
 
@@ -196,8 +196,7 @@ def verify_acknowledged(gateway: str, nodes: int, samples: list[dict]) -> dict:
         issue = sample["acknowledged"]
         observed = load_request(gateway, nodes, "GET", issue_path(sample["cell"]) + f"/{issue['number']}")
         body = observed.get("body", {})
-        if (observed["outcome"] != "success" or body.get("number") != issue["number"]
-                or body.get("title") != issue["title"]):
+        if observed["outcome"] != "success" or not issue_matches(body, issue):
             raise RuntimeError(
                 f"work-{sample['cell']:02d} lost or changed acknowledgement {sample['request_id']} "
                 f"(issue {issue['number']}): {observed.get('error', 'result mismatch')}"
@@ -224,7 +223,7 @@ def cover_routes(gateway: str, nodes: int, cells: int) -> tuple[dict, list[dict]
         seen = set()
         for _ in range(nodes * 4):
             sample = request(gateway, nodes, "GET", issue_path(cell) + "/1")
-            if sample["body"].get("number") != 1:
+            if not issue_matches(sample["body"], initial_issue(cell)):
                 raise RuntimeError(f"work-{cell:02d} did not return its original issue")
             seen.add(sample["entry"])
             samples.append({"cell": cell, "entry": sample["entry"], "latency_ms": sample["latency_ms"]})
@@ -238,6 +237,7 @@ def cover_routes(gateway: str, nodes: int, cells: int) -> tuple[dict, list[dict]
 
 def load_pair(gateway: str, nodes: int, cell: int, arrival: int, run_id: str, scheduled: float, on_acknowledged=None) -> dict:
     title = f"fleet-load-{run_id}-{cell:02d}-{arrival:06d}"
+    issue_body = f"Load-balanced durable Cell issue: {title}"
     request_id = str(uuid.uuid5(uuid.NAMESPACE_URL, title))
     result = {
         "cell": cell, "arrival": arrival, "request_id": request_id,
@@ -246,17 +246,18 @@ def load_pair(gateway: str, nodes: int, cell: int, arrival: int, run_id: str, sc
         "operations": [],
     }
     created = load_request(gateway, nodes, "POST", issue_path(cell), {
-        "request_id": request_id, "title": title, "body": "Load-balanced durable Cell issue",
+        "request_id": request_id, "title": title, "body": issue_body,
     })
     body = created.pop("body", {})
     result["operations"].append({"operation": "write", **created})
     result["outcome"] = created["outcome"]
     if created["outcome"] == "success":
         number = body.get("number")
-        if type(number) is not int or number < 1 or body.get("title") != title:
+        expected_issue = {"number": number, "title": title, "body": issue_body}
+        if not issue_matches(body, expected_issue) or number < 1:
             result.update(outcome="contract_error", error="unexpected issue creation result")
         else:
-            result["acknowledged"] = {"number": number, "title": title}
+            result["acknowledged"] = expected_issue
             result["acknowledged_ns"] = time.monotonic_ns()
             if on_acknowledged is not None:
                 on_acknowledged(result)
@@ -264,7 +265,7 @@ def load_pair(gateway: str, nodes: int, cell: int, arrival: int, run_id: str, sc
             body = observed.pop("body", {})
             result["operations"].append({"operation": "read", **observed})
             result["outcome"] = observed["outcome"]
-            if observed["outcome"] == "success" and body.get("title") != title:
+            if observed["outcome"] == "success" and not issue_matches(body, expected_issue):
                 result.update(outcome="contract_error", error="acknowledged issue readback mismatch")
             elif observed["outcome"] == "failed" and observed["retry_reasons"][-1] == 404:
                 result.update(outcome="contract_error", error="acknowledged issue disappeared")
@@ -553,7 +554,7 @@ def recover_owner(
             if new_session == old_session or not new_session:
                 time.sleep(1)
                 continue
-            if observed["body"].get("title") != latest["title"]:
+            if not issue_matches(observed["body"], latest):
                 raise RuntimeError("recovered owner lost an acknowledged issue")
             if (root.get("commit_sequence", -1) < before["root"]["commit_sequence"]
                     or root.get("txid", -1) < before["root"]["txid"]):
@@ -608,7 +609,7 @@ def main() -> int:
     _, before = owner_map(path, profiles, args.nodes, args.cells)
     coverage, coverage_samples = cover_routes(gateway, args.nodes, args.cells)
     report = {
-        "schema": 6,
+        "schema": 7,
         "source": command("git", "-C", str(ROOT), "rev-parse", "HEAD"),
         "source_role": "load_generator",
         "source_dirty": bool(command("git", "-C", str(ROOT), "status", "--porcelain")),

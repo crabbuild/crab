@@ -41,6 +41,7 @@ their separate performance gates.
 | High, replica read path | Warm snapshots still require routing and response authority reads; refresh uses a new demand-cache view identity (27) | Count provider operations per successful replica read and bytes fetched after refresh. Preserve fencing while evaluating coalesced metadata observations and verified immutable-frame reuse. |
 | High, implemented and range-verified; service latency open | A fragmented root's demand read-ahead fetched 55 pages already cached in that same view (28) | Demand misses now stop before a cached suffix. Exact-range regressions pass at 512/4096-byte pages in memory and RustFS; cross-view reuse and public-action latency benefit remain unmeasured. |
 | Release gate | Current-source saturation, recovery under arrivals and independent-host evidence are incomplete (12, 16, 23) | Run fixed-workload then offered-rate curves at 3/5/10/20 nodes, with actual owner distribution, cgroup/host resources and every acknowledged result checked after failure. |
+| High, verifier corrected; live proof open | Fleet acknowledgement checks ignored issue bodies (29) | Compare number, title and full request-specific body on creation, readback and recovery. Earlier receipts remain ID/title evidence; rerun with the stronger harness before claiming payload recovery. |
 
 ### Latest retained fleet evidence
 
@@ -89,6 +90,16 @@ resource observations, logs, action joins and fault evidence. SHA256 of
 This closes the earlier image's balanced fixed-load and acknowledged-tail
 recovery gates. It does not qualify the newly integrated read-replica source,
 offered-rate saturation, prolonged update/delete churn or independent hosts.
+
+The current-runtime offered-rate attempt
+[36263054379](https://github.com/crabbuild/crab/actions/runs/36263054379)
+imported the qualified image from run 36261394085, but both attempts stopped
+before traffic while Compose pulled auxiliary images. The first identifies
+`bucket-init`'s pinned public ECR AWS CLI image with `toomanyrequests: Data
+limit exceeded`; the retry reports `toomanyrequests: Rate exceeded` without
+identifying a service. Neither attempt supplies a latency or throughput sample.
+The retained attempt logs separate this infrastructure failure from runtime
+behavior. These attempts used the earlier schema-6 load harness.
 
 ### Measurement contract
 
@@ -2624,6 +2635,32 @@ The subsequent churn runner and measurement documents do not change production
 runtime source. Fleet curves still require their separate receipt. Both
 architecture CI jobs at this branch head report the existing app-to-host
 development dependency, not a passing full qualification result.
+
+### 29. Fleet recovery verification omitted the issue body
+
+The baseline load and owner-loss checks compared titles and sometimes issue
+numbers, leaving the application payload unchecked. A controllable HTTP service
+reproduced five false-positive cases: corrupted creation body, boolean readback
+number, changed or null readback body, and a changed earlier acknowledgement
+after takeover. The recovered last issue alone could not detect the last case.
+
+The common comparison now requires an integer issue number, matching title and
+complete body. Scheduled bodies include the run, Cell and arrival identity;
+creation responses, immediate reads, all-acknowledgement verification,
+published-root takeover and unpublished-tail takeover share this comparison.
+The functional scale and entry-route coverage checks also verify their initial
+issue bodies. The list API deliberately returns body `null`, so its duplicate
+scan retains ID/title checks and is paired with the detail readback gate.
+
+Source: [HTTP create/detail and summary contracts](../../crab-http-server/src/issues.rs),
+[shared verification](../../crab-http-server/deploy/cell-issue-fleet/qualify.py),
+[scheduled actions](../../crab-http-server/deploy/cell-issue-fleet/load.py), and
+[unpublished-tail recovery](../../crab-http-server/deploy/cell-issue-fleet/fault.py).
+All 56 fleet harness tests pass with resource warnings treated as errors.
+Load schema 7 and fault schema 2 distinguish the stronger proof and changed
+payload from historical runs. Current-image RustFS fleet execution is still
+required; these harness regressions do not themselves prove runtime recovery
+or a latency improvement. This adds no runtime or storage-format change.
 
 ## Safety and proof retained by the audit
 

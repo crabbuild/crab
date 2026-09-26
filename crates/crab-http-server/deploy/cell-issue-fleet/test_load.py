@@ -324,7 +324,8 @@ class LoadTests(unittest.TestCase):
     def setUp(self):
         self.delay = 0
         self.lose_response = False
-        self.corrupt_read = False
+        self.read_override = {}
+        self.write_override = {}
         self.read_status = 200
         self.receipts = {}
         self.requests = []
@@ -358,9 +359,10 @@ class LoadTests(unittest.TestCase):
                     fresh = body["request_id"] not in fixture.receipts
                     value = fixture.receipts.setdefault(body["request_id"], {
                         "number": len(fixture.receipts) + 1, "title": body["title"],
+                        "body": body["body"],
                     })
                 time.sleep(fixture.delay)
-                self.respond(503 if fresh and fixture.lose_response else 201, value)
+                self.respond(503 if fresh and fixture.lose_response else 201, {**value, **fixture.write_override})
                 with fixture.lock:
                     fixture.active -= 1
 
@@ -371,7 +373,7 @@ class LoadTests(unittest.TestCase):
                 if value is None:
                     self.respond(404, {})
                     return
-                self.respond(fixture.read_status, {**value, "title": "corrupted"} if fixture.corrupt_read else value)
+                self.respond(fixture.read_status, {**value, **fixture.read_override})
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.worker = threading.Thread(target=self.server.serve_forever)
@@ -416,6 +418,7 @@ class LoadTests(unittest.TestCase):
         self.invalid_request_id = True
         result = load.load_request(self.gateway, 3, "POST", "/issues", {
             "request_id": str(uuid.uuid4()), "title": "unjoinable acknowledgement",
+            "body": "unjoinable body",
         })
         self.assertEqual(result["outcome"], "contract_error")
         self.assertIn("request ID", result["error"])
@@ -440,14 +443,24 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(len(snapshots), 1)
 
     def test_acknowledged_readback_mismatch_stops_new_arrivals_and_retains_evidence(self):
-        self.corrupt_read = True
-        summary, samples = load.scheduled_load(
-            self.gateway, 3, load.Workload(1, 5, 2, 1, 0), "corrupt", self.raw,
-        )
-        self.assertTrue(summary["stopped_on_invariant"])
-        self.assertLess(summary["offered_pairs"], summary["planned_pairs"])
-        self.assertEqual(samples[0]["outcome"], "contract_error")
-        self.assertIn("acknowledged", json.loads(self.raw.getvalue().splitlines()[0]))
+        for field, value in (("title", "corrupted"), ("number", True), ("body", "corrupted"), ("body", None)):
+            with self.subTest(field=field, value=value):
+                self.read_override = {field: value}
+                raw = io.StringIO()
+                summary, samples = load.scheduled_load(
+                    self.gateway, 3, load.Workload(1, 5, 2, 1, 0), f"corrupt-{field}-{value}", raw,
+                )
+                self.assertTrue(summary["stopped_on_invariant"])
+                self.assertLess(summary["offered_pairs"], summary["planned_pairs"])
+                self.assertEqual(samples[0]["outcome"], "contract_error")
+                self.assertIn("acknowledged", json.loads(raw.getvalue().splitlines()[0]))
+
+    def test_incorrect_creation_body_cannot_trigger_an_acknowledgement_fault(self):
+        self.write_override = {"body": "corrupted"}
+        acknowledgements = []
+        sample = load.load_pair(self.gateway, 3, 1, 0, "corrupt-create", time.monotonic(), acknowledgements.append)
+        self.assertEqual(sample["outcome"], "contract_error")
+        self.assertEqual(acknowledgements, [])
 
     def test_hot_share_preserves_a_fixed_cell_count(self):
         workload = load.Workload(5, 10, 10, 8, 0.8)
@@ -479,12 +492,12 @@ class LoadTests(unittest.TestCase):
             return ""
 
         first = self.receipts[samples[0]["request_id"]]
-        for corruption in ("missing", "changed"):
+        for corruption in ("missing", "title", "body"):
             with self.subTest(corruption=corruption):
                 if corruption == "missing":
                     del self.receipts[samples[0]["request_id"]]
                 else:
-                    self.receipts[samples[0]["request_id"]] = {**first, "title": "changed"}
+                    self.receipts[samples[0]["request_id"]] = {**first, corruption: "changed"}
                 calls.clear()
                 recovered = {}
                 with patch.object(load, "status", return_value=before), \
@@ -570,7 +583,10 @@ class LoadTests(unittest.TestCase):
                         raise RuntimeError("restart has insufficient disk")
                     return ""
 
-                response = io.BytesIO(json.dumps({"title": "Cell issue 1" if valid else "wrong issue"}).encode())
+                issue = qualify.initial_issue(1)
+                if not valid:
+                    issue["body"] = "corrupted body"
+                response = io.BytesIO(json.dumps(issue).encode())
                 with patch.object(qualify, "compose", side_effect=compose), \
                         patch.object(qualify.urllib.request, "urlopen", return_value=response):
                     if valid and restart_ok:

@@ -245,8 +245,11 @@ After load, the script waits for every node's uncovered publication bytes to
 reach zero, verifies every acknowledged issue and newer RustFS roots, and kills
 one owner. After takeover it checks the selected root has not regressed, then
 rechecks every acknowledged issue across all Cells before restarting the lost
-node. Verification uses at most eight concurrent reads and checks both issue
-number and title against each original request's recorded result. Summary
+node. Verification uses at most eight concurrent reads and checks issue
+number, title and complete body against each original request's recorded result.
+Each scheduled issue body includes its run, Cell and arrival identity, so
+substitution from another issue also fails. Creation responses, immediate
+readback and functional scale checks use the same comparison. Summary
 fields `acknowledgements_before_recovery` and `owner_loss.acknowledgements`
 retain verified counts by Cell and verification duration. This checks
 published-root recovery; failure during outstanding follower-only tails is a
@@ -263,7 +266,10 @@ The summary remains available when post-load verification fails. A missed or
 failed arrival, unbalanced ingress, undrained publication, or failed recovery
 exits nonzero. Inspect the report to distinguish generator capacity from
 service capacity; `passed` is a functional workload result, never a supported
-production limit. Schema 4's `source` identifies the load generator; `server`
+production limit. Schema 7 adds complete-body evidence and a distinct body per
+scheduled issue; older runs verified only issue numbers and titles and used a
+constant body. Keep the workload version fixed for performance comparisons.
+The `source` identifies the load generator; `server`
 contains the inspected server image ID, revision label, and platform. Every
 running node must match the pinned image before load begins. Retain the CI
 image artifact's source proof alongside imported-image reports.

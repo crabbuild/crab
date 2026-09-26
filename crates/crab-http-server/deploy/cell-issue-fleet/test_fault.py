@@ -29,7 +29,7 @@ class TailFaultTests(unittest.TestCase):
                        "owner_session": "SessionId(old)", "owner": "node-03",
                        "proof": "fleet", "commit_sequence": 9}
         self.driver = fault.TailFault(self.path, (), 3, "http://fixture", 1, "node-03", self.control, self.output)
-        self.sample = {"cell": 1, "acknowledged": {"number": 1, "title": "received"}, "operations": []}
+        self.sample = {"cell": 1, "acknowledged": {"number": 1, "title": "received", "body": "received body"}, "operations": []}
 
     def test_failed_placement_is_reported_before_any_fault_mutation(self):
         image = "sha256:" + "1" * 64
@@ -119,14 +119,18 @@ class TailFaultTests(unittest.TestCase):
             self.assertIsNone(self.driver.aws("put-object", missing="AccessDenied"))
 
     def test_kill_requires_the_same_cohort_and_a_project_owned_disposable_volume(self):
-        for case in ("cohort_changed", "other_project", "bind_mount", "success"):
+        for case in ("cohort_changed", "other_project", "bind_mount", "corrupt_recovery", "success"):
             with self.subTest(case=case):
                 self.driver.receipt.clear()
+                (self.output / "failed-owner.log").unlink(missing_ok=True)
                 self.driver.on_acknowledged(self.sample)
                 last_node = copy.deepcopy(self.node)
                 if case == "cohort_changed":
                     last_node["advertisement"]["log"]["epoch"] += 1
                 after = {**self.control, "epoch": 4, "owner": {"session": "new"}, "root": {"commit_sequence": 9}}
+                observed_issue = dict(self.sample["acknowledged"])
+                if case == "corrupt_recovery":
+                    observed_issue["body"] = "corrupted body"
                 commands = []
 
                 def command(*args):
@@ -153,7 +157,7 @@ class TailFaultTests(unittest.TestCase):
                         patch.object(fault, "command", side_effect=command), \
                         patch.object(fault.subprocess, "run"), \
                         patch.object(self.driver, "clear_policy"), \
-                        patch.object(fault.load, "request", return_value={"body": self.sample["acknowledged"]}):
+                        patch.object(fault.load, "request", return_value={"body": observed_issue}):
                     if case == "success":
                         self.driver.run()
                     else:
@@ -163,7 +167,7 @@ class TailFaultTests(unittest.TestCase):
                 self.assertEqual(effects, [
                     ("docker", "kill", "--signal", "KILL", "c" * 12),
                     ("docker", "rm", "c" * 12), ("docker", "volume", "rm", "fixture-data"),
-                ] if case == "success" else [])
+                ] if case in ("success", "corrupt_recovery") else [])
                 if case == "success":
                     self.assertTrue(self.driver.receipt["owner_disk_removed"])
                     self.assertEqual(self.driver.receipt["control_after"]["owner"]["session"], "new")

@@ -264,7 +264,7 @@ class TailFault:
             if not successor or successor == control["owner"]["session"] or current.get("state") != "serving":
                 time.sleep(0.5)
                 continue
-            if observed["body"].get("number") != issue["number"] or observed["body"].get("title") != issue["title"]:
+            if not load.issue_matches(observed["body"], issue):
                 raise RuntimeError("takeover lost the acknowledged unpublished result")
             if (current["epoch"] <= control["epoch"]
                     or current["root"]["commit_sequence"] < action["commit_sequence"]):
@@ -303,7 +303,7 @@ def main():
     if any(deployment["services"][name]["image"] != server["image"] for name in expected):
         raise RuntimeError("all node services must pin the same server image ID; run qualify.py first")
     run_id = uuid.uuid4().hex[:12]
-    report = {"schema": 1, "server": server, "project": project,
+    report = {"schema": 2, "server": server, "project": project,
               "source": command("git", "-C", str(ROOT), "rev-parse", "HEAD"),
               "source_dirty": bool(command("git", "-C", str(ROOT), "status", "--porcelain")),
               "workload": vars(workload), "run_id": run_id,
