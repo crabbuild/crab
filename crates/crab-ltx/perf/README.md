@@ -304,6 +304,65 @@ TMPDIR="$HOME/Workspace/crabbuild-target/crab-8bc8/tmp" \
   --access-key crab --secret-key crab
 ```
 
+### Fixed-working-set update/delete churn (2026-09-26)
+
+`replica-cost --churn-rows N` seeds N rows, then updates, deletes and reinserts
+one row in three separate transactions before moving to the next row. The
+working set cycles while command-seeded payloads change. Omitting the option
+retains append-only inserts. Each `samples` entry includes `mutation`, `row`,
+`live_rows` and checkpoint run/busy/frame/backfill counts, alongside the existing
+capture, preparation and cleanup phases. Compare the mutation classes separately.
+`object_prefix` identifies the retained immutable graph; `churn_rows` identifies
+the initial working set. It does not cap runtime command-history retention.
+
+Every transaction must change exactly one row. After closing the writer and
+pruning its captured cuts, the runner restores the selected root from the
+provider into a fresh destination. An independent key-to-payload-seed model
+rejects lost rows, stale payloads and resurrected deleted keys. A run ending
+immediately after deletion must also restore that absence. These checks run
+outside measured phases. In append mode, `restored_rows` still equals commands;
+in churn mode, it equals the surviving working set.
+
+Reproduce on an existing isolated RustFS bucket; use `--sparse` for the restored
+writer history and a target directory belonging to this checkout:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
+TMPDIR="$HOME/Workspace/crabbuild-target/crab-8bc8/tmp" RUSTC_WRAPPER= \
+  cargo run --release --locked \
+  --manifest-path crates/crab-ltx/perf/replica-cost/Cargo.toml -- \
+  --churn-rows 32 --random-payload --payload-bytes 32768 \
+  --commands 300 --warmup 12 \
+  --endpoint http://127.0.0.1:19010 --bucket crab-cell-issue-fleet \
+  --access-key crab --secret-key crab
+```
+
+Six alternating release processes against local RustFS
+`1.0.0-beta.8-glibc` ran this workload. Each restored all 32 surviving rows,
+with 96 measured updates, 96 deletes and 96 reinserts after warmup. Two
+checkpoints per run backfilled their reported frames with no busy result.
+
+| Repeat | Fresh capture p50 / p95, µs | Sparse capture p50 / p95, µs | Fresh prepare p50 / p95, µs | Sparse prepare p50 / p95, µs |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 468 / 974 | 565 / 947 | 13,669 / 19,304 | 13,820 / 20,893 |
+| 2 | 465 / 566 | 550 / 690 | 13,591 / 19,600 | 13,338 / 19,071 |
+| 3 | 473 / 619 | 546 / 682 | 13,590 / 20,934 | 12,825 / 19,385 |
+
+These are unconstrained macOS processes with Docker-hosted RustFS, one writer
+and roughly 1 MiB of live payload. They do not measure public application
+responses, scheduled compaction, pinned readers, concurrent recovery or the
+one-vCPU/one-GiB node profile. Preparation excludes authority CAS. The fixture
+runs for seconds, so crossing two checkpoints does not establish sustained
+service capacity or a tail-latency SLO. The different payload size, initial
+database and root-chain length prevent a causal comparison with the append
+measurements above.
+
+Evidence is under the checkout's external target in `churn-20260926/`:
+source patch, parent `6169c9c0270`, binary SHA256, six reports and their hashes,
+and stderr. The separate `*-tail-*`, `*-append` and `*-full-image-delete`
+reports exercise final update/delete/reinsert states, the original append
+workload, and cuts exceeding an 8 KiB incremental bound in both histories.
+
 ### Streaming published-cut cleanup (2026-09-26)
 
 Three release processes per workload and implementation used local RustFS,

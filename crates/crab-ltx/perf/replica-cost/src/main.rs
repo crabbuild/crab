@@ -17,6 +17,7 @@ use crab_ltx::{CellReplica, CellStorageLayout, Host, Limits};
 use crab_storage::{ObjectStoreCredentials, Store};
 use object_store::{memory::InMemory, path::Path, ObjectStore};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -27,6 +28,7 @@ struct Config {
     warmup: usize,
     sparse: bool,
     random_payload: bool,
+    churn_rows: Option<usize>,
     max_capture_bytes: Option<u64>,
     endpoint: Option<String>,
     bucket: String,
@@ -37,6 +39,9 @@ struct Config {
 #[derive(Clone, Debug, Serialize)]
 struct Sample {
     command: usize,
+    mutation: &'static str,
+    row: usize,
+    live_rows: usize,
     objects: u64,
     bytes: u64,
     commit_us: u64,
@@ -53,6 +58,10 @@ struct Sample {
     capture_fsync_us: u64,
     capture_parent_sync_us: u64,
     capture_checkpoint_us: u64,
+    checkpoint_runs: u32,
+    checkpoint_busy: u32,
+    checkpoint_frames: u64,
+    checkpoint_backfilled: u64,
     checksum_sync_calls: u64,
     checksum_sync_us: u64,
     wal_read_bytes: u64,
@@ -69,7 +78,9 @@ struct Sample {
 struct Report {
     implementation: &'static str,
     store: &'static str,
+    object_prefix: String,
     workload: &'static str,
+    churn_rows: Option<usize>,
     sqlite_version: &'static str,
     payload_bytes: usize,
     payload_pattern: &'static str,
@@ -124,9 +135,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_host(host);
     let mut database = replica.open_new(&database_path)?;
 
+    let mut expected = BTreeMap::new();
     database.transaction(|transaction| {
         transaction
-            .execute_batch("CREATE TABLE payload(id INTEGER PRIMARY KEY, value BLOB NOT NULL)")
+            .execute_batch("CREATE TABLE payload(id INTEGER PRIMARY KEY, value BLOB NOT NULL)")?;
+        for seed in 0..config.churn_rows.unwrap_or(0) {
+            transaction.execute(
+                "INSERT INTO payload(id, value) VALUES(?1, ?2)",
+                crab_ltx::rusqlite::params![
+                    seed + 1,
+                    payload(seed, config.payload_bytes, config.random_payload)
+                ],
+            )?;
+            expected.insert(seed + 1, seed);
+        }
+        Ok(())
     })?;
     let bootstrap_started = Instant::now();
     let first = database.capture()?;
@@ -153,16 +176,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut samples = Vec::with_capacity(config.commands);
     for command in 0..config.commands {
-        let payload = payload(command, config.payload_bytes, config.random_payload);
+        let (mutation, row, sql) = match config.churn_rows {
+            Some(rows) => {
+                let row = command / 3 % rows + 1;
+                match command % 3 {
+                    0 => ("update", row, "UPDATE payload SET value = ?2 WHERE id = ?1"),
+                    1 => ("delete", row, "DELETE FROM payload WHERE id = ?1"),
+                    _ => (
+                        "reinsert",
+                        row,
+                        "INSERT INTO payload(id, value) VALUES(?1, ?2)",
+                    ),
+                }
+            }
+            None => (
+                "insert",
+                command + 1,
+                "INSERT INTO payload(id, value) VALUES(?1, ?2)",
+            ),
+        };
+        let seed = command
+            .checked_add(config.churn_rows.unwrap_or(0))
+            .ok_or("payload seed overflow")?;
+        let payload = payload(seed, config.payload_bytes, config.random_payload);
         let commit_started = Instant::now();
-        database.transaction(|transaction| {
-            transaction.execute(
-                "INSERT INTO payload(value) VALUES(?1)",
-                [payload.as_slice()],
-            )?;
-            Ok(())
+        let changed = database.transaction(|transaction| {
+            if mutation == "delete" {
+                transaction.execute(sql, [row])
+            } else {
+                transaction.execute(sql, crab_ltx::rusqlite::params![row, payload])
+            }
         })?;
+        if changed != 1 {
+            return Err("workload must change exactly one row".into());
+        }
         let commit_us = commit_started.elapsed().as_micros() as u64;
+        if mutation == "delete" {
+            expected.remove(&row);
+        } else {
+            expected.insert(row, seed);
+        }
         let capture_started = Instant::now();
         // Compare activation histories under the runtime's same capture and
         // cleanup boundaries; immediate capture would add another barrier.
@@ -185,6 +238,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if command >= config.warmup {
             samples.push(Sample {
                 command,
+                mutation,
+                row,
+                live_rows: expected.len(),
                 objects: cost.objects,
                 bytes: cost.bytes,
                 commit_us,
@@ -201,6 +257,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 capture_fsync_us: batch.timing.fsync_nanos / 1_000,
                 capture_parent_sync_us: batch.timing.parent_sync_nanos / 1_000,
                 capture_checkpoint_us: batch.timing.checkpoint_nanos / 1_000,
+                checkpoint_runs: batch.timing.checkpoint_runs,
+                checkpoint_busy: batch.timing.checkpoint_busy,
+                checkpoint_frames: batch.timing.checkpoint_frames,
+                checkpoint_backfilled: batch.timing.checkpoint_backfilled,
                 checksum_sync_calls,
                 checksum_sync_us,
                 wal_read_bytes: batch.timing.wal_read_bytes,
@@ -236,16 +296,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rows = statement.query([])?;
     let mut restored_rows = 0;
     while let Some(row) = rows.next()? {
-        let id: u64 = row.get(0)?;
+        let id: usize = row.get(0)?;
         let value: Vec<u8> = row.get(1)?;
-        if id != restored_rows as u64 + 1
-            || value != payload(restored_rows, config.payload_bytes, config.random_payload)
-        {
+        let seed = expected
+            .remove(&id)
+            .ok_or("restored root resurrected a deleted or unknown row")?;
+        if value != payload(seed, config.payload_bytes, config.random_payload) {
             return Err("restored root changed a committed payload".into());
         }
         restored_rows += 1;
     }
-    if restored_rows != config.commands {
+    if !expected.is_empty() {
         return Err("restored root lost committed payloads".into());
     }
 
@@ -255,6 +316,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report = summarize(
         config,
         store_label,
+        prefix,
         &samples,
         bootstrap_capture_us,
         bootstrap_parent_sync_us,
@@ -330,6 +392,7 @@ fn percentile(values: &[u64], percent: usize) -> u64 {
 fn summarize(
     config: Config,
     store: &'static str,
+    object_prefix: String,
     samples: &[Sample],
     bootstrap_capture_us: u64,
     bootstrap_parent_sync_us: u64,
@@ -349,12 +412,14 @@ fn summarize(
     Report {
         implementation: "crab-ltx CellReplica",
         store,
+        object_prefix,
         sqlite_version: crab_ltx::rusqlite::version(),
         workload: if config.sparse {
             "sparse deferred capture"
         } else {
             "fresh deferred capture"
         },
+        churn_rows: config.churn_rows,
         payload_bytes: config.payload_bytes,
         payload_pattern: if config.random_payload {
             "xorshift64-command-seeded"
@@ -411,6 +476,10 @@ impl Config {
         let warmup = option(&args, "--warmup")?.unwrap_or(4);
         let sparse = args.iter().any(|arg| arg == "--sparse");
         let random_payload = args.iter().any(|arg| arg == "--random-payload");
+        let churn_rows = option(&args, "--churn-rows")?;
+        if churn_rows.is_some_and(|rows| !(1..=100_000).contains(&rows)) {
+            return Err("churn-rows must be 1..100000".into());
+        }
         let max_capture_bytes = option(&args, "--max-capture-bytes")?.map(|bytes| bytes as u64);
         if payload_bytes == 0 || commands == 0 || warmup >= commands {
             return Err(
@@ -427,6 +496,7 @@ impl Config {
             warmup,
             sparse,
             random_payload,
+            churn_rows,
             max_capture_bytes,
             endpoint,
             bucket,

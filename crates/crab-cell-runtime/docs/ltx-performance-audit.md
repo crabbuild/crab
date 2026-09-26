@@ -1083,6 +1083,17 @@ overlap those operations must qualify a fixed SQLite build first, then prove
 the capture barrier and restart handling. Record the linked SQLite version in
 the evidence; a Rust crate version alone does not identify it.
 
+The [fixed-working-set runner](../../crab-ltx/perf/README.md#fixed-working-set-updatedelete-churn-2026-09-26)
+now supplies executable update/delete/reinsert and exact provider-restore
+proof. Six local RustFS release runs completed 300 mutations over 32 rows with
+32 KiB payloads, each crossing two checkpoints and restoring the expected
+final state. Separate cases end after deletion, retain zero live rows, and
+force full-image capture through an 8 KiB incremental bound. Raw per-command
+mutation and checkpoint counts accompany phase timings. This closes the
+append-only fixture gap for local LTX diagnostics. Pinned readers, scheduled
+compaction, concurrent Cells and sustained public-action tails remain open;
+these short unconstrained runs do not qualify that broader gate.
+
 ### 12. Even ingress and Cell targeting do not prove even owner execution
 
 **Confirmed at audited revision:** [run_stage](../../crab-http-server/deploy/cell-issue-fleet/qualify.py)
@@ -2559,9 +2570,13 @@ responses before interpreting their bodies; existing success and rejected-body
 cases also assert closure. Workflow syntax validation passes. Current-image execution of those curves,
 longer churn and independent-host qualification remain open.
 
-At the preceding `5bbc7021c46` revision, [image run 36258714307](https://github.com/crabbuild/crab/actions/runs/36258714307)
-passed build, Compose startup, restore, crash recovery and restart. It does
-not cover the subsequent demand-read or rate-curve changes. The separate
+The preceding [image run 36258714307](https://github.com/crabbuild/crab/actions/runs/36258714307)
+passed build, Compose startup, restore, crash recovery and restart. Its receipt
+and image source are GitHub merge commit `1527155752f9`, with parents
+`396e0ab1b40` and branch head `5bbc7021c46`. Both the merge and that branch head
+have tree `1a33007274f794d4353c0dcdb60e48c17896ad24`; the artifact's exact source
+identity remains the merge commit. It does not cover the subsequent
+demand-read or rate-curve changes. The separate
 architecture gate still rejects the app-to-host development dependency; its
 staged suite relocation and inventory approval remain outside this change.
 
