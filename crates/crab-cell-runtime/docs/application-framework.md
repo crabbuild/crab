@@ -303,13 +303,15 @@ Host code supplies `CellClient::with_read_replicas` with the shared runtime
 `ReplicaReadRouter` built from its existing instrumented `CellAuthority` and
 live directory, an authenticated peer client, and an optional local
 admitted-view resolver. The same router serves explicit HTTP issue-detail
-reads. It consults authority, S3 desired count, and signed live membership,
+reads. It loads authority and the S3 desired count concurrently, rejects a
+policy from a different incarnation, and consults signed live membership. It
 prefers lower ingress-observed in-flight load, and bounds selection and all
 attempts by one five-second deadline. Peer attempts carry the remaining budget.
 Advisory reader discovery shares a bounded one-second membership snapshot
 across directory clones and Cells, with one concurrent refresh. Selection
 filters expired advertisements each time; a failed expired refresh returns an
-error. Local enrollment and withdrawal invalidate this discovery snapshot.
+error. Successful local enrollment and withdrawal invalidate this discovery
+snapshot.
 The same signed snapshot supplies the owner's immutable boot identity for
 physical-node exclusion; an absent owner is inspected directly, including its
 retirement tombstone. Authority, peer authentication, and offline maintenance

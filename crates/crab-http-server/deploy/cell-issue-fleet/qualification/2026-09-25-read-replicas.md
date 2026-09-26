@@ -475,12 +475,84 @@ branch and the freshly fetched `origin/main`; this work does not modify them.
 Other CI jobs were still queued or running. Local proof does not turn those
 checks green or qualify a merge.
 
+## Reader discovery optimization under fixed ingress traffic
+
+The hot path previously listed and fetched the retained node directory for
+every replica query. Runtime `c9d16ebeb358344f4ab5984de2d5bbb3b5d66423` now
+shares a one-second advisory membership snapshot across directory clones and
+Cells, coalesces refreshes, reuses the signed owner's immutable boot identity
+for exclusion, and overlaps independent control/policy loads. Expired nodes
+are filtered on every selection. A failed expired refresh returns an error.
+The final post-SQL authority/session checks, peer authentication, and offline
+maintenance scans remain fresh. No read lease or weaker fencing was added.
+
+The initial driver pinned six clients to node 1 and two to node 5. Fast local
+owner responses dominated its primary sample: one run completed 10,224 reads
+at node 1 and 44,629 at node 5. Replica traffic in that run had the opposite
+proportions. Those aggregate medians do not compare identical ingress traffic.
+An exploratory later restart also moved the primary to node 4; its improved
+aggregate comparison is retained separately and does not establish the result
+below.
+
+The corrected driver uses eight concurrent clients, assigning three requests
+to node 1 followed by one to node 5 throughout both modes. It verifies that
+request mix, boots node 5 first to hold physical ownership constant between
+images, and rejects owner/epoch/incarnation changes within any measured pair.
+Five separate nodes retain their inspected 1 vCPU/1 GiB/no-swap limits. Each
+mode lasts sixty seconds; the final three pairs alternate order. Every query
+checks the acknowledged issue title/body, and replicas must include valid
+receipts and use all four readers from both ingresses.
+
+| Image / pair | Primary requests/s | Replica requests/s | Primary p50 | Replica p50 | Primary p99 | Replica p99 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Original / baseline | 413.41 | 98.16 | 20.67 ms | 78.63 ms | 54.99 ms | 128.10 ms |
+| Optimized / 1 | 411.72 | 1,048.65 | 21.07 ms | 6.70 ms | 52.01 ms | 37.73 ms |
+| Optimized / 2 | 436.35 | 875.96 | 20.52 ms | 7.28 ms | 46.21 ms | 43.15 ms |
+| Optimized / 3 | 449.71 | 858.23 | 20.27 ms | 7.33 ms | 41.31 ms | 44.97 ms |
+
+All three optimized pairs passed: replica throughput was at least 80% of
+primary throughput, and replica p50/p99 were at most 120% of primary latency.
+The 244,880 measured responses had zero errors, including 166,993 replica
+responses. All four readers served each window. Replica throughput was
+1.91–2.55 times its paired primary throughput. The local-primary path at node 5
+still had a 1.86–1.91 ms median, while that ingress's replica medians were
+6.90–7.57 ms. This establishes the requested fixed fleet-mix comparison;
+it does not establish parity with the best-case local-primary path.
+
+After the three pairs, pausing this fixture's RustFS returned HTTP 503
+`replica_unavailable` after 5.077 seconds. Unpause restored the acknowledged
+issue value, unchanged incarnation, and sequence 504 before and after the
+outage. All five nodes then drained with exit code zero and no OOM kill.
+Runtime tests cover schema changes during SQL, owner withdrawal, refresh
+coalescing, expiry and failed discovery refresh. Sixteen concurrent selections
+share five membership GETs, including owner exclusion; an independent routing
+test proves policy reads start while control I/O is stalled. Focused tests,
+live native RustFS, minimal-feature build, all-target runtime Clippy, format,
+layout, and documentation checks pass. The change adds 80 net Rust production
+lines, with no dependency, manifest, or lockfile changes.
+
+Raw receipts remain under `$HOME/.codex/cell-issue-fleet/plan036-sparse-cost-1`:
+
+- Baseline: `reader-perf-fixed-before-3.json`, SHA-256
+  `76ba5573a01fc0ad1d22c45c0a58a6d88ae4102176b7e0368a31f295813c7aa1`.
+  Runtime `287a5eb1397c768f00f753bfc592c58236738a59`, runner
+  `c9d16ebeb358344f4ab5984de2d5bbb3b5d66423`, image
+  `sha256:faf59e3a8b06bea7b4b57473428642a7677fd69b454ce3580150558d0fea381f`.
+- Final: `reader-perf-final-1.json`, SHA-256
+  `d5dc8e5ed6c1f77ca075457665a9ea54cfa86a40e0e2009e76657534dc0ec131`.
+  Runtime `c9d16ebeb358344f4ab5984de2d5bbb3b5d66423`, runner
+  `ebc72e7e4e448667940fb9fb64c791bb1df3e5a3`, image
+  `sha256:1b3e10a60a65d8f8ada1079f7baf61ddfcb76497cc9060c98cbe73a36fd8ed5e`.
+  Interval `2026-09-26T15:26:49.114114+00:00` through
+  `2026-09-26T15:33:21.056970+00:00`.
+
 ## Scope still open
 
 The container runs do not establish complete per-query S3 costs, production
 hot Cell throughput, per-reader peak resources, all release-fault
-interleavings, platform rolling upgrades, or 1k/5k/10k Cell admission. The bounded unequal-ingress run above
-qualifies only its recorded workload. Sparse-reader measurements above show
-balanced distribution but lower throughput than owner reads in this workload.
+interleavings, platform rolling upgrades, or 1k/5k/10k Cell admission. The
+optimized five-node result qualifies its fixed ingress traffic mix; the older
+3/5/10/20-node measurements remain bound to their earlier images. The optimized
+image has not been performance-qualified at twenty nodes or across hosts.
 Protected S3 and multi-host release gates remain outside the requested local
 RustFS execution scope. See [Plan 036](../../../../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md).

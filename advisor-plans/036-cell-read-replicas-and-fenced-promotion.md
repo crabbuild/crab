@@ -370,8 +370,8 @@ receipt regression. RustFS descriptor admission was explicit and verified.
 [Source-bound measurements and fault receipts](../crates/crab-http-server/deploy/cell-issue-fleet/qualification/2026-09-25-read-replicas.md)
 record timings, per-node distribution, sampled resources, raw-report hash,
 and limits. Replica reads were slower than owner reads in this single-host
-workload; membership scans and fresh authority gates remain in the request
-path. No production capacity, throughput-scaling, protected-provider, or
+workload at that revision; membership scans and fresh authority gates were in
+each request path. No production capacity, throughput-scaling, protected-provider, or
 independent-host claim follows from this receipt.
 
 A second fixture verified the offline fleet-to-object transition at runtime
@@ -447,6 +447,20 @@ followers or RustFS, recovers every acknowledgement, and then completes a
 healthy switch followed by loss of all three local disks. Its nineteen fleet-era
 comments and one object-mode comment survive; two readers are recruited again.
 See the linked source-bound receipt.
+
+The subsequent reader-discovery optimization shares one bounded one-second
+membership observation, reuses the owner's signed immutable boot identity for
+placement, and overlaps independent control/policy loads. The post-SQL
+authority/session gate remains fresh. Three five-node RustFS pairs at runtime
+`c9d16ebeb358` passed a fixed 75% node-1 / 25% node-5 request mix with the
+primary held on node 5: replicas delivered 858–1,049 requests/s versus
+412–450 for the owner route, with 6.70–7.33 ms median latency versus
+20.27–21.07 ms. Every pair met the 80% throughput / 120% median and p99
+comparison thresholds. Local-primary reads remained faster at about 1.9 ms;
+the result applies to the specified fleet traffic mix. Pausing RustFS still
+returned HTTP 503, then recovered the acknowledged value and sequence 504.
+The linked receipt records the corrected baseline, exact images, per-ingress
+results, and raw-report hashes.
 
 ## Fault matrix and release gates
 
