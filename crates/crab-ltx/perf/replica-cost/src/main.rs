@@ -60,6 +60,8 @@ struct Sample {
     wal_snapshot_reads: u32,
     wal_full_reads: u32,
     elapsed_us: u64,
+    prune_us: Option<u64>,
+    captured_bytes: u64,
     preparation_io: Vec<storage::BackendCost>,
 }
 
@@ -177,9 +179,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let preparation_io = backend.take();
         let cost = replica.take_publication_cost();
         root = Some(prepared.root());
-        if config.sparse {
+        let prune_us = if config.sparse {
+            let started = Instant::now();
             database.prune_captured(&batch)?;
-        }
+            Some(started.elapsed().as_micros() as u64)
+        } else {
+            None
+        };
         if command >= config.warmup {
             samples.push(Sample {
                 command,
@@ -206,6 +212,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 wal_snapshot_reads: batch.timing.wal_snapshot_reads,
                 wal_full_reads: batch.timing.wal_full_reads,
                 elapsed_us: elapsed.as_micros() as u64,
+                prune_us,
+                captured_bytes: batch
+                    .segments
+                    .iter()
+                    .map(|segment| segment.info().size_bytes)
+                    .sum(),
                 preparation_io,
             });
         }

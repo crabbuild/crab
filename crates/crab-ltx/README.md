@@ -251,9 +251,11 @@ publication succeeds. This is how `crab-cell-runtime` avoids duplicating a
 follower fsync or authoritative object-root CAS with a soon-to-be-deleted local
 file barrier. Failure before the external proof remains an unknown outcome;
 the runtime never acknowledges the local cut alone. Published-cut cleanup
-reverifies and unlinks the local file without making that deletion an
-acknowledgement barrier. A session always uses a fresh metadata directory, so
-crash-resurrected cleanup residue remains quarantined.
+reverifies the local file through a buffered stream and unlinks it without
+making that deletion an acknowledgement barrier. A session always uses a fresh
+metadata directory, so crash-resurrected cleanup residue remains quarantined.
+Streaming avoids retaining the complete compressed file; verification still
+decodes all pages and retains page-index metadata on the caller's worker.
 
 ## Checkpoint without losing capture boundaries
 

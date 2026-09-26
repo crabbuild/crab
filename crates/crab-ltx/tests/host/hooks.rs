@@ -222,7 +222,9 @@ impl FileSystem for Faults {
 fn fixture() -> (tempfile::TempDir, Arc<Faults>, Host, Db) {
     let directory = tempfile::TempDir::new().unwrap();
     let faults = Arc::new(Faults::default());
-    let host = Host::default().with_filesystem(faults.clone());
+    let host = Host::default()
+        .with_filesystem(faults.clone())
+        .with_local_disk_budget(crab_ltx::DiskBudget::new(1 << 30));
     let mut writer = Db::open_with_host(
         &directory.path().join("source.sqlite"),
         Limits::default(),

@@ -252,6 +252,57 @@ response proof latency or grants authority merely by preparing a root.
 The runner also emits per-command `capture_*_us` fields for all phases in
 `CaptureTiming`. They distinguish WAL transfer, page collection, cut encoding,
 checkpoint maintenance, and LTX reinspection during batch collection.
+`prune_us` measures sparse-mode cleanup after root preparation; it is null in
+fresh mode, which retains cuts. `captured_bytes` is the total LTX length in that
+command's batch, including any checkpoint cut. Preparation timing excludes
+cleanup, and neither timing includes the runtime authority CAS.
+
+### Streaming published-cut cleanup (2026-09-26)
+
+Three release processes per workload and implementation used local RustFS,
+command-seeded random payloads, sparse deferred capture, six commands, and one
+warmup. The large workload used 4 MiB inserts and a 1 MiB incremental-capture
+limit, exercising full-image cuts and checkpoint batches. Both versions used
+the same macOS/APFS host and RustFS instance. Baseline production source was
+`0c898097e95`; the candidate replaces cleanup's full-file buffer with a 64 KiB
+buffered reader and verifies its digest during decoding.
+
+| Captured bytes in batch | Before cleanup, median ms | Streaming cleanup, median ms |
+| ---: | ---: | ---: |
+| 16,941,374 | 63.204 | 52.233 |
+| 25,412,106 | 94.847 | 88.384 |
+| 33,882,834 | 128.005 | 127.587 |
+| 42,353,558 | 160.156 | 143.721 |
+| 50,824,284 | 194.740 | 153.671 |
+
+Each row is the median of three matching command positions, not a tail
+percentile. The small 4 KiB payload workload produced 5,162–7,155-byte batches;
+its pooled cleanup median was 161 microseconds for both implementations over
+15 measured commands each. Variation is visible in the raw samples. These
+measurements suggest a large-cut benefit but do not establish an application
+latency improvement, a 1 GiB RSS bound, or sustained throughput.
+
+Raw reports, binary SHA-256 values, host metadata, and the candidate source diff
+are retained under
+`$HOME/Workspace/crabbuild-target/crab-8bc8/prune-streaming-20260926/`.
+`summary.json` retains every per-command comparison. Reproduce the large run
+against an existing local RustFS bucket:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
+TMPDIR="$HOME/Workspace/crabbuild-target/crab-8bc8/tmp" \
+  cargo run --release --locked \
+  --manifest-path crates/crab-ltx/perf/replica-cost/Cargo.toml -- \
+  --sparse --random-payload --payload-bytes 4194304 \
+  --max-capture-bytes 1048576 --commands 6 --warmup 1 \
+  --endpoint http://127.0.0.1:19010 --bucket crab-cell-issue-fleet \
+  --access-key crab --secret-key crab
+```
+
+Cleanup still decodes every page and retains decoder indexes on the SQL worker.
+The transfer-bound regression rejects a whole-file read for a large random cut;
+the failure cases retain accounting and allow retry after repair. Decoder index
+memory and same-worker response interference remain separate audit gates.
 
 ### Large sparse checkpoint capture (2026-09-25)
 

@@ -4,8 +4,8 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Runtime and LTX at `c61a3b1d550`; scheduled-load runner at `1f3659837f4`; compared with `origin/main` at `de0bb234abc` |
-| Status | Findings 1–2 implemented; activation overlap and phase probes added; worker isolation, cleanup, checkpoint tails, and balanced execution qualification remain open |
+| Scope | Initial baseline `0f3f4f7617a`; follow-up through `0c898097e95` plus streaming cleanup below; compared with `origin/main` at `de0bb234abc` |
+| Status | Findings 1–2 and streaming cleanup implemented; activation overlap and phase probes added; worker isolation, decoder memory, checkpoint tails, and balanced execution qualification remain open |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
 
@@ -15,6 +15,9 @@ verification, fencing, stable command receipts, and follower recovery model.
 The recorded sub-millisecond sparse capture and roughly 87–139 ms small-root
 RustFS preparation come from different harnesses and revisions. They identify
 where to investigate; they cannot be subtracted to explain a public action.
+Baseline descriptions retain the original finding; implementation paragraphs
+identify changes already made. Each measurement record names its source and
+harness separately.
 
 ## Priority after the implemented changes
 
@@ -22,7 +25,7 @@ where to investigate; they cannot be subtracted to explain a public action.
 | --- | --- | --- |
 | P1 | Cross-Cell SQL worker blocking (9) | Slow one sparse Cell while reading a resident Cell on the same worker; repeat on different workers |
 | P1 | Whole-graph compaction and serial publication debt (4–5) | Sustained updates through repeated debt thresholds; compare response rate with publication rate |
-| P1 | Full-file cleanup on the SQL worker (10) | Sweep LTX cut sizes; measure confirmation time, temporary RSS, and sibling-Cell latency |
+| P1 | Cleanup on the SQL worker and decoder memory (10, 13) | Streaming removes the body buffer; measure remaining indexes, confirmation time, RSS, and sibling-Cell latency |
 | P1 | Execution load is not proven balanced (12) | Record owner/execution distribution and fixed offered load at every scale stage |
 | P2 | Eager checksum metadata and demand read amplification (3, 8) | First query **and first mutation**, point/random/scan workloads, cold and churned caches |
 | P2 | Checkpoint tail cost and shared maintenance resources (6, 11) | Long update runs with checkpoint, hydration, and compaction interference |
@@ -390,9 +393,9 @@ Cells on **different** workers and proves I/O progress, not same-worker latency
 isolation. Hydration cancellation tests protect admission but do not establish
 foreground latency. This scheduling behavior also exists on the main snapshot.
 
-### 10. Published-cut cleanup buffers and verifies the full LTX again
+### 10. Published-cut cleanup occupies the SQL worker after durability
 
-**Confirmed:** [CellExecutor::confirm_published](../src/cell/executor.rs) calls
+**Confirmed at audited revision:** [CellExecutor::confirm_published](../src/cell/executor.rs) calls
 [Db::prune_captured](../../crab-ltx/src/db.rs) on the SQL worker. Its
 `prune_retained` implementation reads the entire selected file into a `Vec`,
 hashes and decodes it through
@@ -425,6 +428,24 @@ response delay, and sibling-Cell p99. Preserve
 `published_root_survives_local_prune_failure_without_replaying_sql`. These
 already distinguish a published root from failed local reclamation; they do
 not bound reclamation latency or memory.
+
+**Implementation:** cleanup now opens the selected file once and verifies it
+through a 64 KiB buffered reader. The canonical stream verifier checks header
+limits, full page/index/trailer structure, exact length, metadata, and BLAKE3
+before deletion. Bundle and node-frame callers retain their byte-buffer
+length/digest rejection before the same structural verifier. Commands,
+migrations, and bootstrap all use this cleanup path; no authority or sequence
+transition moved. A read or unlink failure still retains unfinished accounting.
+
+The new public-`Db` regression fails on the old whole-file transfer and passes
+with streaming; truncation, extension, corruption, and substitution with another
+valid cut preserve files and reservations until a successful retry. A local
+[RustFS comparison](../../crab-ltx/perf/README.md#streaming-published-cut-cleanup-2026-09-26)
+observed 194.7 to 153.7 ms median cleanup for the largest 50.8 MB batch across
+three processes, with an unchanged pooled 0.161 ms small-cut median. This is
+microbenchmark evidence. Cleanup still blocks the SQL worker and the decoder
+still allocates indexes; finding 13 prevents interpreting this as constant
+memory or completed foreground-latency qualification.
 
 ### 11. Long-run checkpoint tails need their own qualification
 
@@ -486,6 +507,34 @@ failure domains before choosing supported limits. Run Entity, Shard, Workflow,
 and read-model actions through public application handles as well as this issue
 service; issue creation alone does not exercise those service compositions.
 
+### 13. A streaming decoder still retains avoidable metadata
+
+**Confirmed:** [codec::Decoder](../../crab-ltx/src/codec.rs) accumulates the
+decoded page/offset/size index and, whenever `replica` is enabled, a second
+`EncodedPage` index with frame hashes and page checksums. The latter is built
+even when cleanup or ordinary inspection never asks for it. At close, the
+decoder reads the remaining stream into a new `Vec`, then allocates another
+decoded index to compare with the first. Streaming the input alone does not
+remove these allocations. A corrupt early end-of-pages marker can make the
+buffered remainder much larger than a valid footer, up to the admitted input
+length. This behavior also exists on the main snapshot.
+
+**Change to evaluate:** collect replica index entries only for callers that
+need page lookup. Stream and compare footer entries against the observed page
+index while checking the exact encoded length and CRC; reject excess bytes
+without accumulating the whole remainder. Preserve both supported LTX page
+encodings, complete page ordering/coverage, exact digest and trailer checks.
+If the remaining observed-page index is material, evaluate admitted file-backed
+index scratch separately, including cleanup and cancellation ownership.
+
+**Gate:** measure peak allocations for the same decoded database represented
+as compressible and high-entropy cuts, multiple page sizes, and concurrent
+verifications under the 1 GiB node profile. Include long invalid tails, early
+end markers, truncated varints, and valid CRCs around invalid index entries.
+Run the independent Celld/Superfly vectors, bundle and node-frame verification,
+exact restore, and sparse publication. A bounded individual `read` does not
+prove bounded accumulated decoder memory.
+
 ## Safety and proof retained by the audit
 
 The follow-up audit reran the LTX prune-accounting fault test and the runtime
@@ -494,6 +543,15 @@ six HTTP/scheduler tests also pass, including stopping when an acknowledged
 issue returns 404. Local RustFS uniform and overload smoke results are
 [recorded with their image limitation](../../crab-http-server/deploy/cell-issue-fleet/README.md#scheduled-harness-smoke-2026-09-26).
 Those results prove the harness and published-root recovery, not a latency SLO.
+
+Streaming cleanup passed 44 host-hook tests, six bundle cases, two node-frame
+cases, ten independent format/restore cases, four minimal-feature codec cases,
+and the runtime published-root/local-prune-failure test. The LTX replica build
+passes all-target Clippy with warnings denied. The minimal-feature tests still
+emit the pre-existing unused capture/checksum warnings; no warning baseline or
+policy inventory changed. The cost runner built in release mode and completed
+the real RustFS comparison above. Remaining decoder memory and fleet latency
+gates are explicitly open.
 
 Current-source ARM64
 [CI run 36216278190](https://github.com/crabbuild/crab/actions/runs/36216278190)
