@@ -652,6 +652,12 @@ dirty-job, scratch, and telemetry admission across many databases. Sparse page
 read-ahead is capped at 64 pages or 1 MiB per request, and the shared decoded
 page cache is capped at 8 MiB.
 
+Cell compaction buffers sequential index reads within a combined 960 KiB
+budget and dispatches bounded merge batches through `Host` jobs. Scratch files
+and admission remain owned through canceled jobs and cleanup. Range compaction
+still rebuilds the complete directory and reserves scratch against the whole
+database; these bounds do not establish foreground latency isolation.
+
 Large-database and multi-tenant capacity still require workload-specific
 measurement. The existing tests prove bounded correctness behavior; they do not
 establish a 10,000-database or 1,000-TPS production capacity claim.

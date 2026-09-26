@@ -293,7 +293,7 @@ async fn initial_streaming_directory_merges_truncation_and_regrowth() {
     let path = directory.path().join("cell.sqlite");
     let initial = crab_ltx::rusqlite::Connection::open(&path).unwrap();
     initial
-        .execute_batch("PRAGMA auto_vacuum = FULL; VACUUM")
+        .execute_batch("PRAGMA page_size = 512; PRAGMA auto_vacuum = FULL; VACUUM")
         .unwrap();
     drop(initial);
     let mut writer = Db::open(&path, Limits::default()).unwrap();
@@ -337,7 +337,7 @@ async fn initial_streaming_directory_merges_truncation_and_regrowth() {
 
     let restored = directory.path().join("streamed.sqlite");
     prepared.verified().restore(&restored).await.unwrap();
-    let connection = crab_ltx::rusqlite::Connection::open(restored).unwrap();
+    let connection = crab_ltx::rusqlite::Connection::open(&restored).unwrap();
     let (length, is_zero): (u32, bool) = connection
         .query_row(
             "SELECT length(value), value = zeroblob(length(value)) FROM payload",
@@ -347,6 +347,20 @@ async fn initial_streaming_directory_merges_truncation_and_regrowth() {
         .unwrap();
     assert_eq!(length, 4_000_000);
     assert!(!is_zero);
+    drop(connection);
+    let expected = std::fs::read(&restored).unwrap();
+    // The old image spans multiple merge jobs. Compacting through its
+    // truncation must yield even when a batch contains no surviving pages.
+    for (range, level) in [(0..2, 1), (0..segment_count, 9)] {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let compacted = replica
+            .prepare_compaction(&prepared.root(), range, level, scratch.path())
+            .await
+            .unwrap();
+        let destination = scratch.path().join("compacted.sqlite");
+        compacted.verified().restore(&destination).await.unwrap();
+        assert_eq!(std::fs::read(destination).unwrap(), expected);
+    }
 }
 
 #[tokio::test]

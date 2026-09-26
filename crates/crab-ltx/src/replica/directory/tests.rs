@@ -68,9 +68,14 @@ async fn streamed_tree_matches_canonical_root_without_retaining_objects() {
     let replica =
         super::super::CellReplica::new(layout, [1; 32], [2; 16], crate::Limits::default()).unwrap();
     let started = tokio::time::Instant::now();
-    let streamed = build_initial_and_upload(entries.into_iter().map(Ok), 4096, 70_000, &replica)
-        .await
-        .unwrap();
+    let streamed = build_initial_and_upload(
+        futures_util::stream::iter(entries.into_iter().map(Ok)),
+        4096,
+        70_000,
+        &replica,
+    )
+    .await
+    .unwrap();
     let mut level_nodes = 70_000_usize.div_ceil(FANOUT);
     let mut upload_intervals = 0_usize;
     loop {

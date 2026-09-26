@@ -4,7 +4,7 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; committed follow-up through `3cd0bd1bfe6`, plus the routing/admission follow-up below; compared with `origin/main` snapshot `de0bb234abc`. |
+| Scope | Initial baseline `0f3f4f7617a`; committed follow-up through `9ec6da5176e`, with the compaction diagnostic below against that production source; compared with `origin/main` snapshot `de0bb234abc`. |
 | Status | Small uploads, cache hits, streaming cleanup, decoder metadata, checksum I/O batching, and cross-worker admission improved; same-worker isolation, publication capacity, public latency, and fault-under-load qualification remain open |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
@@ -23,9 +23,10 @@ harness separately.
 
 | Priority | Remaining gap | First experiment |
 | --- | --- | --- |
-| P1 | Peer admission can turn provider delay into rejection or excessive waiting (15) | Concurrent hint expiry with delayed enrollment reads; bound request memory and the complete pre-dispatch wait |
+| P1 | Peer admission changes still need load qualification (15) | Measure concurrent hint expiry, activation delay, retained request bytes, and accepted-command cancellation through HTTP |
 | P1 | Cross-Cell SQL worker blocking (9) | Slow one sparse Cell while reading a resident Cell on the same worker; repeat on different workers |
 | P1 | Whole-graph compaction and serial publication debt (4–5) | Sustained updates through repeated debt thresholds; compare response rate with publication rate |
+| P1 | Buffered compaction still needs sustained-load qualification (17) | Measure async task progress, foreground interference, and publisher drain through repeated compaction boundaries |
 | P1 | Cleanup on the SQL worker and decoder memory (10, 13) | Body/footer buffering and unused replica indexes removed; measure remaining index, confirmation time, RSS, and sibling-Cell latency |
 | P1 | Execution load is not proven balanced (12) | Record owner/execution distribution and fixed offered load at every scale stage |
 | P1 | Capacity runs do not fault outstanding follower-only acknowledgements (16) | Kill an owner during sustained arrivals with a proven unpublished tail; verify every acknowledged request after takeover |
@@ -50,9 +51,11 @@ This is not yet a verdict that the current PR meets the performance plan.
 1. Complete peer admission and same-worker interference qualification first.
    A low-latency local capture cannot compensate for an ingress rejection or
    a worker waiting on another Cell's storage request.
-2. Make range compaction proportional to the affected metadata before adding
-   publication concurrency. Concurrent work must never create competing root
-   publishers for one Cell. If publication still cannot drain, evaluate a
+2. First buffer compaction index reads and move bounded merge work off the async
+   task. Then make range compaction and its scratch reservation proportional to
+   the affected data before adding publication concurrency. Concurrent work must
+   never create competing root publishers for one Cell. If publication still
+   cannot drain, evaluate a
    bounded batch of consecutive cuts with one covering root and separate,
    stable command receipts.
 3. Treat lazy checksum loading as a second design step after measuring the
@@ -251,10 +254,22 @@ after eight appends during quiet periods and forces debt handling before an
 append projected to reach 32 segments. That work retains the serialized
 publisher token; it can delay following roots even after follower responses.
 
+The admission estimate also grows with the whole database:
+[compaction_scratch_bytes](../../crab-ltx/src/replica.rs) reserves twice the
+logical database size plus 64 MiB, every descriptor index, and the selected
+compressed bodies. The first term comes from
+[full_job_scratch_bytes](../../crab-ltx/src/recovery.rs). A 1 GiB database thus
+requires over 2 GiB of scratch admission even for a small selected range.
+This is disk reservation, not resident memory or measured peak disk use.
+Optimizing the merge alone leaves this admission floor unchanged.
+
 **Change to evaluate:** reuse authenticated unchanged directory branches and
 update locators only where selected segments still supply the current page.
 Measure before making compaction concurrent with publication: any such change
 needs an exact predecessor check and must discard or safely rebase stale work.
+Derive scratch admission from the bounded range algorithm in the same change;
+include codec scratch, worst-case output expansion, indexes, and cancellation
+lifetime. Keep the current conservative bound until that proof exists.
 
 **Gate:** run updates as well as inserts on a large base; cross repeated
 8-segment promotion and 31/32/33-segment pressure boundaries. Record all-index
@@ -821,7 +836,108 @@ Repeat for uniform and hot/skewed workloads at 3, 5, 10, and 20 nodes, including
 compatible rollout. Record executing owners during load; a pre-load owner map
 cannot identify execution after migration.
 
+### 17. Compaction reads index records individually on the async task
+
+**Confirmed at `9ec6da5176e`:**
+[SpoolCursor::advance](../../crab-ltx/src/replica/compaction/source.rs)
+calls `FileIo::read_exact_at` for each 60-byte index entry. The default
+[filesystem implementation](../../crab-ltx/src/environment/host.rs) performs
+a seek, allocation, and read for each call. Remote index downloads already use
+bounded chunks; their subsequent local merge does not retain a read buffer.
+
+Both consumers run this iteration outside `Host::run`:
+[write_compacted](../../crab-ltx/src/replica/compaction/output.rs) obtains the
+next entries before dispatching body decoding and encoding, and
+[build_and_upload](../../crab-ltx/src/replica/directory/initial.rs) consumes
+the final locator merge while constructing directory nodes. Full compaction
+therefore reads the selected index entries and then the new compacted index
+again. Truncation can make a merge scan many discarded entries before yielding
+one live page. Buffering only the output writer does not address these reads.
+
+**Live diagnostic:** a temporary instrumented run of
+`cell_compaction_coalesces_local_output_writes` used the existing 3,000,000-byte
+`randomblob` SQLite fixture on a current-thread Tokio runtime. Local RustFS at
+port 19010 backed immutable preparation, full compaction, and two restores.
+It recorded **1,474 60-byte reads, all on the async thread**, out of 1,480
+local reads during compaction. The original and compacted roots restored
+byte-identical databases. An in-memory-provider control recorded the same
+counts. Production code and existing test assertions were unchanged; the
+temporary instrumentation was removed after both runs.
+
+The diagnostic patch and logs are retained outside the checkout under
+`$HOME/Workspace/crabbuild-target/crab-8bc8/ltx-index-audit/`:
+`rustfs-probe.patch`, `rustfs-probe.log`, `probe.patch`, and `probe.log`.
+These are debug operation counts, not latency percentiles, a slow-disk fault
+test, or a fleet capacity result. The same per-entry read and async iterator
+consumption exist in the compared main snapshot.
+
+**Impact:** source tracing shows that slow scratch reads can hold the Tokio
+task between await points, including while the publisher's renewal select is
+waiting to regain control. Tokio's
+[fairness guarantee](https://docs.rs/tokio/1.53.1/tokio/runtime/index.html#detailed-runtime-behavior)
+requires bounded task polling time. The provider concurrency improvements do
+not isolate this local work. The existing compaction test bounds output writes;
+it does not bound input reads or verify unrelated async task progress.
+
+**Change to evaluate:** retain sequential buffers for index cursors and consume
+bounded batches through `Host::run` in both merge passes. Budget the sum of all
+cursor buffers, not just one buffer. Bound discarded-entry work as well as live
+output pages; preserve merge state across batches. Let the dispatched job own
+its file handles, reservations, and scratch until completion. The initial
+append's in-memory index iterator shares locator selection but does not need
+a file-I/O adapter. Keep newest-wins selection and truncate/regrow handling
+canonical in `LocatorMerge`.
+
+**Gate:** count reads by index stream and assert block-scale input I/O; inject
+slow and failed scratch reads while checking unrelated Tokio progress and
+renewal scheduling. Cover partial-range and full compaction, bundles with
+nonzero body offsets, later overwrites, truncate/regrow, cancellation, and
+byte-identical restore. Measure retained buffer bytes, scratch peak, foreground
+p99, and publication drain through repeated compaction boundaries. This is a
+bounded first change before finding 4's larger directory-reuse work.
+
+**Implementation:** both file-backed merge passes now read sequential index
+blocks through admitted blocking jobs. All cursors together retain at most
+960 KiB of read buffers, with a 60 KiB maximum per cursor. A merge job stops
+after 4,096 input entries at the next page-group boundary; a group visits at
+most the admitted descriptor count. Discarded entries count toward the budget,
+so a long truncated suffix cannot become one unbounded merge job. The shared
+newest-wins/truncation resolver remains canonical for in-memory initial
+directories and file-backed compaction.
+
+Scratch creation, file opens, reads, writes, syncs, and removal now use host
+jobs. Every open scratch file and upload source retains the scratch owner.
+Cancellation cannot remove files or release their dirty/recovery/scratch
+admission while dispatched work still uses them. Normal completion waits for
+cleanup; canceled work schedules cleanup after its last owner drops, using the
+same blocking-job ceiling. Cleanup remains best effort on filesystem/executor
+failure and requires the Tokio runtime to remain alive.
+
+The existing 3 MB fixture first failed the new read bound with 1,480 local
+reads; the async-thread refusal regression also failed before the change.
+The updated RustFS diagnostic records **8 local reads** and the same 792
+writes, with byte-identical restores of original and compacted roots. This
+reduces local read calls by 185 times in that fixture; it does not establish
+a latency improvement. The diagnostic delta and log are
+`rustfs-after-test.patch` and `rustfs-after.log` in the artifact directory above.
+
+Seven focused compaction tests pass, including six canceled filesystem stages
+with paused cleanup and one job slot. All 26 exact-root/sparse cases pass;
+the truncate/regrow fixture now spans multiple merge jobs and verifies both
+partial and full compaction. Replica all-target Clippy passes with warnings
+denied. Whole-graph metadata work, the conservative scratch admission floor,
+and sustained foreground/publication measurements remain open.
+
 ## Safety and proof retained by the audit
+
+The follow-up [ARM64 image and Compose run 36227844137](https://github.com/crabbuild/crab/actions/runs/36227844137)
+and [runtime/LTX property run 36227842782](https://github.com/crabbuild/crab/actions/runs/36227842782)
+both pass at `c12b41ef638`. The image run retains qualification evidence and
+the exact-source Linux image. This closes those two pending CI runs; it does
+not supply sustained 3/5/10/20-node curves or a diagnosis of the earlier
+placement assertion failure. The all-acknowledgement generator follow-up at
+`9ec6da5176e` and the staged reference-suite relocation are outside that source
+receipt. They still need their respective end-to-end and policy gates.
 
 The follow-up audit's HTTP/mTLS test passes with both in-memory
 storage and real RustFS, including five concurrent calls after hint expiry,

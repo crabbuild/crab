@@ -1,4 +1,5 @@
 use crate::{CellObjectKind, CrabError, Result};
+use futures_util::{Stream, StreamExt as _};
 
 use super::super::merge::LocatorMerge;
 use super::super::{CellReplica, DirectoryInput, OBJECT_UPLOAD_CONCURRENCY};
@@ -72,17 +73,24 @@ impl Iterator for Entries<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let Self { cursors, merge } = self;
-        merge.next_locator(|index| {
-            let cursor = cursors.get_mut(index).ok_or(CrabError::LTXCorrupted)?;
-            let entry = cursor.current.take().ok_or(CrabError::LTXCorrupted)?;
-            cursor.advance()?;
-            Ok((entry, cursor.current.as_ref().map(|entry| entry.page)))
-        })
+        loop {
+            let next = merge.next_group(|index| {
+                let cursor = cursors.get_mut(index).ok_or(CrabError::LTXCorrupted)?;
+                let entry = cursor.current.take().ok_or(CrabError::LTXCorrupted)?;
+                cursor.advance()?;
+                Ok((entry, cursor.current.as_ref().map(|entry| entry.page)))
+            })?;
+            match next {
+                Ok(None) => continue,
+                Ok(Some(entry)) => return Some(Ok(entry)),
+                Err(error) => return Some(Err(error)),
+            }
+        }
     }
 }
 
 pub(in crate::replica) async fn build_and_upload(
-    entries: impl Iterator<Item = Result<DirectoryEntry>>,
+    entries: impl Stream<Item = Result<DirectoryEntry>>,
     page_size: u32,
     database_pages: u32,
     replica: &CellReplica,
@@ -97,7 +105,8 @@ pub(in crate::replica) async fn build_and_upload(
     let mut leaf_entries = Vec::with_capacity(FANOUT);
     let mut nodes = Vec::new();
     let mut pending = Vec::with_capacity(OBJECT_UPLOAD_CONCURRENCY);
-    for entry in entries {
+    futures_util::pin_mut!(entries);
+    while let Some(entry) = entries.next().await {
         let entry = entry?;
         if expected_page == u64::from(lock) {
             expected_page += 1;

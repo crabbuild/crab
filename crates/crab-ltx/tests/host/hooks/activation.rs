@@ -1,33 +1,5 @@
 use super::*;
 
-pub(super) struct Pause {
-    operation: &'static str,
-    entered: tokio::sync::Notify,
-    released: Mutex<bool>,
-    wake: std::sync::Condvar,
-}
-
-impl Pause {
-    pub(super) fn wait(&self, operation: &str) {
-        if self.operation == operation {
-            let mut released = self.released.lock().unwrap();
-            self.entered.notify_one();
-            while !*released {
-                released = self.wake.wait(released).unwrap();
-            }
-        }
-    }
-}
-
-struct Release(Arc<Pause>);
-
-impl Drop for Release {
-    fn drop(&mut self) {
-        *self.0.released.lock().unwrap() = true;
-        self.0.wake.notify_all();
-    }
-}
-
 async fn prepared_root(host: Host, writer: &mut Db) -> crab_ltx::CellPagedDatabase {
     let replica = CellReplica::new(
         CellStorageLayout::new(
