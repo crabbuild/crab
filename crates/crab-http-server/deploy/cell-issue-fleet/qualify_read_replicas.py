@@ -93,6 +93,8 @@ def measure_reads(port: int, size: int) -> dict:
 
 
 def set_reader_target(port: int, repository: int, desired: int) -> dict:
+    # Earlier fault phases may have killed this Cell's owner on a shared node.
+    request_json("GET", node_url(1, port) + issue_path(repository) + "/1")
     url = node_url(1, port) + f"/api/repos/demo/work-{repository:02d}/settings/read-replicas"
     current = request_json("GET", url)
     if current["desired_readers"] == desired and not current["stale_incarnation"]:
@@ -236,6 +238,8 @@ def prove_all_reader_loss(path: Path, profiles: tuple[str, ...], stage: dict, po
 
 def prove_authority_outage(path: Path, profiles: tuple[str, ...], port: int) -> dict:
     url = node_url(1, port) + issue_path(1) + "/1?read=replica"
+    request_json("GET", node_url(1, port) + issue_path(1) + "/1")
+    prove_readers(port, 20, 19)
     before = replica_issue(url, 1)
     started = time.monotonic()
     try:
