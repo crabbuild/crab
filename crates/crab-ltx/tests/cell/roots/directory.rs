@@ -348,3 +348,115 @@ async fn initial_streaming_directory_merges_truncation_and_regrowth() {
     assert_eq!(length, 4_000_000);
     assert!(!is_zero);
 }
+
+#[tokio::test]
+async fn writable_activation_preserves_leaf_order_across_parent_branches() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let path = directory.path().join("source.sqlite");
+    let initial = crab_ltx::rusqlite::Connection::open(&path).unwrap();
+    initial
+        .execute_batch("PRAGMA page_size=512; CREATE TABLE payload(value BLOB)")
+        .unwrap();
+    drop(initial);
+    let mut writer = Db::open(&path, Limits::default()).unwrap();
+    writer
+        .transaction(|tx| tx.execute_batch("INSERT INTO payload VALUES(zeroblob(40000000))"))
+        .unwrap();
+    let replica = replica(Store::new(Arc::new(InMemory::new())), [101; 32], [102; 16]);
+    let root = replica
+        .prepare(None, &writer.capture().unwrap(), 1, 1)
+        .await
+        .unwrap()
+        .root();
+    let verified = replica.open_root(&root).await.unwrap();
+    assert_eq!(verified.directory_height(), 2);
+    let destination = directory.path().join("restored.sqlite");
+    let prepared = verified
+        .paged()
+        .prepare_writable(&destination)
+        .await
+        .unwrap();
+    let mut restored = prepared.open_writable(&destination).unwrap();
+    let length: u64 = restored
+        .query_with(|db| db.query_row("SELECT length(value) FROM payload", [], |row| row.get(0)))
+        .unwrap();
+    assert_eq!(length, 40_000_000);
+    restored.close().unwrap();
+    writer.close().unwrap();
+}
+
+#[tokio::test]
+async fn writable_activation_rejects_a_corrupt_late_leaf_and_cleans_its_file() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let mut writer = Db::open(&directory.path().join("source.sqlite"), Limits::default()).unwrap();
+    writer
+        .transaction(|tx| {
+            tx.execute_batch(
+                "CREATE TABLE payload(value); INSERT INTO payload VALUES(zeroblob(10000000))",
+            )
+        })
+        .unwrap();
+    let backend = Arc::new(InMemory::new());
+    let layout = CellStorageLayout::new(
+        Store::new(backend.clone()),
+        Path::from("activation-corruption"),
+        [103; 16],
+    );
+    let cell = [104; 32];
+    let incarnation = [105; 16];
+    let source = CellReplica::new(layout.clone(), cell, incarnation, Limits::default()).unwrap();
+    let root = source
+        .prepare(None, &writer.capture().unwrap(), 1, 1)
+        .await
+        .unwrap()
+        .root();
+    let mut leaves = Vec::new();
+    for object in source.reachable_objects(&root).await.unwrap() {
+        if object.kind == CellObjectKind::Directory {
+            let path =
+                layout.incarnation_object_path(&cell, &incarnation, &object.digest, object.kind);
+            let bytes = backend.get(&path).await.unwrap().bytes().await.unwrap();
+            // CRBDIR01 kind and first page locate a late leaf independently of
+            // object digest order, so earlier prefetched leaves can succeed.
+            if bytes[10] == 0 {
+                let first = u32::from_be_bytes(bytes[32..36].try_into().unwrap());
+                leaves.push((first, path, bytes));
+            }
+        }
+    }
+    let (first, path, original) = leaves
+        .into_iter()
+        .max_by_key(|(first, _, _)| *first)
+        .unwrap();
+    assert!(first > 256);
+    let io = Arc::new(tokio::sync::Semaphore::new(4));
+    let reader = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(backend.clone()),
+            Path::from("activation-corruption"),
+            [103; 16],
+        ),
+        cell,
+        incarnation,
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(Host::default().with_io_slots(io.clone()));
+    let paged = reader.open_root(&root).await.unwrap().paged();
+    let mut corrupt = original.to_vec();
+    *corrupt.last_mut().unwrap() ^= 1;
+    backend
+        .put(&path, Bytes::from(corrupt).into())
+        .await
+        .unwrap();
+    let destination = directory.path().join("active.sqlite");
+    assert!(matches!(
+        paged.clone().prepare_writable(&destination).await,
+        Err(crab_ltx::CrabError::ChecksumMismatch)
+    ));
+    assert!(!checksum_path(&destination).exists());
+    assert_eq!(io.available_permits(), 4);
+    backend.put(&path, original.into()).await.unwrap();
+    paged.prepare_writable(&destination).await.unwrap();
+    writer.close().unwrap();
+}

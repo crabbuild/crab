@@ -262,6 +262,12 @@ one follower loss, RustFS delay/failure, and ambiguous CAS.
 
 ```sh
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
+  cargo test -p crab-ltx --features replica --test host \
+  hooks::activation --locked
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
+  cargo test -p crab-ltx --features replica --test cell \
+  roots::directory --locked
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
   cargo test -p crab-ltx --features replica --test cell \
   sparse_hydration_coalesces_contiguous_cell_frames --locked
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
@@ -299,9 +305,12 @@ latency benefit.
 Writable activation now dispatches checksum-file operations through the host's
 blocking-job admission. A file owner retains dirty admission through canceled
 work and cleanup; focused tests cover slow I/O, failures, one-slot execution,
-fresh destinations, and retry. The authenticated directory traversal remains
-sequential. This closes the async-thread blocking defect, while the larger
-activation and interference qualification in packet 4 remains open.
+fresh destinations, and retry. Sibling leaf reads now overlap in an ordered
+stream capped at eight reads under the shared I/O admission; internal branches
+stay depth first. Delayed-provider tests prove overlap and the ceiling, while
+corruption and multi-parent tests preserve ordered validation. The metadata
+walk remains eager, and the larger activation and interference qualification
+in packet 4 remains open.
 
 The local [replica cost record](../../crab-ltx/perf/README.md#cell-publication-cost-per-command)
 measures about 0.3 ms for a small sparse deferred capture, but 87–139 ms

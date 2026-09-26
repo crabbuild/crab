@@ -98,7 +98,7 @@ and accounting tests pass. Full-cache concurrent latency remains unmeasured.
 
 **Confirmed:** [prepare_writable](../../crab-ltx/src/replica.rs) awaits
 [load_checksums](../../crab-ltx/src/replica/directory/checksums.rs). That function visits
-every directory node sequentially, authenticates every page entry, writes
+every directory node, authenticates every page entry, writes
 eight checksum bytes per database page, and syncs the checksum file before
 opening the writer. LTX page bodies are lazy; this metadata walk is eager.
 At 4 KiB pages a 10 GiB database alone needs a 20 MiB checksum file, excluding
@@ -140,12 +140,27 @@ Fault tests pause creation, writes, both sync barriers, and final metadata;
 unrelated async work progresses, cancellation retains both admissions through
 paused cleanup, and the same destination can be retried and queried. Error
 injection preserves pre-existing destinations. Exact-root, sparse publication,
-directory, and process-kill recovery tests pass. Ordered directory traversal is
-still sequential; activation percentiles and fleet interference remain open.
+directory, and process-kill recovery tests pass. Activation percentiles and
+fleet interference remain open.
 The real RustFS HTTP/peer test also passes application mutations, owner
 takeover, restored collaboration state, and Git reads with this path.
 Full-image restore is a separate sibling: bulk writes/syncs already use host
 jobs, but initial file setup and scratch cleanup still need the same audit.
+
+Sibling leaf reads now overlap through an ordered stream capped at eight,
+sharing existing host I/O slots. Internal branches stay depth first so sibling
+prefetch cannot reorder coverage or aggregate validation. With ten leaves and
+100 ms injected delay per GET, the previous scan took 1,000 ms even with four
+slots; the changed scan takes 300 ms. One slot takes 1,000 ms and sixteen slots
+still take 200 ms, proving the eight-read ceiling in that fixture. These are
+virtual-time scheduling results, not RustFS performance percentiles.
+
+A 40 MB database with 512-byte pages exercises two parent levels. A separate
+late-leaf corruption test refuses activation, releases I/O admission, removes
+its checksum file, and permits retry after repairing the object. The 26
+exact-root/sparse tests and four activation tests pass. This change applies to
+writable activation only; selected-page lookup and exhaustive retention
+inventory retain their existing traversal and verification contracts.
 
 ### 4. Range compaction can do whole-graph metadata work on the publication lane
 
