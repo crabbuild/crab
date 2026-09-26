@@ -245,9 +245,16 @@ object-store calls; sparse reads count their exact root/page requests.
 Record p50/p95/p99, bytes, page I/O queue depth, disk reservations, and
 time to first read. Reject corrupted page digests, a changed exact root,
 insufficient disk, and a canceled hydration without reusing an unverified
-mutable file. Speculative prefetch stays disabled until recorded scan traces
+mutable file. B-tree-guided speculative prefetch stays disabled until recorded scan traces
 beat point reads under bounded provider latency, as required by the
 [canonical scaling contract](canonical-ltx-scaling.md).
+The current bridge already coalesces up to 64 pages per fault. Separately
+qualify that window's bytes consumed versus prefetched for point queries,
+random access, scans, and hydration; fewer calls alone do not prove lower cost
+or latency. The [RustFS activation probe](../../crab-ltx/examples/README.md#rustfs-scale-workload)
+now measures phase durations and read bytes at fixed database sizes and I/O
+admission settings. Its three samples per setting are diagnostic; sustained
+multi-Cell tails and first-mutation latency remain required.
 
 For writes, attribute SQLite command time, LTX capture, follower append
 and fsync, root preparation, object CAS, queue wait, and final proof source.
