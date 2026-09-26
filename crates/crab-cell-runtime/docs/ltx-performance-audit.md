@@ -2999,9 +2999,28 @@ peer, and membership revocation under the same conditions. The fixture change
 does not implement or qualify that product contract.
 
 The same stage helper serves reader-replica and mode-rollout qualification, so
-they inherit the startup ordering. Those sibling drivers still compare old
-`Cell issue on node N` fixture titles in several paths; reconcile them with
-`initial_issue` and exercise their readback before claiming those suites pass.
+they inherit the startup ordering. A follow-up reconciles their old fixture
+titles with `initial_issue`, and carries each acknowledged body update into
+the next scale stage's expected state. Reverting to the initial body now fails
+that stage's full readback. Replica discovery checks issue identity and receipt;
+the timed owner/replica comparison, promotion, partition, load and rollout
+paths compare the expected number, title and body. Body refresh remains its
+own freshness measurement.
+
+The reader and rollout entry points now use the shared committed-tree image
+builder and source-label verification, and pin every server service plus the
+release bootstrap identity before startup. The retention continuation selects
+the recorded immutable image when replacing services. This repairs sibling
+wiring that still used mutable tags although `prove_node` required an immutable
+image. Rollout retains its explicit runtime-source input for comparisons and
+verifies it against the image label; reader scale-out requires the current
+committed source. No source-mismatch fallback is added.
+
+The current fixture failed both replica discovery and rollout validation before
+the change. All 69 deterministic harness tests now pass, including scale-out
+after an acknowledged body update, rejection of old/corrupt payloads, and both
+entry points rejecting a wrong-source image before starting nodes. These are
+harness regressions; full live reader and rollout qualification remains open.
 
 ## Safety and proof retained by the audit
 

@@ -229,10 +229,13 @@ def object_count(path: Path, profiles: tuple[str, ...]) -> int:
     return result["KeyCount"]
 
 
-def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, gateway_port: int, node_port_base: int, cells: int) -> dict:
+def run_stage(
+    path: Path, profiles: tuple[str, ...], previous: int, size: int,
+    gateway_port: int, node_port_base: int, expected_issues: dict[int, dict],
+) -> dict:
     print(f"Starting {size} Cell nodes", flush=True)
     started = time.monotonic()
-    initial_cells = range(1, cells + 1) if previous == 0 else ()
+    initial_cells = expected_issues if previous == 0 else {}
     if previous == 0:
         # Provision before serving peers snapshot the catalog. Creating between
         # requests races their independent catalog polls and can fail peer auth.
@@ -253,8 +256,7 @@ def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, g
     if len(sessions) != size:
         raise RuntimeError("nodes did not publish distinct boot sessions")
 
-    for index in initial_cells:
-        expected_issue = initial_issue(index)
+    for index, expected_issue in initial_cells.items():
         issue = request_json(
             "POST",
             node_url((index - 1) % size + 1, node_port_base) + issue_path(index),
@@ -280,9 +282,9 @@ def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, g
             raise RuntimeError(f"node {index} did not create its label: {label}")
 
     owners = {}
-    for index in range(1, cells + 1):
+    for index, expected_issue in expected_issues.items():
         visible = request_json("GET", gateway + issue_path(index) + "/1")
-        if not issue_matches(visible, initial_issue(index)):
+        if not issue_matches(visible, expected_issue):
             raise RuntimeError(f"gateway did not read Cell {index} after stage {size}")
         labels = request_json("GET", gateway + f"/api/repos/demo/work-{index:02d}/labels")
         if len(labels.get("items", [])) != 1 or labels["items"][0]["name"] != "distributed":
@@ -296,7 +298,7 @@ def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, g
         owners[f"work-{index:02d}"] = sessions[owner]
     for index in range(previous + 1, size + 1):
         visible = request_json("GET", node_url(index, node_port_base) + issue_path(1) + "/1")
-        if not issue_matches(visible, initial_issue(1)):
+        if not issue_matches(visible, expected_issues[1]):
             raise RuntimeError(f"new node {index} could not route to the original Cell")
     stored_objects = object_count(path, profiles)
     if stored_objects < 1:
@@ -307,7 +309,7 @@ def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, g
     ]
     return {
         "nodes": size,
-        "cells": cells,
+        "cells": len(expected_issues),
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "node_capacity_active_cells": capacities,
         "owners": owners,
@@ -423,9 +425,10 @@ def main() -> int:
     phases = [(3, ()), (5, ("five",)), (10, ("five", "ten")), (20, ("five", "ten", "twenty"))]
     previous = 0
     last_load = None
+    expected_issues = {index: initial_issue(index) for index in range(1, args.cells + 1)}
     try:
         for size, profiles in phases:
-            stage = run_stage(path, profiles, previous, size, args.gateway_port, args.node_port_base, args.cells)
+            stage = run_stage(path, profiles, previous, size, args.gateway_port, args.node_port_base, expected_issues)
             report["stages"].append(stage)
             (path.parent / "report.json").write_text(json.dumps(report, indent=2) + "\n")
             stage["placement"] = {}

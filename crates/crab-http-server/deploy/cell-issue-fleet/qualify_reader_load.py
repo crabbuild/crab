@@ -14,7 +14,7 @@ from itertools import cycle
 from pathlib import Path
 from threading import Lock
 
-from qualify import command, compose, issue_path, node_url, request_json
+from qualify import command, compose, initial_issue, issue_matches, issue_path, node_url, request_json
 from qualify_read_replicas import cost_delta, cost_snapshot, node_inventory, prove_readers, set_reader_target
 from render import node_name
 
@@ -53,7 +53,7 @@ def measure(port: int, mode: str, expected: dict) -> dict:
             try:
                 with urllib.request.urlopen(url, timeout=10) as response:
                     body = json.load(response)
-                    if any(body.get(key) != value for key, value in expected.items()):
+                    if not issue_matches(body, expected):
                         raise RuntimeError("load query returned a different acknowledged value")
                     if mode == "replica":
                         reader = response.headers.get("x-crab-cell-reader")
@@ -136,9 +136,9 @@ def main() -> None:
               "ready_readers": prove_readers(args.node_port_base, 5, 4), "measurements": [],
               "scope": "one host; 60 seconds per mode; closed-loop urllib clients; "
                        "VmHWM is process-lifetime high water, other resources are boundary samples"}
-    expected = {"title": "Cell issue on node 1", "body": previous["acknowledged_body"]}
+    expected = {**initial_issue(1), "body": previous["acknowledged_body"]}
     issue = request_json("GET", node_url(1, args.node_port_base) + issue_path(1) + "/1")
-    if any(issue[key] != value for key, value in expected.items()):
+    if not issue_matches(issue, expected):
         raise RuntimeError("fixture no longer contains the acknowledged loss-test value")
     for mode in ("owner", "replica"):
         before_resources = resources(path)

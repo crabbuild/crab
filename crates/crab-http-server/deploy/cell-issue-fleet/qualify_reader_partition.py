@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from qualify import command, compose, issue_path, node_url, prove_node, request_json
+from qualify import command, compose, initial_issue, issue_matches, issue_path, node_url, prove_node, request_json
 from qualify_read_replicas import node_inventory, prove_readers, set_reader_target
 from render import CONFIG, node_name
 
@@ -36,7 +36,7 @@ def unavailable(url: str, withdrawn: bool = False) -> dict:
         return {"status": error.code, "body": body, "seconds": round(time.monotonic() - started, 3)}
 
 
-def qualify(path: Path, port: int) -> dict:
+def qualify(path: Path, port: int, expected: dict) -> dict:
     profiles = ("five", "ten", "twenty")
     set_reader_target(port, 1, 19)
     sessions = node_inventory(path, profiles, 20)
@@ -96,7 +96,7 @@ def qualify(path: Path, port: int) -> dict:
         observer_url = node_url(observer_index, port) + issue_path(1) + "/1"
         issue = request_json("GET", observer_url)
         after = json.loads(compose(path, profiles, "exec", "-T", observer, *args))
-        if (issue["title"] != "Cell issue on node 1"
+        if (not issue_matches(issue, expected)
                 or after["owner"]["session"] in (isolated_session, before["owner"]["session"])
                 or after["epoch"] <= before["epoch"]
                 or after["root"]["commit_sequence"] < before["root"]["commit_sequence"]):
@@ -139,7 +139,7 @@ def qualify(path: Path, port: int) -> dict:
                 "--wait", "--wait-timeout", "300", isolated)
         compose(partition_path, profiles, "stop", "store-proxy")
     recovered = request_json("GET", node_url(isolated_index, port) + issue_path(1) + "/1")
-    if recovered["title"] != "Cell issue on node 1":
+    if not issue_matches(recovered, expected):
         raise RuntimeError("restored node did not recover ordinary reads")
     return result
 
@@ -164,7 +164,8 @@ def main() -> None:
     output = args.state / "reader-partition-report.json"
     if output.exists():
         raise RuntimeError("partition receipt already exists; preserve it before another run")
-    receipt["partition"] = qualify(path, args.node_port_base)
+    expected = {**initial_issue(1), "body": report["stages"][-1]["refresh_measurement"]["body"]}
+    receipt["partition"] = qualify(path, args.node_port_base, expected)
     receipt["finished_at"] = datetime.now(timezone.utc).isoformat()
     with output.open("x") as stream:
         json.dump(receipt, stream, indent=2)

@@ -1,5 +1,6 @@
 """Keep fixture provisioning ahead of every node's initial catalog snapshot."""
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +20,7 @@ class StageProvisioningTests(unittest.TestCase):
         initialized = bool(previous)
         started = False
         created = []
+        expected = {index: qualify.initial_issue(index) for index in range(1, cells + 1)}
 
         def compose(_path, _profiles, *args):
             nonlocal initialized, started
@@ -50,11 +52,11 @@ class StageProvisioningTests(unittest.TestCase):
             path = Path(state) / "compose.yaml"
             if failure:
                 with self.assertRaisesRegex(RuntimeError, "failed"):
-                    qualify.run_stage(path, (), previous, 3, 18080, 18100, cells)
+                    qualify.run_stage(path, (), previous, 3, 18080, 18100, expected)
                 self.assertFalse(started)
             else:
                 with self.assertRaises(NodesStarted):
-                    qualify.run_stage(path, (), previous, 5 if previous else 3, 18080, 18100, cells)
+                    qualify.run_stage(path, (), previous, 5 if previous else 3, 18080, 18100, expected)
                 self.assertTrue(started)
         return created
 
@@ -68,6 +70,40 @@ class StageProvisioningTests(unittest.TestCase):
         for failure in ("release", "repository"):
             with self.subTest(failure=failure):
                 self.run_startup(failure=failure)
+
+    def test_scale_out_reads_the_acknowledged_update_and_rejects_old_body(self):
+        expected = {index: qualify.initial_issue(index) for index in (1, 2)}
+        expected[1]["body"] = "acknowledged before scale-out"
+        for stale in (False, True):
+            with self.subTest(stale=stale):
+                def request(_method, url):
+                    if url.endswith("/livez"):
+                        return {}
+                    if url.endswith("/labels"):
+                        return {"items": [{"name": "distributed"}]}
+                    index = int(url.split("work-")[1][:2])
+                    return qualify.initial_issue(index) if stale else expected[index]
+
+                def compose(_path, _profiles, *args):
+                    if args[0] == "up":
+                        return ""
+                    self.assertEqual(args[-2], "--name")
+                    index = int(args[-1].split("-")[1])
+                    return json.dumps({"state": "serving", "owner": {"session": f"session{index}"},
+                                       "root": {"commit_sequence": 7}})
+
+                with patch.object(qualify, "compose", side_effect=compose), \
+                        patch.object(qualify, "request_json", side_effect=request), \
+                        patch.object(qualify, "prove_node", side_effect=lambda _p, _f, i:
+                                     (f"session{i}", {"admission": {"active_cells": 8}}, f"container{i}")), \
+                        patch.object(qualify, "object_count", return_value=1), \
+                        patch.object(qualify, "command", return_value=""):
+                    if stale:
+                        with self.assertRaisesRegex(RuntimeError, "did not read Cell 1"):
+                            qualify.run_stage(Path("fixture"), ("five",), 3, 5, 18080, 18100, expected)
+                    else:
+                        stage = qualify.run_stage(Path("fixture"), ("five",), 3, 5, 18080, 18100, expected)
+                        self.assertEqual(stage["owners"], {"work-01": "node-01", "work-02": "node-02"})
 
 
 if __name__ == "__main__":

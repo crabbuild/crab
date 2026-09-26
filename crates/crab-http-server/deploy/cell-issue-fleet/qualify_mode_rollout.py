@@ -2,15 +2,16 @@
 """Qualify a drained three-node fleet-to-object rollout against local RustFS."""
 
 import argparse
-import hashlib
 import json
-import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from qualify import command, compose, issue_path, node_url, prove_node, request_json, run_stage
+from qualify import (
+    build_image, command, compose, initial_issue, issue_matches, issue_path,
+    node_url, pin_image, prove_node, request_json, run_stage,
+)
 from qualify_read_replicas import prove_readers, set_reader_target
 from render import CONFIG, ROOT, node_name, render
 
@@ -34,7 +35,7 @@ def verify_values(port: int, bodies: dict[int, set[str]]) -> None:
     for index in range(1, 4):
         issue = request_json("GET", node_url(1, port) + issue_path(index) + "/1")
         labels = request_json("GET", node_url(1, port) + f"/api/repos/demo/work-{index:02d}/labels")
-        if issue["title"] != f"Cell issue on node {index}" or labels["items"][0]["name"] != "distributed":
+        if not issue_matches(issue, initial_issue(index)) or labels["items"][0]["name"] != "distributed":
             raise RuntimeError("rollout changed an acknowledged issue or label")
         comments = request_json("GET", node_url(1, port) + issue_path(index) + "/1/comments?limit=50")
         if not bodies[index].issubset({item["body"] for item in comments["items"]}):
@@ -108,16 +109,21 @@ def main() -> None:
         raise RuntimeError(f"Compose project {args.project} already has resources")
     path = render(args.state, args.project, args.gateway_port, args.node_port_base)
     compose(path, (), "config", "--quiet")
+    source = command("git", "-C", str(ROOT), "rev-parse", "HEAD")
     if not args.skip_build:
-        subprocess.run(["docker", "compose", "--file", str(path), "build", "release-init"], check=True)
+        build_image(args.project, source)
+    runtime_source = source
+    if args.skip_build:
+        runtime_source = command("git", "-C", str(ROOT), "rev-parse", args.runtime_source + "^{commit}")
+    image = pin_image(path, runtime_source)
     report = {
-        "runtime_source": args.runtime_source or command("git", "-C", str(ROOT), "rev-parse", "HEAD"),
-        "source_commit": command("git", "-C", str(ROOT), "rev-parse", "HEAD"),
-        "source_diff_sha256": hashlib.sha256(command("git", "-C", str(ROOT), "diff", "--binary", "HEAD").encode()).hexdigest(),
-        "image": command("docker", "image", "inspect", "--format", "{{.Id}}", f"{args.project}:local"),
+        "runtime_source": runtime_source,
+        "source_commit": source,
+        **image,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "profile": "local-rustfs-fleet-to-object",
-        "initial_stage": run_stage(path, (), 0, 3, args.gateway_port, args.node_port_base, 3),
+        "initial_stage": run_stage(path, (), 0, 3, args.gateway_port, args.node_port_base,
+                                   {index: initial_issue(index) for index in range(1, 4)}),
     }
     nodes = [node_name(index) for index in range(1, 4)]
     acknowledged = {index: set() for index in range(1, 4)}
