@@ -1,6 +1,7 @@
 //! ExtendDB table operations routed to account Cells.
 
 mod data;
+mod recovery;
 mod remaining;
 
 use std::{
