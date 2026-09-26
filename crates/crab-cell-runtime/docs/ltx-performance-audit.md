@@ -38,12 +38,12 @@ their separate performance gates.
 | High, implemented mechanism; latency unqualified | The baseline empty checksum overlay retained its largest allocation and cloned that capacity (25) | Sealed merges now consume the overlay. Compare large-cut → repeated one-page-cut allocation and latency for both bases, retaining failure fencing and recovery-plan clone semantics. |
 | High, reproduced latency interference | Demand faults block a resident sibling on the same SQL worker; installation, confirmation and cleanup also use that worker (9–10, 19) | Local RustFS release diagnostics show 43–45 ms median sibling delay without injected latency and 414–416 ms with 20 ms per GET. Qualify public actions on one vCPU before selecting bounded executor scheduling or prefetch. An active SQLite callback cannot yield its connection. |
 | High, recovery scaling | Writable activation still walks all authenticated checksum leaves (3, 14) | Measure first query and first mutation during concurrent recovery. Prototype demand-loaded existing directory leaves only with an aggregate/truncation integrity design and bounded old-checksum availability for capture. |
-| High, sustained throughput | One ordered publisher must drain every acknowledged commit; compaction shares that path (4–5, 17) | Measure published commit-sequence advance, oldest uncovered acknowledgement and retained bytes. Evaluate bounded consecutive-root coalescing only if the measured publisher cannot drain; preserve separate receipts and effect order. |
+| High, measured publication delay | Ten-node publication queue/completion p99 reaches 899/1,460 ms; compaction shares the ordered publisher (4–5, 17) | Split preparation, provider attempts, worker binding and confirmation before selecting an optimization. Qualify sustained logical commit progress and bounded uncovered age/bytes; evaluate consecutive-root coalescing only with receipt and effect-order proof. |
 | Medium, resource interference | Optional cache fills share blocking jobs with required work; read-ahead may fetch pages never used (6, 8, 18, 21) | Pause cache syncs while another Cell activates or publishes. Measure useful/fetched bytes and unused prefetch eviction before adding priority or changing cache policy. |
 | High, replica read path | Warm snapshots still require routing and response authority reads; refresh uses a new demand-cache view identity (27) | Count provider operations per successful replica read and bytes fetched after refresh. Preserve fencing while evaluating coalesced metadata observations and verified immutable-frame reuse. |
 | High, implemented and range-verified; service latency open | A fragmented root's demand read-ahead fetched 55 pages already cached in that same view (28) | Demand misses now stop before a cached suffix. Exact-range regressions pass at 512/4096-byte pages in memory and RustFS; cross-view reuse and public-action latency benefit remain unmeasured. |
 | Release gate | Current-source saturation, recovery under arrivals and independent-host evidence are incomplete (12, 16, 23) | Run fixed-workload then offered-rate curves at 3/5/10/20 nodes, with actual owner distribution, cgroup/host resources and every acknowledged result checked after failure. |
-| High, verifier corrected; live proof open | Fleet acknowledgement checks ignored issue bodies (29) | Compare number, title and full request-specific body on creation, readback and recovery. Earlier receipts remain ID/title evidence; rerun with the stronger harness before claiming payload recovery. |
+| High, verifier corrected; combined fleet open | Earlier fleet acknowledgement checks ignored issue bodies (29) | The stronger harness verified complete bodies after recovery at eleven offered-rate points; the twelfth failed availability (30). Earlier receipts remain ID/title evidence. Complete the corrected-source fleet before claiming full payload recovery qualification. |
 
 ### Latest offered-rate evidence: recovery and capacity gates failed
 
@@ -96,6 +96,8 @@ Action durations at the saturated ten-node point identify where to investigate:
 | Cell invocation | 618.742 | 1,612.772 |
 | Actor queue | 0.068 | 933.306 |
 | Durability proof wait | 329.956 | 698.034 |
+| Publication queue | 0 | 899 |
+| Publication completion lag | 371 | 1,460 |
 | SQL worker queue | 0.040 | 4.640 |
 | SQL worker execution | 2.750 | 21.136 |
 | WAL/LTX capture | 0.528 | 7.932 |
@@ -108,13 +110,54 @@ Of 2,121 writes, 1,235 use object proof and 886 use follower proof. Forwarded
 writes number 1,930, with p99 2,597.073 ms versus 1,851.544 ms for 191 local
 writes; this observational split does not isolate the causal forwarding cost.
 
+The collector now joins publication events by execution node, Cell,
+incarnation and commit sequence. Replaying all twelve raw trace sets matched
+**13,507 acknowledged writes to successful publication completions**. Existing
+response/proof/owner joins remain byte-for-byte equivalent as JSON values after
+excluding the new publication fields. This does not change the failed
+post-loss recovery result.
+
+At ten nodes and 50 pairs/s, publication queue p95/p99 was 505/899 ms and
+completion lag p95/p99 was 1,121/1,460 ms. Follower-proof winners alone had
+publication lag p99 1,633 ms. The per-action difference between completion lag
+and queue wait has p99 1,271 ms across all writes; it includes root preparation,
+worker binding, authority CAS and confirmation, so it is not provider latency.
+These producer measurements have millisecond resolution; a reported zero queue
+wait means less than one millisecond. They support measuring publication work
+alongside pre-command queueing before choosing batching or provider changes.
+
+Each joined action retains publication status and observed queue/retained-work
+fields. Summaries count `not_observed`, `started`, `failed`, `completed` and
+`recorded` populations explicitly; only completed publications enter publication
+latency percentiles. A killed publisher can remain `started` while recovery
+preserves its follower acknowledgement. A recorded retry must not inherit the
+original command's publication timing. Missing completion is never fabricated
+as zero latency. Duplicate, mismatched-scope or impossible event pairs cannot
+be used as a successful timing sample. The load and fault acceptance gates
+remain unchanged; incomplete timing populations cannot establish a supported
+performance profile.
+
 Artifact `cell-fleet-qualification-36265830657` retains all twelve reports,
 arrival samples, action joins, node metrics and Compose logs. SHA256 of
 `load-10-04.json` is
 `b74c6ff2f84dab4d9763668235cae82ef95c5c35cafe8cdc10e8dd842f826ecd`.
-Reproduce phase summaries with `action_traces.summarize` over each retained
-`load-*.traces/actions.jsonl`; the phase definitions live in
-[the trace joiner](../../crab-http-server/deploy/cell-issue-fleet/action_traces.py).
+Rebuild joins from the retained raw samples and node logs with
+[the trace joiner](../../crab-http-server/deploy/cell-issue-fleet/action_traces.py)
+before summarizing older artifacts; previously joined files lack publication
+status. For example, from the downloaded artifact directory:
+
+```sh
+python3 /path/to/Crab/crates/crab-http-server/deploy/cell-issue-fleet/action_traces.py \
+  --samples load-3-03.samples.jsonl \
+  --node-log node-01=load-3-03.traces/node-01.log \
+  --node-log node-02=load-3-03.traces/node-02.log \
+  --node-log node-03=load-3-03.traces/node-03.log \
+  --output publication-actions.jsonl
+```
+
+The command writes new action and `.summary.json` files and refuses to replace
+existing artifacts. All 62 harness tests pass, including unfinished/failed
+publisher, recorded reply, scope, ambiguity and timing-order regressions.
 A corrected-source fleet rerun must retain the same arrival, body verification,
 and recovery gates before changing the performance verdict.
 
@@ -359,19 +402,20 @@ their original baseline and subsequent implementation evidence.
 
 | Order | Remaining gap | Decision and acceptance gate |
 | --- | --- | --- |
-| 1 | Current-source capacity and recovery evidence (5, 12, 16, 23) | Provision the actual Compose disk budget, then run fixed-workload and offered-rate curves. Count executed owners, successful responses and published commit coverage separately. Fault an acknowledged follower-only tail during arrivals. |
-| 2 | Cache fills return verified reads before persistence; service benefit is unqualified (18) | Measure first mutation, required host-job interference, skipped-cache origin traffic and foreground tails with slow local syncs. |
-| 3 | Replica routing repeats provider work; root refresh loses demand-page reuse (27) | Measure provider operations per response and hot-set bytes fetched after small updates. Compare bounded observation coalescing and verified immutable-frame reuse while retaining fresh response authority. |
-| 4 | Synchronous demand faults, installation and cleanup block a shared SQL worker (9–10, 19) | Run cold and resident Cells on the same worker. Separate origin wait, installation and confirmation; evaluate scheduling changes only after that attribution. |
-| 5 | Writable activation and checksum residency scale with total page count (3, 14, 20, 22, 25) | Qualify merged-overlay release and the local read/merge change; evaluate lazy authenticated metadata separately. Measure first query, first mutation and recovery storms at fixed changed-page count. |
-| 6 | Ordered root preparation and compaction constrain hot-Cell publication (4–5, 17) | Measure provider GET/HEAD/PUT phases and publisher queue age across repeated debt thresholds. Reuse verified unchanged metadata or coalesce roots only if those measurements justify it. |
-| 7 | Fixed read-ahead and fragmented hydration amplify object reads (8, 21) | Compare point, random and scan workloads on one fixed root; count useful/fetched bytes and concurrent duplicate ranges before changing the window. |
-| 8 | Checkpoint and full-image tails remain insufficiently sampled (6, 11, 13) | Sustained updates/deletes, pinned readers, large changes and simultaneous maintenance under 1 GiB; preserve checkpoint ordering and exact recovery. |
-| 9 | Application and transport improvements lack a controlled latency comparison (15, 24) | Repeat the same typed public actions, durability mode and topology; include peer hint expiry, retries and response enrichment. |
+| 1 | Corrected-source recovery and capacity evidence (12, 16, 23, 29–30) | Repeat full-body readback after process loss with multiple successor nodes; finish all 3/5/10/20-node stages and the follower-only tail fault. Count missed arrivals and actual owners; preserve shared-host limits in the verdict. |
+| 2 | Application preflight adds a serialized Cell query (31) | Evaluate writable-state checks within the command transaction, covering all mutation siblings and archive/retry ordering. Compare identical public actions before removing redundant preflight. |
+| 3 | Publication delay grows under saturation (4–5, 17) | Split provider GET/HEAD/PUT, root preparation, worker binding and confirmation. Measure logical commit advance and uncovered age/bytes across repeated debt thresholds before selecting metadata reuse or consecutive-root coalescing. |
+| 4 | Replica routing repeats provider work; root refresh loses demand-page reuse (27) | Measure provider operations per response and hot-set bytes fetched after small updates. Compare bounded observation coalescing and verified immutable-frame reuse while retaining fresh response authority. |
+| 5 | Synchronous demand faults, installation and cleanup block a shared SQL worker (9–10, 19) | Run cold and resident Cells on the same worker. Separate origin wait, installation and confirmation; evaluate scheduling changes only after that attribution. |
+| 6 | Writable activation and checksum residency scale with total page count (3, 14, 20, 22, 25) | Qualify merged-overlay release and the local read/merge change; evaluate lazy authenticated metadata separately. Measure first query, first mutation and recovery storms at fixed changed-page count. |
+| 7 | Cache fills return verified reads before persistence; service benefit is unqualified (18) | Measure first mutation, required host-job interference, skipped-cache origin traffic and foreground tails with slow local syncs. |
+| 8 | Fixed read-ahead and fragmented hydration amplify object reads (8, 21, 28) | Compare point, random and scan workloads on one fixed root; count useful/fetched bytes, refresh reuse and concurrent duplicate ranges before changing the window. |
+| 9 | Checkpoint and full-image tails remain insufficiently sampled (6, 11, 13) | Sustained updates/deletes, pinned readers, large changes and simultaneous maintenance under 1 GiB; preserve checkpoint ordering and exact recovery. |
 
-These priorities identify code-supported risks and missing evidence. One
-three-node phase now has per-action attribution, but current-HEAD scale and
-saturation measurements are still missing. The best next fix should remove work
+These priorities identify code-supported risks and missing evidence. The latest
+run attributes 13,507 writes at 3/5/10 nodes, including saturation, but failed
+recovery and never reached twenty nodes. Corrected-source scale and saturation
+proof remain open. The best next fix should remove work
 from a measured critical path while retaining the existing authority and
 durability contracts. Raising concurrency or queue capacity alone does not
 meet that criterion.

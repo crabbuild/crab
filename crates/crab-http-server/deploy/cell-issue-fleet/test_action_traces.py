@@ -133,6 +133,58 @@ class TraceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid"):
             traces.parse_log('event="cell_command_response" response_us=-1', "node-01")
 
+    def test_publication_is_joined_by_owner_cell_incarnation_and_sequence(self):
+        start, end = self.publication_events()
+        action = traces.join(self.samples, self.events + [start, end])[0]
+        self.assertEqual(action["publication"]["status"], "completed")
+        self.assertEqual(action["phases"]["publication_work_us"], 8_000)
+        self.assertEqual(traces.summarize([action])["publication_states"], {"completed": 1})
+        for field in ("node", "cell", "incarnation", "commit_sequence"):
+            with self.subTest(field=field):
+                unrelated = copy.deepcopy([start, end])
+                for event in unrelated:
+                    event[field] = 8 if field == "commit_sequence" else "different"
+                unmatched = traces.join(self.samples, self.events + unrelated)[0]
+                self.assertEqual(unmatched["publication"], {"status": "not_observed"})
+                self.assertNotIn("publication_lag_us", unmatched["phases"])
+
+    def test_incomplete_or_failed_publication_is_not_a_success_latency_sample(self):
+        start, end = self.publication_events()
+        fleet = copy.deepcopy(self.events)
+        fleet[-1]["source"] = "Fleet"
+        for events, state in (([], "not_observed"), ([start], "started"),
+                              ([start, {**end, "succeeded": False}], "failed")):
+            with self.subTest(state=state):
+                action = traces.join(self.samples, fleet + events)[0]
+                self.assertEqual(action["publication"]["status"], state)
+                self.assertNotIn("publication_lag_us", action["phases"])
+                summary = traces.summarize([action])
+                self.assertEqual(summary["publication_states"], {state: 1})
+                self.assertEqual(summary["all"]["publication_lag"], {"count": 0})
+
+    def test_publication_refuses_ambiguous_or_impossible_pairs(self):
+        start, end = self.publication_events()
+        for events in ([end], [start, start, end], [start, end, end],
+                       [start, {**end, "publication_lag_ms": 1}]):
+            with self.subTest(events=events), self.assertRaises(ValueError):
+                traces.join(self.samples, self.events + events)
+
+    def test_recorded_replay_does_not_reuse_the_original_publication_latency(self):
+        events = [event for event in copy.deepcopy(self.events)
+                  if event["event"] not in ("cell_capture_completed", "cell_proof_completed")]
+        events[-1]["source"] = "Recorded"
+        action = traces.join(self.samples, events + self.publication_events())[0]
+        self.assertEqual(action["publication"], {"status": "recorded"})
+        self.assertNotIn("publication_lag_us", action["phases"])
+
+    def publication_events(self):
+        identity = {key: self.events[-1][key] for key in ("node", "cell", "incarnation", "commit_sequence")}
+        return [
+            {**identity, "event": "cell_publication_started", "queue_wait_ms": 2,
+             "pending_publications": 3, "publication_bytes": 1_024, "root_sequence_lag": 1},
+            {**identity, "event": "cell_publication_completed", "publication_lag_ms": 10, "succeeded": True},
+        ]
+
 
 if __name__ == "__main__":
     unittest.main()

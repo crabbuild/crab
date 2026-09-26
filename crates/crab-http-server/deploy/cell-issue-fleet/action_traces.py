@@ -5,7 +5,7 @@ import argparse
 import json
 import math
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -28,7 +28,7 @@ def parse_log(text: str, node: str) -> list[dict]:
         if fields.get("event") not in EVENTS:
             continue
         for key, value in fields.items():
-            if key.endswith(("_us", "_ns", "_ms", "_bytes")) or key in ("status", "commit_sequence", "operation_id"):
+            if key.endswith(("_us", "_ns", "_ms", "_bytes")) or key in ("status", "commit_sequence", "operation_id", "pending_publications", "root_sequence_lag"):
                 if not value.isdecimal():
                     raise ValueError(f"invalid {key} in {node} {fields['event']}")
                 fields[key] = int(value)
@@ -60,6 +60,24 @@ def percentiles(samples: list[float]) -> dict:
     return result
 
 
+def publication(events: list[dict]) -> dict:
+    if not events:
+        return {"status": "not_observed"}
+    started = one(events, "cell_publication_started")
+    result = {key: started[key] for key in (
+        "queue_wait_ms", "pending_publications", "publication_bytes", "root_sequence_lag")}
+    completed = [event for event in events if event["event"] == "cell_publication_completed"]
+    if not completed:
+        return {"status": "started", **result}
+    completed = one(events, "cell_publication_completed")
+    if completed["publication_lag_ms"] < result["queue_wait_ms"]:
+        raise ValueError("publication completion precedes its queue admission")
+    return {
+        **result, "status": "completed" if completed["succeeded"] else "failed",
+        "publication_lag_ms": completed["publication_lag_ms"],
+    }
+
+
 def summarize(actions: list[dict]) -> dict:
     rows = []
     phase_names = {key.removesuffix("_us") for action in actions for key in action["phases"]}
@@ -75,23 +93,31 @@ def summarize(actions: list[dict]) -> dict:
             row["capture"] = sum(capture["capture_ns"] for capture in action["captures"]) / 1_000_000
         route = "local" if action["entry"] == action["owner"] else "forwarded"
         rows.append(({"all", route, action["proof"]}, row))
-    names = sorted(phase_names | {"http", "http_outside_invocation", "capture", "proof_wait"})
-    return {
+    names = sorted(phase_names | {"http", "http_outside_invocation", "capture", "proof_wait",
+                                  "publication_queue", "publication_lag", "publication_work"})
+    summary = {
         group: {name: percentiles([row[name] for groups, row in rows if group in groups and name in row])
                 for name in names}
         for group in ("all", "local", "forwarded", "fleet", "object", "recorded")
     }
+    # A killed publisher may never emit completion even though follower
+    # recovery preserves its acknowledgement. Keep that population visible.
+    summary["publication_states"] = dict(Counter(action["publication"]["status"] for action in actions))
+    return summary
 
 
 def join(samples: list[dict], events: list[dict]) -> list[dict]:
     try:
         http = defaultdict(list)
         mutations = defaultdict(list)
+        publications = defaultdict(list)
         for event in events:
             if "request_id" in event:
                 http[event["request_id"]].append(event)
             if "owner_session" in event and "mutation_request_id" in event:
                 mutations[tuple(event.get(key) for key in ("cell", "incarnation", "mutation_request_id"))].append(event)
+            if event["event"] in ("cell_publication_started", "cell_publication_completed"):
+                publications[tuple(event[key] for key in ("node", "cell", "incarnation", "commit_sequence"))].append(event)
         actions = []
         for sample in samples:
             if "acknowledged" not in sample:
@@ -149,6 +175,16 @@ def join(samples: list[dict], events: list[dict]) -> list[dict]:
                 if proof["succeeded"] is not True or proof["commit_sequence"] != released["commit_sequence"]:
                     raise ValueError(f"acknowledgement has no matching proof: {request_id}")
                 phases["proof_wait_us"] = proof["proof_wait_us"]
+            # Publication has no request span. Within an incarnation, sequence
+            # and executing node bind it to this commit; duplicates are refused.
+            publication_key = tuple(released[field] for field in ("node", "cell", "incarnation", "commit_sequence"))
+            published = ({"status": "recorded"} if released["source"] == "Recorded"
+                         else publication(publications[publication_key]))
+            if published["status"] == "completed":
+                queue = published["queue_wait_ms"]
+                lag = published["publication_lag_ms"]
+                phases.update(publication_queue_us=queue * 1_000, publication_lag_us=lag * 1_000,
+                              publication_work_us=(lag - queue) * 1_000)
             captures = [event for event in owner if event["event"] == "cell_capture_completed"]
             if released["source"] != "Recorded" and not captures:
                 raise ValueError(f"acknowledgement has no capture observation: {request_id}")
@@ -162,7 +198,7 @@ def join(samples: list[dict], events: list[dict]) -> list[dict]:
                 "entry": write["entry"], "owner": released["node"],
                 "owner_session": released["owner_session"], "proof": released["source"].lower(),
                 "http_latency_ms": write["latency_ms"], "attempts": write["attempts"],
-                "phases": phases, "captures": captures,
+                "phases": phases, "captures": captures, "publication": published,
                 "repository_routes": [{key: event[key] for key in ("action", "elapsed_us", "succeeded")} for event in routes],
             })
         return actions
