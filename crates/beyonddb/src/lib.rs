@@ -13,6 +13,7 @@ mod server;
 mod split;
 mod table;
 mod tags;
+mod transaction_coordinator;
 mod transaction_token;
 mod ttl;
 
@@ -27,6 +28,7 @@ pub use server::{
 };
 pub use split::*;
 pub use table::*;
+pub use transaction_coordinator::*;
 pub use ttl::*;
 
 pub use authorization::CellAuthorizationStore;
@@ -134,12 +136,14 @@ impl CellApplication for Beyonddb {
     fn register(builder: &mut ApplicationBuilder) -> Result<()> {
         builder.register(AccountModule)?;
         builder.register(partition::DataModule)?;
+        builder.register(transaction_coordinator::CoordinatorModule)?;
         builder.register(credentials::CredentialModule)?;
         builder.cell_type(
             CellType::new(MODULE, MODULE, NAMESPACE, CatalogRole::Sql, 1)?
                 .with_limits(512 * 1024 * 1024, 64 * 1024 * 1024)?,
         )?;
         builder.cell_type(data_cell_type()?)?;
+        builder.cell_type(transaction_coordinator::cell_type()?)?;
         builder.cell_type(credentials::cell_type()?)
     }
 }
