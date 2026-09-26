@@ -270,19 +270,21 @@ async fn request_requires_the_live_sessions_mtls_certificate_and_signing_key() {
 
     assert!(
         directory
-            .verify_peer_request(
-                &request,
+            .peer_verifier(
+                SessionId::from_bytes([1; 16]),
                 Digest::from_bytes([3; 32]),
                 certificate_key,
                 NOW_MS + 1,
             )
             .await
+            .unwrap()
+            .verify(&request, NOW_MS + 1)
             .is_ok()
     );
     assert!(matches!(
         directory
-            .verify_peer_request(
-                &request,
+            .peer_verifier(
+                SessionId::from_bytes([1; 16]),
                 Digest::from_bytes([11; 32]),
                 certificate_key,
                 NOW_MS + 1,
@@ -292,7 +294,12 @@ async fn request_requires_the_live_sessions_mtls_certificate_and_signing_key() {
     ));
     assert!(matches!(
         directory
-            .verify_peer_request(&request, Digest::from_bytes([3; 32]), [12; 32], NOW_MS + 1,)
+            .peer_verifier(
+                SessionId::from_bytes([1; 16]),
+                Digest::from_bytes([3; 32]),
+                [12; 32],
+                NOW_MS + 1,
+            )
             .await,
         Err(Error::PeerAuthorization(_))
     ));

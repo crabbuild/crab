@@ -843,13 +843,14 @@ number of S3-rooted read replicas on live nodes. An acknowledged write in this
 profile must reach the exact S3 control root, so loss of every reader does not
 discard acknowledged state. A replacement reader restores from S3, and a
 successor becomes the only writer through the existing new-epoch takeover CAS.
-The current server still routes reads only to owners. The library now has a
-full-restore read-only snapshot opener, atomic refresh for in-flight queries,
-a gated typed query path, an S3 desired-count record, and signed live-node
-advisory selection. Reader activation, reconciliation, routing,
-an S3-only acknowledgement profile,
-and production qualification remain open.
+Owner reads remain the default. The object durability profile now wires
+read-only exact-root snapshots, atomic refresh, node admission, S3 target CAS,
+signed reader reconciliation, administrator readiness status, and explicit
+issue-detail replica reads. Warm readers may be preferred after owner death,
+with existing session fencing, old-log recovery, and ownership CAS intact.
+Local RustFS and multi-container qualification are recorded in the plan;
+sparse views, rollout automation, and production qualification remain open.
 
 | Plan | Priority | Effort | Depends on | Status |
 | --- | --- | --- | --- | --- |
-| [036](036-cell-read-replicas-and-fenced-promotion.md) | P1 read scaling / P0 safety | XL | 032 and 035 recovery implementation; their protected gates before production enablement | PARTIAL — atomic local snapshot refresh, query, desired-count store, and advisory reader selection; product wiring and qualification TODO |
+| [036](036-cell-read-replicas-and-fenced-promotion.md) | P1 read scaling / P0 safety | XL | 032 and 035 recovery implementation; their protected gates before production enablement | PARTIAL — object-profile product read replicas, target/status APIs, and fenced warm promotion; local qualification in progress, production gates open |

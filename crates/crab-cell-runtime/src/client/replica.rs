@@ -260,6 +260,9 @@ impl CellReadReplica {
         .await
         .map_err(|_| Error::Deadline)?
         .map_err(|_| Error::Fenced)?;
+        let job = tokio::time::timeout_at(deadline.into(), self.runtime.reserve_sql_job())
+            .await
+            .map_err(|_| Error::Deadline)??;
         let interrupt = snapshot.view.connection()?.get_interrupt_handle();
         let view = Arc::clone(&snapshot.view);
         let registry = Arc::clone(&self.registry);
@@ -269,6 +272,7 @@ impl CellReadReplica {
         let now_ms = unix_time_ms()?;
         let mut task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
+            let _job = job;
             let connection = view.connection()?;
             if local::current_sequence(&connection)? != sequence {
                 return Err(Error::Fenced);

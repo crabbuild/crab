@@ -468,6 +468,8 @@ async fn exercise_replica_read(fixture: &Fixture) {
         .await
         .unwrap();
     let old = pending.await.unwrap().unwrap();
+    assert_eq!(during_refresh.worker_jobs(), 1);
+    assert_eq!(reader_runtime.stats().worker_jobs(), 0);
     assert_eq!(during_refresh.file_descriptors(), 8);
     assert_eq!(old.output, 0);
     assert!(old.receipt.commit_sequence < refreshed.receipt().await.commit_sequence);

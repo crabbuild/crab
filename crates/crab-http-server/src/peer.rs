@@ -859,6 +859,7 @@ pub(crate) async fn forward(
     body: Bytes,
 ) -> Response {
     let started = Instant::now();
+    let codec_deadline = (started + Duration::from_secs(5)).into();
     if headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -873,18 +874,41 @@ pub(crate) async fn forward(
         Ok(now_ms) => now_ms,
         Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
     };
+    let Ok(runtime) = server.cell_runtime() else {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let session = {
+        let Ok(_codec) = runtime.reserve_worker_job(codec_deadline).await else {
+            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+        };
+        match crab_cell_runtime::peer::claimed_peer_session(&body) {
+            Ok(session) => session,
+            Err(_) => return peer_http_error(StatusCode::UNAUTHORIZED),
+        }
+    };
+    // Enrollment performs object-store I/O. Holding a CPU job across that
+    // wait would reject concurrent requests even while every worker is idle.
+    let verifier = match receiver
+        .directory
+        .peer_verifier(
+            session,
+            identity.certificate(),
+            identity.public_key(),
+            now_ms,
+        )
+        .await
+    {
+        Ok(verifier) => verifier,
+        Err(error) => {
+            tracing::warn!(error = %error, "peer session authentication failed");
+            return peer_http_error(StatusCode::UNAUTHORIZED);
+        }
+    };
     let request = {
-        let Ok(runtime) = server.cell_runtime() else {
+        let Ok(_codec) = runtime.reserve_worker_job(codec_deadline).await else {
             return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
         };
-        let Some(_codec) = reserve_peer_codec(&runtime) else {
-            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
-        };
-        match receiver
-            .directory
-            .verify_peer_request(&body, identity.certificate(), identity.public_key(), now_ms)
-            .await
-        {
+        match verifier.verify(&body, now_ms) {
             Ok(request) => request,
             Err(error) => {
                 tracing::warn!(error = %error, "peer request authentication failed");
@@ -892,6 +916,8 @@ pub(crate) async fn forward(
             }
         }
     };
+    let codec_deadline =
+        (started + Duration::from_millis(u64::from(request.remaining_ms()))).into();
     if let Err(error) = server.authorize(&request) {
         tracing::warn!(error = %error, "peer request authorization failed");
         return peer_http_error(StatusCode::UNAUTHORIZED);
@@ -1065,7 +1091,7 @@ pub(crate) async fn forward(
         dispatcher = dispatcher.with_replica_resolver(Arc::new(manager.clone()));
     }
     let reply = dispatcher.dispatch(&request, now_ms).await;
-    let Some(_codec) = reserve_peer_codec(&runtime) else {
+    let Ok(_codec) = runtime.reserve_worker_job(codec_deadline).await else {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     };
     match encode_peer_reply(&reply) {
@@ -2428,16 +2454,24 @@ mod tests {
         assert!(
             authorize_repository(&repository(), Some("https://issuer.example"), &describe).is_ok()
         );
-        let query = verified_read(peer_wire::read_request::Operation::CellQuery(
-            peer_wire::CellQuery {
-                query_id: 1,
-                codec_version: 1,
-                input: Vec::new(),
-            },
-        ));
-        assert!(
-            authorize_repository(&repository(), Some("https://issuer.example"), &query).is_err()
-        );
+        let query = peer_wire::CellQuery {
+            query_id: 1,
+            codec_version: 1,
+            input: Vec::new(),
+        };
+        for operation in [
+            peer_wire::read_request::Operation::CellQuery(query.clone()),
+            peer_wire::read_request::Operation::ReplicaQuery(query),
+            peer_wire::read_request::Operation::ReplicaActivate(true),
+            peer_wire::read_request::Operation::ReplicaReconcile(true),
+            peer_wire::read_request::Operation::ReplicaStatus(true),
+        ] {
+            let request = verified_read(operation);
+            assert!(
+                authorize_repository(&repository(), Some("https://issuer.example"), &request)
+                    .is_err()
+            );
+        }
     }
 
     #[tokio::test]

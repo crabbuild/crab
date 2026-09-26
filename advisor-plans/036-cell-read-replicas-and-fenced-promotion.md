@@ -8,6 +8,9 @@ Priority: P1 read scaling; P0 safety for any enabled deployment. Effort: XL. Ris
 Depends on: the recovery implementations tracked by plans 032 and 035;
 production enablement also depends on their capacity and protected-evidence gates.
 
+Execution provider scope: local RustFS only, as requested. Protected S3 and
+dedicated multi-host release qualification remain future release gates.
+
 > Executor: read root `AGENTS.md`, `crates/AGENTS.md`, and the scoped guides for
 > `crab-ltx`, `crab-cell-runtime`, `crab-cell-host`, and `crab-http-server` before
 > editing. Recheck this plan against current `main`. Implement one slice per
@@ -281,6 +284,11 @@ The local in-memory and RustFS tests now also prove that a failed refresh
 leaves the old value readable and that an in-flight query returns its old
 snapshot after a newer view is installed. Runtime Clippy passed with warnings
 denied. These are local library checks, not an admitted product replica route.
+Replica SQL now shares the existing node SQL worker admission pool, retaining
+its job reservation until blocking execution exits. Concurrent peer codecs
+wait within a deadline on the existing primitive-job ledger; S3 enrollment
+lookup no longer holds that CPU reservation. The live concurrency regression
+reproduced immediate 503 rejection before this correction.
 The reader now takes a node runtime on open. Each live snapshot reserves a
 provisional 4 MiB of resident memory and four descriptors in that runtime's
 ledger, and its restored SQLite file uses the runtime's local disk admission.

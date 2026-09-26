@@ -426,15 +426,14 @@ impl NodeDirectory {
         }
     }
 
-    /// Authenticates one request against its live advertisement and mTLS leaf digest.
-    pub async fn verify_peer_request(
+    /// Binds a request verifier to a live session and its mTLS leaf identity.
+    pub async fn peer_verifier(
         &self,
-        input: &[u8],
+        session: SessionId,
         certificate: Digest,
         certificate_public_key: [u8; 32],
         now_ms: i64,
-    ) -> Result<crate::peer::VerifiedPeerRequest> {
-        let session = crate::peer::claimed_peer_session(input)?;
+    ) -> Result<crate::peer::PeerVerifier> {
         let enrolled = self
             .load(session, now_ms)
             .await?
@@ -449,12 +448,11 @@ impl NodeDirectory {
                 "mTLS certificate key does not match peer session",
             ));
         }
-        crate::peer::PeerVerifier::new(
+        Ok(crate::peer::PeerVerifier::new(
             session,
             self.release,
             enrolled.advertisement.verifying_key()?,
-        )
-        .verify(input, now_ms)
+        ))
     }
 
     /// Conditionally publishes the next heartbeat for the same boot session.

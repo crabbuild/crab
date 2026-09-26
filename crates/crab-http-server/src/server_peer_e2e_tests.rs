@@ -777,7 +777,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     let remote = replica_peer
         .query::<crate::cells::repository::GetIssue>(
             &target,
-            selected_reader,
+            selected_reader.clone(),
             exact,
             Some(ready),
             1,
@@ -785,6 +785,25 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .await
         .unwrap();
     assert_eq!(remote.output.unwrap().title, "Remote Cell");
+
+    use futures_util::StreamExt as _;
+    let concurrent = futures_util::stream::iter(0..32)
+        .map(|_| {
+            replica_peer.query::<crate::cells::repository::GetIssue>(
+                &target,
+                selected_reader.clone(),
+                exact,
+                Some(ready),
+                1,
+            )
+        })
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+    assert!(
+        concurrent.iter().all(std::result::Result::is_ok),
+        "concurrent replica reads: {concurrent:?}"
+    );
 
     let stale_update = json_request(
         &client,
@@ -965,7 +984,24 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     );
     eprintln!("qualified restored collaboration matrix");
     let taken_over = authority.load(target.cell_id()).await.unwrap().unwrap();
-    assert_eq!(taken_over.value().root, root_after);
+    // Idle compaction may replace the manifest after the last mutation.
+    // Takeover must preserve the exact authority root observed at owner death,
+    // while that root still identifies the acknowledged database position.
+    assert_eq!(taken_over.value().root, stale_owner.value().root);
+    let acknowledged = root_after.as_ref().unwrap();
+    let recovered = taken_over.value().root.as_ref().unwrap();
+    assert_eq!(
+        (
+            recovered.txid,
+            recovered.checksum,
+            recovered.commit_sequence
+        ),
+        (
+            acknowledged.txid,
+            acknowledged.checksum,
+            acknowledged.commit_sequence
+        )
+    );
     assert_eq!(
         taken_over.value().owner.as_ref().unwrap().session,
         ingress_session

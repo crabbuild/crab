@@ -297,26 +297,35 @@ pub struct ResourceSnapshot {
 pub(crate) struct ResourceLedger {
     // Reservations are short synchronous critical sections; no ledger lock is
     // held while a worker, filesystem, or provider operation runs.
-    state: Arc<Mutex<ResourceSnapshot>>,
+    state: Arc<LedgerState>,
+}
+
+pub(crate) struct LedgerState {
+    snapshot: Mutex<ResourceSnapshot>,
+    released: tokio::sync::Notify,
 }
 
 impl ResourceLedger {
     pub(crate) fn new(limit: ResourceCost) -> Self {
         Self {
-            state: Arc::new(Mutex::new(ResourceSnapshot {
-                used: ResourceCost::zero(),
-                limit,
-            })),
+            state: Arc::new(LedgerState {
+                snapshot: Mutex::new(ResourceSnapshot {
+                    used: ResourceCost::zero(),
+                    limit,
+                }),
+                released: tokio::sync::Notify::new(),
+            }),
         }
     }
 
-    pub(crate) fn weak(&self) -> Weak<Mutex<ResourceSnapshot>> {
+    pub(crate) fn weak(&self) -> Weak<LedgerState> {
         Arc::downgrade(&self.state)
     }
 
     pub(crate) fn try_reserve(&self, cost: ResourceCost) -> Result<ResourceReservation> {
         let mut state = self
             .state
+            .snapshot
             .lock()
             .map_err(|_| Error::Control("resource ledger lock poisoned"))?;
         let next = state
@@ -333,8 +342,25 @@ impl ResourceLedger {
         })
     }
 
+    pub(crate) async fn reserve(&self, cost: ResourceCost) -> Result<ResourceReservation> {
+        if !cost.fits_within(self.snapshot()?.limit) {
+            return Err(Error::Capacity("resource ledger"));
+        }
+        loop {
+            // Register before checking capacity so a release between the
+            // failed attempt and await cannot leave the waiter asleep.
+            let released = self.state.released.notified();
+            match self.try_reserve(cost) {
+                Ok(reservation) => return Ok(reservation),
+                Err(Error::Capacity(_)) => released.await,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     pub(crate) fn snapshot(&self) -> Result<ResourceSnapshot> {
         self.state
+            .snapshot
             .lock()
             .map(|state| *state)
             .map_err(|_| Error::Control("resource ledger lock poisoned"))
@@ -343,6 +369,7 @@ impl ResourceLedger {
     pub(crate) fn set_retained_limit(&self, bytes: usize) -> Result<()> {
         let mut state = self
             .state
+            .snapshot
             .lock()
             .map_err(|_| Error::Control("resource ledger lock poisoned"))?;
         if state.used.retained_bytes() > bytes {
@@ -355,6 +382,7 @@ impl ResourceLedger {
     pub(crate) fn set_disk_limit(&self, bytes: u64) -> Result<()> {
         let mut state = self
             .state
+            .snapshot
             .lock()
             .map_err(|_| Error::Control("resource ledger lock poisoned"))?;
         if state.used.disk_bytes() > bytes {
@@ -374,6 +402,7 @@ impl ResourceLedger {
     ) -> Result<()> {
         let mut state = self
             .state
+            .snapshot
             .lock()
             .map_err(|_| Error::Control("resource ledger lock poisoned"))?;
         let limit = state
@@ -393,6 +422,7 @@ impl ResourceLedger {
     pub(crate) fn reconcile_disk(&self, bytes: u64) -> Result<()> {
         let mut state = self
             .state
+            .snapshot
             .lock()
             .map_err(|_| Error::Control("resource ledger lock poisoned"))?;
         let used = state.used.with_disk_bytes(bytes);
@@ -404,7 +434,7 @@ impl ResourceLedger {
     }
 
     fn release(&self, cost: ResourceCost) {
-        if let Ok(mut state) = self.state.lock()
+        if let Ok(mut state) = self.state.snapshot.lock()
             && let Some(used) = state.used.checked_sub(cost)
         {
             state.used = used;
@@ -422,6 +452,7 @@ pub(crate) struct ResourceReservation {
 impl Drop for ResourceReservation {
     fn drop(&mut self) {
         self.ledger.release(self.cost);
+        self.ledger.state.released.notify_waiters();
     }
 }
 
@@ -445,7 +476,7 @@ fn warn_dropped_ledger(
 }
 
 pub(crate) struct LedgerDiskAdmission {
-    state: Weak<Mutex<ResourceSnapshot>>,
+    state: Weak<LedgerState>,
     session: crate::identity::SessionId,
     warned: std::sync::atomic::AtomicBool,
 }
@@ -479,7 +510,7 @@ impl crab_ltx::DiskBudgetAdmission for LedgerDiskAdmission {
 }
 
 pub(crate) struct LedgerHostResourceAdmission {
-    state: Weak<Mutex<ResourceSnapshot>>,
+    state: Weak<LedgerState>,
     session: crate::identity::SessionId,
     warned: std::sync::atomic::AtomicBool,
 }
@@ -535,6 +566,41 @@ impl crab_ltx::HostResourceAdmission for LedgerHostResourceAdmission {
 mod tests {
     use super::*;
     use crab_ltx::HostResourceAdmission;
+
+    #[tokio::test]
+    async fn waiting_reservation_reuses_released_capacity_without_overcommit() {
+        let cost = ResourceCost::zero().with_primitive_jobs(1);
+        let ledger = ResourceLedger::new(cost);
+        let held = ledger.try_reserve(cost).unwrap();
+        let pending = ledger.reserve(cost);
+        tokio::pin!(pending);
+        assert!(futures_util::poll!(&mut pending).is_pending());
+        assert_eq!(ledger.snapshot().unwrap().used, cost);
+        drop(held);
+        let acquired = tokio::time::timeout(std::time::Duration::from_secs(1), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.snapshot().unwrap().used, cost);
+        drop(acquired);
+        assert_eq!(ledger.snapshot().unwrap().used, ResourceCost::zero());
+    }
+
+    #[tokio::test]
+    async fn cancelled_reservation_does_not_retain_capacity() {
+        let cost = ResourceCost::zero().with_primitive_jobs(1);
+        let ledger = ResourceLedger::new(cost);
+        let held = ledger.try_reserve(cost).unwrap();
+        {
+            let pending = ledger.reserve(cost);
+            tokio::pin!(pending);
+            assert!(futures_util::poll!(&mut pending).is_pending());
+        }
+        drop(held);
+        let acquired = ledger.try_reserve(cost).unwrap();
+        assert_eq!(ledger.snapshot().unwrap().used, cost);
+        drop(acquired);
+    }
 
     #[test]
     fn reservations_are_bounded_and_return_to_baseline() {

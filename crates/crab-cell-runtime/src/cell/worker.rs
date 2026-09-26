@@ -694,6 +694,18 @@ impl SqlWorkerPool {
     }
 
     async fn send_worker_job(&self, cell: CellId, command: WorkerCommand) -> Result<()> {
+        let reservation = self.reserve_job().await?;
+        self.send(
+            cell,
+            WorkerCommand::Reserved {
+                command: Box::new(command),
+                reservation,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn reserve_job(&self) -> Result<WorkerJobReservation> {
         let worker_permits = {
             let lifecycle = self
                 .inner
@@ -713,17 +725,10 @@ impl SqlWorkerPool {
             .inner
             .resources
             .try_reserve(ResourceCost::zero().with_worker_jobs(1))?;
-        self.send(
-            cell,
-            WorkerCommand::Reserved {
-                command: Box::new(command),
-                reservation: WorkerJobReservation {
-                    _reservation: reservation,
-                    _permit: permit,
-                },
-            },
-        )
-        .await
+        Ok(WorkerJobReservation {
+            _reservation: reservation,
+            _permit: permit,
+        })
     }
 
     pub(crate) fn reserve_activation(&self) -> Result<CellReservation> {
@@ -961,7 +966,7 @@ enum WorkerCommand {
     },
 }
 
-struct WorkerJobReservation {
+pub(crate) struct WorkerJobReservation {
     _reservation: ResourceReservation,
     _permit: OwnedSemaphorePermit,
 }

@@ -118,7 +118,14 @@ This run applies read-replica targets of 2, 4, 9, and 19 as the fleet grows
 from 3 to 20 nodes. It queries the original issue through an explicit replica
 route and records each serving node from `x-crab-cell-reader` in
 `read-replica-report.json`. Every Cell mutation uses the object durability
-profile. At 20 nodes the runner also kills a Cell's owner and two observed
+profile. Each stage compares 200 owner and 200 replica reads at concurrency
+eight, reports p50/p99 latency and actual reader distribution, and samples
+process memory, descriptors, local disk, and runtime metrics. These samples
+are not peak-resource or production-capacity measurements. A separate
+primary-only failure must select one of the two verified warm readers and
+successfully publish a new comment afterward.
+
+At 20 nodes the runner also kills a Cell's owner and two observed
 readers, removes those three disposable local Cell volumes, and requires a
 survivor to recover the acknowledged issue and recruit two new readers from
 RustFS. The report proves local RustFS side effects and observed reader

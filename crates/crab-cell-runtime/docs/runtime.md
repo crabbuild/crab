@@ -171,6 +171,12 @@ let observed = issues
 
 Queries run on the owning SQL worker under a read-only application boundary. They don't produce LTX, modify control, or bypass namespace and schema checks.
 
+Replica SQL shares the owner's bounded SQL worker admission pool. Its slot
+stays charged until the blocking query exits, including cancellation. Peer
+codecs use the node primitive-job ledger with deadline-bounded waiting; S3
+session enrollment runs outside the CPU reservation so provider latency does
+not reject otherwise idle concurrent reads.
+
 ## Apply one absolute operation deadline
 
 Native commands and queries receive a five-second wall deadline. The same deadline covers:
