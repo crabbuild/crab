@@ -1226,3 +1226,80 @@ This removes a concrete capacity-triggered loss of the participant owner. It
 does not supply a universal prepare-time reservation for B-tree/index growth,
 request receipts, retained history, WAL, or peak memory. Those requirements and
 the 10,000-Cell/multi-TB qualification remain open.
+
+## Dense exhaustion: safety survives, apply headroom is still missing
+
+The 8-KiB filler refusal left enough slack for the previous capacity regression.
+Continuing with empty-payload items consumed that slack. Both four 380-KiB
+writes and fifty small writes per participant then reproduced `SQLITE_FULL`
+during item application after the coordinator published COMMIT. Temporary
+probes located the failure inside `write_item`; releasing lock rows before
+apply did not cure it. Those probes and the ineffective reordering were removed.
+The original near-full and 8-KiB-exhaustion tests remain unchanged in meaning.
+
+The new dense cases verify the required failure behavior: a retryable result,
+an unchanged durable COMMIT, and a raw participant read that still reports the
+transaction lock. Reclaiming an unrelated item in each blocked participant lets
+the same decision finish and every prepared item is read back byte-for-byte.
+The test permits resolution without reclaim when future admission work makes
+that possible; it does not require the current shortage to remain a feature.
+This is recovery after resource relief, not a guarantee of autonomous progress
+at full capacity.
+
+The reclaim attempt exposed a second allocation problem. Account and data
+`DeleteItem` handlers always returned the old image, so the runtime copied it
+into `sys_requests` even when the storage caller requested no image. At full
+capacity this could fail or provide no useful space for transaction resolution.
+Both handlers now carry the existing `return_old` choice through to their
+durable successful result. The adapter no longer discards that image only after
+publication. Conditional failures still carry the old image; transactional
+Delete keeps its existing compact success outcome.
+
+The pinned ExtendDB engine requests an old image for `ALL_OLD`, Streams, or
+consumed-capacity accounting. That boolean is preserved, including capacity
+requests whose public response has no attributes. Streams remain unsupported.
+The SQLite reference backend likewise returns an old image only when requested.
+The new Cell input field is required, with all repository callers updated;
+BeyondDB is unpublished and absent from current main, so there is no shipped
+wire format requiring a fallback reader. No dependency or SQL schema changed.
+
+**Is this the best fix here?** Successful result selection belongs in the
+handler, before the runtime persists it. Changing receipt retention or raising
+the Cell size would leave unwanted image copies in place. Put and Update also
+return internal images, but neither is used to reclaim space in these tests;
+their result selection needs separate follow-up. A delete requesting an old
+image can still require extra capacity, as its durable receipt must retain it.
+
+Evidence map: SDK/ExtendDB delete → `backend/data.rs` → account `DeleteItem` or
+data `PartitionDelete` → runtime `CellExecutor::execute`/`sys_requests`.
+`backend/recovery.rs` resolves the fixed participant list; `participant::resolve`
+and both item apply implementations share the command transaction. The
+capacity suite exercises both participant kinds; existing account/elastic
+coverage checks conditions, old-image returns, and transaction operations.
+Current main has no BeyondDB implementation; the comparison is against the
+preceding draft-PR commit.
+
+A split cannot rescue this condition automatically: `SealPartition` rejects
+outstanding transaction locks because its copy protocol moves live rows only.
+The participant retains those locks until resolution. Moving ownership also
+preserves the database and its budget, so takeover alone supplies no new space.
+This makes apply admission a prerequisite for unattended scaling, rather than
+an issue that the split or recovery worker can simply retry away.
+
+The next transaction milestone remains prepare-time admission that protects
+apply and terminal-receipt space from unrelated writes, or a storage layout
+that installs indexed versions during prepare and resolves by a bounded state
+change. Payload reuse alone has now been disproved as a sufficient guarantee.
+Any reservation needs bounds for B-tree/index changes, receipts, WAL/local disk,
+and peak memory, plus tests across item/key sizes, concurrent prepares, owner
+restart, and split barriers. The 10,000-Cell/multi-TB target remains unqualified.
+
+Verification for this update: 22 account/elastic tests passed, including both
+dense exhaustion/reclaim cases. Strict all-target Clippy, formatting, diff, and
+Cell/LTX layout checks passed. The separate signed SDK/RustFS process smoke
+passed in 430.21 seconds: `NONE`, `ALL_OLD`, and consumed-capacity delete
+responses, deleted-item absence after changed-address hard restart, large
+transactions/reads, historical token replay, and graceful restart. The binary
+remained fixed throughout that process test. Production growth is seven net
+lines for the existing result-selection contract; the additional test fixture
+covers the newly reproduced shortage and its recovery boundary.

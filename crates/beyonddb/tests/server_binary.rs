@@ -424,6 +424,41 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         .send()
         .await
         .unwrap();
+    for (id, return_old, capacity) in [
+        ("delete-none", false, false),
+        ("delete-old", true, false),
+        ("delete-capacity", false, true),
+    ] {
+        let deleted_item = HashMap::from([
+            ("id".into(), AttributeValue::S(id.into())),
+            ("payload".into(), AttributeValue::S("x".repeat(8192))),
+        ]);
+        sdk.put_item()
+            .table_name("ProcessData")
+            .set_item(Some(deleted_item.clone()))
+            .send()
+            .await
+            .unwrap();
+        let deleted = sdk
+            .delete_item()
+            .table_name("ProcessData")
+            .key("id", AttributeValue::S(id.into()))
+            .return_values(if return_old {
+                aws_sdk_dynamodb::types::ReturnValue::AllOld
+            } else {
+                aws_sdk_dynamodb::types::ReturnValue::None
+            })
+            .return_consumed_capacity(if capacity {
+                aws_sdk_dynamodb::types::ReturnConsumedCapacity::Total
+            } else {
+                aws_sdk_dynamodb::types::ReturnConsumedCapacity::None
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(deleted.attributes(), return_old.then_some(&deleted_item));
+        assert_eq!(deleted.consumed_capacity().is_some(), capacity);
+    }
     let mut batch_ids: Vec<String> = Vec::new();
     for index in 0..64 {
         let id = format!("batch-{index}");
@@ -726,6 +761,16 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
     fs::write(&config, replacement_config.to_string()).unwrap();
     let mut restarted = start(&config, &log, false, s3);
     wait_healthy(&mut restarted, public, &log);
+    for id in ["delete-none", "delete-old", "delete-capacity"] {
+        let deleted = sdk
+            .get_item()
+            .table_name("ProcessData")
+            .key("id", AttributeValue::S(id.into()))
+            .send()
+            .await
+            .unwrap();
+        assert!(deleted.item().is_none());
+    }
     large.assert_recovered(&sdk).await;
     large_read.assert_recovered(&sdk).await;
     sdk.transact_write_items()

@@ -961,6 +961,8 @@ pub struct PartitionDeleteInput {
     pub key: Item,
     /// Optional condition against the previous image.
     pub condition: Option<WireCondition>,
+    /// Include the previous image in the durable successful result.
+    pub return_old: bool,
 }
 
 /// Result of a partition-local DeleteItem.
@@ -1071,7 +1073,7 @@ impl Command for PartitionDelete {
             vec![SqlValue::Blob(key)],
         ))?;
         Ok(CommandResult::Success(Json(
-            PartitionDeleteOutcome::Applied(old),
+            PartitionDeleteOutcome::Applied(if input.return_old { old } else { None }),
         )))
     }
 }

@@ -101,6 +101,8 @@ pub struct DeleteItemInput {
     pub key: Item,
     /// Condition evaluated against the previous item in the same transaction.
     pub condition: Option<WireCondition>,
+    /// Include the previous image in the durable successful result.
+    pub return_old: bool,
 }
 
 /// Delete an item through one durable Cell command.
@@ -158,7 +160,7 @@ impl Command for DeleteItem {
             vec![SqlValue::Text(table.id), SqlValue::Blob(key)],
         ))?;
         Ok(CommandResult::Success(Json(ItemMutationOutcome::Applied(
-            old,
+            if input.return_old { old } else { None },
         ))))
     }
 }

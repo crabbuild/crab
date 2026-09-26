@@ -44,6 +44,7 @@ pub(crate) async fn assert_range_read_barriers(
                     condition: None,
                 }),
                 TransactionOperation::Delete(DeleteItemInput {
+                    return_old: false,
                     table_name: key_info.table_name.clone(),
                     table_id: key_info.table_id.clone(),
                     key: deleted.clone(),
@@ -294,6 +295,7 @@ pub(crate) async fn assert_sdk_read_barrier(
             coordinator_cell,
             coordinator_key: transaction_id.to_vec(),
             operations: vec![TransactionOperation::Delete(DeleteItemInput {
+                return_old: false,
                 table_name: partition.table.table_name.clone(),
                 table_id: partition.table.id.clone(),
                 key,

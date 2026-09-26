@@ -2522,6 +2522,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             &account,
             identity(29),
             Json(DeleteItemInput {
+                return_old: true,
                 table_name: table.table_name.clone(),
                 table_id: table.id.clone(),
                 key: old_account_key,
@@ -2954,6 +2955,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
                 &side.0,
                 identity(121 + u8::try_from(position).unwrap()),
                 Json(PartitionDeleteInput {
+                    return_old: true,
                     table_id: table.id.clone(),
                     epoch: side.1,
                     key: side.2,
@@ -3506,6 +3508,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             &right_target,
             identity(25),
             Json(PartitionDeleteInput {
+                return_old: true,
                 table_id: table.id.clone(),
                 epoch: 2,
                 key: right_key.clone(),
@@ -3768,6 +3771,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             &left_target,
             identity(97),
             Json(PartitionDeleteInput {
+                return_old: true,
                 table_id: table.id.clone(),
                 epoch: 1,
                 key: intent_item,
@@ -3826,6 +3830,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             &left_target,
             identity(48),
             Json(PartitionDeleteInput {
+                return_old: true,
                 table_id: table.id.clone(),
                 epoch: 1,
                 key: left_key.clone(),

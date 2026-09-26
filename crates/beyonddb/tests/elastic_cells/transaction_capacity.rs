@@ -10,15 +10,25 @@ fn mutation() -> MutationIdentity {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn committed_participants_reuse_staged_space_after_unrelated_writes() {
-    capacity_case(false).await;
+    capacity_case(&[], 4, 380 * 1024).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn committed_participants_resolve_after_unrelated_writes_exhaust_capacity() {
-    capacity_case(true).await;
+    capacity_case(&[8 * 1024], 4, 380 * 1024).await;
 }
 
-async fn capacity_case(exhaust: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn small_item_commit_survives_full_apply_and_retries_after_reclaim() {
+    capacity_case(&[8 * 1024, 0], 50, 0).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn large_item_commit_survives_full_apply_and_retries_after_reclaim() {
+    capacity_case(&[8 * 1024, 0], 4, 380 * 1024).await;
+}
+
+async fn capacity_case(fill_sizes: &[usize], per_participant: usize, payload_bytes: usize) {
     let application = Arc::new(
         Beyonddb::compile(BuildDescriptor {
             source_revision: "transaction-capacity".into(),
@@ -146,14 +156,17 @@ async fn capacity_case(exhaust: bool) {
     let operations: Vec<Vec<_>> = tables
         .iter()
         .map(|table| {
-            (0..4)
+            (0..per_participant)
                 .map(|index| {
                     TransactionOperation::Put(PutItemInput {
                         table_name: table.table_name.clone(),
                         table_id: table.id.clone(),
                         item: Item::from([
                             ("id".into(), AttributeValue::S(format!("committed-{index}"))),
-                            ("payload".into(), AttributeValue::S("x".repeat(380 * 1024))),
+                            (
+                                "payload".into(),
+                                AttributeValue::S("x".repeat(payload_bytes)),
+                            ),
                         ]),
                         condition: None,
                     })
@@ -177,14 +190,14 @@ async fn capacity_case(exhaust: bool) {
             .iter()
             .enumerate()
             .map(|(index, operation)| IndexedTransactionOperation {
-                index: (position * 4 + index) as u8,
+                index: (position * per_participant + index) as u8,
                 operation: operation.clone(),
             })
             .collect(),
     })
     .collect();
     participants.sort_by_key(|participant| {
-        *targets[usize::from(participant.operations[0].index) / 4]
+        *targets[usize::from(participant.operations[0].index) / per_participant]
             .cell_id()
             .as_bytes()
     });
@@ -204,7 +217,7 @@ async fn capacity_case(exhaust: bool) {
     .unwrap();
     let coordinator_cell = *coordinator.cell_id().as_bytes();
     for (position, participant) in participants.iter().enumerate() {
-        let index = usize::from(participant.operations[0].index) / 4;
+        let index = usize::from(participant.operations[0].index) / per_participant;
         let prepared = if index == 0 {
             transaction_command!(
                 client,
@@ -274,37 +287,42 @@ async fn capacity_case(exhaust: bool) {
             .await
             .unwrap();
     }
-    if exhaust {
+    if !fill_sizes.is_empty() {
         for table in &tables {
             let info = storage
                 .table_key_info(account_id, &table.table_name)
                 .await
                 .unwrap();
-            let mut refused = false;
-            for i in 0..128 {
-                let result = storage
-                    .put_item(
-                        &info,
-                        Item::from([
-                            ("id".into(), AttributeValue::S(format!("fill-{i}"))),
-                            ("payload".into(), AttributeValue::S("z".repeat(8 * 1024))),
-                        ]),
-                        false,
-                        None,
-                        &ExpressionMaps::default(),
-                        None,
-                    )
-                    .await;
-                if let Err(error) = result {
-                    assert!(
-                        matches!(error, StorageError::Transient(_)),
-                        "capacity refusal must be retryable: {error:?}"
-                    );
-                    refused = true;
-                    break;
+            for &fill_bytes in fill_sizes {
+                let mut refused = false;
+                for i in 0..256 {
+                    let result = storage
+                        .put_item(
+                            &info,
+                            Item::from([
+                                (
+                                    "id".into(),
+                                    AttributeValue::S(format!("fill-{fill_bytes}-{i}")),
+                                ),
+                                ("payload".into(), AttributeValue::S("z".repeat(fill_bytes))),
+                            ]),
+                            false,
+                            None,
+                            &ExpressionMaps::default(),
+                            None,
+                        )
+                        .await;
+                    if let Err(error) = result {
+                        assert!(
+                            matches!(error, StorageError::Transient(_)),
+                            "capacity refusal must be retryable: {error:?}"
+                        );
+                        refused = true;
+                        break;
+                    }
                 }
+                assert!(refused, "fixture must exhaust the Cell budget");
             }
-            assert!(refused, "fixture must exhaust the Cell budget");
         }
     }
     client
@@ -320,6 +338,105 @@ async fn capacity_case(exhaust: bool) {
         )
         .await
         .unwrap();
+    if fill_sizes.contains(&0) {
+        // Tiny filler consumes the slack left by the first large refusal. This
+        // currently exposes missing apply reservation after durable COMMIT.
+        let mut reclaimed = std::collections::BTreeSet::new();
+        for _ in &tables {
+            let Err(error) = storage
+                .finish_decided_cross_cell_transaction(account_id, &transaction_id, transaction_id)
+                .await
+            else {
+                break;
+            };
+            assert!(matches!(error, StorageError::Transient(_)), "{error:?}");
+            let status = client
+                .query::<ReadCrossCellTransaction>(
+                    &coordinator,
+                    None,
+                    Json(ReadCrossCellTransactionInput {
+                        account_id: account_id.into(),
+                        transaction_id,
+                        routing_key: transaction_id.to_vec(),
+                    }),
+                )
+                .await
+                .unwrap()
+                .output
+                .0
+                .unwrap();
+            assert_eq!(status.decision, CoordinatorDecision::Commit);
+            assert!(status.resolved_count < 2);
+
+            // A failed resolver must restore its locks and staged images. A raw
+            // participant read cannot help resolution or hide an incomplete apply.
+            let first = &participants[usize::from(status.resolved_count)];
+            let position = usize::from(first.operations[0].index) / per_participant;
+            let key = Item::from([("id".into(), AttributeValue::S("committed-0".into()))]);
+            let conflict = if position == 0 {
+                let result = client
+                    .query::<GetItem>(
+                        &account,
+                        None,
+                        Json(GetItemInput {
+                            table_name: tables[0].table_name.clone(),
+                            table_id: tables[0].id.clone(),
+                            key,
+                        }),
+                    )
+                    .await
+                    .unwrap()
+                    .output
+                    .0;
+                let GetItemOutcome::Conflict(conflict) = result else {
+                    panic!("failed apply lost its lock: {result:?}")
+                };
+                conflict
+            } else {
+                let result = client
+                    .query::<PartitionGet>(
+                        &data,
+                        None,
+                        Json(PartitionGetInput {
+                            table_id: tables[1].id.clone(),
+                            epoch: 1,
+                            key,
+                        }),
+                    )
+                    .await
+                    .unwrap()
+                    .output
+                    .0;
+                let PartitionGetOutcome::Conflict(conflict) = result else {
+                    panic!("failed apply lost its lock: {result:?}")
+                };
+                conflict
+            };
+            assert_eq!(conflict.transaction.transaction_id, transaction_id);
+            assert!(
+                reclaimed.insert(position),
+                "resolution made no progress after reclaim"
+            );
+            let info = storage
+                .table_key_info(account_id, &tables[position].table_name)
+                .await
+                .unwrap();
+            assert_eq!(
+                storage
+                    .delete_item(
+                        &info,
+                        &Item::from([("id".into(), AttributeValue::S("unrelated".into()))]),
+                        false,
+                        None,
+                        &ExpressionMaps::default(),
+                        None,
+                    )
+                    .await
+                    .unwrap(),
+                None
+            );
+        }
+    }
     storage
         .finish_decided_cross_cell_transaction(account_id, &transaction_id, transaction_id)
         .await
