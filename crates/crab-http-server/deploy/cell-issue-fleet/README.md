@@ -141,3 +141,30 @@ Cell because an earlier killed reader can own other Cells. Node inspection
 selects the unique live advertised boot session, including after restarts.
 The report proves local RustFS side effects and observed reader distribution
 on one host; it does not replace protected-provider evidence.
+
+## Fleet-to-object rollout qualification
+
+Use a fresh disposable project for the three-node mode transition:
+
+```sh
+python3 crates/crab-http-server/deploy/cell-issue-fleet/qualify_mode_rollout.py \
+  --state "$HOME/.codex/cell-issue-fleet/mode-rollout-1" \
+  --project crab-cell-issue-mode-rollout-1
+```
+
+The runner first requires active fleet logs and observed fleet durability
+proofs, then writes a comment and stops all three servers. It changes their
+configs only after every server exits successfully without an OOM kill.
+Successful shutdown includes the existing node-log coverage barrier: every
+issued frame must be object-covered before the durable log close CAS.
+A failed or forced drain leaves the fleet configuration intact and fails the
+run. The provider and all local volumes remain available for investigation.
+
+After restarting in object mode, the runner verifies old values, publishes a
+new comment, checks object proof counters with no new fleet proofs, and
+activates two readers. It then kills all three servers, deletes only their
+project-labeled Cell volumes, restarts fresh nodes, and requires both the
+pre-rollout and post-rollout comments plus the original issues and labels to
+survive. The result is saved in `mode-rollout-report.json`.
+This is an offline rollout for the local fixture; platform rollout and
+protected-provider release procedures remain separate.
