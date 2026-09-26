@@ -2,14 +2,74 @@
 
 import io
 import json
+import tempfile
 import threading
 import time
 import unittest
 from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest.mock import patch
 
 import load
+import qualify
+
+
+class ImageProvenanceTests(unittest.TestCase):
+    def test_missing_or_malformed_revision_cannot_qualify(self):
+        for labels in (None, {}, {"org.opencontainers.image.revision": "main"}):
+            image = {"Config": {"Labels": labels}}
+            with self.subTest(labels=labels), \
+                    patch.object(qualify, "command", return_value=json.dumps([image])), \
+                    self.assertRaisesRegex(RuntimeError, "source revision"):
+                qualify.image_provenance("candidate:local")
+
+    def test_pinning_removes_mutable_tags_and_rejects_a_different_running_image(self):
+        image = {
+            "Id": "sha256:" + "1" * 64,
+            "Os": "linux", "Architecture": "arm64",
+            "Config": {"Labels": {"org.opencontainers.image.revision": "a" * 40}},
+        }
+        with tempfile.TemporaryDirectory() as state:
+            path = qualify.render(Path(state), "crab-cell-issue-pin-test", 18080, 18100, 19010)
+            with patch.object(qualify, "command", return_value=json.dumps([image])):
+                qualify.pin_image(path, "a" * 40)
+            deployment = json.loads(path.read_text())
+            for name in ["release-init", "repository-init", "fleet-net"] + [qualify.node_name(i) for i in range(1, 21)]:
+                service = deployment["services"][name]
+                self.assertEqual(service["image"], image["Id"])
+                self.assertEqual(service["pull_policy"], "never")
+                self.assertNotIn("build", service)
+            self.assertEqual(deployment["services"]["release-init"]["command"][-1], image["Id"])
+            inspected = f"1000000000 1073741824 1073741824 healthy sha256:{'2' * 64}"
+            with patch.object(qualify, "compose", return_value="node-container"), \
+                    patch.object(qualify, "command", return_value=inspected), \
+                    self.assertRaisesRegex(RuntimeError, "pinned server image"):
+                qualify.prove_node(path, (), 1)
+
+    def test_skip_build_refuses_wrong_source_before_starting_nodes(self):
+        source = "a" * 40
+        image = {
+            "Id": "sha256:" + "1" * 64,
+            "Os": "linux", "Architecture": "arm64",
+            "Config": {"Labels": {"org.opencontainers.image.revision": "b" * 40}},
+        }
+
+        def command(*args):
+            if args[0] == "git":
+                return source if "rev-parse" in args else ""
+            if args[:3] == ("docker", "image", "inspect"):
+                return json.dumps([image])
+            return ""
+
+        with tempfile.TemporaryDirectory() as state, \
+                patch.object(qualify.sys, "argv", [
+                    "qualify.py", "--state", state, "--project", "crab-cell-issue-source-test", "--skip-build",
+                ]), \
+                patch.object(qualify, "command", side_effect=command), \
+                patch.object(qualify, "run_stage", side_effect=AssertionError("started wrong-source node")):
+            with self.assertRaisesRegex(RuntimeError, "source revision"):
+                qualify.main()
 
 
 class LoadTests(unittest.TestCase):

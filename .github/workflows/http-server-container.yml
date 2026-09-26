@@ -747,10 +747,11 @@ jobs:
               echo "image_digest requires image_ref." >&2
               exit 1
             fi
-            docker build \
+            git archive --format=tar HEAD | docker build \
               --file crates/crab-http-server/deploy/Dockerfile \
+              --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
               --tag crab-http-server:test \
-              .
+              -
             digest="$(docker image inspect crab-http-server:test --format '{{.Id}}')"
           fi
           printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
@@ -767,6 +768,7 @@ jobs:
           crab-http-server:test
       - name: Verify runtime contract
         run: |
+          test "$(docker image inspect crab-http-server:test --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$(git rev-parse HEAD)"
           test "$(docker image inspect crab-http-server:test --format '{{.Config.User}}')" = "crab:crab"
           test "$(docker image inspect crab-http-server:test --format '{{.Config.StopSignal}}')" = "SIGTERM"
           docker image inspect crab-http-server:test --format '{{json .Config.Healthcheck.Test}}' | grep -F -- '"healthcheck"'

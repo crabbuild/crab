@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 
-from qualify import BUCKET, CONFIG, MEMORY_LIMIT, ROOT, command, compose, issue_path, node_name, prove_node
+from qualify import BUCKET, CONFIG, MEMORY_LIMIT, ROOT, command, compose, image_provenance, issue_path, node_name, prove_node
 
 
 class RequestFailure(RuntimeError):
@@ -445,16 +445,19 @@ def main() -> None:
     if active_nodes != expected_nodes:
         raise RuntimeError(f"expected exactly {args.nodes} running Cell nodes, found {sorted(active_nodes)}")
     profiles = profiles_for(args.nodes)
+    server = image_provenance(deployment["services"]["node-01"]["image"])
+    if any(deployment["services"][name]["image"] != server["image"] for name in expected_nodes):
+        raise RuntimeError("all node services must pin the same server image ID; run qualify.py first")
     gateway = f"http://127.0.0.1:{args.gateway_port}"
     owners, before = owner_map(path, profiles, args.nodes, args.cells)
     coverage, coverage_samples = cover_routes(gateway, args.nodes, args.cells)
     report = {
-        "schema": 2,
+        "schema": 3,
         "source": command("git", "-C", str(ROOT), "rev-parse", "HEAD"),
         "source_role": "load_generator",
         "source_dirty": bool(command("git", "-C", str(ROOT), "status", "--porcelain")),
         "project": project,
-        "server_image": command("docker", "image", "inspect", "--format", "{{.Id}}", deployment["services"]["node-01"]["image"]),
+        "server": server,
         "rustfs": {
             "image": deployment["services"]["rustfs"]["image"],
             "image_id": command("docker", "image", "inspect", "--format", "{{.Id}}", deployment["services"]["rustfs"]["image"]),

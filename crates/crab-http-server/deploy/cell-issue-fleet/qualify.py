@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -24,6 +25,52 @@ def command(*args: str) -> str:
 def compose(path: Path, profiles: tuple[str, ...], *args: str) -> str:
     flags = [flag for profile in profiles for flag in ("--profile", profile)]
     return command("docker", "compose", "--file", str(path), *flags, *args)
+
+
+def image_provenance(reference: str) -> dict:
+    image = json.loads(command("docker", "image", "inspect", reference))[0]
+    source = (image["Config"].get("Labels") or {}).get("org.opencontainers.image.revision", "")
+    if not re.fullmatch(r"[0-9a-f]{40}", source):
+        raise RuntimeError("server image lacks a valid source revision label; rebuild or import a qualified image")
+    return {"image": image["Id"], "source": source, "platform": f"{image['Os']}/{image['Architecture']}"}
+
+
+def build_image(project: str, source: str) -> None:
+    # Stream only the committed tree: ignored files and concurrent workspace
+    # edits cannot silently change the source attributed to the resulting image.
+    with subprocess.Popen(
+        ["git", "-C", str(ROOT), "archive", "--format=tar", source], stdout=subprocess.PIPE,
+    ) as archive:
+        try:
+            subprocess.run([
+                "docker", "build", "--file", "crates/crab-http-server/deploy/Dockerfile",
+                "--label", f"org.opencontainers.image.revision={source}",
+                "--tag", f"{project}:local", "-",
+            ], stdin=archive.stdout, check=True)
+        finally:
+            archive.stdout.close()
+        if archive.wait() != 0:
+            raise RuntimeError("could not archive the committed source for the server image")
+
+
+def pin_image(path: Path, source: str) -> dict:
+    deployment = json.loads(path.read_text())
+    reference = deployment["services"]["node-01"]["image"]
+    image = image_provenance(reference)
+    if image["source"] != source:
+        raise RuntimeError(f"server image source revision {image['source']} differs from checkout {source}")
+    # Containerd can discard an untagged image index even while a container
+    # references it. Retain this run's image if the mutable build tag moves.
+    retained = f"{deployment['name']}:qualified-{image['image'].removeprefix('sha256:')}"
+    command("docker", "image", "tag", image["image"], retained)
+    for service in deployment["services"].values():
+        if service["image"] == reference:
+            service["image"] = image["image"]
+            service["pull_policy"] = "never"
+            service.pop("build", None)
+    deployment["services"]["release-init"]["command"][-1] = image["image"]
+    path.write_text(json.dumps(deployment, indent=2) + "\n")
+    return image
 
 
 def request_json(method: str, url: str, payload: dict | None = None) -> dict:
@@ -87,10 +134,13 @@ def prove_node(path: Path, profiles: tuple[str, ...], index: int) -> tuple[str, 
         "docker",
         "inspect",
         "--format",
-        "{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.State.Health.Status}}",
+        "{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}} {{.HostConfig.MemorySwap}} {{.State.Health.Status}} {{.Image}}",
         container_id,
     ).split()
-    if inspected != [str(CPU_LIMIT), str(MEMORY_LIMIT), str(MEMORY_LIMIT), "healthy"]:
+    expected_image = json.loads(path.read_text())["services"][service]["image"]
+    if inspected[-1] != expected_image or not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_image):
+        raise RuntimeError(f"{service} is not running the pinned server image: {inspected[-1]}")
+    if inspected[:-1] != [str(CPU_LIMIT), str(MEMORY_LIMIT), str(MEMORY_LIMIT), "healthy"]:
         raise RuntimeError(f"{service} has unexpected resource limits or health: {inspected}")
     capacity = json.loads(
         compose(path, profiles, "exec", "-T", service, "crab-http-server", "--config", CONFIG, "cells", "capacity", "--json", "--live")
@@ -301,6 +351,9 @@ def main() -> None:
         Workload(args.cells, args.load_rate, args.load_duration, args.load_max_in_flight, 0)
     except ValueError as error:
         parser.error(str(error))
+    source = command("git", "-C", str(ROOT), "rev-parse", "HEAD")
+    if command("git", "-C", str(ROOT), "status", "--porcelain"):
+        raise RuntimeError("qualification requires a clean committed checkout")
     command("docker", "info", "--format", "{{.ServerVersion}}")
     label = f"label=com.docker.compose.project={args.project}"
     existing = [
@@ -313,11 +366,12 @@ def main() -> None:
     path = render(args.state, args.project, args.gateway_port, args.node_port_base, args.rustfs_port)
     compose(path, (), "config", "--quiet")
     if not args.skip_build:
-        subprocess.run(["docker", "compose", "--file", str(path), "build", "release-init"], check=True)
+        build_image(args.project, source)
+    image = pin_image(path, source)
+    compose(path, ("five", "ten", "twenty"), "config", "--quiet")
     report = {
         "project": args.project,
-        "source": command("git", "-C", str(ROOT), "rev-parse", "HEAD"),
-        "image": command("docker", "image", "inspect", "--format", "{{.Id}}", f"{args.project}:local"),
+        **image,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "node_cpu_limit": 1,
         "node_memory_limit_bytes": MEMORY_LIMIT,

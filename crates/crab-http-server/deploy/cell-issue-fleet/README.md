@@ -58,8 +58,10 @@ python3 crates/crab-http-server/deploy/cell-issue-fleet/qualify.py \
   --state "$state" --project crab-cell-issue-run-1
 ```
 
-The script builds the existing `crab-http-server` image, renders a Compose
-file and node configs, starts three nodes, and adds 2, 5, and 10 nodes in
+The script requires a clean committed checkout. It streams that revision's
+Git archive into the existing server Dockerfile and labels the image with its
+source revision. It renders a Compose file and node configs, starts three
+nodes, and adds 2, 5, and 10 nodes in
 successive stages. It fails if a node is unhealthy, its effective Cell memory
 is not 1 GiB, a resource limit is missing, a Cell has no live owner, an issue
 is not visible through the gateway, or no Cell object reached RustFS. A fresh
@@ -67,6 +69,16 @@ project name avoids touching another Compose stack. The default host ports are
 `18080` for the gateway, `18101`–`18120` for direct node access, and `19010`
 for RustFS on localhost. Choose other ports with `--gateway-port`,
 `--node-port-base`, and `--rustfs-port` if needed.
+
+Before startup it checks the image's `org.opencontainers.image.revision` label
+against the checkout, including with `--skip-build`. Missing or different
+revisions fail. Every server service and the release bootstrap use the inspected
+image ID; each node's actual image must match. A project-local
+`qualified-<image-id>` tag retains the image when its `local` build tag moves.
+Keep that tag while reusing the stack. The load report records the server's
+source, platform, and image separately from the load generator's checkout.
+Image labels are build metadata; imported images still require the CI artifact's
+source and checksum evidence.
 
 To run the gateway workload while each stage has exactly 3, 5, 10, or 20
 active nodes, add `--load-stages`. The functional checks remain the default
@@ -90,6 +102,8 @@ image ID, platform, and exact source revision. On an ARM64 Docker host, dispatch
 the workflow on the desired branch with `-f arm64=true`; it uses GitHub's
 [native ARM64 runner](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 Omit the flag for AMD64. Compare performance only on the same native platform.
+Use a run that includes the revision-label check; earlier unlabeled artifacts
+are rejected by the current qualifier.
 
 ```sh
 gh workflow run http-server-container.yml --ref YOUR_BRANCH -f arm64=true
@@ -128,7 +142,9 @@ docker compose --file "$state/compose.yaml" \
 ```
 
 To operate the rendered stack by hand, run these Compose commands in order.
-The profiles only add nodes; existing node volumes and RustFS data persist:
+The profiles only add nodes; existing node volumes and RustFS data persist.
+These manual builds are exploratory. Use `qualify.py` to produce a pinned stack
+for qualification reports:
 
 ```sh
 docker compose --file "$state/compose.yaml" build release-init
@@ -155,7 +171,8 @@ cat "$state/report.json"
 
 ## Qualify gateway distribution and Cell actions
 
-Run this after the desired scale stage is healthy. Pass the number of active
+Run this after `qualify.py` has pinned the image and the desired scale stage is
+healthy. Pass the number of active
 nodes (`3`, `5`, `10`, or `20`) and the number of provisioned Cells. The load
 uses one fixed schedule independent of completion time:
 
@@ -201,8 +218,10 @@ The summary remains available when post-load verification fails. A missed or
 failed arrival, unbalanced ingress, undrained publication, or failed recovery
 exits nonzero. Inspect the report to distinguish generator capacity from
 service capacity; `passed` is a functional workload result, never a supported
-production limit. The report's source revision identifies the load generator;
-associate its server image ID with the CI image artifact's source proof.
+production limit. Schema 3's `source` identifies the load generator; `server`
+contains the inspected server image ID, revision label, and platform. Every
+running node must match the pinned image before load begins. Retain the CI
+image artifact's source proof alongside imported-image reports.
 
 The node file records Docker CPU, memory, network/block I/O, and the complete
 runtime Prometheus output during load. Collection runs on a separate thread,
