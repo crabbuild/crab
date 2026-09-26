@@ -6,6 +6,75 @@ use futures_util::{StreamExt, stream};
 const READ_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 const READ_RECONCILE_BATCH: usize = 64;
 
+#[derive(Default)]
+pub(super) struct ReplicaRouting {
+    state: std::sync::Mutex<ReplicaRoutingState>,
+}
+
+#[derive(Default)]
+struct ReplicaRoutingState {
+    cursor: usize,
+    in_flight: HashMap<NodeId, usize>,
+}
+
+struct ReplicaAttempt<'a> {
+    routing: &'a ReplicaRouting,
+    node: NodeId,
+}
+
+impl ReplicaRouting {
+    fn reserve(
+        &self,
+        candidates: impl ExactSizeIterator<Item = NodeId>,
+    ) -> crab_cell_runtime::Result<(usize, ReplicaAttempt<'_>)> {
+        let count = candidates.len();
+        if count == 0 {
+            return Err(crab_cell_runtime::Error::ReplicaUnavailable);
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| crab_cell_runtime::Error::Control("replica routing load lock poisoned"))?;
+        let start = state.cursor % count;
+        let (index, node) = candidates
+            .enumerate()
+            .min_by_key(|(index, node)| {
+                let distance = if *index >= start {
+                    *index - start
+                } else {
+                    count - (start - *index)
+                };
+                (state.in_flight.get(node).copied().unwrap_or(0), distance)
+            })
+            .ok_or(crab_cell_runtime::Error::ReplicaUnavailable)?;
+        state.cursor = index + 1;
+        *state.in_flight.entry(node).or_default() += 1;
+        Ok((
+            index,
+            ReplicaAttempt {
+                routing: self,
+                node,
+            },
+        ))
+    }
+}
+
+impl Drop for ReplicaAttempt<'_> {
+    fn drop(&mut self) {
+        let mut state = self
+            .routing
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(active) = state.in_flight.get_mut(&self.node) {
+            *active -= 1;
+            if *active == 0 {
+                state.in_flight.remove(&self.node);
+            }
+        }
+    }
+}
+
 #[derive(serde::Serialize)]
 pub(crate) struct ReadReplicaStatus {
     pub(crate) owner_serving: bool,
@@ -30,7 +99,7 @@ impl RepositoryCellRouter {
         let target = self.repository_target(repository)?;
         let cell = target.cell_id();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let (expected, selected) =
+        let (expected, mut selected) =
             tokio::time::timeout_at(deadline, self.selected_readers(&target))
                 .await
                 .map_err(|_| crab_cell_runtime::Error::ReplicaUnavailable)??;
@@ -47,14 +116,18 @@ impl RepositoryCellRouter {
             },
             Arc::clone(&self.peer.round_trip),
         );
-        let start =
-            self.replica_query_cursor.fetch_add(1, Ordering::Relaxed) as usize % selected.len();
         let mut behind = None;
         let mut fenced = false;
         let attempts = async {
-            for offset in 0..selected.len() {
-                let node = selected[(start + offset) % selected.len()].clone();
-                let reader_node = node.node();
+            while !selected.is_empty() {
+                // This ingress counts outstanding attempts across Cells. Selection
+                // and increment share a lock; cancellation drops the count. Only
+                // active attempts retain entries, so membership churn cannot leak them.
+                let (index, attempt) = self
+                    .replica_routing
+                    .reserve(selected.iter().map(NodeAdvertisement::node))?;
+                let node = selected.remove(index);
+                let reader_node = attempt.node;
                 // Peer transport refuses self-dials; the admitted local view
                 // runs the same post-query authority gate as a remote reader.
                 let queried = if node.session() == self.peer.owner.session {
@@ -67,6 +140,7 @@ impl RepositoryCellRouter {
                         .query::<Q>(&target, node, expected, minimum, input.clone())
                         .await
                 };
+                drop(attempt);
                 match queried {
                     Ok(result) => return Ok((result, reader_node)),
                     Err(error @ crab_cell_runtime::Error::ReplicaBehind { .. }) => {
@@ -441,5 +515,71 @@ impl RepositoryCellRouter {
             // authority independently if snapshots cannot be verified in time.
             _ => Ok(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nodes() -> [NodeId; 3] {
+        [1, 2, 3].map(|byte| NodeId::from_bytes([byte; 16]))
+    }
+
+    #[test]
+    fn idle_readers_share_ties_and_a_busy_reader_is_skipped() {
+        let routing = ReplicaRouting::default();
+        let nodes = nodes();
+        let mut counts = [0; 3];
+        for _ in 0..12 {
+            let (index, _attempt) = routing.reserve(nodes.into_iter()).unwrap();
+            counts[index] += 1;
+        }
+        assert_eq!(counts, [4, 4, 4]);
+
+        let (_, busy) = routing.reserve(nodes.into_iter()).unwrap();
+        assert_eq!(busy.node, nodes[0]);
+        counts = [0; 3];
+        for _ in 0..12 {
+            let (index, _attempt) = routing.reserve(nodes.into_iter()).unwrap();
+            counts[index] += 1;
+        }
+        assert_eq!(counts, [0, 6, 6]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelled_attempt_releases_load_for_overlapping_candidate_sets() {
+        let routing = Arc::new(ReplicaRouting::default());
+        let nodes = nodes();
+        let blocked_routing = Arc::clone(&routing);
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let blocked = tokio::spawn(async move {
+            let (_, attempt) = blocked_routing.reserve(nodes.into_iter()).unwrap();
+            started.send(attempt.node).unwrap();
+            std::future::pending::<()>().await;
+            drop(attempt);
+        });
+        assert_eq!(ready.await.unwrap(), nodes[0]);
+        // A different Cell can share the busy physical reader. Its local load
+        // must carry across the two candidate sets without pinning membership.
+        let (index, attempt) = routing.reserve([nodes[0], nodes[2]].into_iter()).unwrap();
+        assert_eq!(index, 1);
+        drop(attempt);
+        blocked.abort();
+        assert!(blocked.await.unwrap_err().is_cancelled());
+        assert!(routing.state.lock().unwrap().in_flight.is_empty());
+    }
+
+    #[tokio::test]
+    async fn expired_route_attempt_releases_its_load() {
+        let routing = ReplicaRouting::default();
+        let nodes = nodes();
+        let expired = tokio::time::timeout(Duration::from_millis(10), async {
+            let (_, _attempt) = routing.reserve(nodes.into_iter()).unwrap();
+            std::future::pending::<()>().await;
+        })
+        .await;
+        assert!(expired.is_err());
+        assert!(routing.state.lock().unwrap().in_flight.is_empty());
     }
 }

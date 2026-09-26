@@ -7,7 +7,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicI64, AtomicU64, Ordering},
+        atomic::{AtomicI64, Ordering},
     },
     time::Duration,
 };
@@ -84,7 +84,7 @@ pub(crate) struct RepositoryCellRouter {
     // sampled at or before it may predate the released ownership, so the whole
     // fleet view is discarded until every member samples again.
     rebalance_settled_at_ms: Arc<AtomicI64>,
-    replica_query_cursor: Arc<AtomicU64>,
+    replica_routing: Arc<replicas::ReplicaRouting>,
     read_replicas: Option<super::ReadReplicaManager>,
 }
 
@@ -156,7 +156,7 @@ impl RepositoryCellRouter {
                 .into(),
             rebalance_evidence: Arc::new(Mutex::new(HashMap::new())),
             rebalance_settled_at_ms: Arc::new(AtomicI64::new(0)),
-            replica_query_cursor: Arc::new(AtomicU64::new(0)),
+            replica_routing: Arc::new(replicas::ReplicaRouting::default()),
             read_replicas: None,
         })
     }

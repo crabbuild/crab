@@ -67,7 +67,10 @@ CAS the target count through the product API, which sends an authenticated
 owner wake-up hint. Its status route probes selected nodes and distinguishes
 proven-ready, unverified, and placement-shortfall counts. An explicit issue-detail
 route uses selected replicas and reports actual receipts without falling back
-to the writer. No general product read route,
+to the writer. It chooses the fewest outstanding attempts observed by this
+ingress, rotating equal-load choices across readers. Counts span Cells and
+router clones and are released on success, error, timeout, or cancellation;
+they do not measure work issued by other ingress nodes. No general product read route,
 sparse read view or production qualification is enabled. Warm-reader
 preference now probes verified snapshots after owner death, closes read admission,
 and enters the existing fenced takeover and fresh writable restore path.
@@ -277,6 +280,7 @@ owner reconciliation, private activation, node admission, and administrator
 target CAS with owner hint and bounded readiness status exist; broader churn qualification
 remains; 4 typed local and peer queries, position
 errors, receipt checks, authority gates, and explicit issue-detail routing exist,
+including ingress-observed in-flight load selection under one request deadline,
 but other product reads remain owner-only; 5 has warm-reader preference and
 local automatic takeover coverage; 6 has a source/image-bound 3/5/10/20-node Compose run with reader replacement,
 warm promotion, all-reader disk loss, and authority outage; broader capacity

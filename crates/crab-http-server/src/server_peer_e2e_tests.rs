@@ -789,10 +789,10 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     use futures_util::StreamExt as _;
     let concurrent = futures_util::stream::iter(0..32)
         .map(|_| {
-            replica_peer.query::<crate::cells::repository::GetIssue>(
-                &target,
-                selected_reader.clone(),
-                exact,
+            owner_router.query_replica::<crate::cells::repository::GetIssue>(
+                repository_id,
+                &local_operator,
+                &owner_read_replicas,
                 Some(ready),
                 1,
             )
@@ -801,7 +801,15 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .collect::<Vec<_>>()
         .await;
     assert!(
-        concurrent.iter().all(std::result::Result::is_ok),
+        concurrent
+            .iter()
+            .all(|result| result.as_ref().is_ok_and(|(observed, node)| {
+                *node == selected_reader.node()
+                    && observed
+                        .output
+                        .as_ref()
+                        .is_some_and(|issue| issue.title == "Remote Cell")
+            })),
         "concurrent replica reads: {concurrent:?}"
     );
 

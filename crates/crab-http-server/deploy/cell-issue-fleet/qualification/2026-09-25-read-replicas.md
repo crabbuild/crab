@@ -121,6 +121,16 @@ qualification during the drain itself.
 This run does not measure per-query S3 calls or refresh bytes, sustained hot
 Cell throughput, peak resources, retention/release fault combinations, or
 1k/5k/10k Cell admission. It also does not complete sparse readers, generic
-application-client replica policy, or routing by measured in-flight load.
+application-client replica policy, or qualification of routing under uneven load.
+The subsequent routing implementation uses ingress-observed in-flight attempts;
+the container measurements above precede that change and describe the earlier
+round-robin route. Focused routing tests cover equal-load rotation, busy-reader
+avoidance across Cells, and cancellation/timeout cleanup. They do not establish
+distribution under uneven load across multiple ingress nodes.
+The existing product mTLS E2E also passed against in-memory storage and local
+RustFS (isolated prefix `plan036-routed-load-20260926`), including explicit HTTP
+replica reads, minimum-position rejection, 32 concurrent routed mTLS reads, target
+withdrawal, and fenced takeover. That test has one reader; it validates route
+integration and authority behavior, not multi-reader load distribution.
 Protected S3 and multi-host release gates remain outside the requested local
 RustFS execution scope. See [Plan 036](../../../../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md).
