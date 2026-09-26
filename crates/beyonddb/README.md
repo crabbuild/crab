@@ -316,6 +316,13 @@ The provisioner also admits account and credential Cells, including acquisition
 from an idle published root after restart. The signed SDK test exercises both
 initial admission and owner recovery through those paths.
 
+## Streams dependency contract
+
+The closed-shard completion proposal and full Streams implementation boundaries
+are in [STREAMS_CONTRACT.md](STREAMS_CONTRACT.md). Its accompanying patch is
+unapplied and awaits explicit dependency-change approval. Public Streams
+operations remain unsupported.
+
 ## ExtendDB contract to implement
 
 Use ExtendDB's existing `extenddb-server` and engine. The backend must supply
