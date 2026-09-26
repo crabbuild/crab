@@ -119,21 +119,19 @@ impl DataEngine for CellStorage {
         Box::pin(async move {
             if let Some((partition, epoch)) = self.routed_owner(&key_info, &key).await? {
                 let output = self
-                    .client
-                    .query::<PartitionGet>(
+                    .query_resolving::<PartitionGet>(
                         &partition,
-                        None,
+                        &key_info.account_id,
                         Json(PartitionGetInput {
                             table_id: key_info.table_id,
                             epoch,
                             key,
                         }),
                     )
-                    .await
-                    .map_err(cell_error)?;
+                    .await?;
                 return match output.output.0 {
                     PartitionGetOutcome::Found(item) => Ok(item),
-                    PartitionGetOutcome::Conflict => Err(StorageError::Transient(
+                    PartitionGetOutcome::Conflict(_) => Err(StorageError::Transient(
                         "read is waiting for transaction resolution".into(),
                     )),
                     PartitionGetOutcome::InvalidKey => Err(StorageError::Validation(
@@ -148,21 +146,19 @@ impl DataEngine for CellStorage {
             }
             let target = target(&key_info.account_id)?;
             let output = self
-                .client
-                .query::<GetItem>(
+                .query_resolving::<GetItem>(
                     &target,
-                    None,
+                    &key_info.account_id,
                     Json(GetItemInput {
                         table_name: key_info.table_name.clone(),
                         table_id: key_info.table_id,
                         key,
                     }),
                 )
-                .await
-                .map_err(cell_error)?;
+                .await?;
             match output.output.0 {
                 GetItemOutcome::Found(item) => Ok(item),
-                GetItemOutcome::Conflict => Err(StorageError::Transient(
+                GetItemOutcome::Conflict(_) => Err(StorageError::Transient(
                     "item is locked by a transaction".into(),
                 )),
                 GetItemOutcome::TableNotFound => {
@@ -383,10 +379,9 @@ impl DataEngine for CellStorage {
                     .transpose()?
                     .unwrap_or(10_000);
                 let output = self
-                    .client
-                    .query::<PartitionQuery>(
+                    .query_resolving::<PartitionQuery>(
                         &target,
-                        None,
+                        &key_info.account_id,
                         Json(PartitionQueryInput {
                             table_id: key_info.table_id.clone(),
                             epoch,
@@ -398,14 +393,13 @@ impl DataEngine for CellStorage {
                             exclusive_start_key,
                         }),
                     )
-                    .await
-                    .map_err(cell_error)?;
+                    .await?;
                 return match output.output.0 {
                     PartitionQueryOutcome::Page {
                         items,
                         last_evaluated_key,
                     } => Ok((items, last_evaluated_key)),
-                    PartitionQueryOutcome::Conflict => Err(StorageError::Transient(
+                    PartitionQueryOutcome::Conflict(_) => Err(StorageError::Transient(
                         "query is waiting for transaction resolution".into(),
                     )),
                     PartitionQueryOutcome::InvalidKey | PartitionQueryOutcome::InvalidCondition => {
@@ -479,10 +473,9 @@ impl DataEngine for CellStorage {
             }
             let target = target(&key_info.account_id)?;
             let output = self
-                .client
-                .query::<ScanItems>(
+                .query_resolving::<ScanItems>(
                     &target,
-                    None,
+                    &key_info.account_id,
                     Json(ScanItemsInput {
                         table_name: key_info.table_name.clone(),
                         table_id: key_info.table_id.clone(),
@@ -490,14 +483,13 @@ impl DataEngine for CellStorage {
                         exclusive_start_key,
                     }),
                 )
-                .await
-                .map_err(cell_error)?;
+                .await?;
             match output.output.0 {
                 ScanItemsOutcome::Page {
                     items,
                     last_evaluated_key,
                 } => Ok((scan_segment(items, &key_info, segment)?, last_evaluated_key)),
-                ScanItemsOutcome::Conflict => Err(StorageError::Transient(
+                ScanItemsOutcome::Conflict(_) => Err(StorageError::Transient(
                     "scan range is locked by a transaction".into(),
                 )),
                 ScanItemsOutcome::TableNotFound => {

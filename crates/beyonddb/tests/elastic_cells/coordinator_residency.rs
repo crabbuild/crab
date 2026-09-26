@@ -256,6 +256,7 @@ async fn coordinator_history_outgrows_residency_and_released_read_recovers() {
             Json(beyonddb::PrepareAccountTransactionInput {
                 transaction_id: id,
                 coordinator_cell: *oldest.cell_id().as_bytes(),
+                coordinator_key: id.to_vec(),
                 operations: vec![TransactionOperation::Read(GetItemInput {
                     table_name: info.table_name.clone(),
                     table_id: info.table_id.clone(),

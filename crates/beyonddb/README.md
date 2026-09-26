@@ -115,7 +115,10 @@ The signed SDK process test writes two primary keys in distinct data Cells,
 checks replay, mismatch and rollback, then verifies replay and both values
 after a hard kill and restart. Cross-Cell TransactGetItems uses shared key
 locks and durable captured images; the same process test checks projected
-results and missing items before and after restart.
+results and missing items before and after restart. Get, Query, and Scan can
+finish a blocking transaction's durable COMMIT or ABORT and repeat their read.
+Each Cell query helps at most one transaction; BEGIN and unavailable decisions
+remain retryable conflicts. Transactional reads retain conflict cancellation.
 Once a table's initial route is published, keyed CRUD and Scan use its data
 Cells; unactivated tables
 still use the account Cell unless a provisioner is configured. The host-backed

@@ -299,7 +299,7 @@ pub(super) fn key_locked(context: &mut CommandContext<'_, '_>, key: &[u8]) -> Re
 fn lock_query(key: &[u8], write_only: bool) -> crate::SqlBatch {
     statement(
         if write_only {
-            "SELECT 1 FROM ddb_partition_transaction_locks WHERE item_key = ?1 AND write_lock = 1"
+            "SELECT transaction_id FROM ddb_partition_transaction_locks WHERE item_key = ?1 AND write_lock = 1 LIMIT 1"
         } else {
             "SELECT 1 FROM ddb_partition_transaction_locks WHERE item_key = ?1"
         },
@@ -315,8 +315,11 @@ pub(super) fn has_transaction_locks(context: &mut CommandContext<'_, '_>) -> Res
     Ok(!rows[0].rows.is_empty())
 }
 
-pub(super) fn read_key_locked(context: &QueryContext<'_>, key: &[u8]) -> Result<bool> {
-    Ok(!context.sql(&lock_query(key, true))?[0].rows.is_empty())
+pub(super) fn read_key_conflict(
+    context: &QueryContext<'_>,
+    key: &[u8],
+) -> Result<Option<crate::TransactionReadConflict>> {
+    crate::participant::read_conflict(context, &context.sql(&lock_query(key, true))?[0])
 }
 
 /// Result of one consistent read from a routed data Cell.
@@ -384,7 +387,7 @@ impl Query for PartitionTransactGet {
             )?) {
                 return Ok(Json(PartitionTransactGetOutcome::WrongPartition));
             }
-            if read_key_locked(context, &key)? {
+            if read_key_conflict(context, &key)?.is_some() {
                 return Ok(Json(PartitionTransactGetOutcome::Conflict { index }));
             }
             let rows = context.sql(&statement(

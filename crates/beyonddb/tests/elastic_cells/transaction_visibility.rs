@@ -34,6 +34,7 @@ pub(crate) async fn assert_range_read_barriers(
                 epoch,
                 transaction_id,
                 coordinator_cell,
+                coordinator_key: transaction_id.to_vec(),
                 operations: vec![
                     TransactionOperation::Put(PutItemInput {
                         table_name: key_info.table_name.clone(),
@@ -197,7 +198,10 @@ pub(crate) async fn assert_range_read_barriers(
             .output
             .0;
         if conflicts {
-            assert_eq!(result, PartitionQueryOutcome::Conflict, "{name}");
+            assert!(
+                matches!(result, PartitionQueryOutcome::Conflict(conflict) if conflict.transaction.transaction_id == transaction_id && conflict.transaction.coordinator_cell == coordinator_cell && conflict.coordinator_key == transaction_id),
+                "{name}"
+            );
         } else {
             assert!(
                 matches!(result, PartitionQueryOutcome::Page { .. }),
@@ -286,6 +290,7 @@ pub(crate) async fn assert_sdk_read_barrier(
                 epoch: partition.epoch,
                 transaction_id,
                 coordinator_cell,
+                coordinator_key: transaction_id.to_vec(),
                 operations: vec![TransactionOperation::Delete(DeleteItemInput {
                     table_name: partition.table.table_name.clone(),
                     table_id: partition.table.id.clone(),

@@ -99,6 +99,7 @@ pub(super) async fn assert_background_recovery(
                 epoch: 1,
                 transaction_id: good_id,
                 coordinator_cell: *coordinator.cell_id().as_bytes(),
+                coordinator_key: token.as_bytes().to_vec(),
                 operations: request[0]
                     .operations
                     .iter()
@@ -302,6 +303,7 @@ pub(super) async fn assert_background_recovery(
                 epoch: 1,
                 transaction_id: abort_id,
                 coordinator_cell: *abort_coordinator.cell_id().as_bytes(),
+                coordinator_key: abort_id.to_vec(),
                 operations: vec![TransactionOperation::Put(aborted_put)],
             }),
         )

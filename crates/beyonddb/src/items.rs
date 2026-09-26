@@ -293,7 +293,7 @@ pub struct GetItemInput {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum GetItemOutcome {
     /// An unresolved transaction holds this item's lock.
-    Conflict,
+    Conflict(crate::TransactionReadConflict),
     /// The table exists; the item may be absent.
     Found(Option<Item>),
     /// The table does not exist.
@@ -323,8 +323,8 @@ impl Query for GetItem {
             return Ok(Json(GetItemOutcome::InvalidKey));
         }
         let key = item_key(&input.key, &table.key_schema)?;
-        if transaction::read_key_locked(context, &table.id, &key)? {
-            return Ok(Json(GetItemOutcome::Conflict));
+        if let Some(conflict) = transaction::read_key_conflict(context, &table.id, &key)? {
+            return Ok(Json(GetItemOutcome::Conflict(conflict)));
         }
         let rows = context.sql(&statement(
             "SELECT item FROM ddb_items WHERE table_id = ?1 AND item_key = ?2",
@@ -465,7 +465,7 @@ impl Query for TransactGet {
                 return Ok(Json(TransactionGetOutcome::InvalidKey { index }));
             }
             let key = item_key(&request.key, &table.key_schema)?;
-            if transaction::read_key_locked(context, &table.id, &key)? {
+            if transaction::read_key_conflict(context, &table.id, &key)?.is_some() {
                 return Ok(Json(TransactionGetOutcome::Conflict { index }));
             }
             let rows = context.sql(&statement(

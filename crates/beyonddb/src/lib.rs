@@ -23,7 +23,7 @@ pub use items::*;
 pub use participant::{
     ParticipantTransactionState, PrepareTransactionOutcome, ReadTransactionInput,
     ReadTransactionResultInput, ResolveTransactionInput, ResolveTransactionOutcome,
-    TransactionReadResult,
+    TransactionReadConflict, TransactionReadResult,
 };
 pub use partition::*;
 pub use provision::*;

@@ -26,8 +26,9 @@ tick, including coordinators admitted after it starts. It resumes unfinished
 requests, advances past failures, and bounds each pass by an indexed durable cursor so new
 arrivals cannot starve earlier retries. Its backlog rate remains unqualified.
 Cross-Cell TransactGetItems now captures immutable images under shared key
-locks through the same coordinator. Read-triggered decision resolution still
-needs implementation. Reads fail retryably on unresolved write intents;
+locks through the same coordinator. Get, Query, and Scan now help one blocking
+transaction per underlying Cell query when its durable decision is terminal, then repeat
+the read. BEGIN, unavailable decisions, and further blockers fail retryably;
 transactional conflicts return ordered cancellation reasons. Committed read
 images remain retained without collection, another production capacity gate. A
 host-backed provisioner can create 1–256

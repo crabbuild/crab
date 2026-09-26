@@ -183,6 +183,7 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                         epoch: 1,
                         transaction_id: held_id,
                         coordinator_cell: *coordinator.cell_id().as_bytes(),
+                        coordinator_key: transaction_id.to_vec(),
                         operations: request[position]
                             .operations
                             .iter()

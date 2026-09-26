@@ -1259,7 +1259,7 @@ pub enum PartitionGetOutcome {
     /// The key does not match the table schema.
     InvalidKey,
     /// The key has an unresolved transaction intent.
-    Conflict,
+    Conflict(crate::TransactionReadConflict),
 }
 
 /// Read from the current data Cell owner.
@@ -1301,8 +1301,8 @@ impl Query for PartitionGet {
         }
         // The coordinator may have committed before this participant applies.
         // Returning the old image here would violate strong read visibility.
-        if transaction::read_key_locked(context, &key)? {
-            return Ok(Json(PartitionGetOutcome::Conflict));
+        if let Some(conflict) = transaction::read_key_conflict(context, &key)? {
+            return Ok(Json(PartitionGetOutcome::Conflict(conflict)));
         }
         let item_rows = context.sql(&statement(
             "SELECT item FROM ddb_partition_items WHERE item_key = ?1",

@@ -3,6 +3,7 @@ mod elastic_cells {
     mod coordinator_residency;
     mod coordinator_tokens;
     mod public_transactions;
+    mod read_resolution;
     mod transaction_driver;
     mod transaction_reads;
     mod transaction_recovery;
@@ -2691,6 +2692,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
                     epoch: side.1,
                     transaction_id,
                     coordinator_cell: *coordinator_target.cell_id().as_bytes(),
+                    coordinator_key: transaction_id.to_vec(),
                     operations: vec![participants[position].operations[0].operation.clone()],
                 }),
             )
@@ -2817,7 +2819,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         assert_eq!(recorded.output.0, CoordinatorPhaseOutcome::Recorded);
     }
     // A committed transaction has only applied its first participant. The
-    // second must fail retryably rather than return an absent/old item.
+    // direct query must still fence the second; the public read will resolve COMMIT.
     let visibility_key_info = storage
         .table_key_info("123456789012", "Books")
         .await
@@ -2829,10 +2831,19 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             .unwrap(),
         Some(sides[0].2.clone())
     );
-    assert!(matches!(
-        storage.get_item(&visibility_key_info, &sides[1].2).await,
-        Err(StorageError::Transient(_))
-    ));
+    let blocked = client
+        .query::<PartitionGet>(
+            &sides[1].0,
+            None,
+            Json(PartitionGetInput {
+                table_id: table.id.clone(),
+                epoch: sides[1].1,
+                key: sides[1].2.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(blocked.output.0, PartitionGetOutcome::Conflict(_)));
     let unresolved = client
         .query::<ReadUnresolvedCoordinatorParticipants>(
             &coordinator_target,
@@ -2849,6 +2860,13 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .0;
     assert_eq!(unresolved.len(), 1);
     assert_eq!(unresolved[0].position, 1);
+    assert_eq!(
+        storage
+            .get_item(&visibility_key_info, &sides[1].2)
+            .await
+            .unwrap(),
+        Some(sides[1].2.clone())
+    );
     storage
         .finish_decided_cross_cell_transaction("123456789012", &transaction_id, transaction_id)
         .await
@@ -3520,6 +3538,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         epoch: 1,
         transaction_id: [90; 16],
         coordinator_cell: *account.cell_id().as_bytes(),
+        coordinator_key: [90; 16].to_vec(),
         operations: vec![TransactionOperation::Put(PutItemInput {
             table_name: table.table_name.clone(),
             table_id: table.id.clone(),
@@ -3563,7 +3582,9 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         )
         .await
         .unwrap();
-    assert_eq!(hidden.output.0, PartitionGetOutcome::Conflict);
+    assert!(
+        matches!(hidden.output.0, PartitionGetOutcome::Conflict(conflict) if conflict.transaction.transaction_id == prepare_input.transaction_id && conflict.coordinator_key == prepare_input.coordinator_key)
+    );
     let conflicting_write = client
         .command::<PartitionPut>(
             &left_target,
@@ -3631,6 +3652,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         epoch: 1,
         transaction_id: [98; 16],
         coordinator_cell: *account.cell_id().as_bytes(),
+        coordinator_key: [98; 16].to_vec(),
         operations: vec![TransactionOperation::Put(PutItemInput {
             table_name: table.table_name.clone(),
             table_id: table.id.clone(),
@@ -3663,6 +3685,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         epoch: 1,
         transaction_id: [95; 16],
         coordinator_cell: *account.cell_id().as_bytes(),
+        coordinator_key: [95; 16].to_vec(),
         operations: vec![TransactionOperation::Put(PutItemInput {
             table_name: table.table_name.clone(),
             table_id: table.id.clone(),
@@ -4226,6 +4249,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
                 epoch: 3,
                 transaction_id: [101; 16],
                 coordinator_cell: *account.cell_id().as_bytes(),
+                coordinator_key: [101; 16].to_vec(),
                 operations: vec![TransactionOperation::Put(PutItemInput {
                     table_name: table.table_name.clone(),
                     table_id: table.id.clone(),
@@ -4743,7 +4767,9 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         )
         .await
         .unwrap();
-    assert_eq!(recovered_read.output.0, PartitionGetOutcome::Conflict);
+    assert!(
+        matches!(recovered_read.output.0, PartitionGetOutcome::Conflict(conflict) if conflict.transaction.transaction_id == [101; 16] && conflict.coordinator_key == vec![101; 16])
+    );
     let recovered_scan = restored_client
         .query::<PartitionScan>(
             restored_child_target,
@@ -4757,7 +4783,9 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         )
         .await
         .unwrap();
-    assert_eq!(recovered_scan.output.0, PartitionScanOutcome::Conflict);
+    assert!(
+        matches!(recovered_scan.output.0, PartitionScanOutcome::Conflict(conflict) if conflict.transaction.transaction_id == [101; 16] && conflict.coordinator_key == vec![101; 16])
+    );
     let recovered_conflict = restored_client
         .command::<PartitionPut>(
             restored_child_target,
