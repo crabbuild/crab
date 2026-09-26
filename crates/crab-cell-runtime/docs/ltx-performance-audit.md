@@ -1569,15 +1569,21 @@ invocation timer starts in `PreparedCommand::execute`, after description and
 encoding in [command preparation](../src/client.rs), and HTTP response readiness
 follows enrichment. The trace does **not** assign all of this time to labels.
 
-**Change to evaluate:** condition catalog retrieval on whether the returned
-records contain selected IDs, matching the pull-view rule. Apply the same
-rule to list/detail/edit; do not special-case the create operation because a
-duplicate submission can return an existing issue that now has labels.
+**Change to evaluate:** fetch the catalog only when selection validation or
+response rendering needs it, matching the pull-view rule. Create/detail can
+inspect returned IDs; list can inspect the returned page before fetching labels.
+Edit also uses the catalog to validate incoming IDs before the command: retain
+that read for nonempty input, including invalid selections, and retain permission
+checks even when clearing labels. An edit without label changes may still return
+a labeled issue. Do not special-case the create operation because a duplicate
+submission can return an existing issue that now has labels.
 Instrument query, routing and enrichment boundaries before larger batching or
 cached-description changes. Keep action authorization and receipt validation.
 
-**Gate:** public create/read/list/update with empty selections must issue zero
-label queries; selected labels retain their names/colors and permissions.
+**Gate:** public create/read/list/update needing neither selection validation
+nor label rendering must issue zero label queries. Nonempty incoming selections
+still reject unknown/duplicate IDs; selected labels retain their names/colors
+and permissions, including forbidden attempts to clear them.
 Retry an ambiguous create after subsequently labeling the issue and require
 the existing issue plus current label rendering. Compare local and forwarded
 HTTP actions over RustFS with the same workload and count peer operations.
