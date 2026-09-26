@@ -125,8 +125,28 @@ route and records each serving node from `x-crab-cell-reader` in
 `read-replica-report.json`. Every Cell mutation uses the object durability
 profile. Each stage compares 200 owner and 200 replica reads at concurrency
 eight, reports p50/p99 latency and actual reader distribution, and samples
-process memory, descriptors, local disk, and runtime metrics. These samples
-are not peak-resource or production-capacity measurements. A reader-only
+process memory, descriptors, local disk, and runtime metrics. Before/after
+per-node counter snapshots record control-record loads, LTX fetches and bytes,
+and logical page reads for both workloads. Raw series and collection windows
+are retained; amortized costs include background work and collection skew.
+They exclude membership/policy reads and retries hidden inside the provider,
+so they are not total S3 billing-request counts.
+
+Each stage then acknowledges an issue-body update and polls every selected
+reader until its receipt covers the inspected authority root and its body is
+correct. The report records sequence lag, unavailable attempts, each reader's
+first observed fresh response, and per-node LTX bytes during that window.
+Freshness times are polling upper bounds, including authority inspection;
+refresh bytes include background and query-fault traffic on reader nodes.
+Missing metrics, counter resets, changed nodes, or a stale value at a covering
+receipt fail qualification. Parser/evidence checks run with:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
+  -s crates/crab-http-server/deploy/cell-issue-fleet -p 'test_*.py'
+```
+
+These samples are not peak-resource or production-capacity measurements. A reader-only
 failure must recruit a replacement without changing the writer or its epoch.
 A separate primary-only failure must select one of the two verified warm readers and
 successfully publish a new comment afterward.

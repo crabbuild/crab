@@ -264,7 +264,10 @@ async fn generated_queries_report_snapshot_position_while_commands_advance_owner
     let configured = fixture
         .client
         .with_read_replicas(
-            ReplicaReadRouter::new(layout, directory),
+            ReplicaReadRouter::new(
+                CellAuthority::with_telemetry(layout, reader_runtime.telemetry_handle()),
+                directory,
+            ),
             peer,
             Some((reader_session, Arc::new(LocalReader(reader.clone())))),
         )

@@ -390,6 +390,15 @@ cost against owner-only reads on the same workload and proof mode. If replica
 reads do not improve a measured bound, keep the feature opt-in and report the
 cost rather than weakening safety.
 
+The Compose reader qualifier now retains per-node before/after control-load
+and LTX-fetch counter series around owner reads, replica reads, and an
+acknowledged issue-body refresh. It records sequence lag and each selected
+reader's first observed fresh result. These whole-node windows include
+background work and exclude uninstrumented membership/policy calls and
+provider-internal retries; they are not total billable S3 requests. Routing now
+reuses the host's instrumented authority instead of silently dropping its
+control-read telemetry. A fresh-image run is required to qualify these changes.
+
 ## Fault matrix and release gates
 
 The deterministic runtime/coordination suite must cover: target count changes

@@ -4,6 +4,8 @@
 import argparse
 import hashlib
 import json
+import math
+import re
 import subprocess
 import time
 import urllib.error
@@ -66,7 +68,119 @@ def prove_readers(port: int, size: int, target: int, index: int = 1, ingress: in
     }
 
 
-def measure_reads(port: int, size: int) -> dict:
+# These are bounded runtime counters, not all provider HTTP requests. In
+# particular, membership/policy reads and provider-internal retries are excluded.
+COST_METRICS = (
+    "crab_cell_control_reads_total",
+    "crab_cell_ltx_origin_requests_total",
+    "crab_cell_ltx_origin_bytes_total",
+    "crab_cell_ltx_logical_reads_total",
+)
+
+
+def parse_cost_metrics(text: str) -> dict[str, float]:
+    counters = {}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        match = re.fullmatch(r'(\w+(?:\{[^}]*\})?)\s+([^\s]+)', line)
+        if not match or match[1].split("{", 1)[0] not in COST_METRICS:
+            continue
+        value = float(match[2])
+        if not math.isfinite(value) or value < 0 or match[1] in counters:
+            raise RuntimeError("invalid or duplicate runtime cost counter")
+        counters[match[1]] = value
+    missing = set(COST_METRICS) - {key.split("{", 1)[0] for key in counters}
+    if missing:
+        raise RuntimeError(f"runtime cost counters missing: {sorted(missing)}")
+    return counters
+
+
+def cost_snapshot(path: Path, profiles: tuple[str, ...], size: int) -> dict:
+    def sample(index):
+        started = time.monotonic()
+        service = node_name(index)
+        metrics = compose(path, profiles, "exec", "-T", service, "crab-http-server",
+                          "--config", CONFIG, "cells", "metrics")
+        return service, {"started_seconds": started, "finished_seconds": time.monotonic(),
+                         "counters": parse_cost_metrics(metrics)}
+    with ThreadPoolExecutor(max_workers=8) as workers:
+        return dict(workers.map(sample, range(1, size + 1)))
+
+
+def cost_delta(before: dict, after: dict) -> dict:
+    if before.keys() != after.keys():
+        raise RuntimeError("node set changed during the measurement")
+    nodes = {}
+    totals = dict.fromkeys(COST_METRICS, 0.0)
+    for node, start in before.items():
+        end = after[node]
+        if start["counters"].keys() != end["counters"].keys():
+            raise RuntimeError(f"{node}: counter series changed during the measurement")
+        delta = {key: end["counters"][key] - value for key, value in start["counters"].items()}
+        if any(value < 0 for value in delta.values()):
+            raise RuntimeError(f"{node}: counter reset during the measurement")
+        for key, value in delta.items():
+            totals[key.split("{", 1)[0]] += value
+        nodes[node] = {"counters": delta,
+                       "window_seconds": round(end["finished_seconds"] - start["started_seconds"], 6)}
+    return {"before": before, "after": after, "nodes": nodes, "totals": totals,
+            "scope": "whole-node windows including background work and metric collection; "
+                     "control loads and LTX fetches only, not total S3 billing requests"}
+
+
+def measure_refresh(path: Path, profiles: tuple[str, ...], port: int, size: int,
+                    readers: set[str], owner: str) -> dict:
+    url = node_url(1, port) + issue_path(1) + "/1"
+    current = request_json("GET", url)
+    _, _, incarnation = replica_issue(url + "?read=replica", 1)
+    before = cost_snapshot(path, profiles, size)
+    body = f"Acknowledged S3-rooted refresh at {size} nodes"
+    changed = request_json("PATCH", url, {"version": current["version"], "body": body})
+    acknowledged = time.monotonic()
+    if changed.get("body") != body:
+        raise RuntimeError("refresh mutation did not return its acknowledged value")
+    control = json.loads(compose(path, profiles, "exec", "-T", "node-01", "crab-http-server",
+                                 "--config", CONFIG, "cells", "status", "--owner", "demo", "--name", "work-01"))
+    minimum = control["root"]["commit_sequence"]
+    ready = {}
+    max_sequence_lag = 0
+    unavailable = 0
+    deadline = acknowledged + 180
+    while set(ready) != readers and time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url + "?read=replica", timeout=10) as response:
+                observed = json.load(response)
+                node = response.headers.get("x-crab-cell-reader")
+                sequence = int(response.headers.get("x-crab-cell-sequence", "-1"))
+                if node not in readers or response.headers.get("x-crab-cell-incarnation") != incarnation or sequence < 1:
+                    raise RuntimeError("refresh read returned an unexpected reader or incarnation")
+                max_sequence_lag = max(max_sequence_lag, minimum - sequence)
+                if sequence >= minimum:
+                    if observed.get("body") != body:
+                        raise RuntimeError("replica receipt covers the write but its value is stale")
+                    ready.setdefault(node, {"observed_sequence": sequence,
+                                            "observed_after_ack_seconds": round(time.monotonic() - acknowledged, 6)})
+        except urllib.error.HTTPError as error:
+            if error.code != 503:
+                raise
+            unavailable += 1
+        if set(ready) != readers:
+            time.sleep(0.02)
+    if set(ready) != readers:
+        raise RuntimeError(f"refresh reached only {len(ready)}/{len(readers)} selected readers")
+    cost = cost_delta(before, cost_snapshot(path, profiles, size))
+    reader_bytes = sum(value for node, values in cost["nodes"].items() if node != owner
+                       for key, value in values["counters"].items()
+                       if key.split("{", 1)[0] == "crab_cell_ltx_origin_bytes_total")
+    return {"body": body, "authority_root_after_ack": control["root"], "incarnation": incarnation,
+            "owner_node": owner, "readers": ready, "max_observed_sequence_lag": max_sequence_lag,
+            "unavailable_attempts": unavailable, "cost": cost,
+            "reader_node_ltx_bytes_during_refresh": reader_bytes,
+            "timing_scope": "poll-observed upper bounds after acknowledgement, including root inspection"}
+
+
+def measure_reads(path: Path, profiles: tuple[str, ...], port: int, size: int) -> dict:
     result = {}
     for mode in ("owner", "replica"):
         url = node_url(1, port) + issue_path(1) + "/1" + ("?read=replica" if mode == "replica" else "")
@@ -78,16 +192,20 @@ def measure_reads(port: int, size: int) -> dict:
                     raise RuntimeError("measured read returned the wrong value")
                 reader = response.headers.get("x-crab-cell-reader", "owner")
             return time.monotonic() - start, reader
+        before = cost_snapshot(path, profiles, size)
         started = time.monotonic()
         with ThreadPoolExecutor(max_workers=8) as workers:
             samples = list(workers.map(read, range(200)))
         elapsed = time.monotonic() - started
         latencies = sorted(duration * 1000 for duration, _ in samples)
+        cost = cost_delta(before, cost_snapshot(path, profiles, size))
+        cost["amortized_per_completed_read"] = {key: value / len(samples) for key, value in cost["totals"].items()}
         result[mode] = {
             "requests": len(samples), "concurrency": 8,
             "requests_per_second": round(len(samples) / elapsed, 2),
             "p50_ms": round(latencies[99], 2), "p99_ms": round(latencies[197], 2),
             "reader_counts": dict(Counter(reader for _, reader in samples)),
+            "cost": cost,
         }
     return result
 
@@ -314,7 +432,11 @@ def main() -> None:
         if policy["desired_readers"] != target:
             raise RuntimeError(f"{size} nodes: target update was not applied")
         stage["replicas"] = prove_readers(args.node_port_base, size, target)
-        stage["read_measurement"] = measure_reads(args.node_port_base, size)
+        stage["read_measurement"] = measure_reads(path, profiles, args.node_port_base, size)
+        stage["refresh_measurement"] = measure_refresh(
+            path, profiles, args.node_port_base, size,
+            set(stage["replicas"]["reader_counts"]), stage["owners"]["work-01"],
+        )
         stage["readiness"] = request_json("GET", node_url(1, args.node_port_base) + "/api/repos/demo/work-01/settings/read-replicas")
         stage["reader_resources"] = {}
         for index in range(1, size + 1):

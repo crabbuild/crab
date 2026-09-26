@@ -133,6 +133,7 @@ impl RepositoryCellRouter {
                 "repository Cell routing requires an absolute session directory and endpoint",
             ));
         }
+        let authority = CellAuthority::with_telemetry(layout.clone(), runtime.telemetry_handle());
         Ok(Self {
             identity,
             catalog: CellCatalog::with_telemetry(
@@ -140,8 +141,8 @@ impl RepositoryCellRouter {
                 identity.tenant(),
                 runtime.telemetry_handle(),
             ),
-            authority: CellAuthority::with_telemetry(layout.clone(), runtime.telemetry_handle()),
-            replica_routing: ReplicaReadRouter::new(layout.clone(), peer.directory.clone()),
+            replica_routing: ReplicaReadRouter::new(authority.clone(), peer.directory.clone()),
+            authority,
             layout,
             registry,
             runtime,

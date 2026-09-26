@@ -300,7 +300,8 @@ report their actual snapshot receipt, reject a newer minimum with
 `ReplicaBehind`, and never fall back when readers are unavailable.
 
 Host code supplies `CellClient::with_read_replicas` with the shared runtime
-`ReplicaReadRouter`, an authenticated peer client, and an optional local
+`ReplicaReadRouter` built from its existing instrumented `CellAuthority` and
+live directory, an authenticated peer client, and an optional local
 admitted-view resolver. The same router serves explicit HTTP issue-detail
 reads. It consults authority, S3 desired count, and signed live membership,
 prefers lower ingress-observed in-flight load, and bounds selection and all

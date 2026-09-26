@@ -4,7 +4,6 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::control::{ControlState, authority::CellAuthority};
 use crate::identity::{CellTarget, NodeId, SessionId};
-use crate::ltx::CellStorageLayout;
 use crate::node::{NodeAdvertisement, NodeDirectory};
 use crate::peer::{PeerReplicaResolver, ReplicaPeerClient};
 use crate::read_policy::ReadPolicyStore;
@@ -29,10 +28,10 @@ pub struct ReplicaReadRouter {
 impl ReplicaReadRouter {
     /// Creates a router sharing the runtime's existing authority and directory.
     #[must_use]
-    pub fn new(layout: CellStorageLayout, directory: NodeDirectory) -> Self {
+    pub fn new(authority: CellAuthority, directory: NodeDirectory) -> Self {
         Self {
-            authority: CellAuthority::new(layout.clone()),
-            policy: ReadPolicyStore::new(layout),
+            policy: ReadPolicyStore::new(authority.layout().clone()),
+            authority,
             directory,
             load: Arc::new(ReplicaRouting::default()),
         }

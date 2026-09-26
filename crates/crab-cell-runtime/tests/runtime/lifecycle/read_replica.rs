@@ -25,6 +25,15 @@ const CODE: Digest = Digest::from_bytes([5; 32]);
 const NAMESPACE: NamespaceId = NamespaceId::from_bytes([6; 16]);
 static QUERY_BARRIERS: OnceLock<(Barrier, Barrier)> = OnceLock::new();
 
+#[derive(Default)]
+struct ControlReads(AtomicUsize);
+
+impl crab_cell_runtime::fleet::telemetry::CellTelemetry for ControlReads {
+    fn control_read(&self, _: std::time::Duration, _: bool) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 struct ReplicaResolver(CellReadReplica);
 
 impl PeerReplicaResolver for ReplicaResolver {
@@ -420,7 +429,15 @@ async fn exercise_replica_read(fixture: &Fixture) {
         .create(fixture.target.cell_id(), expected.incarnation, 1)
         .await
         .unwrap();
-    let router = ReplicaReadRouter::new(fixture.layout.clone(), directory.clone());
+    let control_reads = Arc::new(ControlReads::default());
+    let routing_authority = CellAuthority::with_telemetry(
+        fixture.layout.clone(),
+        crab_cell_runtime::fleet::telemetry::CellTelemetryHandle::from_sink(control_reads.clone()),
+    );
+    let router = ReplicaReadRouter::new(routing_authority, directory.clone());
+    let (_, selected) = router.selected(&fixture.target).await.unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(control_reads.0.load(Ordering::Relaxed), 1);
     let owner_client = CellClient::local(Arc::clone(&registry), handle.clone());
     let configured = owner_client
         .with_read_replicas(router.clone(), peer_client.clone(), None)
