@@ -37,6 +37,7 @@ use crate::{
     ScanItems, ScanItemsInput, ScanItemsOutcome, SortComparison, SortPredicate, TransactGet,
     TransactWrite, TransactWriteInput, TransactionFailure, TransactionGetOutcome,
     TransactionOutcome, TransactionWrite, UpdateItem, UpdateItemInput, UpdateItemOutcome,
+    data_key_hash,
 };
 use crab_cell_runtime::client::InvocationError;
 use crab_cell_runtime::identity::CellTarget;
@@ -443,12 +444,22 @@ impl DataEngine for CellStorage {
     ) -> BoxedFuture<'_, QueryResult> {
         let key_info = key_info.clone();
         let exclusive_start_key = exclusive_start_key.cloned();
-        let segmented = segment.is_some() || total_segments.is_some();
         let indexed = index_name.is_some();
         Box::pin(async move {
-            if segmented || indexed {
-                return Err(unsupported("parallel or indexed Scan"));
+            if indexed {
+                return Err(unsupported("indexed Scan"));
             }
+            let segment = match (segment, total_segments) {
+                (None, None) => None,
+                (Some(segment), Some(total)) if total > 0 && (0..total).contains(&segment) => {
+                    Some((segment as u64, total as u64))
+                }
+                _ => {
+                    return Err(StorageError::Validation(
+                        "invalid parallel Scan segment".into(),
+                    ));
+                }
+            };
             let limit = limit
                 .map(|value| {
                     u32::try_from(value).map_err(|_| {
@@ -456,11 +467,12 @@ impl DataEngine for CellStorage {
                     })
                 })
                 .transpose()?;
-            if let Some(page) = self
-                .scan_routed(&key_info, limit, exclusive_start_key.clone())
+            if let Some((items, last_evaluated_key)) = self
+                .scan_routed(&key_info, limit, exclusive_start_key.clone(), segment)
                 .await?
             {
-                return Ok(page);
+                // Retain the unfiltered cursor so empty segment pages still advance.
+                return Ok((scan_segment(items, &key_info, segment)?, last_evaluated_key));
             }
             let target = target(&key_info.account_id)?;
             let output = self
@@ -470,7 +482,7 @@ impl DataEngine for CellStorage {
                     None,
                     Json(ScanItemsInput {
                         table_name: key_info.table_name.clone(),
-                        table_id: key_info.table_id,
+                        table_id: key_info.table_id.clone(),
                         limit,
                         exclusive_start_key,
                     }),
@@ -481,7 +493,7 @@ impl DataEngine for CellStorage {
                 ScanItemsOutcome::Page {
                     items,
                     last_evaluated_key,
-                } => Ok((items, last_evaluated_key)),
+                } => Ok((scan_segment(items, &key_info, segment)?, last_evaluated_key)),
                 ScanItemsOutcome::TableNotFound => {
                     Err(StorageError::TableNotFound(key_info.table_name))
                 }
@@ -809,6 +821,43 @@ impl CellStorage {
     ) -> Result<Option<(CellTarget, u64)>, StorageError> {
         self.routed_owner(key_info, key).await
     }
+}
+
+fn scan_segment(
+    items: Vec<Item>,
+    key_info: &TableKeyInfo,
+    segment: Option<(u64, u64)>,
+) -> Result<Vec<Item>, StorageError> {
+    let Some((segment, total)) = segment else {
+        return Ok(items);
+    };
+    items
+        .into_iter()
+        .filter_map(|item| {
+            let key = extract_key(&item, &key_info.base_key_schema);
+            match data_key_hash(&key_info.table_id, &key, &key_info.base_key_schema) {
+                Ok(hash) if segment_for_hash(hash, total) == segment => Some(Ok(item)),
+                Ok(_) => None,
+                Err(error) => Some(Err(StorageError::Internal(error.to_string()))),
+            }
+        })
+        .collect()
+}
+
+fn segment_for_hash(hash: [u8; 16], total: u64) -> u64 {
+    let prefix = u128::from_be_bytes(hash) >> 64;
+    ((prefix * u128::from(total)) >> 64) as u64
+}
+
+fn segment_bounds(segment: u64, total: u64) -> ([u8; 16], Option<[u8; 16]>) {
+    let space = 1_u128 << 64;
+    let total = u128::from(total);
+    let start = (u128::from(segment) * space).div_ceil(total);
+    let end = ((u128::from(segment) + 1) * space).div_ceil(total);
+    (
+        (start << 64).to_be_bytes(),
+        (end < space).then(|| (end << 64).to_be_bytes()),
+    )
 }
 
 fn transaction_canceled(

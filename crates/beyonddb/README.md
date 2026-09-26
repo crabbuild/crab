@@ -67,7 +67,9 @@ Cell drain. Crashed sessions may leave scratch directories for operator cleanup.
 
 The process smoke test starts RustFS, bootstraps a key, sends AWS SDK table and
 item requests, kills the server without draining it, then restarts it and reads
-the committed item after lease expiry and fenced Cell takeover. Run it in a
+the committed item after lease expiry and fenced Cell takeover. It also verifies
+BatchWriteItem, BatchGetItem, and paginated parallel Scan across four initial
+data Cells before the crash and checks batch reads after recovery. Run it in a
 dedicated environment with `rustfs`, `aws`, and `openssl` available:
 
 ```bash
@@ -270,14 +272,16 @@ independently addressable data Cells with partition install, keyed CRUD and
 bounded Scan. The `CellStorage` adapter implements the matching base-table
 `TableEngine` and `DataEngine` methods. Conditional single-item writes and
 update expressions execute inside the Cell transaction. Base-table Scan uses
-bounded pages with stable continuation keys; Query supports hash-only tables
+bounded pages with stable continuation keys. Parallel Scan assigns contiguous
+hash intervals to segments and skips data Cell ranges outside each interval;
+cells crossing an interval boundary still scan and filter their items. Query
+supports hash-only tables
 and sort-key tables once their initial data route is published.
 Account-local transactional put/delete/get operations work before route
 activation. After activation, transactions confined to one data Cell use that
 Cell and are fenced by its routing epoch; cross-Cell transactions are rejected.
-Account-local sort-key Query, index operations, parallel Scan, streamed writes,
-transaction tokens, and transactional update or
-condition-check operations remain unsupported by the adapter. These are internal Cell operations,
+Account-local sort-key Query, index operations, streamed writes, and
+cross-Cell transactions remain unsupported by the adapter. These are internal Cell operations,
 not a DynamoDB HTTP API. `tests/account_cell.rs` exercises them through a real
 `CellNodeBuilder` and in-memory object store, including request replay,
 receipt-based reads, conditional writes, update expressions, scan pagination, rollback of a

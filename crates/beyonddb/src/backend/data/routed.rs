@@ -4,7 +4,7 @@ use crab_cell_runtime::identity::CellTarget;
 use extenddb_core::types::{Item, TableKeyInfo, extract_key, item_size_bytes};
 use extenddb_storage::error::StorageError;
 
-use super::{CellStorage, cell_error, target};
+use super::{CellStorage, cell_error, segment_bounds, target};
 use crate::{
     Json, PartitionDeleteOutcome, PartitionLookupInput, PartitionLookupOutcome,
     PartitionPutOutcome, PartitionScan, PartitionScanInput, PartitionScanOutcome,
@@ -54,6 +54,7 @@ impl CellStorage {
         key_info: &TableKeyInfo,
         limit: Option<u32>,
         exclusive_start_key: Option<Item>,
+        segment: Option<(u64, u64)>,
     ) -> Result<Option<(Vec<Item>, Option<Item>)>, StorageError> {
         let mut remaining = limit.unwrap_or(10_000).min(10_000);
         if remaining == 0 {
@@ -66,6 +67,13 @@ impl CellStorage {
             .map(|key| data_key_hash(&key_info.table_id, key, &key_info.base_key_schema))
             .transpose()
             .map_err(|error| StorageError::Validation(error.to_string()))?;
+        let bounds = segment.map(|(segment, total)| segment_bounds(segment, total));
+        // Contiguous hash intervals let each segment skip unrelated Cell ranges.
+        let start_hash = match (start_hash, bounds) {
+            (Some(hash), Some((lower, _))) => Some(hash.max(lower)),
+            (None, Some((lower, _))) => Some(lower),
+            (hash, None) => hash,
+        };
         let account = target(&key_info.account_id)?;
         let mut route_page = RoutePageInput {
             table_id: key_info.table_id.clone(),
@@ -116,6 +124,14 @@ impl CellStorage {
             let next_lower = last_range.upper;
             let after_lower = last_range.lower;
             for (index, partition) in partitions.into_iter().enumerate() {
+                if let Some((lower, upper)) = bounds {
+                    if partition.upper.is_some_and(|end| end <= lower) {
+                        continue;
+                    }
+                    if upper.is_some_and(|end| partition.lower >= end) {
+                        return Ok(Some((items, None)));
+                    }
+                }
                 let owner = data_target(
                     &key_info.account_id,
                     &key_info.table_id,
