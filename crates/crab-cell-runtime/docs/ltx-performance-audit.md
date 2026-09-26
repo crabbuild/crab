@@ -4,7 +4,7 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `e1d4052b28e`, plus checksum ownership/read-window changes recorded below. The latest three-node action trace uses predecessor `e50055c48bb`. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
+| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `e47d1fc2c48`, plus the sealed-overlay release recorded below. The latest three-node action trace uses predecessor `e50055c48bb`. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
 | Status | Hydration fetch, sparse registration, persistent-cache construction isolation, conditional issue enrichment, recovery receipt preservation, range-proportional compaction, bounded asynchronous cache fills and local checksum read/merge improvements are implemented. Loaded scale-out cannot assume idle ownership transfer. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
@@ -19,6 +19,45 @@ Baseline descriptions retain the original finding; implementation paragraphs
 identify changes already made. Each measurement record names its source and
 harness separately.
 
+## Current-head audit: remaining work and evidence
+
+At `e47d1fc2c48`, the design retains the right authority boundary: one fenced
+SQLite writer, authenticated immutable roots, ordered publication and explicit
+durability proofs. Current evidence does not establish a supported high-throughput,
+low-latency profile. The strongest additional finding is historical allocation
+in the checksum overlay; eliminating the dense-array copy did not eliminate
+all database-history-dependent allocation from small cuts.
+
+| Priority | Gap | Next decision and proof |
+| --- | --- | --- |
+| High, implemented mechanism; latency unqualified | The baseline empty checksum overlay retained its largest allocation and cloned that capacity (25) | Sealed merges now consume the overlay. Compare large-cut → repeated one-page-cut allocation and latency for both bases, retaining failure fencing and recovery-plan clone semantics. |
+| High, latency isolation | Demand faults, page installation, confirmation and cleanup still own a shared SQL worker (9–10, 19) | Measure cold and resident Cells on the same one-vCPU worker. Bound maintenance batches; consider moving only idle executors after measuring demand stalls. An active SQLite callback cannot yield its connection. |
+| High, recovery scaling | Writable activation still walks all authenticated checksum leaves (3, 14) | Measure first query and first mutation during concurrent recovery. Prototype demand-loaded existing directory leaves only with an aggregate/truncation integrity design and bounded old-checksum availability for capture. |
+| High, sustained throughput | One ordered publisher must drain every acknowledged commit; compaction shares that path (4–5, 17) | Measure published commit-sequence advance, oldest uncovered acknowledgement and retained bytes. Evaluate bounded consecutive-root coalescing only if the measured publisher cannot drain; preserve separate receipts and effect order. |
+| Medium, resource interference | Optional cache fills share blocking jobs with required work; read-ahead may fetch pages never used (6, 8, 18, 21) | Pause cache syncs while another Cell activates or publishes. Measure useful/fetched bytes and unused prefetch eviction before adding priority or changing cache policy. |
+| Release gate | Current-source saturation, recovery under arrivals and independent-host evidence are incomplete (12, 16, 23) | Run fixed-workload then offered-rate curves at 3/5/10/20 nodes, with actual owner distribution, cgroup/host resources and every acknowledged result checked after failure. |
+
+Report separate latency distributions for resident local actions, forwarded
+actions, cold first query, cold first mutation, and recovery. Hold the database,
+changed pages, payload entropy and durability contract fixed. In particular,
+the replica-cost runner currently uses `capture()` for fresh databases and
+`capture_deferred()` for sparse ones; that comparison changes the barrier as
+well as the checksum representation. It cannot isolate a representation win.
+
+**Is this the best fix, rather than only a plausible one?** Releasing a merged
+checksum overlay is the smallest newly reproduced allocation opportunity.
+Worker isolation and publication drain have larger architectural consequences;
+choose their implementation using action traces and interference measurements.
+Keep the current VFS/LTX authority model while resolving these specific costs.
+
+The [AMD64 Compose run](https://github.com/crabbuild/crab/actions/runs/36246017568)
+and [deep property run](https://github.com/crabbuild/crab/actions/runs/36246048251)
+passed at `e1d4052b28e`. They exclude the subsequent checksum change. The
+[ARM64 run](https://github.com/crabbuild/crab/actions/runs/36244732114) at
+`1a8c4ad670c` failed its elected-successor membership assertion. Its diagnosis
+remains open; the successful AMD run neither reproduces nor explains that
+failure. None of these runs supplies a service saturation curve.
+
 ## Priority after the implemented changes
 
 The following is the current execution order. Numbered findings below retain
@@ -29,7 +68,7 @@ their original baseline and subsequent implementation evidence.
 | 1 | Current-source capacity and recovery evidence (5, 12, 16, 23) | Provision the actual Compose disk budget, then run fixed-workload and offered-rate curves. Count executed owners, successful responses and published commit coverage separately. Fault an acknowledged follower-only tail during arrivals. |
 | 2 | Cache fills return verified reads before persistence; service benefit is unqualified (18) | Measure first mutation, required host-job interference, skipped-cache origin traffic and foreground tails with slow local syncs. |
 | 3 | Synchronous demand faults, installation and cleanup block a shared SQL worker (9–10, 19) | Run cold and resident Cells on the same worker. Separate origin wait, installation and confirmation; evaluate scheduling changes only after that attribution. |
-| 4 | Writable activation and checksum residency scale with total page count (3, 14, 20, 22) | Qualify the local read/merge change; evaluate lazy authenticated metadata separately. Measure first query, first mutation and recovery storms at fixed changed-page count. |
+| 4 | Writable activation and checksum residency scale with total page count (3, 14, 20, 22, 25) | Qualify merged-overlay release and the local read/merge change; evaluate lazy authenticated metadata separately. Measure first query, first mutation and recovery storms at fixed changed-page count. |
 | 5 | Ordered root preparation and compaction constrain hot-Cell publication (4–5, 17) | Measure provider GET/HEAD/PUT phases and publisher queue age across repeated debt thresholds. Reuse verified unchanged metadata or coalesce roots only if those measurements justify it. |
 | 6 | Fixed read-ahead and fragmented hydration amplify object reads (8, 21) | Compare point, random and scan workloads on one fixed root; count useful/fetched bytes and concurrent duplicate ranges before changing the window. |
 | 7 | Checkpoint and full-image tails remain insufficiently sampled (6, 11, 13) | Sustained updates/deletes, pinned readers, large changes and simultaneous maintenance under 1 GiB; preserve checkpoint ordering and exact recovery. |
@@ -1825,6 +1864,93 @@ changed. Logs under the external target include `label-query-before-corrected.lo
 `label-query-after.log`, `label-query-auth.log` and `label-query-rustfs.log`.
 These prove removed work and application behavior; a fixed-workload release
 comparison is still needed to quantify latency or throughput improvement.
+
+### 25. A cleared checksum overlay retains historical allocation across small cuts
+
+**Confirmed at `e47d1fc2c48`:** `PageChecksums` derives `Clone` and stores
+changed checksums in a `HashMap<u32, u64>`. Both memory-backed and file-backed
+[commit branches](../../crab-ltx/src/pages.rs) call `changes.clear()` after
+merging the sealed cut. [WAL capture](../../crab-ltx/src/capture/wal.rs) clones
+the checksum state before applying the next cut. Rust's
+[`HashMap::clear` contract](https://doc.rust-lang.org/std/collections/struct.HashMap.html#method.clear)
+retains allocation. The retained table is separate from the dense checksum
+array whose allocation reuse was improved in finding 14.
+
+A temporary test inside the actual checksum module applied 32,768 512-byte
+pages, sealed the candidate, then cloned and committed a one-page update.
+On the checkout's Rust 1.97.0 toolchain it observed:
+
+| Observation | Overlay length | Overlay capacity |
+| --- | ---: | ---: |
+| After large cut merged | 0 | 57,344 |
+| Empty candidate cloned for next cut | 0 | 57,344 |
+| After one-page cut merged | 0 | 57,344 |
+
+This proves retained allocation and propagation through the actual candidate
+path. It does not measure allocator bytes, RSS or service latency. A large cut
+can therefore leave later tiny cuts paying for a historically large table,
+even when no immutable snapshot retains the dense base. The same clear/clone
+pattern exists in the compared main snapshot. File-backed capture shares it;
+moving dense checksums to a file alone does not close the gap.
+
+**Change to evaluate:** consume or release the overlay at the successful
+post-seal merge boundary so the next candidate's allocation follows its actual
+changed pages. Compare allocator churn before choosing any retained-capacity
+policy. Do not globally change `Clone` to discard entries:
+[local recovery](../../crab-ltx/src/recovery.rs) accumulates live checksum
+overlays, and [Db::resume](../../crab-ltx/src/db.rs) clones that materialized
+state. Clearing those entries would change recovery semantics. File merge
+failure must still fence the session; pre-seal failure must leave the original
+checksum state intact.
+
+**Gate:** repeated large → tiny → truncate/regrow workloads on memory and
+file bases at 512/4096-byte page sizes. Record allocated bytes, allocation
+count, retained capacity, capture duration and per-node RSS with many Cells.
+Keep `memory_candidates_preserve_snapshots_through_truncation_and_regrowth`,
+`file_backed_overlay_matches_full_scan_across_update_truncate_and_regrowth`,
+`cell_checksum_write_failure_fences_after_sealing_the_cut`, independent CRC
+and process-exit continuation checks. The allocation probe does not replace
+these integrity tests or the public RustFS action comparison.
+
+The audit also tested the private page-cache mechanism: 32 interleaved hits
+did not retain one 4 KiB page after 32 other 64-page batches filled the 8 MiB
+FIFO. This alone does **not** justify switching to LRU. The
+[writable VFS](../../crab-ltx/src/writable_vfs.rs) installs demanded pages
+locally and subsequent reads bypass the bridge cache. Investigate unused
+prefetch eviction, retained copies of installed pages and concurrent duplicate
+fetches; first prove those costs through real sparse reads and hydration.
+The immutable metadata cache is a separate FIFO with repeated directory
+lookups, so any policy change needs its own workload and verification scope.
+
+Both diagnostic tests passed in 0.12 seconds; that is test duration, not action
+latency. Temporary test instrumentation was removed. The exact patch and log
+are retained as `ltx-design-audit/current-head-mechanisms.patch` and
+`ltx-design-audit/current-head-mechanisms.log` under this checkout's external
+Cargo target directory. No runtime behavior, dependency, public contract,
+qualification threshold or test inventory changed for this audit.
+After removing the probes, all four existing checksum module tests passed.
+The documentation check passed 28 schema/protocol assertions and 190 local
+links; `git diff --check` passed. The pre-existing staged changes were preserved.
+
+**Implementation follow-up:** a successful sealed merge takes ownership of
+the overlay. The memory branch consumes its entries into the dense base; the
+file branch consumes them into the existing sorted write batch. Neither keeps
+an empty allocated hash table. Ordinary `PageChecksums::clone` is unchanged,
+so materialized recovery plans still preserve every unmerged entry. A failed
+file merge still fences `Db` before another capture can use the partial state.
+
+The strengthened memory and file regressions both failed on the baseline.
+They now require zero retained overlay capacity after merge, including the
+next memory candidate and truncate/regrow. All four checksum module tests
+pass, including 1,024/32,768-page allocation reuse and snapshot isolation;
+the two minimal-feature cases pass too. Three host checksum tests cover the
+large resumed capture, dense handoff and post-seal write failure. Independent
+full-database CRC and process-exit continuation pass. Replica and minimal-feature
+all-target Clippy pass with warnings denied. The real RustFS HTTP/mTLS test
+also passes through owner takeover, collaboration readback and Git reads.
+These results establish the
+allocation-lifetime change and integrity; fleet action latency and aggregate
+RSS remain unqualified.
 
 ### Re-audit decision and proof gaps
 
