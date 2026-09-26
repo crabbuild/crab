@@ -265,3 +265,13 @@ nodes must recover the acknowledged value at a new epoch and recruit two
 readers at or above that mutation's durable sequence. The provider and its
 volumes remain intact; `reader-first-loss-report.json` records both ownership
 cuts, the deleted local volumes, source/image identities, and recovery timing.
+
+`qualify_reader_load.py --state <same-state>` then resumes five nodes for a
+60-second owner workload and a 60-second replica workload. Sixteen closed-loop
+clients use unequal ingress concurrency (twelve on node 1, four on node 5).
+The report records actual reader receipts/counts per ingress, throughput,
+latencies, control/LTX counter deltas, and process resources. `VmHWM` is the
+process-lifetime resident high-water mark; disk and descriptor counts are
+boundary samples. Any HTTP error, wrong value, old receipt, or missing reader
+fails the run while retaining evidence. This is a bounded single-host load
+measurement, not a production capacity or soak-test claim.
