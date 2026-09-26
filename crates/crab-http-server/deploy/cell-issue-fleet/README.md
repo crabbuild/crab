@@ -67,6 +67,18 @@ project name avoids touching another Compose stack. The default host ports are
 for RustFS on localhost. Choose other ports with `--gateway-port`,
 `--node-port-base`, and `--rustfs-port` if needed.
 
+To run the gateway workload while each stage has exactly 3, 5, 10, or 20
+active nodes, add `--load-stages`. The functional checks remain the default
+when this option is omitted. Each loaded stage writes
+`load-<nodes>-stage.json` beside `report.json`; the latter links all four
+reports. Use `--load-pairs-per-cell` to change the default 10 create/read
+pairs per Cell.
+
+```sh
+python3 crates/crab-http-server/deploy/cell-issue-fleet/qualify.py \
+  --state "$state" --project crab-cell-issue-run-1 --load-stages
+```
+
 To inspect the generated Compose definition without starting Docker:
 
 ```sh
@@ -122,7 +134,10 @@ owner, reads its last acknowledged issue through the gateway after takeover,
 checks that the root did not regress, and restarts the killed node. Temporary
 busy or unavailable responses are retried a bounded number of times; writes
 reuse their original request ID. The JSON report includes retry counts and
-end-to-end latency, including retry waits. A failed run exits nonzero.
+end-to-end latency, including retry waits. It records the active Compose
+profiles, source revision, server and RustFS images, node limits, workload
+size, and p50/p95/p99/max latency. It rejects a stage name that does not
+match the project's running node containers. A failed run exits nonzero.
 
 Each run writes `load-<nodes>-<run-id>.json` under the state directory. The
 measurement is the throughput of this fixed client workload on one machine,

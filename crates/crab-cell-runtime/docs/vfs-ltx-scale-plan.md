@@ -60,23 +60,22 @@ nodes. Both runs used one machine.
 Run from the repository root. Choose a fresh project and state directory for
 each comparison run. This disposable stack uses local RustFS credentials
 `crab/crab`; never expose it outside the local Docker network. The
-`qualify.py` command builds the image and performs the 3 -> 5 -> 10 -> 20
-functional scale check. The existing `load.py` command then measures the
-20-node stage. Keep all raw JSON and logs outside the checkout.
+`qualify.py` command builds the image, performs the 3 -> 5 -> 10 -> 20
+functional scale check, and with `--load-stages` measures each stage while
+it has exactly that many active nodes. Keep all raw JSON and logs outside
+the checkout.
 
 ```sh
 state="$HOME/.codex/cell-vfs-ltx-scale/$(date +%Y%m%d-%H%M%S)"
 project="crab-cell-issue-vfs-ltx-$(date +%s)"
 python3 crates/crab-http-server/deploy/cell-issue-fleet/qualify.py \
-  --state "$state" --project "$project"
-python3 crates/crab-http-server/deploy/cell-issue-fleet/load.py \
-  --state "$state" --nodes 20 --pairs-per-cell 10
+  --state "$state" --project "$project" --load-stages
 ```
 
-The first command writes `report.json`; the second writes a
-`load-20-*.json` report. Do not read `--nodes 3`, `5`, or `10` from a
-stack that has already reached 20 nodes as a stage result. Work packet 1
-extends the runner to load each stage while that stage is actually active.
+The command writes `report.json` and `load-3-stage.json`,
+`load-5-stage.json`, `load-10-stage.json`, and `load-20-stage.json`.
+`load.py` rejects a stage name that does not match the project's active
+node containers. Omit `--load-stages` for the original functional check.
 For a fast syntax-only check before building images:
 
 ```sh
