@@ -9,15 +9,59 @@ use crate::{
     CoordinatorDecision, CoordinatorParticipantTarget, CoordinatorPhaseInput,
     CoordinatorPhaseOutcome, DecideCrossCellTransaction, DecideCrossCellTransactionInput,
     DecideCrossCellTransactionOutcome, Json, NAMESPACE, ParticipantTransactionState,
-    PendingTransactionState, ReadAccountTransaction, ReadCrossCellTransaction,
-    ReadCrossCellTransactionInput, ReadPartitionTransaction, ReadPendingCrossCellTransactions,
-    ReadPendingCrossCellTransactionsInput, ReadTransactionInput,
+    PendingCrossCellTransaction, PendingTransactionCursor, PendingTransactionState,
+    ReadAccountTransaction, ReadCrossCellTransaction, ReadCrossCellTransactionInput,
+    ReadPartitionTransaction, ReadPendingCrossCellTransactions,
+    ReadPendingCrossCellTransactionsInput, ReadPendingTransactionBoundary, ReadTransactionInput,
     ReadUnresolvedCoordinatorParticipants, RecordParticipantResolution, ResolveAccountTransaction,
     ResolvePartitionTransaction, ResolveTransactionInput, ResolveTransactionOutcome,
     account_target, coordinator_target, data_target,
 };
 
 impl CellStorage {
+    pub(crate) async fn pending_coordinator_transaction(
+        &self,
+        coordinator: &CellTarget,
+        after: Option<PendingTransactionCursor>,
+        through: Option<PendingTransactionCursor>,
+    ) -> Result<Option<(PendingCrossCellTransaction, PendingTransactionCursor)>, StorageError> {
+        let through = match through {
+            Some(through) => through,
+            None => {
+                let Some(through) = self
+                    .client
+                    .query::<ReadPendingTransactionBoundary>(coordinator, None, Json(()))
+                    .await
+                    .map_err(cell_error)?
+                    .output
+                    .0
+                else {
+                    return Ok(None);
+                };
+                through
+            }
+        };
+        let entry = self
+            .client
+            .query::<ReadPendingCrossCellTransactions>(
+                coordinator,
+                None,
+                Json(ReadPendingCrossCellTransactionsInput { after, limit: 1 }),
+            )
+            .await
+            .map_err(cell_error)?
+            .output
+            .0
+            .into_iter()
+            .next();
+        Ok(entry
+            .filter(|entry| {
+                (entry.cursor.created_at_ms, entry.cursor.transaction_id)
+                    <= (through.created_at_ms, through.transaction_id)
+            })
+            .map(|entry| (entry, through)))
+    }
+
     /// Resolve every pending record of a coordinator recovered from a fenced owner.
     ///
     /// Only call this after the former owner has lost its node lease. An active

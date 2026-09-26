@@ -20,7 +20,7 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
         *account.application().as_bytes(),
     );
     let host = CellNodeBuilder::new(application.clone())
-        .with_runtime(SqlWorkerPool::new(1, 8).unwrap(), 16 * 1024 * 1024)
+        .with_runtime(SqlWorkerPool::new(1, 16).unwrap(), 16 * 1024 * 1024)
         .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
         .with_session(session)
         .build_unleased_for_maintenance()
@@ -333,7 +333,15 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
             );
         }
     }
-    host.shutdown().await.unwrap();
+    super::transaction_recovery::assert_background_recovery(
+        &host,
+        application,
+        &bootstrap,
+        directory.path(),
+        &table,
+        &participants,
+    )
+    .await;
 }
 
 pub(super) struct DropPhaseReplies {

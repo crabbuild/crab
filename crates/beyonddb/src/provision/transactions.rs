@@ -1,7 +1,13 @@
 //! Restore coordinator and participant owners from durable transaction records.
 
-use std::collections::HashSet;
+use std::{
+    collections::{BTreeMap, HashSet},
+    ops::Bound::{Excluded, Unbounded},
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
+use crab_cell_host::CellNodeTaskGroup;
 use crab_cell_runtime::cell::actor::CellHandle;
 use crab_cell_runtime::client::CellClient;
 use crab_cell_runtime::control::authority::CellAuthority;
@@ -13,15 +19,128 @@ use extenddb_storage::error::StorageError;
 use super::{CellInitialPartitionProvisioner, provision_error, wait_for_expired};
 use crate::backend::cell_error;
 use crate::{
-    CoordinatorParticipantTarget, Json, ListCoordinatorShards, ListCoordinatorShardsInput,
-    ReadCrossCellTransactionInput, ReadPendingCrossCellTransactions,
-    ReadPendingCrossCellTransactionsInput, ReadUnresolvedCoordinatorParticipants, account_target,
-    data_target, initialize_account, initialize_coordinator, initialize_partition,
+    CellStorage, CoordinatorParticipantTarget, Json, ListCoordinatorShards,
+    ListCoordinatorShardsInput, PendingTransactionCursor, ReadCrossCellTransactionInput,
+    ReadPendingCrossCellTransactions, ReadPendingCrossCellTransactionsInput,
+    ReadUnresolvedCoordinatorParticipants, account_target, data_target, initialize_account,
+    initialize_coordinator, initialize_partition,
 };
 
 type Initialize = for<'a> fn(&crab_ltx::rusqlite::Transaction<'a>) -> crab_cell_runtime::Result<()>;
 
+#[derive(Default)]
+pub(super) struct CoordinatorRecovery {
+    shards: RwLock<BTreeMap<[u8; 32], RecoveryShard>>,
+}
+
+#[derive(Clone)]
+struct RecoveryShard {
+    target: CellTarget,
+    after: Option<PendingTransactionCursor>,
+    through: Option<PendingTransactionCursor>,
+}
+
 impl CellInitialPartitionProvisioner {
+    pub(super) fn track_coordinator(&self, target: &CellTarget) -> Result<(), StorageError> {
+        if target.namespace() != crate::transaction_coordinator::NAMESPACE {
+            return Ok(());
+        }
+        self.transaction_recovery
+            .shards
+            .write()
+            .map_err(|_| StorageError::Internal("coordinator recovery lock poisoned".into()))?
+            .entry(*target.cell_id().as_bytes())
+            .or_insert_with(|| RecoveryShard {
+                target: target.clone(),
+                after: None,
+                through: None,
+            });
+        Ok(())
+    }
+
+    /// Supervise recovery of abandoned transactions on locally admitted coordinators.
+    ///
+    /// Install once after startup recovery, using the same provisioner as public
+    /// admission. Each tick visits one shard and at most one pending transaction.
+    /// BEGIN is resumed alongside active requests, never aborted based on age.
+    pub fn install_transaction_recovery_loop(
+        self: &Arc<Self>,
+        tasks: &CellNodeTaskGroup,
+        storage: CellStorage,
+    ) -> Result<(), StorageError> {
+        let provisioner = Arc::clone(self);
+        let cancellation = tasks.cancellation_token();
+        tasks
+            .spawn(async move {
+                let mut ticks = tokio::time::interval(Duration::from_millis(250));
+                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut after = None;
+                loop {
+                    tokio::select! {
+                        () = cancellation.cancelled() => return Ok::<(), StorageError>(()),
+                        _ = ticks.tick() => {}
+                    }
+                    let result = tokio::select! {
+                        () = cancellation.cancelled() => return Ok(()),
+                        result = provisioner.recover_next_transaction(&storage, &mut after) => result,
+                    };
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "transaction recovery deferred");
+                    }
+                }
+            })
+            .map_err(|error| StorageError::Internal(error.to_string()))
+    }
+
+    async fn recover_next_transaction(
+        &self,
+        storage: &CellStorage,
+        after: &mut Option<[u8; 32]>,
+    ) -> Result<(), StorageError> {
+        let selected = {
+            let shards =
+                self.transaction_recovery.shards.read().map_err(|_| {
+                    StorageError::Internal("coordinator recovery lock poisoned".into())
+                })?;
+            after
+                .and_then(|cell| shards.range((Excluded(cell), Unbounded)).next())
+                .or_else(|| shards.first_key_value())
+                .map(|(cell, shard)| (*cell, shard.clone()))
+        };
+        let Some((cell, mut shard)) = selected else {
+            return Ok(());
+        };
+        // Advance even on failure: an unreachable shard or participant must not
+        // prevent unrelated transactions from releasing their locks.
+        *after = Some(cell);
+        let pending = storage
+            .pending_coordinator_transaction(
+                &shard.target,
+                shard.after.clone(),
+                shard.through.clone(),
+            )
+            .await?;
+        // Freeze the pass at a durable cursor, not the host's wall clock. New
+        // arrivals must not postpone retries of earlier failed records forever.
+        shard.after = pending.as_ref().map(|(entry, _)| entry.cursor.clone());
+        shard.through = pending.as_ref().map(|(_, through)| through.clone());
+        self.transaction_recovery
+            .shards
+            .write()
+            .map_err(|_| StorageError::Internal("coordinator recovery lock poisoned".into()))?
+            .insert(cell, shard);
+        if let Some((entry, _)) = pending {
+            storage
+                .resume_cross_cell_transaction(
+                    &entry.account_id,
+                    &entry.routing_key,
+                    entry.transaction_id,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Recover registered coordinator shards assigned to this endpoint.
     ///
     /// Call during startup before accepting transaction requests. Idle shards
@@ -179,6 +298,7 @@ impl CellInitialPartitionProvisioner {
             }
             _ => return Ok(false),
         }
+        self.track_coordinator(target)?;
         Ok(true)
     }
 }

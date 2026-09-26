@@ -250,8 +250,11 @@ reads now reject unresolved intents; range checks include pending creates.
 A mixed-participant host test restores account, data, and coordinator owners
 and finishes a pending transaction with concurrent drivers. These barriers
 fail closed and do not yet resolve decisions on demand.
-Continuous recovery, cross-Cell read snapshots, coordinator passivation, and
-fleet placement remain incomplete. Production currently admits 64 active Cells
+A supervised serving worker now rotates through locally admitted coordinator
+shards, resumes abandoned BEGIN records, and finishes terminal decisions. It
+processes at most one pending transaction per tick, advances past failures,
+and revisits them on a bounded pass. Cross-Cell read snapshots, coordinator
+passivation, and fleet placement remain incomplete. Production currently admits 64 active Cells
 per node; distinct coordinator shards can exhaust that pool. See SCALING.md
 for the unqualified 10,000-Cell, multi-TB target.
 

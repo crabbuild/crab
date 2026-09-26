@@ -389,7 +389,7 @@ async fn serve_ready(
                 .await?;
             storage.recover_fenced_coordinator(&coordinator).await?;
         }
-        Ok(())
+        provisioner.install_transaction_recovery_loop(&tasks, storage)
     }
     .await;
     if let Err(error) = recovery {
