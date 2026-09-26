@@ -14,6 +14,7 @@ struct SparseActivation {
     _destination: tempfile::TempDir,
     cell: CellId,
     incarnation: crate::identity::IncarnationId,
+    replica: CellReplica,
     root: crab_ltx::RootRef,
     database: crab_ltx::CellWritableDatabase,
     destination: PathBuf,
@@ -91,6 +92,7 @@ async fn sparse_activation(cell_byte: u8, store: Store, payload_bytes: usize) ->
         _destination: destination_dir,
         cell,
         incarnation,
+        replica,
         root,
         database,
         destination,
@@ -280,7 +282,13 @@ async fn background_hydration_leaves_both_workers_query_admission_available() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires isolated RustFS credentials; reports injected-delay worker interference"]
-async fn rustfs_hydration_reports_same_and_other_worker_latency() {
+async fn rustfs_sparse_reads_report_worker_interference() {
+    fn payload_digest(connection: &crab_ltx::rusqlite::Connection) -> Result<Vec<u8>> {
+        let value: Vec<u8> =
+            connection.query_row("SELECT value FROM payload", [], |row| row.get(0))?;
+        Ok(blake3::hash(&value).as_bytes().to_vec())
+    }
+
     let required = |name| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
     let endpoint = required("CRAB_LTX_TEST_ENDPOINT");
     let store = crab_storage::build_explicit_store(
@@ -310,12 +318,18 @@ async fn rustfs_hydration_reports_same_and_other_worker_latency() {
     let watching = armed.clone();
     let requests = Arc::new(AtomicU64::new(0));
     let observed = requests.clone();
-    let store = Store::new(backend.clone()).with_read_request_observer(Arc::new(move |_| {
-        observed.fetch_add(1, Ordering::Relaxed);
-        if watching.load(Ordering::Acquire) {
-            notify.notify_one();
-        }
-    }));
+    let bytes = Arc::new(AtomicU64::new(0));
+    let transferred = bytes.clone();
+    let store = Store::new(backend.clone())
+        .with_read_byte_observer(Arc::new(move |count| {
+            transferred.fetch_add(count, Ordering::Relaxed);
+        }))
+        .with_read_request_observer(Arc::new(move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            if watching.swap(false, Ordering::AcqRel) {
+                notify.notify_one();
+            }
+        }));
     let cold = sparse_activation(0, store.clone(), 4 << 20).await;
     let same = sparse_activation(2, store.clone(), 262_144).await;
     let other = sparse_activation(1, store, 262_144).await;
@@ -347,24 +361,32 @@ async fn rustfs_hydration_reports_same_and_other_worker_latency() {
         let pool = pool.clone();
         async move {
             let started = Instant::now();
+            let (timing, measured) = oneshot::channel();
             let output = pool
                 .query(
                     cell,
                     8,
                     started + Duration::from_secs(10),
-                    Box::new(|connection| {
+                    Box::new(move |connection| {
+                        let entered = Instant::now();
                         let length: i64 = connection.query_row(
                             "SELECT length(value) FROM payload",
                             [],
                             |row| row.get(0),
                         )?;
+                        let _ = timing.send((entered.duration_since(started), entered.elapsed()));
                         Ok(length.to_le_bytes().to_vec())
                     }),
                 )
                 .await
                 .unwrap();
             assert_eq!(output, 262_144_i64.to_le_bytes());
-            started.elapsed()
+            let elapsed = started.elapsed();
+            let (admission, sql) = measured.await.unwrap();
+            serde_json::json!({
+                "elapsed_us": elapsed.as_micros(), "admission_and_queue_us": admission.as_micros(),
+                "sql_us": sql.as_micros(),
+            })
         }
     };
     let before = requests.load(Ordering::Relaxed);
@@ -378,6 +400,7 @@ async fn rustfs_hydration_reports_same_and_other_worker_latency() {
     backend.config_mut(|config| config.wait_get_per_call = Duration::from_millis(500));
     armed.store(true, Ordering::Release);
     let hydration_started = Instant::now();
+    let hydration_bytes = bytes.load(Ordering::Relaxed);
     let hydration = {
         let pool = pool.clone();
         tokio::spawn(async move {
@@ -397,21 +420,129 @@ async fn rustfs_hydration_reports_same_and_other_worker_latency() {
     ));
     armed.store(false, Ordering::Release);
     backend.config_mut(|config| config.wait_get_per_call = Duration::ZERO);
-    for cell in [cold.cell, same.cell, other.cell] {
+    let hydration_requests = requests.load(Ordering::Relaxed) - before;
+    let hydration_bytes = bytes.load(Ordering::Relaxed) - hydration_bytes;
+    pool.deactivate(cold.cell).await.unwrap();
+
+    let source = crab_ltx::rusqlite::Connection::open_with_flags(
+        cold._source.path().join("source.sqlite"),
+        crab_ltx::rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let expected_digest = payload_digest(&source).unwrap();
+    drop(source);
+    let mut demand_samples = Vec::new();
+    // Each trial starts with a fresh sparse file for the same immutable root.
+    // The origin and metadata caches stay warm; no hydrated local pages carry
+    // between trials. Alternate order to expose shared-host timing variation.
+    for (trial, delay_ms) in [0, 20, 20, 0, 0, 20].into_iter().enumerate() {
+        let destination = cold
+            ._destination
+            .path()
+            .join(format!("demand-{trial}.sqlite"));
+        let database = cold
+            .replica
+            .open_root(&cold.root)
+            .await
+            .unwrap()
+            .paged()
+            .prepare_writable(&destination)
+            .await
+            .unwrap();
+        pool.activate_restored(
+            cold.cell,
+            RestoredDatabase::Paged(Box::new(database)),
+            destination,
+            cold.incarnation,
+            1,
+            cold.root,
+            pool.reserve_activation().unwrap(),
+        )
+        .await
+        .unwrap();
+        let before_requests = requests.load(Ordering::Relaxed);
+        let before_bytes = bytes.load(Ordering::Relaxed);
+        backend.config_mut(|config| config.wait_get_per_call = Duration::from_millis(delay_ms));
+        armed.store(true, Ordering::Release);
+        let demand_started = Instant::now();
+        let demand = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let digest = pool
+                    .query(
+                        cold.cell,
+                        32,
+                        demand_started + Duration::from_secs(30),
+                        Box::new(payload_digest),
+                    )
+                    .await
+                    .unwrap();
+                (digest, demand_started.elapsed())
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("the demand query must fetch from RustFS");
+        let (demand, same_wait, other_wait) =
+            tokio::join!(demand, query(same.cell), query(other.cell));
+        let (digest, elapsed) = demand.unwrap();
+        assert_eq!(digest, expected_digest);
+        let demand_requests = requests.load(Ordering::Relaxed) - before_requests;
+        let demand_bytes = bytes.load(Ordering::Relaxed) - before_bytes;
+        armed.store(false, Ordering::Release);
+        backend.config_mut(|config| config.wait_get_per_call = Duration::ZERO);
+
+        let before_warm = requests.load(Ordering::Relaxed);
+        let warm_started = Instant::now();
+        let digest = pool
+            .query(
+                cold.cell,
+                32,
+                warm_started + Duration::from_secs(10),
+                Box::new(payload_digest),
+            )
+            .await
+            .unwrap();
+        assert_eq!(digest, expected_digest);
+        assert_eq!(
+            requests.load(Ordering::Relaxed),
+            before_warm,
+            "the repeated full-payload query must read only materialized pages"
+        );
+        demand_samples.push(serde_json::json!({
+            "trial": trial, "injected_get_delay_ms": delay_ms,
+            "demand_query_us": elapsed.as_micros(), "resident_payload_query_us": warm_started.elapsed().as_micros(),
+            "same_worker": same_wait, "other_worker": other_wait,
+            "origin_requests": demand_requests, "origin_bytes": demand_bytes,
+        }));
+        pool.deactivate(cold.cell).await.unwrap();
+    }
+    for cell in [same.cell, other.cell] {
         pool.deactivate(cell).await.unwrap();
     }
     pool.shutdown().await.unwrap();
     eprintln!(
         "worker-interference {}",
         serde_json::json!({
+            "schema": 2,
             "prefix": prefix,
+            "build_profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+            "sqlite_version": crab_ltx::rusqlite::version(),
+            "payload_bytes": 4 << 20,
+            "sql_workers": 2,
+            "cold_root": {"cell": cold.root.cell, "incarnation": cold.root.incarnation,
+                          "digest": cold.root.digest, "txid": cold.root.position.txid,
+                          "checksum": cold.root.position.checksum, "commit_sequence": cold.root.commit_sequence},
+            "payload_digest": expected_digest,
             "injected_get_delay_ms": 500,
-            "same_worker_baseline_us": same_baseline.as_micros(),
-            "other_worker_baseline_us": other_baseline.as_micros(),
-            "same_worker_during_hydration_us": same_wait.as_micros(),
-            "other_worker_during_hydration_us": other_wait.as_micros(),
+            "same_worker_baseline": same_baseline,
+            "other_worker_baseline": other_baseline,
+            "same_worker_during_hydration": same_wait,
+            "other_worker_during_hydration": other_wait,
             "hydration_and_queries_us": hydration_and_queries.as_micros(),
-            "origin_requests_during_hydration": requests.load(Ordering::Relaxed) - before,
+            "origin_requests_during_hydration": hydration_requests,
+            "origin_bytes_during_hydration": hydration_bytes,
+            "demand_samples": demand_samples,
         })
     );
 }
