@@ -15,8 +15,8 @@ fn key(value: &str) -> Item {
     Item::from([("id".into(), AttributeValue::S(value.into()))])
 }
 
-fn put(table: &TableRecord, value: &str) -> TransactionWrite {
-    TransactionWrite::Put(PutItemInput {
+fn put(table: &TableRecord, value: &str) -> TransactionOperation {
+    TransactionOperation::Put(PutItemInput {
         table_name: table.table_name.clone(),
         table_id: table.id.clone(),
         item: key(value),
@@ -43,7 +43,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
         *account.application().as_bytes(),
     );
     let host = CellNodeBuilder::new(application.clone())
-        .with_runtime(SqlWorkerPool::new(1, 8).unwrap(), 16 * 1024 * 1024)
+        .with_runtime(SqlWorkerPool::new(1, 16).unwrap(), 16 * 1024 * 1024)
         .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
         .with_session(session)
         .build_unleased_for_maintenance()
@@ -161,7 +161,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
     }
     let operations = vec![
         put(table, "created"),
-        TransactionWrite::Delete(DeleteItemInput { table_name: table.table_name.clone(), table_id: table.id.clone(), key: key("deleted"), condition: None }),
+        TransactionOperation::Delete(DeleteItemInput { table_name: table.table_name.clone(), table_id: table.id.clone(), key: key("deleted"), condition: None }),
         serde_json::from_value(serde_json::json!({"ConditionCheck": {
             "table_name": table.table_name, "table_id": table.id, "key": key("checked"),
             "condition": {"expression": {"Function": {"name": "attribute_exists", "args": [{"Path": [{"Attribute": "id"}]}]}}, "maps": {"names": {}, "values": {}}}
@@ -188,7 +188,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
         operations: operations
             .iter()
             .enumerate()
-            .map(|(index, operation)| IndexedTransactionWrite {
+            .map(|(index, operation)| IndexedTransactionOperation {
                 index: u8::try_from(index).unwrap(),
                 operation: operation.clone(),
             })
@@ -200,7 +200,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
             partition_id: [212; 16],
             epoch: 1,
         },
-        operations: vec![IndexedTransactionWrite {
+        operations: vec![IndexedTransactionOperation {
             index: 5,
             operation: put(data_table, "created"),
         }],
@@ -364,7 +364,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
 
     let next_session = SessionId::from_bytes([214; 16]);
     let restored = CellNodeBuilder::new(application.clone())
-        .with_runtime(SqlWorkerPool::new(1, 8).unwrap(), 16 * 1024 * 1024)
+        .with_runtime(SqlWorkerPool::new(1, 16).unwrap(), 16 * 1024 * 1024)
         .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
         .with_session(next_session)
         .build_unleased_for_maintenance()
@@ -505,7 +505,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
         )
         .await;
     let mut failing = put(table, "created");
-    let TransactionWrite::Put(input) = &mut failing else {
+    let TransactionOperation::Put(input) = &mut failing else {
         unreachable!()
     };
     input.condition = Some(serde_json::from_value(serde_json::json!({
@@ -516,7 +516,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
             account.cell_id(),
             CoordinatorParticipant {
                 target: CoordinatorParticipantTarget::Account,
-                operations: vec![IndexedTransactionWrite {
+                operations: vec![IndexedTransactionOperation {
                     index: 1,
                     operation: failing,
                 }],
@@ -530,7 +530,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
                     partition_id: [212; 16],
                     epoch: 1,
                 },
-                operations: vec![IndexedTransactionWrite {
+                operations: vec![IndexedTransactionOperation {
                     index: 0,
                     operation: put(data_table, "rollback"),
                 }],
@@ -588,7 +588,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
         coordinator_cell: *coordinator.cell_id().as_bytes(),
         operations: vec![
             put(table, "aborted-create"),
-            TransactionWrite::Delete(DeleteItemInput {
+            TransactionOperation::Delete(DeleteItemInput {
                 table_name: table.table_name.clone(),
                 table_id: table.id.clone(),
                 key: key("checked"),

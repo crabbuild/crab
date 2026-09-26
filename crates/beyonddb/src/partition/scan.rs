@@ -116,7 +116,7 @@ fn scan_page(
     // unapplied creates. Sealed export is already fenced by SealPartition.
     if !export {
         let locks = context.sql(&statement(
-            "SELECT 1 FROM ddb_partition_transaction_locks WHERE item_key > ?1 LIMIT 1",
+            "SELECT 1 FROM ddb_partition_transaction_locks WHERE item_key > ?1 AND write_lock = 1 LIMIT 1",
             vec![SqlValue::Blob(cursor.clone())],
         ))?;
         if !locks[0].rows.is_empty() {

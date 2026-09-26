@@ -25,9 +25,11 @@ visits one locally admitted coordinator and at most one pending transaction per
 tick, including coordinators admitted after it starts. It resumes unfinished
 requests, advances past failures, and bounds each pass by an indexed durable cursor so new
 arrivals cannot starve earlier retries. Its backlog rate remains unqualified.
-Cross-Cell TransactGetItems and read-triggered decision resolution still need
-implementation. Reads fail retryably on unresolved intents; same-Cell
-transactional reads return ordered cancellation reasons. A
+Cross-Cell TransactGetItems now captures immutable images under shared key
+locks through the same coordinator. Read-triggered decision resolution still
+needs implementation. Reads fail retryably on unresolved write intents;
+transactional conflicts return ordered cancellation reasons. Committed read
+images remain retained without collection, another production capacity gate. A
 host-backed provisioner can create 1–256
 independent, evenly spaced initial data Cells during CreateTable and retry
 interrupted setup. This raises initial aggregate capacity and write parallelism.

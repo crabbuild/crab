@@ -12,7 +12,7 @@ use crab_cell_runtime::registry::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::items::{TransactionFailure, TransactionWrite};
+use crate::items::{TransactionFailure, TransactionOperation};
 use crate::table::statement;
 use crate::transaction_token::{TOKEN_LIFETIME_MS, TransactionToken};
 use crate::{
@@ -153,15 +153,15 @@ impl CoordinatorParticipantTarget {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct IndexedTransactionWrite {
+pub struct IndexedTransactionOperation {
     pub index: u8,
-    pub operation: TransactionWrite,
+    pub operation: TransactionOperation,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CoordinatorParticipant {
     pub target: CoordinatorParticipantTarget,
-    pub operations: Vec<IndexedTransactionWrite>,
+    pub operations: Vec<IndexedTransactionOperation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

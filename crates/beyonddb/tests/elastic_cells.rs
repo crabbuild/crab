@@ -3,6 +3,7 @@ mod elastic_cells {
     mod coordinator_tokens;
     mod public_transactions;
     mod transaction_driver;
+    mod transaction_reads;
     mod transaction_recovery;
     pub(crate) mod transaction_visibility;
 }
@@ -28,7 +29,7 @@ use beyonddb::{
     CoordinatorPhaseInput, CoordinatorPhaseOutcome, CreateTable, CreateTableOutcome,
     DecideCrossCellTransaction, DecideCrossCellTransactionInput, DecideCrossCellTransactionOutcome,
     DeleteItem, DeleteItemInput, DeleteTable, DeleteTableOutcome, DescribeTable, GetItem,
-    GetItemInput, GetItemOutcome, ImportPartitionItem, ImportSummary, IndexedTransactionWrite,
+    GetItemInput, GetItemOutcome, ImportPartitionItem, ImportSummary, IndexedTransactionOperation,
     InitialPartitionProvisioner, InstallPartition, InstallPartitionOutcome, ItemMutationOutcome,
     Json, ListCoordinatorShards, ListCoordinatorShardsInput, NodeLeasePublisher,
     ParticipantTransactionState, PartitionDelete, PartitionDeleteInput, PartitionDeleteOutcome,
@@ -47,8 +48,8 @@ use beyonddb::{
     ReadTtlSweep, ReadUnresolvedCoordinatorParticipants, RecordParticipantPrepare,
     RecordParticipantResolution, ResolvePartitionTransaction, ResolveTransactionInput,
     ResolveTransactionOutcome, RoutePageInput, RoutePageOutcome, SealPartition,
-    SealPartitionOutcome, SplitPlan, SplitRouteState, TableRoute, TableSpec, TransactionToken,
-    TransactionWrite, UpdateTtl, UpdateTtlInput, account_target, build_http_state,
+    SealPartitionOutcome, SplitPlan, SplitRouteState, TableRoute, TableSpec, TransactionOperation,
+    TransactionToken, UpdateTtl, UpdateTtlInput, account_target, build_http_state,
     coordinator_target, credential_target, data_key_hash, data_target, initialize_account,
     initialize_coordinator, initialize_partition,
 };
@@ -2569,9 +2570,9 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .iter()
         .map(|side| CoordinatorParticipant {
             target: side.4.clone(),
-            operations: vec![IndexedTransactionWrite {
+            operations: vec![IndexedTransactionOperation {
                 index: side.3,
-                operation: TransactionWrite::Put(PutItemInput {
+                operation: TransactionOperation::Put(PutItemInput {
                     table_name: table.table_name.clone(),
                     table_id: table.id.clone(),
                     item: side.2.clone(),
@@ -3178,7 +3179,10 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             },
         ])
         .await;
-    assert!(matches!(cross_cell, Err(StorageError::Unsupported(_))));
+    assert_eq!(
+        cross_cell.unwrap(),
+        vec![Some(left_key.clone()), Some(right_key.clone())]
+    );
     let tx_maps = ExpressionMaps::default();
     let rolled_back = key_in_range(&table.id, &table.key_schema, true, 300);
     let not_exists = Expr::Function {
@@ -3502,7 +3506,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         epoch: 1,
         transaction_id: [90; 16],
         coordinator_cell: *account.cell_id().as_bytes(),
-        operations: vec![TransactionWrite::Put(PutItemInput {
+        operations: vec![TransactionOperation::Put(PutItemInput {
             table_name: table.table_name.clone(),
             table_id: table.id.clone(),
             item: intent_item.clone(),
@@ -3613,7 +3617,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         epoch: 1,
         transaction_id: [98; 16],
         coordinator_cell: *account.cell_id().as_bytes(),
-        operations: vec![TransactionWrite::Put(PutItemInput {
+        operations: vec![TransactionOperation::Put(PutItemInput {
             table_name: table.table_name.clone(),
             table_id: table.id.clone(),
             item: intent_item.clone(),
@@ -3645,7 +3649,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         epoch: 1,
         transaction_id: [95; 16],
         coordinator_cell: *account.cell_id().as_bytes(),
-        operations: vec![TransactionWrite::Put(PutItemInput {
+        operations: vec![TransactionOperation::Put(PutItemInput {
             table_name: table.table_name.clone(),
             table_id: table.id.clone(),
             item: intent_item.clone(),
@@ -4208,7 +4212,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
                 epoch: 3,
                 transaction_id: [101; 16],
                 coordinator_cell: *account.cell_id().as_bytes(),
-                operations: vec![TransactionWrite::Put(PutItemInput {
+                operations: vec![TransactionOperation::Put(PutItemInput {
                     table_name: table.table_name.clone(),
                     table_id: table.id.clone(),
                     item: changed_item.clone(),

@@ -3,9 +3,17 @@
 use crate::table::statement;
 use crate::{Error, Json, Result, SqlValue, TransactionFailure};
 use crab_cell_runtime::registry::{CommandContext, CommandResult, QueryContext};
+use extenddb_core::types::Item;
 use serde::{Deserialize, Serialize};
 
 pub(crate) const SCHEMA: &str = include_str!("participant_schema.sql");
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) enum StagedEffect {
+    Write,
+    Check,
+    Read,
+}
 
 /// Result of preparing one account or data Cell participant.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -98,18 +106,27 @@ pub(crate) fn prepared(
     Ok(None)
 }
 
-pub(crate) fn record_prepare(
+pub(crate) fn record_prepare<'a>(
     context: &mut CommandContext<'_, '_>,
     transaction_id: [u8; 16],
     coordinator_cell: [u8; 32],
     digest: blake3::Hash,
     staged: Vec<u8>,
+    read_result: impl Iterator<Item = Option<&'a Item>>,
 ) -> Result<()> {
     context.sql(&statement(
         "INSERT INTO ddb_transactions (transaction_id, coordinator_cell, request_digest, state, staged) VALUES (?1, ?2, ?3, 0, ?4)",
         vec![SqlValue::Blob(transaction_id.to_vec()), SqlValue::Blob(coordinator_cell.to_vec()),
              SqlValue::Blob(digest.as_bytes().to_vec()), SqlValue::Blob(staged)],
     ))?;
+    // Persist images with prepare so recovery never re-reads live rows. COMMIT
+    // releases locks but keeps these images until the response can be fetched.
+    for (position, item) in read_result.enumerate() {
+        context.sql(&statement(
+            "INSERT INTO ddb_transaction_reads (transaction_id, position, item) VALUES (?1, ?2, ?3)",
+            vec![SqlValue::Blob(transaction_id.to_vec()), SqlValue::Integer(i64::try_from(position).map_err(|_| Error::Command("read position overflow"))?), item.map(|item| serde_json::to_vec(item).map(SqlValue::Blob)).transpose()?.unwrap_or(SqlValue::Null)],
+        ))?;
+    }
     Ok(())
 }
 
@@ -193,12 +210,59 @@ pub(crate) fn resolve(
             SqlValue::Blob(input.transaction_id.to_vec()),
         ],
     ))?;
+    if !input.commit {
+        context.sql(&statement(
+            "DELETE FROM ddb_transaction_reads WHERE transaction_id = ?1",
+            vec![SqlValue::Blob(input.transaction_id.to_vec())],
+        ))?;
+    }
     let outcome = if input.commit {
         ResolveTransactionOutcome::Committed
     } else {
         ResolveTransactionOutcome::Aborted
     };
     Ok(CommandResult::Success(Json(outcome)))
+}
+
+/// Identity of one immutable read image within a participant.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReadTransactionResultInput {
+    pub transaction: ReadTransactionInput,
+    pub position: u8,
+}
+
+/// Saved image from a committed read participant, including an absent item.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum TransactionReadResult {
+    Unavailable,
+    Item(Option<Item>),
+}
+
+pub(crate) fn read_result(
+    context: &QueryContext<'_>,
+    input: ReadTransactionResultInput,
+) -> Result<Json<TransactionReadResult>> {
+    // Read each saved image by position: a 100-item request must not force a
+    // multi-megabyte participant result through one bounded Cell RPC.
+    let rows = context.sql(&statement(
+        "SELECT r.item FROM ddb_transaction_reads r JOIN ddb_transactions t \
+         ON t.transaction_id = r.transaction_id WHERE r.transaction_id = ?1 \
+         AND r.position = ?2 AND t.coordinator_cell = ?3 AND t.state = 1",
+        vec![
+            SqlValue::Blob(input.transaction.transaction_id.to_vec()),
+            SqlValue::Integer(i64::from(input.position)),
+            SqlValue::Blob(input.transaction.coordinator_cell.to_vec()),
+        ],
+    ))?;
+    let Some(row) = rows[0].rows.first() else {
+        return Ok(Json(TransactionReadResult::Unavailable));
+    };
+    let item = match row.as_slice() {
+        [SqlValue::Null] => None,
+        [SqlValue::Blob(bytes)] => Some(serde_json::from_slice(bytes)?),
+        _ => return Err(Error::Command("invalid transaction read result")),
+    };
+    Ok(Json(TransactionReadResult::Item(item)))
 }
 
 pub(crate) fn read(

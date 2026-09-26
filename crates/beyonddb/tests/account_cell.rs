@@ -6,7 +6,7 @@ use beyonddb::{
     DeleteItemInput, DescribeTable, GetItem, GetItemInput, GetItemOutcome, ItemMutationOutcome,
     Json, ListTables, ListTablesInput, ListTablesOutcome, PutItem, PutItemInput, ReadTtlSchedule,
     ReadTtlSweep, TableSpec, TransactGet, TransactWrite, TransactWriteInput, TransactionGetOutcome,
-    TransactionOutcome, TransactionWrite, UpdateTtl, UpdateTtlInput, account_target,
+    TransactionOperation, TransactionOutcome, UpdateTtl, UpdateTtlInput, account_target,
     initialize_account,
 };
 use crab_cell_app::CellApplication;
@@ -480,13 +480,13 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             identity(8),
             Json(TransactWriteInput {
                 operations: vec![
-                    TransactionWrite::Put(PutItemInput {
+                    TransactionOperation::Put(PutItemInput {
                         table_name: "Books".into(),
                         table_id: book_table_id.clone(),
                         item: book_key.clone(),
                         condition: None,
                     }),
-                    TransactionWrite::Put(PutItemInput {
+                    TransactionOperation::Put(PutItemInput {
                         table_name: "Authors".into(),
                         table_id: author_table_id.clone(),
                         item: invalid_key,
@@ -522,13 +522,13 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             identity(9),
             Json(TransactWriteInput {
                 operations: vec![
-                    TransactionWrite::Put(PutItemInput {
+                    TransactionOperation::Put(PutItemInput {
                         table_name: "Books".into(),
                         table_id: book_table_id.clone(),
                         item: book_key.clone(),
                         condition: None,
                     }),
-                    TransactionWrite::Put(PutItemInput {
+                    TransactionOperation::Put(PutItemInput {
                         table_name: "Authors".into(),
                         table_id: author_table_id.clone(),
                         item: author_key.clone(),
@@ -653,7 +653,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
     );
     let bulk_writes = (0..70)
         .map(|index| {
-            TransactionWrite::Put(PutItemInput {
+            TransactionOperation::Put(PutItemInput {
                 table_name: "Books".into(),
                 table_id: book_table_id.clone(),
                 item: Item::from([("id".into(), AttributeValue::S(format!("bulk-{index:03}")))]),

@@ -31,7 +31,7 @@ use crate::{
     PartitionTransactGet, PartitionTransactGetOutcome, PartitionUpdate, PartitionUpdateInput,
     PartitionUpdateOutcome, PutItem, PutItemInput, ScanItems, ScanItemsInput, ScanItemsOutcome,
     SortComparison, SortPredicate, TransactGet, TransactionFailure, TransactionGetOutcome,
-    TransactionWrite, UpdateItem, UpdateItemInput, UpdateItemOutcome, data_key_hash,
+    TransactionOperation, UpdateItem, UpdateItemInput, UpdateItemOutcome, data_key_hash,
 };
 use crab_cell_runtime::client::InvocationError;
 use crab_cell_runtime::identity::CellTarget;
@@ -528,7 +528,7 @@ impl DataEngine for CellStorage {
             for (key_info, key) in &routing {
                 let next = self.transaction_destination(key_info, key).await?;
                 if destination.as_ref().is_some_and(|current| current != &next) {
-                    return Err(unsupported("cross-partition TransactGetItems"));
+                    return self.cross_cell_read(&account_id, inputs, routing).await;
                 }
                 destination = Some(next);
             }
@@ -547,7 +547,9 @@ impl DataEngine for CellStorage {
                     .await
                     .map_err(cell_error)?;
                 match output.output.0 {
-                    PartitionTransactGetOutcome::Found(items) => return Ok(items),
+                    PartitionTransactGetOutcome::Found(items) => {
+                        return super::transaction_read::validate_read_size(items);
+                    }
                     PartitionTransactGetOutcome::Conflict { index } => {
                         let mut reasons = vec![CancellationReason::none(); routing.len()];
                         reasons[index] = CancellationReason {
@@ -579,7 +581,9 @@ impl DataEngine for CellStorage {
                     .0
             };
             match outcome {
-                TransactionGetOutcome::Found(items) => Ok(items),
+                TransactionGetOutcome::Found(items) => {
+                    super::transaction_read::validate_read_size(items)
+                }
                 TransactionGetOutcome::Conflict { index } => Err(transaction_canceled(
                     index,
                     TransactionFailure::Conflict,
@@ -655,11 +659,13 @@ impl DataEngine for CellStorage {
                 ));
             }
             let count = operations.len();
-            let (decision, replay) = self
+            let admitted = self
                 .admit_transaction(&account_id, token, operations, routing)
                 .await?;
-            match decision {
-                crate::CoordinatorDecision::Commit if replay => Err(StorageError::IdempotentReplay),
+            match admitted.decision {
+                crate::CoordinatorDecision::Commit if admitted.replay => {
+                    Err(StorageError::IdempotentReplay)
+                }
                 crate::CoordinatorDecision::Commit => Ok(()),
                 crate::CoordinatorDecision::Abort { index, reason } => Err(transaction_canceled(
                     usize::from(index.unwrap_or(0)),
@@ -729,7 +735,7 @@ fn segment_bounds(segment: u64, total: u64) -> ([u8; 16], Option<[u8; 16]>) {
     )
 }
 
-fn transaction_canceled(
+pub(super) fn transaction_canceled(
     index: usize,
     reason: TransactionFailure,
     count: usize,
@@ -931,7 +937,7 @@ fn prepare_gets(ops: &[TransactGetOp<'_>]) -> Result<(String, Vec<GetItemInput>)
 
 fn prepare_writes(
     ops: &[TransactWriteOp<'_>],
-) -> Result<(String, Vec<TransactionWrite>), StorageError> {
+) -> Result<(String, Vec<TransactionOperation>), StorageError> {
     let mut account_id = None;
     let mut operations = Vec::with_capacity(ops.len());
     for op in ops {
@@ -945,7 +951,7 @@ fn prepare_writes(
                 ..
             } if stream.is_none() => (
                 *key_info,
-                TransactionWrite::Put(PutItemInput {
+                TransactionOperation::Put(PutItemInput {
                     table_name: key_info.table_name.clone(),
                     table_id: key_info.table_id.clone(),
                     item: (*item).clone(),
@@ -961,7 +967,7 @@ fn prepare_writes(
                 ..
             } if stream.is_none() => (
                 *key_info,
-                TransactionWrite::Delete(DeleteItemInput {
+                TransactionOperation::Delete(DeleteItemInput {
                     table_name: key_info.table_name.clone(),
                     table_id: key_info.table_id.clone(),
                     key: (*key).clone(),
@@ -978,7 +984,7 @@ fn prepare_writes(
                 ..
             } if stream.is_none() => (
                 *key_info,
-                TransactionWrite::Update(UpdateItemInput {
+                TransactionOperation::Update(UpdateItemInput {
                     table_name: key_info.table_name.clone(),
                     table_id: key_info.table_id.clone(),
                     key: (*key).clone(),
@@ -994,7 +1000,7 @@ fn prepare_writes(
                 ..
             } => (
                 *key_info,
-                TransactionWrite::ConditionCheck(ConditionCheckInput {
+                TransactionOperation::ConditionCheck(ConditionCheckInput {
                     table_name: key_info.table_name.clone(),
                     table_id: key_info.table_id.clone(),
                     key: (*key).clone(),

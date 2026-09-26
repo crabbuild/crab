@@ -26,12 +26,16 @@ CREATE TABLE ddb_partition_ttl (
 );
 
 CREATE TABLE ddb_partition_transaction_locks (
-    item_key BLOB PRIMARY KEY,
+    item_key BLOB NOT NULL,
     partition_key BLOB NOT NULL,
     sort_key BLOB NOT NULL,
-    transaction_id BLOB NOT NULL REFERENCES ddb_transactions(transaction_id)
+    transaction_id BLOB NOT NULL REFERENCES ddb_transactions(transaction_id),
+    write_lock INTEGER NOT NULL CHECK (write_lock IN (0, 1)),
+    PRIMARY KEY (item_key, transaction_id)
 );
 CREATE INDEX ddb_partition_transaction_locks_range
-    ON ddb_partition_transaction_locks (partition_key, sort_key, item_key);
+    ON ddb_partition_transaction_locks (partition_key, sort_key, item_key) WHERE write_lock = 1;
+CREATE INDEX ddb_partition_write_locks ON ddb_partition_transaction_locks (item_key)
+    WHERE write_lock = 1;
 CREATE INDEX ddb_partition_transaction_locks_owner
     ON ddb_partition_transaction_locks (transaction_id);

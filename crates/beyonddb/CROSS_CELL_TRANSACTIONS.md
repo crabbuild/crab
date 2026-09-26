@@ -2,27 +2,27 @@
 
 ## Contract and current boundary
 
-This document distinguishes the implemented write protocol from the remaining
-read and recovery work. Public `TransactWriteItems` now routes Put, Delete,
-Update, and ConditionCheck through a durable coordinator, including requests
+This document describes the implemented write and read protocols and the
+remaining recovery and scale qualification work. Public `TransactWriteItems`
+now routes Put, Delete, Update, and ConditionCheck through a durable coordinator, including requests
 confined to one Cell. Account and data Cells prepare, lock, and resolve their
 operations. The adapter returns success only after every participant apply is
 published. Token lookup precedes current table routing and uses that same
 coordinator authority. The earlier account claims and local token receipts
 have been removed.
 
-`TransactGetItems` still uses one local snapshot when all requested keys share
-a Cell; cross-Cell reads remain explicitly unsupported. Account and data
-reads reject unresolved intents instead of returning live images that could
-predate an already-published commit. This is write-path enablement, not full
-DynamoDB compatibility or fleet-scale qualification.
+`TransactGetItems` uses one local snapshot when all requested keys share a
+Cell. Cross-Cell reads use the same durable coordinator with shared key locks
+and immutable participant images. Account and data reads reject unresolved
+write intents instead of returning images that could predate a published
+commit. Full DynamoDB compatibility and fleet-scale qualification remain open.
 
 Each coordinator now indexes records with unresolved participants and exposes
 bounded cursor pages. A new owner can discover both undecided and decided
 work after restoring its published Cell state. An internal resolver can now
 finish a terminal decision across account and data Cell participants, using participant
-state after an ambiguous reply and recording each resolution durably. An
-write driver can also resume a published `BEGIN`: it reads the
+state after an ambiguous reply and recording each resolution durably. A
+transaction driver can also resume a published `BEGIN`: it reads the
 immutable participant payloads, prepares in Cell order, records receipts,
 publishes one decision, and finishes resolution before returning that decision.
 Concurrent resumes and lost prepare/decision replies use durable state as the
@@ -55,6 +55,32 @@ they need not expose one snapshot for the whole response.
 These targets follow the [DynamoDB transaction isolation contract](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis.html)
 and its [100-item, 4-MiB, ten-minute token limits](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_TransactWriteItems.html).
 
+## Why this protocol
+
+**Is this the best fix for the current architecture?** Reusing the durable
+coordinator and participant state machine is the bounded choice for the
+existing single-writer SQLite Cells. Local commands already atomically stage
+images, locks, and phase records; object-store publication and owner fencing
+provide the durable execution boundary. Shared read locks add a common
+serialization point without a second recovery authority.
+
+Independent per-Cell transactions cannot provide cross-key atomicity. A saga
+would expose intermediate changes and require compensation, which does not
+meet the requested contract. Distributed MVCC could reduce reader/writer
+conflicts, but would require version retention, globally comparable visibility
+boundaries, and recovery/collection rules that the current Cell model does not
+provide. It remains a future architectural option if measured contention
+justifies that cost.
+
+The tradeoffs are explicit: this is blocking two-phase commit. An unavailable
+decision owner can hold affected keys until recovery. Prepare and resolution
+currently visit participants sequentially, so latency grows with participant
+count and publication/network latency. A shared read also publishes durable
+state; it costs more than independent Get calls. Hot-key contention does not
+disappear by adding Cells. Coordinator sharding spreads independent requests,
+but activation, placement, retained history, and recovery throughput must also
+scale before 10,000 Cells is a service-level claim.
+
 ## Ownership and durable records
 
 Use a deterministic, account-scoped coordinator Cell chosen from the client
@@ -84,16 +110,21 @@ Participant durable record:
 | Field | Purpose |
 | --- | --- |
 | Transaction ID, coordinator target, request digest, route epoch | Match a prepare to its immutable decision authority. |
-| Locked table ID and canonical item keys | Exclude conflicting writes and transactional reads. |
+| Locked table ID, canonical item keys, and lock mode | Shared reads exclude writes; exclusive writes exclude other transactions. |
 | Old and proposed item images, conditions, operation indexes | Prepare evaluates against one serialized local state; apply needs no expression re-evaluation. |
 | `PREPARED`, `COMMITTED`, or `ABORTED` and decision proof | Make resolution idempotent across retries and owner recovery. An `ABORTED` tombstone also fences a delayed prepare. |
 
-The per-key lock has a unique `(table_id, item_key)` constraint and points to
-its transaction. A prepared record and all its locks must publish in **one**
+Account locks have primary key `(table_id, item_key, transaction_id)`; data
+locks use `(item_key, transaction_id)`. A mode distinguishes shared reads from
+exclusive writes and ConditionCheck. Conflict checks and insertion execute in
+one serialized command, so incompatible owners cannot both prepare. Repeated
+reads within one request share one lock while retaining separate result slots.
+A prepared record, captured read images, and all its locks publish in **one**
 participant command. Proposed images are separate from live item rows. No
 ordinary read, TTL sweep, index writer, or stream reader may expose them before
-commit. A commit-resolution command applies base item, local indexes, TTL
-metadata, stream intent, and the applied marker together. An abort-resolution
+commit. A commit-resolution command applies base items, existing local indexes,
+TTL metadata, and the applied marker together. Future stream capture must
+join that same command. An abort-resolution
 command removes intent and locks together. It records `ABORTED` even if the
 prepare has not arrived, so a delayed prepare cannot acquire locks after
 recovery declares the participant resolved. A rejected command cannot leave a
@@ -144,8 +175,8 @@ the resolver running; it must never be reported as a clean cancellation.
 Acquire all participant prepares in a stable order and fail or back off on
 lock conflict. Do not wait while holding one participant's locks for another
 conflicting transaction to release its locks. This avoids a distributed wait
-cycle. Conditions and updates are evaluated **after** each local lock is
-acquired; preflight expression evaluation is advisory only. Single-item writes,
+cycle. Conditions and updates are evaluated in the same serialized command
+as conflict checking and lock acquisition; preflight evaluation is advisory. Single-item writes,
 same-Cell transactions, TTL deletion, and table deletion must consult the
 same lock table. A separate prepare path without those sibling changes is
 unsafe.
@@ -223,21 +254,56 @@ within the same HASH group. Unrelated keyed reads and disjoint indexed query
 ranges remain available. Read-triggered decision lookup/resolution is not
 implemented; retry success depends on the request driver, serving worker, or
 startup recovery completing resolution. An outage never permits an old-value
-fallback. This is an internal safety prerequisite, not full DynamoDB read
-availability or cross-Cell snapshot support.
+fallback. Read-triggered resolution remains an availability improvement.
+Read barriers ignore shared read locks; writes, TTL deletion, table deletion,
+route activation, and split sealing continue to respect every lock.
 
 Running independent `PartitionTransactGet` queries is insufficient: a write
-can commit between them and produce a mixed result. A cross-Cell
-`TransactGetItems` therefore acquires shared read locks on all requested keys
-in the same participant order, after resolving conflicting prepared writes.
-Each participant returns values from one local snapshot while its read locks
-remain held. Once all locks are held, the collected values have a common
-serialization point; release occurs only after the coordinator has durably
-closed or fenced the read. Read locks are bounded by a durable read lease,
-but expiry must fence a late reader before it can return values. A failed
-participant or split aborts the read and releases all acquired locks. This
-protocol needs a real read coordinator or equivalent durable lock owner;
-using host memory alone can strand locks or allow stale responses.
+can commit between them and produce a mixed result. The implemented cross-Cell
+read uses this protocol:
+
+```text
+publish BEGIN with original keys, operation indexes, and participant targets
+  -> prepare each participant in Cell-ID order
+       reject conflicting write locks
+       capture existing OR absent images and acquire shared locks atomically
+  -> publish COMMIT only after all published prepare receipts
+  -> resolve every participant, releasing shared locks
+  -> fetch saved images by original participant and operation position
+  -> restore request order and return the complete response
+```
+
+**Serialization argument:** each captured key remains unchanged from its
+prepare until the first committed resolution. All those intervals overlap
+once the final prepare publishes. COMMIT occurs inside that common interval.
+An overlapping write either precedes the capture, conflicts, or follows lock
+release. Saved images remain immutable after release, so subsequent writes
+cannot change a response that is still being assembled. Missing items require
+locks too: otherwise a concurrent create could invalidate the snapshot.
+
+Read images live in `ddb_transaction_reads`, keyed by transaction ID and local
+position. They become queryable only after participant COMMIT and a matching
+coordinator identity. ABORT deletes them with lock release. Each image is read
+through one bounded Cell query, preserving missing items and repeated keys
+without forcing the entire response through one RPC. The storage contract
+preserves repeated positions; ExtendDB rejects duplicate keys at the public
+HTTP boundary. Participant preparation and final assembly enforce the 4-MiB
+aggregate item limit.
+
+Readers can coexist. Releasing one reader deletes only its own locks; an
+ordinary write still conflicts until every reader releases. Query and Scan
+ignore shared read locks because no staged mutation needs hiding.
+
+The existing durable coordinator owns read lifetime; no host-memory lock owner
+or independent expiring read lease is introduced. Lost replies, abandoned
+requests, and serving/startup recovery use the same driver as writes. A
+prepare conflict or stale route aborts the whole read. Coordinator uncertainty
+remains retryable and cannot be interpreted as a successful snapshot.
+
+Committed read images are currently retained indefinitely. Safe bounded
+collection requires a completion/response-retention contract that also fences
+late fetches and recovery. This is an explicit capacity gap, especially for
+read-heavy workloads; it must be closed before production scale claims.
 
 ## Splits, recovery, and capacity
 
@@ -285,10 +351,16 @@ write cancellation and rollback alongside transactional read cancellation.
 adapter against mixed account/data participants. It drops replies after BEGIN,
 prepare, decision, and resolution; verifies durable recovery, token replay and
 mismatch; and retries a canceled token after its condition becomes satisfiable.
+The read path also drops all four phase replies and checks ordered existing,
+missing, and repeated-key results. `transaction_reads.rs` prepares two shared
+readers over account/data participants, proves writes remain blocked after
+only one resolves, and verifies saved images after later live writes.
 `tests/server_binary.rs` sends signed AWS SDK writes to two primary keys in
 different data Cells through the serving binary against RustFS, then checks
-replay and both values after a hard kill and restart. The two-owner mTLS test
-also checks a transaction and token replay through a replacement frontend.
+replay and both values after a hard kill and restart. It also checks cross-Cell
+TransactGet with projections and a missing item before and after restart. The two-owner mTLS test
+also checks transactions, transactional reads, and token replay through a
+replacement frontend.
 These tests do not establish fleet-scale qualification.
 
 Coordinator token tests restore historical BEGIN, partially resolved COMMIT,
@@ -393,8 +465,8 @@ by table ID and canonical item key. Account Scan conservatively fences the
 unvisited range, including pending creates without live rows. The account
 participant test checks these barriers and their persistence across owner
 restart; SQLite query plans use covering primary-key lookups for item, range,
-and table fences and an owner index for lock cleanup. Cross-Cell transactional
-reads remain unsupported. TTL candidate reads are internal hints; deletion still uses the
+and table fences and an owner index for lock cleanup. Shared read modes use
+partial indexes for exclusive-intent lookup. TTL candidate reads are internal hints; deletion still uses the
 lock-aware item command. Usage/statistics queries do not expose item images.
 
 The prior branch behavior returned live images without checking intents.
@@ -410,8 +482,9 @@ gates remain necessary.
    coordinator shards per account. Current shards remain resident; ordinary
    transaction traffic can exhaust that pool. Startup registry recovery alone
    is insufficient for the 10,000-Cell, multi-TB target.
-2. Add cross-Cell transactional read locking and read-triggered write
-   resolution. Preserve the account and data read barriers while doing so.
+2. Add read-triggered write resolution. Qualify pending read-owner recovery
+   and concurrent read/write histories across each failure boundary; shared
+   lock and saved-image tests do not establish the full distributed matrix.
 3. Integrate ExtendDB stream and index effects with participant commit. The
    current public adapter rejects unsupported capture/index behavior.
 4. Qualify signed token replay across live splits, restart at each split
@@ -420,11 +493,9 @@ gates remain necessary.
    signed process tests cover two-Cell writes and hard restart. These are
    complementary evidence, not the complete distributed failure matrix.
 5. Bound retained coordinator/participant history without removing evidence
-   needed by delayed invocations, splits, or backups. Measure distribution,
+   needed by delayed invocations, saved read responses, splits, or backups. Measure distribution,
    recovery backlog, throughput and latency at 1,000 and 10,000 active Cells
    with multi-TB data.
 
-Keep cross-Cell `TransactGetItems` explicitly unsupported until its snapshot
-protocol is verified. Public writes must continue to wait for all participant
-resolutions: success after the decision alone could expose partial application;
+Public writes must continue to wait for all participant resolutions: success after the decision alone could expose partial application;
 cancellation after an ambiguous decision could hide a committed transaction.

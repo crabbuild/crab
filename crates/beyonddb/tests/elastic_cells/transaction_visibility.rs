@@ -35,13 +35,13 @@ pub(crate) async fn assert_range_read_barriers(
                 transaction_id,
                 coordinator_cell,
                 operations: vec![
-                    TransactionWrite::Put(PutItemInput {
+                    TransactionOperation::Put(PutItemInput {
                         table_name: key_info.table_name.clone(),
                         table_id: key_info.table_id.clone(),
                         item: created.clone(),
                         condition: None,
                     }),
-                    TransactionWrite::Delete(DeleteItemInput {
+                    TransactionOperation::Delete(DeleteItemInput {
                         table_name: key_info.table_name.clone(),
                         table_id: key_info.table_id.clone(),
                         key: deleted.clone(),
@@ -286,7 +286,7 @@ pub(crate) async fn assert_sdk_read_barrier(
                 epoch: partition.epoch,
                 transaction_id,
                 coordinator_cell,
-                operations: vec![TransactionWrite::Delete(DeleteItemInput {
+                operations: vec![TransactionOperation::Delete(DeleteItemInput {
                     table_name: partition.table.table_name.clone(),
                     table_id: partition.table.id.clone(),
                     key,

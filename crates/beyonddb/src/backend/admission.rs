@@ -1,4 +1,4 @@
-//! Public write admission through one coordinator authority for every destination.
+//! Public transaction admission through one coordinator authority for every destination.
 
 use std::collections::BTreeMap;
 
@@ -11,19 +11,25 @@ use super::{CellStorage, cell_error, mutation_identity};
 use crate::{
     BeginCrossCellTransaction, BeginCrossCellTransactionInput, BeginCrossCellTransactionOutcome,
     CoordinatorDecision, CoordinatorParticipant, CoordinatorParticipantTarget,
-    IndexedTransactionWrite, Json, ReadCoordinatorToken, ReadCoordinatorTokenOutcome,
-    ReadCrossCellTransaction, ReadCrossCellTransactionInput, TransactionToken, TransactionWrite,
-    coordinator_target,
+    IndexedTransactionOperation, Json, ReadCoordinatorToken, ReadCoordinatorTokenOutcome,
+    ReadCrossCellTransaction, ReadCrossCellTransactionInput, TransactionOperation,
+    TransactionToken, coordinator_target,
 };
+
+pub(super) struct AdmittedTransaction {
+    pub identity: ReadCrossCellTransactionInput,
+    pub decision: CoordinatorDecision,
+    pub replay: bool,
+}
 
 impl CellStorage {
     pub(super) async fn admit_transaction(
         &self,
         account_id: &str,
         token: Option<TransactionToken>,
-        operations: Vec<TransactionWrite>,
+        operations: Vec<TransactionOperation>,
         routing: Vec<(TableKeyInfo, Item)>,
-    ) -> Result<(CoordinatorDecision, bool), StorageError> {
+    ) -> Result<AdmittedTransaction, StorageError> {
         let provisioner = self.coordinators.as_ref().ok_or_else(|| {
             StorageError::Connection("transaction coordinator admission is not configured".into())
         })?;
@@ -42,11 +48,9 @@ impl CellStorage {
         if let Some(token) = &token
             && let Some((id, decision)) = self.coordinator_token(&coordinator, token).await?
         {
-            let replay = decision == CoordinatorDecision::Commit;
-            let terminal = self
-                .resume_cross_cell_transaction(account_id, &routing_key, id)
-                .await?;
-            return Ok((terminal, replay));
+            return self
+                .complete_admission(account_id, routing_key, id, decision)
+                .await;
         }
         let mut participants: BTreeMap<[u8; 32], CoordinatorParticipant> = BTreeMap::new();
         for (index, (operation, (info, key))) in operations.into_iter().zip(routing).enumerate() {
@@ -76,7 +80,7 @@ impl CellStorage {
                 .map_err(|_| StorageError::Validation("too many transaction operations".into()))?;
             participant
                 .operations
-                .push(IndexedTransactionWrite { index, operation });
+                .push(IndexedTransactionOperation { index, operation });
         }
         let input = BeginCrossCellTransactionInput {
             account_id: account_id.into(),
@@ -140,10 +144,29 @@ impl CellStorage {
             }
             Err(error) => return Err(cell_error(error)),
         };
+        self.complete_admission(account_id, routing_key, transaction_id, prior)
+            .await
+    }
+
+    async fn complete_admission(
+        &self,
+        account_id: &str,
+        routing_key: Vec<u8>,
+        transaction_id: [u8; 16],
+        prior: CoordinatorDecision,
+    ) -> Result<AdmittedTransaction, StorageError> {
         let decision = self
             .resume_cross_cell_transaction(account_id, &routing_key, transaction_id)
             .await?;
-        Ok((decision, prior == CoordinatorDecision::Commit))
+        Ok(AdmittedTransaction {
+            identity: ReadCrossCellTransactionInput {
+                account_id: account_id.into(),
+                routing_key,
+                transaction_id,
+            },
+            decision,
+            replay: prior == CoordinatorDecision::Commit,
+        })
     }
 
     async fn coordinator_token(

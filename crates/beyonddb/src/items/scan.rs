@@ -64,7 +64,7 @@ impl Query for ScanItems {
         // Missing live rows can still have prepared creates. Probe locks first
         // so Scan cannot skip those intents just because their live rows are absent.
         let locked = context.sql(&statement(
-            "SELECT 1 FROM ddb_account_transaction_locks WHERE table_id = ?1 AND item_key > ?2 LIMIT 1",
+            "SELECT 1 FROM ddb_account_transaction_locks WHERE table_id = ?1 AND item_key > ?2 AND write_lock = 1 LIMIT 1",
             vec![SqlValue::Text(table.id.clone()), SqlValue::Blob(cursor.clone())],
         ))?;
         if !locked[0].rows.is_empty() {

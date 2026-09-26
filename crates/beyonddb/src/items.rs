@@ -334,9 +334,11 @@ impl Query for GetItem {
     }
 }
 
-/// A write staged with other account-local operations in one Cell transaction.
+/// An operation staged with other items under one coordinator decision.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum TransactionWrite {
+pub enum TransactionOperation {
+    /// Capture an item under a shared read lock.
+    Read(GetItemInput),
     /// Replace the item at its primary key.
     Put(PutItemInput),
     /// Delete the item at its primary key.
@@ -363,7 +365,7 @@ pub struct ConditionCheckInput {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TransactWriteInput {
     /// Ordered operations, which may address distinct tables in this account.
-    pub operations: Vec<TransactionWrite>,
+    pub operations: Vec<TransactionOperation>,
 }
 
 /// Result of an account-local transaction.
@@ -416,7 +418,7 @@ impl Command for TransactWrite {
 pub(crate) mod transaction;
 pub use transaction::{
     PrepareAccountTransaction, PrepareAccountTransactionInput, ReadAccountTransaction,
-    ResolveAccountTransaction,
+    ReadAccountTransactionResult, ResolveAccountTransaction,
 };
 
 mod scan;

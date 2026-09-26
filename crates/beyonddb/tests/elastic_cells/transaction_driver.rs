@@ -91,9 +91,9 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                     partition_id,
                     epoch: 1,
                 },
-                operations: vec![IndexedTransactionWrite {
+                operations: vec![IndexedTransactionOperation {
                     index: u8::try_from(position).unwrap(),
-                    operation: TransactionWrite::Put(PutItemInput {
+                    operation: TransactionOperation::Put(PutItemInput {
                         table_name: table.table_name.clone(),
                         table_id: table.id.clone(),
                         item,
@@ -128,7 +128,8 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
             .collect();
         if scenario != 181 && scenario != 185 {
             for participant in &mut request {
-                let TransactionWrite::Put(input) = &mut participant.operations[0].operation else {
+                let TransactionOperation::Put(input) = &mut participant.operations[0].operation
+                else {
                     unreachable!()
                 };
                 input
@@ -137,7 +138,7 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
             }
         }
         if scenario == 182 {
-            let TransactionWrite::Put(input) = &mut request[1].operations[0].operation else {
+            let TransactionOperation::Put(input) = &mut request[1].operations[0].operation else {
                 unreachable!()
             };
             input.condition = Some(serde_json::from_value(serde_json::json!({
@@ -310,7 +311,7 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                 .unwrap();
         }
         for (target, participant) in &participants {
-            let TransactionWrite::Put(input) = &participant.operations[0].operation else {
+            let TransactionOperation::Put(input) = &participant.operations[0].operation else {
                 unreachable!()
             };
             let key = extenddb_core::types::extract_key(&input.item, &table.key_schema);
