@@ -6,7 +6,7 @@ CREATE TABLE ddb_coordinator_transactions (
     request_digest BLOB NOT NULL,
     state INTEGER NOT NULL CHECK (state IN (0, 1, 2)),
     unresolved_count INTEGER NOT NULL CHECK (unresolved_count BETWEEN 0 AND 100),
-    abort_reason BLOB,
+    abort_chunks INTEGER,
     created_at_ms INTEGER NOT NULL,
     decided_at_ms INTEGER,
     completed_at_ms INTEGER
@@ -23,7 +23,7 @@ CREATE TABLE ddb_coordinator_participants (
     position INTEGER NOT NULL,
     cell_id BLOB NOT NULL,
     target BLOB NOT NULL,
-    operations BLOB NOT NULL,
+    operation_chunks INTEGER NOT NULL,
     prepared_sequence INTEGER,
     resolved_sequence INTEGER,
     PRIMARY KEY (transaction_id, position)

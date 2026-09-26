@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     CoordinatorDecision, CoordinatorParticipant, CoordinatorParticipantTarget, MODULE,
-    coordinator_target, decode_decision,
+    coordinator_target, read_decision,
 };
 use crate::table::statement;
 use crate::{Error, Json, Result, SqlValue};
@@ -189,7 +189,7 @@ impl Command for DecideCrossCellTransaction {
             )));
         }
         let rows = context.sql(&statement(
-            "SELECT state, abort_reason FROM ddb_coordinator_transactions \
+            "SELECT state, abort_chunks FROM ddb_coordinator_transactions \
              WHERE transaction_id = ?1 AND account_id = ?2",
             vec![
                 SqlValue::Blob(input.transaction_id.to_vec()),
@@ -205,7 +205,12 @@ impl Command for DecideCrossCellTransaction {
             return Err(Error::Command("invalid coordinator transaction record"));
         };
         if *state != 0 {
-            let current = decode_decision(*state, reason)?;
+            let current = read_decision(
+                |batch| context.sql(batch),
+                input.transaction_id,
+                *state,
+                reason,
+            )?;
             if current == input.decision {
                 return Ok(CommandResult::Success(Json(
                     DecideCrossCellTransactionOutcome::Decided(current),
@@ -233,12 +238,19 @@ impl Command for DecideCrossCellTransaction {
             2
         };
         let reason = if state == 2 {
-            SqlValue::Blob(serde_json::to_vec(&input.decision)?)
+            // Cancellation can carry an old item larger than one SQL result.
+            // Reserve a separate payload position from participant indexes.
+            SqlValue::Integer(crate::transaction_payload::write(
+                context,
+                input.transaction_id,
+                super::DECISION_PAYLOAD,
+                &serde_json::to_vec(&input.decision)?,
+            )?)
         } else {
             SqlValue::Null
         };
         context.sql(&statement(
-            "UPDATE ddb_coordinator_transactions SET state = ?1, abort_reason = ?2, decided_at_ms = ?3 \
+            "UPDATE ddb_coordinator_transactions SET state = ?1, abort_chunks = ?2, decided_at_ms = ?3 \
              WHERE transaction_id = ?4 AND state = 0",
             vec![SqlValue::Integer(state), reason, SqlValue::Integer(context.now_ms()), SqlValue::Blob(input.transaction_id.to_vec())],
         ))?;
@@ -352,7 +364,7 @@ impl Query for ReadCrossCellTransaction {
             ));
         }
         let rows = context.sql(&statement(
-            "SELECT t.state, t.abort_reason, COUNT(p.position), COUNT(p.prepared_sequence), COUNT(p.resolved_sequence) \
+            "SELECT t.state, t.abort_chunks, COUNT(p.position), COUNT(p.prepared_sequence), COUNT(p.resolved_sequence) \
              FROM ddb_coordinator_transactions t JOIN ddb_coordinator_participants p \
              ON p.transaction_id = t.transaction_id \
              WHERE t.transaction_id = ?1 AND t.account_id = ?2 GROUP BY t.transaction_id",
@@ -375,7 +387,12 @@ impl Query for ReadCrossCellTransaction {
             u8::try_from(value).map_err(|_| Error::Command("invalid coordinator participant count"))
         };
         Ok(Json(Some(CrossCellTransactionStatus {
-            decision: decode_decision(*state, reason)?,
+            decision: read_decision(
+                |batch| context.sql(batch),
+                input.transaction_id,
+                *state,
+                reason,
+            )?,
             participant_count: count(*total)?,
             prepared_count: count(*prepared)?,
             resolved_count: count(*resolved)?,
@@ -409,7 +426,7 @@ impl Query for ReadCoordinatorParticipant {
             ));
         }
         let rows = context.sql(&statement(
-            "SELECT p.target, p.operations FROM ddb_coordinator_participants p \
+            "SELECT p.target, p.operation_chunks FROM ddb_coordinator_participants p \
              JOIN ddb_coordinator_transactions t ON t.transaction_id = p.transaction_id \
              WHERE t.transaction_id = ?1 AND t.account_id = ?2 AND p.position = ?3",
             vec![
@@ -421,12 +438,17 @@ impl Query for ReadCoordinatorParticipant {
         let Some(row) = rows[0].rows.first() else {
             return Ok(Json(None));
         };
-        let [SqlValue::Blob(target), SqlValue::Blob(operations)] = row.as_slice() else {
+        let [SqlValue::Blob(target), SqlValue::Integer(chunks)] = row.as_slice() else {
             return Err(Error::Command("invalid coordinator payload"));
         };
         Ok(Json(Some(CoordinatorParticipant {
             target: serde_json::from_slice(target)?,
-            operations: serde_json::from_slice(operations)?,
+            operations: serde_json::from_slice(&crate::transaction_payload::read(
+                |batch| context.sql(batch),
+                input.transaction_id,
+                i64::from(input.position),
+                *chunks,
+            )?)?,
         })))
     }
 }

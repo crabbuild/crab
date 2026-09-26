@@ -156,6 +156,56 @@ recovery declares the participant resolved. A rejected command cannot leave a
 partial prepare: the runtime rolls its application savepoint back while
 recording the rejection.
 
+## Bounded SQL payloads
+
+Coordinator participant operations, cancellation decisions, and participant
+staged images now use `ddb_transaction_payloads`, addressed by transaction,
+position, and chunk. Each chunk is at most 256 KiB. The owning record stores
+the chunk count, and reads require every named chunk. Participant positions
+are nonnegative; the coordinator reserves position -1 for its terminal abort
+reason, which can contain a large old item. A missing chunk is an error.
+
+Every chunk is written inside the original BEGIN, prepare, or decision command.
+There is no separately published upload phase. Locks, chunk counts, and payload
+rows commit or roll back together. Participant resolution reads its chunks,
+applies images, deletes staged chunks, releases locks, and sets its terminal
+marker inside one command. Coordinator history remains retained as before;
+this change does not implement history collection or add durable phase commands.
+
+Large individual items also need bounded SQL, even below DynamoDB's item limit:
+JSON escapes can make their encoded images exceed 1 MiB. The shared
+`src/item_storage.rs` path initializes an empty BLOB and appends 256-KiB pieces
+inside the same command that updates indexes and TTL metadata. Reads use
+byte-based `substr` on BLOBs under the same serialized command/query context.
+This keeps the existing item JSON format and prevents prepare from succeeding
+only to hit the SQL parameter limit when applying its image after COMMIT.
+The same path serves account/data mutations, saved transactional read images,
+Get, local TransactGet, Query, Scan/export, TTL backfill, and TTL candidate reads.
+Query and TTL select bounded key batches before fetching item images; they no
+longer place several large images in one SQL result.
+
+The shared SDK fixture exercises ten 380-KiB items grouped into two participants,
+then Updates, full TransactGet, and token replay after owner replacement. A
+second case includes control characters and UTF-8 characters: each item fits
+DynamoDB's item limit while its JSON exceeds the SQL limit. It also checks
+Query, Scan, and cancellation with `ALL_OLD`. The process smoke exercises the
+same requests across a hard restart. The mixed account/data host fixture drops
+BEGIN, prepare, decision, and apply replies for large payloads, then confirms
+replay cannot recreate subsequently deleted items.
+
+The expanded process fixture also surfaced an intermittent `ServiceUnavailable`
+during later table recreation, after its transaction/restart assertions passed.
+A subsequent complete run passed. The admission failure is not yet minimized;
+movement/reclamation pressure is a hypothesis, not a confirmed cause. This
+remains an availability qualification gap.
+
+The transaction payload schema is unshipped and replaces the former blob
+columns directly; no compatibility reader is retained. Item BLOB encoding and
+external APIs are unchanged. Encoded Cell RPC limits are still finite: a valid
+4-MiB DynamoDB transaction whose complete JSON encoding exceeds the Cell wire
+limit still needs a bounded admission/transport design. Aggregate evaluated
+Update size, capacity reservation, and history collection remain separate gaps.
+
 ## Write state machine
 
 ```text
@@ -570,8 +620,9 @@ gates remain necessary.
 
 ## Foundation review
 
-Review baseline: `88d06d986c9`. This section distinguishes implemented safety
-mechanisms from compatibility defects and unqualified availability properties.
+Historical review baseline: `88d06d986c9`. The SQL payload finding below is
+resolved by the bounded storage path above. The aggregate-size, retention, and
+fleet-availability findings remain open.
 `origin/main` has no BeyondDB implementation to serve as a production baseline.
 
 ### Evidence map
@@ -579,7 +630,7 @@ mechanisms from compatibility defects and unqualified availability properties.
 | Boundary | Entry, owner, and dependency | Existing proof and remaining gap |
 | --- | --- | --- |
 | Public admission | ExtendDB `handle_transact_write_items` → `backend/data.rs` → `backend/admission.rs` → coordinator BEGIN | Signed SDK writes, token mismatch/replay, dropped BEGIN reply; evaluated aggregate write size remains unchecked. |
-| Prepare | `backend/transaction.rs` → account/data wrappers → shared `participant::record_prepare` | Mixed participants, conditions, absent-key locks, owner restart; large participant payload fails the SQL primitive limit below. |
+| Prepare | `backend/transaction.rs` → account/data wrappers → shared `participant::record_prepare` | Mixed participants, conditions, absent-key locks, owner restart; the reproduced SQL payload limit is now addressed by bounded storage. |
 | Decision | Driver → `RecordParticipantPrepare` → `DecideCrossCellTransaction` | COMMIT requires every recorded prepare; terminal decisions cannot change. Receipts are trusted driver assertions, not independently verified certificates. |
 | Apply | `backend/recovery.rs` → account/data resolver → `participant::resolve` | Repeated resolution, abort-before-prepare tombstones, partial apply recovery; capacity reserved for eventual apply is not established. |
 | Reads | Get/Query/Scan barriers and `backend/transaction_read.rs` | Pending creates, partial COMMIT, shared snapshots, saved images; full concurrent-history/fault matrix remains open. |
@@ -634,11 +685,11 @@ an arbitrary faulty/compromised fleet caller.
 ### Confirmed payload limit below the public contract
 
 The runtime SQL primitive caps each input batch and result at **1 MiB**.
-`CommandContext::sql` uses that primitive. BeyondDB stores all of a participant's
-staged images in one `ddb_transactions.staged` blob, and reads that blob again
-for resolution. The coordinator also stores each participant's operations in
-one blob. Those layouts impose a smaller limit than the public transaction
-contract, independently of the 512-MiB database and 64-MiB capture budgets.
+`CommandContext::sql` uses that primitive. At the review baseline, BeyondDB stored all of a participant's staged images
+in one `ddb_transactions.staged` blob, then read that blob for resolution.
+The coordinator also stored each participant's operations in one blob. Those
+layouts imposed a smaller limit than the public transaction contract,
+independently of the 512-MiB database and 64-MiB capture budgets.
 
 A temporary host-level probe extended the mixed account/data integration
 fixture with six items, each carrying a 360-KiB string. Three items belonged to
@@ -658,19 +709,19 @@ integration fixture was restored. It was not a signed SDK acceptance test.
 A separate remote attempt surfaced only a generic peer rejection, so that
 response alone did not establish the source of the failure.
 
-A valid large Put group can fail while recording BEGIN. A small Update request
-can publish BEGIN and then fail while recording its much larger prepared image.
-The serving driver currently treats that failure as retryable; it has no rule
+At that baseline, a valid large Put group could fail while recording BEGIN.
+A small Update request could publish BEGIN and then fail while recording its
+much larger prepared image. The serving driver treated that failure as retryable; it has no rule
 that changes this deterministic size error into a durable ABORT. Earlier
 participants, if any prepared, can therefore retain locks while recovery keeps
 retrying. This latter failure schedule follows the code; the probe did not
 establish earlier-participant lock retention.
 
-The bounded fix belongs in BeyondDB's payload layout: store/retrieve operations
-and staged images in bounded rows or chunks while keeping the complete local
-prepare/apply inside one Cell command savepoint. Account and data participants,
-coordinator admission, recovery reads, and same-Cell read results all need the
-same size audit. Merely increasing the database limit cannot fix it. JSON/peer
+The implemented fix changes BeyondDB's payload layout to bounded chunks while
+keeping the complete local prepare/apply inside one Cell command savepoint.
+It covers account and data participants, coordinator admission/recovery reads,
+and item/saved-read SQL transfers. Increasing the database limit alone would
+not fix this failure. JSON/peer
 encoding also needs explicit qualification: encoded bytes may exceed DynamoDB
 item bytes, especially for binary values and escaped strings.
 
@@ -684,7 +735,7 @@ backend also lacks that aggregate post-evaluation check. This is source evidence
 the oversized transaction probe reached the SQL limit first and did not prove
 that a transaction exceeding 4 MiB commits.
 
-After fixing the payload layout, prepare must publish immutable size accounting
+Prepare must also publish immutable size accounting
 with its outcome. The coordinator must enforce the aggregate limit before
 COMMIT, including resumed prepares and lost replies. The accounting convention
 for Delete and ConditionCheck needs explicit compatibility evidence; it must
@@ -716,9 +767,9 @@ terminal ABORT and complete lock cleanup, never an error discovered after apply.
 
 ### Implementation and qualification order
 
-1. Remove the single-blob SQL ceiling, preserving atomic local savepoints.
-   Add signed local/peer tests near the 4-MiB transaction limit, including
-   Update expansion, binary encoding, lost phase replies, and restart.
+1. The single-blob SQL ceiling is removed, with signed large-payload and
+   escaped-item coverage. Complete encoded wire-limit qualification, including
+   near-limit binary payloads and Updates that expand their stored images.
 2. Enforce evaluated aggregate size before COMMIT; reserve or otherwise prove
    sufficient apply/recovery headroom. Test both account and data participants.
 3. Add systematic concurrent histories and crash cuts at BEGIN, each prepare,

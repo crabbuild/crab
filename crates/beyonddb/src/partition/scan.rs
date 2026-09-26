@@ -4,8 +4,8 @@ use extenddb_core::types::{Item, extract_key, item_size_bytes};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AccessState, DATA_MODULE, Json, Query, QueryContext, Result, SqlValue, decode_item,
-    decode_spec, query_access,
+    AccessState, DATA_MODULE, Json, Query, QueryContext, Result, SqlValue, decode_spec,
+    query_access,
 };
 use crate::Error;
 use crate::items::{item_key, valid_key};
@@ -141,11 +141,9 @@ fn scan_page(
             let [SqlValue::Blob(key)] = row.as_slice() else {
                 return Err(Error::Command("invalid partition scan key row"));
             };
-            let item_rows = context.sql(&statement(
-                "SELECT item FROM ddb_partition_items WHERE item_key = ?1",
-                vec![SqlValue::Blob(key.clone())],
-            ))?;
-            let Some(item) = decode_item(&item_rows[0])? else {
+            let Some(item) =
+                crate::item_storage::StoredItem::Partition(key).read(|batch| context.sql(batch))?
+            else {
                 return Err(Error::Command("partition scan key has no item"));
             };
             let encoded_bytes = serde_json::to_vec(&item)?.len();

@@ -24,7 +24,7 @@ use extenddb_core::types::{Item, KeySchemaElement};
 use serde::{Deserialize, Serialize};
 
 use crate::expression_wire::{WireCondition, WireUpdate};
-use crate::items::{decode_item, item_key, valid_item, valid_key};
+use crate::items::{item_key, valid_item, valid_key};
 use crate::table::{TableRecord, statement};
 use crate::{
     DATA_MODULE, DATA_NAMESPACE, Error, Json, OPERATION_BYTES, Result, SqlResultSet, SqlValue,
@@ -107,7 +107,9 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
                 source.update(include_bytes!("partition/transaction/participant.rs"));
                 source.update(include_bytes!("partition/ttl.rs"));
                 source.update(include_bytes!("items.rs"));
+                source.update(include_bytes!("item_storage.rs"));
                 source.update(include_bytes!("participant.rs"));
+                source.update(include_bytes!("transaction_payload.rs"));
                 source.update(include_bytes!("table.rs"));
                 source.update(include_bytes!("expression_wire.rs"));
                 Digest::from_bytes(*source.finalize().as_bytes())
@@ -1304,13 +1306,9 @@ impl Query for PartitionGet {
         if let Some(conflict) = transaction::read_key_conflict(context, &key)? {
             return Ok(Json(PartitionGetOutcome::Conflict(conflict)));
         }
-        let item_rows = context.sql(&statement(
-            "SELECT item FROM ddb_partition_items WHERE item_key = ?1",
-            vec![SqlValue::Blob(key)],
-        ))?;
-        Ok(Json(PartitionGetOutcome::Found(decode_item(
-            &item_rows[0],
-        )?)))
+        Ok(Json(PartitionGetOutcome::Found(
+            crate::item_storage::StoredItem::Partition(&key).read(|batch| context.sql(batch))?,
+        )))
     }
 }
 
@@ -1387,11 +1385,7 @@ pub(super) fn query_access(context: &mut QueryContext<'_>) -> Result<AccessState
 }
 
 fn command_item(context: &mut CommandContext<'_, '_>, key: &[u8]) -> Result<Option<Item>> {
-    let rows = context.sql(&statement(
-        "SELECT item FROM ddb_partition_items WHERE item_key = ?1",
-        vec![SqlValue::Blob(key.to_vec())],
-    ))?;
-    decode_item(&rows[0])
+    crate::item_storage::StoredItem::Partition(key).read(|batch| context.sql(batch))
 }
 
 fn write_item(
@@ -1405,18 +1399,17 @@ fn write_item(
     context.sql(&statement(
         "INSERT INTO ddb_partition_items \
          (item_key, partition_key, sort_key, item, ttl_generation, ttl_epoch) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(item_key) DO UPDATE SET \
+         VALUES (?1, ?2, ?3, X'', ?4, ?5) ON CONFLICT(item_key) DO UPDATE SET \
          partition_key = excluded.partition_key, sort_key = excluded.sort_key, \
          item = excluded.item, ttl_generation = excluded.ttl_generation, \
          ttl_epoch = excluded.ttl_epoch",
         vec![
-            SqlValue::Blob(key),
+            SqlValue::Blob(key.clone()),
             SqlValue::Blob(partition_key),
             SqlValue::Blob(sort_key),
-            SqlValue::Blob(serde_json::to_vec(item)?),
             ttl_generation,
             ttl_epoch,
         ],
     ))?;
-    Ok(())
+    crate::item_storage::StoredItem::Partition(&key).append(context, item)
 }

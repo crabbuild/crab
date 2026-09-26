@@ -287,7 +287,7 @@ impl Command for BackfillPartitionTtl {
         }
         for _ in 0..32 {
             let rows = context.sql(&statement(
-                "SELECT item_key, item FROM ddb_partition_items \
+                "SELECT item_key FROM ddb_partition_items \
                  WHERE (?1 IS NULL OR item_key > ?1) ORDER BY item_key LIMIT 2",
                 vec![state.cursor.clone().map_or(SqlValue::Null, SqlValue::Blob)],
             ))?;
@@ -301,10 +301,12 @@ impl Command for BackfillPartitionTtl {
                 )));
             }
             for row in &rows[0].rows {
-                let [SqlValue::Blob(key), SqlValue::Blob(image)] = row.as_slice() else {
+                let [SqlValue::Blob(key)] = row.as_slice() else {
                     return Err(Error::Command("invalid TTL backfill item"));
                 };
-                let item: Item = serde_json::from_slice(image)?;
+                let item = crate::item_storage::StoredItem::Partition(key)
+                    .read(|batch| context.sql(batch))?
+                    .ok_or(Error::Command("TTL key has no item"))?;
                 let epoch = item_epoch(&item, state.attribute.as_deref());
                 context.sql(&statement(
                     "UPDATE ddb_partition_items SET ttl_generation = ?1, ttl_epoch = ?2 \
@@ -375,7 +377,7 @@ impl Query for ReadExpiredPartition {
             return Ok(Json(ExpiredPartitionOutcome::NotReady));
         }
         let rows = context.sql(&statement(
-            "SELECT item FROM ddb_partition_items WHERE ttl_generation = ?1 \
+            "SELECT item_key FROM ddb_partition_items WHERE ttl_generation = ?1 \
              AND ttl_epoch BETWEEN 1 AND ?2 ORDER BY ttl_epoch, item_key LIMIT 2",
             vec![
                 SqlValue::Integer(state.generation),
@@ -383,11 +385,20 @@ impl Query for ReadExpiredPartition {
             ],
         ))?;
         let mut items = Vec::with_capacity(rows[0].rows.len());
+        let mut bytes = 0;
         for row in &rows[0].rows {
-            let [SqlValue::Blob(image)] = row.as_slice() else {
+            let [SqlValue::Blob(key)] = row.as_slice() else {
                 return Err(Error::Command("invalid expired item row"));
             };
-            items.push(serde_json::from_slice(image)?);
+            let item = crate::item_storage::StoredItem::Partition(key)
+                .read(|batch| context.sql(batch))?
+                .ok_or(Error::Command("expired key has no item"))?;
+            let encoded = serde_json::to_vec(&item)?.len();
+            if !items.is_empty() && bytes + encoded > 900_000 {
+                break;
+            }
+            bytes += encoded;
+            items.push(item);
         }
         Ok(Json(ExpiredPartitionOutcome::Items(items)))
     }

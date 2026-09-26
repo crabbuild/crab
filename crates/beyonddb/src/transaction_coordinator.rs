@@ -22,7 +22,12 @@ use crate::{
 pub(crate) const MODULE: &str = "beyonddb-coordinator";
 pub(crate) const NAMESPACE: NamespaceId = NamespaceId::from_bytes([0x45; 16]);
 const SHARDS: u32 = 4_096;
-const SCHEMA: &str = include_str!("transaction_coordinator_schema.sql");
+const DECISION_PAYLOAD: i64 = -1;
+const SCHEMA: &str = concat!(
+    include_str!("transaction_payload_schema.sql"),
+    "\n",
+    include_str!("transaction_coordinator_schema.sql")
+);
 
 static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     id: NAMESPACE,
@@ -66,6 +71,7 @@ impl crab_cell_runtime::registry::CellModule for CoordinatorModule {
             source_digest: {
                 let mut source = blake3::Hasher::new();
                 source.update(include_bytes!("transaction_coordinator.rs"));
+                source.update(include_bytes!("transaction_payload.rs"));
                 source.update(include_bytes!("transaction_coordinator/phase.rs"));
                 source.update(include_bytes!("transaction_coordinator/token.rs"));
                 source.update(include_bytes!("transaction_token.rs"));
@@ -228,7 +234,7 @@ impl Command for BeginCrossCellTransaction {
             |token| token.fingerprint.clone(),
         );
         let rows = context.sql(&statement(
-            "SELECT transaction_id, fingerprint, request_digest, state, abort_reason, token \
+            "SELECT transaction_id, fingerprint, request_digest, state, abort_chunks, token \
              FROM ddb_coordinator_transactions \
              WHERE transaction_id = ?1 OR (token = ?2 AND \
              (completed_at_ms IS NULL OR completed_at_ms > ?3))",
@@ -278,7 +284,12 @@ impl Command for BeginCrossCellTransaction {
             return Ok(CommandResult::Success(Json(
                 BeginCrossCellTransactionOutcome::Existing {
                     transaction_id,
-                    decision: decode_decision(*state, reason)?,
+                    decision: read_decision(
+                        |batch| context.sql(batch),
+                        transaction_id,
+                        *state,
+                        reason,
+                    )?,
                 },
             )));
         }
@@ -356,18 +367,23 @@ impl Command for BeginCrossCellTransaction {
             ],
         ))?;
         for (position, cell_id, target, operations) in participants_rows {
+            let position = i64::try_from(position)
+                .map_err(|_| Error::Command("participant index overflow"))?;
+            let chunks = crate::transaction_payload::write(
+                context,
+                input.transaction_id,
+                position,
+                &operations,
+            )?;
             context.sql(&statement(
                 "INSERT INTO ddb_coordinator_participants \
-                 (transaction_id, position, cell_id, target, operations) VALUES (?1, ?2, ?3, ?4, ?5)",
+                 (transaction_id, position, cell_id, target, operation_chunks) VALUES (?1, ?2, ?3, ?4, ?5)",
                 vec![
                     SqlValue::Blob(input.transaction_id.to_vec()),
-                    SqlValue::Integer(
-                        i64::try_from(position)
-                            .map_err(|_| Error::Command("participant index overflow"))?,
-                    ),
+                    SqlValue::Integer(position),
                     SqlValue::Blob(cell_id.to_vec()),
                     SqlValue::Blob(target),
-                    SqlValue::Blob(operations),
+                    SqlValue::Integer(chunks),
                 ],
             ))?;
         }
@@ -377,15 +393,25 @@ impl Command for BeginCrossCellTransaction {
     }
 }
 
-fn decode_decision(state: i64, reason: &SqlValue) -> Result<CoordinatorDecision> {
+fn read_decision(
+    sql: impl FnMut(&crate::SqlBatch) -> Result<Vec<crate::SqlResultSet>>,
+    transaction_id: [u8; 16],
+    state: i64,
+    reason: &SqlValue,
+) -> Result<CoordinatorDecision> {
     match state {
         0 => Ok(CoordinatorDecision::Begin),
         1 => Ok(CoordinatorDecision::Commit),
         2 => {
-            let SqlValue::Blob(bytes) = reason else {
+            let SqlValue::Integer(chunks) = reason else {
                 return Err(Error::Command("aborted transaction has no reason"));
             };
-            Ok(serde_json::from_slice(bytes)?)
+            Ok(serde_json::from_slice(&crate::transaction_payload::read(
+                sql,
+                transaction_id,
+                DECISION_PAYLOAD,
+                *chunks,
+            )?)?)
         }
         _ => Err(Error::Command("invalid coordinator decision")),
     }

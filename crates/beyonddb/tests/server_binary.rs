@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+mod support;
+
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
@@ -666,6 +668,17 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         Some(&AttributeValue::S("updated".into()))
     );
     assert!(snapshot.responses()[2].item().is_none());
+    let mut large_keys = Vec::new();
+    for side in [range("process"), range(&second_write_key)] {
+        large_keys.extend(
+            (0..1_000)
+                .map(|i| format!("large-{i}"))
+                .filter(|id| range(id) == side && range(&format!("escaped-{id}")) == side)
+                .take(5)
+                .map(|id| ("ProcessData".into(), id)),
+        );
+    }
+    let large = support::LargeTransaction::write(&sdk, large_keys).await;
     // Historical coordinator count exceeds the binary's 64 active-Cell slots.
     // Every request still follows the signed SDK path and touches two data Cells.
     let mut shards = std::collections::HashSet::new();
@@ -694,6 +707,7 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
     child.wait().unwrap();
     let mut restarted = start(&config, &log, false, s3);
     wait_healthy(&mut restarted, public, &log);
+    large.assert_recovered(&sdk).await;
     sdk.transact_write_items()
         .client_request_token("process-update-check")
         .transact_items(update("process", "updated"))

@@ -222,8 +222,7 @@ impl Query for PartitionQuery {
         loop {
             let (predicate, parameters) =
                 range_predicate(&partition_key, &bounds, &cursor, input.forward);
-            let mut sql =
-                format!("SELECT item_key, sort_key, item FROM ddb_partition_items {predicate}");
+            let mut sql = format!("SELECT item_key, sort_key FROM ddb_partition_items {predicate}");
             let order = if input.forward { "ASC" } else { "DESC" };
             sql.push_str(&format!(
                 " ORDER BY sort_key {order}, item_key {order} LIMIT 64"
@@ -234,15 +233,12 @@ impl Query for PartitionQuery {
                 break;
             }
             for row in page {
-                let [
-                    SqlValue::Blob(key),
-                    SqlValue::Blob(sort),
-                    SqlValue::Blob(image),
-                ] = row.as_slice()
-                else {
+                let [SqlValue::Blob(key), SqlValue::Blob(sort)] = row.as_slice() else {
                     return Err(Error::Command("invalid partition query row"));
                 };
-                let item: Item = serde_json::from_slice(image)?;
+                let item = crate::item_storage::StoredItem::Partition(key)
+                    .read(|batch| context.sql(batch))?
+                    .ok_or(Error::Command("query key has no item"))?;
                 if matches_item(&input, &item)? {
                     if items.len() >= limit {
                         return Ok(Json(PartitionQueryOutcome::Page {
@@ -250,7 +246,8 @@ impl Query for PartitionQuery {
                             last_evaluated_key: last_returned,
                         }));
                     }
-                    let encoded_bytes = image.len().max(item_size_bytes(&item));
+                    let encoded_bytes =
+                        serde_json::to_vec(&item)?.len().max(item_size_bytes(&item));
                     let next_bytes = bytes.saturating_add(encoded_bytes).saturating_add(128);
                     if !items.is_empty() && next_bytes > 900_000 {
                         return Ok(Json(PartitionQueryOutcome::Page {

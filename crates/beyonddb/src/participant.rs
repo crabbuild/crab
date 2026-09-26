@@ -6,7 +6,11 @@ use crab_cell_runtime::registry::{CommandContext, CommandResult, QueryContext};
 use extenddb_core::types::Item;
 use serde::{Deserialize, Serialize};
 
-pub(crate) const SCHEMA: &str = include_str!("participant_schema.sql");
+pub(crate) const SCHEMA: &str = concat!(
+    include_str!("transaction_payload_schema.sql"),
+    "\n",
+    include_str!("participant_schema.sql")
+);
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) enum StagedEffect {
@@ -158,18 +162,28 @@ pub(crate) fn record_prepare<'a>(
     if coordinator_key.is_empty() || coordinator_key.len() > 128 {
         return Err(Error::Command("invalid coordinator routing key"));
     }
+    let chunks = crate::transaction_payload::write(context, transaction_id, 0, &staged)?;
     context.sql(&statement(
-        "INSERT INTO ddb_transactions (transaction_id, coordinator_cell, request_digest, state, staged, coordinator_key) VALUES (?1, ?2, ?3, 0, ?4, ?5)",
+        "INSERT INTO ddb_transactions (transaction_id, coordinator_cell, request_digest, state, staged_chunks, coordinator_key) VALUES (?1, ?2, ?3, 0, ?4, ?5)",
         vec![SqlValue::Blob(transaction_id.to_vec()), SqlValue::Blob(coordinator_cell.to_vec()),
-             SqlValue::Blob(digest.as_bytes().to_vec()), SqlValue::Blob(staged), SqlValue::Blob(coordinator_key.to_vec())],
+             SqlValue::Blob(digest.as_bytes().to_vec()), SqlValue::Integer(chunks), SqlValue::Blob(coordinator_key.to_vec())],
     ))?;
     // Persist images with prepare so recovery never re-reads live rows. COMMIT
     // releases locks but keeps these images until the response can be fetched.
     for (position, item) in read_result.enumerate() {
+        let position =
+            i64::try_from(position).map_err(|_| Error::Command("read position overflow"))?;
         context.sql(&statement(
             "INSERT INTO ddb_transaction_reads (transaction_id, position, item) VALUES (?1, ?2, ?3)",
-            vec![SqlValue::Blob(transaction_id.to_vec()), SqlValue::Integer(i64::try_from(position).map_err(|_| Error::Command("read position overflow"))?), item.map(|item| serde_json::to_vec(item).map(SqlValue::Blob)).transpose()?.unwrap_or(SqlValue::Null)],
+            vec![SqlValue::Blob(transaction_id.to_vec()), SqlValue::Integer(position), if item.is_some() { SqlValue::Blob(Vec::new()) } else { SqlValue::Null }],
         ))?;
+        if let Some(item) = item {
+            crate::item_storage::StoredItem::TransactionRead {
+                transaction_id: &transaction_id,
+                position,
+            }
+            .append(context, item)?;
+        }
     }
     Ok(())
 }
@@ -180,7 +194,7 @@ pub(crate) fn resolve(
     finish: impl FnOnce(&mut CommandContext<'_, '_>, Option<&[u8]>) -> Result<()>,
 ) -> Result<CommandResult<Json<ResolveTransactionOutcome>>> {
     let rows = context.sql(&statement(
-        "SELECT coordinator_cell, state, staged \
+        "SELECT coordinator_cell, state, staged_chunks \
              FROM ddb_transactions WHERE transaction_id = ?1",
         vec![SqlValue::Blob(input.transaction_id.to_vec())],
     ))?;
@@ -236,18 +250,27 @@ pub(crate) fn resolve(
         }
     }
     let staged = if input.commit {
-        let SqlValue::Blob(bytes) = staged else {
+        let SqlValue::Integer(chunks) = staged else {
             return Err(Error::Command("prepared transaction has no staged images"));
         };
-        Some(bytes.as_slice())
+        Some(crate::transaction_payload::read(
+            |batch| context.sql(batch),
+            input.transaction_id,
+            0,
+            *chunks,
+        )?)
     } else {
         None
     };
     // Image application and lock release share the command savepoint with the
     // terminal marker. A failed callback must leave the participant prepared.
-    finish(context, staged)?;
+    finish(context, staged.as_deref())?;
     context.sql(&statement(
-        "UPDATE ddb_transactions SET state = ?1, staged = NULL \
+        "DELETE FROM ddb_transaction_payloads WHERE transaction_id = ?1",
+        vec![SqlValue::Blob(input.transaction_id.to_vec())],
+    ))?;
+    context.sql(&statement(
+        "UPDATE ddb_transactions SET state = ?1, staged_chunks = NULL \
              WHERE transaction_id = ?2 AND state = 0",
         vec![
             SqlValue::Integer(if input.commit { 1 } else { 2 }),
@@ -289,7 +312,7 @@ pub(crate) fn read_result(
     // Read each saved image by position: a 100-item request must not force a
     // multi-megabyte participant result through one bounded Cell RPC.
     let rows = context.sql(&statement(
-        "SELECT r.item FROM ddb_transaction_reads r JOIN ddb_transactions t \
+        "SELECT 1 FROM ddb_transaction_reads r JOIN ddb_transactions t \
          ON t.transaction_id = r.transaction_id WHERE r.transaction_id = ?1 \
          AND r.position = ?2 AND t.coordinator_cell = ?3 AND t.state = 1",
         vec![
@@ -298,14 +321,14 @@ pub(crate) fn read_result(
             SqlValue::Blob(input.transaction.coordinator_cell.to_vec()),
         ],
     ))?;
-    let Some(row) = rows[0].rows.first() else {
+    if rows[0].rows.is_empty() {
         return Ok(Json(TransactionReadResult::Unavailable));
-    };
-    let item = match row.as_slice() {
-        [SqlValue::Null] => None,
-        [SqlValue::Blob(bytes)] => Some(serde_json::from_slice(bytes)?),
-        _ => return Err(Error::Command("invalid transaction read result")),
-    };
+    }
+    let item = crate::item_storage::StoredItem::TransactionRead {
+        transaction_id: &input.transaction.transaction_id,
+        position: i64::from(input.position),
+    }
+    .read(|batch| context.sql(batch))?;
     Ok(Json(TransactionReadResult::Item(item)))
 }
 

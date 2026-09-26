@@ -13,7 +13,7 @@ use super::{
     valid_item, valid_key, write_item,
 };
 use crate::PrepareTransactionOutcome;
-use crate::items::{TransactionFailure, TransactionOperation, decode_item};
+use crate::items::{TransactionFailure, TransactionOperation};
 
 /// Ordered writes that must all address the same installed data Cell.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -390,11 +390,10 @@ impl Query for PartitionTransactGet {
             if read_key_conflict(context, &key)?.is_some() {
                 return Ok(Json(PartitionTransactGetOutcome::Conflict { index }));
             }
-            let rows = context.sql(&statement(
-                "SELECT item FROM ddb_partition_items WHERE item_key = ?1",
-                vec![SqlValue::Blob(key)],
-            ))?;
-            output.push(decode_item(&rows[0])?);
+            output.push(
+                crate::item_storage::StoredItem::Partition(&key)
+                    .read(|batch| context.sql(batch))?,
+            );
         }
         Ok(Json(PartitionTransactGetOutcome::Found(output)))
     }

@@ -3,7 +3,7 @@
 use crab_cell_runtime::registry::{Query, QueryContext};
 use serde::{Deserialize, Serialize};
 
-use super::{CoordinatorDecision, MODULE, TOKEN_LIFETIME_MS, coordinator_target, decode_decision};
+use super::{CoordinatorDecision, MODULE, TOKEN_LIFETIME_MS, coordinator_target, read_decision};
 use crate::table::statement;
 use crate::{Error, Json, Result, SqlValue, TransactionToken};
 
@@ -36,7 +36,7 @@ impl Query for ReadCoordinatorToken {
             ));
         }
         let rows = context.sql(&statement(
-            "SELECT transaction_id, fingerprint, state, abort_reason FROM ddb_coordinator_transactions \
+            "SELECT transaction_id, fingerprint, state, abort_chunks FROM ddb_coordinator_transactions \
              WHERE token = ?1 AND account_id = ?2 \
              AND (completed_at_ms IS NULL OR completed_at_ms > ?3)",
             vec![SqlValue::Text(token.token), SqlValue::Text(token.account_id), SqlValue::Integer(context.now_ms().saturating_sub(TOKEN_LIFETIME_MS))],
@@ -56,12 +56,13 @@ impl Query for ReadCoordinatorToken {
         if fingerprint != &token.fingerprint {
             return Ok(Json(ReadCoordinatorTokenOutcome::Mismatch));
         }
+        let transaction_id = id
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Command("invalid coordinator transaction ID"))?;
         Ok(Json(ReadCoordinatorTokenOutcome::Found {
-            transaction_id: id
-                .as_slice()
-                .try_into()
-                .map_err(|_| Error::Command("invalid coordinator transaction ID"))?,
-            decision: decode_decision(*state, reason)?,
+            transaction_id,
+            decision: read_decision(|batch| context.sql(batch), transaction_id, *state, reason)?,
         }))
     }
 }
