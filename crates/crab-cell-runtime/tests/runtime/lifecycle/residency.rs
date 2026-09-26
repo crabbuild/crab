@@ -2,6 +2,102 @@
 
 use super::*;
 
+#[tokio::test]
+async fn activation_opens_one_cache_at_the_database_directory_off_async_worker() {
+    let fixture = fixture_for(b"activation-cache-owner");
+    let filesystem = Arc::new(crate::runtime::fault_fs::FaultFileSystem::new());
+    let host = ReplicaHost::default()
+        .with_filesystem(filesystem.clone())
+        .with_local_disk_budget(DiskBudget::new(1 << 30));
+    let session = SessionId::from_bytes([181; 16]);
+    let runtime = CellRuntime::new_with_replica_host(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        16 << 20,
+        session,
+        host.clone(),
+    )
+    .unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, session).await;
+    handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+    drop(handle);
+
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let directory = cold_node_directory(&fixture);
+    // Cold recovery and then clean local resume must share the publisher's
+    // one cache owner instead of reopening it at a parent directory.
+    for (number, name) in [(182, "cold"), (183, "resumed")] {
+        let session = SessionId::from_bytes([number; 16]);
+        let runtime = CellRuntime::new_with_replica_host(
+            SqlWorkerPool::new(1, 1).unwrap(),
+            16 << 20,
+            session,
+            host.clone(),
+        )
+        .unwrap();
+        let handle = runtime
+            .acquire_idle_restored(
+                catalog
+                    .lookup(fixture.target.cell_id())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                fixture.replica.clone(),
+                authority.clone(),
+                authority
+                    .load(fixture.target.cell_id())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                directory.join(format!("{name}.sqlite")),
+                Owner {
+                    session,
+                    endpoint: "https://cache-owner.internal:8081".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            handle
+                .query(64, 64, |db| {
+                    let value: i64 =
+                        db.query_row("SELECT value FROM counter", [], |row| row.get(0))?;
+                    Ok(value.to_be_bytes().to_vec())
+                })
+                .await
+                .unwrap(),
+            0_i64.to_be_bytes()
+        );
+        handle.drain().await.unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+    let opens = filesystem.cache_opens();
+    assert_eq!(
+        opens
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>(),
+        [
+            fixture
+                .database
+                .parent()
+                .unwrap()
+                .join(".crab-cell-directory-cache"),
+            directory.join(".crab-cell-directory-cache"),
+            directory.join(".crab-cell-directory-cache"),
+        ]
+    );
+    assert!(
+        opens
+            .iter()
+            .all(|(_, thread)| *thread != std::thread::current().id())
+    );
+}
+
 /// Counts the metadata and origin reads one cold route performs.
 #[derive(Default)]
 struct ColdPathRecorder {

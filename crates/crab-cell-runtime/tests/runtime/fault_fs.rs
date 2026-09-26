@@ -3,7 +3,10 @@
 use std::{
     io,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use crab_ltx::environment::{DirectFileSystem, FileIo, FileSystem};
@@ -11,6 +14,7 @@ use crab_ltx::environment::{DirectFileSystem, FileIo, FileSystem};
 pub struct FaultFileSystem {
     fail_next_capture: AtomicBool,
     fail_next_remove: AtomicBool,
+    cache_opens: Mutex<Vec<(PathBuf, std::thread::ThreadId)>>,
 }
 
 impl FaultFileSystem {
@@ -18,6 +22,7 @@ impl FaultFileSystem {
         Self {
             fail_next_capture: AtomicBool::new(false),
             fail_next_remove: AtomicBool::new(false),
+            cache_opens: Mutex::new(Vec::new()),
         }
     }
 
@@ -36,9 +41,21 @@ impl FaultFileSystem {
     pub fn prune_failure_consumed(&self) -> bool {
         !self.fail_next_remove.load(Ordering::SeqCst)
     }
+
+    pub fn cache_opens(&self) -> Vec<(PathBuf, std::thread::ThreadId)> {
+        self.cache_opens.lock().unwrap().clone()
+    }
 }
 
 impl FileSystem for FaultFileSystem {
+    fn cleanup_private_temporaries(&self, root: &Path) -> io::Result<()> {
+        self.cache_opens
+            .lock()
+            .unwrap()
+            .push((root.to_owned(), std::thread::current().id()));
+        DirectFileSystem.cleanup_private_temporaries(root)
+    }
+
     fn open(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
         DirectFileSystem.open(path)
     }

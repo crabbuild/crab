@@ -277,18 +277,25 @@ impl Host {
     ///
     /// The cache is an acceleration layer only; directory reachability still
     /// reads canonical objects when collecting retention roots. Its byte bound
-    /// is derived from one eighth of the shared local-disk envelope.
+    /// is derived from one eighth of the shared local-disk envelope. Construction
+    /// uses an admitted blocking job; cancellation retains its disk reservations
+    /// and job admission until that dispatched work completes.
+    /// Admission or dispatch failure returns an error. Invalid optional cache
+    /// membership is ignored and subsequent reads verify origin objects.
     #[cfg(feature = "replica")]
-    #[must_use]
-    pub fn with_directory_cache(mut self, root: PathBuf) -> Self {
+    pub async fn with_directory_cache(mut self, root: PathBuf) -> crate::Result<Self> {
         let capacity = (self.local_disk.capacity() / 8).clamp(1, 8 << 30);
-        self.directory_cache = Some(Arc::new(DirectoryCache::with_budget(
-            Arc::clone(&self.filesystem),
-            root,
-            capacity,
-            self.local_disk.clone(),
-        )));
-        self
+        let filesystem = Arc::clone(&self.filesystem);
+        let budget = self.local_disk.clone();
+        self.directory_cache = Some(
+            self.run(move || {
+                Arc::new(DirectoryCache::with_budget(
+                    filesystem, root, capacity, budget,
+                ))
+            })
+            .await?,
+        );
+        Ok(self)
     }
 
     /// Installs one embedding runtime ledger for bounded replica-host work.

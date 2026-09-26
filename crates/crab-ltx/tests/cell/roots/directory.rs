@@ -106,7 +106,9 @@ async fn directory_cache_survives_replica_restart_without_directory_origin_read(
     let incarnation = [86; 16];
     let cache_host = Host::default()
         .with_local_disk_budget(DiskBudget::new(64 * 1024 * 1024))
-        .with_directory_cache(cache_root.clone());
+        .with_directory_cache(cache_root.clone())
+        .await
+        .unwrap();
     let first =
         replica(Store::new(backend.clone()), cell, incarnation).with_host(cache_host.clone());
     let root = first
@@ -143,7 +145,9 @@ async fn directory_cache_survives_replica_restart_without_directory_origin_read(
     }));
     let cached_host = Host::default()
         .with_local_disk_budget(DiskBudget::new(64 * 1024 * 1024))
-        .with_directory_cache(cache_root);
+        .with_directory_cache(cache_root)
+        .await
+        .unwrap();
     let cached = replica(cached_store, cell, incarnation).with_host(cached_host);
     let cached_root = cached.open_root(&root).await.unwrap();
     cached_reads.store(0, Ordering::SeqCst);

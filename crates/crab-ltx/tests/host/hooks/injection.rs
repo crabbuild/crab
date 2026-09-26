@@ -69,7 +69,9 @@ async fn verify_cache_fill_admission(store: impl Fn() -> Store, prefix: &str) {
     let reader = replica(232).with_host(
         host.with_io_slots(io.clone())
             .with_job_slots(jobs.clone())
-            .with_directory_cache(directory.path().join("cache")),
+            .with_directory_cache(directory.path().join("cache"))
+            .await
+            .unwrap(),
     );
     let pause = Arc::new(Pause {
         operation: "sync_all",

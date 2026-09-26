@@ -670,6 +670,14 @@ dirty-job, scratch, and telemetry admission across many databases. Sparse page
 read-ahead is capped at 64 pages or 1 MiB per request, and the shared decoded
 page cache is capped at 8 MiB.
 
+`Host::with_directory_cache(root).await?` opens persistent cache membership on
+an admitted blocking job. Restart reads at most 16 MiB of index input and
+retains at most 16,384 entries within the shared disk budget. The runtime
+creates one cache owner beside the activation's database and shares its host
+through recovery, SQLite and publication. Cancellation keeps dispatched work
+and its reservations alive until completion. Local capture APIs remain
+synchronous and retain their caller-owned worker contract.
+
 Verified directory reads release object-store admission before persisting a
 cache fill. Fills use immediate blocking-job admission and skip persistence
 when that pool is busy, keeping pending node buffers bounded without a second
