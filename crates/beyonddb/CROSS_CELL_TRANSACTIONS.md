@@ -4,7 +4,8 @@
 
 Initially reviewed against implementation `b68e6486620`, the pinned ExtendDB
 storage contract, and the AWS transaction references below; the bounded
-resolution change documented at the end updates the scheduling assessment.
+resolution, local-index, and settled-root changes documented below update the
+scheduling and recovery assessment.
 The foundation is durable
 two-phase commit with shared/exclusive item locks. It implements cross-Cell
 transactions; production compatibility, bounded resource use, and the
@@ -2049,18 +2050,74 @@ expose limited readiness margin and do not establish a fleet RTO. The fixture
 now captures both server output streams and reports the failing readiness call
 site; the temporary production probes are removed.
 
-A concrete next optimization is durable caching of a proven settled coordinator
-root in the account registry. A skip would require an exact match against the
-current authoritative Idle root and application version; a changed root, a new
-owner, an unknown proof, or an unfinished transaction must take the existing
-recovery path. Prove that a stale hint followed by a new BEGIN cannot hide work,
-that races with reactivation stay safe, and that startup still fails closed on
-unresolved recovery. This is proposed work, not implemented support. Such hints
-would avoid unnecessary restoration of settled history; they would not authorize
-deleting decisions, token records, read images, or participant tombstones.
+The durable settled-root optimization proposed after this measurement is now
+implemented below. The original measurements describe the preceding draft and
+must not be treated as a measured improvement for the new code.
 
 Final verification without production probes: the explicitly enabled signed
 SDK/RustFS process test passes in 384.49s, including hard and graceful restart,
 indexed reads, transaction replay, and restored base/index contents. Strict
 all-target Clippy passes again (9.50s). These successful runs do not resolve the
 earlier load/readiness failures or qualify fleet-scale recovery.
+
+
+## Durable observations of settled coordinators
+
+The account registry now stores one optional settled-root observation per used
+coordinator shard. Startup and serving discovery share this record; the serving
+loop's separate memory cache is removed. Recovery records an observation only
+after `ReadPendingTransactionBoundary` returns no unfinished transactions and
+its receipt matches the current published root's Cell, incarnation, and commit
+sequence. The observation contains the root digest, incarnation, ownership epoch,
+code, and schema. It is an optimization hint, not a transaction decision.
+
+Both consumers require an authoritative Idle control with no owner or recovery
+overlay and an exact observation match, including the installed module code and
+supported schema. Serving or expired owners still take fenced recovery because
+there may be a durable log tail beyond the published root. A new BEGIN changes
+the root; reacquisition changes the ownership epoch. Either invalidates the hint.
+A concurrent change after observation, or a late older registry write, therefore
+causes ordinary recovery on the next discovery pass. Hints never authorize
+history, token, result-image, or participant-tombstone deletion.
+
+Public admission does not consult hints: an Idle coordinator is restored before
+token lookup or new work. The capacity reclaimer also does not write the registry,
+because its node may not own the account Cell. Startup and serving recovery use
+their existing routed client. They write only when the observed root changes;
+a shard evicted before either observes it has no hint and must be restored.
+Registry write errors propagate through the existing startup-readiness or
+serving-retry boundary. This avoids assuming that every clean eviction is cached.
+
+| Boundary | Evidence |
+| --- | --- |
+| Entry points | `recover_registered_coordinators` and `discover_coordinator` in `src/provision/transactions.rs` share proof recording and checking. |
+| Metadata owner | `src/transaction_coordinator/registry.rs` updates an existing account registration; `ListCoordinatorShards` returns that observation with its shard. Registration still precedes the first BEGIN. |
+| Empty-work proof | `ReadPendingTransactionBoundary` reads the coordinator's indexed `unresolved_count > 0` records; resolution decrements that count only after a participant receipt. |
+| Dependency contract | Runtime `Control::release` preserves root and epoch while publishing Idle; reacquisition raises epoch. Query receipts identify the committed SQL sequence. Root matching cannot authorize skipping a Serving owner or recovery overlay. |
+| Callers and siblings | Account and data participant recovery still use the common resolver; foreground `CoordinatorProvisioner::ensure` always restores Idle history. The existing history/residency fixture exercises serving discovery with twelve shards and three active slots. |
+| Regression | `tests/elastic_cells/coordinator_checkpoints.rs` commits three tokenized writes, records settled observations, then prepares a new read after one observation. After owner restart, unchanged history must stay Idle without an epoch increase, while the changed shard must be acquired and its BEGIN aborted. Raw participant state proves cleanup before reads can help. A newer write and old-token replay prove lock release and no duplicate apply. |
+| Baseline | Main has no BeyondDB. On `841529fc834`, the new regression fails because an unchanged settled shard's epoch advances from 1 to 2 during startup. |
+
+**Is this the best fix?** Reuse the bounded account discovery registry and
+existing recovery client. A separate object-store cache would add a storage and
+retention contract; writing from reclamation would add account-owner routing to
+local capacity admission. One durable representation removes the memory-only
+path while preserving the normal recovery path for every unproven root. The
+change adds about 130 net production lines for serialization and shared checks;
+the new metadata changes the unreleased format, so development roots require
+reprovisioning. No dependency or lockfile changes are needed.
+
+This reduces unnecessary restoration when an observation is available. It does
+not remove authority reads, increase the discovery rate, bound transaction
+history, qualify fleet RTO, or demonstrate 10,000 Cells and multi-TB storage.
+
+
+Verification on the final implementation: five focused coordinator tests pass in
+19.68s. Account, elastic-Cell, and signed two-owner peer suites pass all 29 tests
+with two test threads (3.32s, 92.68s, and 92.21s). Strict all-target Clippy passes
+in 31.17s; formatting, diff, and Cell/LTX layout checks pass. The explicitly
+enabled signed SDK/RustFS process smoke passes in 361.74s, including hard and
+graceful restart, local-index contents, transaction replay, and TTL recovery.
+That total duration is functional evidence, not a before/after readiness or
+fleet benchmark. The earlier default-parallel and readiness failures documented
+above remain unqualified at those load conditions.

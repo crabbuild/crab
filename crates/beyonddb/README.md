@@ -301,8 +301,10 @@ discovers one registered shard per tick across configured accounts. It fences
 expired coordinator/participant owners, resumes abandoned BEGIN records, and
 finishes terminal decisions. It processes at most one pending transaction per
 tick, advances past failures, and revisits them on a bounded pass. Discovery
-skips a completed Idle root only when it matches an observed empty-work receipt;
-new or changed roots remain discoverable. Cell admission reclaims settled
+uses an account-registry hint to skip a settled Idle root only when its root
+digest, incarnation, ownership epoch, code, and schema still match. The hint
+survives restart and is shared with startup recovery; an active owner, recovery
+overlay, missing hint, or changed root takes the ordinary recovery path. Cell admission reclaims settled
 coordinators at the active-Cell limit; idle shards restore before token lookup.
 Recovery reactivates released coordinators; startup resolves shards one at a
 time. A participant admission failure no longer prevents a published decision
@@ -460,6 +462,7 @@ unreleased roots with application-only catalog heads require reprovisioning;
 there is no fallback reader. This does not enable multi-tenant backup or garbage
 collection. See [the recovery finding](CROSS_CELL_TRANSACTIONS.md#tenant-catalog-collision-found-during-recovery-qualification).
 
-Local-index schemas and required table/participant metadata also change the
-unreleased Cell format. Reprovision development roots created before local
-indexes; this change does not provide an in-place upgrade reader.
+Local-index schemas, required table/participant metadata, and settled-root
+observations in the coordinator registry also change the unreleased Cell format.
+Reprovision development roots created before these changes; there is no in-place
+upgrade reader.
