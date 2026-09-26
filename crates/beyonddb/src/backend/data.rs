@@ -344,11 +344,8 @@ impl DataEngine for CellStorage {
         let prepared = normalized_query(key_info, key_condition, maps);
         let key_info = key_info.clone();
         let exclusive_start_key = exclusive_start_key.cloned();
-        let indexed = index_name.is_some();
+        let index_name = index_name.map(str::to_owned);
         Box::pin(async move {
-            if indexed {
-                return Err(unsupported("indexed Query"));
-            }
             if limit.is_some_and(|value| value <= 0) {
                 return Err(StorageError::Validation(
                     "query limit must be positive".into(),
@@ -364,10 +361,11 @@ impl DataEngine for CellStorage {
                 .iter()
                 .any(|key| key.key_type == KeyType::Range)
             {
-                let (target, epoch) = self
-                    .routed_owner(&key_info, &partition_key)
-                    .await?
-                    .ok_or_else(|| unsupported("sort-key Query on an account-local table"))?;
+                let owner = self.routed_owner(&key_info, &partition_key).await?;
+                if owner.is_none() && index_name.is_none() {
+                    return Err(unsupported("sort-key Query on an account-local table"));
+                }
+                let epoch = owner.as_ref().map_or(0, |(_, epoch)| *epoch);
                 let limit = limit
                     .map(|value| {
                         u32::try_from(value).map_err(|_| {
@@ -378,22 +376,29 @@ impl DataEngine for CellStorage {
                     })
                     .transpose()?
                     .unwrap_or(10_000);
-                let output = self
-                    .query_resolving::<PartitionQuery>(
-                        &target,
+                let input = Json(PartitionQueryInput {
+                    index_name,
+                    table_id: key_info.table_id.clone(),
+                    epoch,
+                    partition_key,
+                    sort,
+                    extra_range_equals,
+                    forward,
+                    limit,
+                    exclusive_start_key,
+                });
+                let output = if let Some((owner, _)) = owner {
+                    self.query_resolving::<PartitionQuery>(&owner, &key_info.account_id, input)
+                        .await?
+                } else {
+                    let account = target(&key_info.account_id)?;
+                    self.query_resolving::<crate::secondary_index::QueryAccountIndex>(
+                        &account,
                         &key_info.account_id,
-                        Json(PartitionQueryInput {
-                            table_id: key_info.table_id.clone(),
-                            epoch,
-                            partition_key,
-                            sort,
-                            extra_range_equals,
-                            forward,
-                            limit,
-                            exclusive_start_key,
-                        }),
+                        input,
                     )
-                    .await?;
+                    .await?
+                };
                 return match output.output.0 {
                     PartitionQueryOutcome::Page {
                         items,
@@ -441,11 +446,8 @@ impl DataEngine for CellStorage {
     ) -> BoxedFuture<'_, QueryResult> {
         let key_info = key_info.clone();
         let exclusive_start_key = exclusive_start_key.cloned();
-        let indexed = index_name.is_some();
+        let index_name = index_name.map(str::to_owned);
         Box::pin(async move {
-            if indexed {
-                return Err(unsupported("indexed Scan"));
-            }
             let segment = match (segment, total_segments) {
                 (None, None) => None,
                 (Some(segment), Some(total)) if total > 0 && (0..total).contains(&segment) => {
@@ -465,7 +467,13 @@ impl DataEngine for CellStorage {
                 })
                 .transpose()?;
             if let Some((items, last_evaluated_key)) = self
-                .scan_routed(&key_info, limit, exclusive_start_key.clone(), segment)
+                .scan_routed(
+                    &key_info,
+                    limit,
+                    exclusive_start_key.clone(),
+                    segment,
+                    index_name.as_deref(),
+                )
                 .await?
             {
                 // Retain the unfiltered cursor so empty segment pages still advance.
@@ -477,6 +485,7 @@ impl DataEngine for CellStorage {
                     &target,
                     &key_info.account_id,
                     Json(ScanItemsInput {
+                        index_name,
                         table_name: key_info.table_name.clone(),
                         table_id: key_info.table_id.clone(),
                         limit,

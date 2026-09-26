@@ -4,7 +4,7 @@ use crate::participant::StagedEffect;
 use std::collections::HashSet;
 
 use crab_cell_runtime::registry::{Command, CommandContext, CommandResult, QueryContext};
-use extenddb_core::types::{Item, KeySchemaElement};
+use extenddb_core::types::Item;
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -92,7 +92,7 @@ impl Command for PartitionTransactWrite {
             Ok(staged) => staged,
             Err(reason) => return Ok(rejected(reason.single_outcome())),
         };
-        apply_staged(context, &spec.table.key_schema, staged)?;
+        apply_staged(context, &spec.table, staged)?;
         Ok(CommandResult::Success(Json(
             PartitionTransactWriteOutcome::Applied,
         )))
@@ -119,6 +119,7 @@ struct StagedImage {
     sort_key: Vec<u8>,
     image: Option<Item>,
     effect: StagedEffect,
+    index_capacity: crate::secondary_index::Capacity,
 }
 
 enum StageError {
@@ -249,7 +250,13 @@ fn stage_operations(
                 )));
             }
         }
+        let index_capacity = if effect == StagedEffect::Write {
+            crate::secondary_index::capacity(&spec.table, image.as_ref())?
+        } else {
+            crate::secondary_index::Capacity::default()
+        };
         staged.push(StagedImage {
+            index_capacity,
             key,
             partition_key,
             sort_key,
@@ -269,7 +276,7 @@ fn stage_validation(index: usize, message: &str) -> StageError {
 
 fn apply_staged(
     context: &mut CommandContext<'_, '_>,
-    schema: &[KeySchemaElement],
+    table: &crate::TableRecord,
     staged: Vec<StagedImage>,
 ) -> Result<()> {
     for image in staged {
@@ -277,8 +284,9 @@ fn apply_staged(
             continue;
         }
         if let Some(item) = image.image {
-            write_item(context, image.key, &item, schema)?;
+            write_item(context, image.key, &item, table)?;
         } else {
+            crate::secondary_index::delete(context, table, &image.key)?;
             context.sql(&statement(
                 "DELETE FROM ddb_partition_items WHERE item_key = ?1",
                 vec![SqlValue::Blob(image.key)],

@@ -113,7 +113,7 @@ decision evidence tied to the transaction, participant set, and fenced authority
 | Latency | Sequential prepare; up to four terminal resolutions in flight per call; at least `5P + 3` durable commands for single-chunk inputs | Measure publication and RPC time by participant count. Evaluate prepare parallelism and batched coordinator progress with renewed crash/concurrency proof before changing those phases. |
 | Fleet recovery | 4,096 fixed coordinator shards per account; the worker selects one shard per 250-ms tick | Integrate placement and recovery scheduling with bounded concurrency and backlog metrics. A nominal pass over 4,096 known shards already takes about 17 minutes before slow work; this is arithmetic, not measured RTO. |
 | Data distribution | HASH-key siblings share one Cell with a finite database budget | Qualify skew, hot keys, split headroom, and oversized item collections. More Cells do not distribute one key's lock or split a single HASH group in the current layout. |
-| API completion | Secondary indexes and Streams remain unsupported; aggregate evaluated Update-size semantics remain unqualified | Maintain local index and stream effects within participant resolution, use durable asynchronous propagation where the contract permits it, and qualify size/error semantics against AWS before claiming compatibility. |
+| API completion | ALL-projection LSIs now share participant resolution; other index projections, GSIs, and Streams remain incomplete; aggregate evaluated Update-size semantics remain unqualified | Complete the engine read contract, local stream effects, and durable asynchronous projections; qualify size/error semantics against AWS before claiming compatibility. |
 
 With 10,000 data Cells at a 256-MiB live-data split target, the arithmetic storage
 envelope is about 2.44 TiB. This excludes metadata, retained history, claims,
@@ -1496,9 +1496,18 @@ claims remain protected. Claims never expire on age or owner change.
 ### Allocation bound and cost
 
 For `n` local operations, `c` staged chunks, `s` serialized staged bytes, and
-SQLite page size `p`, the participant reserves:
+SQLite page size `p`, additional LSI tree edits `i`, and index overflow
+allowance `b`, the participant reserves:
 
-`(44 * (16*n + c + 16) + 2) * p + 2*s` bytes, rounded up to pages.
+`(44 * (16*n + i + c + 16) + 2) * p + 2*s + b` bytes, rounded up to pages.
+
+A write/delete budgets four additional tree edits per declared LSI: delete and
+insert in the entry table and its ordered query index. New entry bytes include
+table/index identity, base item key, HASH key, index sort key, base sort key, and
+record framing, twice for the two trees. They are reserved separately because
+five indexes can repeat keys more often than the staged item payload. Read and
+ConditionCheck intents do not mutate index trees. Schemas without LSIs retain
+`i = b = 0`.
 
 The pinned SQLite 3.49.1 source (libsqlite3-sys 0.32.0) defines
 `BTCURSOR_MAX_DEPTH = 20`. `balance_nonroot` adds at most two siblings while
@@ -1519,8 +1528,10 @@ schemas have no application triggers and use the default `auto_vacuum=NONE`.
 Any change to SQLite, these schemas,
 indexes, or resolve writes requires re-auditing the bound.
 
-At 4-KiB pages, 100 small local operations claim about 278 MiB before payload
-allowance. This is intentionally conservative and reduces concurrency within a
+At 4-KiB pages, 100 small local operations without LSIs claim about 278 MiB
+before payload allowance. Five LSIs add about 344 MiB for 100 writes under this
+conservative bound, exceeding the current 512-MiB Cell budget even for small
+items; those requests throttle rather than publishing an unsafe COMMIT. This is intentionally conservative and reduces concurrency within a
 512-MiB Cell. It is not an efficient packing or 10,000-Cell throughput result.
 A two-MiB Cell cannot admit even the four-operation regression under this rule;
 that refusal is explicitly tested. Production limits remain unchanged.
@@ -1980,3 +1991,76 @@ cuts run through signed loopback peers; the process smoke verifies the public
 API and persistence path without those injected pauses. Strict all-target
 Clippy, formatting, diff, and Cell/LTX layout checks passed. The source change
 adds 13 net production lines for bounded polling and the six shared descriptors.
+
+## Local indexes join the transaction boundary
+
+ALL-projection local secondary indexes now share the base item's Cell command.
+Prepare validates the evaluated item, stages its image, and reserves additional
+capacity for both index B-trees. COMMIT updates base storage and ordered index
+entries before releasing locks and the capacity claim; ABORT leaves both live
+representations unchanged. Import rebuilds entries from each base image while
+the split child is still unavailable. Ordinary writes and TTL deletion use the
+same index mutation functions.
+
+Indexed Query cannot use only the base sort-key lock range: an unresolved write
+may move an existing item into the requested index range, or create a row absent
+from the live index. The routed query fences exclusive intents across its HASH
+group; the account query conservatively fences its table. Indexed Scan orders
+by base item key and fences the unvisited base-key range. Lock inspection and
+base-image loading happen within the same Cell query. The existing resolver
+helps a published decision and repeats the query; BEGIN remains retryable.
+
+`tests/elastic_cells/local_indexes.rs` covers account and data participants,
+prepared moves/creates/deletes, COMMIT and ABORT read helping, token replay,
+five indexes, numeric pagination, sparse rows, and split import. The process
+fixture adds signed SDK calls and hard-restart recovery. The upstream read-plan
+contract still needs approval and implementation for KEYS_ONLY/INCLUDE; see
+[LSI_CONTRACT.md](LSI_CONTRACT.md). No dependency pin is changed.
+
+Adding the index metadata exposed stack exhaustion in the existing completed-
+split recovery test. Targeted probes located the nested split/admission path;
+the unchanged fixture passed with a larger diagnostic stack. `split_partition`
+now owns a boxed future, keeping that state off its callers' stack. The original
+fixture passes again with the default stack, and temporary probes are removed.
+
+Qualification for this change: strict all-target BeyondDB Clippy passes. The
+account, elastic-Cell, and peer-network suites pass 28 tests with two test
+threads (3.62s, 96.54s, and 100.54s respectively). A preceding default-parallel
+run failed the mixed account/data fixture's large transaction with
+`Cell is not active on its assigned worker`; that fixture passes alone (39.15s)
+and in the two-thread run. The failure's cause is not established, so the latter
+runs do not qualify arbitrary concurrent load. The upstream full protocol suite
+and 10,000-Cell/multi-TB workload remain unqualified.
+
+### Recovery readiness measurement
+
+The first SDK/RustFS process run exceeded its unchanged 45-second readiness
+deadline after restart. Temporary phase probes in a repeat measured 7.50s for
+account/credential recovery, 3.49s for partition recovery, and 25.52s for the
+coordinator pass; public serving started at 36.51s. That instrumented run passed
+all SDK/restart assertions in 390.40s. The first timeout's exact cause is not
+established by the successful repeat.
+
+Within the coordinator pass, reaching shard 56 took 5.15s; reaching shard 80 took
+20.53s. Startup must reclaim settled coordinators when the node's 64 active-Cell
+slots are occupied. The runtime's `MovementBudget::new(2, 1_000)` and the
+provisioner's one-window admission wait constrain this tail. These measurements
+expose limited readiness margin and do not establish a fleet RTO. The fixture
+now captures both server output streams and reports the failing readiness call
+site; the temporary production probes are removed.
+
+A concrete next optimization is durable caching of a proven settled coordinator
+root in the account registry. A skip would require an exact match against the
+current authoritative Idle root and application version; a changed root, a new
+owner, an unknown proof, or an unfinished transaction must take the existing
+recovery path. Prove that a stale hint followed by a new BEGIN cannot hide work,
+that races with reactivation stay safe, and that startup still fails closed on
+unresolved recovery. This is proposed work, not implemented support. Such hints
+would avoid unnecessary restoration of settled history; they would not authorize
+deleting decisions, token records, read images, or participant tombstones.
+
+Final verification without production probes: the explicitly enabled signed
+SDK/RustFS process test passes in 384.49s, including hard and graceful restart,
+indexed reads, transaction replay, and restored base/index contents. Strict
+all-target Clippy passes again (9.50s). These successful runs do not resolve the
+earlier load/readiness failures or qualify fleet-scale recovery.

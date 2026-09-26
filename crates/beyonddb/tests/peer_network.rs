@@ -321,6 +321,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
                 expires_at_ms: issued_at_ms + 60_000,
             },
             Json(TableSpec {
+                local_secondary_indexes: Vec::new(),
                 table_name: "RemoteTable".into(),
                 key_schema: vec![KeySchemaElement {
                     attribute_name: "id".into(),

@@ -11,6 +11,7 @@ mod participant;
 mod partition;
 mod provision;
 mod routing;
+mod secondary_index;
 mod server;
 mod split;
 mod table;
@@ -79,9 +80,10 @@ const APPLICATION: ApplicationId = ApplicationId::from_bytes([0x42; 16]);
 pub const APPLICATION_ID: ApplicationId = APPLICATION;
 static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
-        "{}\n{}\n{}",
+        "{}\n{}\n{}\n{}",
         crab_cell_runtime::primitives::capacity::SCHEMA,
         participant::SCHEMA,
+        secondary_index::SCHEMA,
         include_str!("schema.sql")
     )
 });
@@ -129,7 +131,7 @@ static COMMANDS: [OperationDescriptor; 20] = [
     participant::phase_operation(22),
     crate::transaction_transport::upload_operation(23),
 ];
-static QUERIES: [OperationDescriptor; 21] = [
+static QUERIES: [OperationDescriptor; 22] = [
     operation(4),
     operation(7),
     operation(8),
@@ -151,6 +153,7 @@ static QUERIES: [OperationDescriptor; 21] = [
     participant::phase_operation(25),
     operation(26),
     operation(27),
+    operation(28),
 ];
 
 /// Statically linked account application.
@@ -263,6 +266,10 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
                 source.update(include_bytes!("lib.rs"));
                 source.update(include_bytes!("table.rs"));
                 source.update(include_bytes!("items.rs"));
+                source.update(include_bytes!("secondary_index.rs"));
+                source.update(include_bytes!("secondary_index/read.rs"));
+                source.update(include_bytes!("partition/key.rs"));
+                source.update(include_bytes!("partition/query.rs"));
                 source.update(include_bytes!("item_storage.rs"));
                 source.update(include_bytes!("items/transaction.rs"));
                 source.update(include_bytes!("participant.rs"));
@@ -324,6 +331,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<ListTables>()?;
         registry.bind_query::<DescribeTableById>()?;
         registry.bind_query::<ScanItems>()?;
+        registry.bind_query::<secondary_index::QueryAccountIndex>()?;
         registry.bind_query::<ReadTableRoute>()?;
         registry.bind_query::<ReadSplitPlan>()?;
         registry.bind_query::<ReadPartitionRoute>()?;

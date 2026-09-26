@@ -118,7 +118,12 @@ impl TableEngine for CellStorage {
                 || input
                     .local_secondary_indexes
                     .as_ref()
-                    .is_some_and(|v| !v.is_empty())
+                    .is_some_and(|indexes| {
+                        indexes.iter().any(|index| {
+                            index.projection.projection_type
+                                != extenddb_core::types::ProjectionType::All
+                        })
+                    })
                 || input.vector_indexes.as_ref().is_some_and(|v| !v.is_empty())
                 || input.stream_specification.is_some()
                 || input.sse_specification.is_some()
@@ -126,7 +131,7 @@ impl TableEngine for CellStorage {
                 || input.on_demand_throughput.is_some()
             {
                 return Err(unsupported(
-                    "table indexes, streams, SSE, class, or on-demand ceilings",
+                    "global/vector indexes, non-ALL local index projections, streams, SSE, class, or on-demand ceilings",
                 ));
             }
             extenddb_core::validation::validate_create_table(&input, &LimitsConfig::default())
@@ -137,6 +142,7 @@ impl TableEngine for CellStorage {
                 table_name: input.table_name,
                 key_schema: input.key_schema,
                 attribute_definitions: input.attribute_definitions,
+                local_secondary_indexes: input.local_secondary_indexes.unwrap_or_default(),
                 billing_mode: input.billing_mode.unwrap_or(BillingMode::Provisioned),
                 provisioned_throughput: input.provisioned_throughput,
                 deletion_protection_enabled: input.deletion_protection_enabled.unwrap_or(false),
@@ -427,6 +433,12 @@ impl TableEngine for CellStorage {
                 return Err(StorageError::TableNotActive(table_name));
             }
             Ok(TableKeyInfo {
+                has_lsi: !record.local_secondary_indexes.is_empty(),
+                local_secondary_indexes: record
+                    .local_secondary_indexes
+                    .iter()
+                    .map(|index| local_index_info(&record.id, index))
+                    .collect(),
                 table_name: record.table_name,
                 account_id,
                 table_id: record.id,
@@ -448,8 +460,13 @@ impl TableEngine for CellStorage {
         let table_name = table_name.to_owned();
         let index_name = index_name.to_owned();
         Box::pin(async move {
-            self.record(&account_id, &table_name).await?;
-            Err(StorageError::IndexNotFound(index_name))
+            let record = self.record(&account_id, &table_name).await?;
+            record
+                .local_secondary_indexes
+                .iter()
+                .find(|index| index.index_name == index_name)
+                .map(|index| local_index_info(&record.id, index))
+                .ok_or(StorageError::IndexNotFound(index_name))
         })
     }
 
@@ -467,10 +484,16 @@ impl TableEngine for CellStorage {
                 .query::<DescribeTableById>(&target, None, Json(table_id.clone()))
                 .await
                 .map_err(cell_error)?;
-            if found.output.0.is_none() {
-                return Err(StorageError::TableNotFound(table_id));
-            }
-            Err(StorageError::IndexNotFound(index_name))
+            let record = found
+                .output
+                .0
+                .ok_or(StorageError::TableNotFound(table_id))?;
+            record
+                .local_secondary_indexes
+                .iter()
+                .find(|index| index.index_name == index_name)
+                .map(|index| local_index_info(&record.id, index))
+                .ok_or(StorageError::IndexNotFound(index_name))
         })
     }
 }
@@ -538,6 +561,24 @@ fn description(
             last_update_to_pay_per_request_date_time: Some(since as f64 / 1_000.0),
         });
     TableDescription {
+        local_secondary_indexes: (!record.local_secondary_indexes.is_empty()).then(|| {
+            record
+                .local_secondary_indexes
+                .iter()
+                .map(|index| extenddb_core::types::LsiDescription {
+                    index_name: index.index_name.clone(),
+                    key_schema: index.key_schema.clone(),
+                    projection: index.projection.clone(),
+                    index_size_bytes: 0,
+                    item_count: 0,
+                    index_arn: format!(
+                        "{}/index/{}",
+                        extenddb_storage::util::table_arn(region, account_id, &record.table_name),
+                        index.index_name
+                    ),
+                })
+                .collect()
+        }),
         table_name: record.table_name.clone(),
         key_schema: record.key_schema,
         attribute_definitions: record.attribute_definitions,
@@ -600,4 +641,14 @@ pub(crate) fn cell_error<T>(error: InvocationError<T>) -> StorageError {
 
 fn unsupported(feature: &str) -> StorageError {
     StorageError::Unsupported(feature.to_owned())
+}
+
+fn local_index_info(table_id: &str, index: &extenddb_core::types::LsiInput) -> IndexInfo {
+    IndexInfo {
+        index_name: index.index_name.clone(),
+        index_id: format!("{table_id}/{}", index.index_name),
+        index_type: extenddb_core::types::IndexType::Lsi,
+        key_schema: index.key_schema.clone(),
+        projection: index.projection.clone(),
+    }
 }

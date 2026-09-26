@@ -6,7 +6,7 @@ use extenddb_core::types::{AttributeValue, Item, KeySchemaElement, KeyType};
 use crate::items::item_key;
 use crate::{Error, Result};
 
-pub(super) fn index_key(item: &Item, schema: &[KeySchemaElement]) -> Result<(Vec<u8>, Vec<u8>)> {
+pub(crate) fn index_key(item: &Item, schema: &[KeySchemaElement]) -> Result<(Vec<u8>, Vec<u8>)> {
     let partition = partition_key_bytes(item, schema)?;
     let mut sort = Vec::new();
     for element in schema
@@ -21,7 +21,7 @@ pub(super) fn index_key(item: &Item, schema: &[KeySchemaElement]) -> Result<(Vec
     Ok((partition, sort))
 }
 
-pub(super) fn sort_component(value: &AttributeValue) -> Result<Vec<u8>> {
+pub(crate) fn sort_component(value: &AttributeValue) -> Result<Vec<u8>> {
     let encoded = match value {
         AttributeValue::S(value) => value.as_bytes().to_vec(),
         AttributeValue::B(value) => value.clone(),
@@ -33,7 +33,7 @@ pub(super) fn sort_component(value: &AttributeValue) -> Result<Vec<u8>> {
     Ok(sort)
 }
 
-pub(super) fn sort_prefix(value: &AttributeValue) -> Result<Vec<u8>> {
+pub(crate) fn sort_prefix(value: &AttributeValue) -> Result<Vec<u8>> {
     match value {
         AttributeValue::S(value) => Ok(escape_sort_bytes(value.as_bytes())),
         AttributeValue::B(value) => Ok(escape_sort_bytes(value)),
@@ -55,7 +55,7 @@ fn escape_sort_bytes(encoded: &[u8]) -> Vec<u8> {
     sort
 }
 
-pub(super) fn partition_key_bytes(item: &Item, schema: &[KeySchemaElement]) -> Result<Vec<u8>> {
+pub(crate) fn partition_key_bytes(item: &Item, schema: &[KeySchemaElement]) -> Result<Vec<u8>> {
     let mut partition = Item::new();
     for element in schema
         .iter()

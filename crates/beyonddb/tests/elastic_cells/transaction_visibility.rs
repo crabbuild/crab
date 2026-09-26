@@ -107,6 +107,7 @@ pub(crate) async fn assert_range_read_barriers(
     );
 
     let base = PartitionQueryInput {
+        index_name: None,
         table_id: key_info.table_id.clone(),
         epoch,
         partition_key: Item::from([("pk".into(), AttributeValue::S("same".into()))]),
@@ -128,6 +129,7 @@ pub(crate) async fn assert_range_read_barriers(
         (
             "absent create",
             PartitionQueryInput {
+                index_name: None,
                 sort: compare(SortComparison::Eq, "9"),
                 ..base.clone()
             },
@@ -136,6 +138,7 @@ pub(crate) async fn assert_range_read_barriers(
         (
             "delete with equivalent numeric key",
             PartitionQueryInput {
+                index_name: None,
                 sort: compare(SortComparison::Eq, "2.0"),
                 ..base.clone()
             },
@@ -144,6 +147,7 @@ pub(crate) async fn assert_range_read_barriers(
         (
             "disjoint sort range",
             PartitionQueryInput {
+                index_name: None,
                 sort: compare(SortComparison::Lt, "2"),
                 ..base.clone()
             },
@@ -152,6 +156,7 @@ pub(crate) async fn assert_range_read_barriers(
         (
             "different HASH",
             PartitionQueryInput {
+                index_name: None,
                 partition_key: Item::from([("pk".into(), AttributeValue::S("other".into()))]),
                 ..base.clone()
             },
@@ -160,6 +165,7 @@ pub(crate) async fn assert_range_read_barriers(
         (
             "forward before intent",
             PartitionQueryInput {
+                index_name: None,
                 exclusive_start_key: Some(key("same", "8")),
                 ..base.clone()
             },
@@ -168,6 +174,7 @@ pub(crate) async fn assert_range_read_barriers(
         (
             "forward after intent",
             PartitionQueryInput {
+                index_name: None,
                 exclusive_start_key: Some(created.clone()),
                 ..base.clone()
             },
@@ -176,6 +183,7 @@ pub(crate) async fn assert_range_read_barriers(
         (
             "reverse before intent",
             PartitionQueryInput {
+                index_name: None,
                 forward: false,
                 exclusive_start_key: Some(key("same", "10")),
                 ..base.clone()
@@ -185,6 +193,7 @@ pub(crate) async fn assert_range_read_barriers(
         (
             "reverse after intent",
             PartitionQueryInput {
+                index_name: None,
                 forward: false,
                 exclusive_start_key: Some(deleted.clone()),
                 ..base.clone()

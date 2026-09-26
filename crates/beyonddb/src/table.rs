@@ -1,5 +1,5 @@
 use super::*;
-use extenddb_core::types::Tag;
+use extenddb_core::types::{LsiInput, Tag};
 
 /// An ExtendDB table's key contract stored in the account Cell.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -8,8 +8,10 @@ pub struct TableSpec {
     pub table_name: String,
     /// Primary key schema already validated by ExtendDB's operation engine.
     pub key_schema: Vec<KeySchemaElement>,
-    /// Definitions of the primary key attributes.
+    /// Definitions of base and index key attributes.
     pub attribute_definitions: Vec<AttributeDefinition>,
+    /// Immutable local secondary indexes maintained with each base item.
+    pub local_secondary_indexes: Vec<LsiInput>,
     /// Table billing mode.
     pub billing_mode: BillingMode,
     /// Capacity units for provisioned billing.
@@ -27,6 +29,7 @@ impl TableSpec {
         self.table_name == record.table_name
             && self.key_schema == record.key_schema
             && self.attribute_definitions == record.attribute_definitions
+            && self.local_secondary_indexes == record.local_secondary_indexes
             && self.billing_mode == record.billing_mode
             && self.provisioned_throughput == record.provisioned_throughput
             && self.deletion_protection_enabled == record.deletion_protection_enabled
@@ -55,8 +58,10 @@ pub struct TableRecord {
     pub table_name: String,
     /// Primary key schema.
     pub key_schema: Vec<KeySchemaElement>,
-    /// Definitions of primary key attributes.
+    /// Definitions of base and index key attributes.
     pub attribute_definitions: Vec<AttributeDefinition>,
+    /// Immutable local secondary indexes maintained with each base item.
+    pub local_secondary_indexes: Vec<LsiInput>,
     /// Persisted table billing mode.
     pub billing_mode: BillingMode,
     /// Persisted provisioned capacity, if applicable.
@@ -121,6 +126,7 @@ impl Command for CreateTable {
             table_name: input.table_name.clone(),
             key_schema: input.key_schema.clone(),
             attribute_definitions: input.attribute_definitions.clone(),
+            local_secondary_indexes: input.local_secondary_indexes.clone(),
             billing_mode: input.billing_mode,
             provisioned_throughput: input.provisioned_throughput,
             deletion_protection_enabled: input.deletion_protection_enabled,
@@ -213,6 +219,10 @@ impl Command for DeleteTable {
                     parameters: vec![SqlValue::Text(table.id.clone())],
                 },
                 SqlStatement {
+                    sql: "DELETE FROM ddb_local_index_items WHERE table_id = ?1".into(),
+                    parameters: vec![SqlValue::Text(table.id.clone())],
+                },
+                SqlStatement {
                     sql: "DELETE FROM ddb_items WHERE table_id = ?1".into(),
                     parameters: vec![SqlValue::Text(table.id.clone())],
                 },
@@ -299,6 +309,7 @@ impl Command for UpdateTable {
             table_name: table.table_name.clone(),
             key_schema: table.key_schema.clone(),
             attribute_definitions: table.attribute_definitions.clone(),
+            local_secondary_indexes: table.local_secondary_indexes.clone(),
             billing_mode: table.billing_mode,
             provisioned_throughput: table.provisioned_throughput.clone(),
             deletion_protection_enabled: table.deletion_protection_enabled,
@@ -511,6 +522,7 @@ fn valid_table_spec(spec: &TableSpec) -> bool {
         table_name: spec.table_name.clone(),
         key_schema: spec.key_schema.clone(),
         attribute_definitions: spec.attribute_definitions.clone(),
+        local_secondary_indexes: Some(spec.local_secondary_indexes.clone()),
         billing_mode: Some(spec.billing_mode),
         provisioned_throughput: spec.provisioned_throughput.clone(),
         deletion_protection_enabled: Some(spec.deletion_protection_enabled),
@@ -518,4 +530,7 @@ fn valid_table_spec(spec: &TableSpec) -> bool {
         ..CreateTableInput::default()
     };
     validation::validate_create_table(&input, &LimitsConfig::default()).is_ok()
+        && spec.local_secondary_indexes.iter().all(|index| {
+            index.projection.projection_type == extenddb_core::types::ProjectionType::All
+        })
 }

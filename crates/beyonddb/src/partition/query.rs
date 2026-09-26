@@ -42,7 +42,7 @@ pub enum SortPredicate {
 }
 
 impl SortPredicate {
-    fn attribute(&self) -> &str {
+    pub(crate) fn attribute(&self) -> &str {
         match self {
             Self::Compare { attribute, .. }
             | Self::Between { attribute, .. }
@@ -86,6 +86,7 @@ impl SortPredicate {
 pub struct PartitionQueryInput {
     pub table_id: String,
     pub epoch: u64,
+    pub index_name: Option<String>,
     pub partition_key: Item,
     pub sort: Option<SortPredicate>,
     pub extra_range_equals: Vec<(String, AttributeValue)>,
@@ -138,6 +139,14 @@ impl Query for PartitionQuery {
             AccessState::Serving => {}
             AccessState::Sealed => return Ok(Json(PartitionQueryOutcome::Sealed)),
             AccessState::Importing => return Ok(Json(PartitionQueryOutcome::NotReady)),
+        }
+        if input.index_name.is_some() {
+            match data_key_hash(&spec.table.id, &input.partition_key, &spec.table.key_schema) {
+                Ok(hash) if spec.contains(hash) => {}
+                Ok(_) => return Ok(Json(PartitionQueryOutcome::WrongPartition)),
+                Err(_) => return Ok(Json(PartitionQueryOutcome::InvalidKey)),
+            }
+            return crate::secondary_index::query(context, &spec.table, input, true);
         }
         if input.limit == 0 {
             return Ok(Json(PartitionQueryOutcome::InvalidLimit));
@@ -294,7 +303,7 @@ fn range_predicate(
     (sql, parameters)
 }
 
-fn index_bounds(predicate: &SortPredicate) -> Result<Vec<(&'static str, Vec<u8>)>> {
+pub(crate) fn index_bounds(predicate: &SortPredicate) -> Result<Vec<(&'static str, Vec<u8>)>> {
     match predicate {
         SortPredicate::Compare { op, value, .. } => {
             let operator = match op {

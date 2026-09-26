@@ -16,6 +16,8 @@ use crate::table::statement;
 pub struct PartitionScanInput {
     /// Immutable table identity.
     pub table_id: String,
+    /// Local secondary index to scan, or the base table.
+    pub index_name: Option<String>,
     /// Source data Cell epoch used for routing.
     pub epoch: u64,
     /// Maximum number of items evaluated.
@@ -104,11 +106,37 @@ fn scan_page(
         (AccessState::Importing, false) => return Ok(Json(PartitionScanOutcome::NotReady)),
         (_, true) => return Ok(Json(PartitionScanOutcome::NotSealed)),
     }
+    let index = match input.index_name.as_deref() {
+        Some(name) => match spec
+            .table
+            .local_secondary_indexes
+            .iter()
+            .find(|index| index.index_name == name)
+        {
+            Some(index) => Some(index),
+            None => return Ok(Json(PartitionScanOutcome::InvalidKey)),
+        },
+        None => None,
+    };
+    let key_schema = index.map_or_else(
+        || spec.table.key_schema.clone(),
+        |index| crate::secondary_index::key_schema(&spec.table, index),
+    );
+    if export && index.is_some() {
+        return Ok(Json(PartitionScanOutcome::InvalidKey));
+    }
     if input.limit == Some(0) {
         return Ok(Json(PartitionScanOutcome::InvalidLimit));
     }
     let mut cursor = match input.exclusive_start_key {
-        Some(key) if valid_key(&key, &spec.table) => item_key(&key, &spec.table.key_schema)?,
+        Some(key)
+            if index.map_or_else(
+                || valid_key(&key, &spec.table),
+                |index| crate::secondary_index::valid_cursor(&key, &spec.table, index),
+            ) =>
+        {
+            item_key(&key, &spec.table.key_schema)?
+        }
         Some(_) => return Ok(Json(PartitionScanOutcome::InvalidKey)),
         None => Vec::new(),
     };
@@ -128,16 +156,18 @@ fn scan_page(
     let mut bytes = 0_usize;
     let mut stopped = false;
     loop {
-        let rows = context.sql(&statement(
-            "SELECT item_key FROM ddb_partition_items WHERE item_key > ?1 \
-                 ORDER BY item_key LIMIT 64",
-            vec![SqlValue::Blob(cursor.clone())],
-        ))?;
-        let key_rows = &rows[0].rows;
+        let key_rows = crate::secondary_index::scan_keys(
+            context,
+            &spec.table.id,
+            input.index_name.as_deref(),
+            &cursor,
+            true,
+            64,
+        )?;
         if key_rows.is_empty() {
             break;
         }
-        for row in key_rows {
+        for row in &key_rows {
             let [SqlValue::Blob(key)] = row.as_slice() else {
                 return Err(Error::Command("invalid partition scan key row"));
             };
@@ -168,16 +198,18 @@ fn scan_page(
         }
     }
     let last_evaluated_key = if stopped {
-        let remaining = context.sql(&statement(
-            "SELECT 1 FROM ddb_partition_items WHERE item_key > ?1 LIMIT 1",
-            vec![SqlValue::Blob(cursor)],
-        ))?;
-        if remaining[0].rows.is_empty() {
+        let remaining = crate::secondary_index::scan_keys(
+            context,
+            &spec.table.id,
+            input.index_name.as_deref(),
+            &cursor,
+            true,
+            1,
+        )?;
+        if remaining.is_empty() {
             None
         } else {
-            items
-                .last()
-                .map(|item| extract_key(item, &spec.table.key_schema))
+            items.last().map(|item| extract_key(item, &key_schema))
         }
     } else {
         None

@@ -109,6 +109,7 @@ impl CellSplitController {
                     &source_target,
                     Some(sealed.receipt),
                     Json(PartitionScanInput {
+                        index_name: None,
                         table_id: source.table.id.clone(),
                         epoch: source.epoch,
                         limit: Some(100),

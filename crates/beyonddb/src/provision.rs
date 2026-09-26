@@ -964,88 +964,100 @@ impl CellInitialPartitionProvisioner {
     ///
     /// The source range is unavailable between its seal and the route switch.
     /// A retry resumes a durable plan for the same source after interruption.
-    pub async fn split_partition(
-        &self,
-        account_id: &str,
+    pub fn split_partition<'a>(
+        &'a self,
+        account_id: &'a str,
         account_handle: CellHandle,
-        table_id: &str,
+        table_id: &'a str,
         source_partition_id: [u8; 16],
-    ) -> Result<SplitPlan, StorageError> {
-        let account = account_target(account_id).map_err(provision_error)?;
-        let client = CellClient::local(self.application.registry(), account_handle.clone());
-        if let Some(plan) = client
-            .query::<ReadSplitPlan>(&account, None, Json(table_id.to_owned()))
-            .await
-            .map_err(cell_error)?
-            .output
-            .0
-        {
-            if plan.source.partition_id != source_partition_id {
-                return Err(StorageError::Transient(
-                    "another partition split is pending for this table".into(),
-                ));
+    ) -> BoxedFuture<'a, Result<SplitPlan, StorageError>> {
+        // Split recovery nests admission and replay futures. Keep that state off
+        // the capacity caller's stack, including retries of completed splits.
+        Box::pin(async move {
+            let account = account_target(account_id).map_err(provision_error)?;
+            let client = CellClient::local(self.application.registry(), account_handle.clone());
+            if let Some(plan) = client
+                .query::<ReadSplitPlan>(&account, None, Json(table_id.to_owned()))
+                .await
+                .map_err(cell_error)?
+                .output
+                .0
+            {
+                if plan.source.partition_id != source_partition_id {
+                    return Err(StorageError::Transient(
+                        "another partition split is pending for this table".into(),
+                    ));
+                }
+                self.resume_split(account_id, account_handle, &plan).await?;
+                return Ok(plan);
+            }
+            let published = client
+                .query::<ReadPublishedPartition>(
+                    &account,
+                    None,
+                    Json(PublishedPartitionInput {
+                        table_id: table_id.to_owned(),
+                        partition_id: source_partition_id,
+                    }),
+                )
+                .await
+                .map_err(cell_error)?
+                .output
+                .0;
+            let (route_epoch, source) = match published {
+                PublishedPartitionOutcome::Published { route_epoch, spec } => (route_epoch, spec),
+                PublishedPartitionOutcome::Unrouted => {
+                    return Err(StorageError::TableNotActive(table_id.to_owned()));
+                }
+                PublishedPartitionOutcome::Missing => {
+                    return self
+                        .completed_split(
+                            account_id,
+                            table_id,
+                            source_partition_id,
+                            &client,
+                            &account,
+                        )
+                        .await?
+                        .ok_or_else(|| {
+                            StorageError::Validation(
+                                "split source is absent from table route".into(),
+                            )
+                        });
+                }
+            };
+            let plan = split_plan(&source, route_epoch)?;
+            match client
+                .command::<BeginSplit>(&account, mutation_identity()?, Json(plan.clone()))
+                .await
+            {
+                Ok(committed) if committed.output.0 == BeginSplitOutcome::Planned => {}
+                Ok(_) => {
+                    return Err(StorageError::Internal(
+                        "unexpected successful split plan result".into(),
+                    ));
+                }
+                Err(InvocationError::Rejected(committed)) => {
+                    return Err(match committed.output.0 {
+                        BeginSplitOutcome::TableNotFound => {
+                            StorageError::TableNotFound(table_id.to_owned())
+                        }
+                        BeginSplitOutcome::RouteNotFound => {
+                            StorageError::TableNotActive(table_id.to_owned())
+                        }
+                        BeginSplitOutcome::InvalidPlan | BeginSplitOutcome::Conflict => {
+                            StorageError::Transient("split plan or route changed; retry".into())
+                        }
+                        BeginSplitOutcome::Planned => {
+                            StorageError::Internal("unexpected rejected split plan result".into())
+                        }
+                    });
+                }
+                Err(error) => return Err(cell_error(error)),
             }
             self.resume_split(account_id, account_handle, &plan).await?;
-            return Ok(plan);
-        }
-        let published = client
-            .query::<ReadPublishedPartition>(
-                &account,
-                None,
-                Json(PublishedPartitionInput {
-                    table_id: table_id.to_owned(),
-                    partition_id: source_partition_id,
-                }),
-            )
-            .await
-            .map_err(cell_error)?
-            .output
-            .0;
-        let (route_epoch, source) = match published {
-            PublishedPartitionOutcome::Published { route_epoch, spec } => (route_epoch, spec),
-            PublishedPartitionOutcome::Unrouted => {
-                return Err(StorageError::TableNotActive(table_id.to_owned()));
-            }
-            PublishedPartitionOutcome::Missing => {
-                return self
-                    .completed_split(account_id, table_id, source_partition_id, &client, &account)
-                    .await?
-                    .ok_or_else(|| {
-                        StorageError::Validation("split source is absent from table route".into())
-                    });
-            }
-        };
-        let plan = split_plan(&source, route_epoch)?;
-        match client
-            .command::<BeginSplit>(&account, mutation_identity()?, Json(plan.clone()))
-            .await
-        {
-            Ok(committed) if committed.output.0 == BeginSplitOutcome::Planned => {}
-            Ok(_) => {
-                return Err(StorageError::Internal(
-                    "unexpected successful split plan result".into(),
-                ));
-            }
-            Err(InvocationError::Rejected(committed)) => {
-                return Err(match committed.output.0 {
-                    BeginSplitOutcome::TableNotFound => {
-                        StorageError::TableNotFound(table_id.to_owned())
-                    }
-                    BeginSplitOutcome::RouteNotFound => {
-                        StorageError::TableNotActive(table_id.to_owned())
-                    }
-                    BeginSplitOutcome::InvalidPlan | BeginSplitOutcome::Conflict => {
-                        StorageError::Transient("split plan or route changed; retry".into())
-                    }
-                    BeginSplitOutcome::Planned => {
-                        StorageError::Internal("unexpected rejected split plan result".into())
-                    }
-                });
-            }
-            Err(error) => return Err(cell_error(error)),
-        }
-        self.resume_split(account_id, account_handle, &plan).await?;
-        Ok(plan)
+            Ok(plan)
+        })
     }
 
     async fn completed_split(

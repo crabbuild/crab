@@ -2,6 +2,10 @@
 
 mod support;
 
+mod server_binary {
+    pub(super) mod local_indexes;
+}
+
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
@@ -112,8 +116,8 @@ fn start(config: &Path, log: &Path, bootstrap: bool, s3: SocketAddr) -> ManagedC
     let mut command = Command::new(env!("CARGO_BIN_EXE_beyonddb"));
     command
         .arg(config)
+        .stdout(output.try_clone().unwrap())
         .stderr(output)
-        .stdout(Stdio::null())
         .env("AWS_ACCESS_KEY_ID", "crab")
         .env("AWS_SECRET_ACCESS_KEY", "crab")
         .env("AWS_REGION", "us-east-1")
@@ -135,6 +139,7 @@ fn start(config: &Path, log: &Path, bootstrap: bool, s3: SocketAddr) -> ManagedC
     ManagedChild(child)
 }
 
+#[track_caller]
 fn wait_healthy(child: &mut Child, address: SocketAddr, log: &Path) {
     let deadline = Instant::now() + Duration::from_secs(45);
     while Instant::now() < deadline {
@@ -302,6 +307,7 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         .load()
         .await;
     let sdk = aws_sdk_dynamodb::Client::new(&sdk_config);
+    server_binary::local_indexes::create(&sdk).await;
     let created = sdk
         .create_table()
         .table_name("ProcessData")
@@ -771,6 +777,7 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
             .unwrap();
         assert!(deleted.item().is_none());
     }
+    server_binary::local_indexes::assert_recovered(&sdk).await;
     large.assert_recovered(&sdk).await;
     large_read.assert_recovered(&sdk).await;
     sdk.transact_write_items()

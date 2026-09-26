@@ -66,7 +66,19 @@ impl CellStorage {
         limit: Option<u32>,
         exclusive_start_key: Option<Item>,
         segment: Option<(u64, u64)>,
+        index_name: Option<&str>,
     ) -> Result<Option<(Vec<Item>, Option<Item>)>, StorageError> {
+        let mut key_schema = key_info.base_key_schema.clone();
+        if index_name.is_some() {
+            for key in &key_info.key_schema {
+                if !key_schema
+                    .iter()
+                    .any(|base| base.attribute_name == key.attribute_name)
+                {
+                    key_schema.push(key.clone());
+                }
+            }
+        }
         let mut remaining = limit.unwrap_or(10_000).min(10_000);
         if remaining == 0 {
             return Err(StorageError::Validation(
@@ -155,6 +167,7 @@ impl CellStorage {
                             &owner,
                             &key_info.account_id,
                             Json(PartitionScanInput {
+                                index_name: index_name.map(str::to_owned),
                                 table_id: key_info.table_id.clone(),
                                 epoch: partition.epoch,
                                 limit: Some(remaining),
@@ -205,7 +218,7 @@ impl CellStorage {
                             return Ok(Some((items, last_returned)));
                         }
                         bytes = next_bytes;
-                        cursor = Some(extract_key(&item, &key_info.base_key_schema));
+                        cursor = Some(extract_key(&item, &key_schema));
                         last_returned = cursor.clone();
                         items.push(item);
                         remaining -= 1;
