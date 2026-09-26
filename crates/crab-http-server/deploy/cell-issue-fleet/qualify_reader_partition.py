@@ -16,14 +16,20 @@ from qualify_read_replicas import node_inventory, prove_readers, set_reader_targ
 from render import CONFIG, node_name
 
 
-def unavailable(url: str) -> dict:
+def unavailable(url: str, withdrawn: bool = False) -> dict:
     started = time.monotonic()
     try:
         with urllib.request.urlopen(url + "?read=replica", timeout=10) as response:
             raise RuntimeError(f"isolated reader returned HTTP {response.status}")
     except urllib.error.HTTPError as error:
-        body = json.load(error)
-        if error.code != 503 or body.get("error", {}).get("code") != "replica_unavailable":
+        raw = error.read()
+        # Lease expiry closes the public listener. Only a fresh expired-session
+        # proof permits the gateway's empty error in place of the live-node error.
+        if error.code == 502 and withdrawn and not raw:
+            body = None
+        else:
+            body = json.loads(raw)
+        if body is not None and (error.code != 503 or body.get("error", {}).get("code") != "replica_unavailable"):
             raise RuntimeError("isolated reader did not fail closed") from error
         return {"status": error.code, "body": body, "seconds": round(time.monotonic() - started, 3)}
 
@@ -93,7 +99,16 @@ def qualify(path: Path, port: int) -> dict:
                 or after["epoch"] <= before["epoch"]
                 or after["root"]["commit_sequence"] < before["root"]["commit_sequence"]):
             raise RuntimeError("healthy successor did not recover the authoritative root")
-        result["after_owner_death"] = unavailable(isolated_url)
+        isolated_status = json.loads(compose(path, profiles, "exec", "-T", observer,
+                                            "crab-http-server", "--config", CONFIG,
+                                            "cells", "node", "--session", isolated_session, "--json"))
+        container = compose(partition_path, profiles, "ps", "--all", "--quiet", isolated)
+        state = json.loads(command("docker", "inspect", "--format", "{{json .State}}", container))
+        if state["OOMKilled"]:
+            raise RuntimeError("partitioned node was killed by memory exhaustion")
+        result["isolated_authority_live"] = isolated_status["live"]
+        result["isolated_container_state"] = state
+        result["after_owner_death"] = unavailable(isolated_url, withdrawn=not isolated_status["live"])
         body = "Acknowledged while a read secondary was partitioned from RustFS"
         comment = request_json("POST", observer_url + "/comments",
                                {"request_id": str(uuid.uuid4()), "body": body})

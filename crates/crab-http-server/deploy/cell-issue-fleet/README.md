@@ -150,17 +150,43 @@ These samples are not peak-resource or production-capacity measurements. A reade
 failure must recruit a replacement without changing the writer or its epoch.
 A separate primary-only failure must select one of the two verified warm readers and
 successfully publish a new comment afterward.
+The target-count phase exercises 0→1→2→4→1, verifies zero-target rejection,
+and kills a selected reader before shrinking from four to one. Each step
+checks actual selected/ready counts and unchanged writer authority.
 
 At 20 nodes the runner also kills a Cell's owner and two observed
 readers, removes those three disposable local Cell volumes, and requires a
 survivor to recover the acknowledged issue and recruit two new readers from
-RustFS. Finally it pauses RustFS, requires explicit replica reads to return
+RustFS. The recovered writer must then acknowledge a new issue-body update,
+serve it, and advance the S3 root under the same owner and epoch.
+Finally it pauses RustFS, requires explicit replica reads to return
 `replica_unavailable` without data, resumes the provider, and verifies recovery
 without a receipt regression. Each fault phase first establishes a serving
 Cell because an earlier killed reader can own other Cells. Node inspection
 selects the unique live advertised boot session, including after restarts.
 The report proves local RustFS side effects and observed reader distribution
 on one host; it does not replace protected-provider evidence.
+
+An additional fault runner uses the existing twenty-node project's image:
+
+```sh
+python3 crates/crab-http-server/deploy/cell-issue-fleet/qualify_reader_partition.py \
+  --state "$HOME/.codex/cell-issue-fleet/read-replicas-1"
+```
+
+It routes one non-owner node's S3 endpoint through a disposable Caddy proxy,
+proves that node serves a replica, then pauses only that proxy. HTTP and peer
+networking remain available. It requires the isolated ingress to fail closed,
+kills the owner, and requires a healthy successor to advance the epoch and
+acknowledge a new S3-rooted mutation. The isolated session cannot be that
+successor. After its lease expires the server closes its listener; an empty
+gateway 502 is accepted only with a fresh expired-session record and no OOM kill.
+Cleanup resumes the proxy, restores both nodes and the original
+endpoint, and leaves the proxy stopped. The separate receipt records runtime,
+image, runner, source-report hash, and control states. This is an S3-path
+partition on one host, not independent-network or multi-host qualification.
+The proxy preserves signed request headers and uses explicit HTTP with
+compression disabled ([Caddy contract](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#defaults)).
 
 The completed [local qualification receipt](qualification/2026-09-25-read-replicas.md)
 records exact runtime/runner/image identities, distribution, latency, resources,
