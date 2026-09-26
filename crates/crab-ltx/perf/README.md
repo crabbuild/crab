@@ -304,6 +304,39 @@ The transfer-bound regression rejects a whole-file read for a large random cut;
 the failure cases retain accounting and allow retry after repair. Decoder index
 memory and same-worker response interference remain separate audit gates.
 
+### Streaming footer and optional replica index (2026-09-26)
+
+The next decoder change removes unused replica entries from ordinary
+verification, compares footer entries as a stream, and moves requested replica
+indexes to their caller instead of cloning them. Three release processes per
+implementation repeated the preceding RustFS workload. Baseline LTX behavior
+matches `5c2abfd915e` (unchanged by `a16c8efcc2b`); candidate production changes
+are retained as a source diff beside the reports.
+
+| Captured bytes in batch | Previous decoder cleanup, median ms | Changed decoder cleanup, median ms |
+| ---: | ---: | ---: |
+| 16,941,374 | 46.035 | 25.091 |
+| 25,412,106 | 70.635 | 37.511 |
+| 33,882,834 | 92.304 | 50.118 |
+| 42,353,558 | 131.654 | 63.285 |
+| 50,824,284 | 140.464 | 101.878 |
+
+Rows compare three samples at the same command position. Small-cut pooled
+medians were 202 and 139 microseconds across 15 commands per implementation.
+These are exploratory observations: the shared developer host had unrelated
+compiler/VM activity, and baseline samples overlapped focused compilation.
+The runs were sequential, not randomized or isolated, so the differences
+cannot establish a causal gain or public-action percentiles.
+
+Whole-process maximum RSS for the large workload ranged from 86.5–92.9 MB
+before and 83.6–91.7 MB after; those ranges do not establish a memory reduction.
+They include SQLite, capture, publication, and cleanup, not decoder allocations
+alone. Concurrent verification under the 1 GiB node profile remains unmeasured.
+Raw JSON, `/usr/bin/time -l` output, binary digests, source provenance/diff, and
+per-command comparison are retained under
+`$HOME/Workspace/crabbuild-target/crab-8bc8/decoder-streaming-20260926/`.
+Use the preceding command to reproduce the workload.
+
 ### Large sparse checkpoint capture (2026-09-25)
 
 With `--sparse --payload-bytes 4194304 --max-capture-bytes 1048576

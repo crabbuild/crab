@@ -268,8 +268,9 @@ that worker; the independent provider driver does not let the resident Cell
 execute meanwhile. Measure worker admission, shard queue, provider wait, and
 proof-to-confirmation delay separately. Sweep cut sizes because published-cut
 cleanup verifies every page before releasing retained accounting. Streaming
-now removes its complete input buffer; decoder indexes and buffered footers
-still need memory qualification. The [audit findings 9–11 and 13](ltx-performance-audit.md)
+now removes its complete input buffer; the decoder also streams its footer and
+omits unused replica lookup entries. The remaining observed-page index still
+needs memory qualification. The [audit findings 9–11 and 13](ltx-performance-audit.md)
 define the ownership constraints and focused failure tests for changing these
 paths. The [RustFS cleanup comparison](../../crab-ltx/perf/README.md#streaming-published-cut-cleanup-2026-09-26)
 measures this first change separately from public response latency.
