@@ -334,3 +334,87 @@ used by an AWS SDK and establish all of the following:
 
 Until these gates pass, BeyondDB is a bounded prototype, regardless of the
 declared database budget or the number of Cells the framework can address.
+
+## Table deletion and active residency
+
+The independent ExtendDB Python item suite exposed a serving limit after 31
+successful tests: the next CreateTable returned ServiceUnavailable on a node
+with 64 slots and two initial ranges per table. Earlier tests had deleted their
+tables, but their data Cells remained resident. Admission could reclaim only
+settled coordinators. A five-slot integration reproduction with one live indexed
+table and one repeatedly recreated indexed table failed in 0.17 seconds without
+any coordinator transactions.
+
+Foreground table/index provisioning and coordinator admission now inspect bounded
+local catalog entries under the admission mutex when slots are exhausted. A
+candidate must belong to the requested account, have an installed data or GSI
+specification, and refer to an exact table ID absent at the current account
+owner. The account lookup uses the routed client, so the account can live on a
+peer. Reusing a table name does not reuse its immutable ID. An unavailable account or failed
+query does not prove deletion; only a successful absent result does.
+
+Reclamation waits up to five seconds for the runtime to report an eligible
+settled candidate. This covers asynchronous inventory refresh after recent
+commands. The runtime then rechecks generation, work, owner authority, and
+movement admission before closing the worker and publishing Idle. The existing
+one-window retry for movement capacity is shared with coordinator release.
+Published roots, item data, prepared transactions, and index journals remain;
+this releases residency and does not implement storage garbage collection.
+
+Live table generations, other tenants, account/credential Cells, and unfinished
+installations are ineligible for this proof. This does not make a fleet of live
+ranges fit in one node's 64 slots; general activation/placement and durable
+history reclamation remain required. The independent tests ran unchanged from
+ExtendDB revision `bdb7b3df4ace3b80a6e928f144036d056aec0327`, with signed boto3
+requests against the compiled BeyondDB process and a fresh local RustFS store.
+Its 16 transaction tests passed in 59.93 seconds before this residency fix.
+
+This pressure proof currently runs in foreground table/index provisioning and
+coordinator admission. Split-child and background recovery admissions retain
+their existing coordinator reclamation policy; integrating deleted-range
+reclamation there remains follow-up work. Startup does not reactivate deleted
+tables because their directories are absent from the table listing.
+
+The signed SDK recreation regression also exposed a stale table-key cache in
+HTTP composition. After deleting and recreating a table name, Scan still used
+the previous table ID and returned ResourceInUseException. The server now uses
+ExtendDB's existing pass-through table-key lookup, matching its authorization
+lookup policy. Local invalidation alone would leave other servers stale. This
+adds account-owner reads per request; a future metadata cache needs generation
+validation or a fleet-wide invalidation contract before it can safely return
+cached table identities. No dependency patch or new setting is required.
+
+### Residency evidence map
+
+| Surface | Evidence / ownership |
+| --- | --- |
+| Public entry | ExtendDB CreateTable/DeleteTable and item handlers call `CellStorage`; HTTP table-key lookups consult the owner. |
+| Admission caller | Initial data/GSI provisioning and foreground coordinator `ensure` supply their routed client. |
+| Deletion proof | `DescribeTableById` on the current account owner; target derivation excludes other tenants and applications. |
+| Release callee | Runtime `release_idle_cell` rechecks exact generation and settled work, closes SQLite, and publishes Idle. |
+| Shared boundary | Settled coordinator release uses the same movement retry; split/background recovery integration remains open as noted above. |
+| Regression | Five slots, live indexed data, repeated table generations, preserved roots, and restoration of an old participant. |
+| Peer proof | Signed SDK recreation with the account on another owner, followed by existing transaction recovery and restart assertions. |
+| Baseline | `origin/main` has no BeyondDB subtree; the previous draft retained deleted data/index owners and cached old table IDs. |
+
+**Is this the best fix?** Reclaim residency through the runtime's existing
+fenced release contract, using immutable table-generation absence as product
+proof. Increasing the slot limit only delays exhaustion. Deleting Cell history
+would break recovery, while a new eviction mechanism would duplicate runtime
+authority. The roughly 150 net production lines add bounded discovery and share
+the existing release path; uncached metadata uses an existing dependency API.
+
+Verification on 2026-09-26:
+
+- The unchanged upstream transaction and item suites passed together against
+  one compiled-server process: **56 passed in 431.58 seconds**. This includes
+  the item test that originally failed during table creation. The qualification
+  runner records the exact binary digest, dependency revision, client versions,
+  service logs, and JUnit output in its artifact directory.
+- The five-slot regression passed in 3.68 seconds, including old-generation
+  restoration; the expanded signed SDK peer/restart test passed in 108.95 seconds.
+- Account integration passed; elastic integration had 29 passes and one SDK
+  native-certificate initialization failure. The unchanged failing numeric test
+  passed with `SSL_CERT_FILE=/etc/ssl/cert.pem` (8.45 seconds).
+- Strict all-target Clippy, compiled server build, Rust formatting, Python Ruff,
+  and diff checks passed. No fleet-scale or multi-TB qualification was performed.

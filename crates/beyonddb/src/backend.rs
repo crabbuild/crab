@@ -37,16 +37,18 @@ use super::{
 
 /// Installs an initial table's data Cells before its route becomes visible.
 pub trait InitialPartitionProvisioner: Send + Sync {
-    /// Return the installed, published partition contracts for a new table.
+    /// Return installed ranges, using the routed client for account-owned admission proof.
     fn provision<'a>(
         &'a self,
+        client: &'a CellClient,
         account_id: &'a str,
         table: &'a TableRecord,
     ) -> BoxedFuture<'a, Result<Vec<PartitionSpec>, StorageError>>;
 
-    /// Install a new global index's independently owned initial ranges.
+    /// Install index ranges, using the routed client for account-owned admission proof.
     fn provision_global_index<'a>(
         &'a self,
+        client: &'a CellClient,
         account_id: &'a str,
         table: &'a TableRecord,
         index: &'a crate::GlobalIndexRecord,
@@ -209,7 +211,7 @@ impl TableEngine for CellStorage {
             if let Some(provisioner) = &self.initial_partitions {
                 for index in &record.global_secondary_indexes {
                     let partitions = provisioner
-                        .provision_global_index(&account_id, &record, index)
+                        .provision_global_index(&self.client, &account_id, &record, index)
                         .await?
                         .into_iter()
                         .map(|range| crate::RoutePagePartition {
@@ -232,7 +234,9 @@ impl TableEngine for CellStorage {
                         .await
                         .map_err(cell_error)?;
                 }
-                let partitions = provisioner.provision(&account_id, &record).await?;
+                let partitions = provisioner
+                    .provision(&self.client, &account_id, &record)
+                    .await?;
                 let route = TableRoute {
                     table_id: record.id.clone(),
                     epoch: 1,

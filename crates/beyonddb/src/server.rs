@@ -140,7 +140,12 @@ pub fn build_http_state(
         throttle: Arc::default(),
         auth_cache: AuthCacheRegistry::empty(),
         authz_cache,
-        table_key_info_cache: Arc::new(CachedTableKeyInfoStore::new(storage, Default::default())),
+        // Table generations can change through any server. Process-local cache
+        // invalidation cannot prevent routing a recreated name to its deleted ID.
+        table_key_info_cache: Arc::new(CachedTableKeyInfoStore::pass_through(
+            storage,
+            Default::default(),
+        )),
         config_entries: Vec::new(),
         docs_store: None,
     })

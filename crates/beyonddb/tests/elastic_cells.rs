@@ -10,6 +10,7 @@ mod elastic_cells {
     mod public_transactions;
     mod read_resolution;
     mod recovery_admission;
+    mod table_residency;
     mod transaction_capacity;
     mod transaction_driver;
     mod transaction_reads;
@@ -156,20 +157,23 @@ struct FailOnceProvisioner {
 impl InitialPartitionProvisioner for FailOnceProvisioner {
     fn provision_global_index<'a>(
         &'a self,
+        client: &'a CellClient,
         account_id: &'a str,
         table: &'a beyonddb::TableRecord,
         index: &'a beyonddb::GlobalIndexRecord,
     ) -> BoxedFuture<'a, Result<Vec<beyonddb::GlobalIndexPartitionSpec>, StorageError>> {
-        self.inner.provision_global_index(account_id, table, index)
+        self.inner
+            .provision_global_index(client, account_id, table, index)
     }
 
     fn provision<'a>(
         &'a self,
+        client: &'a CellClient,
         account_id: &'a str,
         table: &'a beyonddb::TableRecord,
     ) -> BoxedFuture<'a, Result<Vec<PartitionSpec>, StorageError>> {
         Box::pin(async move {
-            let partitions = self.inner.provision(account_id, table).await?;
+            let partitions = self.inner.provision(client, account_id, table).await?;
             if !self.failed.swap(true, Ordering::SeqCst) {
                 return Err(StorageError::Transient(
                     "injected provision interruption".into(),
@@ -5362,8 +5366,13 @@ async fn create_table_retries_two_data_cells_before_reporting_active() {
     .unwrap()
     .with_initial_partition_count(2)
     .unwrap();
+    let restored_client = CellClient::local_runtime(
+        application.registry(),
+        restored_host.runtime(),
+        layout.clone(),
+    );
     let restored_specs = restored_provisioner
-        .provision("123456789012", &record)
+        .provision(&restored_client, "123456789012", &record)
         .await
         .unwrap();
     assert_eq!(restored_specs, route.partitions);

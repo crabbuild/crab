@@ -859,9 +859,13 @@ empty transaction history.
 When local Cell activation reaches the active-Cell limit, admission
 inspects runtime-settled candidates in least-recently-used order, checks the
 indexed pending-transaction boundary, and requests release of at most one
-coordinator with no observed pending work. This provisioner does not select
-account, data, or credential Cells for reclamation. The runtime's independent
-pressure policy can shed other settled Cells; general on-demand reactivation
+coordinator with no observed pending work. Foreground coordinator and new-range
+admission first checks for data/GSI Cells whose exact table generation is absent
+at the current account owner; it can release their residency while retaining
+published history for transaction recovery. See [deletion and residency
+proof](SCALING.md#table-deletion-and-active-residency). Account, credential, and
+live table Cells are excluded from this product reclamation policy. The runtime's
+independent pressure policy can shed other settled Cells; general on-demand reactivation
 remains a product availability gap. The runtime rechecks the exact generation and
 settled-work gate, closes SQLite, publishes Idle ownership, and releases its
 reservation. Local Cell activations are serialized; cross-node ownership

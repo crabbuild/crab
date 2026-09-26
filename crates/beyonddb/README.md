@@ -481,3 +481,26 @@ index does not prevent healthy indexes from applying the same source change;
 the journal remains until all have applied. See [global index recovery and
 qualification](GLOBAL_INDEXES.md#splits-and-recovery). This does not establish
 fleet placement, bounded recovery time, or 10,000-Cell capacity.
+
+## Independent client qualification
+
+`scripts/qualify-upstream.py` starts a fresh local RustFS store and the compiled
+BeyondDB binary, then runs ExtendDB's Python client tests unchanged. Requires
+`uv`, `openssl`, and `rustfs`. Supply a read-only ExtendDB checkout at the pinned
+dependency revision and an existing artifact directory on the workspace volume:
+
+```sh
+uv run crates/beyonddb/scripts/qualify-upstream.py \
+  --binary "$HOME/Workspace/crabbuild-target/crab-your-worktree/debug/beyonddb" \
+  --tests-root /path/to/extenddb/tests/python \
+  --artifacts "$HOME/Workspace/crabbuild-target/crab-your-worktree" \
+  test_transactions.py test_items.py
+```
+
+Build the binary first using this checkout's separate `CARGO_TARGET_DIR`. The
+runner records the binary digest, upstream revision, client versions, JUnit
+results, and service logs in a fresh artifact directory. It uses only local
+fixture credentials and stops both services on exit. It disables bytecode and
+pytest cache writes in the upstream checkout. Omit test selectors to collect the
+whole Python suite; it stops at the first failure. Passing selected files does
+not establish full DynamoDB compatibility.

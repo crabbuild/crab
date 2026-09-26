@@ -196,7 +196,7 @@ async fn journal_recovers_partial_projection_and_fences_delayed_images() {
     let index = &range.table.global_secondary_indexes[0];
     let index_hash = data_key_hash(&index.id, &original, &index.specification.key_schema).unwrap();
     let index_ranges = provisioner
-        .provision_global_index(ACCOUNT, &range.table, index)
+        .provision_global_index(&client, ACCOUNT, &range.table, index)
         .await
         .unwrap();
     let index_range = index_ranges

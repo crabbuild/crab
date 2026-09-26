@@ -1,5 +1,6 @@
 //! Initial table data Cell admission through the existing Cell runtime.
 
+mod residency;
 mod transactions;
 
 use std::{
@@ -1403,6 +1404,7 @@ fn split_plan(source: &PartitionSpec, route_epoch: u64) -> Result<SplitPlan, Sto
 impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
     fn provision_global_index<'a>(
         &'a self,
+        client: &'a CellClient,
         account_id: &'a str,
         table: &'a TableRecord,
         index: &'a crate::GlobalIndexRecord,
@@ -1410,6 +1412,7 @@ impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
         Box::pin(async move {
             let mut partitions = Vec::with_capacity(usize::from(self.initial_partition_count));
             for ordinal in 0..self.initial_partition_count {
+                self.reclaim_deleted_ranges(client, account_id).await?;
                 let range = initial_partition(table, self.initial_partition_count, ordinal)?;
                 let spec = crate::GlobalIndexPartitionSpec {
                     table: table.clone(),
@@ -1452,6 +1455,7 @@ impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
 
     fn provision<'a>(
         &'a self,
+        client: &'a CellClient,
         account_id: &'a str,
         table: &'a TableRecord,
     ) -> BoxedFuture<'a, Result<Vec<PartitionSpec>, StorageError>> {
@@ -1462,6 +1466,7 @@ impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
                 .ok_or_else(|| StorageError::Internal("data Cell module is not compiled".into()))?;
             let mut partitions = Vec::with_capacity(usize::from(self.initial_partition_count));
             for index in 0..self.initial_partition_count {
+                self.reclaim_deleted_ranges(client, account_id).await?;
                 let spec = initial_partition(table, self.initial_partition_count, index)?;
                 let target = data_target(account_id, &table.id, &spec.partition_id)
                     .map_err(provision_error)?;

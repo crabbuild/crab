@@ -6,6 +6,7 @@ mod peer_network {
     pub(super) mod capacity;
     pub(super) mod global_indexes;
     pub(super) mod recovery;
+    pub(super) mod table_residency;
 }
 
 use peer_network::recovery;
@@ -355,7 +356,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     assert_eq!(read.table_name, "RemoteTable");
     let other_table = read;
     let other_partitions = provisioner
-        .provision("123456789012", &other_table)
+        .provision(&client, "123456789012", &other_table)
         .await
         .unwrap();
     remote_account
@@ -483,7 +484,8 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
                         "arn:aws:dynamodb:us-east-1:123456789012:table/NetworkData",
                         "arn:aws:dynamodb:us-east-1:123456789012:table/RemoteTable",
                         "arn:aws:dynamodb:us-east-1:123456789012:table/ServingIndexFailover",
-                        "arn:aws:dynamodb:us-east-1:123456789012:table/ServingIndexFailover/index/ByBucket"
+                        "arn:aws:dynamodb:us-east-1:123456789012:table/ServingIndexFailover/index/ByBucket",
+                        "arn:aws:dynamodb:us-east-1:123456789012:table/RecreatedTable"
                     ]
                 }]
             })
@@ -560,6 +562,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .await
         .unwrap();
     assert_eq!(read.item(), Some(&item));
+    peer_network::table_residency::recreate_with_remote_account(&sdk).await;
     peer_network::capacity::assert_capacity_abort(&remote_provisioner, &client, &sdk).await;
     recovery::assert_read_triggered_commit(&remote_provisioner, &client, &sdk).await;
     recovery::assert_abandoned_commit(&remote_provisioner, &client, &sdk, &peer_directory).await;
