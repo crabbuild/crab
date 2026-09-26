@@ -463,8 +463,14 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(acknowledgements, [])
 
     def test_hot_share_preserves_a_fixed_cell_count(self):
-        workload = load.Workload(5, 10, 10, 8, 0.8)
-        self.assertEqual(Counter(workload.cell(i) for i in range(100)), {1: 80, 2: 5, 3: 5, 4: 5, 5: 5})
+        for share, counts in ((0, {1: 20, 2: 20, 3: 20, 4: 20, 5: 20}),
+                              (0.8, {1: 80, 2: 5, 3: 5, 4: 5, 5: 5}), (1, {1: 100})):
+            with self.subTest(hot_share=share):
+                workload = load.Workload(5, 10, 10, 8, share)
+                self.assertEqual(Counter(workload.cell(i) for i in range(100)), counts)
+        for share in (-0.1, 1.1, float("nan"), float("inf")):
+            with self.subTest(hot_share=share), self.assertRaises(ValueError):
+                load.Workload(5, 10, 10, 8, share)
         for rate, duration in [(float("nan"), 1), (1, float("inf")), (1e300, 1e300), (0, 1)]:
             with self.subTest(rate=rate, duration=duration), self.assertRaises(ValueError):
                 load.Workload(5, rate, duration, 8, 0)
@@ -604,10 +610,12 @@ class LoadTests(unittest.TestCase):
                 path = Path(directory) / "compose.yaml"
                 path.write_text("{}")
                 args = ["qualify.py", "--state", directory, "--project", "crab-cell-test",
-                        "--skip-build", "--load-stages", "--load-rate", "5", "20", "5"]
+                        "--skip-build", "--load-stages", "--load-rate", "5", "20", "5",
+                        "--load-hot-share", "0.8"]
                 measured = []
 
                 def point(command, **kwargs):
+                    self.assertEqual(command[command.index("--hot-share") + 1], "0.8")
                     rate = float(command[command.index("--rate") + 1])
                     nodes = int(command[command.index("--nodes") + 1])
                     output = Path(command[command.index("--output") + 1])

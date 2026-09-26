@@ -25,6 +25,11 @@ on:
         required: false
         default: ""
         type: string
+      fleet_hot_share:
+        description: "Rate-curve fraction directed to Cell 1: 0 uniform, 0.8 skewed, 1 hot"
+        required: false
+        default: 0
+        type: number
   pull_request:
     paths:
       - ".dockerignore"
@@ -46,6 +51,11 @@ on:
         required: false
         default: ""
         type: string
+      fleet_hot_share:
+        description: "Rate-curve fraction directed to Cell 1: 0 uniform, 0.8 skewed, 1 hot"
+        required: false
+        default: 0
+        type: number
 
 permissions:
   contents: read
@@ -999,6 +1009,7 @@ jobs:
       actions: read
     env:
       IMAGE_RUN: ${{ inputs.fleet_image_run }}
+      FLEET_HOT_SHARE: ${{ inputs.fleet_hot_share }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -1037,6 +1048,7 @@ jobs:
             --state "${RUNNER_TEMP}/fleet-state" \
             --project "crab-cell-issue-ci-${GITHUB_RUN_ID}" --skip-build \
             --load-stages --cells 20 --load-rate 5 20 50 5 --load-duration 60 \
+            --load-hot-share "$FLEET_HOT_SHARE" \
             2>&1 | tee "${RUNNER_TEMP}/fleet-evidence/stages.log"
           stage_status=("${PIPESTATUS[@]}")
           set -e
@@ -1051,6 +1063,7 @@ jobs:
           # prevent the separate unpublished-tail fault measurement.
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
               summary.write("## Fleet offered-rate measurements\n\n")
+              summary.write("Rate-curve hot-Cell fraction (0 is uniform): " + os.environ["FLEET_HOT_SHARE"] + "\n\n")
               summary.write("All points completed integrity checks. Fully served every point: " + str(report["passed"]) + "\n\n")
               summary.write("| Nodes | Pairs/s | Fully served | Report |\n| --- | --- | --- | --- |\n")
               for stage in report["stages"]:

@@ -129,8 +129,25 @@ are rejected by the current qualifier.
 gh workflow run http-server-container.yml --ref YOUR_BRANCH -f arm64=true
 ```
 
-After that run succeeds, set its run ID below. The exact-source worktree goes
-on the mounted workspace volume; the rendered state stays in a directory
+To run the rate curve in CI, pass the successful image run to the same
+workflow. `fleet_hot_share` forwards the existing `--load-hot-share` option:
+use `0` for uniform traffic, `0.8` for skewed traffic, and `1` for one hot Cell.
+Run the three shapes separately on the same native platform and image.
+Wait for each run to finish before dispatching another on that branch; the
+workflow's concurrency group cancels an earlier active dispatch.
+
+```sh
+gh workflow run http-server-container.yml --ref YOUR_BRANCH \
+  -f arm64=true -f fleet_image_run=YOUR_SUCCESSFUL_RUN_ID -f fleet_hot_share=0.8
+```
+
+Each run retains its actual hot share in every load receipt and its CI
+summary. The subsequent unpublished-tail fault keeps its separate uniform
+five-pair/s workload so it can verify progress on an unaffected owner; a
+single-hot-Cell curve does not claim hot-Cell fault qualification.
+
+For a local run, set the successful image qualification run ID below. The
+exact-source worktree goes on the mounted workspace volume; the rendered state stays in a directory
 Docker can bind-mount. The renderer copies its initialization script into that
 state directory, so `--skip-build` does not need a source-tree bind mount.
 
