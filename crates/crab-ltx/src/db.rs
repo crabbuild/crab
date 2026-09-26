@@ -141,8 +141,20 @@ impl Db {
                 index += 1;
                 continue;
             }
-            let bytes = self.host.read(segment.path(), segment.info().size_bytes)?;
-            crate::recovery::verify_segment(&bytes, segment.info(), self.limits)?;
+            let mut file = LtxHost {
+                facilities: self.host.clone(),
+                max_database_bytes: self.limits.max_database_bytes,
+                max_file_bytes: segment.info().size_bytes,
+            }
+            .open(segment.path())?;
+            if file.file_len()? != segment.info().size_bytes {
+                return Err(CrabError::ChecksumMismatch);
+            }
+            crate::recovery::verify_segment_reader(
+                std::io::BufReader::with_capacity(64 << 10, file),
+                segment.info(),
+                self.limits,
+            )?;
             // The published immutable root, not durable local deletion, releases
             // the result. A fresh session never adopts crash-resurrected residue.
             self.host.filesystem.remove_file(segment.path())?;

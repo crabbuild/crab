@@ -168,6 +168,69 @@ fn capture_partial_write_sync_and_rename_failures_fence_the_session() {
 }
 #[cfg(feature = "replica")]
 #[test]
+fn published_cut_pruning_bounds_each_filesystem_transfer() {
+    let (_directory, faults, host, mut writer) = fixture();
+    writer
+        .transaction(|tx| tx.execute("INSERT INTO t VALUES(randomblob(2000000))", []))
+        .unwrap();
+    let batch = writer.capture_deferred().unwrap();
+    assert!(batch.segments[0].info().size_bytes > 1_000_000);
+    let retained = host.local_disk_used();
+    faults.largest_read.store(0, Ordering::Relaxed);
+
+    assert_eq!(writer.prune_captured(&batch).unwrap(), batch.segments.len());
+
+    assert!(faults.largest_read.load(Ordering::Relaxed) < 128 * 1024);
+    assert!(host.local_disk_used() < retained);
+    assert!(
+        batch
+            .segments
+            .iter()
+            .all(|segment| !segment.path().exists())
+    );
+    writer.close().unwrap();
+}
+
+#[cfg(feature = "replica")]
+#[test]
+fn published_cut_pruning_rejects_changed_bytes_without_releasing_accounting() {
+    for damage in ["truncated", "extended", "corrupted", "replaced"] {
+        let (_directory, _faults, host, mut writer) = fixture();
+        let batch = writer.capture_deferred().unwrap();
+        let path = batch.segments[0].path();
+        let original = std::fs::read(path).unwrap();
+        let retained = host.local_disk_used();
+        let mut changed = original.clone();
+        match damage {
+            "truncated" => changed.truncate(changed.len() - 1),
+            "extended" => changed.push(0),
+            "corrupted" => {
+                let middle = changed.len() / 2;
+                changed[middle] ^= 1;
+            }
+            "replaced" => {
+                // A separately valid cut must not satisfy this batch's identity.
+                let (_other_directory, _faults, _host, mut other) = fixture();
+                let other_batch = other.capture().unwrap();
+                changed = std::fs::read(other_batch.segments[0].path()).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        std::fs::write(path, &changed).unwrap();
+
+        assert!(writer.prune_captured(&batch).is_err(), "{damage}");
+        assert!(path.exists(), "{damage}");
+        assert_eq!(host.local_disk_used(), retained, "{damage}");
+
+        std::fs::write(path, &original).unwrap();
+        assert_eq!(writer.prune_captured(&batch).unwrap(), batch.segments.len());
+        assert_eq!(writer.prune_captured(&batch).unwrap(), 0);
+        writer.close().unwrap();
+    }
+}
+
+#[cfg(feature = "replica")]
+#[test]
 fn captured_pruning_retains_accounting_after_io_failure() {
     for operation in ["read_exact_at", "remove_file"] {
         let (_directory, faults, _host, mut writer) = fixture();

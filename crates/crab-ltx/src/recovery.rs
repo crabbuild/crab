@@ -202,16 +202,42 @@ fn validate_header(header: &ltx::Header, limits: Limits) -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(feature = "replica"), expect(dead_code))]
+#[cfg(feature = "replica")]
 pub(crate) fn verify_segment(bytes: &[u8], info: &SegmentInfo, limits: Limits) -> Result<()> {
     if bytes.len() as u64 > limits.max_file_bytes {
         return Err(CrabError::Limit(crate::LimitKind::LtxBytes));
     }
+    // Buffer callers know their exact bytes up front; preserve permanent
+    // length/digest rejection before the decoder can report a short read.
     if bytes.len() as u64 != info.size_bytes || *blake3::hash(bytes).as_bytes() != info.blake3 {
         return Err(CrabError::ChecksumMismatch);
     }
-    validate_header(&ltx::Header::parse(bytes)?, limits)?;
-    if SegmentInfo::from_decoded(bytes, &ltx::decode_file(bytes)?) != *info {
+    verify_segment_reader(bytes, info, limits)
+}
+
+#[cfg(feature = "replica")]
+pub(crate) fn verify_segment_reader(
+    reader: impl Read,
+    info: &SegmentInfo,
+    limits: Limits,
+) -> Result<()> {
+    if info.size_bytes > limits.max_file_bytes {
+        return Err(CrabError::Limit(crate::LimitKind::LtxBytes));
+    }
+    // Read one extra byte to reject trailing data without trusting a stream's
+    // length. Retain page scratch and indexes, not the complete compressed body.
+    let mut decoder = crate::codec::Decoder::new(reader.take(info.size_bytes.saturating_add(1)));
+    decoder.decode_header()?;
+    validate_header(&decoder.header, limits)?;
+    let mut page = vec![0; decoder.header.page_size as usize];
+    while decoder.decode_page(&mut page)?.is_some() {}
+    decoder.close()?;
+    let (size, digest) = decoder.artifact()?;
+    let decoded = ltx::DecodedFile {
+        header: decoder.header,
+        trailer: decoder.trailer,
+    };
+    if SegmentInfo::from_inspected(&decoded, size, digest) != *info {
         return Err(CrabError::ChecksumMismatch);
     }
     Ok(())
