@@ -16,6 +16,7 @@ use crab_cell_runtime::control::{ControlState, Owner, authority::CellAuthority};
 use crab_cell_runtime::identity::{CellTarget, IncarnationId, SessionId};
 use crab_cell_runtime::ltx::{CellStorageLayout, Limits};
 use crab_cell_runtime::node::NodeDirectory;
+use crab_cell_runtime::partition_for_shard;
 use crab_cell_runtime::recovery::manifest::RecoveryManifestStore;
 use crab_ltx::{CellReplica, rusqlite};
 use extenddb_storage::BoxedFuture;
@@ -27,13 +28,14 @@ use crate::backend::{InitialPartitionProvisioner, cell_error, mutation_identity}
 use crate::split::split_contract;
 use crate::{
     BeginSplit, BeginSplitOutcome, Beyonddb, CellSplitController, DATA_MODULE, DescribeTable,
-    InstallPartition, InstallPartitionOutcome, Json, ListTables, ListTablesInput,
-    ListTablesOutcome, PartitionInstall, PartitionSpec, PartitionState, PartitionUsage,
-    PublishedPartitionInput, PublishedPartitionOutcome, ReadPartitionState, ReadPublishedPartition,
-    ReadRoutePage, ReadSplitPlan, ReadSplitRoute, RoutePageInput, RoutePageOutcome, SplitPlan,
-    SplitRouteState, TableRecord, account_target, coordinator_target, credential_target,
-    data_target, initialize_account, initialize_coordinator, initialize_credentials,
-    initialize_partition,
+    InstallPartition, InstallPartitionOutcome, Json, ListCoordinatorShards,
+    ListCoordinatorShardsInput, ListTables, ListTablesInput, ListTablesOutcome, PartitionInstall,
+    PartitionSpec, PartitionState, PartitionUsage, PublishedPartitionInput,
+    PublishedPartitionOutcome, ReadPartitionState, ReadPublishedPartition, ReadRoutePage,
+    ReadSplitPlan, ReadSplitRoute, RegisterCoordinatorShard, RegisterCoordinatorShardInput,
+    RoutePageInput, RoutePageOutcome, SplitPlan, SplitRouteState, TableRecord, account_target,
+    coordinator_target, credential_target, data_target, initialize_account, initialize_coordinator,
+    initialize_credentials, initialize_partition,
 };
 
 /// Position in an account capacity sweep.
@@ -122,19 +124,42 @@ impl CellInitialPartitionProvisioner {
             .await
     }
 
-    /// Provision or reacquire the account-scoped shard for one transaction key.
+    /// Provision and register the account-scoped shard for one transaction key.
+    ///
+    /// The account must be locally owned or idle. Registration publishes before
+    /// the handle is returned, so later transaction records are discoverable.
     pub async fn admit_coordinator(
         &self,
         account_id: &str,
         routing_key: &[u8],
     ) -> Result<CellHandle, StorageError> {
         let target = coordinator_target(account_id, routing_key).map_err(provision_error)?;
-        self.admit_module(
-            &target,
-            crate::transaction_coordinator::MODULE,
-            initialize_coordinator,
-        )
-        .await
+        let account = account_target(account_id).map_err(provision_error)?;
+        let account_handle = self.admit_account(account_id).await?;
+        let handle = self
+            .admit_module(
+                &target,
+                crate::transaction_coordinator::MODULE,
+                initialize_coordinator,
+            )
+            .await?;
+        let shard_bytes: [u8; 4] = target
+            .partition()
+            .try_into()
+            .map_err(|_| StorageError::Internal("invalid coordinator partition".into()))?;
+        let client = CellClient::local(self.application.registry(), account_handle);
+        client
+            .command::<RegisterCoordinatorShard>(
+                &account,
+                mutation_identity()?,
+                Json(RegisterCoordinatorShardInput {
+                    account_id: account_id.to_owned(),
+                    shard: u32::from_be_bytes(shard_bytes),
+                }),
+            )
+            .await
+            .map_err(cell_error)?;
+        Ok(handle)
     }
 
     /// Admit a configured account or recover its published root after a crash.
@@ -179,6 +204,83 @@ impl CellInitialPartitionProvisioner {
             initialize_coordinator,
         )
         .await
+    }
+
+    /// Recover registered coordinator shards assigned to this endpoint.
+    ///
+    /// Call during startup before accepting transaction requests. Idle shards
+    /// can be acquired; active shards require the former owner's expired lease.
+    pub async fn recover_registered_coordinators(
+        &self,
+        account_id: &str,
+        account_handle: CellHandle,
+        nodes: &NodeDirectory,
+    ) -> Result<Vec<CellTarget>, StorageError> {
+        let account = account_target(account_id).map_err(provision_error)?;
+        let client = CellClient::local(self.application.registry(), account_handle);
+        let authority = CellAuthority::new(self.layout.clone());
+        let mut recovered = Vec::new();
+        let mut after = None;
+        loop {
+            let page = client
+                .query::<ListCoordinatorShards>(
+                    &account,
+                    None,
+                    Json(ListCoordinatorShardsInput {
+                        account_id: account_id.to_owned(),
+                        after,
+                        limit: 100,
+                    }),
+                )
+                .await
+                .map_err(cell_error)?
+                .output
+                .0;
+            if page.is_empty() {
+                return Ok(recovered);
+            }
+            for shard in page {
+                after = Some(shard);
+                let target = CellTarget::new(
+                    account.tenant(),
+                    crate::APPLICATION,
+                    crate::transaction_coordinator::NAMESPACE,
+                    &partition_for_shard(shard),
+                )
+                .map_err(provision_error)?;
+                let observed = authority
+                    .load(target.cell_id())
+                    .await
+                    .map_err(provision_error)?
+                    .ok_or_else(|| {
+                        StorageError::Transient("registered coordinator has no authority".into())
+                    })?;
+                let former = observed
+                    .value()
+                    .owner
+                    .as_ref()
+                    .map(|owner| (owner.session, owner.endpoint.clone()));
+                match former {
+                    Some((session, _)) if session == self.session => {}
+                    Some((session, endpoint)) if endpoint == self.endpoint => {
+                        wait_for_expired(nodes, session).await?;
+                        let proof = self
+                            .cataloged(&target, crate::transaction_coordinator::MODULE)
+                            .await?;
+                        self.takeover_expired(&target, proof, nodes).await?;
+                    }
+                    None if observed.value().root.is_some() => {
+                        let proof = self
+                            .cataloged(&target, crate::transaction_coordinator::MODULE)
+                            .await?;
+                        self.admit_initialized(&target, proof, initialize_coordinator)
+                            .await?;
+                    }
+                    _ => continue,
+                }
+                recovered.push(target);
+            }
+        }
     }
 
     async fn recover_owned(

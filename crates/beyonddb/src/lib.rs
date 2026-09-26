@@ -87,7 +87,7 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 17] = [
+static COMMANDS: [OperationDescriptor; 18] = [
     operation(1),
     operation(2),
     operation(3),
@@ -105,8 +105,9 @@ static COMMANDS: [OperationDescriptor; 17] = [
     operation(17),
     operation(18),
     operation(19),
+    operation(20),
 ];
-static QUERIES: [OperationDescriptor; 19] = [
+static QUERIES: [OperationDescriptor; 20] = [
     operation(4),
     operation(6),
     operation(7),
@@ -126,6 +127,7 @@ static QUERIES: [OperationDescriptor; 19] = [
     operation(21),
     operation(22),
     operation(23),
+    operation(24),
 ];
 
 /// Statically linked account application.
@@ -246,6 +248,8 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
                 source.update(include_bytes!("tags.rs"));
                 source.update(include_bytes!("ttl.rs"));
                 source.update(include_bytes!("transaction_token.rs"));
+                source.update(include_bytes!("transaction_coordinator.rs"));
+                source.update(include_bytes!("transaction_coordinator/registry.rs"));
                 Digest::from_bytes(*source.finalize().as_bytes())
             },
             retained_codes: &[],
@@ -282,6 +286,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<ttl::AdvanceTtlSweep>()?;
         registry.bind_command::<ttl::AdvanceTtlSchedule>()?;
         registry.bind_command::<transaction_token::ClaimTransactionToken>()?;
+        registry.bind_command::<RegisterCoordinatorShard>()?;
         registry.bind_query::<GetItem>()?;
         registry.bind_query::<TransactGet>()?;
         registry.bind_query::<DescribeTable>()?;
@@ -300,7 +305,8 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<ttl::ListTtlTables>()?;
         registry.bind_query::<ttl::ReadTtlSweep>()?;
         registry.bind_query::<ttl::ReadTtlSchedule>()?;
-        registry.bind_query::<transaction_token::ReadTransactionClaim>()
+        registry.bind_query::<transaction_token::ReadTransactionClaim>()?;
+        registry.bind_query::<ListCoordinatorShards>()
     }
 }
 

@@ -21,26 +21,27 @@ use beyonddb::{
     DeleteItem, DeleteItemInput, DeleteTable, DeleteTableOutcome, DescribeTable, GetItem,
     GetItemInput, GetItemOutcome, ImportPartitionItem, ImportSummary, IndexedTransactionWrite,
     InitialPartitionProvisioner, InstallPartition, InstallPartitionOutcome, ItemMutationOutcome,
-    Json, NodeLeasePublisher, PartitionDelete, PartitionDeleteInput, PartitionDeleteOutcome,
-    PartitionExport, PartitionGet, PartitionGetInput, PartitionGetOutcome, PartitionImportInput,
-    PartitionImportOutcome, PartitionInstall, PartitionLookupInput, PartitionLookupOutcome,
-    PartitionPut, PartitionPutInput, PartitionPutOutcome, PartitionScan, PartitionScanInput,
-    PartitionScanOutcome, PartitionSeal, PartitionSpec, PartitionState, PartitionTransactWrite,
-    PartitionTransactWriteInput, PartitionTransactWriteOutcome, PartitionUpdate,
-    PartitionUpdateInput, PartitionUpdateOutcome, PartitionUsage, PendingTransactionState,
-    PreparePartitionTransaction, PreparePartitionTransactionInput,
-    PreparePartitionTransactionOutcome, PublishedNodeLease, PutItem, PutItemInput,
-    ReadCoordinatorParticipant, ReadCoordinatorParticipantInput, ReadCrossCellTransaction,
-    ReadCrossCellTransactionInput, ReadPartitionRoute, ReadPartitionState,
-    ReadPartitionTransaction, ReadPartitionTransactionInput, ReadPartitionTransactionOutcome,
-    ReadPendingCrossCellTransactions, ReadPendingCrossCellTransactionsInput, ReadRoutePage,
-    ReadSplitPlan, ReadSplitRoute, ReadTableRoute, ReadTtlSchedule, ReadTtlSweep,
-    RecordParticipantPrepare, RecordParticipantResolution, ResolvePartitionTransaction,
-    ResolvePartitionTransactionInput, ResolvePartitionTransactionOutcome, RoutePageInput,
-    RoutePageOutcome, SealPartition, SealPartitionOutcome, SplitPlan, SplitRouteState, TableRoute,
-    TableSpec, TransactionToken, TransactionWrite, UpdateTtl, UpdateTtlInput, account_target,
-    build_http_state, coordinator_target, credential_target, data_key_hash, data_target,
-    initialize_account, initialize_coordinator, initialize_partition,
+    Json, ListCoordinatorShards, ListCoordinatorShardsInput, NodeLeasePublisher, PartitionDelete,
+    PartitionDeleteInput, PartitionDeleteOutcome, PartitionExport, PartitionGet, PartitionGetInput,
+    PartitionGetOutcome, PartitionImportInput, PartitionImportOutcome, PartitionInstall,
+    PartitionLookupInput, PartitionLookupOutcome, PartitionPut, PartitionPutInput,
+    PartitionPutOutcome, PartitionScan, PartitionScanInput, PartitionScanOutcome, PartitionSeal,
+    PartitionSpec, PartitionState, PartitionTransactWrite, PartitionTransactWriteInput,
+    PartitionTransactWriteOutcome, PartitionUpdate, PartitionUpdateInput, PartitionUpdateOutcome,
+    PartitionUsage, PendingTransactionState, PreparePartitionTransaction,
+    PreparePartitionTransactionInput, PreparePartitionTransactionOutcome, PublishedNodeLease,
+    PutItem, PutItemInput, ReadCoordinatorParticipant, ReadCoordinatorParticipantInput,
+    ReadCrossCellTransaction, ReadCrossCellTransactionInput, ReadPartitionRoute,
+    ReadPartitionState, ReadPartitionTransaction, ReadPartitionTransactionInput,
+    ReadPartitionTransactionOutcome, ReadPendingCrossCellTransactions,
+    ReadPendingCrossCellTransactionsInput, ReadRoutePage, ReadSplitPlan, ReadSplitRoute,
+    ReadTableRoute, ReadTtlSchedule, ReadTtlSweep, RecordParticipantPrepare,
+    RecordParticipantResolution, ResolvePartitionTransaction, ResolvePartitionTransactionInput,
+    ResolvePartitionTransactionOutcome, RoutePageInput, RoutePageOutcome, SealPartition,
+    SealPartitionOutcome, SplitPlan, SplitRouteState, TableRoute, TableSpec, TransactionToken,
+    TransactionWrite, UpdateTtl, UpdateTtlInput, account_target, build_http_state,
+    coordinator_target, credential_target, data_key_hash, data_target, initialize_account,
+    initialize_coordinator, initialize_partition,
 };
 use crab_cell_app::CellApplication;
 use crab_cell_host::CellNodeBuilder;
@@ -2336,6 +2337,19 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             initialize_coordinator,
         )
         .await;
+    let coordinator_admission = CellInitialPartitionProvisioner::new(
+        host.runtime(),
+        Arc::clone(&application),
+        layout.clone(),
+        session,
+        "https://beyonddb-partition.internal:8081".into(),
+        directory.path().join("registered-coordinator"),
+    )
+    .unwrap();
+    coordinator_admission
+        .admit_coordinator("123456789012", &transaction_id)
+        .await
+        .unwrap();
     let cell_client = CellClient::local_many(
         Arc::clone(&registry),
         [
@@ -2350,6 +2364,22 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     let client = host
         .application_handle::<Beyonddb>(cell_client, account.tenant(), account.application())
         .unwrap();
+    let shard = u32::from_be_bytes(coordinator_target.partition().try_into().unwrap());
+    let registered = client
+        .query::<ListCoordinatorShards>(
+            &account,
+            None,
+            Json(ListCoordinatorShardsInput {
+                account_id: "123456789012".into(),
+                after: None,
+                limit: 1,
+            }),
+        )
+        .await
+        .unwrap()
+        .output
+        .0;
+    assert_eq!(registered, vec![shard]);
     let partitions = [
         PartitionSpec {
             table: table.clone(),
@@ -4247,10 +4277,6 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         directory.path().join("restored-coordinator"),
     )
     .unwrap();
-    let restored_coordinator = restored_provisioner
-        .admit_coordinator("123456789012", &transaction_id)
-        .await
-        .unwrap();
     let proof = CellCatalog::new(layout.clone(), left_target.tenant())
         .lookup(left_target.cell_id())
         .await
@@ -4315,6 +4341,33 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             },
         )
         .await
+        .unwrap();
+    let recovery_nodes = NodeDirectory::new(
+        layout.clone(),
+        Digest::from_bytes([201; 32]),
+        Digest::from_bytes([202; 32]),
+        application.registry().release_digest(),
+    );
+    let registered = restored_provisioner
+        .recover_registered_coordinators("123456789012", restored_account.clone(), &recovery_nodes)
+        .await
+        .unwrap();
+    assert_eq!(registered, vec![coordinator_target.clone()]);
+    let coordinator_proof = CellCatalog::new(layout.clone(), account.tenant())
+        .lookup(coordinator_target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let coordinator_control = CellAuthority::new(layout.clone())
+        .load(coordinator_target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let restored_coordinator = restored_host
+        .runtime()
+        .local_handle(coordinator_proof, &coordinator_control)
+        .await
+        .unwrap()
         .unwrap();
     let restored_child_target = &child_targets[first_child];
     let child_proof = CellCatalog::new(layout.clone(), restored_child_target.tenant())
@@ -4738,6 +4791,53 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             .0,
         PartitionLookupOutcome::Unrouted
     );
+    let second_key = (0..u16::MAX)
+        .map(|suffix| format!("second-shard-{suffix}"))
+        .find(|key| {
+            beyonddb::coordinator_target("123456789012", key.as_bytes()).unwrap()
+                != coordinator_target
+        })
+        .unwrap();
+    let second_target =
+        beyonddb::coordinator_target("123456789012", second_key.as_bytes()).unwrap();
+    restored_provisioner
+        .admit_coordinator("123456789012", second_key.as_bytes())
+        .await
+        .unwrap();
+    let first_shard = restored_client
+        .query::<ListCoordinatorShards>(
+            &account,
+            None,
+            Json(ListCoordinatorShardsInput {
+                account_id: "123456789012".into(),
+                after: None,
+                limit: 1,
+            }),
+        )
+        .await
+        .unwrap()
+        .output
+        .0;
+    let second_shard = restored_client
+        .query::<ListCoordinatorShards>(
+            &account,
+            None,
+            Json(ListCoordinatorShardsInput {
+                account_id: "123456789012".into(),
+                after: first_shard.first().copied(),
+                limit: 1,
+            }),
+        )
+        .await
+        .unwrap()
+        .output
+        .0;
+    let mut expected_shards = [
+        u32::from_be_bytes(coordinator_target.partition().try_into().unwrap()),
+        u32::from_be_bytes(second_target.partition().try_into().unwrap()),
+    ];
+    expected_shards.sort_unstable();
+    assert_eq!([first_shard[0], second_shard[0]], expected_shards);
     restored_host.shutdown().await.unwrap();
 }
 

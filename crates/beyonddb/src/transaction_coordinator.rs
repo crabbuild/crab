@@ -349,4 +349,6 @@ fn decode_decision(state: i64, reason: &SqlValue) -> Result<CoordinatorDecision>
 }
 
 mod phase;
+mod registry;
 pub use phase::*;
+pub use registry::*;
