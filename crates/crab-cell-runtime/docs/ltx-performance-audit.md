@@ -704,6 +704,15 @@ The [HTTP container run at `0360485311b`](https://github.com/crabbuild/crab/acti
 also passed, along with that revision's decoder fuzz workflow. Routing commit
 `4e0d71fe43d` and the checksum batching above still need their own image proof.
 
+The no-job property-workflow failure has a reproduced configuration cause:
+job-level `env` referenced `runner.temp`, but GitHub only exposes that context
+at the later [step environment boundary](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability).
+The repository's pinned actionlint v1.7.11 rejects the previous file at that
+expression. Moving the existing target-directory setting to both Cargo steps
+passes the same check and preserves the 1,000-case workload. The repaired
+workflow still needs a completed GitHub run; the separate app-to-host
+dev-dependency policy failure remains open.
+
 Seven existing tests passed locally with real SQLite and in-memory object
 storage: four `environment::tests::directory_cache` cases, missing cached-root
 metadata refusal, scheduled compaction with byte-identical restore, and
