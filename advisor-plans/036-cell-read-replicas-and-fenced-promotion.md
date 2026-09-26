@@ -319,6 +319,18 @@ Refresh reserves a second view until old in-flight queries finish. Local and
 RustFS tests cover capacity rejection, concurrent charges, and full release;
 the Compose receipt below samples resources under 1 GiB/1 vCPU limits.
 Peak-resource and sustained-capacity qualification remain open.
+At `04bf77cced9`, deterministic tests exposed and fixed two lifecycle gaps:
+SQL-pool shutdown previously joined only dedicated workers, leaving replica
+blocking tasks running; cancelling a query and dropping its reader released
+view admission before that SQL exited. Shutdown now waits for the existing
+SQL-job ledger to drain, and each blocking query retains its complete snapshot
+and admission until execution finishes. The final job admission is serialized
+with pool closure. Both regressions pass in memory and on local RustFS.
+A real schema migration during a blocked old-view query now has explicit
+proof: unchanged owner/epoch, a new code/schema root, rejection of the old
+query and refresh, and the migrated value through a fresh reader. The complete
+offline retention sweep and application release rollout fault combinations
+remain separate qualification work.
 An explicit local or peer replica query whose view is behind a caller's minimum
 returns `ReplicaBehind` with both sequence numbers. The private peer wire has
 an explicit read operation and distinct behind/unavailable error codes.

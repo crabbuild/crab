@@ -277,6 +277,34 @@ The earlier setup failures and the stricter error-shape assertion failure
 remain in separate logs; they are not passing receipts. Seven Python evidence
 checks pass, including rejection of an empty gateway error without expiry.
 
+## Reader lifecycle follow-up — 2026-09-26
+
+Source `04bf77cced9ed058574c494bfa08db5971917d74` fixes two failures reproduced
+by a paused real SQL query. Node drain used to return before replica blocking
+SQL completed. Also, cancelling the query and dropping the reader used to
+release its 12 MiB/four-descriptor reservation while the SQL still held the
+view. The SQL pool now closes admission and drains the existing job ledger;
+the blocking task retains the complete snapshot reservation until it exits.
+Final job admission and pool closure use the same lifecycle lock. This adds
+25 net production lines and reuses the existing admission system.
+
+Both regressions pass against in-memory storage and local RustFS. The tests
+verify charges while blocked, no early drain completion, rejection of the
+closed reader's result, and release of resources and placeholders afterward.
+A concurrent schema-migration test also passes: the owner and epoch stay the
+same, code/schema and durable root advance, the old in-flight query and refresh
+are fenced, and a fresh reader sees the migrated value.
+
+Local RustFS prefix: `plan036-reader-lifecycle-20260926`. Native test log:
+`$HOME/.codex/cell-issue-fleet/plan036-reader-lifecycle-1/runtime-rustfs.log`.
+SHA-256: `dba75fc3ef6e1c1381fe836bcb49e377ccb0d867ffc09a2843449b549b518aab`.
+The adjacent `receipt.json` records source, test, prefix, coverage, and scope.
+Five worker, two shutdown, four migration, seven publication, and ten host
+lifecycle tests pass. Runtime/application/host/HTTP all-target Clippy passes
+with warnings denied, and the native HTTP server build passes.
+This is native runtime/provider evidence; the earlier
+Compose image and performance figures are unchanged.
+
 ## Scope still open
 
 The container runs do not establish complete per-query S3 costs, sustained
