@@ -220,3 +220,28 @@ pre-rollout and post-rollout comments, including every acknowledgement from
 the fleet-proof workload, plus the original issues and labels to survive. The result is saved in `mode-rollout-report.json`.
 This is an offline rollout for the local fixture; platform rollout and
 protected-provider release procedures remain separate.
+
+## Reader drain and offline retention
+
+An existing disposable twenty-node reader fixture can qualify retention after
+its unreachable objects have aged beyond the CLI's one-hour minimum grace.
+Stop all its application nodes first. Build the image from a clean commit and
+record that commit separately from the runner revision:
+
+```sh
+python3 crates/crab-http-server/deploy/cell-issue-fleet/qualify_reader_retention.py \
+  --state "$HOME/.codex/cell-issue-fleet/read-replicas-1" \
+  --image crab-cell-issue-read-replicas-1:local \
+  --runtime-source <image-source-commit>
+```
+
+The runner resumes three nodes, verifies twenty issues and two serving readers,
+creates a backup pin, and enters maintenance through the public CLI. A one-object
+deletion budget must leave the release in Maintenance and every serving process
+cleanly drained. Retrying the same prepared revision completes the sweep. Raw
+provider inventories must match the deletion counters and the grace cutoff;
+the retained pin must still verify. Restarted nodes must recover the same issue
+and comment data, recruit two readers, and acknowledge a new write. The runner
+retains logs and its incremental `reader-retention-report.json` on failure.
+It never lowers the grace period or rewrites object timestamps. Use only the
+disposable fixture: this command actually deletes eligible immutable objects.
