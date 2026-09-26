@@ -2,6 +2,43 @@
 
 use super::*;
 
+#[tokio::test]
+async fn reader_routing_overlaps_independent_control_and_policy_reads() {
+    let store = Arc::new(PausingStore::new(Arc::new(InMemory::new())));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let counted = reads.clone();
+    let fixture = fixture_with_limits_and_store(
+        b"parallel-reader-routing",
+        Limits::default(),
+        Store::new(store.clone()).with_read_request_observer(Arc::new(move |_| {
+            counted.fetch_add(1, Ordering::Relaxed);
+        })),
+    );
+    let registry = compiled_reader_registry();
+    let directory = NodeDirectory::new(
+        fixture.layout.clone(),
+        Digest::from_bytes([9; 32]),
+        Digest::from_bytes([10; 32]),
+        registry.release_digest(),
+    );
+    let router = ReplicaReadRouter::new(CellAuthority::new(fixture.layout.clone()), directory);
+    reads.store(0, Ordering::Relaxed);
+    store.arm_gets();
+    let selected = router.selected(&fixture.target);
+    tokio::pin!(selected);
+    assert!(futures_util::poll!(selected.as_mut()).is_pending());
+    let started = reads.load(Ordering::Relaxed);
+    store.release_gets();
+    assert!(matches!(
+        selected.await,
+        Err(crab_cell_runtime::Error::ReplicaUnavailable)
+    ));
+    assert_eq!(
+        started, 2,
+        "policy discovery waited for the blocked control read"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_refreshes_coalesce_after_the_first_authority_read() {
     let store = Arc::new(PausingStore::new(Arc::new(InMemory::new())));

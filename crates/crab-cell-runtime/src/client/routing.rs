@@ -46,11 +46,11 @@ impl ReplicaReadRouter {
         target: &CellTarget,
     ) -> Result<(CellDescription, Vec<NodeAdvertisement>)> {
         let cell = target.cell_id();
-        let control = self
-            .authority
-            .load(cell)
-            .await?
-            .ok_or(Error::ReplicaUnavailable)?;
+        // These observations are independent. The incarnation check below
+        // rejects a policy from another Cell lifetime before it can route work.
+        let (control, policy) =
+            tokio::try_join!(self.authority.load(cell), self.policy.load(cell))?;
+        let control = control.ok_or(Error::ReplicaUnavailable)?;
         let control = control.value();
         if control.state != ControlState::Serving || control.recovery.is_some() {
             return Err(Error::Fenced);
@@ -62,7 +62,7 @@ impl ReplicaReadRouter {
             code: control.code,
             schema: control.schema,
         };
-        let Some(policy) = self.policy.load(cell).await? else {
+        let Some(policy) = policy else {
             return Ok((expected, Vec::new()));
         };
         let policy = policy.value();
