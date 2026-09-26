@@ -394,6 +394,29 @@ Cells on **different** workers and proves I/O progress, not same-worker latency
 isolation. Hydration cancellation tests protect admission but do not establish
 foreground latency. This scheduling behavior also exists on the main snapshot.
 
+**Implementation:** worker-job admission now has one permit for each fixed SQL
+worker. A queued job waits for its own worker before reserving a node job slot;
+it cannot consume another worker's capacity. Dispatched work retains its permit
+and ledger reservation through completion even when its caller is canceled.
+Shutdown closes every admission queue. Cell assignment, thread count, actor
+ordering, lifecycle messages, and publication-confirmation messages are unchanged.
+
+A public worker regression holds one native operation, queues another Cell on
+that worker, and invokes a third Cell on the idle worker. The old global gate
+failed its one-second completion bound twice; the per-worker gate passes, and
+canceling the queued request leaves no mutation behind. A second fixture uses
+real sparse SQLite with delayed object-store reads during hydration and a fully
+materialized Cell on the other worker. It also fails on the previous gate and
+passes with per-worker admission. This separates admission from SQLite and
+storage progress; these controlled delays are not public-action percentiles.
+Seventeen focused worker, hydration, and public three-node application tests
+pass, as does runtime all-target Clippy. The real RustFS HTTP regression also
+passes through remote execution, owner loss, restored collaboration state, and
+Git clone/tag reads. These checks protect behavior; they do not replace the
+current-source fleet curves.
+The same-worker origin wait, foreground-aware maintenance, asynchronous
+hydration, and proof-to-confirmation latency gates remain open.
+
 ### 10. Published-cut cleanup occupies the SQL worker after durability
 
 **Confirmed at audited revision:** [CellExecutor::confirm_published](../src/cell/executor.rs) calls
@@ -710,8 +733,10 @@ at the later [step environment boundary](https://docs.github.com/en/actions/refe
 The repository's pinned actionlint v1.7.11 rejects the previous file at that
 expression. Moving the existing target-directory setting to both Cargo steps
 passes the same check and preserves the 1,000-case workload. The repaired
-workflow still needs a completed GitHub run; the separate app-to-host
-dev-dependency policy failure remains open.
+[property run 36222852526](https://github.com/crabbuild/crab/actions/runs/36222852526)
+passed both runtime and LTX suites at `8586757a6eb`. It predates the worker
+admission change above; that change still needs fresh broad proof. The separate
+app-to-host dev-dependency policy failure remains open.
 
 Seven existing tests passed locally with real SQLite and in-memory object
 storage: four `environment::tests::directory_cache` cases, missing cached-root

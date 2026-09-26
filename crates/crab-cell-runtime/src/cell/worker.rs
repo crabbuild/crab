@@ -135,7 +135,9 @@ impl SqlWorkerPool {
                 resources,
                 max_active_cells,
                 worker_count,
-                worker_permits: Arc::new(Semaphore::new(worker_count)),
+                worker_permits: (0..worker_count)
+                    .map(|_| Arc::new(Semaphore::new(1)))
+                    .collect(),
             }),
         })
     }
@@ -657,7 +659,9 @@ impl SqlWorkerPool {
                 ));
             }
             lifecycle.closing = true;
-            self.inner.worker_permits.close();
+            for permits in &self.inner.worker_permits {
+                permits.close();
+            }
             lifecycle.workers.clear();
             std::mem::take(&mut lifecycle.threads)
         };
@@ -703,7 +707,9 @@ impl SqlWorkerPool {
             if lifecycle.closing {
                 return Err(Error::RuntimeClosed);
             }
-            Arc::clone(&self.inner.worker_permits)
+            // A queued job must wait for its own shard, without consuming
+            // the admission capacity an idle worker needs to make progress.
+            Arc::clone(&self.inner.worker_permits[worker_index(cell, self.inner.worker_count)])
         };
         let permit = worker_permits
             .acquire_owned()
@@ -774,7 +780,7 @@ struct PoolInner {
     resources: ResourceLedger,
     max_active_cells: usize,
     worker_count: usize,
-    worker_permits: Arc<Semaphore>,
+    worker_permits: Vec<Arc<Semaphore>>,
 }
 
 struct WorkerLifecycle {
@@ -785,7 +791,9 @@ struct WorkerLifecycle {
 
 impl Drop for PoolInner {
     fn drop(&mut self) {
-        self.worker_permits.close();
+        for permits in &self.worker_permits {
+            permits.close();
+        }
         let lifecycle = match self.lifecycle.get_mut() {
             Ok(lifecycle) => lifecycle,
             Err(poisoned) => poisoned.into_inner(),

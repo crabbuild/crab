@@ -54,6 +54,12 @@ The node bounds:
 - Per-Cell request and byte admission
 - Node-wide memory, disk, and activity admission
 
+Worker-job admission uses one slot per SQL worker. A job waiting for a busy
+worker holds neither another worker's slot nor a node worker-job reservation.
+Once dispatched, the job owns its slot and reservation until execution ends,
+including when its caller is canceled. Lifecycle and publication-confirmation
+messages retain their bounded worker queue and do not need a job permit.
+
 Cancellation of a caller doesn't cancel accepted work. The actor still records and publishes the result, so a retry can resolve it.
 
 ## Execute commands in six phases

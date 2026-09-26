@@ -277,6 +277,13 @@ define the ownership constraints and focused failure tests for changing these
 paths. The [RustFS cleanup comparison](../../crab-ltx/perf/README.md#streaming-published-cut-cleanup-2026-09-26)
 measures this first change separately from public response latency.
 
+Worker admission now reserves capacity for each fixed SQL worker separately.
+Queued jobs on a busy worker cannot occupy the slots of idle workers. The
+focused interference regression preserves cancellation before dispatch,
+retention after dispatch, and normal publication. This removes global permit
+hoarding; same-worker sparse faults and maintenance still need the asynchronous
+fetch and short installation experiment from audit finding 9.
+
 Hold database size and changed pages fixed while comparing fresh, sparse,
 resident-after-hydration, and clean-resumed Cells. [Audit finding 14](ltx-performance-audit.md#14-checksum-bookkeeping-depends-on-activation-history-and-uses-tiny-file-io)
 identifies a full checksum-array copy per cut in fresh sessions, individual
