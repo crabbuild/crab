@@ -410,26 +410,29 @@ async fn unknown_outcome_keeps_identity_and_digest_for_resolve() {
         expires_at_ms: now_ms + 60_000,
     };
 
-    let prepared = client
-        .prepare_command::<PendingCommand>(&target, identity, b"input".to_vec())
-        .await
-        .expect("prepare exact command");
-    let evidence = prepared.evidence().clone();
-    let pending = match prepared.execute().await {
-        Err(InvocationError::Pending(pending)) => pending,
-        outcome => panic!("unexpected command outcome: {outcome:?}"),
-    };
-    assert_eq!(*pending, evidence);
-    assert_eq!(pending.identity(), identity);
-    assert_eq!(
-        Some(pending.operation_digest()),
-        *command_digest.lock().unwrap()
-    );
-    assert_eq!(client.resolve(&pending).await.unwrap(), Resolution::Unknown);
-    assert_eq!(
-        Some(pending.operation_digest()),
-        *resolved_digest.lock().unwrap()
-    );
+    let observed = client.clone().with_observed_description(description);
+    for client in [client, observed] {
+        let prepared = client
+            .prepare_command::<PendingCommand>(&target, identity, b"input".to_vec())
+            .await
+            .expect("prepare exact command");
+        let evidence = prepared.evidence().clone();
+        let pending = match prepared.execute().await {
+            Err(InvocationError::Pending(pending)) => pending,
+            outcome => panic!("unexpected command outcome: {outcome:?}"),
+        };
+        assert_eq!(*pending, evidence);
+        assert_eq!(pending.identity(), identity);
+        assert_eq!(
+            Some(pending.operation_digest()),
+            *command_digest.lock().unwrap()
+        );
+        assert_eq!(client.resolve(&pending).await.unwrap(), Resolution::Unknown);
+        assert_eq!(
+            Some(pending.operation_digest()),
+            *resolved_digest.lock().unwrap()
+        );
+    }
 }
 
 #[tokio::test]

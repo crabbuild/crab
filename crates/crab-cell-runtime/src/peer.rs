@@ -45,6 +45,15 @@ pub mod wire {
     include!(concat!(env!("OUT_DIR"), "/crab.cell.peer.v1.rs"));
 }
 
+fn wire_description(value: crate::client::CellDescription) -> wire::CellDescription {
+    wire::CellDescription {
+        cell_id: value.cell.as_bytes().to_vec(),
+        incarnation: value.incarnation.as_bytes().to_vec(),
+        code: value.code.as_bytes().to_vec(),
+        schema: value.schema,
+    }
+}
+
 /// One peer operation currently executable by the typed Cell client.
 #[derive(Clone)]
 pub enum PeerOperation {

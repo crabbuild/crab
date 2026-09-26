@@ -21,6 +21,7 @@ fn verified_description(target: &CellTarget) -> VerifiedPeerRequest {
             61_000,
             30_000,
             crab_cell_runtime::peer::PeerOperation::Read(wire::ReadRequest {
+                expected: None,
                 target: Some(wire::Target {
                     tenant_id: target.tenant().as_bytes().to_vec(),
                     application_id: target.application().as_bytes().to_vec(),
@@ -94,6 +95,147 @@ async fn resolved_peer_dispatch_rejects_a_handle_for_another_target() {
         Some(wire::peer_reply::Outcome::Error(_))
     ));
     fixture.handle().drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn peer_checks_observed_contract_before_commands_queries_and_resolution() {
+    let fixture = fixture().await;
+    let handle = fixture.handle();
+    let expected = wire::CellDescription {
+        cell_id: handle.cell_id().as_bytes().to_vec(),
+        incarnation: handle.incarnation().as_bytes().to_vec(),
+        code: handle.code().as_bytes().to_vec(),
+        schema: handle.schema(),
+    };
+    let target = wire::Target {
+        tenant_id: fixture.target.tenant().as_bytes().to_vec(),
+        application_id: fixture.target.application().as_bytes().to_vec(),
+        namespace_id: fixture.target.namespace().as_bytes().to_vec(),
+        partition: fixture.target.partition().to_vec(),
+    };
+    let identity = mutation_identity(61);
+    let wire_identity = wire::MutationIdentity {
+        request_id: identity.request_id.as_bytes().to_vec(),
+        incarnation: handle.incarnation().as_bytes().to_vec(),
+        issued_at_ms: identity.issued_at_ms,
+        expires_at_ms: identity.expires_at_ms,
+    };
+    let mut encoder = BoundedEncoder::new(64).unwrap();
+    b"once".to_vec().encode(&mut encoder).unwrap();
+    let input = encoder.finish();
+    let mut encoder = BoundedEncoder::new(1).unwrap();
+    ().encode(&mut encoder).unwrap();
+    let query_input = encoder.finish();
+    let description = CellDescription {
+        cell: handle.cell_id(),
+        incarnation: handle.incarnation(),
+        code: handle.code(),
+        schema: handle.schema(),
+    };
+    let digest = command_operation_digest::<CreateComment>(description, identity, &input).unwrap();
+    let signer = PeerSigner::new(
+        SessionId::from_bytes([12; 16]),
+        fixture.registry.release_digest(),
+        ed25519_dalek::SigningKey::from_bytes(&[13; 32]),
+    );
+    let verifier = PeerVerifier::new(
+        SessionId::from_bytes([12; 16]),
+        fixture.registry.release_digest(),
+        signer.verifying_key(),
+    );
+    let dispatcher = PeerDispatcher::new(
+        Arc::clone(&fixture.registry),
+        Arc::new(LocalResolver {
+            target: fixture.target.clone(),
+            handle: handle.clone(),
+        }),
+        Arc::new(RepositoryAuthorizer),
+    );
+    for field in ["current", "cell", "incarnation", "code", "schema"] {
+        let mut observed = expected.clone();
+        match field {
+            "cell" => observed.cell_id[0] ^= 1,
+            "incarnation" => observed.incarnation[0] ^= 1,
+            "code" => observed.code[0] ^= 1,
+            "schema" => observed.schema += 1,
+            _ => {}
+        }
+        let operations = [
+            crab_cell_runtime::peer::PeerOperation::Mutate(wire::MutationRequest {
+                target: Some(target.clone()),
+                identity: Some(wire_identity.clone()),
+                timeout_ms: 30_000,
+                expected: Some(observed.clone()),
+                operation: Some(wire::mutation_request::Operation::CellCommand(
+                    wire::CellCommand {
+                        command_id: CreateComment::ID,
+                        codec_version: CreateComment::CODEC_VERSION,
+                        input: input.clone(),
+                    },
+                )),
+            }),
+            crab_cell_runtime::peer::PeerOperation::Read(wire::ReadRequest {
+                target: Some(target.clone()),
+                timeout_ms: 30_000,
+                minimum: None,
+                expected: Some(observed.clone()),
+                operation: Some(wire::read_request::Operation::CellQuery(wire::CellQuery {
+                    query_id: CountComments::ID,
+                    codec_version: CountComments::CODEC_VERSION,
+                    input: query_input.clone(),
+                })),
+            }),
+            crab_cell_runtime::peer::PeerOperation::Resolve(wire::ResolveRequest {
+                target: Some(target.clone()),
+                identity: Some(wire_identity.clone()),
+                operation_digest: digest.as_bytes().to_vec(),
+                expected: Some(observed),
+            }),
+        ];
+        for operation in operations {
+            let signed = signer
+                .sign(
+                    PeerPrincipal {
+                        issuer: "https://identity.example".into(),
+                        subject: "alice".into(),
+                        actions: vec!["repository.issue.create".into()],
+                    },
+                    identity.issued_at_ms,
+                    identity.expires_at_ms,
+                    30_000,
+                    operation,
+                )
+                .unwrap();
+            let verified = verifier.verify(&signed, identity.issued_at_ms).unwrap();
+            let reply = dispatcher.dispatch(&verified, identity.issued_at_ms).await;
+            if field == "current" {
+                assert!(matches!(
+                    (verified.operation_tag(), reply.outcome),
+                    (10, Some(wire::peer_reply::Outcome::Mutation(_)))
+                        | (11, Some(wire::peer_reply::Outcome::Read(_)))
+                        | (12, Some(wire::peer_reply::Outcome::Resolve(_)))
+                ));
+            } else {
+                assert!(
+                    matches!(reply.outcome,
+                        Some(wire::peer_reply::Outcome::Error(error)) if error.code == wire::error::Code::Unavailable as i32
+                            && error.outcome == wire::error::Outcome::NotStarted as i32
+                    ),
+                    "stale {field}"
+                );
+            }
+        }
+    }
+    let client = CellClient::local(Arc::clone(&fixture.registry), handle.clone());
+    assert_eq!(
+        client
+            .query::<CountComments>(&fixture.target, None, ())
+            .await
+            .unwrap()
+            .output,
+        1
+    );
+    handle.drain().await.unwrap();
 }
 
 #[tokio::test]
@@ -201,18 +343,26 @@ async fn local_and_peer_command_share_digest_dedup_and_query_state() {
             dispatcher,
         }),
     );
-    assert_eq!(
-        peer.command::<CreateComment>(&fixture.target, identity, b"same".to_vec())
+    let observed = peer.clone().with_observed_description(CellDescription {
+        cell: fixture.handle().cell_id(),
+        incarnation: fixture.handle().incarnation(),
+        code: fixture.handle().code(),
+        schema: fixture.handle().schema(),
+    });
+    for peer in [peer, observed] {
+        assert_eq!(
+            peer.command::<CreateComment>(&fixture.target, identity, b"same".to_vec())
+                .await
+                .unwrap(),
+            committed
+        );
+        let result = peer
+            .query::<CountComments>(&fixture.target, Some(committed.receipt), ())
             .await
-            .unwrap(),
-        committed
-    );
-    let observed = peer
-        .query::<CountComments>(&fixture.target, Some(committed.receipt), ())
-        .await
-        .unwrap();
-    assert_eq!(observed.output, 1);
-    assert_eq!(observed.receipt.commit_sequence, 1);
+            .unwrap();
+        assert_eq!(result.output, 1);
+        assert_eq!(result.receipt.commit_sequence, 1);
+    }
 
     fixture.handle().drain().await.unwrap();
 }
