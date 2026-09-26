@@ -71,6 +71,7 @@ pub(crate) struct PeerReceiver {
     releases: Arc<ReleaseStore>,
     resolver: LocalCellResolver,
     round_trip: Arc<dyn PeerRoundTrip>,
+    read_replicas: Option<crate::cells::ReadReplicaManager>,
 }
 
 impl PeerReceiver {
@@ -82,6 +83,7 @@ impl PeerReceiver {
         releases: Arc<ReleaseStore>,
         resolver: LocalCellResolver,
         round_trip: Arc<dyn PeerRoundTrip>,
+        read_replicas: Option<crate::cells::ReadReplicaManager>,
     ) -> Self {
         Self {
             node,
@@ -91,6 +93,7 @@ impl PeerReceiver {
             releases,
             resolver,
             round_trip,
+            read_replicas,
         }
     }
 }
@@ -816,6 +819,9 @@ fn runtime_cell_action(registry: &Registry, request: &VerifiedPeerRequest) -> Op
                     query.query_id,
                     query.codec_version,
                 ),
+            Some(peer_wire::read_request::Operation::ReplicaActivate(true)) => {
+                Some("cell.replica.activate")
+            }
             _ => None,
         },
         Some(peer_wire::peer_request::Operation::Resolve(_)) => runtime_principal_action(request),
@@ -882,6 +888,43 @@ pub(crate) async fn forward(
     }
     if matches!(
         request.operation(),
+        Some(peer_wire::peer_request::Operation::Read(
+            peer_wire::ReadRequest {
+                operation: Some(peer_wire::read_request::Operation::ReplicaActivate(true)),
+                ..
+            }
+        ))
+    ) {
+        let Some(manager) = receiver.read_replicas.as_ref() else {
+            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+        };
+        let receipt = match manager
+            .activate(request.target().clone(), request.origin_session())
+            .await
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                tracing::warn!(error = %error, "read replica activation failed");
+                return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+            }
+        };
+        let reply = peer_wire::PeerReply {
+            outcome: Some(peer_wire::peer_reply::Outcome::Read(peer_wire::ReadReply {
+                receipt: Some(peer_wire::Receipt {
+                    cell_id: receipt.cell.as_bytes().to_vec(),
+                    incarnation: receipt.incarnation.as_bytes().to_vec(),
+                    commit_sequence: receipt.commit_sequence,
+                }),
+                result: Some(peer_wire::read_reply::Result::ReplicaReady(true)),
+            })),
+        };
+        return match encode_peer_reply(&reply) {
+            Ok(body) => peer_http_reply(body),
+            Err(_) => peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
+        };
+    }
+    if matches!(
+        request.operation(),
         Some(peer_wire::peer_request::Operation::Migrate(_))
     ) {
         let allowed = match receiver.releases.load().await {
@@ -896,12 +939,25 @@ pub(crate) async fn forward(
             return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
         }
     }
-    let local_resolution = receiver.resolver.resolve(request.target().clone()).await;
+    let replica_query = matches!(
+        request.operation(),
+        Some(peer_wire::peer_request::Operation::Read(
+            peer_wire::ReadRequest {
+                operation: Some(peer_wire::read_request::Operation::ReplicaQuery(_)),
+                ..
+            }
+        ))
+    );
+    let local_resolution = if replica_query {
+        Err(CellError::CellNotActive)
+    } else {
+        receiver.resolver.resolve(request.target().clone()).await
+    };
     let local_unavailable = matches!(
         &local_resolution,
         Err(CellError::CellNotActive | CellError::Fenced | CellError::CellDraining)
     );
-    if local_unavailable && request.permits("cell.activate") {
+    if !replica_query && local_unavailable && request.permits("cell.activate") {
         let Some(router) = server.repository_cells() else {
             return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
         };
@@ -912,7 +968,7 @@ pub(crate) async fn forward(
         {
             return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
         }
-    } else if local_unavailable && request.hop_count() < 2 {
+    } else if !replica_query && local_unavailable && request.hop_count() < 2 {
         let remaining_ms = match remaining_timeout(started, request.remaining_ms()) {
             Ok(remaining_ms) => remaining_ms.saturating_sub(1),
             Err(_) => return peer_http_error(StatusCode::GATEWAY_TIMEOUT),
@@ -936,12 +992,15 @@ pub(crate) async fn forward(
     let Ok(runtime) = server.cell_runtime() else {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     };
-    let dispatcher = PeerDispatcher::new(
+    let mut dispatcher = PeerDispatcher::new(
         Arc::clone(&receiver.registry),
         Arc::new(receiver.resolver.clone()),
         Arc::clone(&server) as Arc<dyn PeerAuthorizer>,
     )
     .with_telemetry(runtime.telemetry_handle());
+    if let Some(manager) = receiver.read_replicas.as_ref() {
+        dispatcher = dispatcher.with_replica_resolver(Arc::new(manager.clone()));
+    }
     let reply = dispatcher.dispatch(&request, now_ms).await;
     let Some(_codec) = reserve_peer_codec(&runtime) else {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
@@ -1658,6 +1717,9 @@ fn authorize_repository(
                     || permits_repository_mutation(request, access)
             }
             Some(peer_wire::read_request::Operation::CellQuery(_)) => {
+                access >= RepositoryAccess::Read && request.permits("repository.read")
+            }
+            Some(peer_wire::read_request::Operation::ReplicaQuery(_)) => {
                 access >= RepositoryAccess::Read && request.permits("repository.read")
             }
             _ => false,

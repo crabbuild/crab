@@ -110,9 +110,11 @@ cell.serving => control names this owner and exact root
 The following are not goals:
 
 - A V8, JavaScript, WebAssembly, dynamic-library, or public primitive host.
-- A second mutable SQLite owner or hot SQL standby. A read-only exact-root
-  view exists as a local library capability; product routing and admission
-  remain future work under [Plan 036](../../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md).
+- A second mutable SQLite owner or hot SQL standby. In object durability mode,
+  an explicit desired-reader policy can activate admitted read-only exact-root
+  views through private peers. Public product reads still use the owner while
+  [Plan 036](../../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md)
+  completes routing and qualification.
 - A fallback from Cell roots to standalone epoch heads.
 - Listing local files or object prefixes to infer the latest state.
 - Reusing an old mutable SQLite file merely because it exists locally.

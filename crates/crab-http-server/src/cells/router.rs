@@ -33,6 +33,7 @@ use crab_cell_runtime::peer::{
 };
 use crab_cell_runtime::primitives::maintenance::PersistedWorkInventory;
 use crab_cell_runtime::primitives::workflow::MAX_ACTIVITY_PAYLOAD_BYTES;
+use crab_cell_runtime::read_policy::ReadPolicyStore;
 use crab_cell_runtime::recovery::release::{ReleaseState, ReleaseStore};
 use crab_cell_runtime::registry::Registry;
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
@@ -45,6 +46,8 @@ use crate::auth::Identity;
 const ACTIVATION_SHARDS: usize = 4096;
 const REBALANCE_INTERVAL: Duration = Duration::from_secs(15);
 const REBALANCE_IDLE_MS: i64 = 60_000;
+const READ_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+const READ_RECONCILE_BATCH: usize = 64;
 
 #[derive(Clone, Copy)]
 struct RebalanceEvidence {
@@ -111,6 +114,87 @@ impl ScheduledRepositoryCell {
 }
 
 impl RepositoryCellRouter {
+    pub(crate) async fn run_read_replica_reconciliation(
+        &self,
+        cancellation: CancellationToken,
+    ) -> crate::Result<()> {
+        let mut tick = tokio::time::interval(READ_RECONCILE_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut cursor = 0_usize;
+        loop {
+            tokio::select! {
+                () = cancellation.cancelled() => return Ok(()),
+                _ = tick.tick() => {
+                    if let Err(error) = self.reconcile_readers_once(&mut cursor).await {
+                        tracing::warn!(error = %error, "Cell read replica reconciliation failed");
+                    }
+                }
+            }
+        }
+    }
+
+    async fn reconcile_readers_once(&self, cursor: &mut usize) -> crate::Result<()> {
+        let mut entries = self.runtime.active_catalog_entries().await?;
+        entries.retain(|entry| entry.role() == CatalogRole::Repository);
+        entries.sort_by_key(|entry| entry.cell().as_bytes().to_owned());
+        if entries.is_empty() {
+            *cursor = 0;
+            return Ok(());
+        }
+        let now_ms = super::unix_now_ms()?;
+        let policy = ReadPolicyStore::new(self.layout.clone());
+        let count = entries.len().min(READ_RECONCILE_BATCH);
+        for offset in 0..count {
+            let entry = &entries[(*cursor + offset) % entries.len()];
+            let Some(target_policy) = policy.load(entry.cell()).await? else {
+                continue;
+            };
+            let target_policy = target_policy.value();
+            if target_policy.desired_readers() == 0 {
+                continue;
+            }
+            let Some(control) = self.authority.load(entry.cell()).await? else {
+                continue;
+            };
+            let control = control.value();
+            if control.state != ControlState::Serving
+                || control.owner.as_ref() != Some(&self.peer.owner)
+                || target_policy.incarnation() != control.incarnation
+            {
+                continue;
+            }
+            let target = CellTarget::new(
+                self.identity.tenant(),
+                self.identity.application(),
+                entry.namespace(),
+                entry.partition(),
+            )?;
+            let selected = self
+                .peer
+                .directory
+                .select_readers(
+                    entry.cell(),
+                    self.peer.owner.session,
+                    control.code,
+                    usize::from(target_policy.desired_readers()),
+                    now_ms,
+                    10_000,
+                )
+                .await?;
+            for node in selected {
+                if let Err(error) = self
+                    .peer
+                    .activate_read_replica(target.clone(), node, now_ms)
+                    .await
+                {
+                    tracing::warn!(cell = ?entry.cell(), error = %error, "Cell read replica activation hint failed");
+                }
+            }
+        }
+        *cursor = (*cursor + count) % entries.len();
+        Ok(())
+    }
+
     pub(crate) fn new(
         identity: ApplicationIdentity,
         layout: CellStorageLayout,
@@ -1112,6 +1196,46 @@ impl RepositoryCellRouter {
 }
 
 impl RepositoryCellPeer {
+    async fn activate_read_replica(
+        &self,
+        target: CellTarget,
+        node: crab_cell_runtime::node::NodeAdvertisement,
+        now_ms: i64,
+    ) -> crate::Result<()> {
+        let principal = PeerPrincipal {
+            issuer: format!(
+                "crab-runtime:{}",
+                encode_hex(self.directory.fleet().as_bytes())
+            ),
+            subject: encode_hex(self.owner.session.as_bytes()),
+            actions: vec!["cell.replica.activate".to_owned()],
+        };
+        let request = self.signer.sign(
+            principal,
+            now_ms,
+            now_ms.saturating_add(60_000),
+            30_000,
+            PeerOperation::Read(peer_wire::ReadRequest {
+                target: Some(peer_target(&target)),
+                timeout_ms: 30_000,
+                minimum: None,
+                operation: Some(peer_wire::read_request::Operation::ReplicaActivate(true)),
+            }),
+        )?;
+        let reply = self
+            .round_trip
+            .send_to_node(target.clone(), node, request, 30_000)
+            .await?;
+        let reply = crab_cell_runtime::peer::decode_peer_reply(&reply)?;
+        match reply.outcome {
+            Some(peer_wire::peer_reply::Outcome::Read(peer_wire::ReadReply {
+                receipt: Some(receipt),
+                result: Some(peer_wire::read_reply::Result::ReplicaReady(true)),
+            })) if receipt.cell_id == target.cell_id().as_bytes() => Ok(()),
+            _ => Err(crab_cell_runtime::Error::Peer("read replica did not become ready").into()),
+        }
+    }
+
     pub(crate) fn new(
         directory: NodeDirectory,
         signer: Arc<PeerSigner>,

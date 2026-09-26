@@ -49,6 +49,7 @@ use uuid::Uuid;
 use crate::{Config, Error, Result, storage_root::StorageRoot};
 
 mod initializer;
+mod read_replicas;
 pub(crate) mod repository;
 mod router;
 mod scheduler;
@@ -59,6 +60,7 @@ pub(crate) use initializer::initialize_repository_at;
 #[cfg(test)]
 pub(super) use initializer::provision_repository;
 pub(crate) use initializer::{initialize_repository, verify_repository_cells};
+pub(crate) use read_replicas::ReadReplicaManager;
 pub(crate) use router::{RepositoryCell, RepositoryCellPeer, RepositoryCellRouter};
 pub(crate) use scheduler::{RepositoryCellScheduler, SchedulerStatus};
 

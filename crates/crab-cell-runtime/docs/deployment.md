@@ -17,11 +17,13 @@ public traffic. Object-root publication remains a valid alternative proof, and
 all recovery still goes through the existing claim, witness, pin, control-CAS,
 and fresh-database activation gates described in
 [Follower durability and warm failover](failover-and-followers.md).
-The current server routes queries only to the Cell owner. The local read-only
-snapshot API and desired-reader policy described in
+Public product queries still route to the Cell owner. In object durability
+mode, the server reconciles a desired-reader policy and can serve explicit
+authenticated private peer reads from admitted, verified snapshots. The
+snapshot API and policy described in
 [Plan 036](../../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md)
-do not yet enable replicas in this deployment. Fleet-only acknowledgements do
-not provide the plan's all-secondary-loss guarantee.
+are not yet a public product route or a qualified deployment. Fleet-only
+acknowledgements do not provide the plan's all-secondary-loss guarantee.
 
 ## Configure one process per node
 

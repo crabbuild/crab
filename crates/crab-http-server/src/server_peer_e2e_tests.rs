@@ -3,10 +3,13 @@
 use super::*;
 
 use crab_cell_runtime::cell::application::ApplicationIdentity;
+use crab_cell_runtime::client::CellDescription;
 use crab_cell_runtime::control::authority::CellAuthority;
 use crab_cell_runtime::identity::{ApplicationId, Digest, SessionId, TenantId};
 use crab_cell_runtime::ltx::CellStorageLayout;
 use crab_cell_runtime::node::NodeDirectory;
+use crab_cell_runtime::peer::{PeerPrincipal, PeerReplicaResolver, ReplicaPeerClient};
+use crab_cell_runtime::read_policy::ReadPolicyStore;
 use crab_storage::{ObjectStoreCredentials, build_explicit_store};
 use object_store::{memory::InMemory, path::Path as ObjectPath};
 use serde_json::Value;
@@ -134,6 +137,11 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         "https://localhost:{}",
         management_listener.local_addr().unwrap().port()
     );
+    let ingress_management_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ingress_management_endpoint = format!(
+        "https://localhost:{}",
+        ingress_management_listener.local_addr().unwrap().port()
+    );
     let identity_files = IdentityFiles::generate();
     let peer_tls = Arc::new(
         LoadedPeerTls::load(&identity_files.config(url::Url::parse(&management_endpoint).unwrap()))
@@ -155,7 +163,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             directory.clone(),
             peer_tls.signing_key().clone(),
             ingress_session,
-            "https://localhost:2".into(),
+            ingress_management_endpoint.clone(),
             crab_cell_runtime::node::NodeFailureDomain::default(),
             peer_tls.fleet(),
             peer_tls.certificate(),
@@ -260,6 +268,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             ),
             LocalCellResolver::new(cell_layout.clone(), identity, owner_runtime.clone()),
             Arc::new(UnavailablePeer),
+            None,
         )),
     );
     let owner_heartbeat_stop = CancellationToken::new();
@@ -282,7 +291,20 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .unwrap();
     });
 
-    let ingress_runtime = runtime(ingress_session);
+    let ingress_runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 128).unwrap(),
+        16 * 1024 * 1024,
+        ingress_session,
+    )
+    .unwrap();
+    let reader = crate::cells::ReadReplicaManager::new(
+        ingress_runtime.clone(),
+        Arc::clone(&registry),
+        cell_layout.clone(),
+        directory.clone(),
+        ingress_session,
+        ingress_dir.path().join("read-replicas"),
+    );
     let round_trip: Arc<dyn PeerRoundTrip> = Arc::new(PeerHttpRoundTrip::new(
         identity,
         authority.clone(),
@@ -302,10 +324,10 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
                 registry.release_digest(),
                 peer_tls.signing_key().clone(),
             )),
-            round_trip,
+            Arc::clone(&round_trip),
             crab_cell_runtime::control::Owner {
                 session: ingress_session,
-                endpoint: "https://localhost:2".into(),
+                endpoint: ingress_management_endpoint.clone(),
             },
         ),
         ingress_session_dir,
@@ -316,8 +338,37 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         store,
         ingress_runtime.clone(),
         Some(ingress_router),
-        None,
+        Some(PeerReceiver::new(
+            ingress_publisher.node(),
+            ingress_session,
+            directory.clone(),
+            Arc::clone(&registry),
+            Arc::new(
+                crab_cell_runtime::recovery::release::ReleaseStore::new(
+                    cell_layout.clone(),
+                    identity,
+                )
+                .unwrap(),
+            ),
+            LocalCellResolver::new(cell_layout.clone(), identity, ingress_runtime.clone()),
+            round_trip,
+            Some(reader.clone()),
+        )),
     );
+    let ingress_management = management_router(Arc::clone(&ingress_server));
+    let (ingress_management_stop, ingress_management_done) = tokio::sync::oneshot::channel();
+    let ingress_management_tls = Arc::clone(&peer_tls);
+    let ingress_management_task = tokio::spawn(async move {
+        axum::serve(
+            ingress_management_tls.listener(ingress_management_listener),
+            ingress_management.into_make_service_with_connect_info::<PeerTlsIdentity>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = ingress_management_done.await;
+        })
+        .await
+        .unwrap();
+    });
     let ingress_heartbeat_stop = CancellationToken::new();
     let ingress_heartbeat_task = tokio::spawn(
         Arc::clone(&ingress_publisher)
@@ -596,6 +647,93 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .clone();
     assert_ne!(root_after, root_before);
 
+    let current = authority.load(target.cell_id()).await.unwrap().unwrap();
+    let policy = ReadPolicyStore::new(cell_layout.clone());
+    let one_reader = policy
+        .create(target.cell_id(), current.value().incarnation, 1)
+        .await
+        .unwrap();
+    let ready = reader
+        .activate(target.clone(), owner_session)
+        .await
+        .unwrap();
+    let observed = reader
+        .resolve(target.clone())
+        .await
+        .unwrap()
+        .query::<crate::cells::repository::GetIssue>(Some(ready), 1)
+        .await
+        .unwrap();
+    assert_eq!(observed.output.unwrap().title, "Remote Cell");
+    let selected_reader = directory
+        .load(ingress_session, crate::cells::unix_now_ms().unwrap())
+        .await
+        .unwrap()
+        .unwrap()
+        .advertisement()
+        .clone();
+    let replica_peer = ReplicaPeerClient::new(
+        Arc::clone(&registry),
+        Arc::new(crab_cell_runtime::peer::PeerSigner::new(
+            owner_session,
+            registry.release_digest(),
+            peer_tls.signing_key().clone(),
+        )),
+        PeerPrincipal {
+            issuer: local_operator.issuer.clone(),
+            subject: local_operator.subject.clone(),
+            actions: vec!["repository.read".into()],
+        },
+        Arc::new(PeerHttpRoundTrip::new(
+            identity,
+            authority.clone(),
+            directory.clone(),
+            peer_tls.client_identity(),
+            owner_session,
+        )),
+    );
+    let exact = CellDescription {
+        cell: target.cell_id(),
+        incarnation: current.value().incarnation,
+        code: current.value().code,
+        schema: current.value().schema,
+    };
+    let remote = replica_peer
+        .query::<crate::cells::repository::GetIssue>(
+            &target,
+            selected_reader,
+            exact,
+            Some(ready),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(remote.output.unwrap().title, "Remote Cell");
+
+    let zero_readers = policy.update(&one_reader, 0).await.unwrap();
+    let stop_readers = CancellationToken::new();
+    let running_reader = reader.clone();
+    let running_stop = stop_readers.clone();
+    let reader_task = tokio::spawn(async move { running_reader.run(running_stop).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if reader.resolve(target.clone()).await.is_err() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    stop_readers.cancel();
+    reader_task.await.unwrap().unwrap();
+    assert_eq!(ingress_runtime.stats().file_descriptors(), 0);
+    policy.update(&zero_readers, 1).await.unwrap();
+    reader
+        .activate(target.clone(), owner_session)
+        .await
+        .unwrap();
+
     management_stop.send(()).unwrap();
     management_task.await.unwrap();
     owner_heartbeat_stop.cancel();
@@ -605,7 +743,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .value()
         .takeover(crab_cell_runtime::control::Owner {
             session: ingress_session,
-            endpoint: "https://localhost:2".into(),
+            endpoint: ingress_management_endpoint,
         })
         .unwrap();
     authority
@@ -616,6 +754,16 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         )
         .await
         .unwrap();
+    assert!(matches!(
+        reader
+            .resolve(target.clone())
+            .await
+            .unwrap()
+            .query::<crate::cells::repository::GetIssue>(None, 1)
+            .await,
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
+    reader.shutdown().await;
     std::fs::remove_dir_all(owner_dir.path()).unwrap();
 
     let restored = client
@@ -780,6 +928,8 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
 
     public_stop.send(()).unwrap();
     public_task.await.unwrap();
+    ingress_management_stop.send(()).unwrap();
+    ingress_management_task.await.unwrap();
     ingress_heartbeat_stop.cancel();
     ingress_heartbeat_task.await.unwrap().unwrap();
     ingress_server.receives.close();

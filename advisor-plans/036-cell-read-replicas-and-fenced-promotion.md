@@ -1,8 +1,8 @@
 # Plan 036: S3-durable Cell read replicas and fenced promotion
 
-Status: PARTIAL IMPLEMENTATION — local read-only exact-root query, atomic
-snapshot refresh, and S3 desired-count policy exist; no product replica routing
-or production qualification
+Status: PARTIAL IMPLEMENTATION — exact-root views, S3 desired-count policy,
+private peer activation/query, and object-mode reconciliation exist; no public
+product replica route or production qualification
 Base: `origin/main` at `de0bb234abc` (2026-09-25); Cell/LTX source compared with the planning checkout at `fa182c94c7e`
 Priority: P1 read scaling; P0 safety for any enabled deployment. Effort: XL. Risk: HIGH.
 Depends on: the recovery implementations tracked by plans 032 and 035;
@@ -55,13 +55,16 @@ typed query against that view with a fresh authority/session response gate.
 `CellReadReplica::refresh` serializes refreshes, verifies the replacement root,
 and switches a shared snapshot after a fresh authority check; in-flight queries
 retain their exact old view until completion.
-The S3 desired-count object supports conditional create/update. These are
-library capabilities only: no server route, node-wide reconciler, sparse read
-view, warm-reader promotion preference, or production qualification is enabled.
+The S3 desired-count object supports conditional create/update. In object
+durability mode, the server now reconciles active owner Cells, sends authenticated
+activation hints to selected nodes, refreshes their admitted read views, and
+accepts explicit authenticated private replica queries. No public product route,
+operator target API, sparse read view, warm-reader promotion preference, or
+production qualification is enabled.
 The server can select the existing object proof path with `[cells]
 durability = "object"` for a fresh deployment; fleet remains the default and
-the fleet-to-object drain and coverage barrier is not automated. Reads still
-route only to the owner.
+the fleet-to-object drain and coverage barrier is not automated. Public product
+reads still route only to the owner.
 Do not claim the all-reader-loss guarantee or replica read scaling from these
 local tests.
 
@@ -254,11 +257,12 @@ record, mutable LTX head, or owner-to-owner database copy.
 
 Current slice state (local proof only): 0 partially reconciled in docs; 1 open;
 2 full-restore read-only opener, atomic refresh, and exact-root tests pass, but
-sparse view, node-wide admission, and provider fault cases remain; 3 policy
-record passes CAS tests and signed live-node advisory selection replaces an
-expired member, but activation/reconciliation is open; 4 local typed query and authority gate pass,
-but peer/product routing is open; 5 and 6 open. The code is not enabled on the
-HTTP server's request path.
+sparse view and provider fault cases remain; 3 policy CAS, signed selection,
+owner reconciliation, private activation, and node admission exist, but target
+status and churn qualification remain; 4 typed local and peer queries, position
+errors, receipt checks, and authority gates exist, but public product routing
+remains open; 5 and 6 open. Private peer replica requests are accepted only in
+the object-durability server profile.
 
 The ignored `rustfs_replica_reads_exact_root_and_policy_cas` test also passed
 against a local RustFS bucket with an isolated prefix. It exercised real S3
@@ -276,10 +280,9 @@ Refresh reserves a second view until old in-flight queries finish. Local and
 RustFS tests cover capacity rejection, concurrent charges, and full release;
 these provisional limits still need measured 1 GiB/1 vCPU receipts before
 product enablement.
-An explicit local replica query whose view is behind a caller's minimum now
-returns `ReplicaBehind` with both sequence numbers. The peer wire still maps
-that error to generic unavailability until the replica read operation and its
-versioned error contract are added.
+An explicit local or peer replica query whose view is behind a caller's minimum
+returns `ReplicaBehind` with both sequence numbers. The private peer wire has
+an explicit read operation and distinct behind/unavailable error codes.
 The LTX restore install now removes a destination that its blocking worker
 successfully installed after the async read-view opener was cancelled;
 `cancelled_read_view_install_removes_its_unclaimed_destination` pauses at that
@@ -292,8 +295,14 @@ checks the SQLite cache setting.
 the advisory directory selection at targets 0, 1, 2, and 4, with distinct
 physical nodes, failure-domain preference, an expired reader, and a new live
 replacement. A candidate advertising less than the provisional reader-memory
-reservation is excluded. This selection still does not activate a reader or
-reserve its node resources.
+reservation is excluded. A server reconciler now activates selected readers
+through authenticated hints, and each receiver verifies policy and reserves
+its node resources before opening the exact S3 root. The existing two-node
+product E2E passes with both in-memory storage and local RustFS: the non-owner
+reads the written issue from an admitted replica through the signed private
+mTLS peer route, the policy change to zero releases reader admission, and the
+old view is fenced after the owner epoch changes. This is one-process test
+wiring, not the required independent Pod qualification.
 
 | Slice | Change owner | Implementation and focused gate | Completion evidence |
 | --- | --- | --- | --- |
