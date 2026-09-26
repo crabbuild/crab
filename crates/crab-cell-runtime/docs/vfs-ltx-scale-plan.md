@@ -61,8 +61,8 @@ Run from the repository root. Choose a fresh project and state directory for
 each comparison run. This disposable stack uses local RustFS credentials
 `crab/crab`; never expose it outside the local Docker network. The
 `qualify.py` command builds the image, performs the 3 -> 5 -> 10 -> 20
-functional scale check, and with `--load-stages` measures each stage while
-it has exactly that many active nodes. Keep all raw JSON and logs outside
+functional scale check with a fixed 20 Cells, and with `--load-stages` measures
+scheduled arrivals while each stage has exactly that many active nodes. Keep all raw JSON and logs outside
 the checkout.
 
 ```sh
@@ -78,6 +78,12 @@ The command writes `report.json` and `load-3-stage.json`,
 node containers. The [local stage-load record](../../crab-http-server/deploy/cell-issue-fleet/qualification/2026-09-25-stage-load.md)
 captures one completed run. Omit `--load-stages` for the original functional
 check.
+That historical run used completion-paced lanes and one Cell per node. The
+current runner keeps Cell count and offered rate independent of node count;
+use `--cells`, `--load-rate`, `--load-duration`, and `--load-max-in-flight` to
+hold the comparison workload fixed. Raw pair samples and resource/metrics
+snapshots accompany each summary. Scheduled and historical rates must not be
+compared as the same workload.
 For a fast syntax-only check before building images:
 
 ```sh
@@ -256,6 +262,15 @@ now measures phase durations and read bytes at fixed database sizes and I/O
 admission settings. Its three samples per setting are diagnostic; sustained
 multi-Cell tails and first-mutation latency remain required.
 
+Include two Cells on the **same SQL worker** in the interference matrix. A
+cold page wait, hydration step, or published-cut cleanup currently occupies
+that worker; the independent provider driver does not let the resident Cell
+execute meanwhile. Measure worker admission, shard queue, provider wait, and
+proof-to-confirmation delay separately. Sweep cut sizes because published-cut
+cleanup buffers and verifies the full LTX file before releasing retained
+accounting. The [audit findings 9–11](ltx-performance-audit.md) define the
+ownership constraints and focused failure tests for changing these paths.
+
 For writes, attribute SQLite command time, LTX capture, follower append
 and fsync, root preparation, object CAS, queue wait, and final proof source.
 The runtime already supports follower and object proofs. Tune batching or
@@ -384,6 +399,14 @@ object-proof actions. A fixed 20-lane rate is not the maximum throughput.
 Every successful write must have a visible readback or durable receipt and
 survive owner loss. Reject duplicate effects and regressions in published
 root sequence.
+
+Verify executing-owner distribution independently of gateway distribution.
+Record owner/epoch changes, wait for the declared placement settling criterion,
+and retain skewed stages as skewed evidence. The observed five-node smoke
+owned 6/5/5/1/3 of its 20 Cells despite healthy routing. Record the Docker VM's
+CPU/memory too; per-container limits alone do not provide independent resources
+on an oversubscribed host. Current-source uniform capacity qualification must
+meet [audit finding 12](ltx-performance-audit.md) before comparing stage rates.
 
 Use the existing public-host cases as the first application correctness gate:
 
