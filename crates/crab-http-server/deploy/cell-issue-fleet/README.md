@@ -156,8 +156,10 @@ python3 crates/crab-http-server/deploy/cell-issue-fleet/qualify_mode_rollout.py 
   --project crab-cell-issue-mode-rollout-1
 ```
 
-The runner first requires active fleet logs and observed fleet durability
-proofs, then writes a comment and stops all three servers. It changes their
+The runner first drives bounded concurrent writes and requires enrolled logs
+and observed fleet durability proofs, then writes a comment and stops all
+three servers. Fleet mode may also complete writes through object proof;
+individual idle logs need not have won a follower-proof race. It changes their
 configs only after every server exits successfully without an OOM kill.
 Successful shutdown includes the existing node-log coverage barrier: every
 issued frame must be object-covered before the durable log close CAS.

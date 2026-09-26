@@ -82,10 +82,13 @@ def main() -> None:
             status = json.loads(compose(path, (), "exec", "-T", node_name(index), "crab-http-server",
                                         "--config", CONFIG, "cells", "node", "--session", session, "--json"))
             enrolled.append(status["advertisement"])
-        if all(node and node["log"] and node["log"]["active"] for node in enrolled):
+        samples = {node_name(index): metrics(path, index) for index in range(1, 4)}
+        if all(node and node["log"] for node in enrolled) and any(
+            proof_count(sample, "fleet") > 0 for sample in samples.values()
+        ):
             break
     else:
-        raise RuntimeError("fleet proof did not become active on all three nodes")
+        raise RuntimeError("the initial fleet deployment never issued a fleet durability proof")
     fleet_body = "acknowledged before the fleet-to-object drain"
     if comment(args.node_port_base, fleet_body)["body"] != fleet_body:
         raise RuntimeError("fleet comment was not acknowledged")
