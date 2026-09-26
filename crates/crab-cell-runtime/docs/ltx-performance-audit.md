@@ -103,6 +103,40 @@ from the final root. Their [matched measurements](../../crab-ltx/perf/README.md#
 are small-database diagnostics, not a service latency or representation-only
 performance claim.
 
+The current public-host follow-up ran three release processes against local
+RustFS `1.0.0-beta.8-glibc`, each with 100 generated-client local actions,
+100 forwarded actions and one owner takeover. Every action's typed query
+verified the expected count at its committed receipt; takeover verified the
+final count of 200 in each process. This aggregate check is narrower than the
+fleet runner's individual acknowledgement readback. One unconstrained macOS process hosted the three
+`CellNode` instances with static signed loopback routing. This measures the
+application boundary but excludes HTTP ingress, dynamic placement, independent
+hosts and the one-vCPU/one-GiB profile.
+
+| Run | Local action p50 / p95 / p99, ms | Forwarded action p50 / p95 / p99, ms | First verified read after takeover, ms |
+| ---: | ---: | ---: | ---: |
+| 1 | 13.423 / 18.520 / 140.954 | 14.712 / 22.992 / 115.160 | 77.693 |
+| 2 | 13.623 / 18.000 / 73.027 | 15.059 / 21.583 / 82.120 | 66.413 |
+| 3 | 12.798 / 15.059 / 78.377 | 14.832 / 21.213 / 84.782 | 72.769 |
+
+Local object-proof wait p50 was 11.653–12.432 ms and its p99 was
+71.814–139.729 ms; forwarded proof-wait p50 was 11.815–11.894 ms and its p99
+was 78.895–112.634 ms. This interval includes publication queueing and proof
+work. Its long tails justify attributing those phases next; the retained
+percentiles cannot isolate provider latency or be subtracted from action
+percentiles. These serial lanes do not establish saturation throughput.
+
+Measured source: `19d7ba3fa6d` plus the separately staged reference-suite
+relocation, effective index tree `4a152bac8a494fb16ae617a4889c988cb32d53b7`.
+The staged patch, binary/host/provider identities, all six action distributions
+per run and log hashes are retained in `public-host-rustfs-20260926/` beneath
+this checkout's external target. These results do not qualify an unmodified PR
+checkout or resolve the relocation's inventory approval. The earlier
+[2026-09-25 measurements](../../crab-cell-app/performance/2026-09-25-public-host-rustfs.md)
+used a different source and RustFS environment; this is not a controlled
+before/after comparison. Recovery times cover fixture fencing and takeover,
+not production failure detection or lease-expiry latency.
+
 **Is this the best fix, rather than only a plausible one?** Bounding demand
 read-ahead at a cached suffix removes reproduced duplicate work using the
 existing hydration rule and exact-view identity. It needs no new format or
@@ -2579,6 +2613,17 @@ identity remains the merge commit. It does not cover the subsequent
 demand-read or rate-curve changes. The separate
 architecture gate still rejects the app-to-host development dependency; its
 staged suite relocation and inventory approval remain outside this change.
+
+The follow-up [image run 36261394085](https://github.com/crabbuild/crab/actions/runs/36261394085)
+passes build, Compose startup, restore, crash recovery and restart with the
+demand-read fix. The receipt names merge source `a3a074cfa687`, whose tree
+`9aa8caaadb16bb7c3e8dec244b2ba558891e9849` matches branch head `6169c9c0270`.
+Receipt SHA256 is `38afbd6d821723db630cd84d3313fa1fdbeb88f782e96799c5e6f6d5400a7f27`;
+its image digest is `sha256:b3dd7c8bb12d627b5d9b3041d1456ef9b1ba8e3fda153a2f7ea863b7fd318d97`.
+The subsequent churn runner and measurement documents do not change production
+runtime source. Fleet curves still require their separate receipt. Both
+architecture CI jobs at this branch head report the existing app-to-host
+development dependency, not a passing full qualification result.
 
 ## Safety and proof retained by the audit
 
