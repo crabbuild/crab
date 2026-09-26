@@ -48,10 +48,13 @@ and restores the account and credential Cells. Another public endpoint reads
 the data over pinned mTLS. The replacement rejects data takeover while that
 owner is live, then fences its expired boot session, restores the data Cell,
 and reads the committed item from object storage. Placement,
-unattended crash takeover, and multi-node capacity control remain unimplemented,
+fleet-wide unattended crash takeover, and multi-node capacity control remain unimplemented,
 so this is not production multi-node service proof. A separate process smoke
-now proves signed SDK writes and recovery through the serving binary against
-RustFS; it does not prove aggregate capacity or unattended failover.
+now proves signed SDK writes and same-endpoint recovery through the serving
+binary against RustFS after an unclean exit. Startup recovers configured account
+and credential Cells and the routed data Cells formerly served at that peer
+endpoint. Data-only nodes and replacement endpoints still need a recovery
+scheduler. This does not prove aggregate capacity or fleet-wide failover.
 Increasing a Cell's database budget does not increase
 write parallelism or provide online repartitioning. Both Cell types declare a
 512 MiB database budget and 64 MiB capture budget; host admission supplies

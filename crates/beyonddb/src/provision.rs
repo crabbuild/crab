@@ -121,6 +121,176 @@ impl CellInitialPartitionProvisioner {
             .await
     }
 
+    /// Admit a configured account or recover its published root after a crash.
+    pub async fn recover_owned_account(
+        &self,
+        account_id: &str,
+        nodes: &NodeDirectory,
+    ) -> Result<CellHandle, StorageError> {
+        let target = account_target(account_id).map_err(provision_error)?;
+        self.recover_owned(&target, crate::MODULE, nodes, initialize_account)
+            .await
+    }
+
+    /// Admit a configured credential shard or recover it after a crash.
+    pub async fn recover_owned_credential(
+        &self,
+        access_key_id: &str,
+        nodes: &NodeDirectory,
+    ) -> Result<CellHandle, StorageError> {
+        let target = credential_target(access_key_id).map_err(provision_error)?;
+        self.recover_owned(
+            &target,
+            crate::credentials::MODULE,
+            nodes,
+            initialize_credentials,
+        )
+        .await
+    }
+
+    async fn recover_owned(
+        &self,
+        target: &CellTarget,
+        module: &'static str,
+        nodes: &NodeDirectory,
+        initialize: for<'a> fn(&rusqlite::Transaction<'a>) -> crab_cell_runtime::Result<()>,
+    ) -> Result<CellHandle, StorageError> {
+        let observed = CellAuthority::new(self.layout.clone())
+            .load(target.cell_id())
+            .await
+            .map_err(provision_error)?;
+        if let Some(former) = observed
+            .as_ref()
+            .filter(|control| control.value().root.is_some())
+            .and_then(|control| control.value().owner.as_ref())
+            .filter(|owner| owner.session != self.session)
+        {
+            wait_for_expired(nodes, former.session).await?;
+            let proof = self.cataloged(target, module).await?;
+            return self.takeover_expired(target, proof, nodes).await;
+        }
+        self.admit_module(target, module, initialize).await
+    }
+
+    /// Restore ranges that were served from this peer endpoint before its crash.
+    pub async fn recover_local_partitions(
+        &self,
+        account_id: &str,
+        account_handle: CellHandle,
+        nodes: &NodeDirectory,
+    ) -> Result<(), StorageError> {
+        let account = account_target(account_id).map_err(provision_error)?;
+        let client = CellClient::local(self.application.registry(), account_handle);
+        let mut after_table = None;
+        loop {
+            let page = client
+                .query::<ListTables>(
+                    &account,
+                    None,
+                    Json(ListTablesInput {
+                        limit: 100,
+                        exclusive_start: after_table,
+                    }),
+                )
+                .await
+                .map_err(cell_error)?
+                .output
+                .0;
+            let ListTablesOutcome::Page(page) = page else {
+                return Err(StorageError::Internal("invalid recovery table page".into()));
+            };
+            for name in page.names {
+                let Some(table) = client
+                    .query::<DescribeTable>(&account, None, Json(name))
+                    .await
+                    .map_err(cell_error)?
+                    .output
+                    .0
+                else {
+                    continue;
+                };
+                self.recover_local_table(account_id, &account, &client, &table.id, nodes)
+                    .await?;
+            }
+            let Some(next) = page.last_evaluated else {
+                return Ok(());
+            };
+            after_table = Some(next);
+        }
+    }
+
+    async fn recover_local_table(
+        &self,
+        account_id: &str,
+        account: &CellTarget,
+        client: &CellClient,
+        table_id: &str,
+        nodes: &NodeDirectory,
+    ) -> Result<(), StorageError> {
+        let mut after_lower = None;
+        let mut expected_epoch = None;
+        loop {
+            let page = client
+                .query::<ReadRoutePage>(
+                    account,
+                    None,
+                    Json(RoutePageInput {
+                        table_id: table_id.to_owned(),
+                        start_hash: None,
+                        after_lower,
+                        expected_epoch,
+                    }),
+                )
+                .await
+                .map_err(cell_error)?
+                .output
+                .0;
+            let (epoch, partitions, has_more) = match page {
+                RoutePageOutcome::Unrouted => return Ok(()),
+                RoutePageOutcome::Changed => {
+                    return Err(StorageError::Transient(
+                        "table route changed during recovery".into(),
+                    ));
+                }
+                RoutePageOutcome::Page {
+                    epoch,
+                    partitions,
+                    has_more,
+                } => (epoch, partitions, has_more),
+            };
+            after_lower = partitions.last().map(|partition| partition.lower);
+            for partition in partitions {
+                let target = data_target(account_id, table_id, &partition.partition_id)
+                    .map_err(provision_error)?;
+                let observed = CellAuthority::new(self.layout.clone())
+                    .load(target.cell_id())
+                    .await
+                    .map_err(provision_error)?;
+                let Some(former) = observed
+                    .as_ref()
+                    .and_then(|control| control.value().owner.as_ref())
+                    .filter(|owner| {
+                        owner.session != self.session && owner.endpoint == self.endpoint
+                    })
+                else {
+                    continue;
+                };
+                wait_for_expired(nodes, former.session).await?;
+                self.takeover_expired_partition(
+                    account_id,
+                    table_id,
+                    &partition.partition_id,
+                    nodes,
+                )
+                .await?;
+            }
+            if !has_more {
+                return Ok(());
+            }
+            expected_epoch = Some(epoch);
+        }
+    }
+
     /// Recover an account Cell after its previous node lease expires.
     ///
     /// The caller must select this node as the replacement owner. An active
@@ -979,6 +1149,30 @@ impl CellInitialPartitionProvisioner {
             )),
         }
     }
+}
+
+async fn wait_for_expired(nodes: &NodeDirectory, former: SessionId) -> Result<(), StorageError> {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let now_ms = i64::try_from(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|_| StorageError::Internal("system clock predates Unix epoch".into()))?
+                    .as_millis(),
+            )
+            .map_err(|_| StorageError::Internal("system clock exceeds lease range".into()))?;
+            if !nodes
+                .is_live(former, now_ms)
+                .await
+                .map_err(provision_error)?
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    })
+    .await
+    .map_err(|_| StorageError::Transient("previous Cell owner remains live".into()))?
 }
 
 fn split_plan(source: &PartitionSpec, route_epoch: u64) -> Result<SplitPlan, StorageError> {

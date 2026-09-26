@@ -66,7 +66,8 @@ session uses a fresh scratch directory; graceful shutdown removes it after
 Cell drain. Crashed sessions may leave scratch directories for operator cleanup.
 
 The process smoke test starts RustFS, bootstraps a key, sends AWS SDK table and
-item requests, restarts the server, and reads the committed item. Run it in a
+item requests, kills the server without draining it, then restarts it and reads
+the committed item after lease expiry and fenced Cell takeover. Run it in a
 dedicated environment with `rustfs`, `aws`, and `openssl` available:
 
 ```bash
@@ -75,7 +76,11 @@ CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-beyonddb \
 ```
 
 This server uses an explicit list of locally owned account and credential
-Cells. Automatic placement, unattended takeover, multi-node capacity loops,
+Cells. On startup it recovers configured account and credential Cells and routed
+data Cells whose previous owner used this node's peer endpoint. This requires
+the account to be configured on the restarting node; data-only nodes and
+replacements with a different endpoint still need a recovery scheduler.
+Automatic placement, fleet-wide unattended takeover, multi-node capacity loops,
 management APIs, and the remaining DynamoDB operations are still required
 before this is a complete service. A public node with no locally owned account
 or credential Cells can forward signed requests to live owners through mTLS.
@@ -156,8 +161,8 @@ replacement fences its session and restores both Cells from object storage.
 Both public endpoints then read the committed item, including a read that
 forwards to the data owner. The replacement refuses data takeover while that
 owner is live, then fences its expired node session after lease renewal stops,
-restores the data Cell from object storage, and reads the item again. A
-automatic placement and unattended takeover remain unfinished.
+restores the data Cell from object storage, and reads the item again. Automatic
+placement and fleet-wide unattended takeover remain unfinished.
 
 ## Cell ownership
 
