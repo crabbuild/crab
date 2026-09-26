@@ -558,8 +558,15 @@ Current-source ARM64
 built the image and receipt validator but failed the cluster gate waiting for
 the elected successor's recovery-work counter after owner loss. The script had
 already verified recovered issue visibility. The missing counter evidence must
-be diagnosed; neither image qualification nor a data-loss conclusion follows
-from this failure. This leaves current-source fleet performance proof open.
+not be treated as data loss or successful image qualification. Source tracing
+found that the gate sampled only the elected successor, which need not be the
+recovery claimant, and compared it with physical `server-c`'s earlier counters.
+The qualifier now derives work from each surviving process's own before/after
+snapshots, rejects resets or missing data, and retains those snapshots in the
+receipt. Six deterministic cases cover the distinct claimant/owner roles,
+aggregation, process changes, invalid counters, and inactive-log zero work.
+A fresh Compose run must still prove the corrected gate end to end. This
+leaves current-source fleet performance proof open.
 
 Seven existing tests passed locally with real SQLite and in-memory object
 storage: four `environment::tests::directory_cache` cases, missing cached-root
