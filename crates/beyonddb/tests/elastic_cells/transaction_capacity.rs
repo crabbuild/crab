@@ -23,6 +23,38 @@ async fn prepare_refuses_without_resolution_headroom_and_leaves_no_locks() {
     capacity_case(&[], 4, 0, 2).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_full_during_upload_aborts_and_resolves_all_participants() {
+    capacity_case(&[], 4, 380 * 1024, 1).await;
+}
+
+async fn assert_upload_full<C: beyonddb::MultipartTransactionCommand>(
+    client: &CellClient,
+    target: &CellTarget,
+    input: &C::Payload,
+) {
+    let bytes = serde_json::to_vec(input).unwrap();
+    let reference = beyonddb::TransactionPayloadRef::new(&bytes, mutation().expires_at_ms).unwrap();
+    for chunk in reference.chunks(&bytes) {
+        match client
+            .command::<beyonddb::UploadTransactionPayload<C>>(target, mutation(), chunk)
+            .await
+        {
+            Ok(_) => {}
+            Err(error) => {
+                assert!(
+                    matches!(error,
+                    InvocationError::NotStarted(crab_cell_runtime::Error::Sqlite(ref cause))
+                    if cause.sqlite_error_code() == Some(crab_ltx::rusqlite::ErrorCode::DiskFull)),
+                    "expected an actual SQLite FULL with proven rollback: {error:?}"
+                );
+                return;
+            }
+        }
+    }
+    panic!("upload exceeding the Cell must be refused");
+}
+
 async fn capacity_case(
     fill_sizes: &[usize],
     per_participant: usize,
@@ -219,33 +251,43 @@ async fn capacity_case(
     for (position, participant) in participants.iter().enumerate() {
         let index = usize::from(participant.operations[0].index) / per_participant;
         let prepared = if index == 0 {
+            let input = PrepareAccountTransactionInput {
+                transaction_id,
+                coordinator_cell,
+                coordinator_key: transaction_id.to_vec(),
+                operations: operations[0].clone(),
+            };
+            if database_mib == 1 {
+                assert_upload_full::<PrepareAccountTransaction>(&client, &account, &input).await;
+                continue;
+            }
             transaction_command!(
                 client,
                 PrepareAccountTransaction,
                 &account,
                 mutation(),
-                Json(PrepareAccountTransactionInput {
-                    transaction_id,
-                    coordinator_cell,
-                    coordinator_key: transaction_id.to_vec(),
-                    operations: operations[0].clone(),
-                })
+                Json(input)
             )
             .await
         } else {
+            let input = PreparePartitionTransactionInput {
+                table_id: tables[1].id.clone(),
+                epoch: 1,
+                transaction_id,
+                coordinator_cell,
+                coordinator_key: transaction_id.to_vec(),
+                operations: operations[1].clone(),
+            };
+            if database_mib == 1 {
+                assert_upload_full::<PreparePartitionTransaction>(&client, &data, &input).await;
+                continue;
+            }
             transaction_command!(
                 client,
                 PreparePartitionTransaction,
                 &data,
                 mutation(),
-                Json(PreparePartitionTransactionInput {
-                    table_id: tables[1].id.clone(),
-                    epoch: 1,
-                    transaction_id,
-                    coordinator_cell,
-                    coordinator_key: transaction_id.to_vec(),
-                    operations: operations[1].clone(),
-                })
+                Json(input)
             )
             .await
         };
@@ -273,7 +315,7 @@ async fn capacity_case(
             .await
             .unwrap();
     }
-    if database_mib == 2 {
+    if database_mib <= 2 {
         for (file, locks) in [
             (&account_file, "ddb_account_transaction_locks"),
             (&data_file, "ddb_partition_transaction_locks"),

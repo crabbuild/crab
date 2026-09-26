@@ -109,6 +109,14 @@ const COMMANDS: &[OperationDescriptor] = &[
         input_limit: 64,
         output_limit: 64,
     },
+    OperationDescriptor {
+        id: 8,
+        codec_version: 1,
+        schema_min: 1,
+        schema_max: 1,
+        input_limit: 8,
+        output_limit: 1,
+    },
 ];
 const QUERIES: &[OperationDescriptor] = &[
     OperationDescriptor {
@@ -148,6 +156,7 @@ impl CellModule for RepositoryModule {
 
     fn register(self, registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
         registry.bind_command::<CreateComment>()?;
+        registry.bind_command::<AllocateComment>()?;
         registry.bind_command::<RejectComment>()?;
         registry.bind_command::<InvalidResultComment>()?;
         registry.bind_command::<EmitEffectComment>()?;
@@ -186,6 +195,29 @@ impl Command for CreateComment {
             }],
         })?;
         Ok(CommandResult::Success(input))
+    }
+}
+
+struct AllocateComment;
+
+impl Command for AllocateComment {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 8;
+    const CODEC_VERSION: u32 = 1;
+    type Input = u64;
+    type Output = ();
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        bytes: Self::Input,
+    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+        context.sql(&SqlBatch {
+            statements: vec![SqlStatement {
+                sql: "INSERT INTO comments(body) VALUES (zeroblob(?))".into(),
+                parameters: vec![SqlValue::Integer(i64::try_from(bytes).unwrap())],
+            }],
+        })?;
+        Ok(CommandResult::Success(()))
     }
 }
 
@@ -417,6 +449,10 @@ impl Fixture {
 }
 
 async fn fixture() -> Fixture {
+    fixture_with_limits(Limits::default()).await
+}
+
+async fn fixture_with_limits(limits: Limits) -> Fixture {
     let registry = registry();
     let target = CellTarget::new(
         TenantId::from_bytes([1; 16]),
@@ -433,7 +469,7 @@ async fn fixture() -> Fixture {
         layout.clone(),
         *cell.as_bytes(),
         *incarnation.as_bytes(),
-        Limits::default(),
+        limits,
     )
     .unwrap();
     let catalog =

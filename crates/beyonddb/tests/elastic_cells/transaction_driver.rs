@@ -422,9 +422,18 @@ impl PeerRoundTrip for DropPhaseReplies {
             if phase != 0 && lost.fetch_or(phase, Ordering::SeqCst) & phase == 0 {
                 return Err(crab_cell_runtime::Error::PeerTransportUnknown {
                     context: "injected lost phase reply",
-                    // Unknown prepare outcomes remain unknown even when a
-                    // capacity error caused the reply to be lost.
+                    // Neither SQLite FULL nor runtime capacity nested inside
+                    // a lost reply proves that a published phase was refused.
                     source: if phase == 1 {
+                        Box::new(crab_cell_runtime::Error::Sqlite(
+                            crab_ltx::rusqlite::Error::SqliteFailure(
+                                crab_ltx::rusqlite::ffi::Error::new(
+                                    crab_ltx::rusqlite::ffi::SQLITE_FULL,
+                                ),
+                                None,
+                            ),
+                        ))
+                    } else if phase == 2 {
                         Box::new(crab_cell_runtime::Error::Capacity(
                             "injected after publication",
                         ))
