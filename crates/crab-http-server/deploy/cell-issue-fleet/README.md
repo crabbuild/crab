@@ -79,6 +79,42 @@ python3 crates/crab-http-server/deploy/cell-issue-fleet/qualify.py \
   --state "$state" --project crab-cell-issue-run-1 --load-stages
 ```
 
+### Run a CI-qualified Linux image
+
+The HTTP server container workflow uploads `cell-runtime-image-<run-id>` only
+after its image and cluster checks pass. It contains the image archive, SHA-256,
+image ID, platform, and exact source revision. On an ARM64 Docker host, dispatch
+the workflow on the desired branch with `-f arm64=true`; it uses GitHub's
+[native ARM64 runner](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+Omit the flag for AMD64. Compare performance only on the same native platform.
+
+```sh
+gh workflow run http-server-container.yml --ref YOUR_BRANCH -f arm64=true
+```
+
+After that run succeeds, set its run ID below. The exact-source worktree goes
+on the mounted workspace volume; the rendered state stays in a directory
+Docker can bind-mount. The renderer copies its initialization script into that
+state directory, so `--skip-build` does not need a source-tree bind mount.
+
+```sh
+run_id=YOUR_SUCCESSFUL_RUN_ID
+state="$HOME/.codex/cell-issue-fleet/ci-$run_id"
+project="crab-cell-issue-ci-$run_id"
+gh run download "$run_id" --name "cell-runtime-image-$run_id" --dir "$state/image"
+(cd "$state/image" && shasum -a 256 -c image.sha256)
+gzip -dc "$state/image/image.tar.gz" | docker image load
+image_id="$(cat "$state/image/image-id")"
+test "$(docker image inspect "$image_id" --format '{{.Os}}/{{.Architecture}}')" = "$(cat "$state/image/platform")"
+docker image tag "$image_id" "$project:local"
+image_source="$(cat "$state/image/source-revision")"
+git fetch origin "$image_source"
+checkout="$HOME/Workspace/Github/crabbuild/crab-cell-ci-$run_id"
+git worktree add --detach "$checkout" "$image_source"
+python3 "$checkout/crates/crab-http-server/deploy/cell-issue-fleet/qualify.py" \
+  --state "$state" --project "$project" --skip-build --load-stages
+```
+
 To inspect the generated Compose definition without starting Docker:
 
 ```sh

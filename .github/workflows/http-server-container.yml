@@ -15,6 +15,11 @@ on:
         description: "Expected digest for image_ref"
         required: false
         type: string
+      arm64:
+        description: "Build and qualify on a native Linux ARM64 runner"
+        required: false
+        default: false
+        type: boolean
   pull_request:
     paths:
       - ".dockerignore"
@@ -25,6 +30,12 @@ on:
       - "crates/**"
       - "packages/ui/**"
   workflow_dispatch:
+    inputs:
+      arm64:
+        description: "Build and qualify on a native Linux ARM64 runner"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -37,7 +48,7 @@ concurrency:
 jobs:
   image:
     name: Build and inspect image
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.arm64 && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -931,4 +942,25 @@ jobs:
           name: cell-runtime-qualification-${{ github.run_id }}
           path: ${{ runner.temp }}/crab-cell-runtime-qualification
           if-no-files-found: error
+          retention-days: 14
+      - name: Export the qualified Linux image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_dir="${RUNNER_TEMP}/crab-http-server-qualified-image"
+          mkdir -p "$image_dir"
+          git rev-parse HEAD > "$image_dir/source-revision"
+          docker image inspect crab-http-server:test --format '{{.Id}}' > "$image_dir/image-id"
+          docker image inspect crab-http-server:test --format '{{.Os}}/{{.Architecture}}' > "$image_dir/platform"
+          docker image save --output "$image_dir/image.tar" crab-http-server:test
+          gzip -1 "$image_dir/image.tar"
+          cd "$image_dir"
+          sha256sum image.tar.gz > image.sha256
+      - name: Upload the qualified Linux image
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cell-runtime-image-${{ github.run_id }}
+          path: ${{ runner.temp }}/crab-http-server-qualified-image
+          if-no-files-found: error
+          compression-level: 0
           retention-days: 14
