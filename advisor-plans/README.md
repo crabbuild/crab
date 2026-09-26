@@ -849,7 +849,8 @@ signed reader reconciliation, administrator readiness status, and explicit
 issue-detail replica reads. Warm readers may be preferred after owner death,
 with existing session fencing, old-log recovery, and ownership CAS intact.
 Local RustFS and multi-container qualification are recorded in the plan;
-sparse views, rollout automation, and production qualification remain open.
+the offline fleet-to-object rollout also passes. Sparse views, generic client
+routing, platform rolling upgrades, and production qualification remain open.
 
 | Plan | Priority | Effort | Depends on | Status |
 | --- | --- | --- | --- | --- |

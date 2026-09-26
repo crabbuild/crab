@@ -78,6 +78,44 @@ txid 131, checksum 12561710048701396894, sequence 127, before and after
 takeover. The recovered issue and label matched their acknowledged values.
 Each timing is one observation, not a recovery percentile or SLO.
 
+## Fleet-to-object rollout
+
+The separate, uninterrupted `plan036-rollout-4` run passed at runtime source
+`997082d38ebcd5694b4448136bf2616fb949bdec`, runner
+`1f77d6a478de486ad439dec280dc32e26e5ce680` (clean checkout), and image
+`sha256:c8ae5fda425560b34939631f7fd2a101264224cb485cb1c7c01e5d20d2b436af`.
+It ran from 04:13:32 to 04:15:10 UTC on 2026-09-26. This image adds the
+shutdown-order correction described below; the scale measurements above
+remain bound to their earlier image.
+
+The three-node fleet issued five follower-backed proofs while the bounded
+workload acknowledged 37 comments. Every server then drained with exit code
+zero and no OOM kill before the runner changed any configuration. After
+restart in object mode, all original issues, labels, and comments were
+readable. A new comment completed with object proof; the new processes
+reported seven object proofs and zero fleet proofs in aggregate.
+
+The runner then killed all three servers, deleted their three project-labeled
+Cell volumes, and restarted fresh node sessions. It verified all 38 comments,
+all three issues and labels, and two replacement readers. Both readers served
+ten checked issue reads. The provider and its volume survived throughout.
+
+This test exposed an existing host ordering defect: cancelling heartbeat
+maintenance before runtime drain attempted session withdrawal with an open
+log and produced an error exit. The host now joins work producers, drains the
+runtime and closes the covered log while heartbeats remain live, then stops
+lease maintenance and withdraws. The same task ceiling and absolute deadline
+bound both phases. The regression failed before the correction; all 35 host
+tests, including both stalled-task phases and shared task-limit checks, pass.
+Host/server Clippy and the release container build also pass.
+
+Raw receipt: `$HOME/.codex/cell-issue-fleet/plan036-rollout-4/mode-rollout-report.json`.
+SHA-256: `5a32a2bf9d06f34494477b203b20a64b5479a4ef953eb6699c092f14ea7dab31`.
+The earlier failed drain is retained in the `plan036-rollout-3` state directory;
+its fleet configuration and volumes were preserved. This establishes the
+local offline rollout, not a rolling platform upgrade or a provider-outage
+qualification during the drain itself.
+
 ## Scope still open
 
 This run does not measure per-query S3 calls or refresh bytes, sustained hot

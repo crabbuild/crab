@@ -170,7 +170,7 @@ After restarting in object mode, the runner verifies old values, publishes a
 new comment, checks object proof counters with no new fleet proofs, and
 activates two readers. It then kills all three servers, deletes only their
 project-labeled Cell volumes, restarts fresh nodes, and requires both the
-pre-rollout and post-rollout comments plus the original issues and labels to
-survive. The result is saved in `mode-rollout-report.json`.
+pre-rollout and post-rollout comments, including every acknowledgement from
+the fleet-proof workload, plus the original issues and labels to survive. The result is saved in `mode-rollout-report.json`.
 This is an offline rollout for the local fixture; platform rollout and
 protected-provider release procedures remain separate.

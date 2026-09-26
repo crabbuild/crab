@@ -73,7 +73,10 @@ preference now probes verified snapshots after owner death, closes read admissio
 and enters the existing fenced takeover and fresh writable restore path.
 The server can select the existing object proof path with `[cells]
 durability = "object"` for a fresh deployment; fleet remains the default and
-the fleet-to-object drain and coverage barrier is not automated. Issue-detail replica reads are explicit; other public product reads use the owner.
+a local offline rollout runner now verifies the fleet-to-object drain and
+coverage barrier before changing configuration. Platform rolling upgrades
+remain unqualified. Issue-detail replica reads are explicit; other public
+product reads use the owner.
 The local Compose fault receipt proves recovery after all three Cell disks are
 lost in this object-mode fixture. It does not establish production durability
 or throughput scaling; measured replica throughput is below owner throughput.
@@ -265,7 +268,9 @@ record, mutable LTX head, or owner-to-owner database copy.
 
 ## Implementation slices and exit evidence
 
-Current slice state (local proof only): 0 partially reconciled in docs; 1 open;
+Current slice state (local proof only): 0 partially reconciled in docs; 1 has
+the existing object-proof path and a verified offline fleet-to-object rollout,
+with fault injection during rollout still open;
 2 full-restore read-only opener, atomic refresh, and exact-root tests pass, but
 sparse view and provider fault cases remain; 3 policy CAS, signed selection,
 owner reconciliation, private activation, node admission, and administrator
@@ -341,6 +346,18 @@ and limits. Replica reads were slower than owner reads in this single-host
 workload; membership scans and fresh authority gates remain in the request
 path. No production capacity, throughput-scaling, protected-provider, or
 independent-host claim follows from this receipt.
+
+A second fixture verified the offline fleet-to-object transition at runtime
+`997082d38eb`, runner `1f77d6a478d`, image
+`sha256:c8ae5fda425560b34939631f7fd2a101264224cb485cb1c7c01e5d20d2b436af`.
+It observed five fleet proofs, drained all three servers with successful exits,
+switched to object mode, and verified all 37 pre-switch comments plus a new
+object-mode comment after deleting every local Cell volume. Two readers were
+recruited again. The runner retains fleet configuration on any failed drain.
+The host shutdown ordering was corrected after a real failure: work producers
+stop first, runtime publication and log close finish with live heartbeats, and
+session withdrawal follows. Deadline and task-limit regressions pass.
+The linked qualification receipt records both image boundaries and report hashes.
 
 | Slice | Change owner | Implementation and focused gate | Completion evidence |
 | --- | --- | --- | --- |
