@@ -108,7 +108,7 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
     for (position, (_, participant)) in participants.iter_mut().enumerate() {
         participant.operations[0].index = u8::try_from(1 - position).unwrap();
     }
-    for scenario in [181_u8, 182, 183, 184, 185] {
+    for scenario in [181_u8, 182, 183, 184, 185, 186, 187] {
         let transaction_id = [scenario; 16];
         let coordinator = coordinator_target(account_id, &transaction_id).unwrap();
         bootstrap
@@ -126,7 +126,7 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
             .iter()
             .map(|(_, participant)| participant.clone())
             .collect();
-        if scenario != 181 && scenario != 185 {
+        if !matches!(scenario, 181 | 185 | 186) {
             for participant in &mut request {
                 let TransactionOperation::Put(input) = &mut participant.operations[0].operation
                 else {
@@ -204,7 +204,7 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
             assert_eq!(first.as_ref().unwrap(), &CoordinatorDecision::Commit);
             assert_eq!(second.as_ref().unwrap(), &CoordinatorDecision::Commit);
             first.unwrap()
-        } else if scenario == 185 {
+        } else if scenario >= 185 {
             let peer_session = SessionId::from_bytes([200; 16]);
             let peer_runtime = CellRuntime::new(
                 SqlWorkerPool::new(1, 8).unwrap(),
@@ -233,7 +233,17 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                     Arc::new(TestPeerAuthorizer),
                 )),
                 lost: lost.clone(),
-                enabled: 3,
+                enabled: if scenario == 185 { 3 } else { 0 },
+            };
+            let transport: Arc<dyn PeerRoundTrip> = if scenario == 185 {
+                Arc::new(transport)
+            } else {
+                Arc::new(RefusePhase {
+                    inner: transport,
+                    command: if scenario == 186 { 12 } else { 14 },
+                    winner: (scenario == 186).then(|| (client.clone(), transaction_id)),
+                    refused: lost.clone(),
+                })
             };
             let remote = CellStorage::new(
                 CellClient::runtime_with_peer(
@@ -246,7 +256,7 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                         subject: "driver".into(),
                         actions: vec!["beyonddb.cell.invoke".into()],
                     },
-                    Arc::new(transport),
+                    transport,
                 ),
                 "us-east-1",
             );
@@ -254,7 +264,10 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                 .resume_cross_cell_transaction(account_id, &transaction_id, transaction_id)
                 .await
                 .unwrap();
-            assert_eq!(lost.load(Ordering::SeqCst), 3);
+            assert_eq!(
+                lost.load(Ordering::SeqCst),
+                if scenario == 185 { 3 } else { 1 }
+            );
             peer_runtime.shutdown().await.unwrap();
             decision
         } else {
@@ -264,7 +277,14 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                 .unwrap()
         };
         match scenario {
-            181 | 185 => assert_eq!(decision, CoordinatorDecision::Commit),
+            181 | 185 | 186 => assert_eq!(decision, CoordinatorDecision::Commit),
+            187 => assert_eq!(
+                decision,
+                CoordinatorDecision::Abort {
+                    index: Some(1),
+                    reason: Some(TransactionFailure::Throttled)
+                }
+            ),
             182 => assert!(
                 matches!(&decision, CoordinatorDecision::Abort { index: Some(0), reason: Some(TransactionFailure::ConditionFailed(Some(item))) } if item["value"] == AttributeValue::N("1".into()))
             ),
@@ -402,10 +422,79 @@ impl PeerRoundTrip for DropPhaseReplies {
             if phase != 0 && lost.fetch_or(phase, Ordering::SeqCst) & phase == 0 {
                 return Err(crab_cell_runtime::Error::PeerTransportUnknown {
                     context: "injected lost phase reply",
-                    source: Box::new(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+                    // Unknown prepare outcomes remain unknown even when a
+                    // capacity error caused the reply to be lost.
+                    source: if phase == 1 {
+                        Box::new(crab_cell_runtime::Error::Capacity(
+                            "injected after publication",
+                        ))
+                    } else {
+                        Box::new(std::io::Error::from(std::io::ErrorKind::ConnectionReset))
+                    },
                 });
             }
             Ok(response)
+        })
+    }
+}
+
+struct RefusePhase {
+    inner: DropPhaseReplies,
+    command: u32,
+    winner: Option<(CellClient, [u8; 16])>,
+    refused: Arc<std::sync::atomic::AtomicU8>,
+}
+
+impl PeerRoundTrip for RefusePhase {
+    fn send(
+        &self,
+        target: CellTarget,
+        request: Vec<u8>,
+        _remaining_ms: u32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>,
+    > {
+        let verifier = self.inner.verifier.clone();
+        let dispatcher = self.inner.dispatcher.clone();
+        let winner = self.winner.clone();
+        let command = self.command;
+        let refused = self.refused.clone();
+        Box::pin(async move {
+            use crab_cell_runtime::peer::wire::{mutation_request, peer_request};
+            let now_ms = i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+            )
+            .unwrap();
+            let verified = verifier.verify(&request, now_ms)?;
+            assert_eq!(verified.target(), &target);
+            let selected = matches!(verified.operation(),
+                Some(peer_request::Operation::Mutate(mutation)) if matches!(&mutation.operation,
+                    Some(mutation_request::Operation::CellCommand(input)) if input.command_id == command));
+            if selected && refused.swap(1, Ordering::SeqCst) == 0 {
+                if let Some((client, transaction_id)) = winner {
+                    let storage = CellStorage::new(client, "us-east-1");
+                    assert_eq!(
+                        storage
+                            .resume_cross_cell_transaction(
+                                "123456789012",
+                                &transaction_id,
+                                transaction_id
+                            )
+                            .await
+                            .unwrap(),
+                        CoordinatorDecision::Commit
+                    );
+                }
+                // This attempt was never submitted. A competing driver may
+                // nevertheless have committed before the refusal reaches it.
+                return Err(crab_cell_runtime::Error::Capacity(
+                    "injected before submission",
+                ));
+            }
+            dispatcher.dispatch_bytes(&verified, now_ms).await
         })
     }
 }

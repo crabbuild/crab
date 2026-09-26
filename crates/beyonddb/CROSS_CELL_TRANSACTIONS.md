@@ -356,6 +356,32 @@ the existing phase savepoint and adds no second decision authority.
 
 ## Write state machine
 
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Driver
+    participant Coordinator
+    participant Cells as Participant Cells
+    Client->>Driver: TransactWriteItems across primary keys
+    Driver->>Coordinator: Publish BEGIN and immutable participant list
+    loop In Cell-ID order
+        Driver->>Cells: Prepare: evaluate, lock, stage, reserve
+        Cells-->>Driver: Durable prepare receipt
+        Driver->>Coordinator: Record prepare receipt
+    end
+    Driver->>Coordinator: Publish COMMIT or ABORT
+    loop Every participant, including unprepared on ABORT
+        Driver->>Cells: Resolve the authoritative decision
+        Cells-->>Driver: Durable apply or cleanup receipt
+        Driver->>Coordinator: Record resolution receipt
+    end
+    Driver-->>Client: Success or cancellation after all resolutions
+```
+
+The diagram omits multipart upload commands; the command counts above include
+them. A prepare rejection skips remaining prepares and requests ABORT. Recovery
+uses the same durable participant list and terminal decision after driver loss.
+
 ```text
 validate request / authenticate / route and group by participant
   -> upload bounded coordinator input pieces (no token or locks)
@@ -1405,3 +1431,126 @@ large cross-Cell writes/reads, historical token replay, changed-address hard
 restart, restored item/deletion state, and graceful restart. The server binary
 remained fixed throughout the process test. This is end-to-end functional proof,
 not a scale or throughput benchmark.
+
+## Capacity refusal before the decision must terminate BEGIN
+
+After page reservation was installed, a two-MiB participant rejected a prepare
+whose required claim exceeded the entire Cell budget. The coordinator stayed at
+BEGIN and the driver returned `StorageError::Transient`; repeating the immutable
+request could never make that prepare fit. Earlier participants could retain
+locks and claims while this transaction waited for an impossible admission.
+The regression failed at `69817c292a6` with the typed runtime capacity refusal.
+
+The phase transport now preserves `InvocationError::NotStarted(Error::Capacity)`
+through both input upload and prepare. The driver proposes an authoritative
+ABORT with `TransactionFailure::Throttled` at the first original request index
+in that participant. It uses the existing coordinator decision command and
+participant resolver. A cancellation is returned only after every resolution
+receipt is recorded; a failed decision or cleanup remains retryable. An ABORT
+slot releases its token only after all participants finish, as before.
+
+A competing driver can win COMMIT before this refusal reaches the caller. The
+coordinator CAS then rejects ABORT, and the driver completes and returns COMMIT.
+No capacity failure can replace a terminal decision. `Pending` remains ambiguous
+even if its nested transport cause is a capacity error. Timeouts, generic errors,
+and owner unavailability are not converted into cancellation by this rule.
+Capacity during BEGIN upload remains a retryable admission error: no participant
+was admitted by that upload. Capacity during resolution of an existing COMMIT
+also remains retryable.
+
+Both public transaction APIs expose the new reason as `ThrottlingError` inside
+ordered `TransactionCanceledException.CancellationReasons`; unaffected positions
+keep `None`. This uses the [DynamoDB cancellation reason contract](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_TransactWriteItems.html).
+The message describes capacity exhaustion and retry with backoff, without
+claiming that an autoscaler has already supplied more capacity. The pinned
+ExtendDB engine forwards storage cancellation reasons unchanged; its SQLite
+backend claims tokens inside the same SQL transaction and rolls them back on
+cancellation. No dependency, runtime wire code, or SQL schema changed here.
+The added serialized reason is in the unpublished BeyondDB application.
+
+### Evidence map and decision
+
+| Surface | Path and proof |
+| --- | --- |
+| Request | ExtendDB write/read engines → `backend/data.rs` / `backend/transaction_read.rs` → admission → shared transaction driver. |
+| Owner boundary | Runtime `NotStarted(Capacity)` is distinct from `Pending`; peer conversion retains `ResourceExhausted` versus unknown outcomes. Phase transport preserves the distinction until the driver decides. |
+| Decision and cleanup | `DecideCrossCellTransaction` permits only BEGIN → terminal; `finish_transaction` resolves the fixed participant list before returning. |
+| Siblings | Account/data prepare, both phase uploads, transactional reads/writes, original-index cancellation order, and canceled-token reuse use the shared path. |
+| Before change | Current main has no BeyondDB. The preceding draft commit returned a generic transient error for this capacity refusal and left BEGIN unresolved. |
+| Native regression | Insufficient headroom leaves no prepared record or locks, then driver ABORT records both resolutions. |
+| Race and ambiguity | Driver fixture refuses upload before submission, lets another driver commit before a prepare refusal arrives, and loses a published prepare reply with capacity as its nested cause. |
+| Signed SDK | Three real prepared claims in the second data Cell leave too little capacity for another participant. Write and read cancellations report the correct original index; raw participant reads check lock cleanup without invoking public read-triggered recovery, unrelated holders stay prepared, and token reuse succeeds after releasing those holders. Retried values and replay are checked after owner replacement. |
+
+**Is this the best fix?** A participant cannot safely turn every allocation
+failure into a durable business rejection: that rejection itself needs receipt
+space. The transaction driver already owns the authoritative decision and can
+resolve both previously prepared participants and abort-before-prepare
+tombstones. Preserving one typed error distinction at that boundary prevents
+unbounded retry without adding another cancellation authority or matching error
+strings. A generic transient error remains appropriate for unknown outcomes.
+
+This does not reserve coordinator space, make an unreachable owner available,
+or bound ABORT cleanup latency under sustained pressure. Raw SQLite FULL and
+other errors without the runtime's typed capacity-refusal contract still follow
+the existing retry/error path. Post-COMMIT WAL/disk/memory admission, history
+collection, and 10,000-Cell/multi-TB qualification remain open.
+
+
+## Tenant catalog collision found during recovery qualification
+
+The signed two-owner test exposed a second issue while admitting a coordinator:
+`entry Cell digest mismatch`. It was intermittent because account/coordinator
+and credential Cells use different tenants but share one application layout.
+The catalog validated entries against its tenant, while its mutable head path
+contained only the application and first Cell-ID byte. A cross-tenant shard
+collision therefore mixed incompatible entries in one head. The deterministic
+runtime regression reproduces the same failure with two tenants in one shard.
+
+Catalog heads now include the tenant:
+`cells/v1/apps/<app>/catalog/tenants/<tenant>/<shard>/head.json`.
+Provision, lookup, scans, and pinned-shard restore all use this path. Immutable
+pages remain content addressed, with digest and tenant identity validation
+unchanged. Local routing and peer routing both use `CellCatalog`, so they inherit
+one fix instead of separate adapters or relaxed validation.
+
+**Is this the best fix?** The catalog is already tenant scoped; its mutable
+storage authority must carry that scope too. Adding the missing identity to the
+head path fixes the owning boundary. Changing account identities, suppressing
+digest errors, or special-casing credentials would leave the shared invariant
+broken. Cell control and LTX paths already contain the full Cell ID, whose hash
+includes the tenant; immutable catalog page hashes include those Cell IDs.
+
+This is a canonical layout change in unreleased Cell code. No release Git tag
+contains its introduction (`765b12f7b04`); there is no compatibility reader.
+Existing development roots require reprovisioning. The storage path contract,
+all direct callers, page-tampering tests, and storage documentation change
+together. The new regression reopens both catalogs and verifies each lookup and
+scan sees only its own tenant, including absence for the other tenant's Cell.
+
+This does not make application-wide release, backup, or garbage collection
+multi-tenant. Those services retain their single-root identity contract;
+BeyondDB does not expose them. Their use on a shared BeyondDB root requires a
+separate design and proof before enabling them. Retention now rejects a root
+containing another tenant's catalog before marking or deleting: otherwise its
+application-wide sweep could delete objects omitted by its single-tenant scan.
+A regression reproduced that deletion against in-memory storage before the
+preflight guard and checks that the guarded collector leaves an orphan intact.
+Single-tenant backup/restore and retention remain sibling validation gates.
+
+
+### Verification of capacity cancellation and catalog isolation
+
+The account, elastic-Cell, and peer-network suites passed all 22 tests; the
+elastic suite took 57.13 seconds and the signed two-owner test 99.42 seconds.
+Eleven catalog tests, one backup/restore test, and four retention tests passed.
+The separate live RustFS retention test remains ignored; no live retention
+qualification is claimed. The explicitly enabled signed SDK/RustFS process
+smoke passed in 380.07 seconds, including hard restart and restored transaction
+state. Its server binary remained fixed throughout execution.
+
+Strict all-target Clippy passed for BeyondDB, Cell runtime, and LTX; format,
+diff, and Cell/LTX layout checks passed. The production additions preserve typed
+phase refusal through the existing driver and add catalog identity scoping plus
+a pre-deletion retention check. This growth protects decision and tenant
+boundaries without adding a second transaction protocol. These are functional
+and failure-path checks, not 10,000-Cell or multi-TB performance qualification.

@@ -653,6 +653,11 @@ pub(super) fn transaction_canceled(
     let mut reasons = vec![CancellationReason::none(); count];
     if let Some(slot) = reasons.get_mut(index) {
         *slot = match reason {
+            TransactionFailure::Throttled => CancellationReason {
+                code: "ThrottlingError".into(),
+                message: Some("transaction capacity is exhausted; retry with backoff".into()),
+                item: None,
+            },
             TransactionFailure::Conflict => CancellationReason {
                 code: "TransactionConflict".into(),
                 message: Some("transaction conflicts with another operation".into()),

@@ -292,6 +292,32 @@ async fn capacity_case(
                 assert_eq!(rows, 0, "failed prepare left rows in {table}");
             }
         }
+        let decision = storage
+            .resume_cross_cell_transaction(account_id, &transaction_id, transaction_id)
+            .await;
+        assert_eq!(
+            decision.unwrap(),
+            CoordinatorDecision::Abort {
+                index: Some(participants[0].operations[0].index),
+                reason: Some(beyonddb::TransactionFailure::Throttled),
+            }
+        );
+        let status = client
+            .query::<ReadCrossCellTransaction>(
+                &coordinator,
+                None,
+                Json(ReadCrossCellTransactionInput {
+                    account_id: account_id.into(),
+                    transaction_id,
+                    routing_key: transaction_id.to_vec(),
+                }),
+            )
+            .await
+            .unwrap()
+            .output
+            .0
+            .unwrap();
+        assert_eq!(status.resolved_count, 2);
         runtime.shutdown().await.unwrap();
         return;
     }

@@ -271,7 +271,10 @@ table deletion and route activation while prepared intents remain. Sharded coord
 record a participant set, prepare receipts, one commit or abort decision, and
 resolution progress. The public write driver resumes published BEGIN records from
 stored account/data participant payloads, handles prepare/decision ambiguity, and returns
-only after participant resolution. Coordinator token lookup preserves original
+only after participant resolution. A proven capacity refusal during participant
+upload or prepare proposes ABORT and returns ordered `ThrottlingError` reasons
+only after cleanup; unknown outcomes remain retryable and a competing COMMIT wins.
+Coordinator token lookup preserves original
 participants across route changes and starts the ten-minute replay window only
 after all participants resolve. The old account claims and Cell-local token
 receipts have been removed. Fenced startup
@@ -409,3 +412,12 @@ metadata; replay requests and inspect idempotency outcomes. For isolation,
 repeat with two accounts using the same table names. For partitioned cells,
 inject owner loss between prepare, decision, and apply and verify atomic
 resolution.
+
+
+### Development storage layout
+
+Cell catalog heads include the tenant as well as the application and shard.
+This isolates account and credential catalogs sharing a BeyondDB store. Existing
+unreleased roots with application-only catalog heads require reprovisioning;
+there is no fallback reader. This does not enable multi-tenant backup or garbage
+collection. See [the recovery finding](CROSS_CELL_TRANSACTIONS.md#tenant-catalog-collision-found-during-recovery-qualification).
