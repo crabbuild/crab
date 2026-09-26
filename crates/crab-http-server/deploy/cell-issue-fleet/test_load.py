@@ -113,7 +113,10 @@ class LoadTests(unittest.TestCase):
             def do_GET(self):
                 number = int(self.path.rsplit("/", 1)[1])
                 with fixture.lock:
-                    value = next(value for value in fixture.receipts.values() if value["number"] == number)
+                    value = next((value for value in fixture.receipts.values() if value["number"] == number), None)
+                if value is None:
+                    self.respond(404, {})
+                    return
                 self.respond(fixture.read_status, {**value, "title": "corrupted"} if fixture.corrupt_read else value)
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -169,6 +172,48 @@ class LoadTests(unittest.TestCase):
         for rate, duration in [(float("nan"), 1), (1, float("inf")), (1e300, 1e300), (0, 1)]:
             with self.subTest(rate=rate, duration=duration), self.assertRaises(ValueError):
                 load.Workload(5, rate, duration, 8, 0)
+
+    def test_recovery_checks_earlier_acknowledgements_before_restarting_the_owner(self):
+        samples = [load.load_pair(self.gateway, 3, 1, i, "recover", time.monotonic()) for i in range(3)]
+        proof = load.verify_acknowledged(self.gateway, 3, samples)
+        self.assertEqual(proof["verified"], 3)
+        self.assertEqual(proof["by_cell"], {1: 3})
+        before = {"owner": {"session": "old"}, "root": {"commit_sequence": 3, "txid": 3}}
+        after = {**before, "owner": {"session": "new"}}
+        calls = []
+
+        def compose(*args):
+            calls.append(args)
+            if args[-1] == "metrics":
+                return "crab_cell_node_log_uncovered_bytes 0\n"
+            if "status" in args:
+                return json.dumps(after)
+            if "up" in args:
+                # A restarted old owner can hide a missing recovered result.
+                # Verification must fail before this restoration happens.
+                self.receipts[samples[0]["request_id"]] = first
+            return ""
+
+        first = self.receipts[samples[0]["request_id"]]
+        for corruption in ("missing", "changed"):
+            with self.subTest(corruption=corruption):
+                if corruption == "missing":
+                    del self.receipts[samples[0]["request_id"]]
+                else:
+                    self.receipts[samples[0]["request_id"]] = {**first, "title": "changed"}
+                calls.clear()
+                with patch.object(load, "status", return_value=before), \
+                        patch.object(load, "compose", side_effect=compose), \
+                        self.assertRaisesRegex(RuntimeError, samples[0]["request_id"]):
+                    load.recover_owner(Path("fixture"), (), self.gateway, 3, "node-03",
+                                       before, samples[-1]["acknowledged"], 1, samples)
+                self.assertIn("kill", calls[1])
+                self.assertIn("up", calls[-1])
+        with patch.object(load, "status", return_value=before), \
+                patch.object(load, "compose", side_effect=compose):
+            recovered = load.recover_owner(Path("fixture"), (), self.gateway, 3, "node-03",
+                                           before, samples[-1]["acknowledged"], 1, samples)
+        self.assertEqual(recovered["acknowledgements"]["verified"], 3)
 
     def test_missing_acknowledged_issue_stops_new_arrivals(self):
         self.read_status = 404
