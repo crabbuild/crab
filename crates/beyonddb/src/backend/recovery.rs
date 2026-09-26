@@ -15,7 +15,7 @@ use crate::{
     ReadPendingCrossCellTransactionsInput, ReadPendingTransactionBoundary, ReadTransactionInput,
     ReadUnresolvedCoordinatorParticipants, RecordParticipantResolution, ResolveAccountTransaction,
     ResolvePartitionTransaction, ResolveTransactionInput, ResolveTransactionOutcome,
-    account_target, coordinator_target, data_target,
+    UnresolvedCoordinatorParticipant, account_target, coordinator_target, data_target,
 };
 
 impl CellStorage {
@@ -144,14 +144,14 @@ impl CellStorage {
     ) -> Result<(), StorageError> {
         let coordinator = coordinator_target(account_id, routing_key)
             .map_err(|error| StorageError::Internal(error.to_string()))?;
-        let read = || ReadCrossCellTransactionInput {
+        let read = ReadCrossCellTransactionInput {
             account_id: account_id.to_owned(),
             transaction_id,
             routing_key: routing_key.to_vec(),
         };
         let status = self
             .client
-            .query::<ReadCrossCellTransaction>(&coordinator, None, Json(read()))
+            .query::<ReadCrossCellTransaction>(&coordinator, None, Json(read.clone()))
             .await
             .map_err(cell_error)?
             .output
@@ -171,58 +171,29 @@ impl CellStorage {
         }
         let participants = self
             .client
-            .query::<ReadUnresolvedCoordinatorParticipants>(&coordinator, None, Json(read()))
+            .query::<ReadUnresolvedCoordinatorParticipants>(&coordinator, None, Json(read.clone()))
             .await
             .map_err(cell_error)?
             .output
             .0;
+        let mut failure = None;
         for participant in participants {
-            let position = participant.position;
-            let target = match participant.target {
-                CoordinatorParticipantTarget::Account => account_target(account_id)
-                    .map_err(|error| StorageError::Internal(error.to_string()))?,
-                CoordinatorParticipantTarget::Data {
-                    table_id,
-                    partition_id,
-                    ..
-                } => data_target(account_id, &table_id, &partition_id)
-                    .map_err(|error| StorageError::Internal(error.to_string()))?,
-            };
-            let receipt = self
-                .resolve_participant(&target, &coordinator, transaction_id, commit)
-                .await?;
-            let recorded = self
-                .client
-                .command::<RecordParticipantResolution>(
-                    &coordinator,
-                    mutation_identity()?,
-                    Json(CoordinatorPhaseInput {
-                        account_id: account_id.to_owned(),
-                        transaction_id,
-                        routing_key: routing_key.to_vec(),
-                        position,
-                        participant_cell: *target.cell_id().as_bytes(),
-                        sequence: receipt.commit_sequence,
-                    }),
-                )
-                .await;
-            match recorded {
-                Ok(committed)
-                    if matches!(
-                        committed.output.0,
-                        CoordinatorPhaseOutcome::Recorded | CoordinatorPhaseOutcome::Replay
-                    ) => {}
-                Ok(_) | Err(InvocationError::Rejected(_)) => {
-                    return Err(StorageError::Internal(
-                        "coordinator rejected participant resolution".into(),
-                    ));
-                }
-                Err(error) => return Err(cell_error(error)),
+            // The decision is immutable. One unavailable owner or uncertain
+            // receipt must not retain locks on other healthy participants;
+            // completion still requires every durable resolution receipt.
+            if let Err(error) = self
+                .finish_participant(&coordinator, &read, participant, commit)
+                .await
+            {
+                failure.get_or_insert(error);
             }
+        }
+        if let Some(error) = failure {
+            return Err(error);
         }
         let final_status = self
             .client
-            .query::<ReadCrossCellTransaction>(&coordinator, None, Json(read()))
+            .query::<ReadCrossCellTransaction>(&coordinator, None, Json(read.clone()))
             .await
             .map_err(cell_error)?
             .output
@@ -234,6 +205,58 @@ impl CellStorage {
             ));
         }
         Ok(())
+    }
+
+    async fn finish_participant(
+        &self,
+        coordinator: &CellTarget,
+        read: &ReadCrossCellTransactionInput,
+        participant: UnresolvedCoordinatorParticipant,
+        commit: bool,
+    ) -> Result<(), StorageError> {
+        let position = participant.position;
+        let target = match participant.target {
+            CoordinatorParticipantTarget::Account => account_target(&read.account_id)
+                .map_err(|error| StorageError::Internal(error.to_string()))?,
+            CoordinatorParticipantTarget::Data {
+                table_id,
+                partition_id,
+                ..
+            } => data_target(&read.account_id, &table_id, &partition_id)
+                .map_err(|error| StorageError::Internal(error.to_string()))?,
+        };
+        let receipt = self
+            .resolve_participant(&target, coordinator, read.transaction_id, commit)
+            .await?;
+        let recorded = self
+            .client
+            .command::<RecordParticipantResolution>(
+                coordinator,
+                mutation_identity()?,
+                Json(CoordinatorPhaseInput {
+                    account_id: read.account_id.clone(),
+                    transaction_id: read.transaction_id,
+                    routing_key: read.routing_key.clone(),
+                    position,
+                    participant_cell: *target.cell_id().as_bytes(),
+                    sequence: receipt.commit_sequence,
+                }),
+            )
+            .await;
+        match recorded {
+            Ok(committed)
+                if matches!(
+                    committed.output.0,
+                    CoordinatorPhaseOutcome::Recorded | CoordinatorPhaseOutcome::Replay
+                ) =>
+            {
+                Ok(())
+            }
+            Ok(_) | Err(InvocationError::Rejected(_)) => Err(StorageError::Internal(
+                "coordinator rejected participant resolution".into(),
+            )),
+            Err(error) => Err(cell_error(error)),
+        }
     }
 
     async fn resolve_participant(

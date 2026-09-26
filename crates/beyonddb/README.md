@@ -126,6 +126,9 @@ after a hard kill and restart. Cross-Cell TransactGetItems uses shared key
 locks and durable captured images; the same process test checks projected
 results and missing items before and after restart. Get, Query, and Scan can
 finish a blocking transaction's durable COMMIT or ABORT and repeat their read.
+Once a terminal decision is known, resolution attempts every participant even
+if an earlier participant or receipt fails, so reachable Cells can release their
+locks. The overall request stays retryable until all receipts are durable.
 Each Cell query helps at most one transaction; BEGIN and unavailable decisions
 remain retryable conflicts. Transactional reads retain conflict cancellation.
 Once a table's initial route is published, keyed CRUD and Scan use its data

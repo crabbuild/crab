@@ -10,6 +10,7 @@ mod elastic_cells {
     mod transaction_driver;
     mod transaction_reads;
     mod transaction_recovery;
+    mod transaction_resolution;
     mod transaction_transport;
     pub(crate) mod transaction_visibility;
     mod ttl_transactions;

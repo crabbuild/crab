@@ -1620,3 +1620,70 @@ Its binary remained fixed during the run. Strict all-target Clippy for BeyondDB
 and runtime, format, diff, and Cell/LTX layout checks passed. The new FULL
 regressions establish local/peer command refusal and driver cleanup; the process
 smoke protects the deployed server path and does not simulate a full device.
+
+## Resolution must progress past an unavailable participant
+
+At `b03f83f71c2`, `finish_decided_cross_cell_transaction` returned on the first
+participant-state, apply, or resolution-receipt error. With COMMIT already
+durable, an unreachable first participant therefore left later healthy Cells
+PREPARED. The signed loopback regression reproduced this before the fix.
+ABORT had the same loop, unnecessarily retaining healthy participants' locks
+and capacity claims.
+
+Resolution now attempts every participant in the captured unresolved list,
+retaining the first error for the caller. Each successful apply/cleanup and its
+coordinator receipt remain durable progress. A retry reads only unresolved
+participants; an apply whose receipt was lost is recognized through the
+participant's terminal state. Neither an error nor partial progress changes
+the coordinator decision. The caller still receives a retryable error for
+transport uncertainty, and cannot report success or cancellation while work
+remains unresolved. Even if a concurrent resolver finishes everything, an
+observed error may conservatively require another retry.
+
+The regression covers COMMIT and ABORT across mixed account/data participants,
+with three cuts: the first participant state read, its apply command, and the
+first coordinator resolution receipt. Each injected transport failure occurs
+before dispatch but is reported as an unknown outcome, so the caller cannot
+assume refusal. Raw participant queries establish that the healthy later Cell
+resolved before any read helper runs. Its key accepts a newer write; completing
+the original transaction afterward preserves that newer image. The lost-receipt
+case also changes the first participant after its apply and verifies that
+recovery recognizes its terminal record without applying again. The coordinator
+keeps its original decision and one unresolved receipt until retry completes.
+
+| Boundary | Evidence and remaining scope |
+| --- | --- |
+| Entry points | Request/replay driver, read helping, fenced recovery, and serving recovery use the same terminal resolver in `backend/recovery.rs`. |
+| Authority | `DecideCrossCellTransaction` permits only BEGIN → COMMIT/ABORT; the resolver reads this decision before any participant action. |
+| Participant ownership | Account and data resolution both use `participant::resolve`, which atomically applies/discards intents, releases reservations and locks, and records an idempotent terminal marker. |
+| Receipt | `RecordParticipantResolution` records the matching participant's publication sequence and decrements unresolved count once; canceled tokens release only after the last receipt. |
+| Public error contract | The admission driver propagates resolution errors. Pinned ExtendDB maps `StorageError::Transient` to `ServiceUnavailable`; transactional writes forward this mapping instead of returning cancellation or success. |
+| Siblings | Transactional reads use the same resolution loop and retain immutable committed images. Prepare remains fail-closed: it cannot proceed past uncertainty to invent a terminal decision. Existing read, lost-reply, token, capacity, and owner-replacement tests cover these paths. |
+| Admission boundary | Provisioning still requires fenced owner recovery before invoking the driver. A catalog, lease, or activation failure there can defer resolution; this change does not bypass admission or startup readiness. A live remote owner is left in place and reached through the peer client. |
+| Previous behavior | Current main has no BeyondDB. The preceding draft returned immediately on the first resolution error; the regression observed the second participant still PREPARED. |
+
+**Is this the best fix?** Keep per-participant completion in one helper and
+retain the existing decision authority. A failed participant does not invalidate
+another participant's instruction to resolve the already-published decision.
+Continuing that bounded list improves recovery without introducing a second
+protocol or changing the public completion contract. The production change
+adds 23 net lines, primarily separating one participant's apply/receipt attempt
+from the loop's progress policy.
+
+The loop remains sequential and visits at most 100 participants. Progress
+requires a failed attempt to return and the caller to remain alive; cancellation
+or a slow owner can still interrupt the pass. Bounded parallelism, independent
+owner-admission progress, persistent history collection, and 10,000-Cell/multi-TB
+qualification remain separate work. No API, schema, wire format, dependency,
+or lockfile changes are required for this fix.
+
+Verification: 24 tests passed across the account, elastic-Cell, and signed
+peer-network suites (22 elastic tests in 67.41 seconds; two-owner network test
+in 94.30 seconds). The targeted six-cut regression also passed after adding
+newer-write checks for the participant whose apply receipt was lost. The
+explicitly enabled signed SDK/RustFS server-process smoke passed in 368.54
+seconds, including hard restart and replay, with its binary fixed throughout.
+The injected cuts run in the signed loopback regression; the process smoke
+checks the deployed request/recovery path without those injected cuts. Strict
+all-target Clippy, formatting, diff, and Cell/LTX layout checks passed. These
+are functional proofs; they do not qualify full API coverage or fleet scale.
