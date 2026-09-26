@@ -681,9 +681,19 @@ synchronous and retain their caller-owned worker contract.
 Verified directory reads release object-store admission before persisting a
 cache fill. Fills use immediate blocking-job admission and skip persistence
 when that pool is busy, keeping pending node buffers bounded without a second
-queue. Admitted fills still finish before the read returns; cancellation keeps
-their job and disk reservations until completion. Cache persistence is best
-effort, so skipped entries may require another origin read after restart.
+queue. Verified bytes return after dispatch, without waiting for local syncs.
+Concurrent fills of one key are deduplicated, and cache lookups skip busy jobs
+or fill locks. Accepted fills retain their buffers, job and disk accounting
+until completion, including canceled readers, dispatch rejection and panics.
+Reopening a cache excludes outstanding fills from temporary-file cleanup.
+
+Call `Host::drain_cache_fills().await` after stopping replica work and before
+reusing its local directories or stopping its executor. `CellRuntime::shutdown`
+does this after draining Cells and workers. A canceled drain can be retried;
+the host can subsequently serve a new runtime. Cache persistence is best
+effort, so skipped entries may require another verified origin read. Fills
+still share the blocking pool with required work; this does not establish
+foreground latency isolation or reduce membership-index rewrite cost.
 
 Cell compaction buffers sequential index reads within a combined 960 KiB
 budget and dispatches bounded merge batches through `Host` jobs. Scratch files
@@ -731,9 +741,10 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-your-worktree" \
   rustfs_directory_cache_fill -- --ignored --nocapture
 ```
 
-It pauses a cache fsync with one origin permit, verifies a separate origin
-read and exact SQLite restore, and checks canceled-job admission. Each run
-uses a unique `crab-ltx-tests/cache-admission/` prefix and retains its objects.
+It pauses cache fsync with one origin permit and one/two blocking slots,
+verifies the original and concurrent reads return, and restores exact SQLite
+state. A canceled drain retains admission; cache reopen waits for persistence.
+Each run uses a unique `crab-ltx-tests/cache-admission/` prefix and retains its objects.
 The pause/deadline assertions are concurrency proof, not latency percentiles.
 
 The sparse-activation isolation test uses the same environment:

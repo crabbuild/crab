@@ -5,7 +5,9 @@ use super::*;
 #[tokio::test(flavor = "multi_thread")]
 async fn directory_cache_fill_releases_origin_admission_before_local_sync() {
     let backend = Arc::new(InMemory::new());
-    verify_cache_fill_admission(|| Store::new(backend.clone()), "cache-admission").await;
+    for jobs in [1, 2] {
+        verify_cache_fill_admission(|| Store::new(backend.clone()), "cache-admission", jobs).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -37,11 +39,13 @@ async fn rustfs_directory_cache_fill_releases_origin_admission_before_local_sync
         )
         .unwrap()
     };
-    verify_cache_fill_admission(store, &prefix).await;
+    for jobs in [1, 2] {
+        verify_cache_fill_admission(&store, &prefix, jobs).await;
+    }
     eprintln!("RustFS cache admission and exact SQLite restore passed: {prefix}");
 }
 
-async fn verify_cache_fill_admission(store: impl Fn() -> Store, prefix: &str) {
+async fn verify_cache_fill_admission(store: impl Fn() -> Store, prefix: &str, job_count: usize) {
     let (directory, faults, host, mut writer) = fixture();
     let replica = |cell| {
         CellReplica::new(
@@ -65,14 +69,15 @@ async fn verify_cache_fill_admission(store: impl Fn() -> Store, prefix: &str) {
         .root();
     writer.close().unwrap();
     let io = Arc::new(tokio::sync::Semaphore::new(1));
-    let jobs = Arc::new(tokio::sync::Semaphore::new(1));
-    let reader = replica(232).with_host(
-        host.with_io_slots(io.clone())
-            .with_job_slots(jobs.clone())
-            .with_directory_cache(directory.path().join("cache"))
-            .await
-            .unwrap(),
-    );
+    let jobs = Arc::new(tokio::sync::Semaphore::new(job_count));
+    let cache_root = directory.path().join("cache");
+    let cache_host = host
+        .with_io_slots(io.clone())
+        .with_job_slots(jobs.clone())
+        .with_directory_cache(cache_root.clone())
+        .await
+        .unwrap();
+    let reader = replica(232).with_host(cache_host.clone());
     let pause = Arc::new(Pause {
         operation: "sync_all",
         entered: tokio::sync::Notify::new(),
@@ -81,20 +86,47 @@ async fn verify_cache_fill_admission(store: impl Fn() -> Store, prefix: &str) {
     });
     *faults.pause.lock().unwrap() = Some(pause.clone());
     let release = Release(pause.clone());
-    let read = tokio::spawn(async move { reader.open_root(&root).await });
+    let mut read = tokio::spawn(async move { reader.open_root(&root).await });
     tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
         .await
         .unwrap();
-    assert!(!read.is_finished());
+    let reopened = tokio::time::timeout(Duration::from_secs(1), &mut read)
+        .await
+        .expect("verified root must not wait for optional cache persistence")
+        .unwrap()
+        .unwrap();
+    assert_eq!(reopened.root(), root);
 
-    // Another Cell with a fresh store identity bypasses the process byte cache.
-    // It shares origin admission, but does not use the paused disk cache.
-    let other = replica(234).with_host(Host::default().with_io_slots(io.clone()));
+    let same = replica(232).with_host(cache_host.clone());
+    tokio::time::timeout(Duration::from_secs(1), same.open_root(&root))
+        .await
+        .expect("a concurrent lookup must skip the paused fill lock")
+        .unwrap();
+
+    // A fresh store identity bypasses the process byte cache. Both readers
+    // share the paused disk cache and its blocking job slots.
+    let other = replica(234).with_host(cache_host.clone());
     let verified = tokio::time::timeout(Duration::from_secs(1), other.open_root(&other_root)).await;
-    read.abort();
-    assert!(matches!(read.await, Err(error) if error.is_cancelled()));
     assert_eq!(jobs.available_permits(), 0);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), cache_host.drain_cache_fills())
+            .await
+            .is_err()
+    );
+    let reopen = cache_host.clone().with_directory_cache(cache_root);
+    tokio::pin!(reopen);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut reopen)
+            .await
+            .is_err()
+    );
     drop(release);
+    let reopened_cache = tokio::time::timeout(Duration::from_secs(5), &mut reopen)
+        .await
+        .unwrap()
+        .unwrap();
+    cache_host.drain_cache_fills().await;
+    assert!(reopened_cache.directory_cache_stats().unwrap().entries() > 0);
     let finished = tokio::time::timeout(Duration::from_secs(5), jobs.acquire())
         .await
         .unwrap()

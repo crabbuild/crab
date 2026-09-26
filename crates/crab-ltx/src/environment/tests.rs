@@ -28,18 +28,77 @@ async fn directory_cache_fill_does_not_queue_bytes_behind_busy_jobs() {
         .await
         .unwrap();
     let occupied = jobs.acquire().await.unwrap();
-    tokio::time::timeout(
-        Duration::from_millis(250),
-        host.directory_cache_put("node".into(), b"verified".to_vec(), 64),
-    )
-    .await
-    .expect("optional cache fills must not queue verified bytes")
-    .unwrap();
+    host.directory_cache_put("node".into(), b"verified".to_vec(), 64)
+        .unwrap();
     assert_eq!(host.directory_cache_stats().unwrap().entries(), 0);
     drop(occupied);
     host.directory_cache_put("node".into(), b"verified".to_vec(), 64)
+        .unwrap();
+    host.drain_cache_fills().await;
+    assert_eq!(host.directory_cache_stats().unwrap().entries(), 1);
+}
+
+#[cfg(feature = "replica")]
+#[tokio::test]
+async fn cache_fills_deduplicate_bound_dispatch_and_release_dropped_jobs() {
+    #[derive(Default)]
+    struct HeldExecutor(std::sync::Mutex<Vec<Box<dyn FnOnce() + Send>>>);
+    impl Executor for HeldExecutor {
+        fn dispatch(&self, job: Box<dyn FnOnce() + Send>) -> io::Result<()> {
+            self.0.lock().unwrap().push(job);
+            Ok(())
+        }
+        fn start_worker(&self, job: Box<dyn FnOnce() + Send>) -> io::Result<Box<dyn Worker>> {
+            TokioExecutor.start_worker(job)
+        }
+    }
+    let directory = tempfile::TempDir::new().unwrap();
+    let jobs = Arc::new(tokio::sync::Semaphore::new(2));
+    let filesystem = Arc::new(FaultFs::default());
+    let executor = Arc::new(HeldExecutor::default());
+    let host = Host::default()
+        .with_filesystem(filesystem.clone())
+        .with_job_slots(jobs.clone())
+        .with_directory_cache(directory.path().join("cache"))
+        .await
+        .unwrap()
+        .with_executor(executor.clone());
+    for _ in 0..100 {
+        host.directory_cache_put("same".into(), b"verified".to_vec(), 64)
+            .unwrap();
+    }
+    assert_eq!(executor.0.lock().unwrap().len(), 1);
+    host.directory_cache_put("second".into(), b"verified".to_vec(), 64)
+        .unwrap();
+    host.directory_cache_put("overflow".into(), b"verified".to_vec(), 64)
+        .unwrap();
+    assert_eq!(executor.0.lock().unwrap().len(), 2);
+    assert_eq!(jobs.available_permits(), 0);
+    assert!(
+        host.directory_cache_get("same".into(), 64)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    executor.0.lock().unwrap().clear();
+    tokio::time::timeout(Duration::from_secs(1), host.drain_cache_fills())
         .await
         .unwrap();
+    assert_eq!(jobs.available_permits(), 2);
+    assert_eq!(host.directory_cache_stats().unwrap().entries(), 0);
+
+    for (reject, panic) in [(true, false), (false, true), (false, false)] {
+        filesystem.reject_create.store(reject, Ordering::SeqCst);
+        filesystem.panic_create.store(panic, Ordering::SeqCst);
+        host.directory_cache_put("same".into(), b"verified".to_vec(), 64)
+            .unwrap();
+        let job = executor.0.lock().unwrap().pop().unwrap();
+        job();
+        tokio::time::timeout(Duration::from_secs(1), host.drain_cache_fills())
+            .await
+            .unwrap();
+        assert_eq!(jobs.available_permits(), 2);
+    }
     assert_eq!(host.directory_cache_stats().unwrap().entries(), 1);
 }
 
@@ -82,6 +141,19 @@ fn directory_cache_survives_restart_and_evicts_by_bytes() {
     assert_eq!(cache.get("second", 64).unwrap(), Some(b"abcde".to_vec()));
     assert_eq!(cache.stats().entries(), 1);
     assert_eq!(cache.budget.used(), 5);
+}
+
+#[cfg(feature = "replica")]
+#[test]
+fn directory_cache_reaccounts_a_file_without_membership() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let cache = DirectoryCache::new(Arc::new(DirectFileSystem), directory.path().to_owned(), 64);
+    // A fill can install its bytes before the membership index is persisted.
+    // Reusing that file after restart must still acquire its disk reservation.
+    std::fs::write(cache.key_path("orphan"), b"verified").unwrap();
+    cache.put("orphan", b"verified", 64).unwrap();
+    assert_eq!(cache.budget.used(), 8);
+    assert_eq!(cache.get("orphan", 64).unwrap(), Some(b"verified".to_vec()));
 }
 
 #[cfg(feature = "replica")]
@@ -148,13 +220,13 @@ fn directory_cache_serializes_concurrent_fills_for_one_key() {
             let cache = Arc::clone(&cache);
             scope.spawn(move || {
                 cache.put("same-key", b"verified", 64).unwrap();
-                assert_eq!(
-                    cache.get("same-key", 64).unwrap(),
-                    Some(b"verified".to_vec())
-                );
             });
         }
     });
+    assert_eq!(
+        cache.get("same-key", 64).unwrap(),
+        Some(b"verified".to_vec())
+    );
     assert_eq!(cache.stats().entries(), 1);
     assert_eq!(cache.stats().bytes(), 8);
     assert_eq!(cache.budget.used(), 8);
@@ -173,6 +245,7 @@ impl Clock for TestClock {
 #[derive(Default)]
 struct FaultFs {
     reject_create: AtomicBool,
+    panic_create: AtomicBool,
     creates: AtomicUsize,
 }
 impl FileSystem for FaultFs {
@@ -184,6 +257,10 @@ impl FileSystem for FaultFs {
     }
     fn create(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
         self.creates.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            !self.panic_create.load(Ordering::SeqCst),
+            "injected cache panic"
+        );
         if self.reject_create.load(Ordering::SeqCst) {
             return Err(io::Error::new(
                 io::ErrorKind::StorageFull,
@@ -303,6 +380,53 @@ async fn dropped_executor_jobs_return_errors_without_hanging() {
     let host = Host::default().with_executor(Arc::new(DroppingExecutor));
     assert!(host.run(|| 42).await.is_err());
     assert_eq!(Host::default().run(|| 42).await.unwrap(), 42);
+    let directory = tempfile::TempDir::new().unwrap();
+    let cache = Host::default()
+        .with_directory_cache(directory.path().join("cache"))
+        .await
+        .unwrap()
+        .with_executor(Arc::new(DroppingExecutor));
+    cache
+        .directory_cache_put("node".into(), b"verified".to_vec(), 64)
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), cache.drain_cache_fills())
+        .await
+        .unwrap();
+    assert_eq!(cache.directory_cache_stats().unwrap().entries(), 0);
+}
+
+#[cfg(feature = "replica")]
+#[tokio::test]
+async fn rejected_cache_dispatch_releases_its_key_and_admission() {
+    struct RejectExecutor;
+    impl Executor for RejectExecutor {
+        fn dispatch(&self, _: Box<dyn FnOnce() + Send>) -> io::Result<()> {
+            Err(io::Error::other("injected executor rejection"))
+        }
+        fn start_worker(&self, job: Box<dyn FnOnce() + Send>) -> io::Result<Box<dyn Worker>> {
+            TokioExecutor.start_worker(job)
+        }
+    }
+    let directory = tempfile::TempDir::new().unwrap();
+    let jobs = Arc::new(tokio::sync::Semaphore::new(1));
+    let host = Host::default()
+        .with_job_slots(jobs.clone())
+        .with_directory_cache(directory.path().join("cache"))
+        .await
+        .unwrap();
+    assert!(
+        host.clone()
+            .with_executor(Arc::new(RejectExecutor))
+            .directory_cache_put("node".into(), b"verified".to_vec(), 64)
+            .is_err()
+    );
+    assert_eq!(jobs.available_permits(), 1);
+    host.directory_cache_put("node".into(), b"verified".to_vec(), 64)
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), host.drain_cache_fills())
+        .await
+        .unwrap();
+    assert_eq!(host.directory_cache_stats().unwrap().entries(), 1);
 }
 
 #[cfg(feature = "replica")]

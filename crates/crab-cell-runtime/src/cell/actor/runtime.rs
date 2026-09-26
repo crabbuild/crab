@@ -353,6 +353,9 @@ impl CellRuntime {
             Some((_, durability)) => durability.shutdown().await,
             None => Ok(()),
         };
+        // Admission and replica work are stopped. Optional fills outlive their
+        // readers, so keep artifacts/executors until accepted fills complete.
+        self.inner.replica_host.drain_cache_fills().await;
         drain.and(workers).and(durability)
     }
 

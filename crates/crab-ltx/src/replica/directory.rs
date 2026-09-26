@@ -614,8 +614,7 @@ async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<
     drop(permit);
     let _ = verification
         .host
-        .directory_cache_put(persistent_key, bytes.to_vec(), MAX_NODE_BYTES)
-        .await;
+        .directory_cache_put(persistent_key, bytes.to_vec(), MAX_NODE_BYTES);
     let bytes: Arc<[u8]> = bytes.to_vec().into();
     super::cache::insert(
         verification.layout,
