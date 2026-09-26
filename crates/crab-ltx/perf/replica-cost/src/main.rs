@@ -11,6 +11,7 @@
 //! counts are provider independent; only latency changes.
 
 mod filesystem;
+mod storage;
 
 use crab_ltx::{CellReplica, CellStorageLayout, Db, Host, Limits};
 use crab_storage::{ObjectStoreCredentials, Store};
@@ -25,6 +26,7 @@ struct Config {
     commands: usize,
     warmup: usize,
     sparse: bool,
+    random_payload: bool,
     max_capture_bytes: Option<u64>,
     endpoint: Option<String>,
     bucket: String,
@@ -58,6 +60,7 @@ struct Sample {
     wal_snapshot_reads: u32,
     wal_full_reads: u32,
     elapsed_us: u64,
+    preparation_io: Vec<storage::BackendCost>,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,6 +70,7 @@ struct Report {
     workload: &'static str,
     sqlite_version: &'static str,
     payload_bytes: usize,
+    payload_pattern: &'static str,
     measured_commands: usize,
     bootstrap_capture_us: u64,
     bootstrap_parent_sync_us: u64,
@@ -103,6 +107,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut database = Db::open(&database_path, limits)?;
     let (store, store_label, prefix) = open_store(&config)?;
+    let backend = Arc::new(storage::StorageCosts::default());
+    let store = store.with_storage_observer(backend.clone());
     let syncs = Arc::new(filesystem::ChecksumSyncs::default());
     let host = Host::default().with_filesystem(Arc::new(filesystem::MeasuredFileSystem {
         syncs: syncs.clone(),
@@ -143,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut samples = Vec::with_capacity(config.commands);
     for command in 0..config.commands {
-        let payload = payload(command, config.payload_bytes);
+        let payload = payload(command, config.payload_bytes, config.random_payload);
         let commit_started = Instant::now();
         database.transaction(|transaction| {
             transaction.execute(
@@ -161,11 +167,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let capture_us = capture_started.elapsed().as_micros() as u64;
         let (checksum_sync_calls, checksum_sync_us) = syncs.take();
+        // Exclude bootstrap, activation, and sparse reads during commit/capture.
+        let _prior_io = backend.take();
         let started = Instant::now();
         let prepared = replica
             .prepare(root.as_ref(), &batch, command as u64 + 2, 1)
             .await?;
         let elapsed = started.elapsed();
+        let preparation_io = backend.take();
         let cost = replica.take_publication_cost();
         root = Some(prepared.root());
         if config.sparse {
@@ -197,6 +206,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 wal_snapshot_reads: batch.timing.wal_snapshot_reads,
                 wal_full_reads: batch.timing.wal_full_reads,
                 elapsed_us: elapsed.as_micros() as u64,
+                preparation_io,
             });
         }
     }
@@ -253,11 +263,24 @@ fn open_store(
     Ok((store, label, prefix))
 }
 
-/// Deterministic periodic payload retained for historical cost comparisons.
-fn payload(command: usize, bytes: usize) -> Vec<u8> {
-    (0..bytes)
-        .map(|index| ((command * 131 + index) % 251) as u8)
-        .collect()
+fn payload(command: usize, bytes: usize, random: bool) -> Vec<u8> {
+    if !random {
+        // Retain the periodic fixture so historical cost rows are reproducible.
+        return (0..bytes)
+            .map(|index| ((command * 131 + index) % 251) as u8)
+            .collect();
+    }
+    let mut state = (command as u64).wrapping_add(1);
+    let mut payload = vec![0; bytes];
+    for chunk in payload.chunks_mut(8) {
+        // A fixed command seed makes this high-entropy workload repeatable.
+        // This generator is only test data, never a security primitive.
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        chunk.copy_from_slice(&state.to_le_bytes()[..chunk.len()]);
+    }
+    payload
 }
 
 fn percentile(values: &[u64], percent: usize) -> u64 {
@@ -294,6 +317,11 @@ fn summarize(
             "fresh immediate capture"
         },
         payload_bytes: config.payload_bytes,
+        payload_pattern: if config.random_payload {
+            "xorshift64-command-seeded"
+        } else {
+            "periodic-251"
+        },
         measured_commands: samples.len(),
         bootstrap_capture_us,
         bootstrap_parent_sync_us,
@@ -342,6 +370,7 @@ impl Config {
         let commands = option(&args, "--commands")?.unwrap_or(64);
         let warmup = option(&args, "--warmup")?.unwrap_or(4);
         let sparse = args.iter().any(|arg| arg == "--sparse");
+        let random_payload = args.iter().any(|arg| arg == "--random-payload");
         let max_capture_bytes = option(&args, "--max-capture-bytes")?.map(|bytes| bytes as u64);
         if payload_bytes == 0 || commands == 0 || warmup >= commands {
             return Err(
@@ -357,6 +386,7 @@ impl Config {
             commands,
             warmup,
             sparse,
+            random_payload,
             max_capture_bytes,
             endpoint,
             bucket,

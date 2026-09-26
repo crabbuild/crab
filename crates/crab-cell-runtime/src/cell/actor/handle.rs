@@ -150,6 +150,9 @@ impl CellHandle {
         self.inner
             .sender
             .send(Message::Execute(Box::new(QueuedCommand {
+                telemetry: self.inner.telemetry.clone(),
+                queued_at: std::time::Instant::now(),
+                response_proof: None,
                 cell: self.cell,
                 admission: self.admission.clone(),
                 operation: QueuedOperation::Mutation {
@@ -193,6 +196,9 @@ impl CellHandle {
         self.inner
             .sender
             .send(Message::Execute(Box::new(QueuedCommand {
+                telemetry: self.inner.telemetry.clone(),
+                queued_at: std::time::Instant::now(),
+                response_proof: None,
                 cell: self.cell,
                 admission: self.admission.clone(),
                 operation: QueuedOperation::Effect { delivery },

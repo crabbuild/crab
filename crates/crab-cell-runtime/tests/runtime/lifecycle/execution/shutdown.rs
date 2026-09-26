@@ -5,7 +5,12 @@ use super::*;
 #[tokio::test(flavor = "multi_thread")]
 async fn effect_delivery_survives_cancellation_and_exact_root_restore() {
     let fixture = fixture();
-    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    use super::super::durability::RecordingResponses;
+    use crab_cell_runtime::fleet::telemetry::CommandResponseSource;
+
+    let (runtime, handle, _) = activate_runtime(&fixture, 16 * 1024 * 1024).await;
+    let responses = Arc::new(RecordingResponses::default());
+    runtime.install_telemetry(responses.clone()).unwrap();
     let delivery = InboxDelivery {
         effect_id: [70; 32],
         operation_digest: Digest::from_bytes([71; 32]),
@@ -109,6 +114,11 @@ async fn effect_delivery_survives_cancellation_and_exact_root_restore() {
         1_i64.to_be_bytes()
     );
     handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+    assert_eq!(
+        responses.0.lock().unwrap().as_slice(),
+        &[CommandResponseSource::Recorded]
+    );
 
     let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
         fixture.layout.clone(),

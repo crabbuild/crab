@@ -13,6 +13,8 @@ async fn accepted_control_cas_with_lost_response_releases_once() {
         Store::new(object_store),
     );
     let (runtime, handle, _) = activate_runtime(&fixture, 16 * 1024 * 1024).await;
+    let responses = Arc::new(RecordingResponses::default());
+    runtime.install_telemetry(responses.clone()).unwrap();
     let request = mutation_identity_window(136, 10, 10_000);
     let digest = Digest::from_bytes([137; 32]);
     let calls = Arc::new(AtomicUsize::new(0));
@@ -59,6 +61,13 @@ async fn accepted_control_cas_with_lost_response_releases_once() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     handle.drain().await.unwrap();
     runtime.shutdown().await.unwrap();
+    assert_eq!(
+        responses.0.lock().unwrap().as_slice(),
+        &[
+            CommandResponseSource::Object,
+            CommandResponseSource::Recorded
+        ]
+    );
 
     let restored = fixture._directory.path().join("lost-cas-restored.sqlite");
     let verified = fixture.replica.open_root(&root).await.unwrap();
@@ -94,6 +103,8 @@ async fn capture_failure_after_sql_commit_fences_until_authoritative_recovery() 
         ReplicaHost::default().with_filesystem(filesystem.clone()),
     )
     .unwrap();
+    let responses = Arc::new(RecordingResponses::default());
+    runtime.install_telemetry(responses.clone()).unwrap();
     let handle = bootstrap_on(&runtime, &fixture, session).await;
     let authority = CellAuthority::new(fixture.layout.clone());
     let before = authority
@@ -152,6 +163,7 @@ async fn capture_failure_after_sql_commit_fences_until_authoritative_recovery() 
         Resolution::Unknown
     );
     runtime.shutdown().await.unwrap();
+    assert_eq!(responses.0.lock().unwrap().as_slice(), &[]);
 
     let restored = fixture._directory.path().join("capture-restored.sqlite");
     let verified = fixture.replica.open_root(&root).await.unwrap();
@@ -612,6 +624,8 @@ async fn follower_fsync_can_acknowledge_before_object_root_cas() {
         ReplicaHost::default(),
     )
     .unwrap();
+    let responses = Arc::new(RecordingResponses::default());
+    runtime.install_telemetry(responses.clone()).unwrap();
     let lease = NodeLeaseGuard::new(0, 60_000).unwrap();
     runtime.install_node_lease(lease.clone()).unwrap();
     let gate = DurabilityGate::new(
@@ -779,6 +793,13 @@ async fn follower_fsync_can_acknowledge_before_object_root_cas() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     handle.drain().await.unwrap();
     runtime.shutdown().await.unwrap();
+    assert_eq!(
+        responses.0.lock().unwrap().as_slice(),
+        &[
+            CommandResponseSource::Fleet,
+            CommandResponseSource::Recorded
+        ]
+    );
 
     let verified = fixture.replica.open_root(&published_root).await.unwrap();
     let recovered = fixture

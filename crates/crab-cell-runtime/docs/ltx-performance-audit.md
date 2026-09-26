@@ -5,7 +5,7 @@
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
 | Scope | Source at `0f3f4f7617a`; LTX source matches the local `origin/main` snapshot `de0bb234abc` |
-| Status | Findings 1–2 implemented with focused proof; remaining findings and fleet latency qualification open |
+| Status | Findings 1–2 implemented; response attribution added; activation, compaction, interference, and fleet latency qualification open |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
 
@@ -20,7 +20,7 @@ where to investigate; they cannot be subtracted to explain a public action.
 
 ### 1. Small LTX bodies pay the multipart protocol cost
 
-**Confirmed:** [native segment upload](../../crab-ltx/src/replica/upload.rs)
+**Confirmed at audited revision:** [native segment upload](../../crab-ltx/src/replica/upload.rs)
 calls [upload_source](../../crab-ltx/src/replica/compaction/scratch.rs), which
 always calls `Store::put_multipart_source_retry`. The
 [storage implementation](../../crab-storage/src/store.rs) starts multipart
@@ -58,9 +58,15 @@ successful create and reject wrong lengths, changed digests, truncated sources,
 and conflicting existing content. These establish transfer semantics, not
 public-action latency or sustainable publication capacity.
 
+The first seven-run RustFS comparison is
+[recorded with its raw artifact location](../../crab-ltx/perf/README.md#small-body-transfer-experiment).
+Median run p50 moved from 6.64 to 6.16 ms, but p95 rose from 10.95 to
+12.14 ms and unchanged local phases slowed. Latency qualification remains
+open. The real HTTP/peer RustFS test passed mutations and takeover restore.
+
 ### 2. Persistent directory-cache hits perform durable index writes
 
-**Confirmed:** [DirectoryCache::get](../../crab-ltx/src/environment/directory_cache.rs)
+**Confirmed at audited revision:** [DirectoryCache::get](../../crab-ltx/src/environment/directory_cache.rs)
 calls `persist_index` after a valid hit and after a missing file. That method
 clones and serializes the entire entry map, writes a new file, syncs it, and
 renames it. A hit changes in-memory recency, but the serialized index contains
@@ -97,18 +103,26 @@ eight checksum bytes per database page, and syncs the checksum file before
 opening the writer. LTX page bodies are lazy; this metadata walk is eager.
 At 4 KiB pages a 10 GiB database alone needs a 20 MiB checksum file, excluding
 directory transfer and validation. Tiny bootstrap Cells hide this cost.
+The same async path directly calls synchronous filesystem writes and syncs,
+including the final checksum barrier, instead of dispatching them through the
+host's blocking executor. Slow local storage can therefore stall its Tokio
+worker as well as delaying activation; its impact is not yet measured.
 
 **Change to evaluate:** first remove finding 2's cache overhead and overlap
 independent authenticated node reads within existing host admission, retaining
 ordered validation/output. Consider lazy checksum chunks only if this measured
 walk still prevents the recovery target. That larger change must preserve the
 old checksum for every overwritten/truncated page and the final root checksum.
+Move checksum writes and barriers through admitted blocking work, retaining
+file and reservation ownership until dispatched work finishes.
 
 **Gate:** measure first query and first mutation separately for fixed data
 sizes, empty/warm caches, and simultaneous owner loss. Count directory requests,
 checksum bytes, local syncs, admission wait, RSS, and time to serve. Exact-root
 corruption, canceled activation, fresh destination, and checksum-link tests
 must remain intact. A fast first page fault does not prove fast activation.
+Inject slow filesystem writes/syncs and verify unrelated task progress, bounded
+blocking admission, and cleanup when activation is canceled or returns an error.
 
 ### 4. Range compaction can do whole-graph metadata work on the publication lane
 
@@ -133,7 +147,7 @@ boundaries; they do not substitute for the runtime's earlier debt threshold.
 
 ### 5. Early follower responses do not establish sustainable write throughput
 
-**Confirmed:** [start_publication](../src/cell/actor/requests.rs) removes one
+**Confirmed at audited revision:** [start_publication](../src/cell/actor/requests.rs) removes one
 publisher from the active Cell and publishes one queued command at a time.
 `prove_command` races external proofs and discards their source before final
 worker confirmation. Completed-proof counters cannot identify the proof that
@@ -150,6 +164,16 @@ to settle. Accepted commands/s, published commands/s, root lag, retained bytes,
 and rejections must be reported together. Owner loss with follower-only tails,
 duplicate delivery, ambiguous publication, and rollout must still work through
 public application handles. Increasing queue limits is not a throughput fix.
+
+**Instrumentation:** the command/effect reply boundary now reports one source
+(`fleet`, `object`, or `recorded`), admitted-enqueue-to-response time, and final
+SQL worker confirmation time. It records only a successful runtime delivery;
+failed results and abandoned receivers add no winner. A later object proof
+does not add another response. Structured traces include Cell and commit
+sequence; Prometheus labels contain only the finite source. Queries,
+migrations, and transport have separate boundaries and are excluded. This
+closes response-source ambiguity; sustained drain and full phase attribution
+remain unqualified.
 
 ### 6. Bounded I/O does not yet prove foreground latency isolation
 
@@ -173,7 +197,7 @@ as the existing contiguous hydration case.
 
 ### 7. Qualification needs a less favorable payload and arrival model
 
-**Confirmed:** the [cost harness](../../crab-ltx/perf/replica-cost/src/main.rs)
+**Confirmed at audited revision:** the [cost harness](../../crab-ltx/perf/replica-cost/src/main.rs)
 generates `(command * 131 + index) % 251`, repeating every 251 bytes. It is
 compressible despite its source comment. Its loop calls `CellReplica::prepare`
 directly: no runtime authority CAS, follower race, or scheduled compaction.
@@ -194,6 +218,15 @@ filesystem, SQLite and provider dependency versions to each report.
 to study tails. Twenty-eight preparation samples cannot establish p99; that
 nearest-rank p99 is the maximum. Keep microbenchmark, public action, Compose,
 and multi-host results separately labeled.
+
+**Instrumentation:** the cost harness now labels the periodic payload, offers
+deterministic command-seeded random bytes, and records root-preparation calls,
+outcomes, bytes, and durations through the existing storage observer. The
+[RustFS smoke evidence](../../crab-ltx/perf/README.md#backend-calls-and-payload-entropy)
+shows two HEADs and five PUTs per small prepared root; the larger random body
+uses multipart. Provider-internal retries remain opaque. Scheduled arrivals,
+update/delete churn, skew, sustained compaction, and public-action curves are
+still open.
 
 ## Safety and proof retained by the audit
 
