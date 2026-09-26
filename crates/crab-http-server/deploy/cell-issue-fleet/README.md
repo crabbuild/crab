@@ -267,8 +267,9 @@ volumes remain intact; `reader-first-loss-report.json` records both ownership
 cuts, the deleted local volumes, source/image identities, and recovery timing.
 
 `qualify_reader_load.py --state <same-state>` then resumes five nodes for a
-60-second owner workload and a 60-second replica workload. Sixteen closed-loop
-clients use unequal ingress concurrency (twelve on node 1, four on node 5).
+60-second owner workload and a 60-second replica workload. Eight closed-loop
+clients use unequal ingress concurrency (six on node 1, two on node 5), below
+the unchanged eight-request collaboration admission limit at each ingress.
 The report records actual reader receipts/counts per ingress, throughput,
 latencies, control/LTX counter deltas, and process resources. `VmHWM` is the
 process-lifetime resident high-water mark; disk and descriptor counts are
