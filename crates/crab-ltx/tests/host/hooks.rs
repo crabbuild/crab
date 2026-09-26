@@ -60,6 +60,34 @@ impl Executor for DelayedExecutor {
     }
 }
 
+struct Pause {
+    operation: &'static str,
+    entered: tokio::sync::Notify,
+    released: Mutex<bool>,
+    wake: std::sync::Condvar,
+}
+
+impl Pause {
+    fn wait(&self, operation: &str) {
+        if self.operation == operation {
+            let mut released = self.released.lock().unwrap();
+            self.entered.notify_one();
+            while !*released {
+                released = self.wake.wait(released).unwrap();
+            }
+        }
+    }
+}
+
+struct Release(Arc<Pause>);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        *self.0.released.lock().unwrap() = true;
+        self.0.wake.notify_all();
+    }
+}
+
 #[derive(Clone, Default)]
 struct Faults {
     failure: Arc<Mutex<Option<&'static str>>>,
@@ -75,7 +103,7 @@ struct Faults {
     #[cfg(feature = "replica")]
     create_pause: Arc<OnceLock<Arc<InstallPause>>>,
     forbidden_thread: Arc<Mutex<Option<std::thread::ThreadId>>>,
-    pause: Arc<Mutex<Option<Arc<activation::Pause>>>>,
+    pause: Arc<Mutex<Option<Arc<Pause>>>>,
 }
 
 #[cfg(feature = "replica")]

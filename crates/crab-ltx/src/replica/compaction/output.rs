@@ -4,66 +4,79 @@ use super::*;
 
 pub(super) async fn write_compacted(
     replica: &CellReplica,
-    inputs: &[SpoolInput],
-    spool_path: &Path,
-    body_path: &Path,
+    inputs: Vec<SpoolInput>,
     body_inputs: &[BodySpoolInput],
-    ltx_path: &Path,
-    codec_index_path: &Path,
-    index_path: &Path,
+    files: &CompactionFiles,
 ) -> Result<CompactedArtifacts> {
-    let source = replica.host.filesystem.open(spool_path)?;
-    let mut body_source = replica.host.filesystem.open(body_path)?;
-    let mut entries = MergedEntries::new(vec![source], inputs.to_vec())?;
-    let output_file = replica.host.filesystem.open_rw(ltx_path)?;
-    let codec_index_file = replica.host.filesystem.open_rw(codec_index_path)?;
-    let sidecar_file = replica.host.filesystem.open_rw(index_path)?;
-    let first = inputs.first().ok_or(CrabError::TxNotAvailable)?;
-    let last = inputs.last().ok_or(CrabError::TxNotAvailable)?;
-    let mut state = OutputState::new(
-        output_file,
-        codec_index_file,
-        sidecar_file,
-        replica.limits,
-        &first.descriptor.info,
-        &last.descriptor.info,
-    )?;
-    let mut next = entries.next().transpose()?;
+    let first = inputs
+        .first()
+        .ok_or(CrabError::TxNotAvailable)?
+        .descriptor
+        .info
+        .clone();
+    let last = inputs
+        .last()
+        .ok_or(CrabError::TxNotAvailable)?
+        .descriptor
+        .info
+        .clone();
+    let page_size = first.page_size;
+    let post_checksum = last.post_checksum;
+    let source = files.scratch.open(&files.original_indexes).await?;
+    let mut body_source = files.scratch.open(&files.original_bodies).await?;
+    let entries = MergedEntries::open(&replica.host, vec![source], inputs)
+        .await?
+        .stream(replica.host.clone());
+    futures_util::pin_mut!(entries);
+    let output_file = files.scratch.open(&files.compacted_ltx).await?;
+    let codec_index_file = files.scratch.open(&files.codec_index).await?;
+    let sidecar_file = files.scratch.open(&files.compacted_index).await?;
+    let limits = replica.limits;
+    let mut state = replica
+        .host
+        .run(move || {
+            OutputState::new(
+                output_file,
+                codec_index_file,
+                sidecar_file,
+                limits,
+                &first,
+                &last,
+            )
+        })
+        .await??;
+    let mut next = entries.try_next().await?;
     while let Some(first_entry) = next.take() {
+        let mut encoded = u64::from(first_entry.length);
         let mut batch = vec![first_entry];
-        while let Some(entry) = entries.next().transpose()? {
+        while let Some(entry) = entries.try_next().await? {
             let previous = batch.last().ok_or(CrabError::LTXCorrupted)?;
-            let encoded = batch.iter().try_fold(0_u64, |total, entry| {
-                total
-                    .checked_add(u64::from(entry.length))
-                    .ok_or(CrabError::LTXCorrupted)
-            })?;
+            let combined = encoded
+                .checked_add(u64::from(entry.length))
+                .ok_or(CrabError::LTXCorrupted)?;
             if entry.object != previous.object
                 || entry.offset != previous.offset + u64::from(previous.length)
-                || encoded + u64::from(entry.length) > FRAME_READ_BYTES
-                || batch.len() as u64 * u64::from(first.descriptor.info.page_size)
-                    >= FRAME_READ_BYTES
+                || combined > FRAME_READ_BYTES
+                || batch.len() as u64 * u64::from(page_size) >= FRAME_READ_BYTES
             {
                 next = Some(entry);
                 break;
             }
+            encoded = combined;
             batch.push(entry);
         }
         let range = body_range(&batch, body_inputs)?;
-        let page_size = first.descriptor.info.page_size;
         let returned = replica
             .host
             .run(move || {
                 let frames = body_source.read_exact_at(range.start, range.length)?;
                 let pages = decode_pages(&batch, &frames, page_size)?;
-                Ok::<_, CrabError>((body_source, pages))
+                Ok::<_, CrabError>((body_source, state.encode(pages)?))
             })
             .await??;
         body_source = returned.0;
-        let pages = returned.1;
-        state = replica.host.run(move || state.encode(pages)).await??;
+        state = returned.1;
     }
-    let post_checksum = last.descriptor.info.post_checksum;
     replica
         .host
         .run(move || state.finish(post_checksum))

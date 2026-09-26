@@ -41,56 +41,52 @@ impl LocatorMerge {
         self.heap.push(Reverse((page, index)));
     }
 
-    /// Returns the next locator in page order, advancing every source it reads.
+    /// Resolves one page group, returning no locator when truncation discards it.
     ///
     /// `take` removes one source's current locator and reports the page that
     /// source moved to, if any. After an error the merge yields nothing further,
     /// so a caller cannot build a view from a partially read set of sources.
-    pub(in crate::replica) fn next_locator(
+    pub(in crate::replica) fn next_group(
         &mut self,
         mut take: impl FnMut(usize) -> Result<(DirectoryEntry, Option<u32>)>,
-    ) -> Option<Result<DirectoryEntry>> {
+    ) -> Option<Result<Option<DirectoryEntry>>> {
         if self.failed {
             return None;
         }
+        let Reverse((page, first_index)) = self.heap.pop()?;
+        let mut selected = None;
+        let mut index = first_index;
         loop {
-            let Reverse((page, first_index)) = self.heap.pop()?;
-            let mut selected = None;
-            let mut index = first_index;
-            loop {
-                let (entry, next_page) = match take(index) {
-                    Ok(taken) => taken,
-                    Err(error) => {
-                        self.failed = true;
-                        self.heap.clear();
-                        return Some(Err(error));
-                    }
-                };
-                if self
-                    .valid_through
-                    .get(index)
-                    .is_some_and(|pages| page <= *pages)
-                    && selected
-                        .as_ref()
-                        .is_none_or(|(selected_index, _)| index > *selected_index)
-                {
-                    selected = Some((index, entry));
+            let (entry, next_page) = match take(index) {
+                Ok(taken) => taken,
+                Err(error) => {
+                    self.failed = true;
+                    self.heap.clear();
+                    return Some(Err(error));
                 }
-                if let Some(next_page) = next_page {
-                    self.heap.push(Reverse((next_page, index)));
-                }
-                let Some(Reverse((next_page, next_index))) = self.heap.peek().copied() else {
-                    break;
-                };
-                if next_page != page {
-                    break;
-                }
-                self.heap.pop();
-                index = next_index;
+            };
+            if self
+                .valid_through
+                .get(index)
+                .is_some_and(|pages| page <= *pages)
+                && selected
+                    .as_ref()
+                    .is_none_or(|(selected_index, _)| index > *selected_index)
+            {
+                selected = Some((index, entry));
             }
-            if let Some((_, entry)) = selected {
-                return Some(Ok(entry));
+            if let Some(next_page) = next_page {
+                self.heap.push(Reverse((next_page, index)));
             }
+            let Some(Reverse((next_page, next_index))) = self.heap.peek().copied() else {
+                break;
+            };
+            if next_page != page {
+                break;
+            }
+            self.heap.pop();
+            index = next_index;
         }
+        Some(Ok(selected.map(|(_, entry)| entry)))
     }
 }
