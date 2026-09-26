@@ -161,7 +161,26 @@ pub async fn publish(
     transaction: &CapsuleTransaction,
     capsule: &Capsule,
 ) -> Result<RootSnapshot> {
-    let prepared = prepare_publication(router, base, transaction, capsule).await?;
+    let push_ref_head_bases = std::collections::BTreeMap::new();
+    publish_with_ref_head_bases(router, base, transaction, capsule, &push_ref_head_bases).await
+}
+
+/// Publish using ref-head versions already captured by push admission.
+pub async fn publish_with_ref_head_bases(
+    router: &StoreLayout<Store>,
+    base: RootSnapshot,
+    transaction: &CapsuleTransaction,
+    capsule: &Capsule,
+    push_ref_head_bases: &std::collections::BTreeMap<String, Option<(Bytes, ETag)>>,
+) -> Result<RootSnapshot> {
+    let prepared = prepare_publication_with_ref_head_bases(
+        router,
+        base,
+        transaction,
+        capsule,
+        push_ref_head_bases,
+    )
+    .await?;
     publish_prepared(router, prepared).await
 }
 
@@ -213,14 +232,38 @@ pub async fn prepare_publication(
     transaction: &CapsuleTransaction,
     capsule: &Capsule,
 ) -> Result<PreparedCapsulePublication> {
+    let push_ref_head_bases = std::collections::BTreeMap::new();
+    prepare_publication_with_ref_head_bases(
+        router,
+        base,
+        transaction,
+        capsule,
+        &push_ref_head_bases,
+    )
+    .await
+}
+
+async fn prepare_publication_with_ref_head_bases(
+    router: &StoreLayout<Store>,
+    base: RootSnapshot,
+    transaction: &CapsuleTransaction,
+    capsule: &Capsule,
+    push_ref_head_bases: &std::collections::BTreeMap<String, Option<(Bytes, ETag)>>,
+) -> Result<PreparedCapsulePublication> {
     validate_capsule_binding(&base, transaction, capsule)?;
     let transaction_id = transaction.id()?;
-    let snapshots = try_join_all(
-        transaction
-            .edits()
-            .iter()
-            .map(|edit| read_ref_head(router, base.record().root(), edit.ref_name())),
-    )
+    let root = base.record().root();
+    let snapshots = try_join_all(transaction.edits().iter().map(|edit| {
+        let captured = push_ref_head_bases.get(edit.ref_name()).cloned();
+        async move {
+            match captured {
+                Some(captured) => {
+                    read_ref_head_from_capture(router, root, edit.ref_name(), captured).await
+                }
+                None => read_ref_head(router, root, edit.ref_name()).await,
+            }
+        }
+    }))
     .await?;
     for (edit, snapshot) in transaction.edits().iter().zip(&snapshots) {
         if snapshot.visible.oid() != edit.expected_old() {
@@ -354,7 +397,33 @@ pub async fn prepare_coordinated_publication(
     transaction: &CapsuleTransaction,
     capsule: &Capsule,
 ) -> Result<CoordinatedPreparedCapsulePublication> {
-    let prepared = prepare_publication(router, base, transaction, capsule).await?;
+    let push_ref_head_bases = std::collections::BTreeMap::new();
+    prepare_coordinated_publication_with_ref_head_bases(
+        router,
+        base,
+        transaction,
+        capsule,
+        &push_ref_head_bases,
+    )
+    .await
+}
+
+/// Prepare coordinated publication from ref-head versions captured by push admission.
+pub async fn prepare_coordinated_publication_with_ref_head_bases(
+    router: &StoreLayout<Store>,
+    base: RootSnapshot,
+    transaction: &CapsuleTransaction,
+    capsule: &Capsule,
+    push_ref_head_bases: &std::collections::BTreeMap<String, Option<(Bytes, ETag)>>,
+) -> Result<CoordinatedPreparedCapsulePublication> {
+    let prepared = prepare_publication_with_ref_head_bases(
+        router,
+        base,
+        transaction,
+        capsule,
+        push_ref_head_bases,
+    )
+    .await?;
     let descriptor = prepared.coordinated_publication()?;
     let plan_intent = match transaction.plan_id() {
         Some(_) => Some(
@@ -758,8 +827,25 @@ async fn read_ref_head(
     let path = router.capsule_ref_head_path(
         &crab_metadata::capsule_protocol::capsule_ref_name_key(ref_name),
     );
-    let (head, etag) = match router.store().get_with_etag(&path).await {
-        Ok((body, etag)) => {
+    let captured = match router.store().get_with_etag(&path).await {
+        Ok((body, etag)) => Some((body, etag)),
+        Err(StorageError::NotFound { .. }) => None,
+        Err(source) => return Err(source.into()),
+    };
+    read_ref_head_from_capture(router, root, ref_name, captured).await
+}
+
+async fn read_ref_head_from_capture(
+    router: &StoreLayout<Store>,
+    root: &RepositoryRoot,
+    ref_name: &str,
+    captured: Option<(Bytes, ETag)>,
+) -> Result<RefHeadSnapshot> {
+    let path = router.capsule_ref_head_path(
+        &crab_metadata::capsule_protocol::capsule_ref_name_key(ref_name),
+    );
+    let (head, etag) = match captured {
+        Some((body, etag)) => {
             let head = crab_metadata::capsule_protocol::CapsuleRefHead::decode(&body)?;
             if head.ref_name() != ref_name {
                 return Err(WriteError::CorruptObject {
@@ -781,7 +867,7 @@ async fn read_ref_head(
                 )
             }
         }
-        Err(StorageError::NotFound { .. }) => (
+        None => (
             crab_metadata::capsule_protocol::CapsuleRefHead::from_root(
                 ref_name,
                 root.ref_epoch().to_owned(),
@@ -790,7 +876,6 @@ async fn read_ref_head(
             )?,
             None,
         ),
-        Err(source) => return Err(source.into()),
     };
     let mut active = std::collections::BTreeSet::new();
     if let Some(activation_id) = head.prepared_activation_id()
@@ -3317,6 +3402,112 @@ mod tests {
             visible.visible.oid(),
             Some("2222222222222222222222222222222222222222")
         );
+    }
+
+    #[tokio::test]
+    async fn captured_ref_head_base_saves_one_read() {
+        let observer = Arc::new(RecordingObserver::default());
+        let store = Store::new(Arc::new(InMemory::new()))
+            .with_storage_observer(Arc::clone(&observer) as Arc<dyn StorageObserver>);
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        let mut base = initialize(&router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let seed = transaction(&base, None, &"2".repeat(40));
+        base = publish(&router, base, &seed, &capsule(&seed))
+            .await
+            .unwrap();
+
+        let captured = read_ref_head(&router, base.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        let ref_head_bases = std::collections::BTreeMap::from([(
+            "refs/heads/main".to_owned(),
+            Some((
+                captured.head.encode().unwrap(),
+                captured.etag.clone().unwrap(),
+            )),
+        )]);
+        let next = transaction(&base, Some(&"2".repeat(40)), &"3".repeat(40));
+        let next_capsule = capsule(&next);
+
+        observer.observations.lock().unwrap().clear();
+        let _baseline = prepare_publication(&router, base.clone(), &next, &next_capsule)
+            .await
+            .unwrap();
+        let baseline_reads = observer
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|observation| observation.operation == StorageOperation::Get)
+            .count();
+
+        observer.observations.lock().unwrap().clear();
+        let _captured = prepare_publication_with_ref_head_bases(
+            &router,
+            base,
+            &next,
+            &next_capsule,
+            &ref_head_bases,
+        )
+        .await
+        .unwrap();
+        let captured_reads = observer
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|observation| observation.operation == StorageOperation::Get)
+            .count();
+
+        assert_eq!(baseline_reads, captured_reads + 1);
+    }
+
+    #[tokio::test]
+    async fn captured_ref_head_cas_rejects_a_same_ref_winner() {
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        let mut base = initialize(&router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let seed = transaction(&base, None, &"2".repeat(40));
+        base = publish(&router, base, &seed, &capsule(&seed))
+            .await
+            .unwrap();
+
+        let stale_base = base.clone();
+        let captured = read_ref_head(&router, base.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        let ref_head_bases = std::collections::BTreeMap::from([(
+            "refs/heads/main".to_owned(),
+            Some((
+                captured.head.encode().unwrap(),
+                captured.etag.clone().unwrap(),
+            )),
+        )]);
+
+        let winner = transaction(&base, Some(&"2".repeat(40)), &"3".repeat(40));
+        base = publish(&router, base, &winner, &capsule(&winner))
+            .await
+            .unwrap();
+        let late = transaction(&stale_base, Some(&"2".repeat(40)), &"4".repeat(40));
+        let error = publish_with_ref_head_bases(
+            &router,
+            stale_base,
+            &late,
+            &capsule(&late),
+            &ref_head_bases,
+        )
+        .await
+        .expect_err("stale captured ETag must fail its ref-head CAS");
+
+        assert!(matches!(error, WriteError::RefChanged { .. }));
+        let visible = read_ref_head(&router, base.record().root(), "refs/heads/main")
+            .await
+            .unwrap();
+        assert_eq!(visible.visible.oid(), Some("3".repeat(40).as_str()));
     }
 
     #[tokio::test]

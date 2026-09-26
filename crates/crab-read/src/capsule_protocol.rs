@@ -138,13 +138,15 @@ enum CheckpointData {
 ///
 /// This view intentionally excludes checkpoint and capsule payloads. Writers
 /// may use it for ref policy and expected-old validation, but consumers of Git
-/// objects or pointer catalogs must open a [`CapsuleRepositoryView`].
+/// objects or pointer catalogs must open a [`CapsuleRepositoryView`]. A view
+/// that captured ref heads also carries their bodies and ETags for conditional publication.
 #[derive(Debug, Clone)]
 pub struct CapsuleRefView {
     root: crab_metadata::capsule_protocol::RootSnapshot,
     refs: BTreeMap<String, String>,
     peeled_refs: BTreeMap<String, String>,
     visible_ref_transactions: BTreeMap<String, String>,
+    push_ref_head_bases: BTreeMap<String, Option<(Bytes, crab_storage::ETag)>>,
 }
 
 impl CapsuleRefView {
@@ -172,6 +174,14 @@ impl CapsuleRefView {
         &self.visible_ref_transactions
     }
 
+    /// Return captured ref-head bodies and CAS versions from a push admission view.
+    ///
+    /// These are conditional-write bases, not proof that the refs remain current.
+    #[must_use]
+    pub fn push_ref_head_bases(&self) -> &BTreeMap<String, Option<(Bytes, crab_storage::ETag)>> {
+        &self.push_ref_head_bases
+    }
+
     /// Return the symbolic HEAD target owned by the compacted root.
     #[must_use]
     pub fn head(&self) -> &str {
@@ -186,6 +196,7 @@ impl From<CapsuleRepositoryView> for CapsuleRefView {
             refs: view.refs,
             peeled_refs: view.peeled_refs,
             visible_ref_transactions: view.visible_ref_transactions,
+            push_ref_head_bases: BTreeMap::new(),
         }
     }
 }
@@ -3601,13 +3612,15 @@ pub async fn open_ref_view_from_root(
     router: &StoreLayout<Store>,
     snapshot: crab_metadata::capsule_protocol::RootSnapshot,
 ) -> Result<CapsuleRefView> {
-    let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
+    let (heads, active, push_ref_head_bases) =
+        capture_ref_heads(router, snapshot.record().root()).await?;
     let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?;
     Ok(CapsuleRefView {
         root: snapshot,
         refs: visible.refs,
         peeled_refs: visible.peeled_refs,
         visible_ref_transactions: visible.transactions,
+        push_ref_head_bases,
     })
 }
 
@@ -3619,7 +3632,7 @@ pub async fn read_activity_from_root(
     router: &StoreLayout<Store>,
     snapshot: &crab_metadata::capsule_protocol::RootSnapshot,
 ) -> Result<CapsuleRepositoryActivity> {
-    let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
+    let (heads, active, _) = capture_ref_heads(router, snapshot.record().root()).await?;
     let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?;
     let capsule_count = visible.pointers.iter().try_fold(0_u64, |total, pointer| {
         total
@@ -3679,6 +3692,7 @@ pub async fn open_ref_view_from_root_for_refs(
             .into_iter()
             .filter(|(ref_name, _)| ref_names.contains(ref_name))
             .collect(),
+        push_ref_head_bases: BTreeMap::new(),
     })
 }
 
@@ -3695,7 +3709,7 @@ pub async fn open_ref_view_from_root_for_push(
     let loaded = load_selected_ref_heads(router, ref_names).await?;
     let heads = loaded
         .iter()
-        .filter_map(|entry| entry.as_ref().map(|(head, _)| head.clone()))
+        .filter_map(|entry| entry.as_ref().map(|(head, _, _)| head.clone()))
         .filter(|head| head.ref_epoch() == snapshot.record().root().ref_epoch())
         .collect::<Vec<_>>();
     let active = resolve_referenced_activations(router, &heads).await?;
@@ -3715,6 +3729,15 @@ pub async fn open_ref_view_from_root_for_push(
         }
     }
     let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)?;
+    let push_ref_head_bases = ref_names
+        .iter()
+        .cloned()
+        .zip(loaded.iter().map(|entry| {
+            entry
+                .as_ref()
+                .map(|(_, etag, body)| (body.clone(), etag.clone()))
+        }))
+        .collect();
     Ok(CapsuleRefView {
         root: snapshot,
         refs: visible
@@ -3732,6 +3755,7 @@ pub async fn open_ref_view_from_root_for_push(
             .into_iter()
             .filter(|(ref_name, _)| ref_names.contains(ref_name))
             .collect(),
+        push_ref_head_bases,
     })
 }
 
@@ -3744,7 +3768,7 @@ pub async fn open_view_from_root(
     snapshot: crab_metadata::capsule_protocol::RootSnapshot,
     limits: CapsuleReadLimits,
 ) -> Result<CapsuleRepositoryView> {
-    let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
+    let (heads, active, _) = capture_ref_heads(router, snapshot.record().root()).await?;
     assemble_view(
         router,
         snapshot,
@@ -3766,7 +3790,7 @@ pub async fn open_view_from_root_with_control(
     snapshot: crab_metadata::capsule_protocol::RootSnapshot,
     limits: CapsuleReadLimits,
 ) -> Result<CapsuleRepositoryView> {
-    let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
+    let (heads, active, _) = capture_ref_heads(router, snapshot.record().root()).await?;
     assemble_view(
         router,
         snapshot,
@@ -3789,7 +3813,7 @@ pub async fn open_view_from_root_with_layered_control(
     snapshot: crab_metadata::capsule_protocol::RootSnapshot,
     limits: CapsuleReadLimits,
 ) -> Result<CapsuleRepositoryView> {
-    let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
+    let (heads, active, _) = capture_ref_heads(router, snapshot.record().root()).await?;
     assemble_view(
         router,
         snapshot,
@@ -4570,7 +4594,12 @@ fn materialize_visible_ref_heads(
 async fn load_ref_heads(
     router: &StoreLayout<Store>,
     objects: &[ObjectMeta],
-) -> Result<Option<Vec<crab_metadata::capsule_protocol::CapsuleRefHead>>> {
+) -> Result<
+    Option<(
+        Vec<crab_metadata::capsule_protocol::CapsuleRefHead>,
+        BTreeMap<String, Option<(Bytes, crab_storage::ETag)>>,
+    )>,
+> {
     let loaded = futures_util::stream::iter(objects.iter().cloned().map(|object| async move {
         let (body, etag) = router.store().get_with_etag(&object.location).await?;
         let head = crab_metadata::capsule_protocol::CapsuleRefHead::decode(&body)?;
@@ -4583,17 +4612,27 @@ async fn load_ref_heads(
                 "capsule ref-head key does not match its ref name",
             ));
         }
-        Ok::<_, ReadError>((head, listed_version_matches(&object, &etag)))
+        Ok::<_, ReadError>((head, listed_version_matches(&object, &etag), body, etag))
     }))
     .buffer_unordered(32)
     .try_collect::<Vec<_>>()
     .await?;
-    if loaded.iter().any(|(_, matched)| !matched) {
+    if loaded.iter().any(|(_, matched, _, _)| !matched) {
         return Ok(None);
     }
-    let mut heads = loaded.into_iter().map(|(head, _)| head).collect::<Vec<_>>();
-    heads.sort_unstable_by(|left, right| left.ref_name().cmp(right.ref_name()));
-    Ok(Some(heads))
+    let mut loaded = loaded;
+    loaded.sort_unstable_by(|left, right| left.0.ref_name().cmp(right.0.ref_name()));
+    let push_ref_head_bases = loaded
+        .iter()
+        .map(|(head, _, body, etag)| {
+            (
+                head.ref_name().to_owned(),
+                Some((body.clone(), etag.clone())),
+            )
+        })
+        .collect();
+    let heads = loaded.into_iter().map(|(head, _, _, _)| head).collect();
+    Ok(Some((heads, push_ref_head_bases)))
 }
 
 async fn capture_ref_heads(
@@ -4602,10 +4641,11 @@ async fn capture_ref_heads(
 ) -> Result<(
     Vec<crab_metadata::capsule_protocol::CapsuleRefHead>,
     BTreeSet<String>,
+    BTreeMap<String, Option<(Bytes, crab_storage::ETag)>>,
 )> {
     for _ in 0..8 {
         let before = list_ref_head_objects(router).await?;
-        let Some(heads) = load_ref_heads(router, &before).await? else {
+        let Some((heads, push_ref_head_bases)) = load_ref_heads(router, &before).await? else {
             continue;
         };
         let heads = heads
@@ -4627,7 +4667,7 @@ async fn capture_ref_heads(
                 ));
             }
         }
-        return Ok((heads, active));
+        return Ok((heads, active, push_ref_head_bases));
     }
     Err(ReadError::internal(
         "capsule ref snapshot changed during every bounded capture attempt",
@@ -4646,7 +4686,7 @@ async fn capture_selected_ref_heads(
         let before = load_selected_ref_heads(router, ref_names).await?;
         let heads = before
             .iter()
-            .filter_map(|entry| entry.as_ref().map(|(head, _)| head.clone()))
+            .filter_map(|entry| entry.as_ref().map(|(head, _, _)| head.clone()))
             .filter(|head| head.ref_epoch() == root.ref_epoch())
             .collect::<Vec<_>>();
         let active = resolve_referenced_activations(router, &heads).await?;
@@ -4679,6 +4719,7 @@ async fn load_selected_ref_heads(
         Option<(
             crab_metadata::capsule_protocol::CapsuleRefHead,
             crab_storage::ETag,
+            Bytes,
         )>,
     >,
 > {
@@ -4698,7 +4739,7 @@ async fn load_selected_ref_heads(
                 "capsule ref-head key does not match its ref name",
             ));
         }
-        Ok(Some((head, etag)))
+        Ok(Some((head, etag, body)))
     }))
     .buffered(32)
     .try_collect()
@@ -6132,6 +6173,24 @@ mod tests {
                 StorageOperation::List,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn ref_view_retains_head_bodies_and_cas_tokens_for_push() {
+        let inner = Arc::new(InMemory::new());
+        seed_prepared_multi_ref(inner.clone(), true, true).await;
+        let router = StoreLayout::new(Store::new(inner), "repositories/test".to_owned());
+        let root = load_root(&router).await.unwrap();
+
+        let view = open_ref_view_from_root(&router, root).await.unwrap();
+        let ref_names = view
+            .push_ref_head_bases()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+
+        assert_eq!(ref_names, vec!["refs/heads/feature", "refs/heads/main"]);
+        assert!(view.push_ref_head_bases().values().all(Option::is_some));
     }
 
     #[tokio::test]

@@ -157,6 +157,7 @@ async fn run_inner(
         }
     };
     let base = view.root_snapshot().clone();
+    let push_ref_head_bases = view.push_ref_head_bases().clone();
     let git_dir = config
         .git_dir
         .clone()
@@ -444,6 +445,7 @@ async fn run_inner(
             }
             let result = if changes_namespace {
                 let commit_layout = layout.clone();
+                let commit_push_ref_head_bases = push_ref_head_bases.clone();
                 crab_write::with_ref_namespaces_wait(
                     layout.store(),
                     &layout,
@@ -469,6 +471,7 @@ async fn run_inner(
                             &capsule,
                             &pointer_delta,
                             &lfs_objects,
+                            &commit_push_ref_head_bases,
                         )
                         .await
                     },
@@ -483,6 +486,7 @@ async fn run_inner(
                     &capsule,
                     &pointer_delta,
                     &lfs_objects,
+                    &push_ref_head_bases,
                 )
                 .await
             };
@@ -547,9 +551,17 @@ async fn publish_capsule(
     capsule: &crab_metadata::capsule_protocol::Capsule,
     pointer_delta: &crab_metadata::capsule_protocol::PointerCatalog,
     lfs_objects: &[String],
+    push_ref_head_bases: &BTreeMap<String, Option<(Bytes, crab_storage::ETag)>>,
 ) -> Result<CapsulePublishAttempt> {
     let Some(replication) = config.active_active_replication.as_ref() else {
-        return match crab_write::capsule_protocol::publish(layout, base, transaction, capsule).await
+        return match crab_write::capsule_protocol::publish_with_ref_head_bases(
+            layout,
+            base,
+            transaction,
+            capsule,
+            push_ref_head_bases,
+        )
+        .await
         {
             Ok(_) => Ok(CapsulePublishAttempt::Committed(None)),
             Err(crab_write::WriteError::RefChanged { .. }) => Ok(CapsulePublishAttempt::RefChanged),
@@ -564,13 +576,15 @@ async fn publish_capsule(
                 key: "replication.coordinator".to_owned(),
                 origin: "protocol-v2 active-active push requires a live coordinator".to_owned(),
             })?;
-    let prepared = crab_write::capsule_protocol::prepare_coordinated_publication(
-        layout,
-        base,
-        transaction,
-        capsule,
-    )
-    .await?;
+    let prepared =
+        crab_write::capsule_protocol::prepare_coordinated_publication_with_ref_head_bases(
+            layout,
+            base,
+            transaction,
+            capsule,
+            push_ref_head_bases,
+        )
+        .await?;
     let descriptor = prepared.descriptor().clone();
     let refs = transaction
         .edits()
@@ -1139,6 +1153,7 @@ mod tests {
             &capsule,
             &crab_metadata::capsule_protocol::PointerCatalog::new(),
             &[],
+            &BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1204,6 +1219,7 @@ mod tests {
             &capsule,
             &crab_metadata::capsule_protocol::PointerCatalog::new(),
             &[],
+            &BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1590,9 +1606,17 @@ mod tests {
         assert!(result.all_ok());
         assert!(committed.is_none());
         let second_requests = observer.count() - before_second;
-        assert!(
-            second_requests <= 10,
-            "incremental push request budget exceeded: {second_requests}"
+        let operations = observer
+            .observations
+            .lock()
+            .expect("observer lock")
+            .iter()
+            .skip(before_second)
+            .map(|observation| observation.operation)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            second_requests, 9,
+            "incremental push request budget changed: {operations:?}"
         );
         let committed = crab_read::capsule_protocol::open_view(&layout, limits)
             .await
