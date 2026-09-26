@@ -596,6 +596,15 @@ impl NodeLogTransport for FaultFollowerTransport {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn follower_fsync_can_acknowledge_before_object_root_cas() {
+    exercise_fleet_ack_drain(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fleet_ack_drain_reconciles_a_lost_root_cas_response() {
+    exercise_fleet_ack_drain(true).await;
+}
+
+async fn exercise_fleet_ack_drain(lose_response: bool) {
     let store = Arc::new(PausingStore::new(Arc::new(InMemory::new())));
     let object_store: Arc<dyn ObjectStore> = store.clone();
     let fixture = fixture_with_limits_and_store(
@@ -735,7 +744,37 @@ async fn follower_fsync_can_acknowledge_before_object_root_cas() {
             .ltx_root(),
         Some(initial_root)
     );
+    let duplicate_calls = calls.clone();
+    assert_eq!(
+        handle
+            .execute(request, digest, 21, 1_024, 1_024, move |_| {
+                duplicate_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(HandlerOutcome::Success(b"duplicate".to_vec()))
+            })
+            .await
+            .unwrap(),
+        outcome
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let drain = handle.drain();
+    tokio::pin!(drain);
+    let early = tokio::time::timeout(std::time::Duration::from_millis(50), &mut drain).await;
+    if lose_response {
+        store.lose_next_update_response();
+    }
+    // Release the provider before asserting so a failed gate does not strand SQL work.
     store.release();
+    assert!(
+        early.is_err(),
+        "fleet-only acknowledgement must not complete drain"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), &mut drain)
+        .await
+        .unwrap()
+        .unwrap();
+    if lose_response {
+        assert!(store.lost_update_response_consumed());
+    }
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let control = authority
@@ -765,19 +804,6 @@ async fn follower_fsync_can_acknowledge_before_object_root_cas() {
         .unwrap();
     assert_eq!(published_root.position.txid, 2);
     assert_ne!(published_root.digest, initial_root.digest);
-    let duplicate_calls = calls.clone();
-    assert_eq!(
-        handle
-            .execute(request, digest, 21, 1_024, 1_024, move |_| {
-                duplicate_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(HandlerOutcome::Success(b"duplicate".to_vec()))
-            })
-            .await
-            .unwrap(),
-        outcome
-    );
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    handle.drain().await.unwrap();
     runtime.shutdown().await.unwrap();
 
     let verified = fixture.replica.open_root(&published_root).await.unwrap();

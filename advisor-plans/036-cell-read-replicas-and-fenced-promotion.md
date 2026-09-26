@@ -45,11 +45,10 @@ and more nodes, including loss and replacement. Measure read throughput,
 freshness, memory, disk, descriptors, S3 calls, and takeover time before a
 production claim.
 
-`crates/crab-cell-runtime/docs/canonical-ltx-scaling.md:110` explicitly excludes
-read replicas from the **current** design, and
-`crates/crab-cell-runtime/docs/failover-and-followers.md:18` says today's followers are durability logs,
-not SQL readers. This plan is a proposed extension, not a reinterpretation of
-those contracts. Slice 0 must reconcile those documents before code changes.
+The canonical scaling and follower documents now describe this opt-in
+read-only extension. Durability followers remain logs; read secondaries have
+independent placement and admission. The library client policy is explicit,
+and the product peer route requires object durability mode.
 The existing nine-profile protected release gate remains independent; local
 Compose or RustFS receipts never satisfy it.
 
@@ -276,7 +275,7 @@ record, mutable LTX head, or owner-to-owner database copy.
 
 ## Implementation slices and exit evidence
 
-Current slice state (local proof only): 0 partially reconciled in docs; 1 has
+Current slice state (local proof only): 0 reconciled in docs; 1 has
 the existing object-proof path and a verified offline fleet-to-object rollout,
 with fault injection during rollout still open;
 2 sparse immutable opener, atomic refresh, exact-root isolation, bounded page
@@ -328,9 +327,8 @@ and admission until execution finishes. The final job admission is serialized
 with pool closure. Both regressions pass in memory and on local RustFS.
 A real schema migration during a blocked old-view query now has explicit
 proof: unchanged owner/epoch, a new code/schema root, rejection of the old
-query and refresh, and the migrated value through a fresh reader. The complete
-offline retention sweep and application release rollout fault combinations
-remain separate qualification work.
+query and refresh, and the migrated value through a fresh reader. The complete offline retention sweep now passes as recorded below.
+Application release rollout fault combinations remain separate qualification work.
 An explicit local or peer replica query whose view is behind a caller's minimum
 returns `ReplicaBehind` with both sequence numbers. The private peer wire has
 an explicit read operation and distinct behind/unavailable error codes.
@@ -432,6 +430,17 @@ recovers all twenty issues and comments, recruits two readers, and acknowledges
 a new write. It exposed and fixed maintenance-session reuse after tombstoning
 and runtime shutdown bypassing its owning host. The linked qualification
 receipt distinguishes the failed attempts, fixed image, and successful run.
+
+Additional local proof now covers both readers dying before a surviving
+writer acknowledges a new S3-rooted value, followed by loss of that writer's
+disk and recovery at the next epoch. A two-minute five-node workload through
+unequally loaded ingresses returned correct values without errors and balanced
+4,345 replica reads across four readers (1,084–1,090 each). Replica throughput
+was 72.39 requests/s versus 279.10 for the owner route. Concurrent refreshes
+coalesce; storage-full snapshot creation fails without replacing existing
+files and can retry. The deterministic durability suite now blocks drain of
+a follower-only acknowledgement until exact S3 publication, also when that
+root CAS commits but its response is lost. See the linked source-bound receipt.
 
 ## Fault matrix and release gates
 

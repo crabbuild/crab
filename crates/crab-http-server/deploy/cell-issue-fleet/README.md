@@ -212,7 +212,10 @@ issued frame must be object-covered before the durable log close CAS.
 A failed or forced drain leaves the fleet configuration intact and fails the
 run. The provider and all local volumes remain available for investigation.
 
-Add `--exercise-drain-faults` to kill both members of an observed active
+Add `--exercise-drain-faults` to temporarily give RustFS 0.25 vCPU during
+fleet enrollment, restoring its normal CPU schedule before fault injection.
+This makes follower proofs observable against a slower object provider. The
+runner then kills both members of an observed active
 durability log, then separately stop RustFS before drain. Each interrupted
 attempt must fail the same rollout barrier with byte-identical fleet configs;
 restart must recover every acknowledged value before the next phase. The

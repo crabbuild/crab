@@ -121,35 +121,45 @@ def main() -> None:
     }
     nodes = [node_name(index) for index in range(1, 4)]
     acknowledged = {index: set() for index in range(1, 4)}
-    # A quiet local store can win every initial proof race. Activation follows
-    # follower fsync during a mutation; polling idle logs cannot exercise it.
-    for attempt in range(5):
-        def write_probe(offset):
-            index = offset % 3 + 1
-            body = f"fleet activation {attempt}:{offset}"
-            result = request_json(
-                "POST", node_url(index, args.node_port_base) + issue_path(index) + "/1/comments",
-                {"request_id": str(uuid.uuid4()), "body": body},
-            )
-            if result["body"] != body:
-                raise RuntimeError("fleet proof workload returned the wrong comment")
-            return index, body
-        with ThreadPoolExecutor(max_workers=6) as workers:
-            for index, body in workers.map(write_probe, range(18)):
-                acknowledged[index].add(body)
-        enrolled = []
-        for index in range(1, 4):
-            session, _, _ = prove_node(path, (), index)
-            status = json.loads(compose(path, (), "exec", "-T", node_name(index), "crab-http-server",
-                                        "--config", CONFIG, "cells", "node", "--session", session, "--json"))
-            enrolled.append(status["advertisement"])
-        samples = {node_name(index): metrics(path, index) for index in range(1, 4)}
-        if all(node and node["log"] for node in enrolled) and any(
-            proof_count(sample, "fleet") > 0 for sample in samples.values()
-        ):
-            break
-    else:
-        raise RuntimeError("the initial fleet deployment never issued a fleet durability proof")
+    provider = compose(path, (), "ps", "--quiet", "rustfs")
+    if args.exercise_drain_faults:
+        # Slower object publication makes the existing follower-proof race observable.
+        # This changes only the disposable provider's CPU schedule, never a proof gate.
+        command("docker", "update", "--cpus", "0.25", provider)
+        report["fleet_enrollment_provider_cpus"] = 0.25
+    try:
+        # A quiet local store can win every initial proof race. Activation follows
+        # follower fsync during a mutation; polling idle logs cannot exercise it.
+        for attempt in range(5):
+            def write_probe(offset):
+                index = offset % 3 + 1
+                body = f"fleet activation {attempt}:{offset}"
+                result = request_json(
+                    "POST", node_url(index, args.node_port_base) + issue_path(index) + "/1/comments",
+                    {"request_id": str(uuid.uuid4()), "body": body},
+                )
+                if result["body"] != body:
+                    raise RuntimeError("fleet proof workload returned the wrong comment")
+                return index, body
+            with ThreadPoolExecutor(max_workers=6) as workers:
+                for index, body in workers.map(write_probe, range(18)):
+                    acknowledged[index].add(body)
+            enrolled = []
+            for index in range(1, 4):
+                session, _, _ = prove_node(path, (), index)
+                status = json.loads(compose(path, (), "exec", "-T", node_name(index), "crab-http-server",
+                                            "--config", CONFIG, "cells", "node", "--session", session, "--json"))
+                enrolled.append(status["advertisement"])
+            samples = {node_name(index): metrics(path, index) for index in range(1, 4)}
+            if all(node and node["log"] for node in enrolled) and any(
+                proof_count(sample, "fleet") > 0 for sample in samples.values()
+            ):
+                break
+        else:
+            raise RuntimeError("the initial fleet deployment never issued a fleet durability proof")
+    finally:
+        if args.exercise_drain_faults:
+            command("docker", "update", "--cpus", "0", provider)
     fleet_body = "acknowledged before the fleet-to-object drain"
     if comment(args.node_port_base, fleet_body)["body"] != fleet_body:
         raise RuntimeError("fleet comment was not acknowledged")

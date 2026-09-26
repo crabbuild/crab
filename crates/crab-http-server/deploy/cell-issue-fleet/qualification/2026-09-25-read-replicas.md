@@ -361,12 +361,78 @@ layout, and documentation validation pass. The final server image built
 successfully. This closes the local offline-retention case; it is not a
 concurrent online-retention protocol or a production release qualification.
 
+## Reader loss before writer loss
+
+`qualify_reader_first_loss.py` passed on runtime `287a5eb1397`, runner
+`9bfe045988f`, and the same `faf59e3a8b06` image as retention. Both readers
+(nodes 1 and 3) were killed and their local volumes deleted first. Replica
+reads became explicitly unavailable. The surviving writer on node 2 remained
+at epoch 11 and acknowledged a new issue body, advancing the exact S3 root
+from sequence 331 to 332 in 0.886 seconds after reader loss.
+
+The writer was then killed and its volume deleted. Three fresh nodes recovered
+the identical sequence-332 root at epoch 12, returned the acknowledged body,
+and recruited two readers. Recovery plus node and reader checks took 14.037
+seconds. This proves write acknowledgement is independent of surviving read
+secondaries in object mode.
+
+Receipt: `plan036-sparse-cost-1/reader-first-loss-report.json`, SHA-256
+`ad4272a7e3a7aa6965906655a1256131680c89b05270fee2a5d36794665ef02e`.
+Interval: `2026-09-26T07:15:06.214552+00:00` through
+`2026-09-26T07:15:57.106930+00:00`.
+
+## Sustained reads across unequal ingresses
+
+`qualify_reader_load.py` passed on runtime `287a5eb1397`, runner `3819b4565b2`,
+and image `faf59e3a8b06`. Five nodes retained the 1 vCPU/1 GiB limits. Six
+closed-loop clients used node 1 and two used node 5, for sixty seconds on each
+route. Every response matched the previously acknowledged title/body; both
+modes had zero errors. Every replica receipt was at least sequence 362.
+
+| Route | Successful reads | Requests/s | p50 ms | p99 ms |
+| --- | ---: | ---: | ---: | ---: |
+| Owner | 16,752 | 279.10 | 24.35 | 85.23 |
+| Replica | 4,345 | 72.39 | 98.55 | 326.63 |
+
+Node 1 sent 3,256 replica reads, distributed 811–818 per reader. Node 5 sent
+1,089, distributed 272–273 per reader. Across both ingresses, the four readers
+served 1,084–1,090 each. Selection balances work observed by each ingress;
+this run does not establish a global load estimator. The longer workload,
+forwarding paths, and changing fixture differ from the earlier 200-request
+measurements; these numbers should not be treated as a controlled regression
+comparison with those bursts.
+
+The owner window recorded 17,722 control reads and 142 LTX origin requests
+(247,866 bytes); the replica window recorded 9,621 control reads and no LTX
+origin fetches. These are whole-node counters including background work,
+excluding membership/policy requests and provider retries. Boundary samples
+across both modes showed 65.3–89.0 MiB RSS, 117–337 descriptors, and
+4,008–6,688 KiB local Cell disk. Process-lifetime RSS high-water marks were
+also 65.3–89.0 MiB; these are neither per-reader peaks nor capacity proof.
+
+The first attempt used twelve clients at one ingress and exceeded its existing
+eight-request collaboration admission limit. It returned 89,881 HTTP 429s;
+that failed receipt is retained as `reader-load-overload-report.json`, SHA-256
+`e6d4677fc14028e46376173ff30b11115a9e9d7e3d58eda96bcc339e3a5733a4`.
+Server limits were unchanged for the admitted run.
+
+Passing receipt: `plan036-sparse-cost-1/reader-load-report.json`, SHA-256
+`804d6de1ae30f194c4f556d11debec71fa7255bce1962ddc0335381c2d9071a4`.
+Interval: `2026-09-26T07:29:55.508529+00:00` through
+`2026-09-26T07:32:08.618895+00:00`.
+
+The local deterministic checks also cover overlapping refresh coalescing,
+placeholder creation failing with storage-full, preservation of stale files,
+and successful fresh-view retry. The durability suite proves that a
+follower-backed acknowledgement cannot finish drain before S3 coverage,
+including reconciliation of a committed root CAS whose response was lost.
+
 ## Scope still open
 
-The container runs do not establish complete per-query S3 costs, sustained
-hot Cell throughput, peak resources, the complete release-fault matrix, or
-1k/5k/10k Cell admission. Distribution under uneven load across multiple
-ingress nodes remains unqualified. Sparse-reader measurements above show
+The container runs do not establish complete per-query S3 costs, production
+hot Cell throughput, per-reader peak resources, the complete release-fault
+matrix, or 1k/5k/10k Cell admission. The bounded unequal-ingress run above
+qualifies only its recorded workload. Sparse-reader measurements above show
 balanced distribution but lower throughput than owner reads in this workload.
 Protected S3 and multi-host release gates remain outside the requested local
 RustFS execution scope. See [Plan 036](../../../../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md).
