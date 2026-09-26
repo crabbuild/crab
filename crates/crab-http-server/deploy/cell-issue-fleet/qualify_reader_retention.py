@@ -116,9 +116,11 @@ def main() -> None:
     for limit in (1, 100_000):
         started = datetime.now(timezone.utc)
         run = subprocess.run([*arguments, str(limit)], text=True, capture_output=True, timeout=600)
+        finished = datetime.now(timezone.utc)
         (args.state / f"retention-{limit}.log").write_text(run.stderr + "\n" + run.stdout)
         counts = pass_counts(run.stderr)
         record = {"limit": limit, "started_at": started.isoformat(), "counts": counts,
+                  "finished_at": finished.isoformat(),
                   "exit_code": run.returncode, "release": cli("release", "status")}
         report["passes"].append(record)
         save()
@@ -142,7 +144,9 @@ def main() -> None:
             raise RuntimeError("same-revision maintenance retry did not complete with its backup pin")
     after = inventory(path)
     deleted = sorted(report["before_inventory"].keys() - after.keys())
-    cutoff = datetime.fromisoformat(report["passes"][0]["started_at"]) - timedelta(hours=1)
+    # Collector time falls inside the command interval. Use its upper bound;
+    # objects can legitimately cross the grace cutoff during a long mark scan.
+    cutoff = datetime.fromisoformat(report["passes"][-1]["finished_at"]) - timedelta(hours=1)
     if len(deleted) != sum(record["counts"]["deleted_objects"] for record in report["passes"]):
         raise RuntimeError("provider inventory and retention deletion counts differ")
     if any(datetime.fromisoformat(report["before_inventory"][key]["LastModified"]) > cutoff for key in deleted):
