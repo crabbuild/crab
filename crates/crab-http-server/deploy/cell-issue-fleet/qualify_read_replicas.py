@@ -341,6 +341,20 @@ def prove_all_reader_loss(path: Path, profiles: tuple[str, ...], stage: dict, po
     if after is None:
         raise RuntimeError("survivor did not recover the acknowledged issue from RustFS")
     replacement = prove_readers(port, 20, 2, 20, survivor_index)
+    writer_index = sessions[after["owner"]["session"]][0]
+    writer_url = node_url(writer_index, port) + issue_path(20) + "/1"
+    body = "Written after owner and all reader disks were lost"
+    written = request_json("PATCH", writer_url, {"version": issue["version"], "body": body})
+    visible = request_json("GET", writer_url)
+    after_write = json.loads(compose(path, profiles, *status_args))
+    if written.get("body") != body or visible.get("body") != body:
+        raise RuntimeError("recovered writer did not acknowledge and serve a new mutation")
+    if (
+        after_write["owner"] != after["owner"]
+        or after_write["epoch"] != after["epoch"]
+        or after_write["root"]["commit_sequence"] <= after["root"]["commit_sequence"]
+    ):
+        raise RuntimeError("recovered writer did not advance its durable root after acknowledgement")
     compose(path, profiles, "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300", *sorted(lost))
     return {
         "lost_nodes": sorted(lost),
@@ -351,6 +365,8 @@ def prove_all_reader_loss(path: Path, profiles: tuple[str, ...], stage: dict, po
         "root_after": after["root"],
         "recovery_seconds": round(time.monotonic() - started, 3),
         "replacement_readers": replacement,
+        "new_write": {"body": body, "owner": after_write["owner"],
+                      "epoch": after_write["epoch"], "root": after_write["root"]},
     }
 
 
