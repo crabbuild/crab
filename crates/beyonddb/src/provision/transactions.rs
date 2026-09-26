@@ -15,7 +15,7 @@ use crab_cell_runtime::node::NodeDirectory;
 use crab_cell_runtime::partition_for_shard;
 use extenddb_storage::error::StorageError;
 
-use super::{CellInitialPartitionProvisioner, provision_error, wait_for_expired};
+use super::{CellInitialPartitionProvisioner, provision_error};
 use crate::backend::cell_error;
 use crate::{
     CellStorage, CoordinatorParticipantTarget, Json, ListCoordinatorShards,
@@ -257,10 +257,11 @@ impl CellInitialPartitionProvisioner {
         Ok(())
     }
 
-    /// Recover registered coordinator shards assigned to this endpoint.
+    /// Recover idle or expired registered coordinators for a configured account.
     ///
     /// Call during startup before accepting transaction requests. Idle shards
-    /// can be acquired; active shards require the former owner's expired lease.
+    /// can be acquired; expired owners require a fenced session and Cell CAS.
+    /// Live remote owners remain in place, regardless of their endpoint.
     /// Resolve each shard before admitting the next; private peer routing must
     /// already be available, while public transaction admission remains stopped.
     pub async fn recover_registered_coordinators(
@@ -304,7 +305,7 @@ impl CellInitialPartitionProvisioner {
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
                 let local = loop {
                     let result = self
-                        .recover_local_transaction_owner(
+                        .recover_discovered_owner(
                             &target,
                             crate::transaction_coordinator::MODULE,
                             initialize_coordinator,
@@ -392,46 +393,12 @@ impl CellInitialPartitionProvisioner {
                             ),
                         };
                     if visited.insert(target.cell_id()) {
-                        self.recover_local_transaction_owner(&target, module, initialize, nodes)
+                        self.recover_discovered_owner(&target, module, initialize, nodes)
                             .await?;
                     }
                 }
             }
         }
-    }
-
-    async fn recover_local_transaction_owner(
-        &self,
-        target: &CellTarget,
-        module: &'static str,
-        initialize: Initialize,
-        nodes: &NodeDirectory,
-    ) -> Result<bool, StorageError> {
-        let observed = CellAuthority::new(self.layout.clone())
-            .load(target.cell_id())
-            .await
-            .map_err(provision_error)?
-            .ok_or_else(|| StorageError::Transient("transaction Cell has no authority".into()))?;
-        let former = observed
-            .value()
-            .owner
-            .as_ref()
-            .map(|owner| (owner.session, owner.endpoint.clone()));
-        match former {
-            Some((session, _)) if session == self.session => {}
-            Some((session, endpoint)) if endpoint == self.endpoint => {
-                wait_for_expired(nodes, session).await?;
-                let proof = self.cataloged(target, module).await?;
-                self.takeover_expired(target, proof, nodes).await?;
-            }
-            None if observed.value().root.is_some() => {
-                let proof = self.cataloged(target, module).await?;
-                self.admit_initialized(target, proof, initialize).await?;
-            }
-            _ => return Ok(false),
-        }
-        self.track_coordinator(target)?;
-        Ok(true)
     }
 }
 

@@ -711,6 +711,19 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
     }
     child.kill().unwrap();
     child.wait().unwrap();
+    // A replacement process can receive a new private address. Durable Cell
+    // ownership must follow its fenced session, including historical coordinators.
+    let replacement_peer = loop {
+        let address = free_addr();
+        if address != peer {
+            break address;
+        }
+    };
+    let mut replacement_config: serde_json::Value =
+        serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    replacement_config["peer_bind"] = json!(replacement_peer);
+    replacement_config["peer_endpoint"] = json!(format!("https://{replacement_peer}"));
+    fs::write(&config, replacement_config.to_string()).unwrap();
     let mut restarted = start(&config, &log, false, s3);
     wait_healthy(&mut restarted, public, &log);
     large.assert_recovered(&sdk).await;
@@ -809,6 +822,17 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
             .and_then(|description| description.attribute_name())
             .is_none()
     );
+    // Graceful drain leaves ranges Idle. Discovery must reopen their published
+    // roots as well as taking over expired active owners after a hard restart.
+    let idle_read = sdk
+        .get_item()
+        .table_name("ProcessData")
+        .key("id", AttributeValue::S("process".into()))
+        .consistent_read(true)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(idle_read.item(), Some(&updated));
     sdk.delete_table()
         .table_name("ProcessData")
         .send()

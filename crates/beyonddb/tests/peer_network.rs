@@ -616,6 +616,22 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .take(14)
         .collect();
     let large_read = support::LargeTransaction::single_cell(&sdk, "RemoteTable", read_keys).await;
+    // Leave a coordinator on the owner that will disappear, with one participant
+    // applied and its resolution receipt lost. Choose an unused shard explicitly.
+    let restart_id = loop {
+        let candidate = *uuid::Uuid::now_v7().as_bytes();
+        let target = beyonddb::coordinator_target("123456789012", &candidate).unwrap();
+        if CellAuthority::new(layout.clone())
+            .load(target.cell_id())
+            .await
+            .unwrap()
+            .is_none()
+        {
+            break candidate;
+        }
+    };
+    let (restart_coordinator, _) =
+        recovery::abandon_commit(&provisioner, &client, restart_id, "changed-endpoint").await;
     shutdown_tx.send(()).unwrap();
     server.await.unwrap().unwrap();
     owner_lease.cancel();
@@ -652,16 +668,23 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .takeover_expired_account("123456789012", &peer_directory)
         .await
         .unwrap();
+    replacement_provisioner
+        .recover_registered_partitions("123456789012", replacement_account.clone(), &peer_directory)
+        .await
+        .unwrap();
     for partition in &other_partitions {
-        replacement_provisioner
-            .takeover_expired_partition(
-                "123456789012",
-                &other_table.id,
-                &partition.partition_id,
-                &peer_directory,
-            )
+        let target =
+            beyonddb::data_target("123456789012", &other_table.id, &partition.partition_id)
+                .unwrap();
+        let current = CellAuthority::new(layout.clone())
+            .load(target.cell_id())
             .await
+            .unwrap()
             .unwrap();
+        assert_eq!(
+            current.value().owner.as_ref().unwrap().session,
+            replacement_session
+        );
     }
     let local_account = replacement
         .application_handle::<Beyonddb>(
@@ -721,6 +744,35 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         })
         .await
     });
+    replacement_provisioner
+        .recover_registered_coordinators(
+            "123456789012",
+            &replacement_client,
+            &beyonddb::CellStorage::new(replacement_client.clone(), "us-east-1"),
+            &peer_directory,
+        )
+        .await
+        .unwrap();
+    let recovered_transaction = replacement_client
+        .query::<beyonddb::ReadCrossCellTransaction>(
+            &restart_coordinator,
+            None,
+            Json(beyonddb::ReadCrossCellTransactionInput {
+                account_id: "123456789012".into(),
+                transaction_id: restart_id,
+                routing_key: restart_id.to_vec(),
+            }),
+        )
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    assert_eq!(
+        recovered_transaction.decision,
+        beyonddb::CoordinatorDecision::Commit
+    );
+    assert_eq!(recovered_transaction.resolved_count, 2);
     let recovered = sdk
         .get_item()
         .table_name("NetworkData")
@@ -791,6 +843,19 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .await
         .unwrap();
     assert_eq!(cross_owner_read.item(), Some(&item));
+    for name in ["NetworkData", "RemoteTable"] {
+        let item = replacement_sdk
+            .get_item()
+            .table_name(name)
+            .key("id", AwsAttributeValue::S("changed-endpoint".into()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            item.item().unwrap().get("value"),
+            Some(&AwsAttributeValue::S("recovered".into()))
+        );
+    }
     recovery::assert_recovered_images(&replacement_sdk).await;
     large.assert_recovered(&replacement_sdk).await;
     large_read.assert_recovered(&replacement_sdk).await;

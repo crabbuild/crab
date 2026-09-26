@@ -9,7 +9,7 @@ use beyonddb::{
 };
 use extenddb_core::types::{AttributeValue, Item};
 
-async fn abandon_commit(
+pub(crate) async fn abandon_commit(
     provisioner: &Arc<CellInitialPartitionProvisioner>,
     client: &CellClient,
     transaction_id: [u8; 16],
