@@ -77,3 +77,7 @@ CREATE TABLE ddb_transaction_applied (
     PRIMARY KEY (account_id, token)
 );
 CREATE INDEX ddb_transaction_applied_age ON ddb_transaction_applied (created_at_ms);
+
+CREATE TABLE ddb_coordinator_shards (
+    shard INTEGER PRIMARY KEY CHECK (shard BETWEEN 0 AND 4095)
+);

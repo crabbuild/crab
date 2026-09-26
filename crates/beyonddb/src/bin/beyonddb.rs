@@ -282,6 +282,7 @@ async fn serve_ready(
         )?
         .with_initial_partition_count(config.initial_partitions)?,
     );
+    let mut recovered_coordinators = Vec::new();
     for account_id in &config.owned_accounts {
         let account = provisioner
             .recover_owned_account(account_id, &directory)
@@ -289,6 +290,11 @@ async fn serve_ready(
         provisioner
             .recover_local_partitions(account_id, account.clone(), &directory)
             .await?;
+        recovered_coordinators.extend(
+            provisioner
+                .recover_registered_coordinators(account_id, account.clone(), &directory)
+                .await?,
+        );
         provisioner.install_account_capacity_loop(
             &tasks,
             account_id.clone(),
@@ -303,6 +309,12 @@ async fn serve_ready(
             .await?;
     }
     let client = build_peer_client(node, layout.clone(), directory.clone(), session, &tls)?;
+    if !recovered_coordinators.is_empty() {
+        let storage = CellStorage::new(client.clone(), config.region.clone());
+        for coordinator in recovered_coordinators {
+            storage.recover_fenced_coordinator(&coordinator).await?;
+        }
+    }
     if let (Some(bootstrap), Some(secret)) = (config.bootstrap.as_ref(), bootstrap_secret) {
         let policy = std::fs::read_to_string(&bootstrap.policy_file)?;
         CellCredentialStore::new(client.clone(), layout.clone(), encryption_key)
