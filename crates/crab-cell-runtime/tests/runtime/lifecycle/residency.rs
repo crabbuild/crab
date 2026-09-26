@@ -937,8 +937,15 @@ async fn released_large_cell_with_store(
     session: SessionId,
 ) -> (Arc<PausingStore>, Fixture) {
     let pausing = Arc::new(PausingStore::new(Arc::new(InMemory::new())));
-    let fixture =
-        fixture_with_limits_and_store(seed, Limits::default(), Store::new(pausing.clone()));
+    let store = Store::with_retry(
+        pausing.clone(),
+        RetryPolicy {
+            // Expose transport failures to the runtime's hydration retry policy.
+            max_attempts: 1,
+            ..RetryPolicy::DEFAULT
+        },
+    );
+    let fixture = fixture_with_limits_and_store(seed, Limits::default(), store);
     let first_runtime =
         CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 64 * 1024 * 1024, session).unwrap();
     let handle = bootstrap_role_on(
@@ -948,7 +955,9 @@ async fn released_large_cell_with_store(
         CatalogRole::Repository,
         |transaction| {
             transaction.execute_batch(
-                "CREATE TABLE payload(value BLOB NOT NULL);\
+                "CREATE TABLE resident(value INTEGER NOT NULL);\
+                 INSERT INTO resident VALUES(0);\
+                 CREATE TABLE payload(value BLOB NOT NULL);\
                  WITH RECURSIVE numbers(value) AS (\
                    SELECT 1 UNION ALL SELECT value + 1 FROM numbers WHERE value < 512\
                  )\
@@ -961,6 +970,199 @@ async fn released_large_cell_with_store(
     handle.drain().await.unwrap();
     first_runtime.shutdown().await.unwrap();
     (pausing, fixture)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn foreground_query_and_mutation_progress_during_same_cell_hydration() {
+    let (pausing, fixture) = released_large_cell_with_store(
+        b"foreground-during-hydration",
+        SessionId::from_bytes([181; 16]),
+    )
+    .await;
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let observed = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let session = SessionId::from_bytes([182; 16]);
+    let runtime = CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 64 << 20, session).unwrap();
+    let restored = runtime
+        .acquire_idle_restored(
+            proof,
+            fixture.replica.clone(),
+            authority.clone(),
+            observed,
+            cold_node_directory(&fixture).join("foreground.sqlite"),
+            Owner {
+                session,
+                endpoint: "https://foreground.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let read = || {
+        restored.query(64, 64, |connection| {
+            let value: i64 =
+                connection.query_row("SELECT value FROM resident", [], |row| row.get(0))?;
+            Ok(value.to_be_bytes().to_vec())
+        })
+    };
+    assert_eq!(read().await.unwrap(), 0_i64.to_be_bytes());
+    pausing.arm_gets();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        pausing.wait_until_get_blocked(),
+    )
+    .await
+    .unwrap();
+    let foreground = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        let before = read().await?;
+        let now = now_ms();
+        restored
+            .execute(
+                mutation_identity_window(183, now, now + 10_000),
+                Digest::from_bytes([184; 32]),
+                now,
+                64,
+                64,
+                |transaction| {
+                    transaction.execute("UPDATE resident SET value = value + 1", [])?;
+                    Ok(HandlerOutcome::Success(Vec::new()))
+                },
+            )
+            .await?;
+        Ok::<_, crab_cell_runtime::Error>((before, read().await?))
+    })
+    .await;
+    // Release before checking the deadline so the failing baseline can drain.
+    pausing.release_gets();
+    restored.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+    let (before, after) = foreground
+        .expect("background fetch blocked foreground work on its own Cell")
+        .unwrap();
+    assert_eq!(
+        (before, after),
+        (0_i64.to_be_bytes().to_vec(), 1_i64.to_be_bytes().to_vec())
+    );
+    let root = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap()
+        .value()
+        .ltx_root()
+        .unwrap();
+    let destination = fixture._directory.path().join("foreground-restored.sqlite");
+    fixture
+        .replica
+        .open_root(&root)
+        .await
+        .unwrap()
+        .restore(&destination)
+        .await
+        .unwrap();
+    let connection = crab_ltx::rusqlite::Connection::open(destination).unwrap();
+    let value: i64 = connection
+        .query_row("SELECT value FROM resident", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(value, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retryable_hydration_fetch_failure_preserves_the_serving_owner() {
+    let (pausing, fixture) = released_large_cell_with_store(
+        b"retryable-hydration-fetch",
+        SessionId::from_bytes([185; 16]),
+    )
+    .await;
+    let catalog = crab_cell_runtime::cell::catalog::CellCatalog::new(
+        fixture.layout.clone(),
+        fixture.target.tenant(),
+    );
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let observed = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let session = SessionId::from_bytes([186; 16]);
+    let runtime = CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 64 << 20, session).unwrap();
+    let restored = runtime
+        .acquire_idle_restored(
+            proof,
+            fixture.replica.clone(),
+            authority,
+            observed,
+            cold_node_directory(&fixture).join("retryable-fetch.sqlite"),
+            Owner {
+                session,
+                endpoint: "https://retryable-fetch.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let read = || {
+        restored.query(64, 64, |connection| {
+            let value: i64 =
+                connection.query_row("SELECT value FROM resident", [], |row| row.get(0))?;
+            Ok(value.to_be_bytes().to_vec())
+        })
+    };
+    read().await.unwrap();
+    pausing.arm_gets();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        pausing.wait_until_get_blocked(),
+    )
+    .await
+    .unwrap();
+    // One failed transport attempt reaches the runtime before its fetch
+    // deadline, proving the retryable-error branch independently of timeout.
+    pausing.transient_get_failures.store(1, Ordering::Release);
+    pausing.release_gets();
+    tokio::time::timeout(std::time::Duration::from_secs(6), async {
+        while runtime.stats().hydration_jobs() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(pausing.transient_get_failures.load(Ordering::Acquire), 0);
+    assert_eq!(runtime.stats().active_cells(), 1);
+    assert_eq!(read().await.unwrap(), 0_i64.to_be_bytes());
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            if runtime
+                .resident_handle(&fixture.target, CatalogRole::Repository)
+                .await
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    restored.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
