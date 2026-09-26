@@ -287,7 +287,7 @@ impl CellCatalog {
             };
             let revision = head.revision;
             let encoded = head.encode()?;
-            let path = self.layout.catalog_head_path(shard);
+            let path = self.layout.catalog_head_path(self.tenant.as_bytes(), shard);
             let published = match observed {
                 Some(observed) => {
                     self.layout
@@ -399,7 +399,7 @@ impl CellCatalog {
             pages: page_refs,
         };
         let encoded = head.encode()?;
-        let path = self.layout.catalog_head_path(shard);
+        let path = self.layout.catalog_head_path(self.tenant.as_bytes(), shard);
         match self
             .layout
             .store()
@@ -439,7 +439,7 @@ impl CellCatalog {
     }
 
     async fn load_head(&self, shard: u8) -> Result<Option<ObservedHead>> {
-        let path = self.layout.catalog_head_path(shard);
+        let path = self.layout.catalog_head_path(self.tenant.as_bytes(), shard);
         let started = std::time::Instant::now();
         let observed = self
             .layout
