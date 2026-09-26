@@ -282,7 +282,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             ),
             LocalCellResolver::new(cell_layout.clone(), identity, owner_runtime.clone()),
             Arc::new(UnavailablePeer),
-            Some(owner_read_replicas),
+            Some(owner_read_replicas.clone()),
         )),
     );
     let owner_heartbeat_stop = CancellationToken::new();
@@ -675,6 +675,14 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     .await;
     assert_eq!(one_reader.0, StatusCode::ACCEPTED);
     assert_eq!(one_reader.1["revision"], 1);
+    let target_status = json_get(&client, readers_url.as_str()).await;
+    assert_eq!(target_status.1["convergence"], "ready");
+    assert_eq!(target_status.1["readiness"]["ready_readers"], 1);
+    let remote_status = owner_router
+        .read_replica_status(&target, &owner_read_replicas)
+        .await
+        .unwrap();
+    assert_eq!(remote_status.ready_readers, 1);
     let ready = reader
         .resolve(target.clone())
         .await
@@ -785,11 +793,22 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     )
     .await;
     assert_eq!(stale_update.0, StatusCode::CONFLICT);
+    let two_readers = json_request(
+        &client,
+        reqwest::Method::PUT,
+        readers_url.as_str(),
+        serde_json::json!({"expected_revision":1,"desired_readers":2}),
+    )
+    .await;
+    assert_eq!(two_readers.0, StatusCode::ACCEPTED);
+    let shortfall = json_get(&client, readers_url.as_str()).await;
+    assert_eq!(shortfall.1["convergence"], "shortfall");
+    assert_eq!(shortfall.1["readiness"]["selected_readers"], 1);
     let zero_readers = json_request(
         &client,
         reqwest::Method::PUT,
         readers_url.as_str(),
-        serde_json::json!({"expected_revision":1,"desired_readers":0}),
+        serde_json::json!({"expected_revision":2,"desired_readers":0}),
     )
     .await;
     assert_eq!(zero_readers.0, StatusCode::ACCEPTED);
@@ -817,7 +836,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         &client,
         reqwest::Method::PUT,
         readers_url.as_str(),
-        serde_json::json!({"expected_revision":2,"desired_readers":1}),
+        serde_json::json!({"expected_revision":3,"desired_readers":1}),
     )
     .await;
     assert_eq!(restored_target.0, StatusCode::ACCEPTED);

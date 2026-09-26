@@ -60,9 +60,10 @@ durability mode, the server now reconciles active owner Cells, sends authenticat
 activation hints to selected nodes, refreshes their admitted read views, and
 accepts explicit authenticated private replica queries. An administrator may
 CAS the target count through the product API, which sends an authenticated
-owner wake-up hint. An explicit issue-detail route uses selected replicas and
-reports actual receipts without falling back to the writer. No general product
-read route, verified ready-count status,
+owner wake-up hint. Its status route probes selected nodes and distinguishes
+proven-ready, unverified, and placement-shortfall counts. An explicit issue-detail
+route uses selected replicas and reports actual receipts without falling back
+to the writer. No general product read route,
 sparse read view, warm-reader promotion preference, or
 production qualification is enabled.
 The server can select the existing object proof path with `[cells]
@@ -263,8 +264,8 @@ Current slice state (local proof only): 0 partially reconciled in docs; 1 open;
 2 full-restore read-only opener, atomic refresh, and exact-root tests pass, but
 sparse view and provider fault cases remain; 3 policy CAS, signed selection,
 owner reconciliation, private activation, node admission, and administrator
-target CAS with owner hint exist, but verified ready status and churn qualification
-remain; 4 typed local and peer queries, position
+target CAS with owner hint and bounded readiness status exist; broader churn qualification
+remains; 4 typed local and peer queries, position
 errors, receipt checks, authority gates, and explicit issue-detail routing exist,
 but other product reads remain owner-only; 5 and 6 open. Private peer replica requests are accepted only in
 the object-durability server profile.

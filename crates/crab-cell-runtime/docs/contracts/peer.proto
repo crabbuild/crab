@@ -150,6 +150,7 @@ message ReadRequest {
     bool replica_activate = 16; // Advisory; receiver verifies policy and current owner.
     CellQuery replica_query = 17; // Explicit snapshot-consistent read.
     bool replica_reconcile = 18; // Advisory owner wake-up after policy CAS.
+    bool replica_status = 19; // Fresh readiness check; never activates a view.
   }
   reserved 11 to 14;
 }

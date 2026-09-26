@@ -196,6 +196,13 @@ impl ReadReplicaManager {
         Ok(receipt)
     }
 
+    pub(crate) async fn status(&self, target: CellTarget) -> Result<Receipt> {
+        if !self.still_selected(target.cell_id()).await? {
+            return Err(Error::ReplicaUnavailable);
+        }
+        self.resolve(target).await?.ready_receipt().await
+    }
+
     async fn destination(&self, cell: CellId) -> Result<PathBuf> {
         let directory = self.root.join(format!("{cell:?}"));
         tokio::fs::create_dir_all(&directory)

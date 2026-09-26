@@ -61,7 +61,9 @@ pub(crate) use initializer::initialize_repository_at;
 pub(super) use initializer::provision_repository;
 pub(crate) use initializer::{initialize_repository, verify_repository_cells};
 pub(crate) use read_replicas::ReadReplicaManager;
-pub(crate) use router::{RepositoryCell, RepositoryCellPeer, RepositoryCellRouter};
+pub(crate) use router::{
+    ReadReplicaStatus, RepositoryCell, RepositoryCellPeer, RepositoryCellRouter,
+};
 pub(crate) use scheduler::{RepositoryCellScheduler, SchedulerStatus};
 
 const REPOSITORY_MIGRATION: &str = include_str!("cells/migrations/0001_repository_identity.sql");

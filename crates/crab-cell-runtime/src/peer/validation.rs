@@ -299,6 +299,9 @@ pub(super) fn validate_read(request: &wire::ReadRequest) -> Result<()> {
         {
             Ok(())
         }
+        Some(wire::read_request::Operation::ReplicaStatus(true)) if request.minimum.is_none() => {
+            Ok(())
+        }
         Some(wire::read_request::Operation::ReplicaQuery(query))
             if query.query_id != 0 && query.codec_version != 0 =>
         {
@@ -315,6 +318,9 @@ pub(super) fn validate_read(request: &wire::ReadRequest) -> Result<()> {
         }
         Some(wire::read_request::Operation::ReplicaReconcile(_)) => {
             Err(Error::Peer("invalid replica reconciliation request"))
+        }
+        Some(wire::read_request::Operation::ReplicaStatus(_)) => {
+            Err(Error::Peer("invalid replica status request"))
         }
         None => Err(Error::Peer("read operation is missing")),
     }

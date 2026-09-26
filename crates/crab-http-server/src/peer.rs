@@ -829,6 +829,9 @@ fn runtime_cell_action(registry: &Registry, request: &VerifiedPeerRequest) -> Op
             Some(peer_wire::read_request::Operation::ReplicaReconcile(true)) => {
                 Some("cell.replica.reconcile")
             }
+            Some(peer_wire::read_request::Operation::ReplicaStatus(true)) => {
+                Some("cell.replica.status")
+            }
             _ => None,
         },
         Some(peer_wire::peer_request::Operation::Resolve(_)) => runtime_principal_action(request),
@@ -926,25 +929,44 @@ pub(crate) async fn forward(
             Err(_) => peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
         };
     }
-    if matches!(
+    let replica_status = matches!(
         request.operation(),
         Some(peer_wire::peer_request::Operation::Read(
             peer_wire::ReadRequest {
-                operation: Some(peer_wire::read_request::Operation::ReplicaActivate(true)),
+                operation: Some(peer_wire::read_request::Operation::ReplicaStatus(true)),
                 ..
             }
         ))
-    ) {
+    );
+    if replica_status
+        || matches!(
+            request.operation(),
+            Some(peer_wire::peer_request::Operation::Read(
+                peer_wire::ReadRequest {
+                    operation: Some(peer_wire::read_request::Operation::ReplicaActivate(true)),
+                    ..
+                }
+            ))
+        )
+    {
         let Some(manager) = receiver.read_replicas.as_ref() else {
             return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
         };
-        let receipt = match manager
-            .activate(request.target().clone(), request.origin_session())
-            .await
-        {
+        let readiness = if replica_status {
+            manager.status(request.target().clone()).await
+        } else {
+            manager
+                .activate(request.target().clone(), request.origin_session())
+                .await
+        };
+        let receipt = match readiness {
             Ok(receipt) => receipt,
             Err(error) => {
-                tracing::warn!(error = %error, "read replica activation failed");
+                if replica_status {
+                    tracing::debug!(error = %error, "read replica is not ready");
+                } else {
+                    tracing::warn!(error = %error, "read replica activation failed");
+                }
                 return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
             }
         };

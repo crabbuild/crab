@@ -25,7 +25,7 @@ use crab_cell_runtime::fleet::placement::{
 use crab_cell_runtime::identity::{CellTarget, NodeId};
 use crab_cell_runtime::ltx::CellReplica;
 use crab_cell_runtime::ltx::CellStorageLayout;
-use crab_cell_runtime::node::NodeDirectory;
+use crab_cell_runtime::node::{NodeAdvertisement, NodeDirectory};
 use crab_cell_runtime::peer::{
     EffectPeerClient, MigrationPeerClient, PeerOperation, PeerPrincipal, PeerReplicaResolver,
     PeerRoundTrip, PeerSigner, ReplicaPeerClient, wire as peer_wire,
@@ -36,6 +36,7 @@ use crab_cell_runtime::read_policy::ReadPolicyStore;
 use crab_cell_runtime::recovery::release::{ReleaseState, ReleaseStore};
 use crab_cell_runtime::registry::Query;
 use crab_cell_runtime::registry::Registry;
+use futures_util::{StreamExt, stream};
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -108,6 +109,15 @@ pub(crate) struct ScheduledRepositoryCell {
     release_after: bool,
 }
 
+#[derive(serde::Serialize)]
+pub(crate) struct ReadReplicaStatus {
+    pub(crate) owner_serving: bool,
+    pub(crate) selected_readers: usize,
+    pub(crate) ready_readers: usize,
+    pub(crate) unverified_readers: usize,
+    pub(crate) minimum_sequence: Option<u64>,
+}
+
 impl ScheduledRepositoryCell {
     pub(crate) fn should_release(&self) -> bool {
         self.release_after
@@ -128,49 +138,14 @@ impl RepositoryCellRouter {
     {
         let target = self.repository_target(repository)?;
         let cell = target.cell_id();
-        let control = self
-            .authority
-            .load(cell)
-            .await?
-            .ok_or(crab_cell_runtime::Error::ReplicaUnavailable)?;
-        let control = control.value();
-        if control.state != ControlState::Serving || control.recovery.is_some() {
-            return Err(crab_cell_runtime::Error::Fenced);
-        }
-        let owner = control
-            .owner
-            .as_ref()
-            .ok_or(crab_cell_runtime::Error::Fenced)?;
-        let policy = ReadPolicyStore::new(self.layout.clone())
-            .load(cell)
-            .await?
-            .ok_or(crab_cell_runtime::Error::ReplicaUnavailable)?;
-        let policy = policy.value();
-        if policy.incarnation() != control.incarnation || policy.desired_readers() == 0 {
-            return Err(crab_cell_runtime::Error::ReplicaUnavailable);
-        }
-        let selected = self
-            .peer
-            .directory
-            .select_readers(
-                cell,
-                owner.session,
-                control.code,
-                usize::from(policy.desired_readers()),
-                super::unix_now_ms()
-                    .map_err(|_| crab_cell_runtime::Error::Command("clock failed"))?,
-                10_000,
-            )
-            .await?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let (expected, selected) =
+            tokio::time::timeout_at(deadline, self.selected_readers(&target))
+                .await
+                .map_err(|_| crab_cell_runtime::Error::ReplicaUnavailable)??;
         if selected.is_empty() {
             return Err(crab_cell_runtime::Error::ReplicaUnavailable);
         }
-        let expected = CellDescription {
-            cell,
-            incarnation: control.incarnation,
-            code: control.code,
-            schema: control.schema,
-        };
         let client = ReplicaPeerClient::new(
             Arc::clone(&self.registry),
             Arc::clone(&self.peer.signer),
@@ -221,9 +196,176 @@ impl RepositoryCellRouter {
                 crab_cell_runtime::Error::ReplicaUnavailable
             }))
         };
-        tokio::time::timeout(Duration::from_secs(5), attempts)
+        tokio::time::timeout_at(deadline, attempts)
             .await
             .unwrap_or(Err(crab_cell_runtime::Error::ReplicaUnavailable))
+    }
+
+    async fn selected_readers(
+        &self,
+        target: &CellTarget,
+    ) -> crab_cell_runtime::Result<(CellDescription, Vec<NodeAdvertisement>)> {
+        let cell = target.cell_id();
+        let control = self
+            .authority
+            .load(cell)
+            .await?
+            .ok_or(crab_cell_runtime::Error::ReplicaUnavailable)?;
+        let control = control.value();
+        if control.state != ControlState::Serving || control.recovery.is_some() {
+            return Err(crab_cell_runtime::Error::Fenced);
+        }
+        let owner = control
+            .owner
+            .as_ref()
+            .ok_or(crab_cell_runtime::Error::Fenced)?;
+        let expected = CellDescription {
+            cell,
+            incarnation: control.incarnation,
+            code: control.code,
+            schema: control.schema,
+        };
+        let Some(policy) = ReadPolicyStore::new(self.layout.clone()).load(cell).await? else {
+            return Ok((expected, Vec::new()));
+        };
+        let policy = policy.value();
+        if policy.incarnation() != control.incarnation || policy.desired_readers() == 0 {
+            return Ok((expected, Vec::new()));
+        }
+        let selected = self
+            .peer
+            .directory
+            .select_readers(
+                cell,
+                owner.session,
+                control.code,
+                usize::from(policy.desired_readers()),
+                super::unix_now_ms()
+                    .map_err(|_| crab_cell_runtime::Error::Command("clock failed"))?,
+                10_000,
+            )
+            .await?;
+        Ok((expected, selected))
+    }
+
+    pub(crate) async fn read_replica_status(
+        &self,
+        target: &CellTarget,
+        local: &super::ReadReplicaManager,
+    ) -> crab_cell_runtime::Result<ReadReplicaStatus> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let initial = tokio::time::timeout_at(deadline, self.authority.load(target.cell_id()))
+            .await
+            .map_err(|_| crab_cell_runtime::Error::Deadline)??
+            .ok_or(crab_cell_runtime::Error::Fenced)?;
+        if initial.value().state != ControlState::Serving
+            || initial.value().recovery.is_some()
+            || initial.value().owner.is_none()
+        {
+            return Ok(ReadReplicaStatus {
+                owner_serving: false,
+                selected_readers: 0,
+                ready_readers: 0,
+                unverified_readers: 0,
+                minimum_sequence: None,
+            });
+        }
+        let (expected, selected) = tokio::time::timeout_at(deadline, self.selected_readers(target))
+            .await
+            .map_err(|_| crab_cell_runtime::Error::Deadline)??;
+        let mut status = ReadReplicaStatus {
+            owner_serving: true,
+            selected_readers: selected.len(),
+            ready_readers: 0,
+            unverified_readers: selected.len(),
+            minimum_sequence: None,
+        };
+        {
+            let probes = stream::iter(selected)
+                .map(|node| self.replica_status_on_node(target, node, expected, local))
+                .buffer_unordered(16);
+            tokio::pin!(probes);
+            let probe_deadline = deadline - Duration::from_secs(1);
+            while let Ok(Some(result)) =
+                tokio::time::timeout_at(probe_deadline, probes.next()).await
+            {
+                if let Ok(receipt) = result {
+                    status.ready_readers += 1;
+                    status.unverified_readers -= 1;
+                    status.minimum_sequence = Some(
+                        status
+                            .minimum_sequence
+                            .map_or(receipt.commit_sequence, |sequence| {
+                                sequence.min(receipt.commit_sequence)
+                            }),
+                    );
+                }
+            }
+        }
+        let current = tokio::time::timeout_at(deadline, self.authority.load(target.cell_id()))
+            .await
+            .map_err(|_| crab_cell_runtime::Error::Deadline)??
+            .ok_or(crab_cell_runtime::Error::Fenced)?;
+        let initial = initial.value();
+        let current = current.value();
+        if current.state != ControlState::Serving
+            || current.recovery.is_some()
+            || current.epoch != initial.epoch
+            || current.owner != initial.owner
+            || current.incarnation != expected.incarnation
+            || current.code != expected.code
+            || current.schema != expected.schema
+        {
+            return Err(crab_cell_runtime::Error::Fenced);
+        }
+        Ok(status)
+    }
+
+    async fn replica_status_on_node(
+        &self,
+        target: &CellTarget,
+        node: NodeAdvertisement,
+        expected: CellDescription,
+        local: &super::ReadReplicaManager,
+    ) -> crab_cell_runtime::Result<Receipt> {
+        if node.session() == self.peer.owner.session {
+            return local.status(target.clone()).await;
+        }
+        let now_ms =
+            super::unix_now_ms().map_err(|_| crab_cell_runtime::Error::Command("clock failed"))?;
+        let request = self.peer.signer.sign(
+            self.runtime_principal(&["cell.replica.status"]),
+            now_ms,
+            now_ms.saturating_add(10_000),
+            5_000,
+            PeerOperation::Read(peer_wire::ReadRequest {
+                target: Some(peer_target(target)),
+                timeout_ms: 5_000,
+                minimum: None,
+                operation: Some(peer_wire::read_request::Operation::ReplicaStatus(true)),
+            }),
+        )?;
+        let bytes = self
+            .peer
+            .round_trip
+            .send_to_node(target.clone(), node, request, 5_000)
+            .await?;
+        let reply = crab_cell_runtime::peer::decode_peer_reply(&bytes)?;
+        match reply.outcome {
+            Some(peer_wire::peer_reply::Outcome::Read(peer_wire::ReadReply {
+                receipt: Some(receipt),
+                result: Some(peer_wire::read_reply::Result::ReplicaReady(true)),
+            })) if receipt.cell_id == expected.cell.as_bytes()
+                && receipt.incarnation == expected.incarnation.as_bytes() =>
+            {
+                Ok(Receipt {
+                    cell: expected.cell,
+                    incarnation: expected.incarnation,
+                    commit_sequence: receipt.commit_sequence,
+                })
+            }
+            _ => Err(crab_cell_runtime::Error::ReplicaUnavailable),
+        }
     }
 
     pub(crate) async fn run_read_replica_reconciliation(

@@ -125,6 +125,14 @@ impl CellReadReplica {
         self.snapshot_receipt(&snapshot)
     }
 
+    /// Returns this admitted view's position after a fresh authority and owner-session check.
+    pub async fn ready_receipt(&self) -> Result<Receipt> {
+        self.runtime.ensure_running()?;
+        let snapshot = self.snapshot.read().await.clone();
+        self.confirm_authority(&snapshot).await?;
+        Ok(self.snapshot_receipt(&snapshot))
+    }
+
     /// Installs a newer exact root without disrupting queries using the old view.
     ///
     /// The destination must be fresh and private. Concurrent refreshes are

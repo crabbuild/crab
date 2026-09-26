@@ -127,6 +127,7 @@ fn rules(kind: MessageKind) -> Vec<FieldRule> {
             scalar_oneof(16, 0, 1),
             oneof(17, Some(MessageKind::CellQuery), 1),
             scalar_oneof(18, 0, 1),
+            scalar_oneof(19, 0, 1),
         ],
         MessageKind::ResolveRequest => vec![
             message(1, MessageKind::Target),
@@ -338,7 +339,7 @@ pub(super) fn oneof_payload<'a>(
 pub(super) fn validate_operation(tag: u32, payload: &[u8]) -> Result<()> {
     let (kind, required, operation_tags): (MessageKind, &[u32], &[u32]) = match tag {
         10 => (MessageKind::MutationRequest, &[1, 2], &[10]),
-        11 => (MessageKind::ReadRequest, &[1], &[10, 15, 16, 17, 18]),
+        11 => (MessageKind::ReadRequest, &[1], &[10, 15, 16, 17, 18, 19]),
         12 => (MessageKind::ResolveRequest, &[1, 2, 3], &[]),
         13 => (MessageKind::EffectRequest, &[1, 2, 3], &[10]),
         14 => (MessageKind::EffectResolveRequest, &[1, 2, 3, 4], &[]),

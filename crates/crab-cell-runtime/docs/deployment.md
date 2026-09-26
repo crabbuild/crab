@@ -30,8 +30,12 @@ An administrator can set a repository Cell's desired read-replica count with
 `{"expected_revision":0,"desired_readers":1}` for the first policy and the
 returned revision for later changes. `GET` on the same path returns the current
 target and revision. A successful update means the S3 policy CAS completed;
-the `convergence` field remains `pending` until independently checked reader
-readiness is available. The server sends an authenticated owner hint after the
+the update's `convergence` field is `pending`. `GET` probes the selected nodes
+and reports selected, proven-ready, and unverified reader counts plus the
+lowest proven sequence. Readiness probes use at most 16 concurrent requests
+inside a five-second budget and do not activate views. Failed or timed-out
+probes remain unverified; a selected-node count below the target is a placement
+`shortfall`. The server sends an authenticated owner hint after the
 CAS and also reconciles owned Cells periodically. A stale revision returns
 HTTP 409. This API is available only in the object durability profile.
 

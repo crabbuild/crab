@@ -37,6 +37,7 @@ struct TargetOutput {
     revision: u64,
     stale_incarnation: bool,
     convergence: &'static str,
+    readiness: Option<crate::cells::ReadReplicaStatus>,
 }
 
 enum Error {
@@ -128,11 +129,32 @@ async fn read(
     let (incarnation, policy) = manager.target(&target).await.map_err(Error::Cell)?;
     let stale = policy.is_some_and(|policy| policy.incarnation() != incarnation);
     let current = policy.filter(|_| !stale);
+    let desired_readers = current.map_or(0, |policy| policy.desired_readers());
+    let router = server.repository_cells().ok_or(Error::Unavailable)?;
+    let readiness = router
+        .read_replica_status(&target, &manager)
+        .await
+        .map_err(Error::Cell)?;
+    if manager.target(&target).await.map_err(Error::Cell)? != (incarnation, policy) {
+        return Err(Error::Conflict);
+    }
+    let convergence = if stale {
+        "stale_incarnation"
+    } else if readiness.ready_readers == usize::from(desired_readers) {
+        "ready"
+    } else if !readiness.owner_serving {
+        "pending"
+    } else if readiness.selected_readers < usize::from(desired_readers) {
+        "shortfall"
+    } else {
+        "pending"
+    };
     Ok(Json(TargetOutput {
-        desired_readers: current.map_or(0, |policy| policy.desired_readers()),
+        desired_readers,
         revision: policy.map_or(0, |policy| policy.revision()),
         stale_incarnation: stale,
-        convergence: "unverified",
+        convergence,
+        readiness: Some(readiness),
     }))
 }
 
@@ -165,6 +187,7 @@ async fn update(
             revision: policy.revision(),
             stale_incarnation: false,
             convergence: "pending",
+            readiness: None,
         }),
     ))
 }
