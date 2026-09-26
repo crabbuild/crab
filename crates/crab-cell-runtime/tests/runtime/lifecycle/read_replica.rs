@@ -4,8 +4,10 @@ use super::*;
 use std::sync::{Barrier, OnceLock};
 
 use crab_cell_runtime::cell::actor::CellHandle;
-use crab_cell_runtime::client::CellDescription;
 use crab_cell_runtime::client::CellReadReplica;
+use crab_cell_runtime::client::{
+    CellClient, CellDescription, InvocationError, ReadPolicy, ReplicaReadRouter,
+};
 use crab_cell_runtime::node::{NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain};
 use crab_cell_runtime::peer::{
     PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerReplicaResolver,
@@ -227,12 +229,9 @@ async fn rustfs_replica_reads_exact_root_and_policy_cas() {
     exercise_replica_read(&fixture).await;
     let policy = crab_cell_runtime::read_policy::ReadPolicyStore::new(fixture.layout.clone());
     let first = policy
-        .create(
-            fixture.target.cell_id(),
-            IncarnationId::from_bytes([2; 16]),
-            1,
-        )
+        .load(fixture.target.cell_id())
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(
         policy
@@ -394,12 +393,59 @@ async fn exercise_replica_read(fixture: &Fixture) {
         vec![CODE],
         vec![1],
         NodeFailureDomain::default(),
-        NodeCapacity::default(),
+        NodeCapacity {
+            free_memory_bytes: 8 << 20,
+            free_disk_bytes: 1 << 20,
+            job_credits: 1,
+            ..NodeCapacity::default()
+        },
     )
     .unwrap();
     assert_eq!(
         peer_client
             .query::<ReadCounter>(&fixture.target, reader_node.clone(), expected, None, 0)
+            .await
+            .unwrap()
+            .output,
+        0
+    );
+    directory
+        .create(reader_node.clone(), now_ms())
+        .await
+        .unwrap();
+    let policy = crab_cell_runtime::read_policy::ReadPolicyStore::new(fixture.layout.clone());
+    let selected_policy = policy
+        .create(fixture.target.cell_id(), expected.incarnation, 1)
+        .await
+        .unwrap();
+    let router = ReplicaReadRouter::new(fixture.layout.clone(), directory.clone());
+    let owner_client = CellClient::local(Arc::clone(&registry), handle.clone());
+    let configured = owner_client
+        .with_read_replicas(router.clone(), peer_client.clone(), None)
+        .unwrap();
+    let replica_client = configured.with_read_policy(ReadPolicy::Replica);
+    assert_eq!(
+        replica_client
+            .query::<ReadCounter>(&fixture.target, None, 0)
+            .await
+            .unwrap()
+            .output,
+        0
+    );
+    let local_client = owner_client
+        .with_read_replicas(
+            router,
+            peer_client.clone(),
+            Some((
+                reader_node.session(),
+                Arc::new(ReplicaResolver(reader.clone())),
+            )),
+        )
+        .unwrap()
+        .with_read_policy(ReadPolicy::Replica);
+    assert_eq!(
+        local_client
+            .query::<ReadCounter>(&fixture.target, None, 0)
             .await
             .unwrap()
             .output,
@@ -438,6 +484,51 @@ async fn exercise_replica_read(fixture: &Fixture) {
         Err(crab_cell_runtime::Error::ReplicaBehind { observed_sequence, minimum_sequence })
             if observed_sequence < minimum_sequence && minimum_sequence == minimum.commit_sequence
     ));
+    assert_eq!(
+        configured
+            .query::<ReadCounter>(&fixture.target, None, 0)
+            .await
+            .unwrap()
+            .output,
+        1
+    );
+    assert_eq!(
+        replica_client
+            .query::<ReadCounter>(&fixture.target, None, 0)
+            .await
+            .unwrap()
+            .output,
+        0
+    );
+    assert!(matches!(
+        replica_client
+            .query::<ReadCounter>(&fixture.target, Some(minimum), 0)
+            .await,
+        Err(InvocationError::NotStarted(
+            crab_cell_runtime::Error::ReplicaBehind { .. }
+        ))
+    ));
+    let withdrawn_policy = policy.update(&selected_policy, 0).await.unwrap();
+    assert!(matches!(
+        replica_client
+            .query::<ReadCounter>(&fixture.target, None, 0)
+            .await,
+        Err(InvocationError::NotStarted(
+            crab_cell_runtime::Error::ReplicaUnavailable
+        ))
+    ));
+    policy.update(&withdrawn_policy, 1).await.unwrap();
+    // Owner-ordered streams keep their watermark contract even on a capability
+    // whose ordinary queries explicitly select lagging snapshots.
+    let mut stream = replica_client
+        .open_state_stream::<ReadCounter>(
+            &fixture.target,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stream.emit(0).await.unwrap().output, 1);
+    drop(stream);
     drop(peer_client);
 
     let refreshed_path = fixture._directory.path().join("refreshed.sqlite");
@@ -518,6 +609,17 @@ async fn exercise_replica_read(fixture: &Fixture) {
         refreshed.readiness().await,
         Err(crab_cell_runtime::Error::Fenced)
     ));
+    assert!(matches!(
+        replica_client
+            .query::<ReadCounter>(&fixture.target, None, 0)
+            .await,
+        Err(InvocationError::NotStarted(
+            crab_cell_runtime::Error::Fenced
+        ))
+    ));
+    drop(replica_client);
+    drop(local_client);
+    drop(configured);
     drop(reader);
     drop(refreshed);
     assert!(!reader_path.exists());

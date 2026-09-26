@@ -290,11 +290,28 @@ pub enum ReadConsistency {
 `After(receipt)` additionally requires the same Cell and incarnation and a
 commit sequence at or beyond the receipt. The framework does not expose an
 unfenced local-file read or a global timestamp spanning Cells.
-An explicit replica-consistent typed peer query and repository issue-detail
-route exist for the object durability profile. Generated application clients
-do not yet expose that route; their current owner and `After` behavior remains
-the default while [Plan 036](../../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md)
-completes the public consistency contract.
+The implemented client API uses `client::ReadPolicy::{CurrentOwner, Replica}`
+on a cloned capability and an optional minimum `Receipt` on each typed query.
+`CellClient::with_read_policy` and `ApplicationHandle::with_read_policy` select
+the policy; generated clients retain it when deriving scoped accessors.
+Commands, resolution, state streams, and Queue/Effects/Workflow activity lease
+validation still use the owner. Replica queries
+report their actual snapshot receipt, reject a newer minimum with
+`ReplicaBehind`, and never fall back when readers are unavailable.
+
+Host code supplies `CellClient::with_read_replicas` with the shared runtime
+`ReplicaReadRouter`, an authenticated peer client, and an optional local
+admitted-view resolver. The same router serves explicit HTTP issue-detail
+reads. It consults authority, S3 desired count, and signed live membership,
+prefers lower ingress-observed in-flight load, and bounds selection and all
+attempts by one five-second deadline. Peer attempts carry the remaining budget.
+The author handle does not expose storage, local files, or routing internals.
+Fresh authority checks remain mandatory before a replica releases a result.
+Blob queries hydrate content-addressed parts with digest and length checks;
+missing or reclaimed parts fail instead of returning unverified bytes.
+The object durability profile supplies the all-node-loss contract;
+[Plan 036](../../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md)
+tracks remaining sparse-view and qualification work.
 
 ## Generate an application client
 

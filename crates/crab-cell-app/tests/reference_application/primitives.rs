@@ -365,7 +365,10 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
         .unwrap();
     assert_eq!(claimed.output.len(), 1);
     assert!(
-        queue
+        typed
+            .with_read_policy(crab_cell_runtime::client::ReadPolicy::Replica)
+            .queue::<ReferenceQueue>()
+            .unwrap()
             .validate_claim(0, claimed.output.clone(), Some(claimed.receipt))
             .await
             .unwrap()
@@ -422,7 +425,10 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
         outcome => panic!("unexpected activity start outcome: {outcome:?}"),
     };
     let activity = crab_cell_runtime::primitives::workflow::ActivitySupervisor::new(
-        typed.activities::<ReferenceWorkflow>().unwrap(),
+        typed
+            .with_read_policy(crab_cell_runtime::client::ReadPolicy::Replica)
+            .activities::<ReferenceWorkflow>()
+            .unwrap(),
         5_000,
     )
     .unwrap();
@@ -449,6 +455,7 @@ async fn typed_application_executes_every_primitive_through_a_local_router() {
         .await
         .unwrap();
     let effects = typed
+        .with_read_policy(crab_cell_runtime::client::ReadPolicy::Replica)
         .effects::<ReferenceWorkflow>(
             CellTarget::new(
                 tenant,

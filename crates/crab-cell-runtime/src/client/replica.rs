@@ -73,12 +73,10 @@ impl CellReadReplica {
         if control.state != ControlState::Serving || control.recovery.is_some() {
             return Err(Error::Fenced);
         }
-        let (module, descriptor) = registry
+        let (module, _) = registry
             .namespace_contract(target.namespace())
             .ok_or(Error::Registry("replica namespace is not registered"))?;
-        if descriptor.role != CatalogRole::Repository
-            || !registry.supports_module_code(module, control.code, control.schema)
-        {
+        if !registry.supports_module_code(module, control.code, control.schema) {
             return Err(Error::Registry("replica module or code is unsupported"));
         }
         if !directory.is_live(owner.session, unix_time_ms()?).await? {

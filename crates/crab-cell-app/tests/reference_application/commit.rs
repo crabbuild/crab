@@ -97,6 +97,227 @@ async fn generated_client_derives_target_and_commits_bound_operation() {
     fixture.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generated_replica_policy_never_falls_back_and_commands_still_use_owner() {
+    use crab_cell_runtime::client::ReadPolicy;
+    let fixture = PerfFixture::start(1).await;
+    let client = ReferenceClient::new(fixture.typed.with_read_policy(ReadPolicy::Replica)).unwrap();
+    let order = client.orders(&OrderId(b"order-42".to_vec())).unwrap();
+    let committed = order
+        .receive_cron(
+            reference_identity(61, super::performance_fixture::now_ms()),
+            CronInvocation {
+                schedule_id: [62; 16],
+                generation: 1,
+                occurrence: 1,
+                scheduled_at_ms: super::performance_fixture::now_ms(),
+                payload: b"replica-policy".to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        order.receipt_count(Some(committed.receipt), ()).await,
+        Err(InvocationError::NotStarted(Error::ReplicaUnavailable))
+    ));
+    let owner = ReferenceClient::new(fixture.typed.clone()).unwrap();
+    assert_eq!(
+        owner
+            .orders(&OrderId(b"order-42".to_vec()))
+            .unwrap()
+            .receipt_count(Some(committed.receipt), ())
+            .await
+            .unwrap()
+            .output,
+        1
+    );
+    fixture.shutdown().await;
+}
+
+struct LocalReader(crab_cell_runtime::client::CellReadReplica);
+
+impl crab_cell_runtime::peer::PeerReplicaResolver for LocalReader {
+    fn resolve(
+        &self,
+        _target: CellTarget,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<crab_cell_runtime::client::CellReadReplica>>
+                + Send
+                + 'static,
+        >,
+    > {
+        let reader = self.0.clone();
+        Box::pin(async move { Ok(reader) })
+    }
+}
+
+struct NoReplicaPeer;
+
+impl crab_cell_runtime::peer::PeerRoundTrip for NoReplicaPeer {
+    fn send(
+        &self,
+        _target: CellTarget,
+        _request: Vec<u8>,
+        _remaining_ms: u32,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'static>> {
+        Box::pin(async { Err(Error::Peer("test has no peer route")) })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generated_queries_report_snapshot_position_while_commands_advance_owner() {
+    use super::performance_fixture::{node_session, now_ms};
+    use crab_cell_runtime::client::{CellReadReplica, ReadPolicy, ReplicaReadRouter};
+    use crab_cell_runtime::peer::{PeerPrincipal, PeerSigner, ReplicaPeerClient};
+
+    let fixture = PerfFixture::start(1).await;
+    let layout = fixture.layout.clone().unwrap();
+    let target = fixture.sql_target.clone();
+    let registry = &fixture.registry;
+    let fleet = Digest::from_bytes([71; 32]);
+    let image = Digest::from_bytes([72; 32]);
+    let directory = NodeDirectory::new(layout.clone(), fleet, image, registry.release_digest());
+    let reader_session = crab_cell_runtime::SessionId::from_bytes([73; 16]);
+    let key = SigningKey::from_bytes(&[74; 32]);
+    for (id, session) in [(75, node_session(0)), (76, reader_session)] {
+        let now = now_ms();
+        directory
+            .create(
+                NodeAdvertisement::sign(
+                    NodeId::from_bytes([id; 16]),
+                    session,
+                    format!("https://node-{id}.internal:8081"),
+                    fleet,
+                    Digest::from_bytes([id; 32]),
+                    image,
+                    registry.release_digest(),
+                    &key,
+                    1,
+                    now,
+                    now + 15_000,
+                    registry.module_digests(),
+                    vec![1],
+                    NodeFailureDomain::default(),
+                    NodeCapacity {
+                        free_memory_bytes: 8 << 20,
+                        free_disk_bytes: 1 << 20,
+                        job_credits: 2,
+                        ..NodeCapacity::default()
+                    },
+                )
+                .unwrap(),
+                now,
+            )
+            .await
+            .unwrap();
+    }
+    let control = CellAuthority::new(layout.clone())
+        .load(target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let incarnation = control.value().incarnation;
+    crab_cell_runtime::read_policy::ReadPolicyStore::new(layout.clone())
+        .create(target.cell_id(), incarnation, 1)
+        .await
+        .unwrap();
+    let reader_runtime = CellRuntime::new_with_replica_host(
+        SqlWorkerPool::new(1, 200).unwrap(),
+        16 << 20,
+        reader_session,
+        reference_host(),
+    )
+    .unwrap();
+    let files = tempfile::TempDir::new().unwrap();
+    let reader = CellReadReplica::open(
+        reader_runtime.clone(),
+        Arc::clone(registry),
+        CellAuthority::new(layout.clone()),
+        directory.clone(),
+        CellReplica::new(
+            layout.clone(),
+            *target.cell_id().as_bytes(),
+            *incarnation.as_bytes(),
+            Limits::default(),
+        )
+        .unwrap(),
+        target.clone(),
+        &files.path().join("snapshot.sqlite"),
+    )
+    .await
+    .unwrap();
+    let peer = ReplicaPeerClient::new(
+        Arc::clone(registry),
+        Arc::new(PeerSigner::new(
+            reader_session,
+            registry.release_digest(),
+            key,
+        )),
+        PeerPrincipal {
+            issuer: "reference".into(),
+            subject: "reader".into(),
+            actions: vec!["cell.read".into()],
+        },
+        Arc::new(NoReplicaPeer),
+    );
+    let configured = fixture
+        .client
+        .with_read_replicas(
+            ReplicaReadRouter::new(layout, directory),
+            peer,
+            Some((reader_session, Arc::new(LocalReader(reader.clone())))),
+        )
+        .unwrap();
+    let application = fixture.nodes[0]
+        .application_handle::<ReferenceApplication>(
+            configured,
+            target.tenant(),
+            target.application(),
+        )
+        .unwrap();
+    let client = ReferenceClient::new(application.with_read_policy(ReadPolicy::Replica)).unwrap();
+    let order = client.orders(&OrderId(b"order-42".to_vec())).unwrap();
+    let before = order.receipt_count(None, ()).await.unwrap();
+    assert_eq!(before.output, 0);
+    let committed = order
+        .receive_cron(
+            reference_identity(81, now_ms()),
+            CronInvocation {
+                schedule_id: [82; 16],
+                generation: 1,
+                occurrence: 1,
+                scheduled_at_ms: now_ms(),
+                payload: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let stale = order.receipt_count(None, ()).await.unwrap();
+    assert_eq!(stale, before);
+    assert!(matches!(
+        order.receipt_count(Some(committed.receipt), ()).await,
+        Err(InvocationError::NotStarted(Error::ReplicaBehind { .. }))
+    ));
+    reader
+        .refresh(&files.path().join("refreshed.sqlite"))
+        .await
+        .unwrap();
+    let refreshed = order
+        .receipt_count(Some(committed.receipt), ())
+        .await
+        .unwrap();
+    assert_eq!(refreshed.output, 1);
+    assert!(refreshed.receipt.commit_sequence >= committed.receipt.commit_sequence);
+    reader.close();
+    drop(order);
+    drop(client);
+    drop(application);
+    drop(reader);
+    reader_runtime.shutdown().await.unwrap();
+    fixture.shutdown().await;
+}
+
 #[allow(dead_code)]
 fn typed_capability_surface<A: CellApplication>(
     handle: &ApplicationHandle<A>,

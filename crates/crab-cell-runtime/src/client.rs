@@ -37,8 +37,10 @@ mod tests;
 
 mod local;
 mod replica;
+mod routing;
 
 pub use replica::CellReadReplica;
+pub use routing::ReplicaReadRouter;
 
 pub use local::command_operation_digest;
 pub(crate) use local::{
@@ -46,6 +48,19 @@ pub(crate) use local::{
     receipt, validate_description,
 };
 use local::{decode_output, unix_time_ms, validate_minimum};
+
+/// Execution policy for typed queries on a client capability.
+///
+/// Commands, mutation resolution, state streams and primitive lease validation
+/// always use the owner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReadPolicy {
+    /// Execute FIFO on the current owner, optionally after a receipt.
+    #[default]
+    CurrentOwner,
+    /// Execute on an admitted snapshot, failing if no reader proves the minimum.
+    Replica,
+}
 
 /// Immutable owner metadata used to fence a routed invocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -476,6 +491,8 @@ pub struct CellClient {
     registry: Arc<Registry>,
     transport: Arc<dyn CellTransport>,
     blob_artifact_store: Option<crate::BlobArtifactStore>,
+    read_policy: ReadPolicy,
+    replicas: Option<Arc<routing::ReplicaClient>>,
 }
 
 impl CellClient {
@@ -485,7 +502,46 @@ impl CellClient {
             registry,
             transport,
             blob_artifact_store: None,
+            read_policy: ReadPolicy::CurrentOwner,
+            replicas: None,
         }
+    }
+
+    /// Wires replica placement and authenticated execution at the host boundary.
+    ///
+    /// The peer registry must match this client's compiled application. Share
+    /// the router across callers; optionally supply this node's admitted local
+    /// snapshot resolver to avoid self-dials. Query policy remains unchanged.
+    pub fn with_read_replicas(
+        &self,
+        router: ReplicaReadRouter,
+        peer: crate::peer::ReplicaPeerClient,
+        local: Option<(crate::SessionId, Arc<dyn crate::peer::PeerReplicaResolver>)>,
+    ) -> Result<Self> {
+        if peer.registry().release_digest() != self.registry.release_digest() {
+            return Err(Error::Registry(
+                "replica client registry differs from owner client",
+            ));
+        }
+        let mut client = self.clone();
+        client.replicas = Some(Arc::new(routing::ReplicaClient {
+            router,
+            peer,
+            local,
+        }));
+        Ok(client)
+    }
+
+    /// Returns a capability using the explicit policy for typed queries only.
+    ///
+    /// Replica queries without host wiring fail with `ReplicaUnavailable`;
+    /// they never fall back to the owner. Commands, streams and primitive lease
+    /// validation retain owner order.
+    #[must_use]
+    pub fn with_read_policy(&self, policy: ReadPolicy) -> Self {
+        let mut client = self.clone();
+        client.read_policy = policy;
+        client
     }
 
     /// Returns the compiled registry identity used to encode typed calls.
@@ -743,13 +799,32 @@ impl CellClient {
         })
     }
 
-    /// Runs one typed FIFO read at or beyond an optional receipt.
+    /// Runs a typed query under this capability's policy at or beyond a receipt.
+    ///
+    /// The default policy executes FIFO on the owner; explicit replica reads
+    /// return their actual snapshot position or fail closed.
     pub async fn query<Q: Query>(
         &self,
         target: &CellTarget,
         minimum: Option<Receipt>,
         input: Q::Input,
     ) -> std::result::Result<Observed<Q::Output>, InvocationError<Q::Output>> {
+        if self.read_policy == ReadPolicy::Replica {
+            let replicas = self
+                .replicas
+                .as_ref()
+                .ok_or(InvocationError::NotStarted(Error::ReplicaUnavailable))?;
+            let local = replicas
+                .local
+                .as_ref()
+                .map(|(session, resolver)| (*session, resolver.as_ref()));
+            return replicas
+                .router
+                .query::<Q>(&replicas.peer, local, target, minimum, input)
+                .await
+                .map(|(observed, _)| observed)
+                .map_err(InvocationError::NotStarted);
+        }
         let description = self.describe::<Q::Output>(target).await?;
         self.query_with_description::<Q>(target, description, minimum, input)
             .await

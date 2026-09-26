@@ -20,7 +20,9 @@ use crab_cell_runtime::cell::application::ApplicationIdentity;
 use crab_cell_runtime::cell::catalog::CatalogRole;
 use crab_cell_runtime::cell::catalog::{CatalogProof, CellCatalog};
 use crab_cell_runtime::cell::worker::ACTIVE_CELL_PAGE_CACHE_BYTES;
-use crab_cell_runtime::client::{CellClient, CellDescription, Observed, Receipt};
+use crab_cell_runtime::client::{
+    CellClient, CellDescription, Observed, Receipt, ReplicaReadRouter,
+};
 use crab_cell_runtime::control::authority::{CellAuthority, VersionedControl};
 use crab_cell_runtime::control::{ControlState, Owner};
 use crab_cell_runtime::fleet::placement::{
@@ -84,7 +86,7 @@ pub(crate) struct RepositoryCellRouter {
     // sampled at or before it may predate the released ownership, so the whole
     // fleet view is discarded until every member samples again.
     rebalance_settled_at_ms: Arc<AtomicI64>,
-    replica_routing: Arc<replicas::ReplicaRouting>,
+    replica_routing: ReplicaReadRouter,
     read_replicas: Option<super::ReadReplicaManager>,
 }
 
@@ -139,6 +141,7 @@ impl RepositoryCellRouter {
                 runtime.telemetry_handle(),
             ),
             authority: CellAuthority::with_telemetry(layout.clone(), runtime.telemetry_handle()),
+            replica_routing: ReplicaReadRouter::new(layout.clone(), peer.directory.clone()),
             layout,
             registry,
             runtime,
@@ -156,7 +159,6 @@ impl RepositoryCellRouter {
                 .into(),
             rebalance_evidence: Arc::new(Mutex::new(HashMap::new())),
             rebalance_settled_at_ms: Arc::new(AtomicI64::new(0)),
-            replica_routing: Arc::new(replicas::ReplicaRouting::default()),
             read_replicas: None,
         })
     }

@@ -116,21 +116,41 @@ its fleet configuration and volumes were preserved. This establishes the
 local offline rollout, not a rolling platform upgrade or a provider-outage
 qualification during the drain itself.
 
+## Framework client follow-up
+
+Later changes moved the ingress load selector into runtime `ReplicaReadRouter`
+and added explicit `ReadPolicy::Replica` to `CellClient` and
+`ApplicationHandle`. HTTP issue-detail queries use the same runtime router.
+The container measurements above precede these changes and describe the earlier
+round-robin route. Focused selection tests cover equal-load rotation,
+busy-reader avoidance across Cells, and cancellation/timeout cleanup.
+
+The runtime exact-root test exercises local and authenticated peer routes,
+default owner reads after a write, stale snapshot reads, minimum-position
+rejection, target withdrawal without owner fallback, owner-ordered streams,
+and fencing after release. Its RustFS run uses the isolated prefix
+`plan036-client-policy-20260926`.
+Generated application clients also read and refresh a real SQL snapshot, report
+its actual receipt, and keep commands on the owner. The primitive scenario sets
+replica policy while verifying that Queue, Effects, and Workflow activity lease
+checks still use the owner before external work.
+
+The application fixture originally used LTX defaults that disagreed with its
+compiled storage limits. An existing generated-client test reproduced the
+failure. Bootstrap and takeover now obtain limits from the same compiled Cell
+type; production admission remains intact.
+
+The product mTLS E2E uses in-memory storage and local RustFS (isolated prefix
+`plan036-shared-router-20260926`), including explicit HTTP replica reads,
+minimum-position rejection, 32 concurrent routed mTLS reads, target withdrawal,
+and fenced takeover. That test has one reader; it validates route integration
+and authority behavior, not multi-reader load distribution.
+
 ## Scope still open
 
-This run does not measure per-query S3 calls or refresh bytes, sustained hot
-Cell throughput, peak resources, retention/release fault combinations, or
-1k/5k/10k Cell admission. It also does not complete sparse readers, generic
-application-client replica policy, or qualification of routing under uneven load.
-The subsequent routing implementation uses ingress-observed in-flight attempts;
-the container measurements above precede that change and describe the earlier
-round-robin route. Focused routing tests cover equal-load rotation, busy-reader
-avoidance across Cells, and cancellation/timeout cleanup. They do not establish
-distribution under uneven load across multiple ingress nodes.
-The existing product mTLS E2E also passed against in-memory storage and local
-RustFS (isolated prefix `plan036-routed-load-20260926`), including explicit HTTP
-replica reads, minimum-position rejection, 32 concurrent routed mTLS reads, target
-withdrawal, and fenced takeover. That test has one reader; it validates route
-integration and authority behavior, not multi-reader load distribution.
+The container runs do not measure per-query S3 calls or refresh bytes, sustained
+hot Cell throughput, peak resources, retention/release fault combinations, or
+1k/5k/10k Cell admission. Sparse readers remain unimplemented; distribution
+under uneven load across multiple ingress nodes remains unqualified.
 Protected S3 and multi-host release gates remain outside the requested local
 RustFS execution scope. See [Plan 036](../../../../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md).

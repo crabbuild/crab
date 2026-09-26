@@ -2,7 +2,7 @@
 
 Status: PARTIAL IMPLEMENTATION — exact-root views, S3 desired-count policy,
 private peer activation/query, object-mode reconciliation, an operator
-target API, and explicit issue-detail replica reads exist; 3/5/10/20-node local RustFS
+target API, typed/generated client policy, and explicit issue-detail replica reads exist; 3/5/10/20-node local RustFS
 qualification passes; no production qualification
 Base: `origin/main` at `de0bb234abc` (2026-09-25); Cell/LTX source compared with the planning checkout at `fa182c94c7e`
 Priority: P1 read scaling; P0 safety for any enabled deployment. Effort: XL. Risk: HIGH.
@@ -70,7 +70,13 @@ route uses selected replicas and reports actual receipts without falling back
 to the writer. It chooses the fewest outstanding attempts observed by this
 ingress, rotating equal-load choices across readers. Counts span Cells and
 router clones and are released on success, error, timeout, or cancellation;
-they do not measure work issued by other ingress nodes. No general product read route,
+they do not measure work issued by other ingress nodes. The selection and query
+path now live in runtime `ReplicaReadRouter`. Hosts wire it into `CellClient`,
+and authors explicitly choose `ReadPolicy::Replica` on an `ApplicationHandle`
+before constructing generated clients. Commands, resolution, streams, and
+primitive lease validation remain owner-ordered. Compiled SQL and primitive
+namespaces may open snapshots through the same registry/code/schema checks;
+the former repository-role restriction is removed. No general product read route,
 sparse read view or production qualification is enabled. Warm-reader
 preference now probes verified snapshots after owner death, closes read admission,
 and enters the existing fenced takeover and fresh writable restore path.
@@ -281,7 +287,8 @@ target CAS with owner hint and bounded readiness status exist; broader churn qua
 remains; 4 typed local and peer queries, position
 errors, receipt checks, authority gates, and explicit issue-detail routing exist,
 including ingress-observed in-flight load selection under one request deadline,
-but other product reads remain owner-only; 5 has warm-reader preference and
+and explicit policy on typed/generated application clients, but other product
+reads remain owner-only; 5 has warm-reader preference and
 local automatic takeover coverage; 6 has a source/image-bound 3/5/10/20-node Compose run with reader replacement,
 warm promotion, all-reader disk loss, and authority outage; broader capacity
 and fault qualification remain open. Private peer replica requests are accepted only in
