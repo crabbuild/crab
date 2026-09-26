@@ -1,5 +1,169 @@
 use super::*;
 
+fn seed_cache(root: &Path, entries: usize, entry_bytes: usize) {
+    std::fs::create_dir(root).unwrap();
+    let mut index = std::collections::BTreeMap::new();
+    for number in 0..entries {
+        let key = format!("restart-diagnostic-{number:05}");
+        let path = root.join(blake3::hash(key.as_bytes()).to_hex().as_str());
+        std::fs::write(path, vec![0_u8; entry_bytes]).unwrap();
+        index.insert(key, entry_bytes as u64);
+    }
+    std::fs::write(
+        root.join("index-v1.json"),
+        serde_json::to_vec(&serde_json::json!({"version": 1, "entries": index})).unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn directory_cache_reopens_off_async_worker() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("cache");
+    seed_cache(&root, 2, 1024);
+    let faults = Arc::new(Faults::default());
+    *faults.forbidden_thread.lock().unwrap() = Some(std::thread::current().id());
+    let host = Host::default()
+        .with_filesystem(faults)
+        .with_local_disk_budget(crab_ltx::DiskBudget::new(1 << 20))
+        .with_directory_cache(root)
+        .await
+        .unwrap();
+    assert_eq!(host.directory_cache_stats().unwrap().entries(), 2);
+}
+
+#[tokio::test]
+async fn directory_cache_rejects_oversized_index_before_reading() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("cache");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::File::create(root.join("index-v1.json"))
+        .unwrap()
+        .set_len(32 << 20)
+        .unwrap();
+    let faults = Arc::new(Faults::default());
+    faults.track_all.store(true, Ordering::Relaxed);
+    let host = Host::default()
+        .with_filesystem(faults.clone())
+        .with_directory_cache(root)
+        .await
+        .unwrap();
+    assert_eq!(host.directory_cache_stats().unwrap().entries(), 0);
+    assert_eq!(faults.read_calls.load(Ordering::Relaxed), 0);
+}
+
+struct PausedCacheAdmission(Arc<Pause>);
+
+impl crab_ltx::DiskBudgetAdmission for PausedCacheAdmission {
+    fn reconcile(&self, bytes: u64) -> crab_ltx::Result<()> {
+        if bytes != 0 {
+            self.0.wait("reserve");
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn canceled_cache_reopen_retains_admission_until_the_dispatched_job_finishes() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("cache");
+    seed_cache(&root, 2, 1);
+    let budget = crab_ltx::DiskBudget::new(16);
+    let pause = Arc::new(Pause {
+        operation: "reserve",
+        entered: tokio::sync::Notify::new(),
+        released: Mutex::new(false),
+        wake: std::sync::Condvar::new(),
+    });
+    let release = Release(pause.clone());
+    budget
+        .install_admission(Arc::new(PausedCacheAdmission(pause.clone())))
+        .unwrap();
+    let jobs = Arc::new(tokio::sync::Semaphore::new(1));
+    let host = Host::default()
+        .with_local_disk_budget(budget.clone())
+        .with_job_slots(jobs.clone());
+    let task = tokio::spawn(host.with_directory_cache(root));
+    // This current-thread runtime must progress while the blocking constructor
+    // owns a reservation. Canceling its waiter cannot release that job early.
+    tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
+        .await
+        .unwrap();
+    task.abort();
+    assert!(task.await.err().unwrap().is_cancelled());
+    assert_eq!(jobs.available_permits(), 0);
+    assert_eq!(budget.used(), 1);
+    drop(release);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while budget.used() != 0 || jobs.available_permits() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_cache_reopens_share_the_remaining_disk_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = directory.path().join("first");
+    let second = directory.path().join("second");
+    seed_cache(&first, 2, 1);
+    seed_cache(&second, 2, 1);
+    let budget = crab_ltx::DiskBudget::new(16);
+    let occupied = budget.try_reserve(13).unwrap();
+    let host = Host::default().with_local_disk_budget(budget.clone());
+    let (first, second) = tokio::join!(
+        host.clone().with_directory_cache(first),
+        host.with_directory_cache(second),
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_eq!(
+        first.directory_cache_stats().unwrap().entries()
+            + second.directory_cache_stats().unwrap().entries(),
+        3
+    );
+    assert_eq!(budget.used(), 16);
+    drop((first, second, occupied));
+    assert_eq!(budget.used(), 0);
+}
+
+#[tokio::test]
+#[ignore = "filesystem diagnostic; records cache reopen cost, not a service SLO"]
+async fn directory_cache_restart_diagnostic() {
+    for entries in [1_024, 4_096, 16_384] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("cache");
+        // Seed membership directly so setup excludes the per-fill index rewrite.
+        // These are cache metadata fixtures, not authenticated LTX directory nodes.
+        seed_cache(&root, entries, 1024);
+
+        for repetition in 0..3 {
+            let budget = crab_ltx::DiskBudget::new(256 << 20);
+            let host = Host::default().with_local_disk_budget(budget.clone());
+            let started = std::time::Instant::now();
+            let host = host.with_directory_cache(root.clone()).await.unwrap();
+            let elapsed_us = started.elapsed().as_micros();
+            let stats = host.directory_cache_stats().unwrap();
+            assert_eq!(stats.entries(), entries);
+            assert_eq!(stats.bytes(), entries as u64 * 1024);
+            println!(
+                "{}",
+                serde_json::json!({
+                    "diagnostic": "directory_cache_restart",
+                    "entries": entries,
+                    "repetition": repetition,
+                    "elapsed_us": elapsed_us,
+                    "debug_assertions": cfg!(debug_assertions),
+                })
+            );
+            drop(host);
+            assert_eq!(budget.used(), 0);
+        }
+    }
+}
+
 async fn prepared_root(host: Host, writer: &mut Db, store: Store) -> crab_ltx::CellPagedDatabase {
     let replica = CellReplica::new(
         CellStorageLayout::new(store, ObjectPath::from("activation-admission"), [81; 16]),
@@ -28,7 +192,9 @@ async fn writable_activation_dispatches_filesystem_work_with_one_job_slot() {
     let host = host
         .with_job_slots(jobs.clone())
         .with_dirty_slots(dirty.clone())
-        .with_directory_cache(directory.path().join("cache"));
+        .with_directory_cache(directory.path().join("cache"))
+        .await
+        .unwrap();
     writer
         .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(zeroblob(40000000))"))
         .unwrap();

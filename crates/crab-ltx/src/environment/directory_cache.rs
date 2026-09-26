@@ -71,6 +71,8 @@ pub(crate) struct DirectoryCache {
 
 #[cfg(feature = "replica")]
 pub(crate) const MAX_DIRECTORY_CACHE_ENTRIES: usize = 16_384;
+#[cfg(feature = "replica")]
+const MAX_DIRECTORY_CACHE_INDEX_BYTES: u64 = 16 << 20;
 
 #[cfg(feature = "replica")]
 impl DirectoryCache {
@@ -91,6 +93,12 @@ impl DirectoryCache {
             .open(&index)
             .and_then(|mut file| {
                 let length = file.file_len()?;
+                if length > MAX_DIRECTORY_CACHE_INDEX_BYTES {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "cache index too large",
+                    ));
+                }
                 let length = usize::try_from(length).map_err(io::Error::other)?;
                 let bytes = file.read_exact_at(0, length)?;
                 let index: DirectoryCacheIndex =
@@ -104,40 +112,29 @@ impl DirectoryCache {
                 Ok(index.entries)
             })
             .unwrap_or_default();
-        let entries = entries
-            .into_iter()
-            .filter_map(|(key, length)| {
-                let path = root.join(hex_digest(blake3::hash(key.as_bytes()).as_bytes()));
-                let valid = length != 0
-                    && length <= max_bytes
-                    && filesystem.exists(&path).ok() == Some(true)
-                    && filesystem.file_len(&path).ok() == Some(length)
-                    && safe_cache_entry(&filesystem, &root, &path).ok() == Some(true);
-                if !valid {
-                    let _ = filesystem.remove_file(&path);
-                }
-                valid.then_some((key, length))
-            })
-            .collect::<BTreeMap<_, _>>();
         let mut retained = BTreeMap::new();
+        let mut bytes = 0u64;
         let mut reservations = BTreeMap::new();
         for (key, length) in entries {
-            let within_limits = length <= max_bytes
+            let path = root.join(hex_digest(blake3::hash(key.as_bytes()).as_bytes()));
+            let valid = length != 0
+                && length <= max_bytes
                 && retained.len() < MAX_DIRECTORY_CACHE_ENTRIES
-                && retained.values().copied().fold(0_u64, u64::saturating_add)
-                    <= max_bytes.saturating_sub(length);
-            let reservation = within_limits
-                .then(|| budget.try_reserve(length).ok())
-                .flatten();
+                && bytes <= max_bytes.saturating_sub(length)
+                && filesystem.exists(&path).ok() == Some(true)
+                && filesystem.file_len(&path).ok() == Some(length)
+                && safe_cache_entry(&filesystem, &root, &path).ok() == Some(true);
+            let reservation = valid.then(|| budget.try_reserve(length).ok()).flatten();
             if let Some(reservation) = reservation {
+                // The admission check proves this addition fits the cache cap.
+                // Re-summing earlier entries makes restart quadratic in count.
+                bytes += length;
                 retained.insert(key.clone(), length);
                 reservations.insert(key, reservation);
             } else {
-                let path = root.join(hex_digest(blake3::hash(key.as_bytes()).as_bytes()));
                 let _ = filesystem.remove_file(&path);
             }
         }
-        let bytes = retained.values().copied().sum();
         let order = retained.keys().cloned().collect();
         Self {
             filesystem,

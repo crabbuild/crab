@@ -4,8 +4,8 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `3611a7895f6` and the activation registry change recorded below; each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
-| Status | Background hydration releases worker and foreground ownership, reuses prefetched pages and defers retryable fetch failures. Sparse registration no longer holds its global lock during local setup. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
+| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `e50055c48bb` and the cache-construction change recorded below. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
+| Status | Hydration fetch, sparse registration and persistent-cache construction isolation are implemented. Loaded scale-out cannot assume idle ownership transfer. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
 
@@ -25,13 +25,14 @@ harness separately.
 | --- | --- | --- |
 | P1 | Hydration fetch isolation is implemented; service latency remains unqualified (19) | Measure same-Cell and sibling-Cell tails under arrivals, fragmented fetches and slow page installation |
 | P1 | Sparse activation registry isolation is implemented; recovery-storm performance remains unqualified (20) | Concurrent activation under constrained disk IOPS; measure worker occupancy and shared bridge startup |
+| P1 | Persistent-cache construction is admitted and its quadratic byte summation is removed; service recovery remains unqualified (22) | Repeat concurrent recovery with slow metadata I/O and measure unrelated foreground latency |
 | P1 | Peer admission changes still need load qualification (15) | Measure concurrent hint expiry, activation delay, retained request bytes, and accepted-command cancellation through HTTP |
 | P1 | Cross-Cell SQL worker blocking (9) | Background fetch passes the same-worker probe; qualify demand faults, installation, confirmation and cleanup separately |
 | P1 | Directory-cache fills still extend reads and occupy shared blocking jobs (18) | Measure remaining cache-install wait and sibling foreground interference after origin admission isolation |
 | P1 | Whole-graph compaction and serial publication debt (4–5) | Sustained updates through repeated debt thresholds; compare response rate with publication rate |
 | P1 | Buffered compaction still needs sustained-load qualification (17) | Measure async task progress, foreground interference, and publisher drain through repeated compaction boundaries |
 | P1 | Cleanup on the SQL worker and decoder memory (10, 13) | Body/footer buffering and unused replica indexes removed; measure remaining index, confirmation time, RSS, and sibling-Cell latency |
-| P1 | Execution load is not proven balanced (12) | Record owner/execution distribution and fixed offered load at every scale stage |
+| P1 | Execution load is not proven balanced; continued traffic prevents the idle-transfer gate (12) | Separate settled capacity from scale-out during arrivals; record owner/execution distribution in both |
 | P1 | Capacity runs do not fault outstanding follower-only acknowledgements (16) | Kill an owner during sustained arrivals with a proven unpublished tail; verify every acknowledged request after takeover |
 | P2 | Eager checksum metadata and demand read amplification (3, 8) | First query **and first mutation**, point/random/scan workloads, cold and churned caches |
 | P2 | Hydration cache reuse is restored; fragmentation and concurrent duplicate fetches remain (21) | Fixed-root random/scan workloads; count duplicate range bytes, fetch waves and total hydration time |
@@ -755,6 +756,41 @@ forwarding estimate. It does not enforce execution balance or attribute read
 owners. The shared-process RustFS test and retained-log replay prove the join;
 placement settling and cross-container measurements remain open.
 
+**Loaded scale-out gap at `e50055c48bb`:** the server
+[rebalance adapter](../../crab-http-server/src/cells/router.rs) checks every
+15 seconds and normally excludes a Cell used within the last 60 seconds.
+The [actor](../src/cell/actor/lifecycle/scheduling.rs) refreshes last-used time
+for both queries and commands. The [planner](../src/fleet/placement.rs) also
+requires two stable observations and 60 seconds from the adapter's first
+eligible observation, with at most two transfers per planning batch. Draining
+has a separate eligibility path. These rules also exist on the compared main
+snapshot; they are not regressions introduced by the recent LTX changes.
+
+At five uniformly scheduled pairs/s across 20 Cells, a Cell is targeted about
+every four seconds. Continued traffic therefore prevents its ordinary idle
+eligibility. A healthy new container and evenly distributed ingress cannot
+establish that old owners shed this workload. This is a source-derived
+explanation to test against the retained execution traces, not a causal
+attribution of the historical p99. The current qualifier starts each load
+after functional checks without a placement convergence gate.
+
+**Design correction:** qualify two explicit scenarios. For settled capacity,
+stop application actions while ownership converges, observe signed capacity
+and authority without invoking Cell handlers, and require stable ownership
+and the declared weighted balance before timing. A fixed 60-second sleep is
+insufficient: fresh eligibility evidence, bounded movement and current signed
+observations all matter. For scale-out during arrivals, keep traffic running
+and measure time to redistribute work. Supporting that case requires bounded
+quiescence of a busy Cell through the ordinary drain/publication/release and
+takeover gates. Preserve the separate hot-Cell case: moving a single writer
+cannot parallelize its workload across nodes.
+
+Existing `fleet_rebalance_donates_ownership_surplus_without_headroom_gain` and
+`fleet_rebalance_releases_settled_cell_and_restores_its_result` tests cover
+settled transfer. Add continuous-arrival convergence and unaffected-Cell tail
+latency to the public service gate; do not reduce production idle guards merely
+to obtain an even benchmark chart.
+
 ### 13. A streaming decoder still retains avoidable metadata
 
 **Confirmed at audited revision:** [codec::Decoder](../../crab-ltx/src/codec.rs) accumulates the
@@ -1333,6 +1369,113 @@ checkpoint supersession, truncate/regrow, foreign activation and exact restore.
 Concurrent demand/fetch single-flight, fragmented multi-span fetching and total
 memory accounting remain separate qualification work.
 
+### 22. Reopening a persistent directory cache blocks async activation
+
+**Confirmed at `e50055c48bb`:** the async runtime acquisition paths call
+[`replica_with_directory_cache`](../src/cell/actor/acquire.rs), which calls
+[`Host::with_directory_cache`](../../crab-ltx/src/environment/host.rs)
+synchronously. [`DirectoryCache::with_budget`](../../crab-ltx/src/environment/directory_cache.rs)
+cleans temporaries, reads/parses the complete index, checks each file's length
+and canonical path, and acquires its disk reservation before returning.
+This constructor bypasses the admitted executor used by subsequent cache
+reads and fills. Slow cache storage can occupy a Tokio worker even though
+checksum-file creation and sparse registry setup have been isolated elsewhere.
+Tokio's [fairness contract](https://docs.rs/tokio/1.53.1/tokio/runtime/index.html)
+requires bounded task polling; wrapping this constructor in an async function
+does not move its filesystem calls off that worker.
+
+There is a second, independent cost: for each accepted entry, construction
+sums **all previously retained lengths** to check the byte cap. With `n`
+valid entries below the cap this visits `n(n-1)/2` lengths; at the 16,384-entry
+cap, 134,209,536 length visits occur before the final total. The constructor
+also validates entries before applying the count cap. This is source-proven
+bookkeeping complexity, not a measured fraction of HTTP response time.
+
+**Reproduction:** the ignored
+[`directory_cache_restart_diagnostic`](../../crab-ltx/tests/host/hooks/activation.rs)
+seeds a version-1 membership index and 1 KiB local files, then reopens it three
+times with a 256 MiB disk budget and a derived 32 MiB cache cap. It verifies
+membership, retained bytes and reservation release. Production source remains
+`e50055c48bb`; only this diagnostic was added. On macOS arm64, mounted APFS,
+Rust 1.97.0 and an optimized build:
+
+| Entries | Constructor samples (ms) | Median (ms) |
+| --- | --- | ---: |
+| 1,024 | 34.562 / 33.788 / 34.170 | 34.170 |
+| 4,096 | 142.539 / 153.516 / 135.378 | 142.539 |
+| 16,384 | 757.404 / 762.246 / 713.062 | 757.404 |
+
+These measurements include filesystem metadata and bookkeeping. They do not
+isolate the fold, inject disk delay, exercise RustFS, measure authenticated
+directory lookup, or establish a service percentile. Files were seeded locally
+before timing; OS caches were not flushed. The debug run also passes and is
+retained separately. Raw output is `audit-cache-restart-e500-release.log` and
+`audit-cache-restart-e500.log` beneath this checkout's external Cargo target.
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
+TMPDIR="$HOME/Workspace/crabbuild-target/crab-8bc8/tmp" \
+  cargo test -p crab-ltx --features replica --test host \
+  directory_cache_restart_diagnostic --release --locked -- --ignored --nocapture
+```
+
+**Change evaluated:** maintain a checked running byte total during
+reconstruction, and have runtime acquisition await one admitted blocking cache
+construction job. Bound index input before allocation and avoid
+validating an arbitrary number of entries beyond the accepted cache envelope.
+Preserve canonical-path checks, private-temporary cleanup, reservation ownership
+and origin verification. Cancellation must retain the dispatched job and its
+reservations until it finishes. A cache remains an optional accelerator.
+
+**Gate:** repeat the entry-count curve with unchanged fixtures and slow metadata
+I/O; prove an unrelated timer and resident action progress while acquisition
+waits. Test canceled acquisition and simultaneous restarts against one shared
+disk budget. Existing cache restart/eviction, corruption/symlink, concurrent-fill
+and exact-root cache reuse tests protect behavior but do not cover constructor
+latency or executor isolation. Full replay, cold acquisition and warm reacquisition
+callers must use the same construction seam. The audited constructor and runtime
+call also exist on `origin/main` snapshot `de0bb234abc`.
+
+**Implementation:** reconstruction now retains a running byte total, checks
+the 16 MiB index-input cap before reading and checks membership/byte admission
+before validating each file. `Host::with_directory_cache` now awaits the existing
+admitted executor and returns a `Result`. All workspace callers await that one
+path. This builder is absent from release tag `v1.2.4`; no synchronous alias or
+new root export was added. The separate local capture APIs remain synchronous.
+
+Tracing the caller found repeated cache construction within one activation:
+the final publisher path passed an already selected directory into a helper
+that took its parent again. The public runtime regression reproduced five
+cache openings across bootstrap, cold acquisition and clean reacquisition,
+including incorrect parent directories. Each acquisition entry now creates
+one cache host before recovery, and passes its clones through SQLite and
+publication. The internal activation stages no longer replace that host.
+
+The off-async-worker and oversized-input regressions both fail against
+`e50055c48bb` and pass with the change. A current-thread Tokio test pauses after
+the first disk reservation, cancels its waiter and proves the blocking slot and
+bytes remain held until dispatched work finishes. Concurrent cache construction
+also shares a deliberately constrained disk budget without overcommitting it.
+
+With only the running-total change applied, the optimized diagnostic's
+16,384-entry median fell from 757.404 ms to 528.169 ms. Filesystem validation
+remains material; moving it off the async caller is a separate improvement.
+This is one before/after diagnostic series, not a service percentile or a
+supported recovery limit. Raw output is
+`cache-construction-running-total-release.log` beneath the external target;
+the failing seam logs are `cache-construction-before.log` and
+`cache-owner-before.log`.
+
+The final optimized async-construction probe reports medians of 31.406,
+130.442 and 524.585 ms for the same three entry counts; retain
+`cache-construction-final-release.log` separately from the single-change
+experiment. Six cache unit tests, eight directory cases, eleven activation
+cases, twenty-five runtime residency cases and eight minimal-feature LTX cases
+pass. The real RustFS HTTP/mTLS collaboration/takeover test and public CellNode
+primitive takeover test pass, including the acknowledgement trace join in the
+HTTP case. Replica/runtime all-target Clippy, formatting and documentation
+validation pass. These checks do not qualify fleet recovery percentiles.
+
 ### Re-audit decision and proof gaps
 
 **Is this the best fix for the reproduced waits?** Splitting remote fetch from
@@ -1365,6 +1508,13 @@ beside their owning `Db` API; the frozen root prelude is unchanged. No inventory
 was edited to suppress a failure. Full-plan completion remains unproven.
 
 ## Safety and proof retained by the audit
+
+Both the [ARM64 image/Compose run](https://github.com/crabbuild/crab/actions/runs/36239430827)
+and [AMD64 image/Compose run](https://github.com/crabbuild/crab/actions/runs/36239424906)
+passed at `e50055c48bb`. The ARM64 image was checksum/source verified and
+imported for the next fixed-workload fleet comparison. Those CI receipts cover
+the preceding hydration and registry changes; they exclude the cache-construction
+change above and do not establish sustained service capacity.
 
 The hydration follow-up passes 67 focused worker, coordination, sparse LTX and
 public lifecycle tests, plus all eight minimal-feature LTX integration tests.

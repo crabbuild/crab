@@ -24,7 +24,9 @@ async fn directory_cache_fill_does_not_queue_bytes_behind_busy_jobs() {
     let jobs = Arc::new(tokio::sync::Semaphore::new(1));
     let host = Host::default()
         .with_job_slots(jobs.clone())
-        .with_directory_cache(directory.path().join("cache"));
+        .with_directory_cache(directory.path().join("cache"))
+        .await
+        .unwrap();
     let occupied = jobs.acquire().await.unwrap();
     tokio::time::timeout(
         Duration::from_millis(250),
