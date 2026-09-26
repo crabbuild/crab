@@ -48,6 +48,9 @@ def main():
     # Clean drain preserves the fixture; only node 5 can claim its first read.
     compose(path, ("five",), "stop", "gateway", *nodes)
     compose(path, ("five",), "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300", "node-05")
+    # The retained fixture's public per-node ports are gateway proxy listeners.
+    # Bypass its node-01 startup dependency until node 5 has claimed the Cell.
+    compose(path, ("five",), "up", "--detach", "--no-build", "--no-deps", "gateway")
     expected = {"title": "Cell issue on node 1", "body": previous["acknowledged_body"]}
     current = request_json("GET", node_url(5, args.node_port_base) + issue_path(1) + "/1")
     if any(current.get(key) != value for key, value in expected.items()):
