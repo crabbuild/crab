@@ -10,7 +10,7 @@ replication protocol.
 | --- | --- |
 | Content type | Technical design and executable delivery plan |
 | Audience | Runtime, HTTP, application, and qualification contributors |
-| Status | In progress; the stage-load harness and single-resolution peer receiver are implemented |
+| Status | In progress; routing and LTX improvements plus response attribution implemented; scale qualification remains open |
 | Decision | Fix owner routing first; change pager or durability policy only after phase-specific evidence |
 
 [Back to the Cell runtime index](README.md)
