@@ -227,7 +227,10 @@ impl CellStorage {
                 {
                     Ok(_) => deleted += 1,
                     Err(StorageError::ConditionFailed(_)) => {}
-                    Err(StorageError::Transient(_)) => {
+                    // A prepare can lock an item after candidate selection.
+                    // Defer that key so unrelated items/tables keep progressing;
+                    // its expiry entry remains available after lock resolution.
+                    Err(StorageError::Transient(_) | StorageError::TransactionConflict(_)) => {
                         deferred += 1;
                         continue;
                     }

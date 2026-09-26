@@ -376,9 +376,14 @@ impl Query for ReadExpiredPartition {
         if !state.ready || state.attribute.as_deref() != Some(&input.attribute_name) {
             return Ok(Json(ExpiredPartitionOutcome::NotReady));
         }
+        // Shared and exclusive locks both prevent deletion. Excluding them
+        // before LIMIT lets later expired items progress while a decision is
+        // pending; the delete command still fences locks acquired after this read.
         let rows = context.sql(&statement(
-            "SELECT item_key FROM ddb_partition_items WHERE ttl_generation = ?1 \
-             AND ttl_epoch BETWEEN 1 AND ?2 ORDER BY ttl_epoch, item_key LIMIT 2",
+            "SELECT i.item_key FROM ddb_partition_items i WHERE i.ttl_generation = ?1 \
+             AND i.ttl_epoch BETWEEN 1 AND ?2 AND NOT EXISTS \
+             (SELECT 1 FROM ddb_partition_transaction_locks l WHERE l.item_key = i.item_key) \
+             ORDER BY i.ttl_epoch, i.item_key LIMIT 2",
             vec![
                 SqlValue::Integer(state.generation),
                 SqlValue::Integer(input.cutoff_epoch),
