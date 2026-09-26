@@ -121,8 +121,9 @@ route and records each serving node from `x-crab-cell-reader` in
 profile. Each stage compares 200 owner and 200 replica reads at concurrency
 eight, reports p50/p99 latency and actual reader distribution, and samples
 process memory, descriptors, local disk, and runtime metrics. These samples
-are not peak-resource or production-capacity measurements. A separate
-primary-only failure must select one of the two verified warm readers and
+are not peak-resource or production-capacity measurements. A reader-only
+failure must recruit a replacement without changing the writer or its epoch.
+A separate primary-only failure must select one of the two verified warm readers and
 successfully publish a new comment afterward.
 
 At 20 nodes the runner also kills a Cell's owner and two observed
