@@ -236,6 +236,44 @@ These focused tests are a local correctness gate. The RustFS action command
 above and the protected qualification workflows remain separate gates. Do
 not claim a recovery percentile from one owner-loss sample.
 
+### LTX audit gates before tuning
+
+The local [replica cost record](../../crab-ltx/perf/README.md#cell-publication-cost-per-command)
+measures about 0.3 ms for a small sparse deferred capture, but 87–139 ms
+at p50/p95 for a small successor-root preparation over loopback RustFS.
+That preparation writes five immutable objects for a small command. These
+measurements have different harnesses and are not an end-to-end latency
+decomposition. The runtime serializes publication for each Cell, even when
+a follower proof releases a response earlier. The current plan cannot yet
+identify which portion of a hot Cell's latency or capacity belongs to LTX.
+
+Close these gaps in order, using the same reference action and issue-service
+workloads before and after each change:
+
+| Priority | Missing evidence or pressure point | Experiment and acceptance gate |
+| --- | --- | --- |
+| 1 | The current durability counters report completed fleet and object proofs. An object publication can finish after a response was released on fleet proof, so those counters do not identify the proof that released the action. | Record one bounded-cardinality response-winner observation at `prove_command`, with queue, SQLite, capture, follower, publication, and confirmation times tied to the same action trace. Compare first action after node-log activation with steady actions. Prove one winner per successful action and preserve the existing ambiguous-result behavior. |
+| 2 | Root preparation reports one duration and upload count. It does not distinguish predecessor root GET/HEAD, directory reads, immutable PUT, provider wait, and authority CAS. | Extend the RustFS cost harness or an instrumented store to count GET, HEAD, PUT, bytes, attempts, and time by finite phase. Run single and many-Cell concurrency, plus hot-Cell increasing offered load. Report publisher queue age, unpublished bytes, admission rejections, root lag, provider saturation, and sustainable published roots/s. A latency change passes only if throughput or p95/p99 improves without increasing failed proofs or provider pressure. |
+| 3 | A cached predecessor still needs origin presence checks. `load_graph` HEAD-checks cached root metadata; a test requires the next prepare to fail when those objects disappear. | Measure the HEAD wave separately. Keep the [missing-metadata invariant](../../crab-ltx/tests/cell/roots/lifecycle.rs) while testing any reuse of verified predecessor state. Do not remove HEADs solely because metadata is cached or because PUT keys are content addressed. Compare chain lengths around 1, 96, and 97 descriptors before considering reuse of unchanged segment pages. |
+| 4 | Tiny steady writes hide checkpoint, full-image fallback, and sparse activation tails. A capture can read the whole WAL or emit a full database image, while the shared paged I/O driver has a bounded request queue and jobs. | Run hot and skewed Cells across checkpoint and compaction thresholds, a pinned reader, large changed-page sets, and simultaneous cold opens. Attribute checkpoint runs/busy/restarts, full WAL reads, full-image bytes, page-fault queue and deadline errors, cache misses, provider I/O, and p99. Test with the 1 GiB node limit; retain exact-root and disk-admission fault tests. |
+| 5 | SQLite uses `synchronous=FULL` on managed connections even though the Cell response waits for an external proof. The local sync might be visible in write latency, but no power-loss equivalence has been established. | Benchmark SQLite commit and response latency with the current mode as control. Consider a different mode only in an isolated experiment that proves no response can use an unverified local WAL or continuation after power loss, including failure before capture, after follower proof, and during object publication. Keep the current mode until crash and recovery qualification justifies a contract change. |
+
+The replica's `cold` origin counter includes predecessor-graph reads made by
+publication, so it cannot by itself measure cold activation. Add a finite
+operation/phase distinction instead of Cell-ID labels. Keep the existing
+64-page coalesced fault window and bounded caches while measuring cold-open
+storms; raising global I/O concurrency or cache size without the 1 GiB
+resource profile can make tail latency worse. The local `capture()` comparison
+also measures a stronger file-and-directory barrier than the runtime's
+`capture_deferred()` path; use the latter for a runtime optimization decision.
+
+Gate any root coalescing on ordered acknowledgements and replay: every
+accepted command keeps its exact stable receipt; a successor reconstructs
+every acknowledged follower-only tail; immutable roots remain a monotonic
+prefix; and the pending publication limit stays bounded. A faster object
+preparation that still cannot drain the offered hot-Cell rate is not a
+supported throughput increase.
+
 ## Work packet 5: prove application-level scale
 
 Use the existing [reference application](application-framework-example.md)
