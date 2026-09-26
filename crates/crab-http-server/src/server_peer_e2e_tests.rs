@@ -724,6 +724,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .unwrap();
     let replica_body: Value = serde_json::from_slice(&replica_bytes).unwrap();
     assert_eq!(replica_body["title"], "Remote Cell");
+    assert_eq!(replica_body["labels"][0]["id"], 1);
     let behind_url = format!(
         "{replica_url}&after_incarnation={incarnation}&after_sequence={}",
         sequence + 1

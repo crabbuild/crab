@@ -118,5 +118,8 @@ This run applies read-replica targets of 2, 4, 9, and 19 as the fleet grows
 from 3 to 20 nodes. It queries the original issue through an explicit replica
 route and records each serving node from `x-crab-cell-reader` in
 `read-replica-report.json`. Every Cell mutation uses the object durability
-profile. The report proves local RustFS side effects and observed reader
+profile. At 20 nodes the runner also kills a Cell's owner and two observed
+readers, removes those three disposable local Cell volumes, and requires a
+survivor to recover the acknowledged issue and recruit two new readers from
+RustFS. The report proves local RustFS side effects and observed reader
 distribution on one host; it does not replace protected-provider evidence.

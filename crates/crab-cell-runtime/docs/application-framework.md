@@ -290,6 +290,11 @@ pub enum ReadConsistency {
 `After(receipt)` additionally requires the same Cell and incarnation and a
 commit sequence at or beyond the receipt. The framework does not expose an
 unfenced local-file read or a global timestamp spanning Cells.
+An explicit replica-consistent typed peer query and repository issue-detail
+route exist for the object durability profile. Generated application clients
+do not yet expose that route; their current owner and `After` behavior remains
+the default while [Plan 036](../../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md)
+completes the public consistency contract.
 
 ## Generate an application client
 

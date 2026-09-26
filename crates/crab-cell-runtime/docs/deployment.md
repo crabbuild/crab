@@ -43,7 +43,8 @@ both `after_incarnation` (32 lowercase hex digits) and `after_sequence` on a
 later replica request to require at least that position. The route reports
 `replica_behind` (409) or `replica_unavailable` (503) and never runs the issue
 query on the owner as a fallback. The default issue route still reads from the
-owner. Other issue metadata may be resolved separately from the owner.
+owner. Label metadata on the replica route is queried at or beyond the issue
+receipt; assignee metadata comes from the authorized repository configuration.
 
 ## Configure one process per node
 

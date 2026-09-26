@@ -309,6 +309,19 @@ mTLS peer route, the policy change to zero releases reader admission, and the
 old view is fenced after the owner epoch changes. This is one-process test
 wiring, not the required independent Pod qualification.
 
+A local Compose slice at runtime source `5f6c121494c` also passed against RustFS
+with 3, 5, 10, and 20 independent containers, each limited to 1 CPU / 1 GiB.
+The reader targets 2, 4, 9, and 19 all served the original issue. Measured
+per-reader counts were 10/10, four times 10, 9–11, and nineteen times 10.
+At 20 nodes, the runner killed one Cell's owner and both readers, removed their
+three local volumes, and recovered the issue and label from the identical
+published root on a surviving node. It then observed two replacement readers.
+This receipt uses image `sha256:d46b4d06971a608da9fd326fe6e7c482919e0313cd2d1efe798124990ba664bf`;
+the raw report is outside the checkout under
+`$HOME/.codex/cell-issue-fleet/plan036-local-1/read-replica-report.json`.
+It predates the later change that also routes issue label metadata to readers.
+It proves a local functional slice, not a production capacity or protected-provider gate.
+
 | Slice | Change owner | Implementation and focused gate | Completion evidence |
 | --- | --- | --- | --- |
 | 0. Reconcile contracts | `crates/crab-cell-runtime/docs/{canonical-ltx-scaling,failover-and-followers,application-framework,deployment}.md`, product durability config | Record this as an opt-in extension to the former read-replica non-goal. Freeze S3-rooted acknowledgements, target-count ownership, `CurrentOwner` versus explicit replica-read semantics, and public API/peer version. Check release tags before changing any shipped wire or API shape. | Reviewed invariant and compatibility map; fleet-only acknowledgements are excluded from the all-secondary-loss claim. |

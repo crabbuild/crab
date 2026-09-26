@@ -25,7 +25,7 @@ use crate::{
             CommentKey, CommentPage, CommentRecord, CreateComment, CreateCommentInput,
             CreateCommentOutcome, CreateIssue, CreateIssueInput, CreateIssueOutcome, GetComment,
             GetIssue, IssueRecord, IssueSummary, ListComments, ListCommentsInput, ListIssues,
-            ListIssuesInput, RepositoryAuthor, UpdateComment, UpdateCommentInput,
+            ListIssuesInput, ListLabels, RepositoryAuthor, UpdateComment, UpdateCommentInput,
             UpdateCommentOutcome, UpdateIssue, UpdateIssueInput, UpdateIssueOutcome,
         },
     },
@@ -292,21 +292,23 @@ async fn detail(
 ) -> Result<Response> {
     let repo = repository(&server, &principal, &(owner, name))?;
     let author = actor(&principal)?;
-    let (issue, receipt, reader_node) = match params.read.as_deref() {
+    let (issue, receipt, reader_node, labels) = match params.read.as_deref() {
         None | Some("owner") => {
             if params.after_incarnation.is_some() || params.after_sequence.is_some() {
                 return Err(Error::Invalid("Replica receipt requires read=replica"));
             }
             let routed = route(&server, &repo, &author, "repository.read").await?;
+            let issue = query_output(
+                routed
+                    .client
+                    .query::<GetIssue>(&routed.target, None, number(id)?)
+                    .await,
+            )?;
             (
-                query_output(
-                    routed
-                        .client
-                        .query::<GetIssue>(&routed.target, None, number(id)?)
-                        .await,
-                )?,
+                issue,
                 None,
                 None,
+                labels::catalog(&server, &repo, &author).await?,
             )
         }
         Some("replica") => {
@@ -347,12 +349,23 @@ async fn detail(
                 .query_replica::<GetIssue>(repo.id, &author, &local, minimum, number(id)?)
                 .await
                 .map_err(Error::Cell)?;
-            (observed.output, Some(observed.receipt), Some(reader_node))
+            let labels = router
+                .query_replica::<ListLabels>(repo.id, &author, &local, Some(observed.receipt), ())
+                .await
+                .map_err(Error::Cell)?
+                .0
+                .output
+                .labels;
+            (
+                observed.output,
+                Some(observed.receipt),
+                Some(reader_node),
+                labels,
+            )
         }
         Some(_) => return Err(Error::Invalid("Read mode must be owner or replica")),
     };
     let issue = issue.ok_or(Error::NotFound)?;
-    let labels = labels::catalog(&server, &repo, &author).await?;
     let assignees = assignees::available(&repo, &author);
     let mut response = Json(issue_view(
         &issue,
