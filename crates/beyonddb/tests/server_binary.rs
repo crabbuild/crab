@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File},
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
@@ -12,7 +12,10 @@ use std::{
 };
 
 use aws_credential_types::Credentials;
-use aws_sdk_dynamodb::types::{AttributeValue, ConditionCheck, TransactWriteItem, Update};
+use aws_sdk_dynamodb::types::{
+    AttributeValue, ConditionCheck, KeysAndAttributes, PutRequest, TransactWriteItem, Update,
+    WriteRequest,
+};
 use serde_json::json;
 
 struct ManagedChild(Child);
@@ -269,6 +272,7 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
             "public_endpoint": format!("http://{public}"),
             "owned_accounts": ["123456789012"],
             "owned_access_keys": ["AKIAIOSFODNN7EXAMPLE"],
+            "initial_partitions": 4,
             "bootstrap": {
                 "account_id": "123456789012",
                 "access_key_id": "AKIAIOSFODNN7EXAMPLE",
@@ -327,6 +331,30 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
     let arn = created
         .table_description()
         .and_then(|description| description.table_arn())
+        .unwrap();
+    let table_id = created
+        .table_description()
+        .and_then(|description| description.table_id())
+        .unwrap();
+    let schema = [extenddb_core::types::KeySchemaElement {
+        attribute_name: "id".into(),
+        key_type: extenddb_core::types::KeyType::Hash,
+    }];
+    let range = |id: &str| {
+        beyonddb::data_key_hash(
+            table_id,
+            &extenddb_core::types::Item::from([(
+                "id".into(),
+                extenddb_core::types::AttributeValue::S(id.into()),
+            )]),
+            &schema,
+        )
+        .unwrap()[0]
+            >> 6
+    };
+    let condition_key = (0..32)
+        .map(|index| format!("condition-{index}"))
+        .find(|id| range(id) == range("process"))
         .unwrap();
     let initial_tags = sdk
         .list_tags_of_resource()
@@ -390,6 +418,101 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         .send()
         .await
         .unwrap();
+    let mut batch_ids: Vec<String> = Vec::new();
+    for index in 0..64 {
+        let id = format!("batch-{index}");
+        if batch_ids
+            .iter()
+            .any(|existing| range(existing) == range(&id))
+        {
+            continue;
+        }
+        batch_ids.push(id);
+        if batch_ids.len() == 3 {
+            break;
+        }
+    }
+    assert_eq!(batch_ids.len(), 3);
+    let batch_items = batch_ids
+        .iter()
+        .map(|id| {
+            HashMap::from([
+                ("id".into(), AttributeValue::S(id.clone())),
+                ("value".into(), AttributeValue::S("batched".into())),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let writes = batch_items
+        .iter()
+        .map(|batch_item| {
+            WriteRequest::builder()
+                .put_request(
+                    PutRequest::builder()
+                        .set_item(Some(batch_item.clone()))
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+        })
+        .collect();
+    let written = sdk
+        .batch_write_item()
+        .request_items("ProcessData", writes)
+        .send()
+        .await
+        .unwrap();
+    assert!(written.unprocessed_items().is_none_or(HashMap::is_empty));
+    let batch_keys = batch_items
+        .iter()
+        .map(|item| HashMap::from([("id".into(), item["id"].clone())]))
+        .collect::<Vec<_>>();
+    let read_batch = || {
+        sdk.batch_get_item().request_items(
+            "ProcessData",
+            KeysAndAttributes::builder()
+                .set_keys(Some(batch_keys.clone()))
+                .consistent_read(true)
+                .build()
+                .unwrap(),
+        )
+    };
+    let batch = read_batch().send().await.unwrap();
+    let found = &batch.responses().unwrap()["ProcessData"];
+    assert!(batch_items.iter().all(|item| found.contains(item)));
+    for total_segments in [2, 3] {
+        let mut scanned = HashSet::new();
+        for segment in 0..total_segments {
+            let mut start = None;
+            for page_number in 0..20 {
+                let page = sdk
+                    .scan()
+                    .table_name("ProcessData")
+                    .segment(segment)
+                    .total_segments(total_segments)
+                    .limit(2)
+                    .set_exclusive_start_key(start)
+                    .send()
+                    .await
+                    .unwrap();
+                for item in page.items() {
+                    assert!(scanned.insert(item["id"].as_s().unwrap().clone()));
+                }
+                start = page.last_evaluated_key().cloned();
+                if start.is_none() {
+                    break;
+                }
+                assert!(page_number < 19, "parallel Scan did not finish");
+            }
+        }
+        assert_eq!(
+            scanned,
+            batch_ids
+                .iter()
+                .cloned()
+                .chain(std::iter::once("process".into()))
+                .collect()
+        );
+    }
     let updated = HashMap::from([
         ("id".into(), AttributeValue::S("process".into())),
         ("value".into(), AttributeValue::S("updated".into())),
@@ -413,7 +536,7 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
             .condition_check(
                 ConditionCheck::builder()
                     .table_name("ProcessData")
-                    .key("id", AttributeValue::S("absent".into()))
+                    .key("id", AttributeValue::S(condition_key.clone()))
                     .condition_expression(condition)
                     .build()
                     .unwrap(),
@@ -470,6 +593,9 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         .await
         .unwrap();
     assert_eq!(read.item(), Some(&updated));
+    let recovered_batch = read_batch().send().await.unwrap();
+    let recovered = &recovered_batch.responses().unwrap()["ProcessData"];
+    assert!(batch_items.iter().all(|item| recovered.contains(item)));
     let recovered_tags = sdk
         .list_tags_of_resource()
         .resource_arn(arn)

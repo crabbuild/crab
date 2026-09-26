@@ -103,6 +103,10 @@ IDs never change when a partition splits. Routing hashes a canonical encoding
 of the HASH key attributes only, so all sort-key siblings share one Cell owner.
 Query can then read that Cell in sort-key order. Scan reads the directory in
 64-range pages and pins its epoch while advancing through pages in one request.
+Parallel Scan assigns each segment a contiguous hash interval, starts at that
+interval, and skips data Cell ranges outside it. A Cell that straddles an
+interval boundary still scans and filters its local items; throughput at the
+10,000-Cell target remains unmeasured.
 Keyed requests use an indexed owner-row lookup in the account Cell, so their
 route result stays constant in size as the range count grows. The account Cell
 stores one indexed row per range and updates only the split source and children
