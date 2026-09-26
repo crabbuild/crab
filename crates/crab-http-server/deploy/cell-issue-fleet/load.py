@@ -208,6 +208,10 @@ def recover_owner(
         time.sleep(1)
     else:
         raise RuntimeError("owner did not publish its retained bytes to RustFS")
+    live = status(path, profiles, target)
+    if live["owner"]["session"] != before["owner"]["session"]:
+        raise RuntimeError("owner moved before the owner-loss fault")
+    before = live
     started = time.monotonic()
     try:
         compose(path, profiles, "kill", "--signal", "SIGKILL", owner)
@@ -287,8 +291,10 @@ def main() -> None:
         if observed["body"].get("title") != issue["title"]:
             raise RuntimeError(f"work-{cell:02d} lost its last acknowledged issue")
     after = verify_roots(path, profiles, before, args.nodes)
+    owners_at_recovery, recovery_baseline = owner_map(path, profiles, args.nodes)
     recovery = recover_owner(
-        path, profiles, gateway, args.nodes, owners[args.nodes], after[args.nodes], latest[args.nodes]
+        path, profiles, gateway, args.nodes,
+        owners_at_recovery[args.nodes], recovery_baseline[args.nodes], latest[args.nodes],
     )
     report = {
         "source": command("git", "-C", str(ROOT), "rev-parse", "HEAD"),
