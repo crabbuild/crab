@@ -376,6 +376,8 @@ impl CellPagedDatabase {
     ///
     /// The destination must be fresh and must later be passed unchanged to
     /// `CellWritableDatabase::open_writable`.
+    /// Requires a running Tokio runtime, which must remain alive while canceled
+    /// activation work releases its file and host admission.
     pub async fn prepare_writable(
         mut self,
         destination: &std::path::Path,

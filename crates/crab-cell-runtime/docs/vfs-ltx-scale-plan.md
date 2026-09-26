@@ -296,6 +296,13 @@ Disk-cache hits no longer rewrite unchanged membership. These changes still
 need public-action and sustained-drain measurements before assigning a fleet
 latency benefit.
 
+Writable activation now dispatches checksum-file operations through the host's
+blocking-job admission. A file owner retains dirty admission through canceled
+work and cleanup; focused tests cover slow I/O, failures, one-slot execution,
+fresh destinations, and retry. The authenticated directory traversal remains
+sequential. This closes the async-thread blocking defect, while the larger
+activation and interference qualification in packet 4 remains open.
+
 The local [replica cost record](../../crab-ltx/perf/README.md#cell-publication-cost-per-command)
 measures about 0.3 ms for a small sparse deferred capture, but 87–139 ms
 at p50/p95 for a small successor-root preparation over loopback RustFS.
