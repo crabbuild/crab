@@ -9,26 +9,26 @@ fn mutation() -> MutationIdentity {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn committed_participants_reuse_staged_space_after_unrelated_writes() {
-    capacity_case(&[], 4, 380 * 1024).await;
+async fn small_item_commit_uses_reserved_capacity_after_other_writers_fill_cell() {
+    capacity_case(&[380 * 1024, 8 * 1024, 0], 50, 0, 144).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn committed_participants_resolve_after_unrelated_writes_exhaust_capacity() {
-    capacity_case(&[8 * 1024], 4, 380 * 1024).await;
+async fn large_item_commit_uses_reserved_capacity_after_other_writers_fill_cell() {
+    capacity_case(&[380 * 1024, 8 * 1024, 0], 4, 380 * 1024, 32).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn small_item_commit_survives_full_apply_and_retries_after_reclaim() {
-    capacity_case(&[8 * 1024, 0], 50, 0).await;
+async fn prepare_refuses_without_resolution_headroom_and_leaves_no_locks() {
+    capacity_case(&[], 4, 0, 2).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn large_item_commit_survives_full_apply_and_retries_after_reclaim() {
-    capacity_case(&[8 * 1024, 0], 4, 380 * 1024).await;
-}
-
-async fn capacity_case(fill_sizes: &[usize], per_participant: usize, payload_bytes: usize) {
+async fn capacity_case(
+    fill_sizes: &[usize],
+    per_participant: usize,
+    payload_bytes: usize,
+    database_mib: u64,
+) {
     let application = Arc::new(
         Beyonddb::compile(BuildDescriptor {
             source_revision: "transaction-capacity".into(),
@@ -62,7 +62,7 @@ async fn capacity_case(fill_sizes: &[usize], per_participant: usize, payload_byt
         session,
     };
     let limits = Limits {
-        max_database_bytes: 2 * 1024 * 1024,
+        max_database_bytes: database_mib * 1024 * 1024,
         max_capture_bytes: 1024 * 1024,
         ..Limits::default()
     };
@@ -232,7 +232,6 @@ async fn capacity_case(fill_sizes: &[usize], per_participant: usize, payload_byt
                 })
             )
             .await
-            .unwrap()
         } else {
             transaction_command!(
                 client,
@@ -249,8 +248,15 @@ async fn capacity_case(fill_sizes: &[usize], per_participant: usize, payload_byt
                 })
             )
             .await
-            .unwrap()
         };
+        if database_mib == 2 {
+            assert!(
+                prepared.is_err(),
+                "prepare must refuse insufficient headroom"
+            );
+            continue;
+        }
+        let prepared = prepared.unwrap();
         client
             .command::<RecordParticipantPrepare>(
                 &coordinator,
@@ -266,6 +272,28 @@ async fn capacity_case(fill_sizes: &[usize], per_participant: usize, payload_byt
             )
             .await
             .unwrap();
+    }
+    if database_mib == 2 {
+        for (file, locks) in [
+            (&account_file, "ddb_account_transaction_locks"),
+            (&data_file, "ddb_partition_transaction_locks"),
+        ] {
+            let connection = crab_ltx::rusqlite::Connection::open_with_flags(
+                file,
+                crab_ltx::rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            for table in [locks, "ddb_transactions", "capacity_reservations"] {
+                let rows: i64 = connection
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(rows, 0, "failed prepare left rows in {table}");
+            }
+        }
+        runtime.shutdown().await.unwrap();
+        return;
     }
     for table in &tables {
         let info = storage
@@ -325,6 +353,31 @@ async fn capacity_case(fill_sizes: &[usize], per_participant: usize, payload_byt
             }
         }
     }
+    for file in [&account_file, &data_file] {
+        let connection = crab_ltx::rusqlite::Connection::open_with_flags(
+            file,
+            crab_ltx::rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let held: i64 = connection
+            .query_row("SELECT pages FROM capacity_total", [], |row| row.get(0))
+            .unwrap();
+        let used: i64 = connection
+            .query_row(
+                "SELECT page_count - freelist_count FROM pragma_page_count, pragma_freelist_count",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(held > 0);
+        assert!(used + held <= (limits.max_database_bytes / 4096) as i64);
+        if fill_sizes.contains(&0) {
+            assert!(
+                (limits.max_database_bytes / 4096) as i64 - used - held < 8,
+                "filler must reach the reserved page boundary: used={used}, held={held}"
+            );
+        }
+    }
     client
         .command::<DecideCrossCellTransaction>(
             &coordinator,
@@ -338,105 +391,6 @@ async fn capacity_case(fill_sizes: &[usize], per_participant: usize, payload_byt
         )
         .await
         .unwrap();
-    if fill_sizes.contains(&0) {
-        // Tiny filler consumes the slack left by the first large refusal. This
-        // currently exposes missing apply reservation after durable COMMIT.
-        let mut reclaimed = std::collections::BTreeSet::new();
-        for _ in &tables {
-            let Err(error) = storage
-                .finish_decided_cross_cell_transaction(account_id, &transaction_id, transaction_id)
-                .await
-            else {
-                break;
-            };
-            assert!(matches!(error, StorageError::Transient(_)), "{error:?}");
-            let status = client
-                .query::<ReadCrossCellTransaction>(
-                    &coordinator,
-                    None,
-                    Json(ReadCrossCellTransactionInput {
-                        account_id: account_id.into(),
-                        transaction_id,
-                        routing_key: transaction_id.to_vec(),
-                    }),
-                )
-                .await
-                .unwrap()
-                .output
-                .0
-                .unwrap();
-            assert_eq!(status.decision, CoordinatorDecision::Commit);
-            assert!(status.resolved_count < 2);
-
-            // A failed resolver must restore its locks and staged images. A raw
-            // participant read cannot help resolution or hide an incomplete apply.
-            let first = &participants[usize::from(status.resolved_count)];
-            let position = usize::from(first.operations[0].index) / per_participant;
-            let key = Item::from([("id".into(), AttributeValue::S("committed-0".into()))]);
-            let conflict = if position == 0 {
-                let result = client
-                    .query::<GetItem>(
-                        &account,
-                        None,
-                        Json(GetItemInput {
-                            table_name: tables[0].table_name.clone(),
-                            table_id: tables[0].id.clone(),
-                            key,
-                        }),
-                    )
-                    .await
-                    .unwrap()
-                    .output
-                    .0;
-                let GetItemOutcome::Conflict(conflict) = result else {
-                    panic!("failed apply lost its lock: {result:?}")
-                };
-                conflict
-            } else {
-                let result = client
-                    .query::<PartitionGet>(
-                        &data,
-                        None,
-                        Json(PartitionGetInput {
-                            table_id: tables[1].id.clone(),
-                            epoch: 1,
-                            key,
-                        }),
-                    )
-                    .await
-                    .unwrap()
-                    .output
-                    .0;
-                let PartitionGetOutcome::Conflict(conflict) = result else {
-                    panic!("failed apply lost its lock: {result:?}")
-                };
-                conflict
-            };
-            assert_eq!(conflict.transaction.transaction_id, transaction_id);
-            assert!(
-                reclaimed.insert(position),
-                "resolution made no progress after reclaim"
-            );
-            let info = storage
-                .table_key_info(account_id, &tables[position].table_name)
-                .await
-                .unwrap();
-            assert_eq!(
-                storage
-                    .delete_item(
-                        &info,
-                        &Item::from([("id".into(), AttributeValue::S("unrelated".into()))]),
-                        false,
-                        None,
-                        &ExpressionMaps::default(),
-                        None,
-                    )
-                    .await
-                    .unwrap(),
-                None
-            );
-        }
-    }
     storage
         .finish_decided_cross_cell_transaction(account_id, &transaction_id, transaction_id)
         .await
@@ -456,6 +410,17 @@ async fn capacity_case(fill_sizes: &[usize], per_participant: usize, payload_byt
                 Some(input.item.clone())
             );
         }
+    }
+    for file in [&account_file, &data_file] {
+        let connection = crab_ltx::rusqlite::Connection::open_with_flags(
+            file,
+            crab_ltx::rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let held: i64 = connection
+            .query_row("SELECT pages FROM capacity_total", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(held, 0, "resolved participant must release its reservation");
     }
     runtime.shutdown().await.unwrap();
 }

@@ -100,7 +100,10 @@ impl Command for PreparePartitionTransaction {
             input.transaction_id,
             input.coordinator_cell,
             digest,
-            serde_json::to_vec(&prepared)?,
+            crate::participant::PreparedPayload {
+                bytes: serde_json::to_vec(&prepared)?,
+                operations: prepared.images.len(),
+            },
             &input.coordinator_key,
             prepared
                 .images

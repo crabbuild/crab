@@ -220,8 +220,9 @@ admission pattern, not all overload or owner-availability failures.
 The transaction payload schema is unshipped and replaces the former blob
 columns directly; no compatibility reader is retained. Item BLOB encoding and
 external APIs are unchanged. Bounded wire uploads now transfer BEGIN and prepare
-inputs that exceed one Cell RPC. Aggregate evaluated Update size, apply-capacity
-reservation, and history collection remain separate gaps.
+inputs that exceed one Cell RPC. Aggregate evaluated Update size, WAL/disk/memory
+admission, and history collection remain separate gaps. SQLite page reservations
+are described in the final section below.
 
 ## Cell wire payloads and transactional reads
 
@@ -343,8 +344,8 @@ upload path and both participant tombstone checks.
 
 Remaining transport qualification includes sustained temporary-capacity
 pressure and clocks at the tolerance boundary or moving during transfer.
-Prepared/apply headroom and retained transaction history need separate
-admission and collection work. The pinned ExtendDB HTTP router also imposes a
+WAL/disk/memory admission and retained transaction history need separate
+work; the final section describes the implemented SQLite page claim. The pinned ExtendDB HTTP router also imposes a
 16-MiB request body limit; the internal 32-MiB transfer ceiling does not remove it.
 Individual item RPCs still need qualification for all encoded attribute shapes.
 
@@ -810,7 +811,7 @@ fleet-availability findings remain open.
 | Public admission | ExtendDB `handle_transact_write_items` → `backend/data.rs` → `backend/admission.rs` → coordinator BEGIN | Signed SDK writes, token mismatch/replay, dropped BEGIN reply; evaluated aggregate write size remains unchecked. |
 | Prepare | `backend/transaction.rs` → account/data wrappers → shared `participant::record_prepare` | Mixed participants, conditions, absent-key locks, owner restart; the reproduced SQL payload limit is now addressed by bounded storage. |
 | Decision | Driver → `RecordParticipantPrepare` → `DecideCrossCellTransaction` | COMMIT requires every recorded prepare; terminal decisions cannot change. Receipts are trusted driver assertions, not independently verified certificates. |
-| Apply | `backend/recovery.rs` → account/data resolver → `participant::resolve` | Repeated resolution, abort-before-prepare tombstones, partial apply recovery, and a near-full account/data regression; transaction-specific apply headroom is still not reserved. |
+| Apply | `backend/recovery.rs` → account/data resolver → `participant::resolve` | Repeated resolution, abort-before-prepare tombstones, partial apply recovery, and a near-full account/data regression; durable SQLite page claims now protect apply from unrelated writes; WAL/disk/memory admission remains separate. |
 | Reads | Get/Query/Scan barriers and `backend/transaction_read.rs` | Pending creates, partial COMMIT, shared snapshots, saved images; full concurrent-history/fault matrix remains open. |
 | Sibling writers | Ordinary item commands, conditional TTL delete, split seal, account table deletion | Key and split fences exist. TTL excludes prepared locks before candidate selection and defers conflicts acquired before deletion; the regression covers later-item/table progress and deletion after ABORT. Routed table deletion needs its own lifecycle qualification, beyond the account lock test. |
 | Durability | Cell command savepoint → runtime publication → owner authority | `Committed<T>` releases after publication; `CellExecutor::query` refuses an unpublished head. Restart/peer tests exercise this dependency. |
@@ -1060,10 +1061,10 @@ of which bytes the public API counts.
   are fixed at 4,096 per account and also have finite database budgets. A safe
   collector must fence delayed prepare/resolve/fetch operations before deleting
   their evidence; token expiry alone is insufficient.
-- **Apply headroom.** Prepare does not reserve a transaction-specific budget
-  that guarantees later apply can complete despite unrelated writes/history
-  growth. The near-full regression below fixes duplicate image allocation; it
-  does not establish a universal reservation guarantee.
+- **Apply headroom.** Prepare reserves a conservative SQLite page budget and
+  the runtime protects it against unrelated writes and receipts. WAL, host disk,
+  and peak memory are not reserved by this mechanism. The final section records
+  its bound, evidence, concurrency cost, and remaining qualification gaps.
 - **TTL fairness addressed.** Candidate selection excludes shared and exclusive
   locks before its two-item limit. A prepare racing that read can still make
   conditional deletion return `TransactionConflict`; the sweep defers that key
@@ -1170,8 +1171,8 @@ occurred during that smoke. Format and diff checks passed.
 
 This closes configured-account transaction discovery during serving. It does
 not qualify 10,000 Cells, multi-TB storage, fleet placement, or bounded recovery
-time. General apply-space reservation and transaction/read-history collection
-also remain required before a production transaction guarantee.
+time. Beyond the SQLite page claim described below, WAL/disk/memory admission
+and transaction/read-history collection remain required.
 
 
 ## Capacity refusal must leave prepared participants recoverable
@@ -1227,7 +1228,10 @@ does not supply a universal prepare-time reservation for B-tree/index growth,
 request receipts, retained history, WAL, or peak memory. Those requirements and
 the 10,000-Cell/multi-TB qualification remain open.
 
-## Dense exhaustion: safety survives, apply headroom is still missing
+## Dense exhaustion reproduced before page reservation
+
+This section records the failure and delete-result fix at `cc2f7fab467`. The
+following section describes the current admission fix.
 
 The 8-KiB filler refusal left enough slack for the previous capacity regression.
 Continuing with empty-payload items consumed that slack. Both four 380-KiB
@@ -1235,14 +1239,14 @@ writes and fifty small writes per participant then reproduced `SQLITE_FULL`
 during item application after the coordinator published COMMIT. Temporary
 probes located the failure inside `write_item`; releasing lock rows before
 apply did not cure it. Those probes and the ineffective reordering were removed.
-The original near-full and 8-KiB-exhaustion tests remain unchanged in meaning.
+The later dense tests subsume the original near-full and 8-KiB-exhaustion cases.
 
-The new dense cases verify the required failure behavior: a retryable result,
+Before the page-reservation change below, the dense cases verified failure behavior: a retryable result,
 an unchanged durable COMMIT, and a raw participant read that still reports the
 transaction lock. Reclaiming an unrelated item in each blocked participant lets
 the same decision finish and every prepared item is read back byte-for-byte.
-The test permits resolution without reclaim when future admission work makes
-that possible; it does not require the current shortage to remain a feature.
+The current version requires resolution without reclaim, using the page
+reservation introduced below. The earlier version allowed either outcome.
 This is recovery after resource relief, not a guarantee of autonomous progress
 at full capacity.
 
@@ -1286,7 +1290,7 @@ preserves the database and its budget, so takeover alone supplies no new space.
 This makes apply admission a prerequisite for unattended scaling, rather than
 an issue that the split or recovery worker can simply retry away.
 
-The next transaction milestone remains prepare-time admission that protects
+This reproduction motivated prepare-time admission that protects
 apply and terminal-receipt space from unrelated writes, or a storage layout
 that installs indexed versions during prepare and resolves by a bounded state
 change. Payload reuse alone has now been disproved as a sufficient guarantee.
@@ -1303,3 +1307,101 @@ transactions/reads, historical token replay, and graceful restart. The binary
 remained fixed throughout that process test. Production growth is seven net
 lines for the existing result-selection contract; the additional test fixture
 covers the newly reproduced shortage and its recovery boundary.
+
+
+## Durable page admission for participant resolution
+
+The earlier dense-exhaustion reproduction showed why freeing staged images is
+insufficient: after PREPARE, unrelated writes could consume the remaining space
+and leave an irrevocable COMMIT unable to apply. Prepare now records a durable
+SQLite page claim in the runtime capacity primitive alongside images and locks.
+Both account and data participants use the same rule. If the claim cannot fit,
+the prepare command rolls back without prepared state or locks.
+
+The runtime checks occupied pages plus held pages against `max_page_count` after
+all application, receipt, and metadata writes. Commands, rejected-command
+receipts, effect inboxes, bootstrap, and migrations share this boundary. The
+primitive maintains a running total, avoiding a scan of every transaction per
+commit. Claims are small ledger rows, not large zero-filled allocations.
+Resolution releases its own claim in the same SQLite transaction as apply,
+lock cleanup, and the terminal marker. Failure restores the claim; other held
+claims remain protected. Claims never expire on age or owner change.
+
+### Allocation bound and cost
+
+For `n` local operations, `c` staged chunks, `s` serialized staged bytes, and
+SQLite page size `p`, the participant reserves:
+
+`(44 * (16*n + c + 16) + 2) * p + 2*s` bytes, rounded up to pages.
+
+The pinned SQLite 3.49.1 source (libsqlite3-sys 0.32.0) defines
+`BTCURSOR_MAX_DEPTH = 20`. `balance_nonroot` adds at most two siblings while
+reusing old pages, and `balance_deeper` accounts for root expansion. The 44-page
+allowance covers that structural growth per tree edit. The per-operation bound
+covers eight item/index edits, five lock-tree deletions, two saved-read tree
+deletions on ABORT, and a spare edit. One tree edit per staged chunk covers
+its WITHOUT ROWID payload deletion. Sixteen fixed edits cover the reservation
+ledger/total, participant phase, request receipt/index, and runtime metadata,
+including delete/insert forms of updates. The payload allowance covers new item
+and key overflow allocations without relying on reclaiming staged bytes.
+
+This accounting follows `items::transaction::apply`,
+`partition::transaction::apply_staged`, both `write_item` implementations,
+`StoredItem::write`, participant cleanup, and the runtime receipt schemas.
+Incremental BLOB writes do not grow an already allocated image. The current
+schemas have no application triggers and use the default `auto_vacuum=NONE`.
+Any change to SQLite, these schemas,
+indexes, or resolve writes requires re-auditing the bound.
+
+At 4-KiB pages, 100 small local operations claim about 278 MiB before payload
+allowance. This is intentionally conservative and reduces concurrency within a
+512-MiB Cell. It is not an efficient packing or 10,000-Cell throughput result.
+A two-MiB Cell cannot admit even the four-operation regression under this rule;
+that refusal is explicitly tested. Production limits remain unchanged.
+
+`PartitionUsage.database_bytes` now counts occupied pages, excluding the
+freelist, so reusable pages do not cause artificial split pressure. Ordinary
+splitting still refuses prepared locks; a split does not move reservations or
+unresolved intents to child Cells.
+
+### Evidence and remaining boundaries
+
+The runtime tests exercise a large receipt refused despite a tiny handler
+write, effect-inbox refusal and retry, release rollback for errors and durable
+rejections, recovery from the published root in a new runtime/session/address,
+and bootstrap/migration refusal before publication. Protected SQL and BLOB
+paths reject capacity-ledger access. Participant tests fill account and data
+Cells with successively smaller unrelated items until refusal, assert the
+reservation boundary, publish COMMIT, and verify every prepared image without
+manual reclamation. They also assert claims are released after resolution.
+
+**Is this the best fix for the reproduced failure?** The runtime owns receipt,
+inbox, and migration allocations, so an application-only limit cannot protect
+the promise. A durable runtime claim enforces it across those sibling paths
+without replicating padding bytes. The application owns its apply-size bound.
+Current main has no BeyondDB; its runtime lacks this optional primitive. This
+unshipped application installs the new primitive directly and needs no legacy
+reader or root-schema migration.
+
+The claim covers database pages, not WAL, capture, disk, or peak heap. Those
+resources can still delay a decided transaction. Coordinator capacity/history
+collection, cloud aggregate-size semantics, systematic concurrency/crash-cut
+qualification, and the 10,000-Cell/multi-TB target remain open. COMMIT remains
+irrevocable; resource errors must never turn it into ABORT.
+
+
+Verification for page admission: four runtime boundary tests and six SQL
+capability tests passed. All 22 account/elastic/peer-network tests passed,
+including the three current capacity regressions. The 20-test elastic suite
+completed in 65.70 seconds and the signed two-owner network case in 97.22 seconds.
+Strict all-target Clippy passed for BeyondDB and runtime with `test-support`;
+format, diff, and Cell/LTX layout checks passed. The change adds one 108-line
+runtime primitive and its small optional schema, plus application accounting and
+four executor checks. That production growth provides the common enforcement
+boundary; it does not introduce a second transaction protocol or padding I/O.
+
+The separate signed SDK/RustFS process smoke passed in 374.95 seconds, including
+large cross-Cell writes/reads, historical token replay, changed-address hard
+restart, restored item/deletion state, and graceful restart. The server binary
+remained fixed throughout the process test. This is end-to-end functional proof,
+not a scale or throughput benchmark.
