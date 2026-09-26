@@ -7,6 +7,7 @@ import json
 import math
 import re
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -14,6 +15,8 @@ import uuid
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.dont_write_bytecode = True
 
 from qualify import BUCKET, CONFIG, MEMORY_LIMIT, ROOT, command, compose, issue_path, node_name, prove_node
 
