@@ -7,7 +7,7 @@ capture remains usable without the `replica` feature; object-store examples use
 | Example | Demonstrates |
 | --- | --- |
 | `local_roundtrip` | Local WAL capture, verified plan construction, exact restore, and SQL verification |
-| `rustfs_cell_replica_scale_load` | Cell-scoped immutable publication, source deletion, exact restore, and full-range compaction with checksum verification |
+| `rustfs_cell_replica_scale_load` | Immutable publication, sparse activation phase measurements, source deletion, exact restore, and full-range compaction with checksum verification |
 | `power_cut_probe` | Exact capture and clean-continuation checkpoints for an external power-cut controller |
 
 Run the local example from the repository root:
@@ -46,6 +46,29 @@ deletes the source database, restores the published root, compacts its complete
 range, and compares source and restored BLAKE3/length. It never lists or deletes
 remote objects. Run it only against a disposable bucket and let the bucket
 owner clean up remote data.
+
+After deleting the source, the example emits 18 JSON lines with
+`measurement: "sparse_activation"`: three rounds at one, four, and eight shared
+I/O slots, each with a fresh metadata cache and a second activation reusing it.
+Slot order reverses in the middle round. Each line separates exact-root open,
+checksum preparation, writable open (including blocking-worker dispatch), and
+the first row-length query. Each phase reports elapsed microseconds, storage
+read calls, and returned bytes. Hydrated-page and page-fault counts show how
+much of the database the initial SQL access actually touched.
+
+Fresh `Store` identities exclude previously cached immutable metadata; provider
+connections and RustFS caches remain warm. The reused pass retains bounded
+metadata caches and uses a fresh sparse destination, so a database larger than
+the metadata cache may still require origin reads. There is no persistent
+directory cache in this probe. Read calls include the Store read API's GET,
+range, and HEAD observations, not provider-internal retries. Three samples per
+slot/cache pair are diagnostics, not p95/p99 or a supported latency limit.
+
+For a small real-provider smoke, use `CRAB_CELL_LTX_TARGET_BYTES=33554432`
+with the same command. The final load, exact restore, compaction, and compacted
+restore timers cover separate phases; digest comparison is outside restore
+timing. Retain stdout with the source revision, image/provider version,
+architecture, filesystem, and resource limits when comparing runs.
 
 ## Public API exercised
 
