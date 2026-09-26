@@ -45,7 +45,9 @@ unimplemented.
 
 The ExtendDB `DataEngine` contract requires all writes, the account-scoped
 client token, and stream capture to commit together. Its engine validates up
-to 100 unique items and 4 MiB across tables before calling the backend.
+to 100 unique items and a request-side 4-MiB estimate across tables before
+calling the backend. That estimate does not establish an aggregate bound on
+evaluated Update images; see the review findings below.
 BeyondDB currently rejects transaction writes with stream capture, so that
 separate gap must be closed before claiming full compatibility. The target
 is atomic writes and serializable `TransactGetItems` relative to transactional
@@ -134,8 +136,8 @@ Participant durable record:
 | --- | --- |
 | Transaction ID, coordinator target, request digest, route epoch | Match a prepare to its immutable decision authority. |
 | Locked table ID, canonical item keys, and lock mode | Shared reads exclude writes; exclusive writes exclude other transactions. |
-| Old and proposed item images, conditions, operation indexes | Prepare evaluates against one serialized local state; apply needs no expression re-evaluation. |
-| `PREPARED`, `COMMITTED`, or `ABORTED` and decision proof | Make resolution idempotent across retries and owner recovery. An `ABORTED` tombstone also fences a delayed prepare. |
+| Proposed write images or captured read images and local positions | Prepare evaluates conditions against one serialized local state; apply needs no expression re-evaluation. The coordinator retains the original operations and request indexes. |
+| `PREPARED`, `COMMITTED`, or `ABORTED` and coordinator identity | Make resolution idempotent across retries and owner recovery. The trusted driver reads the decision; participants do not store or independently verify a decision certificate. An `ABORTED` tombstone also fences a delayed prepare. |
 
 Account locks have primary key `(table_id, item_key, transaction_id)`; data
 locks use `(item_key, transaction_id)`. A mode distinguishes shared reads from
@@ -565,6 +567,176 @@ The prior branch behavior returned live images without checking intents.
 `origin/main` has no BeyondDB transaction implementation. The new barrier
 addresses that unsafe visibility path, while the following API and recovery
 gates remain necessary.
+
+## Foundation review
+
+Review baseline: `88d06d986c9`. This section distinguishes implemented safety
+mechanisms from compatibility defects and unqualified availability properties.
+`origin/main` has no BeyondDB implementation to serve as a production baseline.
+
+### Evidence map
+
+| Boundary | Entry, owner, and dependency | Existing proof and remaining gap |
+| --- | --- | --- |
+| Public admission | ExtendDB `handle_transact_write_items` → `backend/data.rs` → `backend/admission.rs` → coordinator BEGIN | Signed SDK writes, token mismatch/replay, dropped BEGIN reply; evaluated aggregate write size remains unchecked. |
+| Prepare | `backend/transaction.rs` → account/data wrappers → shared `participant::record_prepare` | Mixed participants, conditions, absent-key locks, owner restart; large participant payload fails the SQL primitive limit below. |
+| Decision | Driver → `RecordParticipantPrepare` → `DecideCrossCellTransaction` | COMMIT requires every recorded prepare; terminal decisions cannot change. Receipts are trusted driver assertions, not independently verified certificates. |
+| Apply | `backend/recovery.rs` → account/data resolver → `participant::resolve` | Repeated resolution, abort-before-prepare tombstones, partial apply recovery; capacity reserved for eventual apply is not established. |
+| Reads | Get/Query/Scan barriers and `backend/transaction_read.rs` | Pending creates, partial COMMIT, shared snapshots, saved images; full concurrent-history/fault matrix remains open. |
+| Sibling writers | Ordinary item commands, conditional TTL delete, split seal, account table deletion | Key and split fences exist. TTL propagates a transaction conflict out of the current sweep; its outer worker logs and retries. Routed table deletion needs its own lifecycle qualification, beyond the account lock test. |
+| Durability | Cell command savepoint → runtime publication → owner authority | `Committed<T>` releases after publication; `CellExecutor::query` refuses an unpublished head. Restart/peer tests exercise this dependency. |
+| Recovery discovery | Account shard registry → provisioner → serving/startup resolver | Same-endpoint restart and coordinator reactivation; unattended replacement at a different endpoint is still missing. |
+
+BeyondDB source paths in the table are relative to `crates/beyonddb/src/`.
+Read the driver, both participant wrappers, coordinator, and provisioner
+together with the named tests above. Runtime contracts are in
+`crates/crab-cell-runtime/src/client.rs`,
+`crates/crab-cell-runtime/src/publication.rs`,
+`crates/crab-cell-runtime/src/cell/executor.rs`, and
+`crates/crab-cell-runtime/src/primitives/sql.rs`.
+ExtendDB source was checked at the Cargo-pinned revision
+`bdb7b3df4ace3b80a6e928f144036d056aec0327`, including its transaction engine,
+request-size helper, storage trait, and SQLite transaction implementation.
+
+### Safety argument and trust boundary
+
+For a transfer between keys A and B in different Cells:
+
+1. BEGIN fixes both participants and the request before either locks a key.
+2. Each prepare evaluates the condition/update and persists its proposed image
+   plus exclusive lock in one local command. A failed command leaves neither.
+3. COMMIT can publish only after both prepare receipts are recorded. From that
+   moment, recovery must finish the transfer; a timeout cannot turn it into ABORT.
+4. Each apply atomically installs its image, records its terminal state, and
+   releases its lock. A retry cannot apply the same transfer twice.
+5. During partial apply, an ordinary read of the unresolved key encounters its
+   lock and resolves the decision or fails retryably. A transactional read
+   cannot assemble one old and one new value: its shared locks must coexist
+   across every captured key, or the whole read is canceled.
+
+Independent Get calls can straddle the transaction. Applications requiring a
+multi-key snapshot must use TransactGetItems. Reading two balances and later
+writing unconditional replacements is also insufficient: the write must include
+conditions on the observed versions, or evaluate its arithmetic and conditions
+inside the transaction. TransactGetItems is not an interactive transaction whose
+locks remain held for a later client call.
+
+This is a crash/omission failure protocol with trusted fleet code. The
+participant resolution input contains a coordinator Cell ID and a `commit`
+boolean. `participant::resolve` checks identity and phase consistency but does
+not contact the coordinator or verify a signed decision certificate. Likewise,
+prepare progress stores a participant Cell ID and sequence supplied by the
+driver. The private listener authenticates fleet peers, and the driver reads
+published state before issuing these commands. That is the current authority
+boundary; it must not be described as Byzantine fault tolerance or proof against
+an arbitrary faulty/compromised fleet caller.
+
+### Confirmed payload limit below the public contract
+
+The runtime SQL primitive caps each input batch and result at **1 MiB**.
+`CommandContext::sql` uses that primitive. BeyondDB stores all of a participant's
+staged images in one `ddb_transactions.staged` blob, and reads that blob again
+for resolution. The coordinator also stores each participant's operations in
+one blob. Those layouts impose a smaller limit than the public transaction
+contract, independently of the 512-MiB database and 64-MiB capture budgets.
+
+A temporary host-level probe extended the mixed account/data integration
+fixture with six items, each carrying a 360-KiB string. Three items belonged to
+the account participant and three to the data participant. A transaction set a
+small Boolean attribute on all six. The preexisting images totaled 2,211,966
+bytes, below 4 MiB, and each individual image was below 400 KiB. A new token
+was routed to an already active coordinator to exclude admission pressure.
+The local runtime path returned:
+
+```text
+Transient("Cell invocation did not start: invalid Cell command: SQL batch exceeds 1 MiB")
+```
+
+The six flags remained absent. This reproduces a compatibility failure, not
+partial application. The probe was removed after diagnosis; the existing
+integration fixture was restored. It was not a signed SDK acceptance test.
+A separate remote attempt surfaced only a generic peer rejection, so that
+response alone did not establish the source of the failure.
+
+A valid large Put group can fail while recording BEGIN. A small Update request
+can publish BEGIN and then fail while recording its much larger prepared image.
+The serving driver currently treats that failure as retryable; it has no rule
+that changes this deterministic size error into a durable ABORT. Earlier
+participants, if any prepared, can therefore retain locks while recovery keeps
+retrying. This latter failure schedule follows the code; the probe did not
+establish earlier-participant lock retention.
+
+The bounded fix belongs in BeyondDB's payload layout: store/retrieve operations
+and staged images in bounded rows or chunks while keeping the complete local
+prepare/apply inside one Cell command savepoint. Account and data participants,
+coordinator admission, recovery reads, and same-Cell read results all need the
+same size audit. Merely increasing the database limit cannot fix it. JSON/peer
+encoding also needs explicit qualification: encoded bytes may exceed DynamoDB
+item bytes, especially for binary values and escaped strings.
+
+### Aggregate Update size remains a separate gap
+
+ExtendDB's `PreparedOp::item_size` counts a Put image, but estimates Update from
+its key and expression values. BeyondDB evaluates Updates under the locks and
+validates each resulting item, yet neither participant wrapper nor coordinator
+sums the evaluated write images across the transaction. The pinned SQLite
+backend also lacks that aggregate post-evaluation check. This is source evidence;
+the oversized transaction probe reached the SQL limit first and did not prove
+that a transaction exceeding 4 MiB commits.
+
+After fixing the payload layout, prepare must publish immutable size accounting
+with its outcome. The coordinator must enforce the aggregate limit before
+COMMIT, including resumed prepares and lost replies. The accounting convention
+for Delete and ConditionCheck needs explicit compatibility evidence; it must
+not be guessed from their small request keys. An over-limit request needs a
+terminal ABORT and complete lock cleanup, never an error discovered after apply.
+
+### Availability and scale constraints
+
+- **Blocking decision authority.** An unreachable coordinator preserves safety
+  by retaining locks. Endpoint-independent owner replacement and bounded
+  recovery latency are required for service availability.
+- **Recovery throughput.** One worker selects one coordinator and at most one
+  pending transaction per 250-ms tick. With negligible work this is nominally
+  four selections per second. A pass over 4,096 tracked local shards takes
+  about 17 minutes; real resolution adds latency. This is scheduler arithmetic,
+  not a benchmark. Data Cell count and tracked coordinator count are different.
+- **Retained history.** Completed coordinator payloads, participant tombstones,
+  and committed read images have no collection protocol. Coordinator shards
+  are fixed at 4,096 per account and also have finite database budgets. A safe
+  collector must fence delayed prepare/resolve/fetch operations before deleting
+  their evidence; token expiry alone is insufficient.
+- **Apply headroom.** Prepare does not reserve a transaction-specific budget
+  that guarantees later apply can complete despite unrelated writes/history
+  growth. Reproduce near-full Cells before asserting this liveness property.
+- **TTL fairness.** Conditional expiration uses the lock-aware delete command,
+  so it cannot overwrite an intent. `TransactionConflict` ends the current
+  account sweep before cursor advancement; the binary logs it and keeps its
+  worker alive. Defer that key and preserve progress over unrelated candidates.
+
+### Implementation and qualification order
+
+1. Remove the single-blob SQL ceiling, preserving atomic local savepoints.
+   Add signed local/peer tests near the 4-MiB transaction limit, including
+   Update expansion, binary encoding, lost phase replies, and restart.
+2. Enforce evaluated aggregate size before COMMIT; reserve or otherwise prove
+   sufficient apply/recovery headroom. Test both account and data participants.
+3. Add systematic concurrent histories and crash cuts at BEGIN, each prepare,
+   receipt, decision, apply, and final receipt. Assert no mixed successful
+   TransactGet, no double apply, no opposing terminal decisions, and eventual
+   lock release after recoverable failures.
+4. Add bounded history collection and endpoint-independent failover. Then
+   parallelize participant/recovery work with explicit concurrency limits and
+   the same failure tests; preserve one durable decision authority.
+5. Measure p50/p95/p99 latency by participant count, conflict rate, retained
+   bytes, recovery backlog age/drain rate, and owner-replacement time at 1,000
+   and 10,000 active Cells with multi-TB data.
+
+**Is this the best fix?** Keep the existing two-phase commit and shared-lock
+foundation for the single-writer Cell architecture. Correct its bounded payload
+layout, admission accounting, and recovery lifecycle before optimizing phase
+parallelism. The current evidence supports those mechanisms under tested
+failures; it does not justify production readiness or unlimited scaling.
 
 ## Remaining implementation and proof
 
