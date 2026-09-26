@@ -14,7 +14,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crab_cell_runtime::client::{CellClient, InvocationError};
+use crab_cell_runtime::client::{CellClient, InvocationError, ReadPolicy};
 use crab_cell_runtime::identity::{CellTarget, RequestId, TenantId};
 use crab_cell_runtime::{MutationIdentity, partition_for_shard};
 use extenddb_core::limits::LimitsConfig;
@@ -80,10 +80,11 @@ impl CellStorage {
     /// Binds ExtendDB operations to a Cell client and AWS region.
     ///
     /// The server must provision and activate each account Cell before routing
-    /// its requests through this backend.
+    /// its requests through this backend. All reads use the current owner so
+    /// transaction decisions and prepared intents cannot come from stale snapshots.
     pub fn new(client: CellClient, region: impl Into<String>) -> Self {
         Self {
-            client,
+            client: client.with_read_policy(ReadPolicy::CurrentOwner),
             region: region.into(),
             initial_partitions: None,
             coordinators: None,

@@ -110,7 +110,7 @@ decision evidence tied to the transaction, participant set, and fenced authority
 | --- | --- | --- |
 | Safety qualification | Deterministic failure tests cover selected schedules | Exercise concurrent transfers, conditional write skew, read transactions, owner replacement, and lost replies with a recorded-history checker. Check conservation, serializability, and no duplicate effects at every injected phase cut. |
 | Bounded history | Completed decisions, participant markers, and committed read images are retained | Design an acknowledged retirement boundary that rejects late phase messages before deleting tombstones; include split/backup pins and outstanding read fetches. Ten-minute client token expiry alone cannot authorize deletion. Prove storage reaches a steady state under a soak workload. |
-| Admission | A 100-operation participant reserves about 278 MiB at 4-KiB pages, plus payload allowance | Qualify the allocation bound and contention cost; add WAL, disk, and heap admission. Coordinator progress also needs capacity to record decisions and receipts. Never reclaim an unresolved participant's claim on timeout. |
+| Admission | A 100-operation participant reserves about 278 MiB at 4-KiB pages before index/journal claims and payload allowance | Qualify the allocation bound and contention cost; add WAL, disk, and heap admission. Coordinator progress also needs capacity to record decisions and receipts. Never reclaim an unresolved participant's claim on timeout. |
 | Latency | Sequential prepare; up to four terminal resolutions in flight per call; at least `5P + 3` durable commands for single-chunk inputs | Measure publication and RPC time by participant count. Evaluate prepare parallelism and batched coordinator progress with renewed crash/concurrency proof before changing those phases. |
 | Fleet recovery | 4,096 fixed coordinator shards per account; the worker selects one shard per 250-ms tick | Integrate placement and recovery scheduling with bounded concurrency and backlog metrics. A nominal pass over 4,096 known shards already takes about 17 minutes before slow work; this is arithmetic, not measured RTO. |
 | Data distribution | HASH-key siblings share one Cell with a finite database budget | Qualify skew, hot keys, split headroom, and oversized item collections. More Cells do not distribute one key's lock or split a single HASH group in the current layout. |
@@ -2144,3 +2144,57 @@ seconds). The elastic suite includes interrupted partial GSI application with
 large chunked old/new images, split fencing, and delayed-version suppression.
 These runs qualify selected paths, not sustained projection capacity, automatic
 index splitting, history collection, or the 10,000-Cell/multi-TB target.
+
+### Owner reads after runtime replica support
+
+The runtime now allows a CellClient capability to request snapshot-replica
+queries. CellStorage explicitly selects CurrentOwner when accepting that
+capability. Coordinator status, prepared-intent checks, token lookup, and read
+image retrieval therefore retain owner ordering. A stale snapshot that predates
+a prepared intent cannot establish the transaction read barrier.
+
+The public transaction fixture now supplies a replica-configured client to the
+adapter while exercising dropped phase replies, token replay, shared snapshots,
+and terminal-decision read resolution. Raw fixture control still uses its owner
+client. The server's provisioner, credential, and catalog paths construct owner
+clients by default; this change does not enable replica reads in BeyondDB.
+
+### Rebase regression: optional replica queries enlarged owner futures
+
+After rebasing onto `396e0ab1b40`, the unchanged
+`data_ranges_use_independent_cells_and_survive_owner_restart` fixture aborted
+with stack overflow, both in the elastic suite and alone. The runtime's typed
+query future now embedded replica placement/admission work even when the
+capability selected CurrentOwner. Boxing only the optional replica-router
+future fixed the original default-stack reproduction (1.78 seconds). No test
+assertion or stack configuration changed. The debugger did not produce a trace;
+the reproducible failure and one-change passing run establish the fix evidence.
+
+The rebase also required using NodeDirectory's split session-verifier API in
+BeyondDB and updating two new HTTP-server peer fixture constructors to the
+shared transport's Arc-owned scope/TLS contract. Session enrollment releases
+the codec reservation during object-store lookup; capacity refusals remain
+before dispatch. The dependency pin and lockfile are unchanged by these fixes.
+
+### Rebased verification
+
+On the combined implementation, the account, elastic-Cell, and peer-owner
+suites passed all 30 tests with two test threads (3.47, 92.80, and 101.82
+seconds). This includes the replica-configured storage-adapter regression,
+lost replies, write skew, capacity exhaustion, owner restart, and partial GSI
+projection recovery. The runtime snapshot-read/fencing regression passed in
+0.23 seconds after the optional-query allocation fix.
+
+Strict all-target BeyondDB Clippy passed (18.08 seconds). The HTTP-server
+all-target consumer check passed (32.82 seconds), after building the React UI.
+Format, diff, and Cell/LTX layout checks passed. These checks do not constitute
+a full workspace gate or a serializable-history, cloud-reference, or fleet
+performance qualification.
+
+The final signed AWS SDK/RustFS server-process smoke passed in 339.11 seconds.
+It exercises the compiled binary, ordinary and transactional index changes,
+all three GSI projections, rejected strong reads and wrong sort-operand types,
+hard restart, and client-token replay. This supplies the durable client-to-server
+proof for the initial GSI path; online index lifecycle, automatic GSI splitting,
+retention, full DynamoDB compatibility, and 10,000-Cell/multi-TB qualification
+remain open.

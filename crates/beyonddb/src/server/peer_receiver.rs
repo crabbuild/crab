@@ -165,17 +165,14 @@ async fn forward(
     {
         return error(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
-    let Some(_reservation) = receiver.runtime.try_reserve_worker_job().ok().flatten() else {
-        // This request has not been dispatched. Give the sender's bounded
-        // retry time to outlive the request currently holding the codec slot.
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [
-                (header::CACHE_CONTROL, "no-store"),
-                (header::RETRY_AFTER, "1"),
-            ],
-        )
-            .into_response();
+    let session = {
+        let Some(_reservation) = receiver.runtime.try_reserve_worker_job().ok().flatten() else {
+            return busy();
+        };
+        match crab_cell_runtime::peer::claimed_peer_session(&body) {
+            Ok(session) => session,
+            Err(_) => return error(StatusCode::UNAUTHORIZED),
+        }
     };
     let now_ms = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
         Ok(duration) => match i64::try_from(duration.as_millis()) {
@@ -184,11 +181,25 @@ async fn forward(
         },
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
     };
-    let request = match receiver
+    // Session enrollment reads object storage. Release the codec reservation
+    // during that I/O so unrelated requests can make progress.
+    let verifier = match receiver
         .directory
-        .verify_peer_request(&body, identity.certificate(), identity.public_key(), now_ms)
+        .peer_verifier(
+            session,
+            identity.certificate(),
+            identity.public_key(),
+            now_ms,
+        )
         .await
     {
+        Ok(verifier) => verifier,
+        Err(_) => return error(StatusCode::UNAUTHORIZED),
+    };
+    let Some(_reservation) = receiver.runtime.try_reserve_worker_job().ok().flatten() else {
+        return busy();
+    };
+    let request = match verifier.verify(&body, now_ms) {
         Ok(request) => request,
         Err(_) => return error(StatusCode::UNAUTHORIZED),
     };
@@ -209,4 +220,16 @@ async fn forward(
 
 fn error(status: StatusCode) -> Response {
     (status, [(header::CACHE_CONTROL, "no-store")]).into_response()
+}
+
+fn busy() -> Response {
+    // No dispatch has occurred; the sender may retry after codec capacity frees.
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::RETRY_AFTER, "1"),
+        ],
+    )
+        .into_response()
 }

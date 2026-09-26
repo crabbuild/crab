@@ -49,8 +49,13 @@ pub(super) async fn assert_lost_replies_and_canceled_token_reuse(
         },
         Arc::new(transport),
     );
-    let storage = CellStorage::new(client.clone(), "us-east-1")
-        .with_transaction_coordinators(provisioner.clone());
+    // The adapter must keep transaction decisions and intent barriers on the
+    // owner even when its caller supplies a snapshot-read capability.
+    let storage = CellStorage::new(
+        client.with_read_policy(crab_cell_runtime::client::ReadPolicy::Replica),
+        "us-east-1",
+    )
+    .with_transaction_coordinators(provisioner.clone());
     let maps = ExpressionMaps::default();
     let item = Item::from([("id".into(), AttributeValue::S("lost-admission".into()))]);
     let ops = infos

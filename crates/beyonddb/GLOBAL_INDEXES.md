@@ -39,6 +39,10 @@ entries while applying staged base images; ABORT discards the staged images
 without emitting projection work. Prepare reserves space for journal metadata
 and the old/new images in addition to the existing base/local-index claim.
 The account and routed participant paths use the same journal representation.
+At 4-KiB pages, eight additional worst-case B-tree edits per changed item add
+about 137.5 MiB of reservation for a 100-write participant, before image bytes.
+This conservative claim consumes the finite Cell budget; it is an admission
+cost, not measured physical growth or proof that every maximal request fits.
 
 One entry contains the table/index generation snapshot, old and new base images,
 and the source range epoch plus actor sequence. It is shared across the table's
@@ -108,11 +112,20 @@ restores owners, and checks journal completion, duplicate apply, stale-image
 suppression, split fencing, and chunked old/new images larger than 700 KiB.
 The process fixture covers creation of all three projections, duplicate index
 keys, sparse entries, Query/parallel Scan pagination, transaction key moves and
-deletes, rejected strong reads, and replay after owner restart. The signed SDK/RustFS process fixture passed in 330.55 seconds before the
+deletes, rejected strong reads, and replay after owner restart.
+
+The signed SDK/RustFS process fixture passed in 330.55 seconds before the
 runtime read-replica rebase. The expanded elastic suite passed all 28 tests in
 86.28 seconds, including partial-projection restart and binary prefix bounds.
 The account and peer-owner tests passed in 3.41 and 99.12 seconds. These are
 selected-path results; fleet throughput and recovery remain unqualified.
+After rebasing onto `396e0ab1b40` and fixing optional replica-query stack growth,
+the account, elastic, and peer suites again passed all 30 tests (3.47, 92.80,
+and 101.82 seconds). The runtime snapshot-read/fencing test, strict BeyondDB
+Clippy, HTTP-server all-target check, and Cell/LTX layout checks also passed.
+The final rebased signed SDK/RustFS server-process smoke passed in 339.11
+seconds, including the added wrong-sort-operand validation check, GSI state
+recovery, and transaction-token replay after hard restart.
 
 The new index metadata, journal schemas, and Cell namespace change the unreleased
 storage format. Development roots from earlier builds require reprovisioning.

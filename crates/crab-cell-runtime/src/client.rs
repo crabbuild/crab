@@ -39,10 +39,10 @@ mod tests;
 mod local;
 mod replica;
 mod routing;
+mod runtime;
 
 pub use replica::CellReadReplica;
 pub use routing::ReplicaReadRouter;
-mod runtime;
 
 pub use local::command_operation_digest;
 pub(crate) use local::{
@@ -918,12 +918,18 @@ impl CellClient {
                 .local
                 .as_ref()
                 .map(|(session, resolver)| (*session, resolver.as_ref()));
-            return replicas
-                .router
-                .query::<Q>(&replicas.peer, local, target, minimum, input)
-                .await
-                .map(|(observed, _)| observed)
-                .map_err(InvocationError::NotStarted);
+            // Placement and replica admission carry large I/O futures. Keep
+            // that optional state off every caller's owner-query stack frame.
+            return Box::pin(replicas.router.query::<Q>(
+                &replicas.peer,
+                local,
+                target,
+                minimum,
+                input,
+            ))
+            .await
+            .map(|(observed, _)| observed)
+            .map_err(InvocationError::NotStarted);
         }
         let description = self.describe::<Q::Output>(target).await?;
         self.query_with_description::<Q>(target, description, minimum, input)
