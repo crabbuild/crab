@@ -302,9 +302,13 @@ impl Command for RecordParticipantResolution {
             ],
         ))?;
         context.sql(&statement(
-            "UPDATE ddb_coordinator_transactions SET unresolved_count = unresolved_count - 1 \
+            "UPDATE ddb_coordinator_transactions SET unresolved_count = unresolved_count - 1, \
+             completed_at_ms = CASE WHEN unresolved_count = 1 THEN ?2 ELSE completed_at_ms END \
              WHERE transaction_id = ?1 AND unresolved_count > 0",
-            vec![SqlValue::Blob(input.transaction_id.to_vec())],
+            vec![
+                SqlValue::Blob(input.transaction_id.to_vec()),
+                SqlValue::Integer(context.now_ms()),
+            ],
         ))?;
         Ok(CommandResult::Success(Json(
             CoordinatorPhaseOutcome::Recorded,

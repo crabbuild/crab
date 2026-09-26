@@ -161,13 +161,31 @@ refreshing routes.
 | Coordinator unreachable | Prepared intent with unknown decision | Hold locks and fail affected requests retryably; recover the owner. |
 
 The client token maps to one coordinator record for its account and
-fingerprint. Replay reads the terminal decision and returns the existing
+fingerprint. `ReadCoordinatorToken` now resolves that identity before any table
+routing. A matching token/fingerprint in `BeginCrossCellTransaction` returns
+the original record even when a retry proposes different partition epochs or
+Cell targets; its stored participant set is never rewritten. The fingerprint
+is supplied by ExtendDB, computed from `TransactItems` independently of data
+Cell routing. Replay reads the terminal decision and returns the existing
 outcome without reapplying writes. A mismatched fingerprint fails. Retain the
 token outcome for at least the external ten-minute replay window measured
 from completion; retain undecided records and participant resolution evidence
 until every participant is resolved, regardless of age. After the replay
 window, safe garbage collection requires a terminal decision, all-resolution
 proof, and no split or backup pin. Reuse after expiry starts a new transaction.
+
+The coordinator records `completed_at_ms` atomically when the last unresolved
+participant receipt is recorded. Repeated resolution receipts do not move it.
+Token lookup and admission retain every unresolved record, regardless of its
+creation or decision age. After ten minutes from completion, admission may
+unlink the old token slot and bind a new transaction/fingerprint. It keeps the
+old decision and participant rows so delayed phase requests retain their
+original identity; history garbage collection is still outstanding.
+
+The coordinator token path is not yet the public adapter's token path. The
+adapter still uses account claims and Cell-local receipts. Their migration to
+a common admission authority, and signed cross-Cell replay across splits,
+remain API enablement gates.
 
 ## Visibility and transactional reads
 
@@ -260,6 +278,14 @@ The driver is internal: public request admission, token lookup/replay across
 routing changes, coordinator provisioning, continuous recovery, and account
 participants still need integration. These tests do not constitute a signed
 cross-Cell `TransactWriteItems` acceptance test or a fleet-scale qualification.
+
+Coordinator token tests restore historical BEGIN, partially resolved COMMIT,
+and completed COMMIT snapshots. They verify indefinite pinning of unresolved
+work, a fresh replay window after delayed completion, mismatch rejection,
+route-independent replay, and reuse with a new fingerprint after expiry.
+The owner-restart test discovers the token before and after fenced recovery.
+SQL query plans use the token and transaction-ID indexes rather than scanning
+coordinator history.
 
 ## Read-barrier evidence and limits
 

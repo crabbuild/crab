@@ -1,4 +1,5 @@
 mod elastic_cells {
+    mod coordinator_tokens;
     mod transaction_driver;
     pub(crate) mod transaction_visibility;
 }
@@ -4555,6 +4556,27 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     assert_eq!(discovered[1].transaction_id, abort_id);
     assert_eq!(discovered[2].transaction_id, token_id);
     assert_eq!(discovered[2].routing_key, token_value.as_bytes());
+    let restored_token = TransactionToken {
+        account_id: "123456789012".into(),
+        token: token_value.clone(),
+        fingerprint: "recovery-request".into(),
+    };
+    assert_eq!(
+        restored_client
+            .query::<beyonddb::ReadCoordinatorToken>(
+                &coordinator_target,
+                None,
+                Json(restored_token.clone()),
+            )
+            .await
+            .unwrap()
+            .output
+            .0,
+        beyonddb::ReadCoordinatorTokenOutcome::Found {
+            transaction_id: token_id,
+            decision: CoordinatorDecision::Begin
+        }
+    );
     assert!(matches!(
         restored_storage
             .finish_decided_cross_cell_transaction("123456789012", &pending_id, pending_id)
@@ -4644,6 +4666,25 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             .output
             .0
             .is_empty()
+    );
+    assert_eq!(
+        restored_client
+            .query::<beyonddb::ReadCoordinatorToken>(
+                &coordinator_target,
+                None,
+                Json(restored_token),
+            )
+            .await
+            .unwrap()
+            .output
+            .0,
+        beyonddb::ReadCoordinatorTokenOutcome::Found {
+            transaction_id: token_id,
+            decision: CoordinatorDecision::Abort {
+                index: None,
+                reason: None
+            }
+        }
     );
     let restored_participant = restored_client
         .query::<ReadCoordinatorParticipant>(
