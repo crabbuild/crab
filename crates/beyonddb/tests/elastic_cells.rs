@@ -27,19 +27,20 @@ use beyonddb::{
     PartitionPut, PartitionPutInput, PartitionPutOutcome, PartitionScan, PartitionScanInput,
     PartitionScanOutcome, PartitionSeal, PartitionSpec, PartitionState, PartitionTransactWrite,
     PartitionTransactWriteInput, PartitionTransactWriteOutcome, PartitionUpdate,
-    PartitionUpdateInput, PartitionUpdateOutcome, PartitionUsage, PreparePartitionTransaction,
-    PreparePartitionTransactionInput, PreparePartitionTransactionOutcome, PublishedNodeLease,
-    PutItem, PutItemInput, ReadCoordinatorParticipant, ReadCoordinatorParticipantInput,
-    ReadCrossCellTransaction, ReadCrossCellTransactionInput, ReadPartitionRoute,
-    ReadPartitionState, ReadPartitionTransaction, ReadPartitionTransactionInput,
-    ReadPartitionTransactionOutcome, ReadRoutePage, ReadSplitPlan, ReadSplitRoute, ReadTableRoute,
-    ReadTtlSchedule, ReadTtlSweep, RecordParticipantPrepare, RecordParticipantResolution,
-    ResolvePartitionTransaction, ResolvePartitionTransactionInput,
-    ResolvePartitionTransactionOutcome, RoutePageInput, RoutePageOutcome, SealPartition,
-    SealPartitionOutcome, SplitPlan, SplitRouteState, TableRoute, TableSpec, TransactionWrite,
-    UpdateTtl, UpdateTtlInput, account_target, build_http_state, coordinator_target,
-    credential_target, data_key_hash, data_target, initialize_account, initialize_coordinator,
-    initialize_partition,
+    PartitionUpdateInput, PartitionUpdateOutcome, PartitionUsage, PendingTransactionState,
+    PreparePartitionTransaction, PreparePartitionTransactionInput,
+    PreparePartitionTransactionOutcome, PublishedNodeLease, PutItem, PutItemInput,
+    ReadCoordinatorParticipant, ReadCoordinatorParticipantInput, ReadCrossCellTransaction,
+    ReadCrossCellTransactionInput, ReadPartitionRoute, ReadPartitionState,
+    ReadPartitionTransaction, ReadPartitionTransactionInput, ReadPartitionTransactionOutcome,
+    ReadPendingCrossCellTransactions, ReadPendingCrossCellTransactionsInput, ReadRoutePage,
+    ReadSplitPlan, ReadSplitRoute, ReadTableRoute, ReadTtlSchedule, ReadTtlSweep,
+    RecordParticipantPrepare, RecordParticipantResolution, ResolvePartitionTransaction,
+    ResolvePartitionTransactionInput, ResolvePartitionTransactionOutcome, RoutePageInput,
+    RoutePageOutcome, SealPartition, SealPartitionOutcome, SplitPlan, SplitRouteState, TableRoute,
+    TableSpec, TransactionToken, TransactionWrite, UpdateTtl, UpdateTtlInput, account_target,
+    build_http_state, coordinator_target, credential_target, data_key_hash, data_target,
+    initialize_account, initialize_coordinator, initialize_partition,
 };
 use crab_cell_app::CellApplication;
 use crab_cell_host::CellNodeBuilder;
@@ -2554,6 +2555,39 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         begun_transaction.output.0,
         BeginCrossCellTransactionOutcome::Begun
     );
+    let pending = client
+        .query::<ReadPendingCrossCellTransactions>(
+            &coordinator_target,
+            None,
+            Json(ReadPendingCrossCellTransactionsInput {
+                after: None,
+                limit: 1,
+            }),
+        )
+        .await
+        .unwrap()
+        .output
+        .0;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].transaction_id, transaction_id);
+    assert_eq!(pending[0].state, PendingTransactionState::Begin);
+    assert_eq!(pending[0].routing_key, transaction_id);
+    assert!(
+        client
+            .query::<ReadPendingCrossCellTransactions>(
+                &coordinator_target,
+                None,
+                Json(ReadPendingCrossCellTransactionsInput {
+                    after: Some(pending[0].cursor.clone()),
+                    limit: 1,
+                }),
+            )
+            .await
+            .unwrap()
+            .output
+            .0
+            .is_empty()
+    );
     let early_decision = client
         .command::<DecideCrossCellTransaction>(
             &coordinator_target,
@@ -2664,6 +2698,20 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             decision: CoordinatorDecision::Commit,
         }
     );
+    let pending_commit = client
+        .query::<ReadPendingCrossCellTransactions>(
+            &coordinator_target,
+            None,
+            Json(ReadPendingCrossCellTransactionsInput {
+                after: None,
+                limit: 1,
+            }),
+        )
+        .await
+        .unwrap()
+        .output
+        .0;
+    assert_eq!(pending_commit[0].state, PendingTransactionState::Commit);
     for (position, side) in sides.iter().enumerate() {
         let applied = client
             .command::<ResolvePartitionTransaction>(
@@ -2716,6 +2764,22 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     assert_eq!(coordinator_state.decision, CoordinatorDecision::Commit);
     assert_eq!(coordinator_state.prepared_count, 2);
     assert_eq!(coordinator_state.resolved_count, 2);
+    assert!(
+        client
+            .query::<ReadPendingCrossCellTransactions>(
+                &coordinator_target,
+                None,
+                Json(ReadPendingCrossCellTransactionsInput {
+                    after: None,
+                    limit: 1,
+                }),
+            )
+            .await
+            .unwrap()
+            .output
+            .0
+            .is_empty()
+    );
     let cross_key_info = storage
         .table_key_info("123456789012", "Books")
         .await
@@ -4065,6 +4129,55 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         recovery_prepare.output.0,
         PreparePartitionTransactionOutcome::Prepared
     );
+    let pending_id = (0..=u16::MAX)
+        .map(|suffix| {
+            let mut id = transaction_id;
+            id[14..].copy_from_slice(&suffix.to_be_bytes());
+            id
+        })
+        .find(|id| {
+            *id != transaction_id
+                && beyonddb::coordinator_target("123456789012", id).unwrap() == coordinator_target
+        })
+        .unwrap();
+    client
+        .command::<BeginCrossCellTransaction>(
+            &coordinator_target,
+            identity(126),
+            Json(BeginCrossCellTransactionInput {
+                account_id: "123456789012".into(),
+                transaction_id: pending_id,
+                token: None,
+                participants: participants.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+    let token_value = (0..=u16::MAX)
+        .map(|suffix| format!("recovery-{suffix}"))
+        .find(|token| {
+            beyonddb::coordinator_target("123456789012", token.as_bytes()).unwrap()
+                == coordinator_target
+        })
+        .unwrap();
+    let token_id = [127; 16];
+    client
+        .command::<BeginCrossCellTransaction>(
+            &coordinator_target,
+            identity(127),
+            Json(BeginCrossCellTransactionInput {
+                account_id: "123456789012".into(),
+                transaction_id: token_id,
+                token: Some(TransactionToken {
+                    account_id: "123456789012".into(),
+                    token: token_value.clone(),
+                    fingerprint: "recovery-request".into(),
+                }),
+                participants: participants.clone(),
+            }),
+        )
+        .await
+        .unwrap();
     for handle in child_handles {
         handle.drain().await.unwrap();
     }
@@ -4226,6 +4339,56 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .unwrap();
     assert_eq!(restored_decision.decision, CoordinatorDecision::Commit);
     assert_eq!(restored_decision.resolved_count, 2);
+    let restored_pending = restored_client
+        .query::<ReadPendingCrossCellTransactions>(
+            &coordinator_target,
+            None,
+            Json(ReadPendingCrossCellTransactionsInput {
+                after: None,
+                limit: 1,
+            }),
+        )
+        .await
+        .unwrap()
+        .output
+        .0;
+    assert_eq!(restored_pending.len(), 1);
+    let next_pending = restored_client
+        .query::<ReadPendingCrossCellTransactions>(
+            &coordinator_target,
+            None,
+            Json(ReadPendingCrossCellTransactionsInput {
+                after: Some(restored_pending[0].cursor.clone()),
+                limit: 1,
+            }),
+        )
+        .await
+        .unwrap()
+        .output
+        .0;
+    assert_eq!(next_pending.len(), 1);
+    let mut discovered = [restored_pending[0].clone(), next_pending[0].clone()];
+    discovered.sort_by_key(|entry| entry.transaction_id);
+    assert_eq!(discovered[0].transaction_id, pending_id);
+    assert_eq!(discovered[1].transaction_id, token_id);
+    assert_eq!(discovered[0].state, PendingTransactionState::Begin);
+    assert_eq!(discovered[1].routing_key, token_value.as_bytes());
+    assert!(
+        restored_client
+            .query::<ReadPendingCrossCellTransactions>(
+                &coordinator_target,
+                None,
+                Json(ReadPendingCrossCellTransactionsInput {
+                    after: Some(next_pending[0].cursor.clone()),
+                    limit: 1,
+                }),
+            )
+            .await
+            .unwrap()
+            .output
+            .0
+            .is_empty()
+    );
     let restored_participant = restored_client
         .query::<ReadCoordinatorParticipant>(
             &coordinator_target,

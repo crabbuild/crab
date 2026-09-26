@@ -6,6 +6,7 @@ CREATE TABLE ddb_coordinator_transactions (
     request_digest BLOB NOT NULL,
     participants BLOB NOT NULL,
     state INTEGER NOT NULL CHECK (state IN (0, 1, 2)),
+    unresolved_count INTEGER NOT NULL CHECK (unresolved_count BETWEEN 0 AND 100),
     abort_reason BLOB,
     created_at_ms INTEGER NOT NULL,
     decided_at_ms INTEGER
@@ -14,7 +15,8 @@ CREATE TABLE ddb_coordinator_transactions (
 CREATE UNIQUE INDEX ddb_coordinator_token
     ON ddb_coordinator_transactions (token) WHERE token IS NOT NULL;
 CREATE INDEX ddb_coordinator_pending
-    ON ddb_coordinator_transactions (state, created_at_ms, transaction_id);
+    ON ddb_coordinator_transactions (created_at_ms, transaction_id)
+    WHERE unresolved_count > 0;
 
 CREATE TABLE ddb_coordinator_participants (
     transaction_id BLOB NOT NULL REFERENCES ddb_coordinator_transactions(transaction_id),

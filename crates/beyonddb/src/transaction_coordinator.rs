@@ -34,7 +34,7 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
 }];
 static COMMANDS: [OperationDescriptor; 4] =
     [operation(1), operation(2), operation(3), operation(4)];
-static QUERIES: [OperationDescriptor; 2] = [operation(1), operation(2)];
+static QUERIES: [OperationDescriptor; 3] = [operation(1), operation(2), operation(3)];
 
 const fn operation(id: u32) -> OperationDescriptor {
     OperationDescriptor {
@@ -84,7 +84,8 @@ impl crab_cell_runtime::registry::CellModule for CoordinatorModule {
         registry.bind_command::<DecideCrossCellTransaction>()?;
         registry.bind_command::<RecordParticipantResolution>()?;
         registry.bind_query::<ReadCrossCellTransaction>()?;
-        registry.bind_query::<ReadCoordinatorParticipant>()
+        registry.bind_query::<ReadCoordinatorParticipant>()?;
+        registry.bind_query::<ReadPendingCrossCellTransactions>()
     }
 }
 
@@ -297,8 +298,8 @@ impl Command for BeginCrossCellTransaction {
         }
         context.sql(&statement(
             "INSERT INTO ddb_coordinator_transactions \
-             (transaction_id, account_id, token, fingerprint, request_digest, participants, state, created_at_ms) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+             (transaction_id, account_id, token, fingerprint, request_digest, participants, state, unresolved_count, created_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8)",
             vec![
                 SqlValue::Blob(input.transaction_id.to_vec()),
                 SqlValue::Text(input.account_id),
@@ -306,6 +307,10 @@ impl Command for BeginCrossCellTransaction {
                 SqlValue::Text(fingerprint),
                 SqlValue::Blob(digest.as_bytes().to_vec()),
                 SqlValue::Blob(participants),
+                SqlValue::Integer(
+                    i64::try_from(input.participants.len())
+                        .map_err(|_| Error::Command("participant count overflow"))?,
+                ),
                 SqlValue::Integer(context.now_ms()),
             ],
         ))?;
