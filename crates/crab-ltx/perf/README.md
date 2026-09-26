@@ -464,8 +464,8 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
   --access-key crab --secret-key crab
 ```
 
-Three real RustFS smoke runs, each with eight measured preparations after four
-warmups, produced these aggregate counts:
+Three real RustFS smoke runs at `6226f0445c1`, each with eight measured
+preparations after four warmups, produced these aggregate counts:
 
 | Payload | HEAD | PUT | Multipart start / part / complete | Mean logical bytes / root |
 | --- | ---: | ---: | ---: | ---: |
@@ -475,8 +475,8 @@ warmups, produced these aggregate counts:
 
 All calls completed successfully. The small-root path still performs two
 metadata presence checks and five immutable PUTs per measured command. The
-larger body crosses the bounded single-PUT threshold. Raw `io-*.json` samples
-and source/binary metadata are retained beside the small-body comparison above.
+larger body crosses the bounded single-PUT threshold. Raw `io-committed-*.json`
+samples and source/binary metadata are retained beside the comparison above.
 These short runs verify observation wiring and expose payload sensitivity;
 they do not establish tail latency, runtime CAS cost, compaction cost, or
 sustainable throughput. Keep the missing-root-metadata refusal invariant when
