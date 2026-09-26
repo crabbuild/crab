@@ -135,6 +135,7 @@ pub(super) enum Message {
 }
 
 pub(super) struct QueuedCommand {
+    pub(super) trace: tracing::Span,
     pub(super) telemetry: crate::fleet::telemetry::CellTelemetryHandle,
     pub(super) queued_at: std::time::Instant,
     pub(super) response_proof: Option<(crate::node::log::DurabilitySource, std::time::Duration)>,

@@ -7,6 +7,7 @@ import tarfile
 import threading
 import time
 import unittest
+import uuid
 from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -192,6 +193,8 @@ class LoadTests(unittest.TestCase):
         self.read_status = 200
         self.receipts = {}
         self.requests = []
+        self.http_requests = []
+        self.invalid_request_id = False
         self.active = 0
         self.peak = 0
         self.lock = threading.Lock()
@@ -202,8 +205,12 @@ class LoadTests(unittest.TestCase):
                 pass
 
             def respond(self, status, body):
+                request_id = str(uuid.uuid4())
+                with fixture.lock:
+                    fixture.http_requests.append((status, request_id))
                 self.send_response(status)
                 self.send_header("X-Crab-Fleet-Entry", "127.0.0.1:8201")
+                self.send_header("x-request-id", "invalid" if fixture.invalid_request_id else request_id)
                 self.end_headers()
                 self.wfile.write(json.dumps(body).encode())
 
@@ -265,7 +272,18 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(len(self.requests), 2)
         self.assertEqual(len(self.receipts), 1)
         self.assertEqual(samples[0]["operations"][0]["retry_reasons"], [503])
+        attempts = samples[0]["operations"][0]["attempts"]
+        self.assertEqual([(item["status"], item["http_request_id"]) for item in attempts], self.http_requests[:2])
+        self.assertNotEqual(attempts[0]["http_request_id"], attempts[1]["http_request_id"])
         self.assertGreater(samples[0]["scheduled_latency_ms"], 100)
+
+    def test_success_without_a_valid_server_request_id_is_not_qualified(self):
+        self.invalid_request_id = True
+        result = load.load_request(self.gateway, 3, "POST", "/issues", {
+            "request_id": str(uuid.uuid4()), "title": "unjoinable acknowledgement",
+        })
+        self.assertEqual(result["outcome"], "contract_error")
+        self.assertIn("request ID", result["error"])
 
     def test_acknowledged_readback_mismatch_stops_new_arrivals_and_retains_evidence(self):
         self.corrupt_read = True

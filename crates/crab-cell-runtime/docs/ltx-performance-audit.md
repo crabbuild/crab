@@ -5,7 +5,7 @@
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
 | Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `7d3dd9232b0`; each diagnostic below identifies its revision separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
-| Status | Small uploads, cache hits, streaming cleanup, decoder metadata, checksum I/O batching, and cross-worker admission improved; same-worker isolation, publication capacity, public latency, and fault-under-load qualification remain open |
+| Status | Small uploads, cache admission, streaming cleanup, decoder metadata, checksum I/O batching, and cross-worker admission improved; acknowledged-write attribution implemented; same-worker isolation, publication capacity, public latency, and fault-under-load qualification remain open |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
 
@@ -36,8 +36,8 @@ harness separately.
 | P2 | Checkpoint tail cost and shared maintenance resources (6, 11) | Long update runs with checkpoint, hydration, and compaction interference |
 
 These priorities identify code-supported risks and missing evidence. They do
-not rank measured contributions to public p99: the required action-level
-phase measurements are still missing. The best next fix should remove work
+not rank measured contributions to public p99: current-source fleet phase
+measurements are still missing. The best next fix should remove work
 from a measured critical path while retaining the existing authority and
 durability contracts. Raising concurrency or queue capacity alone does not
 meet that criterion.
@@ -99,14 +99,44 @@ microbenchmarks. These are proposed acceptance gates, not achieved SLOs.
 | 5 | Checksum state | Use bounded authenticated checksum blocks for old-value lookup and transactional updates. With changed pages held fixed, a fresh Cell must not copy a database-sized array every cut. Lazy activation must retain aggregate verification, including deleted suffixes and later mutations. |
 | 6 | Sustained service and recovery | At fixed Cell count and offered arrivals, measure acknowledgement rate, publication rate, retained bytes, oldest unpublished age, rejection rate and latency together. Run long enough to cross repeated compaction/checkpoint cycles. Fault a proven follower-only acknowledged tail during arrivals and verify every acknowledged result after owner/local-data loss. |
 
-The HTTP correlation is still incomplete: `issues.rs::mutation_identity`
-generates a runtime request ID per attempt, while `submission_id` represents
-the stable application input. `command_output` returns only the output and
-discards the receipt. Runtime response-source metrics cannot by themselves
-identify the proof of a particular load-generator acknowledgement. This also
-applies to the analogous output adapters in labels, statuses and checks.
-The stable application key remains useful for idempotent readback; it is not
-already a join key for all runtime phase observations.
+**Action-attribution implementation:** the shared HTTP submission validator
+records the stable application input under the existing server request span.
+The public typed client records its runtime attempt and committed receipt
+before the issue/label/status/check output adapters return their payload.
+The owner carries Cell, incarnation, request ID and owner session through actor
+and worker queues, capture, winning proof and final successful reply. IDs live
+in traces, never metric labels. Effects share worker/actor tracing under their
+effect identity; the issue-load join qualifies only command writes.
+
+The scheduled fleet runner retains every HTTP attempt and the successful
+response's `x-request-id`. It collects each node's log before owner loss and
+joins every acknowledged write to exactly one matching owner response and
+commit sequence. Missing phases, conflicting owners, mismatched receipts or
+ambiguous duplicate responses fail attribution. The report records actual
+write owners and forwarded writes; the previous pre-load-owner estimate was
+removed. A stored runtime result has source `Recorded` and does not invent a
+new capture or proof. A new runtime attempt deduplicated by the application can
+still commit a new runtime receipt; its stable submission ID remains separate.
+
+The real RustFS/mTLS HTTP test passed after owner takeover and Git readback;
+its actual text-formatted logs also passed the fleet join CLI. One acknowledged
+issue write measured 165.890 ms at the client, 164.083 ms to HTTP response
+readiness, 72.339 ms in the typed invocation, 4.065 ms on the SQL worker
+(including 1.653 ms capture), and 27.227 ms waiting in the proof task. This is
+one diagnostic action on a debug build, not a percentile or an isolated
+bottleneck measurement. Artifacts beneath the checkout's external target are
+`action-trace-rustfs-formatted.log`, `action-trace-rustfs.samples.jsonl`, and
+`action-trace-rustfs.actions.jsonl`.
+
+The timings overlap: capture is inside worker time; worker and proof work sit
+inside broader request lifetimes. HTTP response readiness precedes client body
+receipt. Proof wait starts when the proof task runs and excludes earlier node-
+log submission and actor scheduling. Authentication/routing/activation, query
+phases, individual provider attempts, and proof submission need further
+attribution before a complete latency decomposition. Replaying a shared-process
+test log proves the correlation fields and parser, not cross-container collection.
+Current-source Compose load, trace-overhead comparison, and saturation curves
+remain required. See the [action trace runbook](../../crab-http-server/REFERENCE.md#attribute-acknowledged-cell-writes).
 
 Keep checkpoint execution serialized with the managed writer when exploring
 background work. The workspace pins `rusqlite` 0.34.0 / `libsqlite3-sys` 0.32.0;
@@ -623,7 +653,7 @@ the evidence; a Rust crate version alone does not identify it.
 
 ### 12. Even ingress and Cell targeting do not prove even owner execution
 
-**Confirmed:** [run_stage](../../crab-http-server/deploy/cell-issue-fleet/qualify.py)
+**Confirmed at audited revision:** [run_stage](../../crab-http-server/deploy/cell-issue-fleet/qualify.py)
 checks live sessions, reads existing Cells, and records their owners. The
 [load runner](../../crab-http-server/deploy/cell-issue-fleet/load.py) checks a
 70–130% ingress split and uniform offered Cell targets. It does not enforce
@@ -681,6 +711,12 @@ wrong-source refusal. All Compose profiles validate. The first Docker trial
 exposed image-index disappearance after retagging; retaining the qualification
 tag fixes that observed failure. This verifies evidence binding, not service
 latency; current-source fleet curves remain open.
+
+**Attribution follow-up:** schema 4 now joins each acknowledged write to the
+actual executing owner/session and receipt, replacing the stale pre-load
+forwarding estimate. It does not enforce execution balance or attribute read
+owners. The shared-process RustFS test and retained-log replay prove the join;
+placement settling and cross-container measurements remain open.
 
 ### 13. A streaming decoder still retains avoidable metadata
 
@@ -1085,6 +1121,17 @@ remain open; this change does not claim those gates.
 
 ## Safety and proof retained by the audit
 
+The action-tracing change passes the real RustFS HTTP/mTLS application test and
+replays its formatter output through the same join CLI used by the fleet
+runner. Twenty-three fleet tests cover scheduled arrivals, HTTP retry identity,
+provenance and attribution refusal. Thirteen runtime durability cases and two
+command/effect cancellation cases pass with the instrumentation. Runtime and
+HTTP all-target Clippy pass with warnings denied; actionlint and runtime docs
+validation pass. These checks do not establish tracing overhead or fleet
+performance. The unrelated staged reference-suite relocation still fails the
+layout inventory gate pending its previously requested approval; it is not
+included in this tracing change.
+
 The placement-parity failure at `c6870fd6a88` is reproduced as a sampling race:
 metrics returned one active Cell while its signed advertisement still returned
 zero. A live RustFS probe on the unchanged `c12b41ef638` publisher observed
@@ -1102,7 +1149,12 @@ collector/recovery tests pass, and the live collector passed on the RustFS
 fleet with generations 1037/1038 in 2.65 seconds. The raw result and trace are
 `placement-collector-live.json` and `placement-collector-live.log` beneath
 the checkout's external target directory. This proves the collector against
-that running image; current-source full Compose qualification remains required.
+that running image. The subsequent
+[ARM64 image and Compose run 36233256995](https://github.com/crabbuild/crab/actions/runs/36233256995)
+passed at `5feef9968e6`, including the collector and prior all-acknowledgement
+changes. The [image workflow 36234166704](https://github.com/crabbuild/crab/actions/runs/36234166704)
+also passed at cache-admission revision `efcef4b1ffa`. Neither run covers the
+later action-tracing changes or sustained 3/5/10/20-node load curves.
 The earlier shutdown refusal about an unsealed node log is a separate open
 lifecycle observation.
 

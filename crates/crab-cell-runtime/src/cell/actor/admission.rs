@@ -132,7 +132,9 @@ pub(super) fn send_command_reply(
             // reply boundary so failed or later object proofs cannot add winners.
             let elapsed = command.queued_at.elapsed();
             tracing::debug!(
-                cell = ?command.cell,
+                target: "crab_cell_runtime::action",
+                parent: &command.trace,
+                event = "cell_command_response",
                 commit_sequence,
                 source = ?source,
                 response_us = elapsed.as_micros(),

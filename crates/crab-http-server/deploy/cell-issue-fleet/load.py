@@ -21,12 +21,14 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 
 from qualify import BUCKET, CONFIG, MEMORY_LIMIT, ROOT, command, compose, image_provenance, issue_path, node_name, prove_node
+import action_traces
 
 
 class RequestFailure(RuntimeError):
-    def __init__(self, status: int, detail: str):
+    def __init__(self, status: int, detail: str, http_request_id: str | None):
         super().__init__(detail)
         self.status = status
+        self.http_request_id = http_request_id
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,16 @@ def status(path: Path, profiles: tuple[str, ...], cell: int) -> dict:
     return value
 
 
+def server_request_id(headers, required: bool) -> str | None:
+    value = headers.get("x-request-id")
+    if value is None and not required:
+        return None
+    try:
+        return str(uuid.UUID(value))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise RuntimeError("HTTP response has no valid server request ID") from error
+
+
 def request(gateway: str, nodes: int, method: str, path: str, payload: dict | None = None) -> dict:
     body = json.dumps(payload).encode() if payload is not None else None
     headers = {"content-type": "application/json"} if body is not None else {}
@@ -92,6 +104,7 @@ def request(gateway: str, nodes: int, method: str, path: str, payload: dict | No
             expected = 201 if method == "POST" else 200
             if response.status != expected:
                 raise RuntimeError(f"{method} {path} returned {response.status}, expected {expected}")
+            http_request_id = server_request_id(response.headers, required=True)
             upstream = response.headers.get("X-Crab-Fleet-Entry", "")
             match = re.fullmatch(r"127\.0\.0\.1:(\d+)", upstream)
             entry = int(match.group(1)) - 8200 if match else 0
@@ -102,10 +115,13 @@ def request(gateway: str, nodes: int, method: str, path: str, payload: dict | No
                 raise RuntimeError(f"{method} {path} returned a non-object JSON body")
     except urllib.error.HTTPError as error:
         with error:
+            http_request_id = server_request_id(error.headers, required=False)
             detail = error.read(512).decode(errors="replace")
-        raise RequestFailure(error.code, f"{method} {path} returned {error.code}: {detail}") from error
+        raise RequestFailure(error.code, f"{method} {path} returned {error.code}: {detail}", http_request_id) from error
     return {
         "entry": node_name(entry),
+        "status": expected,
+        "http_request_id": http_request_id,
         "latency_ms": (time.monotonic() - started) * 1_000,
         "body": result,
     }
@@ -114,15 +130,23 @@ def request(gateway: str, nodes: int, method: str, path: str, payload: dict | No
 def load_request(gateway: str, nodes: int, method: str, path: str, payload: dict | None = None) -> dict:
     started = time.monotonic()
     failures = []
+    attempts = []
     for attempt in range(6):
+        attempt_started = time.monotonic()
+        http_request_id = None
+        status = None
         try:
             sample = request(gateway, nodes, method, path, payload)
+            attempts.append({key: sample[key] for key in ("status", "http_request_id", "latency_ms")})
             sample["latency_ms"] = (time.monotonic() - started) * 1_000
             sample["retries"] = len(failures)
             sample["retry_reasons"] = failures
+            sample["attempts"] = attempts
             sample["outcome"] = "success"
             return sample
         except RequestFailure as error:
+            http_request_id = error.http_request_id
+            status = error.status
             failures.append(error.status)
             detail = str(error)
             retryable = error.status in (429, 502, 503, 504)
@@ -134,12 +158,17 @@ def load_request(gateway: str, nodes: int, method: str, path: str, payload: dict
             failures.append("contract")
             detail = str(error)
             retryable = False
+        attempts.append({
+            "status": status, "http_request_id": http_request_id,
+            "latency_ms": (time.monotonic() - attempt_started) * 1_000,
+        })
         if not retryable or attempt == 5:
             return {
                 "outcome": "contract_error" if failures[-1] == "contract" else "failed",
                 "latency_ms": (time.monotonic() - started) * 1_000,
                 "retries": attempt,
                 "retry_reasons": failures,
+                "attempts": attempts,
                 "error": detail,
             }
         time.sleep(0.1 * 2 ** attempt)
@@ -467,7 +496,8 @@ def main() -> None:
     output = args.output.expanduser().resolve() if args.output else path.parent / f"load-{args.nodes}-{run_id}.json"
     raw_path = output.with_suffix(".samples.jsonl")
     nodes_path = output.with_suffix(".nodes.jsonl")
-    if any(candidate.exists() for candidate in (output, raw_path, nodes_path)):
+    traces_path = output.with_suffix(".traces")
+    if any(candidate.exists() for candidate in (output, raw_path, nodes_path, traces_path)):
         raise RuntimeError(f"load report or samples already exist: {output}")
     expected_nodes = {node_name(index) for index in range(1, args.nodes + 1)}
     active_nodes = running_nodes(project)
@@ -478,10 +508,10 @@ def main() -> None:
     if any(deployment["services"][name]["image"] != server["image"] for name in expected_nodes):
         raise RuntimeError("all node services must pin the same server image ID; run qualify.py first")
     gateway = f"http://127.0.0.1:{args.gateway_port}"
-    owners, before = owner_map(path, profiles, args.nodes, args.cells)
+    _, before = owner_map(path, profiles, args.nodes, args.cells)
     coverage, coverage_samples = cover_routes(gateway, args.nodes, args.cells)
     report = {
-        "schema": 3,
+        "schema": 4,
         "source": command("git", "-C", str(ROOT), "rev-parse", "HEAD"),
         "source_role": "load_generator",
         "source_dirty": bool(command("git", "-C", str(ROOT), "status", "--porcelain")),
@@ -496,6 +526,7 @@ def main() -> None:
         "compose_profiles": list(profiles),
         "node_cpu_limit": deployment["services"]["node-01"]["cpus"],
         "node_memory_limit_bytes": MEMORY_LIMIT,
+        "trace_filters": {name: deployment["services"][name]["environment"].get("RUST_LOG") for name in sorted(expected_nodes)},
         "started_at": datetime.now(timezone.utc).isoformat(),
         "nodes": args.nodes,
         "workload": vars(workload),
@@ -538,7 +569,6 @@ def main() -> None:
             entry_requests=dict(sorted(entries.items())),
             ingress_balanced=balanced,
             cell_offered_pairs=dict(Counter(sample["cell"] for sample in samples)),
-            forwarded_requests=sum(operation["entry"] != owners[operation["cell"]] for operation in successes),
             total_retries=sum(operation["retries"] for operation in operations),
             attempt_failures=dict(Counter(str(reason) for operation in operations for reason in operation["retry_reasons"])),
             latency={operation: percentiles([sample["latency_ms"] for sample in successes if sample["operation"] == operation])
@@ -551,6 +581,22 @@ def main() -> None:
         report["publication_drain"] = drain_publication(path, profiles, args.nodes)
         if not report["publication_drain"]["drained"]:
             raise RuntimeError("publication backlog did not drain; inspect retained backlog samples")
+        traces_path.mkdir()
+        trace_events = []
+        for name in sorted(expected_nodes):
+            log = compose(path, profiles, "logs", "--no-color", "--no-log-prefix", "--since", report["started_at"], name)
+            (traces_path / f"{name}.log").write_text(log + "\n")
+            trace_events.extend(action_traces.parse_log(log, name))
+        actions = action_traces.join(samples, trace_events)
+        with (traces_path / "actions.jsonl").open("x") as joined:
+            for action in actions:
+                joined.write(json.dumps(action) + "\n")
+        report["action_traces"] = {
+            "directory": traces_path.name, "acknowledged_writes": len(actions),
+            "proofs": dict(Counter(action["proof"] for action in actions)),
+            "execution_owners": dict(Counter(action["owner"] for action in actions)),
+            "forwarded_writes": sum(action["entry"] != action["owner"] for action in actions),
+        }
         report["acknowledgements_before_recovery"] = verify_acknowledged(gateway, args.nodes, samples)
         after = verify_roots(path, profiles, before, acknowledged)
         report["roots_advanced"] = bool(after)

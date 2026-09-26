@@ -287,6 +287,8 @@ impl SqlWorkerPool {
         self.send_worker_job(
             cell,
             WorkerCommand::Execute {
+                trace: tracing::Span::current(),
+                queued_at: Instant::now(),
                 cell,
                 identity,
                 operation_digest,
@@ -338,6 +340,8 @@ impl SqlWorkerPool {
         self.send_worker_job(
             cell,
             WorkerCommand::DeliverEffect {
+                trace: tracing::Span::current(),
+                queued_at: Instant::now(),
                 cell,
                 delivery,
                 now_ms,
@@ -861,6 +865,8 @@ enum WorkerCommand {
     },
     Bootstrap(Box<WorkerBootstrap>),
     Execute {
+        trace: tracing::Span,
+        queued_at: Instant,
         cell: CellId,
         identity: MutationIdentity,
         operation_digest: Digest,
@@ -878,6 +884,8 @@ enum WorkerCommand {
         reply: oneshot::Sender<Result<PendingMigration>>,
     },
     DeliverEffect {
+        trace: tracing::Span,
+        queued_at: Instant,
         cell: CellId,
         delivery: InboxDelivery,
         now_ms: i64,
