@@ -71,14 +71,20 @@ def measure(port: int, mode: str, expected: dict) -> dict:
     ingress_results = {}
     for ingress in (1, 5):
         readers, errors = Counter(), Counter()
-        count = 0
+        ingress_latencies = []
         for node, values, counts, failures, _ in samples:
             if node == ingress:
-                count += len(values)
+                ingress_latencies.extend(values)
                 readers.update(counts)
                 errors.update(failures)
-        ingress_results[node_name(ingress)] = {"successful_reads": count,
-                                               "reader_counts": dict(readers), "errors": dict(errors)}
+        ingress_latencies.sort()
+        count = len(ingress_latencies)
+        ingress_results[node_name(ingress)] = {
+            "successful_reads": count, "requests_per_second": count / elapsed,
+            "p50_ms": ingress_latencies[int((count - 1) * .50)] if count else None,
+            "p99_ms": ingress_latencies[int((count - 1) * .99)] if count else None,
+            "reader_counts": dict(readers), "errors": dict(errors),
+        }
     sequences = [value for _, _, _, _, values in samples for value in values]
     if not latencies:
         raise RuntimeError("load run completed no successful queries")

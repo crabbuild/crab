@@ -74,8 +74,8 @@ async fn concurrent_reader_selection_shares_discovery_across_cells() {
         );
     }
     assert!(
-        reads.load(Ordering::Relaxed) <= 5 + 16,
-        "each query rescanned membership: {} provider reads",
+        reads.load(Ordering::Relaxed) <= 5,
+        "selection repeated discovery reads: {} provider reads",
         reads.load(Ordering::Relaxed)
     );
 }

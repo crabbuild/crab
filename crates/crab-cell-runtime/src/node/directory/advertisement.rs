@@ -42,7 +42,13 @@ impl NodeDirectory {
         // An expired owner still identifies the excluded physical node.
         // Selection is advisory and must survive owner death so warm readers
         // remain discoverable; query and takeover gates enforce liveness.
-        let owner_advertisement = self.inspect_advertisement(owner, now_ms).await?;
+        // Node identity and failure domain cannot change within a boot session.
+        // Reuse their signed discovery proof for exclusion; this grants no
+        // liveness, which the query's final authority gate checks independently.
+        let owner_advertisement = match live.iter().find(|node| node.session() == owner) {
+            Some(owner) => Some(owner.clone()),
+            None => self.inspect_advertisement(owner, now_ms).await?,
+        };
         let owner_node = if let Some(advertisement) = &owner_advertisement {
             advertisement.node()
         } else {
