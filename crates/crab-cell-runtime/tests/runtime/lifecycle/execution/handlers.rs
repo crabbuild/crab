@@ -283,3 +283,59 @@ async fn proven_handler_rollback_keeps_the_cell_servable() {
     ));
     handle.drain().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn automatic_sqlite_rollback_keeps_the_cell_servable() {
+    let fixture = fixture_with_limits(
+        b"automatic-rollback",
+        Limits {
+            max_database_bytes: 512 * 1024,
+            ..Limits::default()
+        },
+    );
+    let (runtime, handle, _pool) = activate_runtime(&fixture, 16 * 1024 * 1024).await;
+    let failed = handle
+        .execute(
+            mutation_identity_window(71, 10, 10_000),
+            Digest::from_bytes([72; 32]),
+            20,
+            1_024,
+            1_024,
+            |transaction| {
+                transaction.execute("UPDATE counter SET value = 99", [])?;
+                transaction.execute("CREATE TABLE oversized(value BLOB)", [])?;
+                transaction.execute("INSERT INTO oversized VALUES(zeroblob(1048576))", [])?;
+                Ok(HandlerOutcome::Success(Vec::new()))
+            },
+        )
+        .await;
+    assert!(
+        matches!(failed, Err(crab_cell_runtime::Error::Sqlite(ref error))
+        if error.sqlite_error_code() == Some(crab_ltx::rusqlite::ErrorCode::DiskFull)),
+        "expected a rolled-back capacity refusal, got {failed:?}"
+    );
+    let outcome = handle
+        .execute(
+            mutation_identity_window(73, 10, 10_000),
+            Digest::from_bytes([74; 32]),
+            21,
+            1_024,
+            1_024,
+            |transaction| {
+                transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                let value: i64 =
+                    transaction.query_row("SELECT value FROM counter", [], |row| row.get(0))?;
+                Ok(HandlerOutcome::Success(value.to_be_bytes().to_vec()))
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        StoredOutcome::Success {
+            result: 1_i64.to_be_bytes().to_vec(),
+            commit_sequence: 1,
+        }
+    );
+    runtime.shutdown().await.unwrap();
+}
