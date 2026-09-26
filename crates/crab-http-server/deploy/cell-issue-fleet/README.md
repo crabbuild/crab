@@ -249,3 +249,19 @@ the resumed runner and image source, and retries the same prepared revision.
 An updated executor image must still match the prepared application descriptor.
 It never lowers the grace period or rewrites object timestamps. Use only the
 disposable fixture: this command actually deletes eligible immutable objects.
+
+After stopping that fixture, qualify loss of every reader before the writer:
+
+```sh
+python3 crates/crab-http-server/deploy/cell-issue-fleet/qualify_reader_first_loss.py \
+  --state "$HOME/.codex/cell-issue-fleet/read-replicas-1"
+```
+
+This resumes three nodes using the successful retention receipt's image. It
+proves two readers, kills them and deletes their project-owned Cell volumes,
+then requires a new object-backed acknowledgement from the unchanged writer.
+Only afterward does it kill the writer and delete its Cell volume. Fresh
+nodes must recover the acknowledged value at a new epoch and recruit two
+readers at or above that mutation's durable sequence. The provider and its
+volumes remain intact; `reader-first-loss-report.json` records both ownership
+cuts, the deleted local volumes, source/image identities, and recovery timing.
