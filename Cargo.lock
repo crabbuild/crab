@@ -1371,6 +1371,7 @@ dependencies = [
  "extenddb-engine",
  "extenddb-server",
  "extenddb-storage",
+ "futures-util",
  "getrandom 0.3.4",
  "object_store",
  "serde",

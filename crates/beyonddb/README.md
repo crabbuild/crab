@@ -128,7 +128,10 @@ results and missing items before and after restart. Get, Query, and Scan can
 finish a blocking transaction's durable COMMIT or ABORT and repeat their read.
 Once a terminal decision is known, resolution attempts every participant even
 if an earlier participant or receipt fails, so reachable Cells can release their
-locks. The overall request stays retryable until all receipts are durable.
+locks. It keeps up to four attempts in flight per call and replenishes that
+window as attempts finish, allowing progress while one owner remains slow.
+The overall request stays incomplete until all receipts are durable; errors
+remain retryable. Cancellation leaves durable progress for the next resolver.
 Each Cell query helps at most one transaction; BEGIN and unavailable decisions
 remain retryable conflicts. Transactional reads retain conflict cancellation.
 Once a table's initial route is published, keyed CRUD and Scan use its data

@@ -3,6 +3,7 @@
 use crab_cell_runtime::client::{InvocationError, Observed, Receipt};
 use crab_cell_runtime::identity::CellTarget;
 use extenddb_storage::error::StorageError;
+use futures_util::{StreamExt, stream};
 
 use super::{CellStorage, cell_error, mutation_identity};
 use crate::{
@@ -190,14 +191,14 @@ impl CellStorage {
             .output
             .0;
         let mut failure = None;
-        for participant in participants {
-            // The decision is immutable. One unavailable owner or uncertain
-            // receipt must not retain locks on other healthy participants;
-            // completion still requires every durable resolution receipt.
-            if let Err(error) = self
-                .finish_participant(&coordinator, &read, participant, commit)
-                .await
-            {
+        // Only terminal decisions permit independent resolution. Keep a small
+        // window so a slow owner cannot hold healthy keys, without fanning one
+        // request out to all 100 participants or detaching work on cancellation.
+        let mut resolving = stream::iter(participants)
+            .map(|participant| self.finish_participant(&coordinator, &read, participant, commit))
+            .buffer_unordered(4);
+        while let Some(result) = resolving.next().await {
+            if let Err(error) = result {
                 failure.get_or_insert(error);
             }
         }

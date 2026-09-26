@@ -12,6 +12,16 @@ pub(crate) const SCHEMA: &str = concat!(
     include_str!("participant_schema.sql")
 );
 
+pub(crate) const fn phase_operation(id: u32) -> crab_cell_runtime::registry::OperationDescriptor {
+    // State, resolution, and receipt messages contain no item images. Their
+    // actual bounds leave mailbox and node headroom for concurrent resolution.
+    crab_cell_runtime::registry::OperationDescriptor {
+        input_limit: 4096,
+        output_limit: 4096,
+        ..crate::operation(id)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) enum StagedEffect {
     Write,

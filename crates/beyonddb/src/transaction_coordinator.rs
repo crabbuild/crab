@@ -39,9 +39,9 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
 }];
 static COMMANDS: [OperationDescriptor; 5] = [
     operation(1),
-    operation(2),
+    crate::participant::phase_operation(2),
     operation(3),
-    operation(4),
+    crate::participant::phase_operation(4),
     crate::transaction_transport::upload_operation(5),
 ];
 static QUERIES: [OperationDescriptor; 6] = [
@@ -80,6 +80,8 @@ impl crab_cell_runtime::registry::CellModule for CoordinatorModule {
             source_digest: {
                 let mut source = blake3::Hasher::new();
                 source.update(include_bytes!("transaction_coordinator.rs"));
+                source.update(include_bytes!("lib.rs"));
+                source.update(include_bytes!("participant.rs"));
                 source.update(include_bytes!("transaction_payload.rs"));
                 source.update(include_bytes!("transaction_transport.rs"));
                 source.update(include_bytes!("transaction_coordinator/phase.rs"));
