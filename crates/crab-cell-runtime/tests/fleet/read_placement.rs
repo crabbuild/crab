@@ -146,4 +146,19 @@ async fn desired_readers_follow_live_distinct_nodes_and_replace_a_lost_member() 
             .iter()
             .all(|candidate| candidate.node() != NodeId::from_bytes([2; 16]))
     );
+    let advertisement = directory.load(owner, 9_000).await.unwrap().unwrap();
+    directory.withdraw(&advertisement, 9_000).await.unwrap();
+    let warm = directory
+        .select_readers(cell, owner, code, 4, 9_000, 16)
+        .await
+        .unwrap();
+    assert_eq!(
+        warm.iter()
+            .map(NodeAdvertisement::node)
+            .collect::<HashSet<_>>(),
+        replacement
+            .iter()
+            .map(NodeAdvertisement::node)
+            .collect::<HashSet<_>>()
+    );
 }

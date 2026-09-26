@@ -1228,7 +1228,8 @@ pub async fn serve(config: Config) -> Result<()> {
         ),
         session_dir,
     )?
-    .with_recovery_artifacts(Arc::clone(&recovery_artifacts));
+    .with_recovery_artifacts(Arc::clone(&recovery_artifacts))
+    .with_read_replicas(read_replicas.clone());
     let cell_scheduler = crate::cells::RepositoryCellScheduler::new(
         startup.identity,
         startup.layout,

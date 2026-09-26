@@ -125,12 +125,24 @@ impl CellReadReplica {
         self.snapshot_receipt(&snapshot)
     }
 
-    /// Returns this admitted view's position after a fresh authority and owner-session check.
-    pub async fn ready_receipt(&self) -> Result<Receipt> {
+    /// Returns the verified position and whether the original owner is still live.
+    ///
+    /// A false readiness bit is advisory warm state only; it never permits a
+    /// query or takeover. Changed authority or closed admission rejects it.
+    pub async fn readiness(&self) -> Result<(Receipt, bool)> {
         self.runtime.ensure_running()?;
         let snapshot = self.snapshot.read().await.clone();
-        self.confirm_authority(&snapshot).await?;
-        Ok(self.snapshot_receipt(&snapshot))
+        self.confirm_snapshot(&snapshot).await?;
+        let live = self
+            .directory
+            .is_live(snapshot.owner.session, unix_time_ms()?)
+            .await?;
+        Ok((self.snapshot_receipt(&snapshot), live))
+    }
+
+    /// Closes reader admission across every clone before eviction or writable activation.
+    pub fn close(&self) {
+        self.query_gate.close();
     }
 
     /// Installs a newer exact root without disrupting queries using the old view.
@@ -209,6 +221,9 @@ impl CellReadReplica {
 
     pub(crate) async fn query_encoded(&self, query: EncodedQuery) -> Result<EncodedObservation> {
         self.runtime.ensure_running()?;
+        if self.query_gate.is_closed() {
+            return Err(Error::Fenced);
+        }
         if query.target != self.target || query.expected != self.expected {
             return Err(Error::Fenced);
         }
@@ -244,7 +259,7 @@ impl CellReadReplica {
         )
         .await
         .map_err(|_| Error::Deadline)?
-        .map_err(|_| Error::RuntimeClosed)?;
+        .map_err(|_| Error::Fenced)?;
         let interrupt = snapshot.view.connection()?.get_interrupt_handle();
         let view = Arc::clone(&snapshot.view);
         let registry = Arc::clone(&self.registry);
@@ -294,16 +309,23 @@ impl CellReadReplica {
         receipt(self.expected, snapshot.view.root().commit_sequence)
     }
 
-    async fn confirm_authority(&self, snapshot: &ReplicaSnapshot) -> Result<()> {
+    async fn confirm_snapshot(&self, snapshot: &ReplicaSnapshot) -> Result<()> {
+        if self.query_gate.is_closed() {
+            return Err(Error::Fenced);
+        }
         let current = self
             .authority
             .load(self.expected.cell)
             .await?
             .ok_or(Error::Fenced)?;
-        let current = current.value();
-        if !self.same_owner_and_code(current, snapshot) {
+        if !self.same_owner_and_code(current.value(), snapshot) {
             return Err(Error::Fenced);
         }
+        Ok(())
+    }
+
+    async fn confirm_authority(&self, snapshot: &ReplicaSnapshot) -> Result<()> {
+        self.confirm_snapshot(snapshot).await?;
         if !self
             .directory
             .is_live(snapshot.owner.session, unix_time_ms()?)

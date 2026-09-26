@@ -70,15 +70,12 @@ pub(super) fn validate_read_reply(reply: &wire::ReadReply) -> Result<()> {
             }
             Ok(())
         }
-        Some(wire::read_reply::Result::ReplicaReady(true)) => validate_receipt(
+        Some(wire::read_reply::Result::ReplicaReady(_)) => validate_receipt(
             reply
                 .receipt
                 .as_ref()
                 .ok_or(Error::Peer("replica-ready receipt is missing"))?,
         ),
-        Some(wire::read_reply::Result::ReplicaReady(false)) => {
-            Err(Error::Peer("replica-ready selector must be true"))
-        }
         Some(wire::read_reply::Result::ReplicaReconciled(true)) if reply.receipt.is_none() => {
             Ok(())
         }

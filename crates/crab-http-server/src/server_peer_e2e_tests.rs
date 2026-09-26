@@ -346,7 +346,8 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         ),
         ingress_session_dir,
     )
-    .unwrap();
+    .unwrap()
+    .with_read_replicas(Some(reader.clone()));
     let ingress_server = server(
         repository,
         store,
@@ -847,31 +848,16 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     owner_heartbeat_stop.cancel();
     owner_heartbeat_task.await.unwrap().unwrap();
     let stale_owner = authority.load(target.cell_id()).await.unwrap().unwrap();
-    let takeover = stale_owner
-        .value()
-        .takeover(crab_cell_runtime::control::Owner {
-            session: ingress_session,
-            endpoint: ingress_management_endpoint,
-        })
-        .unwrap();
-    authority
-        .transition(
-            &stale_owner,
-            takeover,
-            crab_cell_runtime::control::Transition::Takeover,
-        )
-        .await
-        .unwrap();
+    let stale_reader = reader.resolve(target.clone()).await.unwrap();
+    let (warm, ready) = reader.status(target.clone()).await.unwrap();
+    assert!(!ready);
+    assert_eq!(warm.incarnation, stale_owner.value().incarnation);
     assert!(matches!(
-        reader
-            .resolve(target.clone())
-            .await
-            .unwrap()
+        stale_reader
             .query::<crate::cells::repository::GetIssue>(None, 1)
             .await,
         Err(crab_cell_runtime::Error::Fenced)
     ));
-    reader.shutdown().await;
     std::fs::remove_dir_all(owner_dir.path()).unwrap();
 
     let restored = client
@@ -882,6 +868,21 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .await
         .unwrap();
     assert_eq!(restored.status(), StatusCode::OK);
+    let promoted = authority.load(target.cell_id()).await.unwrap().unwrap();
+    assert_eq!(
+        promoted.value().owner.as_ref().unwrap().session,
+        ingress_session
+    );
+    assert!(promoted.value().epoch > stale_owner.value().epoch);
+    assert!(reader.resolve(target.clone()).await.is_err());
+    assert!(matches!(
+        stale_reader
+            .query::<crate::cells::repository::GetIssue>(None, 1)
+            .await,
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
+    drop(stale_reader);
+
     let restored: Value = serde_json::from_slice(&restored.bytes().await.unwrap()).unwrap();
     assert_eq!(restored["items"][0]["title"], "Remote Cell");
     assert_eq!(restored["items"][0]["labels"][0]["name"], "remote");

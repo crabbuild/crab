@@ -54,10 +54,11 @@ impl ReadReplicaManager {
         session: SessionId,
         root: PathBuf,
     ) -> Self {
+        let authority = CellAuthority::with_telemetry(layout.clone(), runtime.telemetry_handle());
         Self {
             runtime,
             registry,
-            authority: CellAuthority::new(layout.clone()),
+            authority,
             policy: ReadPolicyStore::new(layout.clone()),
             layout,
             directory,
@@ -163,11 +164,11 @@ impl ReadReplicaManager {
             match existing.refresh(&path).await {
                 Ok(receipt) if self.still_selected(cell).await? => return Ok(receipt),
                 Ok(_) => {
-                    self.active.write().await.remove(&cell);
+                    self.remove_locked(cell).await;
                     return Err(Error::Fenced);
                 }
                 Err(Error::Fenced) => {
-                    self.active.write().await.remove(&cell);
+                    self.remove_locked(cell).await;
                 }
                 Err(error) => return Err(error),
             }
@@ -196,11 +197,11 @@ impl ReadReplicaManager {
         Ok(receipt)
     }
 
-    pub(crate) async fn status(&self, target: CellTarget) -> Result<Receipt> {
+    pub(crate) async fn status(&self, target: CellTarget) -> Result<(Receipt, bool)> {
         if !self.still_selected(target.cell_id()).await? {
             return Err(Error::ReplicaUnavailable);
         }
-        self.resolve(target).await?.ready_receipt().await
+        self.resolve(target).await?.readiness().await
     }
 
     async fn destination(&self, cell: CellId) -> Result<PathBuf> {
@@ -271,7 +272,7 @@ impl ReadReplicaManager {
                             match self.still_selected(cell).await {
                                 Ok(true) => {},
                                 Ok(false) => {
-                                    self.active.write().await.remove(&cell);
+                                    self.remove(cell).await;
                                     continue;
                                 },
                                 Err(error) => {
@@ -282,7 +283,11 @@ impl ReadReplicaManager {
                             let path = self.destination(cell).await?;
                             match reader.refresh(&path).await {
                                 Ok(_) => {},
-                                Err(Error::Fenced) => { self.active.write().await.remove(&cell); },
+                                Err(Error::Fenced) => {
+                                    // Keep verified warm bytes after owner death. Queries
+                                    // still require a live owner; changed authority evicts.
+                                    if reader.readiness().await.is_err() { self.remove(cell).await; }
+                                },
                                 Err(error) => tracing::warn!(?cell, error = %error, "read replica refresh failed"),
                             }
                         }
@@ -293,8 +298,22 @@ impl ReadReplicaManager {
         }
     }
 
+    pub(crate) async fn remove(&self, cell: CellId) {
+        let _activation = self.activation.lock().await;
+        self.remove_locked(cell).await;
+    }
+
+    async fn remove_locked(&self, cell: CellId) {
+        if let Some(reader) = self.active.write().await.remove(&cell) {
+            reader.close();
+        }
+    }
+
     pub(crate) async fn shutdown(&self) {
-        self.active.write().await.clear();
+        let _activation = self.activation.lock().await;
+        for (_, reader) in self.active.write().await.drain() {
+            reader.close();
+        }
     }
 }
 

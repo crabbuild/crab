@@ -958,8 +958,9 @@ pub(crate) async fn forward(
             manager
                 .activate(request.target().clone(), request.origin_session())
                 .await
+                .map(|receipt| (receipt, true))
         };
-        let receipt = match readiness {
+        let (receipt, ready) = match readiness {
             Ok(receipt) => receipt,
             Err(error) => {
                 if replica_status {
@@ -977,7 +978,7 @@ pub(crate) async fn forward(
                     incarnation: receipt.incarnation.as_bytes().to_vec(),
                     commit_sequence: receipt.commit_sequence,
                 }),
-                result: Some(peer_wire::read_reply::Result::ReplicaReady(true)),
+                result: Some(peer_wire::read_reply::Result::ReplicaReady(ready)),
             })),
         };
         return match encode_peer_reply(&reply) {

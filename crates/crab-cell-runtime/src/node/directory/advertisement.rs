@@ -22,20 +22,28 @@ impl NodeDirectory {
         limit: usize,
     ) -> Result<Vec<NodeAdvertisement>> {
         let live = self.live(now_ms, limit).await?;
-        let owner = live
-            .iter()
-            .find(|candidate| candidate.session() == owner)
-            .ok_or(Error::Node("read-replica owner is not live"))?;
-        let owner_node = owner.node();
-        let mut zones = owner
-            .failure_domain()
-            .zone()
+        // An expired owner still identifies the excluded physical node.
+        // Selection is advisory and must survive owner death so warm readers
+        // remain discoverable; query and takeover gates enforce liveness.
+        let owner_advertisement = self.inspect_advertisement(owner, now_ms).await?;
+        let owner_node = if let Some(advertisement) = &owner_advertisement {
+            advertisement.node()
+        } else {
+            let path = self.layout.node_path(owner.as_bytes());
+            match self.load_record_at(&path).await? {
+                Some((NodeRecord::Tombstone(tombstone), _)) => tombstone.node,
+                _ => return Err(Error::Node("read-replica owner record is missing")),
+            }
+        };
+        let mut zones = owner_advertisement
+            .as_ref()
+            .and_then(|owner| owner.failure_domain().zone())
             .map(str::to_owned)
             .into_iter()
             .collect::<HashSet<_>>();
-        let mut hosts = owner
-            .failure_domain()
-            .host()
+        let mut hosts = owner_advertisement
+            .as_ref()
+            .and_then(|owner| owner.failure_domain().host())
             .map(str::to_owned)
             .into_iter()
             .collect::<HashSet<_>>();

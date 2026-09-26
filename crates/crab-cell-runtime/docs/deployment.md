@@ -17,13 +17,13 @@ public traffic. Object-root publication remains a valid alternative proof, and
 all recovery still goes through the existing claim, witness, pin, control-CAS,
 and fresh-database activation gates described in
 [Follower durability and warm failover](failover-and-followers.md).
-Public product queries still route to the Cell owner. In object durability
-mode, the server reconciles a desired-reader policy and can serve explicit
-authenticated private peer reads from admitted, verified snapshots. The
-snapshot API and policy described in
-[Plan 036](../../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md)
-are not yet a public product route or a qualified deployment. Fleet-only
-acknowledgements do not provide the plan's all-secondary-loss guarantee.
+Owner queries remain the default. In object durability mode, the server
+reconciles a desired-reader policy and serves explicit authenticated reads
+from admitted, verified snapshots. The issue-detail route below is the first
+public product consumer. This is local implementation evidence for
+[Plan 036](../../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md),
+not a qualified production deployment. Fleet-only acknowledgements do not
+provide the plan's all-secondary-loss guarantee.
 
 An administrator can set a repository Cell's desired read-replica count with
 `PUT /api/repos/{owner}/{name}/settings/read-replicas`, sending
@@ -49,6 +49,15 @@ later replica request to require at least that position. The route reports
 query on the owner as a fallback. The default issue route still reads from the
 owner. Label metadata on the replica route is queried at or beyond the issue
 receipt; assignee metadata comes from the authorized repository configuration.
+
+After the owner session expires, verified snapshots remain warm but cannot
+answer queries. Recovery probes the selected live nodes and prefers a warm
+reader, after any mandatory durability-log successor. The destination closes
+reader admission, proves predecessor death, wins the normal Cell-control CAS,
+and opens a fresh writable database from the authoritative root. It never
+turns a read-only connection into a writer. A missing warm reader only removes
+the placement preference; the existing cold recovery path retains every
+session, old-log, and authority gate.
 
 ## Configure one process per node
 

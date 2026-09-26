@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -64,6 +65,69 @@ def prove_readers(port: int, size: int, target: int, index: int = 1, ingress: in
     }
 
 
+def measure_reads(port: int, size: int) -> dict:
+    result = {}
+    for mode in ("owner", "replica"):
+        url = node_url(1, port) + issue_path(1) + "/1" + ("?read=replica" if mode == "replica" else "")
+        def read(_):
+            start = time.monotonic()
+            with urllib.request.urlopen(url, timeout=15) as response:
+                body = json.load(response)
+                if body.get("title") != "Cell issue on node 1":
+                    raise RuntimeError("measured read returned the wrong value")
+                reader = response.headers.get("x-crab-cell-reader", "owner")
+            return time.monotonic() - start, reader
+        started = time.monotonic()
+        with ThreadPoolExecutor(max_workers=8) as workers:
+            samples = list(workers.map(read, range(200)))
+        elapsed = time.monotonic() - started
+        latencies = sorted(duration * 1000 for duration, _ in samples)
+        result[mode] = {
+            "requests": len(samples), "concurrency": 8,
+            "requests_per_second": round(len(samples) / elapsed, 2),
+            "p50_ms": round(latencies[99], 2), "p99_ms": round(latencies[197], 2),
+            "reader_counts": dict(Counter(reader for _, reader in samples)),
+        }
+    return result
+
+
+def prove_warm_promotion(path: Path, profiles: tuple[str, ...], port: int) -> dict:
+    request_json("PUT", node_url(1, port) + "/api/repos/demo/work-19/settings/read-replicas",
+                 {"expected_revision": 0, "desired_readers": 2})
+    warm = prove_readers(port, 20, 2, 19)
+    sessions = {}
+    for index in range(1, 21):
+        session, _, _ = prove_node(path, profiles, index)
+        status = json.loads(compose(path, profiles, "exec", "-T", "node-01", "crab-http-server",
+                                    "--config", CONFIG, "cells", "node", "--session", session, "--json"))
+        sessions[session] = (index, status["advertisement"]["node"])
+    args = ("crab-http-server", "--config", CONFIG, "cells", "status", "--owner", "demo", "--name", "work-19")
+    before = json.loads(compose(path, profiles, "exec", "-T", "node-01", *args))
+    owner_index = sessions[before["owner"]["session"]][0]
+    observer = next(index for index, node in sessions.values()
+                    if index != owner_index and node not in warm["reader_counts"])
+    started = time.monotonic()
+    try:
+        compose(path, profiles, "kill", "--signal", "SIGKILL", node_name(owner_index))
+        issue = request_json("GET", node_url(observer, port) + issue_path(19) + "/1")
+        after = json.loads(compose(path, profiles, "exec", "-T", node_name(observer), *args))
+        successor = sessions[after["owner"]["session"]][1]
+        if successor not in warm["reader_counts"] or issue["title"] != "Cell issue on node 19":
+            raise RuntimeError("failed owner was not replaced by a verified warm reader")
+        if after["root"]["commit_sequence"] < before["root"]["commit_sequence"]:
+            raise RuntimeError("warm promotion regressed the acknowledged root")
+        comment = request_json("POST", node_url(observer, port) + issue_path(19) + "/1/comments",
+                               {"body": "written by the promoted warm reader"})
+        if comment.get("body") != "written by the promoted warm reader":
+            raise RuntimeError("promoted reader did not acknowledge a new mutation")
+        return {"old_owner_session": before["owner"]["session"],
+                "new_owner_session": after["owner"]["session"], "promoted_reader": successor,
+                "previous_readers": warm, "root_before": before["root"], "root_after": after["root"],
+                "recovery_and_write_seconds": round(time.monotonic() - started, 3)}
+    finally:
+        compose(path, profiles, "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300", node_name(owner_index))
+
+
 def prove_all_reader_loss(path: Path, profiles: tuple[str, ...], stage: dict, port: int, project: str) -> dict:
     policy = request_json(
         "PUT",
@@ -74,6 +138,7 @@ def prove_all_reader_loss(path: Path, profiles: tuple[str, ...], stage: dict, po
         raise RuntimeError("all-reader-loss target was not applied")
     before_readers = prove_readers(port, 20, 2, 20)
     node_by_id = {}
+    node_by_session = {}
     for index in range(1, 21):
         session, _, _ = prove_node(path, profiles, index)
         status = json.loads(compose(
@@ -81,7 +146,10 @@ def prove_all_reader_loss(path: Path, profiles: tuple[str, ...], stage: dict, po
             "--config", CONFIG, "cells", "node", "--session", session, "--json",
         ))
         node_by_id[status["advertisement"]["node"]] = node_name(index)
-    owner = stage["owners"]["work-20"]
+        node_by_session[session] = node_name(index)
+    current = json.loads(compose(path, profiles, "exec", "-T", "node-01", "crab-http-server",
+                                 "--config", CONFIG, "cells", "status", "--owner", "demo", "--name", "work-20"))
+    owner = node_by_session[current["owner"]["session"]]
     lost = {owner} | {node_by_id[node] for node in before_readers["reader_counts"]}
     if len(lost) != 3:
         raise RuntimeError(f"expected one owner and two distinct readers, got {lost}")
@@ -182,10 +250,23 @@ def main() -> None:
         if policy["desired_readers"] != target:
             raise RuntimeError(f"{size} nodes: target update was not applied")
         stage["replicas"] = prove_readers(args.node_port_base, size, target)
+        stage["read_measurement"] = measure_reads(args.node_port_base, size)
+        stage["readiness"] = request_json("GET", node_url(1, args.node_port_base) + "/api/repos/demo/work-01/settings/read-replicas")
+        stage["reader_resources"] = {}
+        for index in range(1, size + 1):
+            service = node_name(index)
+            stage["reader_resources"][service] = {
+                "process_status": compose(path, profiles, "exec", "-T", service, "cat", "/proc/1/status"),
+                "descriptors": compose(path, profiles, "exec", "-T", service, "ls", "/proc/1/fd").splitlines(),
+                "local_cell_disk_kib": int(compose(path, profiles, "exec", "-T", service, "du", "-sk", "/var/lib/crab/cells").split()[0]),
+                "metrics": compose(path, profiles, "exec", "-T", service, "crab-http-server", "--config", CONFIG, "cells", "metrics"),
+            }
         report["stages"].append(stage)
         (path.parent / "read-replica-report.json").write_text(json.dumps(report, indent=2) + "\n")
         print(f"Verified {size} nodes and {target} distinct S3-rooted issue readers", flush=True)
         previous = size
+    report["warm_promotion"] = prove_warm_promotion(path, phases[-1][1], args.node_port_base)
+    (path.parent / "read-replica-report.json").write_text(json.dumps(report, indent=2) + "\n")
     report["all_reader_loss"] = prove_all_reader_loss(
         path, phases[-1][1], report["stages"][-1], args.node_port_base, args.project
     )

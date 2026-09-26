@@ -166,7 +166,7 @@ message ReadReply {
     CellDescription description = 2;
     bytes command_output = 6;
     Error error = 7;
-    bool replica_ready = 8; // Receipt names the exact local snapshot.
+    bool replica_ready = 8; // Exact local snapshot; false means warm only, never readable.
     bool replica_reconciled = 9; // Owner accepted a reconciliation hint.
   }
   reserved 3 to 5;

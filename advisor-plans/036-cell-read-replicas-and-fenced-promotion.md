@@ -64,12 +64,12 @@ owner wake-up hint. Its status route probes selected nodes and distinguishes
 proven-ready, unverified, and placement-shortfall counts. An explicit issue-detail
 route uses selected replicas and reports actual receipts without falling back
 to the writer. No general product read route,
-sparse read view, warm-reader promotion preference, or
-production qualification is enabled.
+sparse read view or production qualification is enabled. Warm-reader
+preference now probes verified snapshots after owner death, closes read admission,
+and enters the existing fenced takeover and fresh writable restore path.
 The server can select the existing object proof path with `[cells]
 durability = "object"` for a fresh deployment; fleet remains the default and
-the fleet-to-object drain and coverage barrier is not automated. Public product
-reads still route only to the owner.
+the fleet-to-object drain and coverage barrier is not automated. Issue-detail replica reads are explicit; other public product reads use the owner.
 Do not claim the all-reader-loss guarantee or replica read scaling from these
 local tests.
 
@@ -267,7 +267,9 @@ owner reconciliation, private activation, node admission, and administrator
 target CAS with owner hint and bounded readiness status exist; broader churn qualification
 remains; 4 typed local and peer queries, position
 errors, receipt checks, authority gates, and explicit issue-detail routing exist,
-but other product reads remain owner-only; 5 and 6 open. Private peer replica requests are accepted only in
+but other product reads remain owner-only; 5 has warm-reader preference and
+local automatic takeover coverage; 6 has an initial Compose slice, with final
+source-bound fault and performance qualification still open. Private peer replica requests are accepted only in
 the object-durability server profile.
 
 The ignored `rustfs_replica_reads_exact_root_and_policy_cas` test also passed

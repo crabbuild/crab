@@ -487,6 +487,16 @@ async fn exercise_replica_read(fixture: &Fixture) {
         1
     );
 
+    let advertised = directory.load(session, now_ms()).await.unwrap().unwrap();
+    directory.withdraw(&advertised, now_ms()).await.unwrap();
+    let (warm, ready) = reader.readiness().await.unwrap();
+    assert!(!ready);
+    assert_eq!(warm.commit_sequence, committed.commit_sequence());
+    assert!(matches!(
+        reader.query::<ReadCounter>(None, 0).await,
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
+
     handle.drain().await.unwrap();
     assert!(runtime.active_catalog_entries().await.unwrap().is_empty());
     assert!(matches!(
@@ -495,6 +505,15 @@ async fn exercise_replica_read(fixture: &Fixture) {
     ));
     assert!(matches!(
         refreshed.query::<ReadCounter>(None, 0).await,
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
+    assert!(matches!(
+        reader.readiness().await,
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
+    reader.close();
+    assert!(matches!(
+        refreshed.readiness().await,
         Err(crab_cell_runtime::Error::Fenced)
     ));
     drop(reader);
