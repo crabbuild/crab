@@ -425,10 +425,10 @@ def prove_all_reader_loss(path: Path, profiles: tuple[str, ...], stage: dict, po
     }
 
 
-def prove_authority_outage(path: Path, profiles: tuple[str, ...], port: int) -> dict:
+def prove_authority_outage(path: Path, profiles: tuple[str, ...], port: int, size: int) -> dict:
     url = node_url(1, port) + issue_path(1) + "/1?read=replica"
     request_json("GET", node_url(1, port) + issue_path(1) + "/1")
-    prove_readers(port, 20, 19)
+    prove_readers(port, size, size - 1)
     before = replica_issue(url, 1)
     started = time.monotonic()
     try:
@@ -540,7 +540,7 @@ def main() -> None:
         path, phases[-1][1], report["stages"][-1], args.node_port_base, args.project
     )
     (path.parent / "read-replica-report.json").write_text(json.dumps(report, indent=2) + "\n")
-    report["authority_outage"] = prove_authority_outage(path, phases[-1][1], args.node_port_base)
+    report["authority_outage"] = prove_authority_outage(path, phases[-1][1], args.node_port_base, 20)
     (path.parent / "read-replica-report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(path.parent / "read-replica-report.json")
 

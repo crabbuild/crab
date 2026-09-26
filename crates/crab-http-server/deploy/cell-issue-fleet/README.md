@@ -308,3 +308,6 @@ Every pair must have zero errors, correct values/receipts, all four readers,
 replica throughput at least 80% of owner throughput, and replica median/p99
 latency at most 120% of owner latency. Reports and derived Compose files are
 retained on failure; these limits apply only to the recorded local workload.
+After passing every pair, the runner pauses RustFS and requires a replica
+request to fail closed with HTTP 503. It then resumes RustFS and checks the
+same incarnation, a non-regressing receipt, and the acknowledged issue value.

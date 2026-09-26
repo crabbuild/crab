@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from qualify import command, compose, issue_path, node_url, request_json
-from qualify_read_replicas import cost_delta, cost_snapshot, node_inventory, prove_readers, set_reader_target
+from qualify_read_replicas import cost_delta, cost_snapshot, node_inventory, prove_authority_outage, prove_readers, set_reader_target
 from qualify_reader_load import measure, resources
 from render import CONFIG, node_name
 
@@ -115,6 +115,11 @@ def main():
         and pair["comparison"]["p50_ratio"] <= 1.2
         and pair["comparison"]["p99_ratio"] <= 1.2 for pair in report["rounds"]
     )
+    if report["similar_performance"]:
+        report["authority_outage"] = prove_authority_outage(path, ("five",), args.node_port_base, 5)
+        current = request_json("GET", node_url(1, args.node_port_base) + issue_path(1) + "/1?read=replica")
+        if any(current.get(key) != value for key, value in expected.items()):
+            raise RuntimeError("authority recovery changed the acknowledged value")
     report["finished_at"] = datetime.now(timezone.utc).isoformat()
     args.report.write_text(json.dumps(report, indent=2) + "\n")
     if not report["similar_performance"]:
