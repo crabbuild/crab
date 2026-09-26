@@ -377,17 +377,30 @@ number of directory leaves a payload touches: 5 objects for a small write up to
 is dominated by the rewritten leaves and root document, and the payload's
 compressibility matters more than its size.
 
-A hot Cell at 100 commands per second would issue roughly 500-1,300 immutable
-PUTs per second, which is why the runtime admits against one pending-publication
-byte high-water mark per Cell plus the 32-segment compaction debt that folds the
+A hot Cell offering 100 commands per second would demand roughly 500-1,300
+logical immutable-object uploads per second at these measured costs. These
+are not HTTP request counts: native LTX bodies use multipart even when small,
+and retries, metadata reads, and authority CAS add requests. The runtime admits
+against one pending-publication byte high-water mark per Cell plus the
+32-segment compaction debt that folds the
 root graph. Publication stays one serialized root per command because the object
 path is the long-term durability authority and the node-log fleet proof releases
 the command earlier; on this loopback RustFS path one command costs roughly
 0.09-0.15 seconds of provider work, so a Cell without a fleet proof is
 provider-latency bound, not CPU bound. Coalescing several commands into one root
-would save metadata objects, not bodies, and the fleet-proof race already
-absorbs most of that latency for enrolled nodes. Multi-Cell concurrency,
+could save metadata objects while retaining each command's captured bodies.
+Fleet proof can release a response before object publication; the response
+winner and sustained publication drain rate still need measurement. Multi-Cell concurrency,
 cloud-bucket p99, and retention cost remain unmeasured.
+
+Audit qualification limits: `replica-cost` generates a periodic payload that
+repeats every 251 bytes; it does not represent incompressible data. Its direct
+`CellReplica::prepare` loop excludes runtime authority CAS, the follower race,
+and scheduled compaction. With 28 measured commands, nearest-rank p99 is the
+maximum sample. Retain these rows as a reproducible historical workload;
+qualify entropy, sustained publication debt, and application latency separately.
+The [LTX performance audit](../../crab-cell-runtime/docs/ltx-performance-audit.md)
+records source-backed optimization candidates and their acceptance gates.
 
 The runners also use the implementations' pinned bundled SQLite versions:
 Crab currently links SQLite 3.49.1 while the pinned Celld revision links SQLite
