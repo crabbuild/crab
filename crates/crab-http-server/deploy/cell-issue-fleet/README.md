@@ -143,7 +143,8 @@ Each run writes `load-<nodes>-<run-id>.json` under the state directory. The
 measurement is the throughput of this fixed client workload on one machine,
 not maximum fleet throughput or a production SLO. See the
 [gateway load qualification](qualification/2026-09-25-gateway-load.md) for
-one local run and its limits.
+one local run and its limits. The [stage-load qualification](qualification/2026-09-25-stage-load.md)
+records load while 3, 5, 10, and 20 nodes were each active.
 
 ## Measure public-host actions against RustFS
 

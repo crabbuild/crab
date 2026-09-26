@@ -75,7 +75,9 @@ python3 crates/crab-http-server/deploy/cell-issue-fleet/qualify.py \
 The command writes `report.json` and `load-3-stage.json`,
 `load-5-stage.json`, `load-10-stage.json`, and `load-20-stage.json`.
 `load.py` rejects a stage name that does not match the project's active
-node containers. Omit `--load-stages` for the original functional check.
+node containers. The [local stage-load record](../../crab-http-server/deploy/cell-issue-fleet/qualification/2026-09-25-stage-load.md)
+captures one completed run. Omit `--load-stages` for the original functional
+check.
 For a fast syntax-only check before building images:
 
 ```sh
