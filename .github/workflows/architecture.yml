@@ -236,37 +236,49 @@ jobs:
 
       - name: Verify canonical LTX and Cell source-loss recovery
         run: |
-          cargo test -p crab-ltx --locked --features replica --test cell \
-            cell::roots::exact_root_inventory_verifies_every_remote_dependency \
+          set -euo pipefail
+          run_test() {
+            local output="${RUNNER_TEMP}/cell-runtime-rustfs-test.log"
+            "$@" 2>&1 | tee "$output"
+            # An exact filter can exit successfully after its test moves.
+            # Require executed proof, including for ignored provider tests.
+            if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$output" ||
+                grep -Eq 'test result: ok\. 0 passed;' "$output"; then
+              echo 'error: every selected test binary must execute a passing test' >&2
+              return 1
+            fi
+          }
+          run_test cargo test -p crab-ltx --locked --features replica --test cell \
+            cell::roots::lifecycle::exact_root_inventory_verifies_every_remote_dependency \
             -- --exact --nocapture
-          cargo test -p crab-cell-runtime --locked --test runtime \
-            runtime::lifecycle::rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
+          run_test cargo test -p crab-cell-runtime --locked --test runtime \
+            runtime::lifecycle::ownership::recovery::rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
             -- --ignored --exact --nocapture
-          cargo test -p crab-cell-runtime --locked --lib \
+          run_test cargo test -p crab-cell-runtime --locked --lib \
             recovery::retention::tests::rustfs_maintenance_collection_preserves_live_and_pinned_graphs \
             -- --ignored --exact --nocapture
-          cargo test -p crab-http-server --locked --lib \
+          run_test cargo test -p crab-http-server --locked --lib \
             server::peer_e2e_tests::rustfs_public_collaboration_reaches_remote_owner_and_publishes_ltx \
             -- --ignored --exact --nocapture
-          cargo test -p crab-http-server --release --locked --test public_cell_qualification \
+          run_test cargo test -p crab-http-server --release --locked --test public_cell_qualification \
             rustfs_public_cell_node_runs_typed_primitive_workload \
             -- --ignored --exact --nocapture
-          cargo test -p crab-http-server --locked --test public_cell_process_fault \
+          run_test cargo test -p crab-http-server --locked --test public_cell_process_fault \
             -- --ignored --nocapture
-          cargo test -p crab-http-server --locked \
+          run_test cargo test -p crab-http-server --locked \
             --test public_cell_response_loss --test public_cell_retry \
             -- --ignored --nocapture
-          cargo test -p crab-http-server --locked --test public_cell_activity_retry \
+          run_test cargo test -p crab-http-server --locked --test public_cell_activity_retry \
             -- --ignored --nocapture
-          cargo test -p crab-http-server --locked --test public_cell_cancellation \
+          run_test cargo test -p crab-http-server --locked --test public_cell_cancellation \
             -- --ignored --nocapture
-          cargo test -p crab-http-server --locked --test public_cell_data_cancellation \
+          run_test cargo test -p crab-http-server --locked --test public_cell_data_cancellation \
             -- --ignored --nocapture
-          cargo test -p crab-http-server --locked --test public_cell_activity_cancellation \
+          run_test cargo test -p crab-http-server --locked --test public_cell_activity_cancellation \
             -- --ignored --nocapture
-          cargo test -p crab-http-server --locked --test public_cell_effect_delivery_cancellation \
+          run_test cargo test -p crab-http-server --locked --test public_cell_effect_delivery_cancellation \
             -- --ignored --nocapture
-          cargo test -p crab-http-server --locked --test public_cell_lease_expiry \
+          run_test cargo test -p crab-http-server --locked --test public_cell_lease_expiry \
             -- --ignored --nocapture
 
   binary-contracts:
