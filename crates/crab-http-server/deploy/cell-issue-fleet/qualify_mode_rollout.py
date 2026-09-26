@@ -41,6 +41,54 @@ def verify_values(port: int, bodies: dict[int, set[str]]) -> None:
             raise RuntimeError("rollout lost an acknowledged comment")
 
 
+def drain_fleet(path: Path, nodes: list[str]) -> dict:
+    compose(path, (), "stop", "gateway")
+    compose(path, (), "stop", *nodes)
+    states = {}
+    for service in nodes:
+        container = compose(path, (), "ps", "--all", "--quiet", service)
+        states[service] = json.loads(command("docker", "inspect", "--format", "{{json .State}}", container))
+    return states
+
+
+def require_drained(states: dict) -> None:
+    for service, state in states.items():
+        if state["Running"] or state["ExitCode"] != 0 or state["OOMKilled"]:
+            raise RuntimeError(f"{service} did not finish the coverage barrier; fleet config retained")
+
+
+def exercise_drain_faults(path: Path, nodes: list[str], enrolled: list[dict],
+                          port: int, acknowledged: dict, report: dict) -> None:
+    configs = {file.name: file.read_bytes() for file in (path.parent / "config").glob("*.toml")}
+    active = next(node for node in enrolled if node["log"]["active"])
+    by_node = {node["node"]: node_name(index) for index, node in enumerate(enrolled, 1)}
+    followers = [by_node[node] for node in active["log"]["member_nodes"]]
+    if len(followers) != 2 or len(set(followers)) != 2:
+        raise RuntimeError("fault fixture must have two distinct durability followers")
+    report["drain_faults"] = []
+    for fault in ("all_followers_lost", "provider_unavailable"):
+        if fault == "all_followers_lost":
+            compose(path, (), "kill", "--signal", "SIGKILL", *followers)
+        else:
+            compose(path, (), "stop", "rustfs")
+        states = drain_fleet(path, nodes)
+        try:
+            require_drained(states)
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError(f"{fault} unexpectedly passed the rollout barrier")
+        if any((path.parent / "config" / name).read_bytes() != value for name, value in configs.items()):
+            raise RuntimeError("failed drain changed the deployment configuration")
+        report["drain_faults"].append({"fault": fault, "states": states,
+                                      "followers": followers if fault == "all_followers_lost" else [],
+                                      "fleet_config_unchanged": True})
+        (path.parent / "mode-rollout-report.json").write_text(json.dumps(report, indent=2) + "\n")
+        compose(path, (), "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300")
+        verify_values(port, acknowledged)
+        report["drain_faults"][-1]["acknowledged_values_recovered"] = True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", type=Path, required=True)
@@ -48,7 +96,13 @@ def main() -> None:
     parser.add_argument("--gateway-port", type=int, default=18080)
     parser.add_argument("--node-port-base", type=int, default=18100)
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--runtime-source", help="source commit of the existing image when skipping its build")
+    parser.add_argument("--exercise-drain-faults", action="store_true")
     args = parser.parse_args()
+    if args.skip_build and not args.runtime_source:
+        parser.error("--skip-build requires --runtime-source")
+    if command("git", "-C", str(ROOT), "status", "--porcelain"):
+        raise RuntimeError("qualification requires committed source")
     label = f"label=com.docker.compose.project={args.project}"
     if any(command("docker", kind, "ls", "-q", "--filter", label) for kind in ("volume", "network")) or command("docker", "ps", "-aq", "--filter", label):
         raise RuntimeError(f"Compose project {args.project} already has resources")
@@ -57,6 +111,7 @@ def main() -> None:
     if not args.skip_build:
         subprocess.run(["docker", "compose", "--file", str(path), "build", "release-init"], check=True)
     report = {
+        "runtime_source": args.runtime_source or command("git", "-C", str(ROOT), "rev-parse", "HEAD"),
         "source_commit": command("git", "-C", str(ROOT), "rev-parse", "HEAD"),
         "source_diff_sha256": hashlib.sha256(command("git", "-C", str(ROOT), "diff", "--binary", "HEAD").encode()).hexdigest(),
         "image": command("docker", "image", "inspect", "--format", "{{.Id}}", f"{args.project}:local"),
@@ -106,19 +161,14 @@ def main() -> None:
     report["fleet_advertisements"] = enrolled
     (path.parent / "mode-rollout-report.json").write_text(json.dumps(report, indent=2) + "\n")
 
+    if args.exercise_drain_faults:
+        exercise_drain_faults(path, nodes, enrolled, args.node_port_base, acknowledged, report)
+
     # A successful server shutdown includes the node-log coverage and close
     # barrier. A killed/failed drain must leave every config in fleet mode.
-    compose(path, (), "stop", "gateway")
-    compose(path, (), "stop", *nodes)
-    report["drain"] = {}
-    for service in nodes:
-        container = compose(path, (), "ps", "--all", "--quiet", service)
-        state = json.loads(command("docker", "inspect", "--format", "{{json .State}}", container))
-        report["drain"][service] = state
+    report["drain"] = drain_fleet(path, nodes)
     (path.parent / "mode-rollout-report.json").write_text(json.dumps(report, indent=2) + "\n")
-    for service, state in report["drain"].items():
-        if state["Running"] or state["ExitCode"] != 0 or state["OOMKilled"]:
-            raise RuntimeError(f"{service} did not finish the coverage barrier; fleet config retained")
+    require_drained(report["drain"])
     path = render(args.state, args.project, args.gateway_port, args.node_port_base, True)
     compose(path, (), "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300")
     verify_values(args.node_port_base, acknowledged)

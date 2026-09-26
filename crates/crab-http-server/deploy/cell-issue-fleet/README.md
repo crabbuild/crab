@@ -212,6 +212,14 @@ issued frame must be object-covered before the durable log close CAS.
 A failed or forced drain leaves the fleet configuration intact and fails the
 run. The provider and all local volumes remain available for investigation.
 
+Add `--exercise-drain-faults` to kill both members of an observed active
+durability log, then separately stop RustFS before drain. Each interrupted
+attempt must fail the same rollout barrier with byte-identical fleet configs;
+restart must recover every acknowledged value before the next phase. The
+runner then completes the normal mode transition and all-disk-loss checks.
+Using a prebuilt image requires `--skip-build --runtime-source <commit>` so
+the report distinguishes runtime source from qualifier source.
+
 After restarting in object mode, the runner verifies old values, publishes a
 new comment, checks object proof counters with no new fleet proofs, and
 activates two readers. It then kills all three servers, deletes only their
