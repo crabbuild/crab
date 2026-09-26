@@ -30,8 +30,13 @@ locks through the same coordinator. Get, Query, and Scan now help one blocking
 transaction per underlying Cell query when its durable decision is terminal, then repeat
 the read. BEGIN, unavailable decisions, and further blockers fail retryably;
 transactional conflicts return ordered cancellation reasons. Committed read
-images remain retained without collection, another production capacity gate. A
-host-backed provisioner can create 1–256
+images remain retained without collection, another production capacity gate.
+BEGIN and prepare now upload bounded 256-KiB binary pieces before the phase
+atomically consumes and validates the complete input. Coordinator recovery reads
+operations in bounded pieces too. Temporary uploads expire and have a 32-MiB
+per-Cell aggregate payload ceiling; this does not reserve eventual apply capacity
+or remove the HTTP request-body limit. See the transaction protocol for wire,
+SQL, retention, and admission boundaries. A host-backed provisioner can create 1–256
 independent, evenly spaced initial data Cells during CreateTable and retry
 interrupted setup. This raises initial aggregate capacity and write parallelism.
 The host can plan a midpoint split of a serving range and repeat it on an

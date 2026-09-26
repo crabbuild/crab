@@ -6,6 +6,7 @@ mod recovery;
 mod remaining;
 mod transaction;
 mod transaction_read;
+mod transaction_transport;
 
 use std::{
     sync::Arc,

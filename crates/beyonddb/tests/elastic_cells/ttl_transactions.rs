@@ -29,29 +29,30 @@ async fn begin(
     transaction_id: [u8; 16],
     operation: TransactionOperation,
 ) -> PreparePartitionTransactionInput {
-    client
-        .command::<BeginCrossCellTransaction>(
-            coordinator,
-            mutation(),
-            Json(BeginCrossCellTransactionInput {
-                account_id: info.account_id.clone(),
-                transaction_id,
-                token: None,
-                participants: vec![CoordinatorParticipant {
-                    target: CoordinatorParticipantTarget::Data {
-                        table_id: info.table_id.clone(),
-                        partition_id: spec.partition_id,
-                        epoch: spec.epoch,
-                    },
-                    operations: vec![IndexedTransactionOperation {
-                        index: 0,
-                        operation: operation.clone(),
-                    }],
+    transaction_command!(
+        client,
+        BeginCrossCellTransaction,
+        coordinator,
+        mutation(),
+        Json(BeginCrossCellTransactionInput {
+            account_id: info.account_id.clone(),
+            transaction_id,
+            token: None,
+            participants: vec![CoordinatorParticipant {
+                target: CoordinatorParticipantTarget::Data {
+                    table_id: info.table_id.clone(),
+                    partition_id: spec.partition_id,
+                    epoch: spec.epoch,
+                },
+                operations: vec![IndexedTransactionOperation {
+                    index: 0,
+                    operation: operation.clone(),
                 }],
-            }),
-        )
-        .await
-        .unwrap();
+            }],
+        }),
+    )
+    .await
+    .unwrap();
     PreparePartitionTransactionInput {
         table_id: info.table_id.clone(),
         epoch: spec.epoch,
@@ -167,10 +168,15 @@ async fn ttl_skips_transaction_locks_and_revisits_after_abort() {
             })
         };
         let prepare = begin(&client, &coordinator, info, spec, id, operation).await;
-        client
-            .command::<PreparePartitionTransaction>(&data, mutation(), Json(prepare.clone()))
-            .await
-            .unwrap();
+        transaction_command!(
+            client,
+            PreparePartitionTransaction,
+            &data,
+            mutation(),
+            Json(prepare.clone())
+        )
+        .await
+        .unwrap();
         prepares.push(prepare);
     }
     // Both oldest expired rows are locked, in different modes. Selection must
@@ -367,10 +373,15 @@ impl PeerRoundTrip for LockAfterCandidates {
                     Some(read_request::Operation::CellQuery(query)) if query.query_id == ReadExpiredPartition::ID));
             let response = dispatcher.dispatch_bytes(&verified, now_ms).await?;
             if candidates && !raced.swap(true, Ordering::SeqCst) {
-                client
-                    .command::<PreparePartitionTransaction>(&owner, mutation(), Json(prepare))
-                    .await
-                    .unwrap();
+                transaction_command!(
+                    client,
+                    PreparePartitionTransaction,
+                    &owner,
+                    mutation(),
+                    Json(prepare)
+                )
+                .await
+                .unwrap();
             }
             Ok(response)
         })

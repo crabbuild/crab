@@ -684,7 +684,7 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         .filter(|id| range(id) == range("process"))
         .take(14)
         .collect();
-    let large_read = support::LargeRead::seed(&sdk, "ProcessData", read_keys).await;
+    let large_read = support::LargeTransaction::single_cell(&sdk, "ProcessData", read_keys).await;
     // Historical coordinator count exceeds the binary's 64 active-Cell slots.
     // Every request still follows the signed SDK path and touches two data Cells.
     let mut shards = std::collections::HashSet::new();
@@ -714,7 +714,7 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
     let mut restarted = start(&config, &log, false, s3);
     wait_healthy(&mut restarted, public, &log);
     large.assert_recovered(&sdk).await;
-    large_read.assert_read(&sdk).await;
+    large_read.assert_recovered(&sdk).await;
     sdk.transact_write_items()
         .client_request_token("process-update-check")
         .transact_items(update("process", "updated"))

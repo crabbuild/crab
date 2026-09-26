@@ -37,11 +37,20 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     effect_targets: &[],
     dead_letter: None,
 }];
-static COMMANDS: [OperationDescriptor; 4] =
-    [operation(1), operation(2), operation(3), operation(4)];
-static QUERIES: [OperationDescriptor; 6] = [
+static COMMANDS: [OperationDescriptor; 5] = [
     operation(1),
     operation(2),
+    operation(3),
+    operation(4),
+    crate::transaction_transport::upload_operation(5),
+];
+static QUERIES: [OperationDescriptor; 6] = [
+    operation(1),
+    OperationDescriptor {
+        input_limit: 4096,
+        output_limit: crate::transaction_transport::CHUNK_BYTES as u32 + 4096,
+        ..operation(2)
+    },
     operation(3),
     operation(4),
     operation(5),
@@ -72,6 +81,7 @@ impl crab_cell_runtime::registry::CellModule for CoordinatorModule {
                 let mut source = blake3::Hasher::new();
                 source.update(include_bytes!("transaction_coordinator.rs"));
                 source.update(include_bytes!("transaction_payload.rs"));
+                source.update(include_bytes!("transaction_transport.rs"));
                 source.update(include_bytes!("transaction_coordinator/phase.rs"));
                 source.update(include_bytes!("transaction_coordinator/token.rs"));
                 source.update(include_bytes!("transaction_token.rs"));
@@ -96,6 +106,7 @@ impl crab_cell_runtime::registry::CellModule for CoordinatorModule {
     }
 
     fn register(self, registry: &mut RegistryBuilder) -> Result<()> {
+        registry.bind_command::<crate::UploadTransactionPayload<BeginCrossCellTransaction>>()?;
         registry.bind_command::<BeginCrossCellTransaction>()?;
         registry.bind_command::<RecordParticipantPrepare>()?;
         registry.bind_command::<DecideCrossCellTransaction>()?;
@@ -202,17 +213,23 @@ pub enum BeginCrossCellTransactionOutcome {
 /// Fix the participant set and token before any data Cell prepare.
 pub struct BeginCrossCellTransaction;
 
+impl crate::MultipartTransactionCommand for BeginCrossCellTransaction {
+    type Payload = BeginCrossCellTransactionInput;
+    const UPLOAD_COMMAND_ID: u32 = 5;
+}
+
 impl Command for BeginCrossCellTransaction {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 1;
     const CODEC_VERSION: u32 = 1;
-    type Input = Json<BeginCrossCellTransactionInput>;
+    type Input = Json<crate::TransactionPayloadRef>;
     type Output = Json<BeginCrossCellTransactionOutcome>;
 
     fn execute(
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
+        let input = crate::transaction_transport::consume::<Self>(context, input)?;
         let key = input
             .token
             .as_ref()

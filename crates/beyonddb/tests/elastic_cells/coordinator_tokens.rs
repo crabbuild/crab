@@ -190,12 +190,17 @@ async fn tokens_pin_unfinished_work_and_replay_original_routes_until_completion_
                 .insert("replacement".into(), AttributeValue::Bool(true));
         }
         let active_token = retry.token.clone().unwrap();
-        let begun = client
-            .command::<BeginCrossCellTransaction>(&coordinator, identity(211), Json(retry.clone()))
-            .await
-            .unwrap()
-            .output
-            .0;
+        let begun = transaction_command!(
+            client,
+            BeginCrossCellTransaction,
+            &coordinator,
+            identity(211),
+            Json(retry.clone())
+        )
+        .await
+        .unwrap()
+        .output
+        .0;
         assert_eq!(
             begun,
             if expired {
@@ -212,6 +217,7 @@ async fn tokens_pin_unfinished_work_and_replay_original_routes_until_completion_
                 &coordinator,
                 None,
                 Json(ReadCoordinatorParticipantInput {
+                    chunk: 0,
                     account_id: ACCOUNT.into(),
                     transaction_id: original.transaction_id,
                     routing_key: TOKEN.as_bytes().to_vec(),
@@ -221,12 +227,16 @@ async fn tokens_pin_unfinished_work_and_replay_original_routes_until_completion_
             .await
             .unwrap()
             .output
-            .0
             .unwrap();
-        assert_eq!(original_payload, original.participants[0]);
+        assert_eq!(original_payload.target, original.participants[0].target);
+        assert_eq!(
+            serde_json::from_slice::<Vec<IndexedTransactionOperation>>(&original_payload.payload)
+                .unwrap(),
+            original.participants[0].operations
+        );
         retry.token = Some(changed_token);
         assert!(
-            matches!(client.command::<BeginCrossCellTransaction>(&coordinator, identity(212), Json(retry)).await, Err(InvocationError::Rejected(result)) if result.output.0 == BeginCrossCellTransactionOutcome::Mismatch)
+            matches!(transaction_command!(client, BeginCrossCellTransaction,&coordinator, identity(212), Json(retry)).await, Err(InvocationError::Rejected(result)) if result.output.0 == BeginCrossCellTransactionOutcome::Mismatch)
         );
         if !expired {
             if original_decision == CoordinatorDecision::Begin {

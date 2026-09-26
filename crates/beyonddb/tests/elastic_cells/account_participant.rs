@@ -210,22 +210,23 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
         (data.cell_id(), data_participant),
     ];
     participants.sort_by_key(|(cell, _)| *cell.as_bytes());
-    client
-        .command::<BeginCrossCellTransaction>(
-            &coordinator,
-            mutation(),
-            Json(BeginCrossCellTransactionInput {
-                account_id: account_id.into(),
-                transaction_id,
-                token: None,
-                participants: participants
-                    .into_iter()
-                    .map(|(_, participant)| participant)
-                    .collect(),
-            }),
-        )
-        .await
-        .unwrap();
+    transaction_command!(
+        client,
+        BeginCrossCellTransaction,
+        &coordinator,
+        mutation(),
+        Json(BeginCrossCellTransactionInput {
+            account_id: account_id.into(),
+            transaction_id,
+            token: None,
+            participants: participants
+                .into_iter()
+                .map(|(_, participant)| participant)
+                .collect(),
+        }),
+    )
+    .await
+    .unwrap();
     let prepare = PrepareAccountTransactionInput {
         transaction_id,
         coordinator_cell: *coordinator.cell_id().as_bytes(),
@@ -233,22 +234,27 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
         operations,
     };
     assert_eq!(
-        client
-            .command::<PrepareAccountTransaction>(&account, mutation(), Json(prepare.clone()))
-            .await
-            .unwrap()
-            .output
-            .0,
+        transaction_command!(
+            client,
+            PrepareAccountTransaction,
+            &account,
+            mutation(),
+            Json(prepare.clone())
+        )
+        .await
+        .unwrap()
+        .output
+        .0,
         PrepareTransactionOutcome::Prepared
     );
     assert!(
-        matches!(client.command::<PrepareAccountTransaction>(&account, mutation(), Json(prepare.clone())).await,
+        matches!(transaction_command!(client, PrepareAccountTransaction,&account, mutation(), Json(prepare.clone())).await,
         Err(InvocationError::Rejected(result)) if result.output.0 == PrepareTransactionOutcome::Replay)
     );
     let mut mismatch = prepare.clone();
     mismatch.operations[0] = put(table, "different");
     assert!(
-        matches!(client.command::<PrepareAccountTransaction>(&account, mutation(), Json(mismatch)).await,
+        matches!(transaction_command!(client, PrepareAccountTransaction,&account, mutation(), Json(mismatch)).await,
         Err(InvocationError::Rejected(result)) if result.output.0 == PrepareTransactionOutcome::Mismatch)
     );
     for value in ["created", "deleted", "checked", "updated"] {
@@ -483,7 +489,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
         ..prepare
     };
     assert!(
-        matches!(client.command::<PrepareAccountTransaction>(&account, mutation(), Json(delayed)).await,
+        matches!(transaction_command!(client, PrepareAccountTransaction,&account, mutation(), Json(delayed)).await,
         Err(InvocationError::Rejected(result)) if result.output.0 == PrepareTransactionOutcome::Aborted)
     );
 
@@ -539,22 +545,23 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
         ),
     ];
     participants.sort_by_key(|(cell, _)| *cell.as_bytes());
-    client
-        .command::<BeginCrossCellTransaction>(
-            &failed_coordinator,
-            mutation(),
-            Json(BeginCrossCellTransactionInput {
-                account_id: account_id.into(),
-                transaction_id: failed_id,
-                token: None,
-                participants: participants
-                    .into_iter()
-                    .map(|(_, participant)| participant)
-                    .collect(),
-            }),
-        )
-        .await
-        .unwrap();
+    transaction_command!(
+        client,
+        BeginCrossCellTransaction,
+        &failed_coordinator,
+        mutation(),
+        Json(BeginCrossCellTransactionInput {
+            account_id: account_id.into(),
+            transaction_id: failed_id,
+            token: None,
+            participants: participants
+                .into_iter()
+                .map(|(_, participant)| participant)
+                .collect(),
+        }),
+    )
+    .await
+    .unwrap();
     assert!(matches!(
         storage
             .resume_cross_cell_transaction(account_id, &failed_id, failed_id)
@@ -598,10 +605,15 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
             }),
         ],
     };
-    client
-        .command::<PrepareAccountTransaction>(&account, mutation(), Json(prepared_abort.clone()))
-        .await
-        .unwrap();
+    transaction_command!(
+        client,
+        PrepareAccountTransaction,
+        &account,
+        mutation(),
+        Json(prepared_abort.clone())
+    )
+    .await
+    .unwrap();
     let abort = ResolveTransactionInput {
         transaction_id: prepared_abort.transaction_id,
         coordinator_cell: prepared_abort.coordinator_cell,

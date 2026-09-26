@@ -152,19 +152,20 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
             };
             *epoch = 2;
         }
-        client
-            .command::<BeginCrossCellTransaction>(
-                &coordinator,
-                identity(scenario),
-                Json(BeginCrossCellTransactionInput {
-                    account_id: account_id.into(),
-                    transaction_id,
-                    token: None,
-                    participants: request.clone(),
-                }),
-            )
-            .await
-            .unwrap();
+        transaction_command!(
+            client,
+            BeginCrossCellTransaction,
+            &coordinator,
+            identity(scenario),
+            Json(BeginCrossCellTransactionInput {
+                account_id: account_id.into(),
+                transaction_id,
+                token: None,
+                participants: request.clone(),
+            }),
+        )
+        .await
+        .unwrap();
         if scenario == 181 || scenario == 183 {
             // Resume a prepare whose receipt was never recorded, or collide
             // with a different transaction on the second participant.
@@ -174,25 +175,26 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
             } else {
                 transaction_id
             };
-            client
-                .command::<PreparePartitionTransaction>(
-                    &participants[position].0,
-                    identity(scenario),
-                    Json(PreparePartitionTransactionInput {
-                        table_id: table.id.clone(),
-                        epoch: 1,
-                        transaction_id: held_id,
-                        coordinator_cell: *coordinator.cell_id().as_bytes(),
-                        coordinator_key: transaction_id.to_vec(),
-                        operations: request[position]
-                            .operations
-                            .iter()
-                            .map(|operation| operation.operation.clone())
-                            .collect(),
-                    }),
-                )
-                .await
-                .unwrap();
+            transaction_command!(
+                client,
+                PreparePartitionTransaction,
+                &participants[position].0,
+                identity(scenario),
+                Json(PreparePartitionTransactionInput {
+                    table_id: table.id.clone(),
+                    epoch: 1,
+                    transaction_id: held_id,
+                    coordinator_cell: *coordinator.cell_id().as_bytes(),
+                    coordinator_key: transaction_id.to_vec(),
+                    operations: request[position]
+                        .operations
+                        .iter()
+                        .map(|operation| operation.operation.clone())
+                        .collect(),
+                }),
+            )
+            .await
+            .unwrap();
         }
         let decision = if scenario == 181 {
             let (first, second) = tokio::join!(
@@ -385,6 +387,9 @@ impl PeerRoundTrip for DropPhaseReplies {
                             3 => 2,
                             1 => 4,
                             13 | 22 => 8,
+                            5 => 16,
+                            14 => 32,
+                            23 => 64,
                             _ => 0,
                         }
                     }

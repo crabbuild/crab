@@ -1,3 +1,5 @@
+mod transaction_transport;
+
 use std::collections::HashMap;
 
 use aws_sdk_dynamodb::{
@@ -29,17 +31,55 @@ impl LargeTransaction {
         let cases = vec![
             PayloadTransaction::new(
                 keys,
-                "x".repeat(380 * 1024),
+                AttributeValue::S("x".repeat(380 * 1024)),
                 "large-payload-put",
                 "large-payload-update",
             ),
             PayloadTransaction::new(
                 escaped_keys,
-                format!("{}{}", "\0".repeat(160 * 1024), "🙂".repeat(20 * 1024)),
+                AttributeValue::S(format!(
+                    "{}{}",
+                    "\0".repeat(160 * 1024),
+                    "🙂".repeat(20 * 1024)
+                )),
                 "escaped-payload-put",
                 "escaped-payload-update",
             ),
         ];
+        let test = Self { cases };
+        test.assert_recovered(sdk).await;
+        test
+    }
+
+    pub async fn single_cell(sdk: &Client, table: &str, keys: Vec<String>) -> Self {
+        assert_eq!(keys.len(), 14);
+        let mut cases = Vec::new();
+        for (ids, payload, put_token, update_token) in [
+            (
+                &keys[..10],
+                AttributeValue::B(vec![0xa5; 380 * 1024].into()),
+                "binary-transfer-put",
+                "binary-transfer-update",
+            ),
+            (
+                &keys[10..],
+                AttributeValue::S("\0".repeat(380 * 1024)),
+                "escaped-transfer-put",
+                "escaped-transfer-update",
+            ),
+        ] {
+            let keys = ids
+                .iter()
+                .rev()
+                .map(|id| (table.to_owned(), id.clone()))
+                .collect();
+            cases.push(PayloadTransaction::new(
+                keys,
+                payload,
+                put_token,
+                update_token,
+            ));
+        }
         let test = Self { cases };
         test.assert_recovered(sdk).await;
         test
@@ -55,7 +95,7 @@ impl LargeTransaction {
 impl PayloadTransaction {
     fn new(
         keys: Vec<(String, String)>,
-        payload: String,
+        payload: AttributeValue,
         put_token: &'static str,
         update_token: &'static str,
     ) -> Self {
@@ -66,7 +106,7 @@ impl PayloadTransaction {
         for (table, id) in keys {
             let key = HashMap::from([("id".into(), AttributeValue::S(id))]);
             let mut item = key.clone();
-            item.insert("payload".into(), AttributeValue::S(payload.clone()));
+            item.insert("payload".into(), payload.clone());
             puts.push(
                 TransactWriteItem::builder()
                     .put(
@@ -217,80 +257,6 @@ impl PayloadTransaction {
                     after = scan.last_evaluated_key().cloned();
                     assert!(after.is_some(), "Scan skipped the escaped item");
                 }
-            }
-        }
-    }
-}
-
-/// Verify legal read images whose aggregate JSON exceeds a Cell wire response.
-pub struct LargeRead {
-    cases: Vec<ReadImages>,
-}
-
-struct ReadImages {
-    reads: Vec<TransactGetItem>,
-    expected: Vec<HashMap<String, AttributeValue>>,
-}
-
-impl LargeRead {
-    pub async fn seed(sdk: &Client, table: &str, keys: Vec<String>) -> Self {
-        assert_eq!(keys.len(), 14);
-        let mut cases = Vec::new();
-        for (ids, payload) in [
-            (
-                &keys[..10],
-                AttributeValue::B(vec![0xa5; 380 * 1024].into()),
-            ),
-            (&keys[10..], AttributeValue::S("\0".repeat(380 * 1024))),
-        ] {
-            let mut reads = Vec::new();
-            let mut expected = Vec::new();
-            for id in ids {
-                let item = HashMap::from([
-                    ("id".into(), AttributeValue::S(id.clone())),
-                    ("payload".into(), payload.clone()),
-                ]);
-                sdk.put_item()
-                    .table_name(table)
-                    .set_item(Some(item.clone()))
-                    .send()
-                    .await
-                    .unwrap();
-                reads.push(
-                    TransactGetItem::builder()
-                        .get(
-                            Get::builder()
-                                .table_name(table)
-                                .key("id", AttributeValue::S(id.clone()))
-                                .build()
-                                .unwrap(),
-                        )
-                        .build(),
-                );
-                expected.push(item);
-            }
-            // Reverse the request order to prove saved images retain request
-            // positions, independently of key ordering or page assembly.
-            reads.reverse();
-            expected.reverse();
-            cases.push(ReadImages { reads, expected });
-        }
-        let test = Self { cases };
-        test.assert_read(sdk).await;
-        test
-    }
-
-    pub async fn assert_read(&self, sdk: &Client) {
-        for ReadImages { reads, expected } in &self.cases {
-            let result = sdk
-                .transact_get_items()
-                .set_transact_items(Some(reads.clone()))
-                .send()
-                .await
-                .unwrap();
-            assert_eq!(result.responses().len(), expected.len());
-            for (response, item) in result.responses().iter().zip(expected) {
-                assert_eq!(response.item(), Some(item));
             }
         }
     }
