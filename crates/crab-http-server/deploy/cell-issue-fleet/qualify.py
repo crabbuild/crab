@@ -189,9 +189,8 @@ def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, g
 
     owners = {}
     for index in range(1, size + 1):
-        path_for_repo = issue_path(index) + "?state=all"
-        visible = request_json("GET", gateway + path_for_repo)
-        if len(visible.get("items", [])) != 1 or visible["items"][0]["title"] != f"Cell issue on node {index}":
+        visible = request_json("GET", gateway + issue_path(index) + "/1")
+        if visible.get("title") != f"Cell issue on node {index}":
             raise RuntimeError(f"gateway did not read Cell {index} after stage {size}")
         labels = request_json("GET", gateway + f"/api/repos/demo/work-{index:02d}/labels")
         if len(labels.get("items", [])) != 1 or labels["items"][0]["name"] != "distributed":
@@ -204,8 +203,8 @@ def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, g
             raise RuntimeError(f"Cell {index} is not served by a live node: {status}")
         owners[f"work-{index:02d}"] = sessions[owner]
     for index in range(previous + 1, size + 1):
-        visible = request_json("GET", node_url(index, node_port_base) + issue_path(1) + "?state=all")
-        if len(visible.get("items", [])) != 1:
+        visible = request_json("GET", node_url(index, node_port_base) + issue_path(1) + "/1")
+        if visible.get("title") != "Cell issue on node 1":
             raise RuntimeError(f"new node {index} could not route to the original Cell")
     stored_objects = object_count(path, profiles)
     if stored_objects < 1:
@@ -250,7 +249,7 @@ def prove_owner_loss(path: Path, profiles: tuple[str, ...], owner: str, gateway_
                 # An idle Cell is acquired by a request, so drive the public
                 # read before checking whether another owner has claimed it.
                 with urllib.request.urlopen(
-                    f"http://127.0.0.1:{gateway_port}{issue_path(20)}?state=all", timeout=5
+                    f"http://127.0.0.1:{gateway_port}{issue_path(20)}/1", timeout=5
                 ) as response:
                     issues = json.load(response)
                 after = json.loads(compose(path, profiles, *status_args))
@@ -258,7 +257,7 @@ def prove_owner_loss(path: Path, profiles: tuple[str, ...], owner: str, gateway_
                 if session is None or session == before["owner"]["session"]:
                     time.sleep(1)
                     continue
-                if len(issues.get("items", [])) != 1 or issues["items"][0]["title"] != "Cell issue on node 20":
+                if issues.get("title") != "Cell issue on node 20":
                     raise RuntimeError("recovered owner did not return the acknowledged issue")
                 root = after.get("root") or {}
                 if root.get("commit_sequence", -1) < before["root"]["commit_sequence"] or root.get("txid", -1) < before["root"]["txid"]:
@@ -287,7 +286,11 @@ def main() -> None:
     parser.add_argument("--node-port-base", type=int, default=18100)
     parser.add_argument("--rustfs-port", type=int, default=19010)
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--load-stages", action="store_true", help="run gateway load while each stage is active")
+    parser.add_argument("--load-pairs-per-cell", type=int, default=10)
     args = parser.parse_args()
+    if not 1 <= args.load_pairs_per_cell <= 100:
+        parser.error("--load-pairs-per-cell must be between 1 and 100")
     command("docker", "info", "--format", "{{.ServerVersion}}")
     label = f"label=com.docker.compose.project={args.project}"
     existing = [
@@ -312,12 +315,32 @@ def main() -> None:
     }
     phases = [(3, ()), (5, ("five",)), (10, ("five", "ten")), (20, ("five", "ten", "twenty"))]
     previous = 0
+    last_load = None
     for size, profiles in phases:
-        report["stages"].append(run_stage(path, profiles, previous, size, args.gateway_port, args.node_port_base))
+        stage = run_stage(path, profiles, previous, size, args.gateway_port, args.node_port_base)
+        report["stages"].append(stage)
         (path.parent / "report.json").write_text(json.dumps(report, indent=2) + "\n")
         print(f"Verified {size} nodes and {size} Cell-backed issue services", flush=True)
+        if args.load_stages:
+            output = path.parent / f"load-{size}-stage.json"
+            subprocess.run([
+                sys.executable,
+                str(Path(__file__).with_name("load.py")),
+                "--state", str(path.parent),
+                "--nodes", str(size),
+                "--gateway-port", str(args.gateway_port),
+                "--pairs-per-cell", str(args.load_pairs_per_cell),
+                "--output", str(output),
+            ], check=True)
+            stage["load_report"] = output.name
+            last_load = output
+            (path.parent / "report.json").write_text(json.dumps(report, indent=2) + "\n")
         previous = size
-    report["owner_loss"] = prove_owner_loss(path, phases[-1][1], report["stages"][-1]["owners"]["work-20"], args.gateway_port)
+    if last_load:
+        report["owner_loss"] = json.loads(last_load.read_text())["owner_loss"]
+        report["owner_loss_source"] = last_load.name
+    else:
+        report["owner_loss"] = prove_owner_loss(path, phases[-1][1], report["stages"][-1]["owners"]["work-20"], args.gateway_port)
     (path.parent / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(path.parent / "report.json")
 

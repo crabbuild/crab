@@ -15,7 +15,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from qualify import CONFIG, ROOT, command, compose, issue_path, node_name, prove_node
+from qualify import BUCKET, CONFIG, MEMORY_LIMIT, ROOT, command, compose, issue_path, node_name, prove_node
 
 
 class RequestFailure(RuntimeError):
@@ -26,6 +26,14 @@ class RequestFailure(RuntimeError):
 
 def profiles_for(nodes: int) -> tuple[str, ...]:
     return {3: (), 5: ("five",), 10: ("five", "ten"), 20: ("five", "ten", "twenty")}[nodes]
+
+
+def running_nodes(project: str) -> set[str]:
+    services = command(
+        "docker", "ps", "--filter", f"label=com.docker.compose.project={project}",
+        "--format", '{{.Label "com.docker.compose.service"}}',
+    ).splitlines()
+    return {service for service in services if re.fullmatch(r"node-\d{2}", service)}
 
 
 def status(path: Path, profiles: tuple[str, ...], cell: int) -> dict:
@@ -91,10 +99,12 @@ def load_request(gateway: str, nodes: int, method: str, path: str, payload: dict
 
 def percentiles(samples: list[float]) -> dict:
     ordered = sorted(samples)
-    return {
+    result = {
         f"p{percentile}_ms": round(ordered[math.ceil(len(ordered) * percentile / 100) - 1], 3)
         for percentile in (50, 95, 99)
     }
+    result["max_ms"] = round(ordered[-1], 3)
+    return result
 
 
 def cover_routes(gateway: str, nodes: int) -> tuple[dict, list[dict]]:
@@ -238,10 +248,17 @@ def main() -> None:
     parser.add_argument("--nodes", type=int, choices=(3, 5, 10, 20), required=True)
     parser.add_argument("--gateway-port", type=int, default=18080)
     parser.add_argument("--pairs-per-cell", type=int, default=10)
+    parser.add_argument("--output", type=Path, help="write the report to this path instead of a generated name")
     args = parser.parse_args()
     if not 1 <= args.pairs_per_cell <= 100:
         parser.error("--pairs-per-cell must be between 1 and 100")
     path = args.state.expanduser().resolve() / "compose.yaml"
+    deployment = json.loads(path.read_text())
+    project = deployment["name"]
+    expected_nodes = {node_name(index) for index in range(1, args.nodes + 1)}
+    active_nodes = running_nodes(project)
+    if active_nodes != expected_nodes:
+        raise RuntimeError(f"expected exactly {args.nodes} running Cell nodes, found {sorted(active_nodes)}")
     profiles = profiles_for(args.nodes)
     gateway = f"http://127.0.0.1:{args.gateway_port}"
     owners, before = owner_map(path, profiles, args.nodes)
@@ -272,7 +289,18 @@ def main() -> None:
     )
     report = {
         "source": command("git", "-C", str(ROOT), "rev-parse", "HEAD"),
-        "project": json.loads(path.read_text())["name"],
+        "source_dirty": bool(command("git", "-C", str(ROOT), "status", "--porcelain")),
+        "project": project,
+        "server_image": command("docker", "image", "inspect", "--format", "{{.Id}}", deployment["services"]["node-01"]["image"]),
+        "rustfs": {
+            "image": deployment["services"]["rustfs"]["image"],
+            "image_id": command("docker", "image", "inspect", "--format", "{{.Id}}", deployment["services"]["rustfs"]["image"]),
+            "bucket": BUCKET,
+            "endpoint": "http://rustfs:9000",
+        },
+        "compose_profiles": list(profiles),
+        "node_cpu_limit": deployment["services"]["node-01"]["cpus"],
+        "node_memory_limit_bytes": MEMORY_LIMIT,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "nodes": args.nodes,
         "cells": args.nodes,
@@ -298,7 +326,9 @@ def main() -> None:
         "roots_advanced": all(after[cell]["root"]["commit_sequence"] > before[cell]["root"]["commit_sequence"] for cell in before),
         "owner_loss": recovery,
     }
-    output = path.parent / f"load-{args.nodes}-{run_id}.json"
+    output = args.output.expanduser().resolve() if args.output else path.parent / f"load-{args.nodes}-{run_id}.json"
+    if output.exists():
+        raise RuntimeError(f"load report already exists: {output}")
     output.write_text(json.dumps(report, indent=2) + "\n")
     print(output)
 
