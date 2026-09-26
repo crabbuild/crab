@@ -161,7 +161,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
     }
     let operations = vec![
         put(table, "created"),
-        TransactionOperation::Delete(DeleteItemInput { table_name: table.table_name.clone(), table_id: table.id.clone(), key: key("deleted"), condition: None }),
+        TransactionOperation::Delete(DeleteItemInput { return_old: false, table_name: table.table_name.clone(), table_id: table.id.clone(), key: key("deleted"), condition: None }),
         serde_json::from_value(serde_json::json!({"ConditionCheck": {
             "table_name": table.table_name, "table_id": table.id, "key": key("checked"),
             "condition": {"expression": {"Function": {"name": "attribute_exists", "args": [{"Path": [{"Attribute": "id"}]}]}}, "maps": {"names": {}, "values": {}}}
@@ -598,6 +598,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
         operations: vec![
             put(table, "aborted-create"),
             TransactionOperation::Delete(DeleteItemInput {
+                return_old: false,
                 table_name: table.table_name.clone(),
                 table_id: table.id.clone(),
                 key: key("checked"),

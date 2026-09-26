@@ -193,6 +193,7 @@ impl DataEngine for CellStorage {
                         &partition,
                         mutation_identity()?,
                         Json(PartitionDeleteInput {
+                            return_old,
                             table_id: key_info.table_id,
                             epoch,
                             key,
@@ -214,10 +215,11 @@ impl DataEngine for CellStorage {
                     }
                     Err(error) => return Err(cell_error(error)),
                 };
-                return Ok(if return_old { old } else { None });
+                return Ok(old);
             }
             let target = target(&key_info.account_id)?;
             let input = DeleteItemInput {
+                return_old,
                 table_name: key_info.table_name.clone(),
                 table_id: key_info.table_id,
                 key,
@@ -241,7 +243,7 @@ impl DataEngine for CellStorage {
                 }
                 Err(error) => return Err(cell_error(error)),
             };
-            Ok(if return_old { old } else { None })
+            Ok(old)
         })
     }
 
@@ -875,6 +877,7 @@ fn prepare_writes(
             } if stream.is_none() => (
                 *key_info,
                 TransactionOperation::Delete(DeleteItemInput {
+                    return_old: false,
                     table_name: key_info.table_name.clone(),
                     table_id: key_info.table_id.clone(),
                     key: (*key).clone(),

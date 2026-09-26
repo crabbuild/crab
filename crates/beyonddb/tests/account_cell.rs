@@ -260,6 +260,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             &target,
             identity(6),
             Json(DeleteItemInput {
+                return_old: true,
                 table_name: "Books".into(),
                 table_id: book_table_id.clone(),
                 key,
