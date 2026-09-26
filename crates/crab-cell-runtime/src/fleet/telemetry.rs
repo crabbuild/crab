@@ -347,6 +347,19 @@ impl crab_ltx::LtxTelemetry for CellTelemetryHandle {
     }
 
     fn capture(&self, timing: &crab_ltx::CaptureTiming, succeeded: bool) {
+        tracing::debug!(
+            target: "crab_cell_runtime::action",
+            event = "cell_capture_completed",
+            capture_ns = timing.total_nanos,
+            encode_ns = timing.encode_nanos,
+            write_ns = timing.local_write_nanos,
+            fsync_ns = timing.fsync_nanos,
+            parent_sync_ns = timing.parent_sync_nanos,
+            checkpoint_ns = timing.checkpoint_nanos,
+            wal_read_bytes = timing.wal_read_bytes,
+            ltx_bytes = timing.ltx_bytes,
+            succeeded,
+        );
         self.ltx_capture(timing, succeeded);
     }
 }

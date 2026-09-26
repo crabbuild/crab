@@ -111,6 +111,8 @@ fn run_worker_command(
             let _ = reply.send(result);
         }
         WorkerCommand::Execute {
+            trace,
+            queued_at,
             cell,
             identity,
             operation_digest,
@@ -120,6 +122,13 @@ fn run_worker_command(
             handler,
             reply,
         } => {
+            let _trace = trace.enter();
+            let started = Instant::now();
+            tracing::debug!(
+                target: "crab_cell_runtime::action",
+                event = "cell_worker_started",
+                worker_queue_us = queued_at.elapsed().as_micros(),
+            );
             let result = run_native_callback(cells, cell, deadline, move |active| {
                 match active.executor.execute(
                     identity,
@@ -138,6 +147,12 @@ fn run_worker_command(
                         .ok_or(Error::Fenced),
                 }
             });
+            tracing::debug!(
+                target: "crab_cell_runtime::action",
+                event = "cell_worker_completed",
+                worker_execute_us = started.elapsed().as_micros(),
+                succeeded = result.is_ok(),
+            );
             drop(reservation.take());
             let _ = reply.send(result);
         }
@@ -160,6 +175,8 @@ fn run_worker_command(
             let _ = reply.send(result);
         }
         WorkerCommand::DeliverEffect {
+            trace,
+            queued_at,
             cell,
             delivery,
             now_ms,
@@ -168,6 +185,13 @@ fn run_worker_command(
             handler,
             reply,
         } => {
+            let _trace = trace.enter();
+            let started = Instant::now();
+            tracing::debug!(
+                target: "crab_cell_runtime::action",
+                event = "cell_worker_started",
+                worker_queue_us = queued_at.elapsed().as_micros(),
+            );
             let result = run_native_callback(cells, cell, deadline, move |active| {
                 match active
                     .executor
@@ -183,6 +207,12 @@ fn run_worker_command(
                         .ok_or(Error::Fenced),
                 }
             });
+            tracing::debug!(
+                target: "crab_cell_runtime::action",
+                event = "cell_worker_completed",
+                worker_execute_us = started.elapsed().as_micros(),
+                succeeded = result.is_ok(),
+            );
             drop(reservation.take());
             let _ = reply.send(result);
         }

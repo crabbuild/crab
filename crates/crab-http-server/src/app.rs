@@ -413,7 +413,13 @@ pub(crate) fn submission(value: &str) -> Result<String> {
     {
         return Err(Error::Invalid("Submission ID must be a UUID"));
     }
-    Ok(value.to_ascii_lowercase())
+    let value = value.to_ascii_lowercase();
+    tracing::debug!(
+        target: "crab_http_server::action",
+        event = "application_submission",
+        submission_id = %value,
+    );
+    Ok(value)
 }
 
 pub(crate) fn title(value: &str) -> Result<String> {

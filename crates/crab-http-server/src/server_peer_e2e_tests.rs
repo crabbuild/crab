@@ -21,6 +21,8 @@ use crate::{
     peer_tls::{LoadedPeerTls, PeerTlsIdentity, tests::IdentityFiles},
 };
 
+mod action_trace_tests;
+
 struct UnavailablePeer;
 
 #[derive(Default)]
@@ -120,8 +122,9 @@ async fn public_collaboration_requests_reach_remote_owner_over_mtls_and_publish_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires an isolated pre-created RustFS bucket, prefix and explicit test credentials"]
+#[ignore = "requires isolated tracing, a pre-created RustFS bucket, prefix and test credentials"]
 async fn rustfs_public_collaboration_reaches_remote_owner_and_publishes_ltx() {
+    let traces = action_trace_tests::Events::install();
     let required = |name| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
     let bucket = required("CRAB_HTTP_CELL_TEST_BUCKET");
     let store = build_explicit_store(
@@ -136,11 +139,13 @@ async fn rustfs_public_collaboration_reaches_remote_owner_and_publishes_ltx() {
         true,
     )
     .unwrap();
-    public_collaboration_remote_owner(store, &bucket, &required("CRAB_HTTP_CELL_TEST_PREFIX"))
-        .await;
+    let request_id =
+        public_collaboration_remote_owner(store, &bucket, &required("CRAB_HTTP_CELL_TEST_PREFIX"))
+            .await;
+    traces.verify_acknowledgement(&request_id);
 }
 
-async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &str) {
+async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &str) -> String {
     let repository_prefix = format!("{root}/repository");
     let repository = repository(store.clone(), bucket, repository_prefix).await;
     let repository_id = repository.id;
@@ -436,6 +441,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     crate::server::receive_tests::success(source_path, &["push", &git_url, "feature"]).await;
     eprintln!("qualified native Git main and feature pushes");
 
+    let create_started = Instant::now();
     let created = client
         .post(format!("{public_origin}/api/repos/team/repo/issues"))
         .header(axum::http::header::CONTENT_TYPE, "application/json")
@@ -451,7 +457,12 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .await
         .unwrap();
     let created_status = created.status();
+    let created_request_id = created.headers()["x-request-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
     let created_bytes = created.bytes().await.unwrap();
+    let create_ms = create_started.elapsed().as_secs_f64() * 1_000.0;
     assert_eq!(
         created_status,
         StatusCode::CREATED,
@@ -460,6 +471,16 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     );
     let created: Value = serde_json::from_slice(&created_bytes).unwrap();
     assert_eq!(created["number"], 1);
+    eprintln!(
+        "action-sample {}",
+        serde_json::json!({
+            "request_id": "00000000-0000-4000-8000-000000000001",
+            "acknowledged": {"number": 1},
+            "operations": [{"operation": "write", "http_request_id": created_request_id,
+                "entry": "test-process", "latency_ms": create_ms,
+                "attempts": [{"status": 201, "http_request_id": created_request_id, "latency_ms": create_ms}]}],
+        })
+    );
     let label = client
         .post(format!("{public_origin}/api/repos/team/repo/labels"))
         .header(axum::http::header::CONTENT_TYPE, "application/json")
@@ -1074,6 +1095,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         released.value().root.as_ref().unwrap().commit_sequence
             >= root_after.as_ref().unwrap().commit_sequence
     );
+    created_request_id
 }
 
 async fn repository(store: Store, bucket: &str, prefix: String) -> Arc<Repository> {

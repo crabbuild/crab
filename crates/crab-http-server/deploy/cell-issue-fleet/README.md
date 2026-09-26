@@ -231,11 +231,11 @@ fields `acknowledgements_before_recovery` and `owner_loss.acknowledgements`
 retain verified counts by Cell and verification duration. This checks
 published-root recovery; failure during outstanding follower-only tails is a
 separate fault gate. Successful ingress counts must be within 70–130% of
-an even split. The owner map used for forwarded counts is the pre-load snapshot;
-these counts do not attribute owner movement during the load.
+an even split. Trace joins identify the actual execution owner and forwarded
+write count for every acknowledged write. Read forwarding is not attributed.
 
-Each run writes a summary and sibling `.samples.jsonl` and `.nodes.jsonl`
-files. Every admitted,
+Each run writes a summary, sibling `.samples.jsonl` and `.nodes.jsonl` files,
+and a `.traces/` directory with node logs and joined `actions.jsonl`. Every admitted,
 rejected, late, or failed pair is retained with its arrival index, Cell,
 operation timing, and write receipt ID where applicable. A readback mismatch
 stops new arrivals after it is observed; already dispatched work is drained.
@@ -243,10 +243,19 @@ The summary remains available when post-load verification fails. A missed or
 failed arrival, unbalanced ingress, undrained publication, or failed recovery
 exits nonzero. Inspect the report to distinguish generator capacity from
 service capacity; `passed` is a functional workload result, never a supported
-production limit. Schema 3's `source` identifies the load generator; `server`
+production limit. Schema 4's `source` identifies the load generator; `server`
 contains the inspected server image ID, revision label, and platform. Every
 running node must match the pinned image before load begins. Retain the CI
 image artifact's source proof alongside imported-image reports.
+
+The renderer enables action tracing on each node. Raw samples retain every
+HTTP attempt's server request ID, status and latency. After publication drains,
+the runner collects logs before owner loss and joins each acknowledged write to
+its submission, runtime attempt, Cell/incarnation, owner/session, receipt and
+proof. Incomplete or ambiguous joins fail the run. The
+[trace runbook](../../REFERENCE.md#attribute-acknowledged-cell-writes) explains
+timing overlap, retained evidence, replay commands and current limits. Keep
+tracing enabled for comparisons; its overhead is not yet qualified.
 
 The node file records Docker CPU, memory, network/block I/O, and the complete
 runtime Prometheus output during load. Collection runs on a separate thread,
@@ -261,7 +270,7 @@ Verify the scheduler locally with its controllable HTTP service:
 
 ```sh
 python3 -B -W error::ResourceWarning -m unittest discover \
-  -s crates/crab-http-server/deploy/cell-issue-fleet -p test_load.py -v
+  -s crates/crab-http-server/deploy/cell-issue-fleet -p 'test_*.py' -v
 ```
 
 The [gateway load qualification](qualification/2026-09-25-gateway-load.md) and

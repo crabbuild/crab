@@ -173,7 +173,10 @@ def compose(
     for index in range(1, 21):
         service = {
             "image": server_image,
-            "environment": storage_env,
+            "environment": {
+                **storage_env,
+                "RUST_LOG": "info,crab_cell_runtime::action=debug,crab_http_server::action=debug",
+            },
             "network_mode": "service:fleet-net",
             "volumes": [
                 f"{state / 'config' / f'{node_name(index)}.toml'}:{CONFIG}:ro",

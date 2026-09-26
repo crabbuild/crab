@@ -150,6 +150,14 @@ impl CellHandle {
         self.inner
             .sender
             .send(Message::Execute(Box::new(QueuedCommand {
+                trace: tracing::debug_span!(
+                    target: "crab_cell_runtime::action",
+                    "cell_execution",
+                    cell = ?self.cell,
+                    incarnation = ?self.incarnation,
+                    owner_session = ?self.inner.session,
+                    mutation_request_id = ?identity.request_id,
+                ),
                 telemetry: self.inner.telemetry.clone(),
                 queued_at: std::time::Instant::now(),
                 response_proof: None,
@@ -196,6 +204,14 @@ impl CellHandle {
         self.inner
             .sender
             .send(Message::Execute(Box::new(QueuedCommand {
+                trace: tracing::debug_span!(
+                    target: "crab_cell_runtime::action",
+                    "cell_effect_execution",
+                    cell = ?self.cell,
+                    incarnation = ?self.incarnation,
+                    owner_session = ?self.inner.session,
+                    effect_id = ?delivery.effect_id,
+                ),
                 telemetry: self.inner.telemetry.clone(),
                 queued_at: std::time::Instant::now(),
                 response_proof: None,

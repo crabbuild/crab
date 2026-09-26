@@ -2161,8 +2161,9 @@ async fn boundary(State(server): State<Arc<Server>>, request: Request, next: Nex
             response.headers_mut().insert("x-request-id", value);
         }
         tracing::info!(
+            event = "http_response_ready",
             status = response.status().as_u16(),
-            elapsed_ms = started.elapsed().as_millis(),
+            elapsed_us = started.elapsed().as_micros(),
             "request completed"
         );
         let status = response.status();
