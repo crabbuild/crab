@@ -200,11 +200,14 @@ same requests across a hard restart. The mixed account/data host fixture drops
 BEGIN, prepare, decision, and apply replies for large payloads, then confirms
 replay cannot recreate subsequently deleted items.
 
-The expanded process fixture also surfaced an intermittent `ServiceUnavailable`
-during later table recreation, after its transaction/restart assertions passed.
-A subsequent complete run passed. The admission failure is not yet minimized;
-movement/reclamation pressure is a hypothesis, not a confirmed cause. This
-remains an availability qualification gap.
+The expanded process fixture surfaced intermittent `ServiceUnavailable` during
+table recreation after its transaction/restart assertions. A focused host test
+reproduced coordinator movement-budget exhaustion: admitting four data ranges
+on a full node needed more than the runtime's two releases per one-second
+window. The provisioner now waits one window and retries a capacity-refused
+release once. Generation and settled-work checks still run at the runtime
+boundary; persistent pressure still fails retryably. This addresses that
+admission pattern, not all overload or owner-availability failures.
 
 The transaction payload schema is unshipped and replaces the former blob
 columns directly; no compatibility reader is retained. Item BLOB encoding and
@@ -320,8 +323,9 @@ the existing phase savepoint and adds no second decision authority.
 
 ```text
 validate request / authenticate / route and group by participant
-  -> publish BEGIN (immutable participant set and fingerprint)
-  -> prepare participants in Cell-ID order
+  -> upload bounded coordinator input pieces (no token or locks)
+  -> atomically seal input and publish BEGIN (participants and fingerprint)
+  -> upload and prepare each participant in Cell-ID order
        conflict or failed condition -> publish ABORT -> resolve all prepares
        all prepared and published -> publish COMMIT
   -> resolve all participants from the durable decision
@@ -636,7 +640,10 @@ pressure policy can shed other settled Cells; general on-demand reactivation
 remains a product availability gap. The runtime rechecks the exact generation and
 settled-work gate, closes SQLite, publishes Idle ownership, and releases its
 reservation. Local Cell activations are serialized; cross-node ownership
-still uses authority CAS. Movement-budget or busy-owner failures are retryable.
+still uses authority CAS. A capacity-refused release waits one second for the
+runtime's movement window and retries once with the same generation. The
+admission mutex remains held; runtime fencing and settled-work checks remain
+authoritative. Persistent capacity or busy-owner failures are retryable.
 The account capacity worker retains its cursor and durable split plan on
 transient pressure and retries on its next tick, preserving node readiness.
 Other task failures still stop serving; shutdown exposes their source error.
@@ -664,6 +671,9 @@ shared read after coordinator release. The serving-process test exercises sevent
 writes, then hard restart and token replay. These tests bound residency;
 they do not establish fleet throughput. Startup still visits the historical
 registry. Its cost, movement limits, data-owner activation, and history collection remain production work.
+A full eight-slot host regression fills seven slots with idle coordinators, then
+creates a four-range table. It reproduces movement-budget refusal without the
+bounded wait and verifies the complete active route after the fix.
 A two-slot host regression also exhausts split admission and checks that the
 capacity worker preserves readiness and its pending split across retries.
 
