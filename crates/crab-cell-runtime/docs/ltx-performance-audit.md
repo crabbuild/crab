@@ -56,7 +56,29 @@ passed at `e1d4052b28e`. They exclude the subsequent checksum change. The
 [ARM64 run](https://github.com/crabbuild/crab/actions/runs/36244732114) at
 `1a8c4ad670c` failed its elected-successor membership assertion. Its diagnosis
 remains open; the successful AMD run neither reproduces nor explains that
-failure. None of these runs supplies a service saturation curve.
+failure. The [deep property run at `64c66f20200`](https://github.com/crabbuild/crab/actions/runs/36248053477)
+also passed, including the sealed-overlay change. None of these runs supplies a
+service saturation curve.
+
+The follow-up recovery audit reproduced a qualification gap shared with the
+compared main snapshot. The first-fault collector and both receipt selection
+checks used the startup log's members even though the receipt already contains
+the active log observed after the follower-only acknowledgement. The
+[durability supervisor](../../crab-cell-host/src/durability.rs) can retire a
+fully covered log and recruit different members before that write. Two public
+receipt regressions demonstrated rejection of a valid later cohort and
+acceptance of an inactive acknowledging log. Selection now uses the active
+post-write log; the collector also requires unchanged Cell ownership across the
+write and unchanged log epoch/members through its last pre-kill observation.
+Failure output retains all three log observations and the successor control.
+The second-loss path already checks its replacement member after the write;
+the fallback path deliberately verifies a nonmember after object coverage.
+This corrects the reproduced evidence gap. The earlier ARM log omitted the
+later cohort and successor, so attributing that failure to this gap still
+requires a live rerun. The five public receipt tests, eight private validator
+tests and six recovery-metric collector tests pass. Runtime all-target Clippy,
+Bash parsing and ShellCheck also pass. No runtime election, durability mode or
+qualification threshold changed.
 
 ## Priority after the implemented changes
 

@@ -50,7 +50,7 @@ pub(super) fn validate_selection(
     let first_members = member_nodes(as_object(
         object_value(
             as_object(fleet_only_commit, "fleet-only commit")?,
-            "node_log_before",
+            "node_log_after",
         )?,
         "node log",
     )?)?;

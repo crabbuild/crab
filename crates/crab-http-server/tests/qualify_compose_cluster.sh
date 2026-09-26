@@ -617,6 +617,13 @@ if ! $covered; then
   exit 1
 fi
 control_before="$fleet_only_control"
+if ! jq --exit-status --arg session "$session_before" --argjson epoch "$epoch_before" \
+  '.state == "serving" and .owner.session == $session and .epoch == $epoch' \
+  <<<"$control_before" >/dev/null; then
+  echo "The owner changed before the follower-only write." >&2
+  printf '%s\n' "$control_before" >&2
+  exit 1
+fi
 sequence_before="$covered_sequence"
 root_before_state="$(jq --compact-output '.root' <<<"$control_before")"
 fleet_only_response="$(post_json_eventually \
@@ -628,8 +635,11 @@ fleet_only_response="$(post_json_eventually \
 control_fleet_only="$("${compose[@]}" exec -T "$b_service" crab-http-server \
   --config /etc/crab/server.toml cells status --owner demo --name hello)"
 if ! jq --exit-status --argjson sequence_before "$sequence_before" \
-  '.root.commit_sequence == $sequence_before' <<<"$control_fleet_only" >/dev/null; then
-  echo "The follower-acked label advanced the object root." >&2
+  --arg session "$session_before" --argjson epoch "$epoch_before" \
+  '.root.commit_sequence == $sequence_before and
+   .state == "serving" and .owner.session == $session and .epoch == $epoch' \
+  <<<"$control_fleet_only" >/dev/null; then
+  echo "The follower-acked label changed the owner or advanced the object root." >&2
   echo "Expected commit_sequence ${sequence_before}." >&2
   printf '%s\n' "$control_fleet_only" >&2
   "${compose[@]}" exec -T "$c_service" crab-http-server \
@@ -651,6 +661,12 @@ if ! jq --exit-status \
   printf '%s\n' "$node_fleet_only" >&2
   exit 1
 fi
+# Covered logs may rotate before this write. Measure a member of the active
+# acknowledging log; the early enrollment is only a startup observation.
+c_service="$(service_for_node "$(jq --raw-output \
+  '.advertisement.log.member_nodes[0]' <<<"$node_fleet_only")")"
+c_origin="$(cluster_origin_for_service "$c_service")"
+c_endpoint="$(cluster_endpoint_for_service "$c_service")"
 metrics_owner_fleet_only="$("${compose[@]}" exec -T "$b_service" crab-http-server \
   --config /etc/crab/server.toml cells metrics)"
 metrics_follower_fleet_only="$("${compose[@]}" exec -T "$c_service" crab-http-server \
@@ -682,6 +698,17 @@ metrics_first_before="$(recovery_metrics "${first_recovery_services[@]}")"
 owner_advertisement="$("${compose[@]}" exec -T "$c_service" crab-http-server \
   --config /etc/crab/server.toml cells node \
   --session "$session_before" --json)"
+if ! jq --exit-status \
+  --argjson acknowledged "$(jq '.advertisement.log' <<<"$node_fleet_only")" \
+  '.live == true and .advertisement.log.state == "open" and
+   .advertisement.log.active == true and
+   .advertisement.log.epoch == $acknowledged.epoch and
+   .advertisement.log.member_nodes == $acknowledged.member_nodes' \
+  <<<"$owner_advertisement" >/dev/null; then
+  echo "The acknowledging log changed before owner loss." >&2
+  printf '%s\n' "$node_fleet_only" "$owner_advertisement" >&2
+  exit 1
+fi
 advertisement_expired_ms="$(jq --exit-status --raw-output \
   'select(.live == true) | .advertisement.expires_at_ms | select(type == "number" and . > 0)' \
   <<<"$owner_advertisement")"
@@ -775,15 +802,19 @@ if [ -z "$control_after" ]; then
 fi
 # The product elects the original follower from the live members, so read the
 # successor back instead of predicting which member wins, and require it to be
-# one of the owner's enrolled members.
+# one of the members that protected the follower-only acknowledgement.
 c_endpoint="$(jq --raw-output '.owner.endpoint' <<<"$control_after")"
 c_service="$(cluster_service_for_endpoint "$c_endpoint")"
 c_origin="$(cluster_origin_for_service "$c_service")"
 c_node_id="$(jq --raw-output '.advertisement.node' <<<"$(service_node "$c_service")")"
 if ! jq --exit-status --arg node "$c_node_id" \
-  'any(.advertisement.log.member_nodes[]; . == $node)' <<<"$node_before" >/dev/null; then
+  'any(.advertisement.log.member_nodes[]; . == $node)' <<<"$node_fleet_only" >/dev/null; then
   echo "The elected successor is not one of the owner's enrolled members." >&2
-  printf '%s\n' "$node_before" >&2
+  jq --null-input --arg successor_node "$c_node_id" \
+    --argjson early "$node_before" --argjson acknowledged "$node_fleet_only" \
+    --argjson before_kill "$owner_advertisement" --argjson after "$control_after" \
+    '{successor_node: $successor_node, early_enrollment: $early,
+      acknowledging_log: $acknowledged, before_kill: $before_kill, control_after: $after}' >&2
   exit 1
 fi
 recovery_sealed_ms="$(unix_millis)"
@@ -1469,7 +1500,7 @@ fallback_work="$(recovery_work_evidence \
 
 failed_node_first="$(node_id_for_session "$session_before")"
 successor_node_first="$(node_id_for_session "$session_after")"
-first_failed_log_members="$(jq -c '.advertisement.log.member_nodes' <<<"$node_before")"
+first_failed_log_members="$(jq -c '.advertisement.log.member_nodes' <<<"$node_fleet_only")"
 second_failed_log_members="$(jq -c '.advertisement.log.member_nodes' <<<"$node_before_second_loss")"
 selection="$(jq -n \
   --arg failed_session "$session_before" \
