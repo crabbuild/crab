@@ -482,6 +482,56 @@ they do not establish tail latency, runtime CAS cost, compaction cost, or
 sustainable throughput. Keep the missing-root-metadata refusal invariant when
 evaluating those two HEADs.
 
+### Sparse activation over real RustFS
+
+The scale example at `42b7eb8e0c9` measures cold and reused metadata at one,
+four, and eight shared I/O slots. The library includes bounded leaf overlap
+from `b2c3b51bede`. See the [runnable example](../examples/README.md#rustfs-scale-workload)
+for setup, JSON fields, and cache semantics. This experiment compares admission
+settings on the same implementation; it is not a previous-revision comparison.
+
+Two release processes on 2026-09-25 (local time) used SQLite `randomblob`
+payloads of 32 MiB and 256 MiB. Each process produced three samples per
+slot/cache pair, reversing slot order in the middle round. The table gives
+median checksum-preparation milliseconds; calls/bytes were identical in all
+three cold samples for each size and slot count.
+
+| Payload | Metadata cache | 1 slot | 4 slots | 8 slots | Origin calls / bytes |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 32 MiB | Cold | 100.464 | 74.721 | 73.979 | 33 / 723,272 |
+| 32 MiB | Reused | 52.158 | 78.214 | 83.789 | 0 / 0 |
+| 256 MiB | Cold | 1,057.293 | 419.734 | 295.320 | 259 / 5,797,768 |
+| 256 MiB | Reused | 119.020 | 57.479 | 71.758 | 0 / 0 |
+
+The databases contained 8,207 and 65,626 pages of 4 KiB. Every activation
+queried its restored row successfully and materialized four pages. Both
+processes deleted the source and passed byte-identical full restore and
+compaction restore. Cold checksum preparation benefits from overlap in these
+samples; the zero-origin phase still has substantial and variable local work.
+Wider concurrency does not improve every phase: cold writable-open medians at
+256 MiB were 107, 82, and 126 ms for one, four, and eight slots. Three samples
+per setting do not establish tails or a universally optimal concurrency.
+
+The first query made two range calls totaling 524,994 bytes at 32 MiB and
+265,332 bytes at 256 MiB. The current VFS requests up to 64 contiguous
+same-object pages per miss. This exposes a demand-read versus read-ahead
+tradeoff to qualify with scans and hydration before changing policy.
+
+Environment: native ARM64 release binary on macOS 26.5.2, external APFS volume,
+Rust 1.97.0, SQLite 3.49.1, workspace `object_store` 0.14.1. RustFS ran in the
+existing Colima ARM64 VM (8 CPUs, approximately 16 GiB), using
+`1.0.0-beta.8-glibc` at digest
+`sha256:040304b66e029a5cde4bed140b41513e925909839a9b912a40a98340610d1f66`.
+Provider connections and provider-side caches were reused. This is a local
+library probe without per-node cgroup limits, runtime ownership/CAS, followers,
+concurrent application traffic, or a persistent directory cache.
+
+Raw JSON lines and phase summaries: `32mib.log` and `256mib.log` under
+`$HOME/Workspace/crabbuild-target/crab-8bc8/activation-probe/`. Binary SHA-256:
+`0be9ec6e3015dff76aea2a7c769c87a0087335d265cd86a32a66cd638954ac47`.
+The same directory retains source/environment metadata and stderr. Keep this
+microbenchmark separate from public-action and fleet qualification.
+
 The runners also use the implementations' pinned bundled SQLite versions:
 Crab currently links SQLite 3.49.1 while the pinned Celld revision links SQLite
 3.45.0. `workload_write_us` and therefore `total_us` include that difference;

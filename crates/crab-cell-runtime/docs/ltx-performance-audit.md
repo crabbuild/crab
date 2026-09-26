@@ -5,7 +5,7 @@
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
 | Scope | Source at `0f3f4f7617a`; LTX source matches the local `origin/main` snapshot `de0bb234abc` |
-| Status | Findings 1–2 implemented; response attribution added; activation, compaction, interference, and fleet latency qualification open |
+| Status | Findings 1–2 implemented; activation overlap and phase probes added; compaction, read-ahead, interference, and fleet latency qualification open |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
 
@@ -162,6 +162,17 @@ exact-root/sparse tests and four activation tests pass. This change applies to
 writable activation only; selected-page lookup and exhaustive retention
 inventory retain their existing traversal and verification contracts.
 
+The [real RustFS activation probe](../../crab-ltx/perf/README.md#sparse-activation-over-real-rustfs)
+now separates root open, checksum preparation, writable open, and first query.
+On a 256 MiB source, three cold-metadata samples per admission setting measured
+checksum preparation medians of 1,057 ms with one I/O slot, 420 ms with four,
+and 295 ms with eight. All settings fetched 259 objects and 5,797,768 bytes.
+Reused metadata required zero origin reads but still spent 57–119 ms in this
+phase. This supports bounded read overlap for cold metadata; it does not
+attribute the remaining local cost or qualify end-to-end tails. The probe
+also fixes an earlier timer that included compaction and a second restore in
+the reported restore duration.
+
 ### 4. Range compaction can do whole-graph metadata work on the publication lane
 
 **Confirmed:** [compaction::prepare](../../crab-ltx/src/replica/compaction.rs)
@@ -265,6 +276,36 @@ shows two HEADs and five PUTs per small prepared root; the larger random body
 uses multipart. Provider-internal retries remain opaque. Scheduled arrivals,
 update/delete churn, skew, sustained compaction, and public-action curves are
 still open.
+
+### 8. Sparse point faults and bulk hydration use the same read-ahead window
+
+**Confirmed:** [paged_io::fetch](../../crab-ltx/src/paged_io.rs) asks for up to
+64 pages for every cache miss, for both `Sparse` and `Hydrating` origins.
+[CellPagedDatabase::read_run](../../crab-ltx/src/replica.rs) selects the first
+same-object span in that window, fetches it, and validates every returned frame
+before the requested page is delivered. Extra pages enter the shared 8 MiB
+view-keyed cache; only pages demanded by SQLite become materialized VFS pages.
+
+In the 32 MiB RustFS probe, the first `SELECT length(value) ... WHERE rowid = 1`
+made two range reads totaling 524,994 bytes. The whole activation, including
+open, materialized just four 4 KiB pages. The 256 MiB probe fetched 265,332 bytes
+for that query, reflecting a different segment layout. This is observable
+read amplification, not proof that a smaller window universally lowers latency:
+read-ahead can avoid later requests during scans and hydration.
+
+**Change to evaluate:** distinguish demand access from bulk progress using the
+existing origin classification. Compare demand-only reads, bounded adaptive
+read-ahead after sequential access, and the current window. Keep hydration
+coalescing, the shared memory ceiling, deadlines, and authentication intact.
+Any asynchronous prefetch must retain admission until completion and must not
+publish unverified bytes or occupy all foreground slots.
+
+**Gate:** compare point lookups, random reads, sequential scans, and hydration
+on both contiguous and fragmented roots. Record requested/decoded/consumed
+pages, useful prefetch hits, wasted bytes, origin calls, CPU, and p50/p95/p99
+under concurrent Cells. An improvement in point-read bytes must not silently
+regress scan throughput or starve durable publication. The existing contiguous
+hydration test proves coalescing correctness; it does not establish this tradeoff.
 
 ## Safety and proof retained by the audit
 
