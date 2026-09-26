@@ -427,11 +427,59 @@ and successful fresh-view retry. The durability suite proves that a
 follower-backed acknowledgement cannot finish drain before S3 coverage,
 including reconciliation of a committed root CAS whose response was lost.
 
+## Interrupted offline mode rollout
+
+`qualify_mode_rollout.py --exercise-drain-faults` passed on runtime
+`287a5eb1397`, runner `693b3848c96`, image `faf59e3a8b06`. The three servers
+kept 1 vCPU/1 GiB limits. During enrollment only, the disposable RustFS
+container received 0.25 vCPU so follower proofs could win against slower
+object publication. Its normal CPU allocation was restored before faults.
+Ten fleet proofs were observed; nineteen comment acknowledgements were saved.
+
+Both selected followers of an active node log were killed. Their exit codes
+were 137, the surviving server exited zero, and the canonical rollout barrier
+rejected the attempt. Every fleet config remained byte-identical. Restart
+recovered all nineteen comments plus the original issues and labels.
+
+RustFS was then stopped before a second drain. All three servers exited 1;
+rollout was rejected again with unchanged fleet configs. After restoring
+RustFS and restarting, every acknowledged value recovered again. The final
+healthy drain exited zero on all three nodes and allowed the object-mode
+configuration. A new object-proven comment was acknowledged with no fleet
+proofs in the new processes. Killing all three servers and deleting their
+project-owned Cell volumes preserved all twenty pre/post-switch comments,
+issues, and labels after restart. Two fresh readers returned sequence 38.
+
+Receipt: `plan036-rollout-faults-2/mode-rollout-report.json`, SHA-256
+`202017bbefe3f1ff0cf7dbb562a4ff138fdcf328d35d2b9d30db951196f29e2f`.
+Interval: `2026-09-26T07:38:17.520942+00:00` through
+`2026-09-26T07:42:20.167518+00:00`. The earlier unthrottled setup produced
+only object proofs and is retained as a failed enrollment attempt in
+`plan036-rollout-faults-1`; it is not a passing fault receipt.
+
+Lost root-CAS responses and a pending fleet-only acknowledgement during drain
+are separately deterministic runtime cases in `durability/proofs.rs`; they
+were not injected into this HTTP/Compose run. All ten durability cases,
+overlapping refresh, storage-full read-view retry, all-target LTX/runtime
+Clippy, nine Python tests, formatting, layout, and documentation checks pass.
+All qualification containers created by these follow-ups are stopped, with
+volumes and raw evidence retained.
+
+## CI status at closeout
+
+The prior pushed revision's workflow-syntax check failed in
+`.github/workflows/cell-property-qualification.yml:26` (unavailable `runner`
+context) and `.github/workflows/cell-runtime-qualification-contract.yml:149`
+(literal-dollar shell checks). Both files have identical Git blobs on this
+branch and the freshly fetched `origin/main`; this work does not modify them.
+Other CI jobs were still queued or running. Local proof does not turn those
+checks green or qualify a merge.
+
 ## Scope still open
 
 The container runs do not establish complete per-query S3 costs, production
-hot Cell throughput, per-reader peak resources, the complete release-fault
-matrix, or 1k/5k/10k Cell admission. The bounded unequal-ingress run above
+hot Cell throughput, per-reader peak resources, all release-fault
+interleavings, platform rolling upgrades, or 1k/5k/10k Cell admission. The bounded unequal-ingress run above
 qualifies only its recorded workload. Sparse-reader measurements above show
 balanced distribution but lower throughput than owner reads in this workload.
 Protected S3 and multi-host release gates remain outside the requested local

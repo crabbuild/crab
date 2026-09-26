@@ -1,9 +1,9 @@
 # Plan 036: S3-durable Cell read replicas and fenced promotion
 
-Status: PARTIAL IMPLEMENTATION — exact-root views, S3 desired-count policy,
-private peer activation/query, object-mode reconciliation, an operator
-target API, typed/generated client policy, and explicit issue-detail replica reads exist; 3/5/10/20-node local RustFS
-qualification passes; no production qualification
+Status: IMPLEMENTED — named local RustFS paths and focused fault checks pass;
+3/5/10/20-node smoke, five-node unequal-ingress load, reader loss, fenced
+promotion, offline retention, and interrupted mode rollout are recorded.
+Production provider, independent-host, capacity, and release gates remain open.
 Base: `origin/main` at `de0bb234abc` (2026-09-25); Cell/LTX source compared with the planning checkout at `fa182c94c7e`
 Priority: P1 read scaling; P0 safety for any enabled deployment. Effort: XL. Risk: HIGH.
 Depends on: the recovery implementations tracked by plans 032 and 035;
@@ -277,14 +277,14 @@ record, mutable LTX head, or owner-to-owner database copy.
 
 Current slice state (local proof only): 0 reconciled in docs; 1 has
 the existing object-proof path and a verified offline fleet-to-object rollout,
-with fault injection during rollout still open;
+including interrupted drains after follower loss and provider outage;
 2 sparse immutable opener, atomic refresh, exact-root isolation, bounded page
 cache, cancellation cleanup, and provider fault tests pass locally; runtime
 and product mTLS tests pass on local RustFS; 3 policy CAS, signed selection,
 owner reconciliation, private activation, node admission, and administrator
 target CAS with owner hint and bounded readiness status exist; local
 0→1→2→4→1 convergence passes, including shrink during reader loss;
-broader churn qualification remains; 4 typed local and peer queries, position
+extended production churn qualification remains; 4 typed local and peer queries, position
 errors, receipt checks, authority gates, and explicit issue-detail routing exist,
 including ingress-observed in-flight load selection under one request deadline,
 and explicit policy on typed/generated application clients, but other product
@@ -292,7 +292,7 @@ reads remain owner-only; 5 has warm-reader preference and
 local automatic takeover coverage; 6 has a source/image-bound 3/5/10/20-node Compose run with reader replacement,
 warm promotion, all-reader disk loss with a new acknowledged write, global
 authority outage, and a separately isolated reader during takeover; broader capacity
-and fault qualification remain open. Private peer replica requests are accepted only in
+and production fault qualification remain open. Private peer replica requests are accepted only in
 the object-durability server profile.
 
 The ignored `rustfs_replica_reads_exact_root_and_policy_cas` test also passed
@@ -328,7 +328,8 @@ with pool closure. Both regressions pass in memory and on local RustFS.
 A real schema migration during a blocked old-view query now has explicit
 proof: unchanged owner/epoch, a new code/schema root, rejection of the old
 query and refresh, and the migrated value through a fresh reader. The complete offline retention sweep now passes as recorded below.
-Application release rollout fault combinations remain separate qualification work.
+Interrupted offline mode rollout now passes; platform rolling upgrades and
+exhaustive release-fault interleavings remain separate production qualification.
 An explicit local or peer replica query whose view is behind a caller's minimum
 returns `ReplicaBehind` with both sequence numbers. The private peer wire has
 an explicit read operation and distinct behind/unavailable error codes.
@@ -440,7 +441,12 @@ was 72.39 requests/s versus 279.10 for the owner route. Concurrent refreshes
 coalesce; storage-full snapshot creation fails without replacing existing
 files and can retry. The deterministic durability suite now blocks drain of
 a follower-only acknowledgement until exact S3 publication, also when that
-root CAS commits but its response is lost. See the linked source-bound receipt.
+root CAS commits but its response is lost. The interrupted offline rollout
+runner observes fleet proofs, refuses configuration change after loss of both
+followers or RustFS, recovers every acknowledgement, and then completes a
+healthy switch followed by loss of all three local disks. Its nineteen fleet-era
+comments and one object-mode comment survive; two readers are recruited again.
+See the linked source-bound receipt.
 
 ## Fault matrix and release gates
 
@@ -453,6 +459,24 @@ stale hint after epoch change; primary returns after takeover; release/schema
 migration while old replica queries run; reader restart with stale files; and
 offline retention after reader drain. Assert exact values and control
 owner/epoch/root at each step, not just HTTP status or log text.
+
+
+Local evidence map (the receipt records provider and process boundaries):
+
+| Required case | Evidence |
+| --- | --- |
+| Target changes and member loss | Compose 0→1→2→4→1 follow-up; `tests/fleet/read_placement.rs` |
+| Concurrent refresh and old snapshot isolation | `tests/runtime/lifecycle/read_replica/lifecycle.rs`; root A/B and in-flight query checks in `read_replica.rs` |
+| Root CAS lost response and provider failure around publication | Ten `tests/runtime/lifecycle/durability/proofs.rs` cases, including publication-gated drain |
+| All readers die before writer; all disks lost together | Reader-first loss receipt; full Compose all-loss receipt |
+| Fleet ACK during mode switch | Deterministic blocked publication/drain; interrupted Compose rollout after follower/provider loss |
+| Reader disk full, corrupt object, stale files | LTX `tests/host/hooks/restore.rs` and `tests/cell/roots/sparse.rs` |
+| Reader authority partition and replacement | Isolated-reader Compose receipt; global RustFS outage receipt |
+| Stale epoch, returned owner, schema change | Product private-peer takeover E2E; runtime authority gates and blocked-query schema-migration test |
+| Reader drain before retention | Aged-object offline retention receipt with partial-sweep retry, backup verification, and fresh readers |
+
+These receipts cover the named local cases. They do not establish every fault
+interleaving or replace protected production release gates.
 
 Local E2E must use the public typed application through separate processes:
 one primary and two read secondaries, an S3-rooted acknowledged write,
