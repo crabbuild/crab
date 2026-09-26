@@ -85,7 +85,8 @@ complete immutable object graph, then restore it or activate sparse SQL.
 
 `VerifiedRoot::open_read_only` restores an exact root to a fresh, private
 SQLite file and opens it with SQLite read-only and query-only guards. Its owned
-view releases the file and disk reservation on drop. This is a full restore;
+view uses the managed 64 KiB SQLite page-cache target and releases the file
+and disk reservation on drop. This is a full restore;
 it does not yet provide the sparse read-replica view or Cell-authority response
 gate required by the proposed read-replica design.
 If a read-view open is cancelled after a blocking install succeeds, the

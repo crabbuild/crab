@@ -39,6 +39,12 @@ async fn read_only_roots_keep_exact_snapshots_and_release_local_disk() {
     assert!(first_path.exists());
     {
         let connection = first_view.connection().unwrap();
+        assert_eq!(
+            connection
+                .query_row("PRAGMA cache_size", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            -64
+        );
         let value: i64 = connection
             .query_row("SELECT value FROM counter", [], |row| row.get(0))
             .unwrap();

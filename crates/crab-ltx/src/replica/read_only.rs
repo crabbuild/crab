@@ -53,6 +53,7 @@ impl ReadOnlyRoot {
             Some(vfs) => Connection::open_with_flags_and_vfs(destination, flags, vfs)?,
             None => Connection::open_with_flags(destination, flags)?,
         };
+        crate::db::configure_managed_connection(&connection)?;
         connection.pragma_update(None, "query_only", true)?;
         view.connection = Some(Mutex::new(connection));
         Ok(view)

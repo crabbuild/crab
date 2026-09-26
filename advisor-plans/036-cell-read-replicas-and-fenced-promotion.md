@@ -271,6 +271,10 @@ successfully installed after the async read-view opener was cancelled;
 `cancelled_read_view_install_removes_its_unclaimed_destination` pauses at that
 exact seam and checks both destination and scratch cleanup. A filesystem error
 after a no-clobber install remains ambiguous and cannot authorize deletion.
+Read-only views now apply the same 64 KiB page-cache target and disabled
+lookaside allocation as managed LTX connections; the exact-root view test
+checks the SQLite cache setting. Node-wide reader reservation still needs a
+measured memory and descriptor cost before product admission.
 `desired_readers_follow_live_distinct_nodes_and_replace_a_lost_member` proves
 the advisory directory selection at targets 0, 1, 2, and 4, with distinct
 physical nodes, failure-domain preference, an expired reader, and a new live
