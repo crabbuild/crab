@@ -107,6 +107,8 @@ def main() -> None:
         container = compose(path, (), "ps", "--all", "--quiet", service)
         state = json.loads(command("docker", "inspect", "--format", "{{json .State}}", container))
         report["drain"][service] = state
+    (path.parent / "mode-rollout-report.json").write_text(json.dumps(report, indent=2) + "\n")
+    for service, state in report["drain"].items():
         if state["Running"] or state["ExitCode"] != 0 or state["OOMKilled"]:
             raise RuntimeError(f"{service} did not finish the coverage barrier; fleet config retained")
     path = render(args.state, args.project, args.gateway_port, args.node_port_base, True)

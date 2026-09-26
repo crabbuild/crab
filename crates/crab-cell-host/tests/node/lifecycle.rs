@@ -79,31 +79,36 @@ async fn node_deadline_returns_after_a_stalled_facility() {
 
 #[tokio::test]
 async fn node_deadline_bounds_a_stalled_coordination_task() {
-    let node = CellNodeBuilder::new(application())
-        .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
-        .with_replica_host(ReplicaHost::default())
-        .with_session(SessionId::from_bytes([23; 16]))
-        .build()
-        .unwrap();
-    let tasks = node
-        .install_task_group(CancellationToken::new(), CancellationToken::new())
-        .unwrap();
-    tasks
-        .spawn(async {
+    for lease_maintenance in [false, true] {
+        let node = CellNodeBuilder::new(application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+            .with_replica_host(ReplicaHost::default())
+            .with_session(SessionId::from_bytes([23; 16]))
+            .build()
+            .unwrap();
+        let tasks = node
+            .install_task_group(CancellationToken::new(), CancellationToken::new())
+            .unwrap();
+        let stalled = async {
             std::future::pending::<()>().await;
             Ok::<(), Error>(())
-        })
-        .unwrap();
+        };
+        if lease_maintenance {
+            tasks.spawn_lease_maintenance(stalled).unwrap();
+        } else {
+            tasks.spawn(stalled).unwrap();
+        }
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        node.shutdown_until(Instant::now() + std::time::Duration::from_millis(10)),
-    )
-    .await
-    .expect("deadline-aware shutdown must return");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            node.shutdown_until(Instant::now() + std::time::Duration::from_millis(10)),
+        )
+        .await
+        .expect("deadline-aware shutdown must return");
 
-    assert!(result.is_err());
-    assert_eq!(node.state(), NodeState::Draining);
+        assert!(result.is_err());
+        assert_eq!(node.state(), NodeState::Draining);
+    }
 }
 
 #[tokio::test]
@@ -247,4 +252,32 @@ async fn three_nodes_have_independent_lifecycle_and_resource_ledgers() {
         assert_eq!(node.state(), NodeState::Stopped);
         assert!(node.is_shutting_down());
     }
+}
+
+#[tokio::test]
+async fn session_withdrawal_waits_for_runtime_drain() {
+    let node = CellNodeBuilder::new(application())
+        .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), 16 * 1024 * 1024)
+        .with_replica_host(ReplicaHost::default())
+        .with_session(SessionId::from_bytes([44; 16]))
+        .build()
+        .unwrap();
+    let shutdown = CancellationToken::new();
+    let tasks = node
+        .install_task_group(CancellationToken::new(), shutdown.clone())
+        .unwrap();
+    let runtime = node.runtime();
+    tasks
+        .spawn_lease_maintenance(async move {
+            shutdown.cancelled().await;
+            if !runtime.is_shutting_down() {
+                return Err(Error::Control("session withdrew before runtime drain"));
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    node.shutdown_until(Instant::now() + Duration::from_secs(1))
+        .await
+        .unwrap();
 }

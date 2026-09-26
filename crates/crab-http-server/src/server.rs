@@ -1419,7 +1419,7 @@ pub async fn serve(config: Config) -> Result<()> {
     let node_server = Arc::clone(&server);
     let heartbeat_shutdown = node_shutdown.clone();
     let heartbeat_publisher = Arc::clone(&node_publisher);
-    cell_tasks.spawn(async move {
+    cell_tasks.spawn_lease_maintenance(async move {
         heartbeat_publisher
             .run_shared(node_server, heartbeat_shutdown)
             .await

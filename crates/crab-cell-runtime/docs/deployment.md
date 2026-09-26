@@ -58,6 +58,13 @@ turns a read-only connection into a writer. A missing warm reader only removes
 the placement preference; the existing cold recovery path retains every
 session, old-log, and authority gate.
 
+On shutdown, the host cancels work producers and closes reader admission,
+then drains accepted runtime work and seals the covered node log. Heartbeat
+maintenance remains live through that barrier. Session withdrawal follows
+runtime drain; withdrawing earlier fences the log authority and prevents a
+clean fleet-to-object transition. Every phase uses the same absolute shutdown
+deadline. A failed drain must not authorize a durability-mode change.
+
 ## Configure one process per node
 
 The existing HTTP server owns Cell runtime construction. Configuration supplies the authoritative object store, local volume, public listener, management listener, and peer identity.

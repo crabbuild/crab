@@ -6,6 +6,14 @@ durability, scale down, and shutdown, and reports one lifecycle status. A
 product server supplies providers, authentication, and network transports; it
 must not construct a second runtime alongside this host.
 
+Shutdown first cancels admission and joins work producers. Lease maintenance
+registered with `CellNodeTaskGroup::spawn_lease_maintenance` keeps renewing the
+node session while the runtime drains accepted work and closes its covered
+node log. Only then does the host cancel the node-shutdown token and join lease
+maintenance, allowing session withdrawal. Both phases share the original task
+limit and absolute shutdown deadline. Ordinary tasks stop on the work
+cancellation token; lease maintenance stops on the node-shutdown token.
+
 ## Module map
 
 | Module | Responsibility |

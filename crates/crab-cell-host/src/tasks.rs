@@ -26,9 +26,20 @@ impl<T> Drop for AbortOnDrop<T> {
 pub struct CellNodeTaskGroup {
     pub(super) cancellation: CancellationToken,
     pub(super) node_shutdown: CancellationToken,
-    pub(super) tasks: Mutex<Vec<JoinHandle<FacilityResult>>>,
+    tasks: Mutex<Vec<NodeTask>>,
     pub(super) failed: Arc<AtomicBool>,
     pub(super) draining: AtomicBool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TaskPhase {
+    Work,
+    Lease,
+}
+
+struct NodeTask {
+    phase: TaskPhase,
+    handle: JoinHandle<FacilityResult>,
 }
 
 impl Drop for CellNodeTaskGroup {
@@ -38,16 +49,15 @@ impl Drop for CellNodeTaskGroup {
             Err(poisoned) => poisoned.into_inner(),
         };
         for task in tasks.iter() {
-            task.abort();
+            task.handle.abort();
         }
     }
 }
 
 impl CellNodeTaskGroup {
-    pub(super) fn cancel(&self) {
+    pub(super) fn cancel_work(&self) {
         self.draining.store(true, Ordering::Release);
         self.cancellation.cancel();
-        self.node_shutdown.cancel();
     }
 
     /// Creates a task group whose cancellation tokens are controlled by the product host.
@@ -68,7 +78,7 @@ impl CellNodeTaskGroup {
         }
         self.tasks
             .lock()
-            .map(|tasks| tasks.iter().all(|task| !task.is_finished()))
+            .map(|tasks| tasks.iter().all(|task| !task.handle.is_finished()))
             .unwrap_or(false)
     }
 
@@ -85,11 +95,50 @@ impl CellNodeTaskGroup {
         F: Future<Output = std::result::Result<(), E>> + Send + 'static,
         E: std::error::Error + Send + Sync + 'static,
     {
+        self.spawn_task(
+            async move {
+                task.await
+                    .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
+            },
+            TaskPhase::Work,
+        )
+    }
+
+    /// Retains lease renewal until the node has drained its runtime and closed its log.
+    ///
+    /// This task must stop on the node-shutdown token rather than the work
+    /// cancellation token. It shares the ordinary task limit and supervision.
+    pub fn spawn_lease_maintenance<F, E>(&self, task: F) -> crab_cell_runtime::Result<()>
+    where
+        F: Future<Output = std::result::Result<(), E>> + Send + 'static,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        self.spawn_task(
+            async move {
+                task.await
+                    .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
+            },
+            TaskPhase::Lease,
+        )
+    }
+
+    /// Spawns one task that already uses the node's boxed facility error type.
+    pub fn spawn_boxed<F>(&self, task: F) -> crab_cell_runtime::Result<()>
+    where
+        F: Future<Output = FacilityResult> + Send + 'static,
+    {
+        self.spawn_task(task, TaskPhase::Work)
+    }
+
+    fn spawn_task<F>(&self, task: F, phase: TaskPhase) -> crab_cell_runtime::Result<()>
+    where
+        F: Future<Output = FacilityResult> + Send + 'static,
+    {
         self.ensure_accepting_tasks()?;
-        let mut tasks = match self.tasks.lock() {
-            Ok(tasks) => tasks,
-            Err(_) => return Err(Error::Control("CellNode task group lock poisoned")),
-        };
+        let mut tasks = self
+            .tasks
+            .lock()
+            .map_err(|_| Error::Control("CellNode task group lock poisoned"))?;
         self.ensure_accepting_tasks()?;
         if tasks.len() >= MAX_NODE_TASKS {
             return Err(Error::Capacity("CellNode task limit reached"));
@@ -99,9 +148,6 @@ impl CellNodeTaskGroup {
             let mut task = AbortOnDrop::new(tokio::spawn(task));
             match task.join().await {
                 Ok(result) => {
-                    let result = result.map_err(|error| {
-                        Box::new(error) as Box<dyn std::error::Error + Send + Sync>
-                    });
                     if result.is_err() {
                         failed.store(true, Ordering::Release);
                     }
@@ -113,41 +159,13 @@ impl CellNodeTaskGroup {
                 }
             }
         });
-        tasks.push(handle);
+        tasks.push(NodeTask { phase, handle });
         Ok(())
     }
 
-    /// Spawns one task that already uses the node's boxed facility error type.
-    pub fn spawn_boxed<F>(&self, task: F) -> crab_cell_runtime::Result<()>
-    where
-        F: Future<Output = FacilityResult> + Send + 'static,
-    {
-        self.ensure_accepting_tasks()?;
-        let mut tasks = match self.tasks.lock() {
-            Ok(tasks) => tasks,
-            Err(_) => return Err(Error::Control("CellNode task group lock poisoned")),
-        };
-        self.ensure_accepting_tasks()?;
-        if tasks.len() >= MAX_NODE_TASKS {
-            return Err(Error::Capacity("CellNode task limit reached"));
-        }
-        let failed = Arc::clone(&self.failed);
-        tasks.push(tokio::spawn(async move {
-            let mut task = AbortOnDrop::new(tokio::spawn(task));
-            match task.join().await {
-                Ok(result) => {
-                    if result.is_err() {
-                        failed.store(true, Ordering::Release);
-                    }
-                    result
-                }
-                Err(error) => {
-                    failed.store(true, Ordering::Release);
-                    Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
-                }
-            }
-        }));
-        Ok(())
+    pub(super) async fn drain_work_until(&self, deadline: Option<Instant>) -> FacilityResult {
+        self.cancel_work();
+        self.join_until(deadline, false).await
     }
 
     /// Cancels admission and joins tasks in reverse registration order.
@@ -157,12 +175,23 @@ impl CellNodeTaskGroup {
 
     /// Cancels admission and joins tasks until an optional absolute deadline.
     pub async fn drain_until(&self, deadline: Option<Instant>) -> FacilityResult {
-        self.cancel();
+        self.cancel_work();
+        self.node_shutdown.cancel();
+        self.join_until(deadline, true).await
+    }
+
+    async fn join_until(&self, deadline: Option<Instant>, include_lease: bool) -> FacilityResult {
         let tasks = match self.tasks.lock() {
-            Ok(mut tasks) => std::mem::take(&mut *tasks),
+            Ok(mut tasks) => {
+                let (joining, retained): (Vec<_>, Vec<_>) = std::mem::take(&mut *tasks)
+                    .into_iter()
+                    .partition(|task| include_lease || task.phase == TaskPhase::Work);
+                *tasks = retained;
+                joining.into_iter().map(|task| task.handle).collect()
+            }
             Err(poisoned) => {
                 for task in poisoned.into_inner().drain(..) {
-                    task.abort();
+                    task.handle.abort();
                 }
                 return Err(Box::new(std::io::Error::other(
                     "CellNode task group lock poisoned",
