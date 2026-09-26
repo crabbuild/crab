@@ -88,6 +88,9 @@ SQLite file and opens it with SQLite read-only and query-only guards. Its owned
 view releases the file and disk reservation on drop. This is a full restore;
 it does not yet provide the sparse read-replica view or Cell-authority response
 gate required by the proposed read-replica design.
+If a read-view open is cancelled after a blocking install succeeds, the
+unclaimed destination is removed. An I/O error during the no-clobber install
+remains ambiguous and must be inspected before that path is reused.
 
 ### What Cell authority does
 

@@ -266,6 +266,11 @@ The local in-memory and RustFS tests now also prove that a failed refresh
 leaves the old value readable and that an in-flight query returns its old
 snapshot after a newer view is installed. Runtime Clippy passed with warnings
 denied. These are local library checks, not an admitted product replica route.
+The LTX restore install now removes a destination that its blocking worker
+successfully installed after the async read-view opener was cancelled;
+`cancelled_read_view_install_removes_its_unclaimed_destination` pauses at that
+exact seam and checks both destination and scratch cleanup. A filesystem error
+after a no-clobber install remains ambiguous and cannot authorize deletion.
 `desired_readers_follow_live_distinct_nodes_and_replace_a_lost_member` proves
 the advisory directory selection at targets 0, 1, 2, and 4, with distinct
 physical nodes, failure-domain preference, an expired reader, and a new live
