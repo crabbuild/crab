@@ -141,6 +141,8 @@ fn validation(index: usize, message: &str) -> CommandResult<Json<PartitionTransa
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct StagedImage {
     key: Vec<u8>,
+    partition_key: Vec<u8>,
+    sort_key: Vec<u8>,
     image: Option<Item>,
     write: bool,
 }
@@ -238,6 +240,7 @@ fn stage_operations(
                 Err(reason) => return Ok(Err(stage_validation(index, &reason))),
             }
         }
+        let (partition_key, sort_key) = super::key::index_key(item, &spec.table.key_schema)?;
         let (image, write) = match operation {
             TransactionWrite::Put(input) => (Some(input.item), true),
             TransactionWrite::Delete(_) => (None, true),
@@ -257,7 +260,13 @@ fn stage_operations(
             }
             TransactionWrite::ConditionCheck(_) => (None, false),
         };
-        staged.push(StagedImage { key, image, write });
+        staged.push(StagedImage {
+            key,
+            partition_key,
+            sort_key,
+            image,
+            write,
+        });
     }
     Ok(Ok(staged))
 }
@@ -309,6 +318,14 @@ pub(super) fn has_transaction_locks(context: &mut CommandContext<'_, '_>) -> Res
     Ok(!rows[0].rows.is_empty())
 }
 
+pub(super) fn read_key_locked(context: &QueryContext<'_>, key: &[u8]) -> Result<bool> {
+    let rows = context.sql(&statement(
+        "SELECT 1 FROM ddb_partition_transaction_locks WHERE item_key = ?1",
+        vec![SqlValue::Blob(key.to_vec())],
+    ))?;
+    Ok(!rows[0].rows.is_empty())
+}
+
 /// Result of one consistent read from a routed data Cell.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PartitionTransactGetOutcome {
@@ -328,6 +345,8 @@ pub enum PartitionTransactGetOutcome {
     WrongPartition,
     /// The key violates the table schema.
     InvalidKey { index: usize },
+    /// A requested key has an unresolved transaction intent.
+    Conflict { index: usize },
 }
 
 /// Read several keys in one data Cell snapshot.
@@ -371,6 +390,9 @@ impl Query for PartitionTransactGet {
                 &spec.table.key_schema,
             )?) {
                 return Ok(Json(PartitionTransactGetOutcome::WrongPartition));
+            }
+            if read_key_locked(context, &key)? {
+                return Ok(Json(PartitionTransactGetOutcome::Conflict { index }));
             }
             let rows = context.sql(&statement(
                 "SELECT item FROM ddb_partition_items WHERE item_key = ?1",

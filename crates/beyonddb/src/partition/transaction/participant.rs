@@ -136,8 +136,14 @@ impl Command for PreparePartitionTransaction {
         ))?;
         for image in staged {
             context.sql(&statement(
-                "INSERT INTO ddb_partition_transaction_locks (item_key, transaction_id) VALUES (?1, ?2)",
-                vec![SqlValue::Blob(image.key), SqlValue::Blob(input.transaction_id.to_vec())],
+                "INSERT INTO ddb_partition_transaction_locks \
+                 (item_key, partition_key, sort_key, transaction_id) VALUES (?1, ?2, ?3, ?4)",
+                vec![
+                    SqlValue::Blob(image.key),
+                    SqlValue::Blob(image.partition_key),
+                    SqlValue::Blob(image.sort_key),
+                    SqlValue::Blob(input.transaction_id.to_vec()),
+                ],
             ))?;
         }
         Ok(CommandResult::Success(Json(

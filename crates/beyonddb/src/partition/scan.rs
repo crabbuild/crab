@@ -48,6 +48,8 @@ pub enum PartitionScanOutcome {
     InvalidKey,
     /// Limit must be positive.
     InvalidLimit,
+    /// An unvisited key has an unresolved transaction intent.
+    Conflict,
 }
 
 /// Scan a single range through a bounded Cell query.
@@ -110,6 +112,17 @@ fn scan_page(
         Some(_) => return Ok(Json(PartitionScanOutcome::InvalidKey)),
         None => Vec::new(),
     };
+    // Check absent keys too; reading only live rows would skip committed but
+    // unapplied creates. Sealed export is already fenced by SealPartition.
+    if !export {
+        let locks = context.sql(&statement(
+            "SELECT 1 FROM ddb_partition_transaction_locks WHERE item_key > ?1 LIMIT 1",
+            vec![SqlValue::Blob(cursor.clone())],
+        ))?;
+        if !locks[0].rows.is_empty() {
+            return Ok(Json(PartitionScanOutcome::Conflict));
+        }
+    }
     let max_items = input.limit.unwrap_or(u32::MAX).min(10_000) as usize;
     let mut items = Vec::new();
     let mut bytes = 0_usize;

@@ -109,6 +109,8 @@ pub enum PartitionQueryOutcome {
     InvalidKey,
     InvalidCondition,
     InvalidLimit,
+    /// A key in the requested range has an unresolved transaction intent.
+    Conflict,
 }
 
 /// Read matching items in RANGE-key order from one data Cell.
@@ -206,28 +208,22 @@ impl Query for PartitionQuery {
         } else {
             Vec::new()
         };
+        // Probe the intent index itself: a prepared insert has no live row.
+        // Multi-attribute RANGE predicates conservatively fence the HASH group.
+        let (predicate, parameters) =
+            range_predicate(&partition_key, &bounds, &cursor, input.forward);
+        let locks = context.sql(&statement(
+            &format!("SELECT 1 FROM ddb_partition_transaction_locks {predicate} LIMIT 1"),
+            parameters,
+        ))?;
+        if !locks[0].rows.is_empty() {
+            return Ok(Json(PartitionQueryOutcome::Conflict));
+        }
         loop {
-            let mut sql = String::from(
-                "SELECT item_key, sort_key, item FROM ddb_partition_items WHERE partition_key = ?",
-            );
-            let mut parameters = vec![SqlValue::Blob(partition_key.clone())];
-            for (operator, bound) in &bounds {
-                sql.push_str(" AND sort_key ");
-                sql.push_str(operator);
-                sql.push_str(" ?");
-                parameters.push(SqlValue::Blob(bound.clone()));
-            }
-            if let Some((sort, key)) = &cursor {
-                let cmp = if input.forward { ">" } else { "<" };
-                sql.push_str(&format!(
-                    " AND (sort_key {cmp} ? OR (sort_key = ? AND item_key {cmp} ?))"
-                ));
-                parameters.extend([
-                    SqlValue::Blob(sort.clone()),
-                    SqlValue::Blob(sort.clone()),
-                    SqlValue::Blob(key.clone()),
-                ]);
-            }
+            let (predicate, parameters) =
+                range_predicate(&partition_key, &bounds, &cursor, input.forward);
+            let mut sql =
+                format!("SELECT item_key, sort_key, item FROM ddb_partition_items {predicate}");
             let order = if input.forward { "ASC" } else { "DESC" };
             sql.push_str(&format!(
                 " ORDER BY sort_key {order}, item_key {order} LIMIT 64"
@@ -277,6 +273,28 @@ impl Query for PartitionQuery {
             last_evaluated_key: None,
         }))
     }
+}
+
+fn range_predicate(
+    partition_key: &[u8],
+    bounds: &[(&str, Vec<u8>)],
+    cursor: &Option<(Vec<u8>, Vec<u8>)>,
+    forward: bool,
+) -> (String, Vec<SqlValue>) {
+    let mut sql = String::from("WHERE partition_key = ?");
+    let mut parameters = vec![SqlValue::Blob(partition_key.to_vec())];
+    for (operator, bound) in bounds {
+        sql.push_str(" AND sort_key ");
+        sql.push_str(operator);
+        sql.push_str(" ?");
+        parameters.push(SqlValue::Blob(bound.clone()));
+    }
+    if let Some((sort, key)) = cursor {
+        let cmp = if forward { ">" } else { "<" };
+        sql.push_str(&format!(" AND (sort_key, item_key) {cmp} (?, ?)"));
+        parameters.extend([SqlValue::Blob(sort.clone()), SqlValue::Blob(key.clone())]);
+    }
+    (sql, parameters)
 }
 
 fn index_bounds(predicate: &SortPredicate) -> Result<Vec<(&'static str, Vec<u8>)>> {
