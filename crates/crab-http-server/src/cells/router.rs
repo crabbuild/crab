@@ -83,6 +83,7 @@ pub(crate) struct RepositoryCellRouter {
 
 #[derive(Clone)]
 pub(crate) struct RepositoryCellPeer {
+    owner_hints: crate::peer::PeerOwnerHints,
     directory: NodeDirectory,
     signer: Arc<PeerSigner>,
     round_trip: Arc<dyn PeerRoundTrip>,
@@ -872,6 +873,19 @@ impl RepositoryCellRouter {
                 _operation: None,
             }));
         }
+        // Reuse the sender's bounded observation only for routing. The owner
+        // checks this signed description and actor admission before execution.
+        if let Some(description) = self
+            .peer
+            .owner_hints
+            .description(target.cell_id(), super::unix_now_ms()?)
+        {
+            return Ok(Some(self.peer_described(
+                target.clone(),
+                principal.clone(),
+                description,
+            )));
+        }
         let Some(proof) = self.catalog.lookup(target.cell_id()).await? else {
             return Ok(None);
         };
@@ -1048,6 +1062,15 @@ impl RepositoryCellRouter {
             code: control.code,
             schema: control.schema,
         };
+        self.peer_described(target, principal, description)
+    }
+
+    fn peer_described(
+        &self,
+        target: CellTarget,
+        principal: PeerPrincipal,
+        description: CellDescription,
+    ) -> RepositoryCell {
         RepositoryCell {
             target,
             client: CellClient::peer(
@@ -1126,12 +1149,14 @@ impl RepositoryCellRouter {
 
 impl RepositoryCellPeer {
     pub(crate) fn new(
+        owner_hints: crate::peer::PeerOwnerHints,
         directory: NodeDirectory,
         signer: Arc<PeerSigner>,
         round_trip: Arc<dyn PeerRoundTrip>,
         owner: Owner,
     ) -> Self {
         Self {
+            owner_hints,
             directory,
             signer,
             round_trip,
@@ -1418,6 +1443,7 @@ mod tests {
             release,
         );
         let peer = RepositoryCellPeer::new(
+            crate::peer::PeerOwnerHints::default(),
             directory,
             Arc::new(PeerSigner::new(session, release, key.clone())),
             Arc::new(DelayedActivationPeer {
@@ -1949,6 +1975,7 @@ mod tests {
             Arc::clone(&registry),
             source_runtime.clone(),
             RepositoryCellPeer::new(
+                crate::peer::PeerOwnerHints::default(),
                 directory.clone(),
                 Arc::new(PeerSigner::new(
                     source,
@@ -2174,6 +2201,7 @@ mod tests {
             Arc::clone(&registry),
             source_runtime.clone(),
             RepositoryCellPeer::new(
+                crate::peer::PeerOwnerHints::default(),
                 directory,
                 Arc::new(PeerSigner::new(
                     source,
@@ -2372,6 +2400,7 @@ mod tests {
             Arc::clone(&registry),
             runtime,
             RepositoryCellPeer::new(
+                crate::peer::PeerOwnerHints::default(),
                 NodeDirectory::new(
                     layout,
                     crab_cell_runtime::Digest::from_bytes([21; 32]),

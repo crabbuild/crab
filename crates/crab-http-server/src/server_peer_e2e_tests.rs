@@ -8,6 +8,7 @@ use crab_cell_runtime::identity::{ApplicationId, Digest, SessionId, TenantId};
 use crab_cell_runtime::ltx::CellStorageLayout;
 use crab_cell_runtime::node::NodeDirectory;
 use crab_storage::{ObjectStoreCredentials, build_explicit_store};
+use object_store::throttle::{ThrottleConfig, ThrottledStore};
 use object_store::{memory::InMemory, path::Path as ObjectPath};
 use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -27,6 +28,7 @@ struct ReceiverReads {
     heads: AtomicUsize,
     pages: AtomicUsize,
     controls: AtomicUsize,
+    queries: AtomicUsize,
 }
 
 impl ReceiverReads {
@@ -40,6 +42,18 @@ impl ReceiverReads {
 }
 
 impl CellTelemetry for ReceiverReads {
+    fn primitive_operation(
+        &self,
+        _module: &'static str,
+        kind: crab_cell_runtime::fleet::telemetry::PrimitiveOperationKind,
+        _outcome: crab_cell_runtime::fleet::telemetry::PrimitiveOperationOutcome,
+        _elapsed: Duration,
+    ) {
+        if kind == crab_cell_runtime::fleet::telemetry::PrimitiveOperationKind::Query {
+            self.queries.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     fn catalog_read(&self, kind: CatalogReadKind, _elapsed: Duration, _succeeded: bool) {
         match kind {
             CatalogReadKind::Head => &self.heads,
@@ -234,6 +248,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         Arc::clone(&registry),
         owner_runtime.clone(),
         crate::cells::RepositoryCellPeer::new(
+            crate::peer::PeerOwnerHints::default(),
             directory.clone(),
             Arc::new(crab_cell_runtime::peer::PeerSigner::new(
                 owner_session,
@@ -243,7 +258,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             Arc::new(UnavailablePeer),
             crab_cell_runtime::control::Owner {
                 session: owner_session,
-                endpoint: management_endpoint,
+                endpoint: management_endpoint.clone(),
             },
         ),
         owner_session_dir,
@@ -276,6 +291,18 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .root
         .clone();
 
+    owner_runtime
+        .install_telemetry(receiver_reads.clone())
+        .unwrap();
+    let resolver_store = Arc::new(ThrottledStore::new(
+        Arc::clone(store.inner()),
+        ThrottleConfig::default(),
+    ));
+    let resolver_layout = CellStorageLayout::new(
+        Store::new(resolver_store.clone()),
+        ObjectPath::from(format!("{root}/cells")),
+        *identity.application().as_bytes(),
+    );
     let owner_server = server(
         Arc::clone(&repository),
         store.clone(),
@@ -294,7 +321,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
                 .unwrap(),
             ),
             LocalCellResolver::new(
-                cell_layout.clone(),
+                resolver_layout,
                 identity,
                 owner_runtime.clone(),
                 CellTelemetryHandle::from_sink(receiver_reads.clone()),
@@ -322,20 +349,28 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .unwrap();
     });
 
+    let owner_hints = crate::peer::PeerOwnerHints::default();
     let ingress_runtime = runtime(ingress_session);
-    let round_trip: Arc<dyn PeerRoundTrip> = Arc::new(PeerHttpRoundTrip::new(
+    let ingress_reads = Arc::new(ReceiverReads::default());
+    ingress_runtime
+        .install_telemetry(ingress_reads.clone())
+        .unwrap();
+    let sender = Arc::new(PeerHttpRoundTrip::new(
+        owner_hints.clone(),
         identity,
-        authority.clone(),
+        CellAuthority::with_telemetry(cell_layout.clone(), ingress_runtime.telemetry_handle()),
         directory.clone(),
         peer_tls.client_identity(),
         ingress_session,
     ));
+    let round_trip: Arc<dyn PeerRoundTrip> = sender.clone();
     let ingress_router = crate::cells::RepositoryCellRouter::new(
         identity,
         cell_layout.clone(),
         Arc::clone(&registry),
         ingress_runtime.clone(),
         crate::cells::RepositoryCellPeer::new(
+            owner_hints.clone(),
             directory.clone(),
             Arc::new(crab_cell_runtime::peer::PeerSigner::new(
                 ingress_session,
@@ -467,17 +502,6 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     assert_eq!(comment.0, StatusCode::CREATED);
     assert_eq!(comment.1["number"], 1);
     eprintln!("qualified issue comment mutation");
-    let sender_reads = Arc::new(ReceiverReads::default());
-    let sender = Arc::new(PeerHttpRoundTrip::new(
-        identity,
-        CellAuthority::with_telemetry(
-            cell_layout.clone(),
-            CellTelemetryHandle::from_sink(sender_reads.clone()),
-        ),
-        directory.clone(),
-        peer_tls.client_identity(),
-        ingress_session,
-    ));
     let peer_client = crab_cell_runtime::client::CellClient::peer(
         Arc::clone(&registry),
         Arc::new(crab_cell_runtime::peer::PeerSigner::new(
@@ -492,6 +516,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         },
         sender.clone(),
     );
+    let sender_reads_before = ingress_reads.snapshot();
     let observed = peer_client
         .query::<crate::cells::repository::ListComments>(
             &target,
@@ -508,8 +533,19 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         observed.output,
         crate::cells::repository::CommentPage::Found { .. }
     ));
-    assert_eq!(sender_reads.snapshot().2, 1);
+    assert_eq!(ingress_reads.snapshot(), sender_reads_before);
+    assert!(
+        owner_hints
+            .description(target.cell_id(), crate::cells::unix_now_ms().unwrap())
+            .is_some()
+    );
+    assert!(
+        owner_hints
+            .description(target.cell_id(), i64::MAX)
+            .is_none()
+    );
     let reads_before = receiver_reads.snapshot();
+    let ingress_before = ingress_reads.snapshot();
     let (comments_status, comments) = json_get(
         &client,
         format!("{public_origin}/api/repos/team/repo/issues/1/comments"),
@@ -518,6 +554,11 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     assert_eq!(comments_status, StatusCode::OK);
     assert_eq!(comments["items"][0]["body"], "Durable issue comment");
     let reads_after = receiver_reads.snapshot();
+    assert_eq!(
+        ingress_reads.snapshot(),
+        ingress_before,
+        "warm forwarding must reuse the sender observation without ingress catalog/control reads",
+    );
     // Ingress already read the exact Cell description while routing. Reusing
     // it leaves one receiver resolution for Query, without a Describe round trip.
     assert_eq!(
@@ -528,6 +569,110 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         ),
         (1, 1, 1),
     );
+    // Delay only post-authentication resolution. Expiration must stop before
+    // the query handler, even though the signed request itself remains valid.
+    use crab_cell_runtime::codec::{BoundedEncoder, WireValue};
+    use crab_cell_runtime::peer::{PeerOperation, PeerPrincipal, PeerSigner, wire};
+    use crab_cell_runtime::registry::Query;
+    let mut input = BoundedEncoder::new(1024).unwrap();
+    crate::cells::repository::ListCommentsInput {
+        issue: 1,
+        before: None,
+        limit: 30,
+    }
+    .encode(&mut input)
+    .unwrap();
+    let description = owner_hints
+        .description(target.cell_id(), crate::cells::unix_now_ms().unwrap())
+        .unwrap();
+    let now = crate::cells::unix_now_ms().unwrap();
+    let timed_request = PeerSigner::new(
+        ingress_session,
+        registry.release_digest(),
+        peer_tls.signing_key().clone(),
+    )
+    .sign(
+        PeerPrincipal {
+            issuer: local_operator.issuer.clone(),
+            subject: local_operator.subject.clone(),
+            actions: vec!["repository.read".into()],
+        },
+        now,
+        now + 10_000,
+        500,
+        PeerOperation::Read(wire::ReadRequest {
+            target: Some(wire::Target {
+                tenant_id: identity.tenant().as_bytes().to_vec(),
+                application_id: identity.application().as_bytes().to_vec(),
+                namespace_id: target.namespace().as_bytes().to_vec(),
+                partition: target.partition().to_vec(),
+            }),
+            timeout_ms: 500,
+            minimum: None,
+            expected: Some(wire::CellDescription {
+                cell_id: description.cell.as_bytes().to_vec(),
+                incarnation: description.incarnation.as_bytes().to_vec(),
+                code: description.code.as_bytes().to_vec(),
+                schema: description.schema,
+            }),
+            operation: Some(wire::read_request::Operation::CellQuery(wire::CellQuery {
+                query_id: crate::cells::repository::ListComments::ID,
+                codec_version: crate::cells::repository::ListComments::CODEC_VERSION,
+                input: input.finish(),
+            })),
+        }),
+    )
+    .unwrap();
+    let peer_http = peer_tls
+        .client_identity()
+        .client(
+            peer_tls.certificate(),
+            peer_tls.signing_key().verifying_key().to_bytes(),
+        )
+        .unwrap();
+    resolver_store.config_mut(|config| config.wait_get_per_call = Duration::from_secs(2));
+    let queries_before = receiver_reads.queries.load(Ordering::Relaxed);
+    let deadline_reply = peer_http
+        .post(format!("{management_endpoint}/internal/cells/v1/forward"))
+        .header(axum::http::header::CONTENT_TYPE, "application/x-protobuf")
+        .body(timed_request.clone())
+        .send()
+        .await
+        .unwrap();
+    resolver_store.config_mut(|config| config.wait_get_per_call = Duration::ZERO);
+    assert_eq!(deadline_reply.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(
+        receiver_reads.queries.load(Ordering::Relaxed),
+        queries_before
+    );
+    assert_eq!(owner_runtime.stats().primitive_jobs(), 0);
+    let healthy_reply = peer_http
+        .post(format!("{management_endpoint}/internal/cells/v1/forward"))
+        .header(axum::http::header::CONTENT_TYPE, "application/x-protobuf")
+        .body(timed_request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(healthy_reply.status(), StatusCode::OK);
+    assert!(receiver_reads.queries.load(Ordering::Relaxed) > queries_before);
+    // Concurrent expiry may send callers through the existing slow path, but
+    // it must not fabricate authority, amplify beyond those callers, or fail.
+    tokio::time::sleep(Duration::from_millis(5_050)).await;
+    let expired_before = ingress_reads.snapshot();
+    let concurrent = (0..5).map(|_| {
+        json_get(
+            &client,
+            format!("{public_origin}/api/repos/team/repo/issues/1/comments"),
+        )
+    });
+    for (status, comments) in futures_util::future::join_all(concurrent).await {
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(comments["items"][0]["body"], "Durable issue comment");
+    }
+    let expired_after = ingress_reads.snapshot();
+    assert!((1..=5).contains(&(expired_after.0 - expired_before.0)));
+    assert!((1..=5).contains(&(expired_after.1 - expired_before.1)));
+    assert!((1..=10).contains(&(expired_after.2 - expired_before.2)));
     let status = json_request(
         &client,
         reqwest::Method::POST,

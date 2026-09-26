@@ -1466,6 +1466,7 @@ pub(crate) async fn enter_maintenance(
         Arc::clone(&registry),
         runtime.clone(),
         RepositoryCellPeer::new(
+            crate::peer::PeerOwnerHints::default(),
             directory.clone(),
             Arc::new(PeerSigner::new(
                 session,
@@ -2746,6 +2747,7 @@ mod tests {
             Arc::clone(&registry),
             runtime.clone(),
             RepositoryCellPeer::new(
+                crate::peer::PeerOwnerHints::default(),
                 directory.clone(),
                 Arc::new(PeerSigner::new(
                     session,
@@ -2924,6 +2926,7 @@ mod tests {
             Arc::clone(&registry),
             runtime.clone(),
             RepositoryCellPeer::new(
+                crate::peer::PeerOwnerHints::default(),
                 directory.clone(),
                 Arc::new(PeerSigner::new(
                     session,

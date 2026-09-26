@@ -1145,8 +1145,10 @@ pub async fn serve(config: Config) -> Result<()> {
         cell_runtime.clone(),
         cell_runtime.telemetry_handle(),
     );
+    let owner_hints = crate::peer::PeerOwnerHints::default();
     let peer_round_trip: Arc<dyn PeerRoundTrip> = Arc::new(
         crate::peer::PeerHttpRoundTrip::new(
+            owner_hints.clone(),
             startup.identity,
             crab_cell_runtime::control::authority::CellAuthority::with_telemetry(
                 startup.layout.clone(),
@@ -1201,6 +1203,7 @@ pub async fn serve(config: Config) -> Result<()> {
         Arc::clone(&registry),
         cell_runtime.clone(),
         crate::cells::RepositoryCellPeer::new(
+            owner_hints,
             directory.clone(),
             Arc::new(PeerSigner::new(
                 session,

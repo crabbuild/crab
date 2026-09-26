@@ -420,8 +420,21 @@ Only the management listener serves probes. Every public request retains strict
 canonical `Host` validation.
 `crab_cell_owner_hint_total{outcome="hit|miss|stale|refused"}` counts the peer
 sender's bounded owner observations. A hit saves that sender's control and
-node-directory reads; the receiving node still verifies control and actor
-admission. Refusals clear the observed session before an authoritative retry.
+node-directory reads. The public entry router shares that observation to avoid
+catalog/control reads for a warm remote target. Only a serving, published Cell
+can supply the cached description; the receiving node still verifies target,
+control, authorization, and actor admission. Observations expire within five
+seconds and before the signed node lease, with at most 4,096 entries. Refusals
+and ambiguous results clear the observed session; only the existing retryable
+cases take one authoritative retry.
+
+Forwarded requests reserve retained bytes while waiting. Codec admission uses
+one absolute received transport deadline, and releases its job slot during
+enrollment storage I/O. Structural decoding runs once; signature verification
+rechecks the enrollment lifetime after the wait. Resolution, activation,
+dispatch waiting, and reply encoding share the received deadline. A timed-out
+HTTP wait returns 504; an already accepted mutation can still finish and must
+be resolved by its stable request identity.
 
 Before starting either listener, the process also claims and releases one of
 16 dedicated startup-probe slots in the shared transfer-admission namespace.

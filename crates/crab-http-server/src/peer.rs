@@ -43,7 +43,7 @@ use crate::{RepositoryAccess, RepositoryConfig, peer_tls::PeerTlsIdentity, serve
 
 mod client;
 mod node_log_client;
-pub(crate) use client::PeerHttpRoundTrip;
+pub(crate) use client::{PeerHttpRoundTrip, PeerOwnerHints};
 pub(crate) use node_log_client::NodeLogHttpTransport;
 
 const PROTOBUF_MEDIA_TYPE: &str = "application/x-protobuf";
@@ -60,6 +60,38 @@ fn reserve_peer_codec(
     runtime: &CellRuntime,
 ) -> Option<crab_cell_runtime::cell::actor::NodeJobReservation> {
     runtime.try_reserve_worker_job().ok().flatten()
+}
+
+async fn verify_forwarded_request(
+    runtime: &CellRuntime,
+    directory: &NodeDirectory,
+    identity: &PeerTlsIdentity,
+    body: &[u8],
+    started: Instant,
+) -> crate::Result<VerifiedPeerRequest> {
+    let request = {
+        let _codec = runtime
+            .reserve_worker_job(started + Duration::from_secs(60))
+            .await?;
+        crab_cell_runtime::peer::UnverifiedPeerRequest::decode(body)?
+    };
+    let deadline = started + Duration::from_millis(u64::from(request.remaining_ms()));
+    if Instant::now() >= deadline {
+        return Err(CellError::Deadline.into());
+    }
+    // Enrollment I/O owns request bytes, not a CPU job. Otherwise one slow
+    // directory read rejects unrelated peer work on a one-worker node.
+    let enrollment = directory.peer_verifier(
+        request.session(),
+        identity.certificate(),
+        identity.public_key(),
+        now_ms()?,
+    );
+    let verifier = tokio::time::timeout_at(deadline.into(), enrollment)
+        .await
+        .map_err(|_| CellError::Deadline)??;
+    let _codec = runtime.reserve_worker_job(deadline).await?;
+    verifier.verify(request, now_ms()?).map_err(Into::into)
 }
 
 #[derive(Clone)]
@@ -858,29 +890,53 @@ pub(crate) async fn forward(
     let Some(receiver) = server.peer_receiver() else {
         return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     };
-    let now_ms = match now_ms() {
-        Ok(now_ms) => now_ms,
-        Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
+    let Ok(runtime) = server.cell_runtime() else {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
     };
-    let request = {
-        let Ok(runtime) = server.cell_runtime() else {
+    // Bound both the raw/signed operation copies and enrollment bookkeeping
+    // while requests wait for provider I/O or codec admission.
+    let Ok(_request_bytes) = runtime.try_reserve_node_bytes(body.len() * 3 + 64 * 1024) else {
+        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let authentication_deadline = started + Duration::from_secs(60);
+    let request = match tokio::time::timeout_at(
+        authentication_deadline.into(),
+        verify_forwarded_request(&runtime, &receiver.directory, &identity, &body, started),
+    )
+    .await
+    {
+        Ok(Ok(request)) => request,
+        Err(_) | Ok(Err(crate::Error::Cell(CellError::Deadline))) => {
+            return peer_http_error(StatusCode::GATEWAY_TIMEOUT);
+        }
+        Ok(Err(crate::Error::Cell(CellError::RuntimeClosed))) => {
             return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
-        };
-        let Some(_codec) = reserve_peer_codec(&runtime) else {
-            return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
-        };
-        match receiver
-            .directory
-            .verify_peer_request(&body, identity.certificate(), identity.public_key(), now_ms)
-            .await
-        {
-            Ok(request) => request,
-            Err(error) => {
-                tracing::warn!(error = %error, "peer request authentication failed");
-                return peer_http_error(StatusCode::UNAUTHORIZED);
-            }
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "peer request authentication failed");
+            return peer_http_error(StatusCode::UNAUTHORIZED);
         }
     };
+    let deadline = started + Duration::from_millis(u64::from(request.remaining_ms()));
+    if Instant::now() >= deadline {
+        return peer_http_error(StatusCode::GATEWAY_TIMEOUT);
+    }
+    tokio::time::timeout_at(
+        deadline.into(),
+        dispatch_forwarded_request(&server, &receiver, &runtime, request, started, deadline),
+    )
+    .await
+    .unwrap_or_else(|_| peer_http_error(StatusCode::GATEWAY_TIMEOUT))
+}
+
+async fn dispatch_forwarded_request(
+    server: &Arc<Server>,
+    receiver: &PeerReceiver,
+    runtime: &CellRuntime,
+    request: VerifiedPeerRequest,
+    started: Instant,
+    deadline: Instant,
+) -> Response {
     if let Err(error) = server.authorize(&request) {
         tracing::warn!(error = %error, "peer request authorization failed");
         return peer_http_error(StatusCode::UNAUTHORIZED);
@@ -902,6 +958,9 @@ pub(crate) async fn forward(
         }
     }
     let mut local_resolution = receiver.resolver.resolve(request.target().clone()).await;
+    if Instant::now() >= deadline {
+        return peer_http_error(StatusCode::GATEWAY_TIMEOUT);
+    }
     let local_unavailable = matches!(
         &local_resolution,
         Err(CellError::CellNotActive | CellError::Fenced | CellError::CellDraining)
@@ -941,20 +1000,28 @@ pub(crate) async fn forward(
             Err(_) => peer_http_error(StatusCode::SERVICE_UNAVAILABLE),
         };
     }
-    let Ok(runtime) = server.cell_runtime() else {
-        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
-    };
+    // A timed-out caller cannot start new actor work. Once admitted, commands
+    // retain their own resources and finish publication if this wait is canceled.
+    if Instant::now() >= deadline {
+        return peer_http_error(StatusCode::GATEWAY_TIMEOUT);
+    }
     let dispatcher = PeerDispatcher::new(
         Arc::clone(&receiver.registry),
         Arc::new(receiver.resolver.clone()),
-        Arc::clone(&server) as Arc<dyn PeerAuthorizer>,
+        Arc::clone(server) as Arc<dyn PeerAuthorizer>,
     )
     .with_telemetry(runtime.telemetry_handle());
+    let now_ms = match now_ms() {
+        Ok(now_ms) => now_ms,
+        Err(_) => return peer_http_error(StatusCode::INTERNAL_SERVER_ERROR),
+    };
     let reply = dispatcher
         .dispatch_resolved(&request, now_ms, local_resolution)
         .await;
-    let Some(_codec) = reserve_peer_codec(&runtime) else {
-        return peer_http_error(StatusCode::SERVICE_UNAVAILABLE);
+    let _codec = match runtime.reserve_worker_job(deadline).await {
+        Ok(reservation) => reservation,
+        Err(CellError::Deadline) => return peer_http_error(StatusCode::GATEWAY_TIMEOUT),
+        Err(_) => return peer_http_error(StatusCode::SERVICE_UNAVAILABLE),
     };
     match encode_peer_reply(&reply) {
         Ok(body) => peer_http_reply(body),

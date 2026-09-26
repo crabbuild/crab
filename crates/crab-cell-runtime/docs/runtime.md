@@ -191,6 +191,21 @@ Arbitrary Rust cannot be preempted safely. When a callback exceeds the deadline,
 
 After exit, recovery closes the SQLite handle and reloads control. It releases only authority that still names the same Cell, incarnation, code, schema, owner, and epoch.
 
+HTTP peer codecs use a separate primitive-job budget. Immediate and queued
+admission share that budget; queued admission checks one absolute deadline
+before waiting and after waking. Canceling a waiter reserves nothing, and
+runtime shutdown wakes queued callers with `RuntimeClosed`. Callers must
+reserve retained request bytes before waiting. Enrollment storage I/O releases
+the codec slot; decoded requests remain untrusted until signature verification
+rechecks the signed enrollment's lifetime.
+
+The HTTP receiver applies its received transport budget to enrollment,
+resolution, activation, dispatch waiting, and reply encoding. That budget
+starts after the request body arrives and remains distinct from the native
+work deadline above. Canceling the HTTP wait does not cancel an accepted
+mutation's durable completion; the caller resolves an ambiguous result using
+the same stable request identity.
+
 ## Recover from panic without losing the worker
 
 The worker catches native callback panic at its fixed thread boundary. SQLite unwinds the transaction, the affected Cell becomes fenced, and the worker continues serving other Cells.
