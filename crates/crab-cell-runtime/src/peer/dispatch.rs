@@ -125,6 +125,14 @@ impl PeerDispatcher {
         let result = self.mutate_inner(transport, request, now_ms).await;
         let outcome = match result {
             Ok(outcome) => mutation_reply(transport, outcome),
+            // Command execution wraps fenced commit/publication failures as
+            // OutcomeUnknown. A direct FULL here therefore proves rollback;
+            // migration and other peer operations retain their own contract.
+            Err(Error::Sqlite(error))
+                if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull) =>
+            {
+                return error_reply(Error::Capacity("SQLite database full"));
+            }
             Err(error) => return error_reply(error),
         };
         wire::PeerReply {

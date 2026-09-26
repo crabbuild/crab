@@ -99,6 +99,13 @@ servable. No request receipt or commit sequence advances for that failed
 command. An observed commit or failed rollback still requires fencing; an
 unreachable result must never be reported as a proven rollback.
 
+For typed commands, a direct SQLite `FULL` remains the original SQLite error
+locally and maps to `RESOURCE_EXHAUSTED` / `NOT_STARTED` over peers. Command
+execution wraps fenced commit/publication errors as unknown before this mapping;
+a nested `FULL` therefore cannot become a refusal. This mapping is specific to
+typed command execution. Migration and other peer operations retain their own
+outcome contracts.
+
 ### Bounded application BLOB writes
 
 `CommandContext::write_sql_blob` fills an already allocated BLOB at a byte offset,

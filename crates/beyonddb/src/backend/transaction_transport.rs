@@ -23,6 +23,11 @@ impl<T> From<InvocationError<T>> for PhaseError {
             InvocationError::NotStarted(error @ crab_cell_runtime::Error::Capacity(_)) => {
                 Self::Capacity(error)
             }
+            InvocationError::NotStarted(crab_cell_runtime::Error::Sqlite(error))
+                if error.sqlite_error_code() == Some(crab_ltx::rusqlite::ErrorCode::DiskFull) =>
+            {
+                Self::Capacity(crab_cell_runtime::Error::Sqlite(error))
+            }
             error => Self::Other(cell_error(error)),
         }
     }

@@ -273,7 +273,8 @@ resolution progress. The public write driver resumes published BEGIN records fro
 stored account/data participant payloads, handles prepare/decision ambiguity, and returns
 only after participant resolution. A proven capacity refusal during participant
 upload or prepare proposes ABORT and returns ordered `ThrottlingError` reasons
-only after cleanup; unknown outcomes remain retryable and a competing COMMIT wins.
+only after cleanup. This includes direct SQLite FULL errors with verified rollback;
+unknown outcomes remain retryable and a competing COMMIT wins.
 Coordinator token lookup preserves original
 participants across route changes and starts the ten-minute replay window only
 after all participants resolve. The old account claims and Cell-local token

@@ -3,6 +3,98 @@
 use super::*;
 
 #[tokio::test]
+async fn sqlite_full_preserves_local_cause_and_peer_not_started_outcome() {
+    let fixture = fixture_with_limits(Limits {
+        max_database_bytes: 512 * 1024,
+        ..Limits::default()
+    })
+    .await;
+    let local = CellClient::local(fixture.registry.clone(), fixture.handle().clone());
+    let signer = PeerSigner::new(
+        SessionId::from_bytes([12; 16]),
+        fixture.registry.release_digest(),
+        ed25519_dalek::SigningKey::from_bytes(&[13; 32]),
+    );
+    let transport = LoopbackRoundTrip {
+        verifier: Arc::new(PeerVerifier::new(
+            SessionId::from_bytes([12; 16]),
+            fixture.registry.release_digest(),
+            signer.verifying_key(),
+        )),
+        dispatcher: Arc::new(PeerDispatcher::new(
+            fixture.registry.clone(),
+            Arc::new(LocalResolver {
+                target: fixture.target.clone(),
+                handle: fixture.handle().clone(),
+            }),
+            Arc::new(RepositoryAuthorizer),
+        )),
+    };
+    let peer = CellClient::peer(
+        fixture.registry.clone(),
+        Arc::new(signer),
+        PeerPrincipal {
+            issuer: "https://identity.example".into(),
+            subject: "alice".into(),
+            actions: vec!["repository.issue.create".into()],
+        },
+        Arc::new(transport),
+    );
+    for (index, client) in [&local, &peer].into_iter().enumerate() {
+        let error = client
+            .command::<AllocateComment>(
+                &fixture.target,
+                mutation_identity(80 + index as u8),
+                1024 * 1024,
+            )
+            .await
+            .unwrap_err();
+        if index == 0 {
+            assert!(
+                matches!(error, InvocationError::NotStarted(crab_cell_runtime::Error::Sqlite(ref cause))
+                if cause.sqlite_error_code() == Some(crab_ltx::rusqlite::ErrorCode::DiskFull)),
+                "{error:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    error,
+                    InvocationError::NotStarted(crab_cell_runtime::Error::Capacity(_))
+                ),
+                "{error:?}"
+            );
+        }
+        assert_eq!(
+            client
+                .query::<CountComments>(&fixture.target, None, ())
+                .await
+                .unwrap()
+                .output,
+            0
+        );
+    }
+    // Both refused transactions rolled back; the same owner can still publish.
+    let saved = peer
+        .command::<CreateComment>(
+            &fixture.target,
+            mutation_identity(82),
+            b"after-full".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved.receipt.commit_sequence, 1);
+    assert_eq!(
+        local
+            .query::<CountComments>(&fixture.target, None, ())
+            .await
+            .unwrap()
+            .output,
+        1
+    );
+    fixture.handle().drain().await.unwrap();
+}
+
+#[tokio::test]
 async fn typed_client_publishes_replays_rejections_and_receipted_reads() {
     let fixture = fixture().await;
     let client = CellClient::local(Arc::clone(&fixture.registry), fixture.handle().clone());

@@ -1490,9 +1490,10 @@ unbounded retry without adding another cancellation authority or matching error
 strings. A generic transient error remains appropriate for unknown outcomes.
 
 This does not reserve coordinator space, make an unreachable owner available,
-or bound ABORT cleanup latency under sustained pressure. Raw SQLite FULL and
-other errors without the runtime's typed capacity-refusal contract still follow
-the existing retry/error path. Post-COMMIT WAL/disk/memory admission, history
+or bound ABORT cleanup latency under sustained pressure. At this revision, raw
+SQLite FULL still followed the existing retry/error path; the later SQLite FULL
+section closes that command-path gap. Other errors without a proven refusal
+continue through recovery. Post-COMMIT WAL/disk/memory admission, history
 collection, and 10,000-Cell/multi-TB qualification remain open.
 
 
@@ -1554,3 +1555,68 @@ phase refusal through the existing driver and add catalog identity scoping plus
 a pre-deletion retention check. This growth protects decision and tenant
 boundaries without adding a second transaction protocol. These are functional
 and failure-path checks, not 10,000-Cell or multi-TB performance qualification.
+
+
+## SQLite FULL must preserve command refusal across peers
+
+At `77d85519019`, an actual multipart participant upload into a one-MiB Cell
+returned `InvocationError::NotStarted(Error::Sqlite(DiskFull))` locally. The
+BeyondDB phase adapter flattened that into a generic transient error, leaving
+BEGIN unresolved. Across a peer, the same verified rollback became
+`INTERNAL` / `UNKNOWN`, so the client returned Pending instead of refusal.
+Both failures were reproduced before the change.
+
+The local phase adapter now recognizes only direct `NotStarted(Sqlite(FULL))`,
+retaining the original SQLite cause in its capacity error. The peer typed-command
+dispatcher maps direct FULL to the existing `RESOURCE_EXHAUSTED` / `NOT_STARTED`
+wire contract. No enum, wire format, schema, dependency, or transaction-state
+transition changes. The driver uses the existing durable ABORT and resolution
+path; public cancellation still waits for every participant's cleanup. Existing
+COMMIT resolution keeps retrying and cannot turn into ABORT.
+
+FULL alone does not establish rollback. SQLite documents that some errors may
+roll back a statement or a whole transaction, and applications must inspect the
+transaction state. The actual proof here is the pinned managed writer contract:
+`Db::transaction_with` returns `Operation` only after rollback, while commit,
+rollback, and capture ambiguity fences the worker. Command execution inspects
+worker state and wraps fenced failures in `OutcomeUnknown`. The peer mapping
+never descends into that wrapper. See [SQLite transaction error handling](https://www.sqlite.org/lang_transaction.html)
+and [SQLite result codes](https://www.sqlite.org/rescode.html#full).
+
+### Evidence map and scope
+
+| Boundary | Evidence |
+| --- | --- |
+| Dependency | Pinned rusqlite 0.34.0 exposes `sqlite_error_code()` only for `SqliteFailure`; libsqlite3-sys 0.32.0 maps SQLITE_FULL to `ErrorCode::DiskFull`. No message matching. |
+| Local command | LTX verified rollback → runtime ready state → `NotStarted(Sqlite(FULL))` → phase capacity refusal. |
+| Peer command | The same actor result → typed mutation dispatch → existing resource-exhausted wire outcome → `NotStarted(Capacity)` → the same driver. |
+| Real refusal | Actual account/data upload allocations exceed one-MiB test Cells; no locks, prepared records, or reservations remain. The resumed coordinator reaches ABORT with two resolution receipts. Total requested item payload remains below four MiB. |
+| Peer behavior | A registered SQL command overflows a real 512-KiB Cell both locally and over a signed loopback peer. Neither attempt creates a row or receipt; a subsequent peer write on the same owner succeeds at sequence one. |
+| Ambiguity | Lost published prepare replies carry nested SQLite FULL; lost decision replies carry nested runtime capacity. Durable state still recovers COMMIT. |
+| Siblings | Account/data upload and prepare share the phase adapter. Public transactional reads/writes share its driver. Effects and migrations retain their existing peer error mapping; migration does not use the command path's unknown-outcome wrapper. |
+| Other consumer | Crab HTTP command adapters already preserve `NotStarted(Capacity)` as a Cell error; `app.rs` maps that existing variant to HTTP 429 with retry guidance. No new wire code or consumer branch is required. |
+| Main | BeyondDB is absent from current main; its peer converter treats SQLite failures generically. |
+
+**Is this the best fix?** Classification belongs at the boundaries that know
+whether command execution was refused. Changing SQLite rollback, inventing a
+new decision authority, or treating every SQLite error as capacity would widen
+the change without proof. The shared peer error converter deliberately remains
+unchanged: applying the command assumption to migration would misstate its
+outcome. This adds thirteen production lines across the two relevant boundaries.
+
+A completely full device can still prevent the coordinator decision or ABORT
+tombstone from being written. In that case the client receives a retryable error
+and recovery retains the work; cancellation is not reported prematurely. This
+change is not a WAL/disk/heap reservation, orphan-upload collection, history GC,
+or fleet-scale qualification. The full DynamoDB API objective remains open.
+
+
+Verification: all 13 runtime protocol tests and two peer-migration tests passed.
+The account, elastic-Cell, and signed peer-network suites passed all 23 tests;
+the elastic suite took 58.48 seconds and the two-owner case 97.51 seconds.
+The explicitly enabled signed SDK/RustFS server-process smoke passed in
+370.04 seconds, including hard restart, transaction replay, and restored data.
+Its binary remained fixed during the run. Strict all-target Clippy for BeyondDB
+and runtime, format, diff, and Cell/LTX layout checks passed. The new FULL
+regressions establish local/peer command refusal and driver cleanup; the process
+smoke protects the deployed server path and does not simulate a full device.
