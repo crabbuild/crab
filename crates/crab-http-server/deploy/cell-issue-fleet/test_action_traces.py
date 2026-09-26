@@ -99,6 +99,28 @@ class TraceTests(unittest.TestCase):
         self.assertNotIn("proof_wait_us", joined["phases"])
         self.assertEqual(joined["captures"], [])
 
+    def test_phase_summary_keeps_populations_and_subtracts_only_matched_timings(self):
+        remote = traces.join(self.samples, self.events)[0]
+        remote["phases"].update(http_response_ready_us=10_000, client_invocation_us=9_000)
+        local = copy.deepcopy(remote)
+        local.update(owner=local["entry"], proof="recorded", captures=[])
+        local["phases"].update(http_response_ready_us=20_000, client_invocation_us=1_000)
+        del local["phases"]["proof_wait_us"]
+        summary = traces.summarize([remote, local])
+        self.assertEqual(summary["all"]["http_outside_invocation"]["p50_ms"], 1)
+        self.assertEqual(summary["all"]["http_outside_invocation"]["p99_ms"], 19)
+        self.assertEqual(summary["all"]["proof_wait"]["count"], 1)
+        self.assertEqual(summary["local"]["capture"], {"count": 0})
+        self.assertEqual(summary["forwarded"], summary["object"])
+        self.assertEqual(summary["fleet"]["http"], {"count": 0})
+        self.assertEqual(traces.summarize([])["all"]["http"], {"count": 0})
+
+    def test_phase_summary_refuses_an_invocation_longer_than_its_http_request(self):
+        action = traces.join(self.samples, self.events)[0]
+        action["phases"]["http_response_ready_us"] = 1
+        with self.assertRaisesRegex(ValueError, "nested HTTP"):
+            traces.summarize([action])
+
     def test_text_formatter_spans_colors_and_booleans_preserve_the_join(self):
         events = []
         for original in self.events:

@@ -465,7 +465,6 @@ class LoadTests(unittest.TestCase):
     def test_hot_share_preserves_a_fixed_cell_count(self):
         workload = load.Workload(5, 10, 10, 8, 0.8)
         self.assertEqual(Counter(workload.cell(i) for i in range(100)), {1: 80, 2: 5, 3: 5, 4: 5, 5: 5})
-        self.assertEqual(load.percentiles([]), {"count": 0})
         for rate, duration in [(float("nan"), 1), (1, float("inf")), (1e300, 1e300), (0, 1)]:
             with self.subTest(rate=rate, duration=duration), self.assertRaises(ValueError):
                 load.Workload(5, rate, duration, 8, 0)

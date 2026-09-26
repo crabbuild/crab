@@ -512,6 +512,15 @@ Preparation must match the exact acknowledged Cell, incarnation, mutation
 request, module and stable operation ID. Missing preparation or boundary events
 fail the current join.
 
+`action_traces.latency` summarizes each observed phase separately for `all`,
+`local`, `forwarded`, `fleet`, `object` and `recorded` writes. Fault reports add
+the same summaries within each before/during/after population. Every distribution
+retains its sample count; absent proof or capture observations are not zero-time
+measurements. `http_outside_invocation` subtracts the nested typed invocation
+from HTTP response-readiness time for each matched action on the entry node,
+then computes percentiles. This interval includes request-path work and is not
+a network-only estimate. The other phase distributions still overlap.
+
 Replay retained evidence from the repository root, with one `--node-log` for
 every participating node and a new output path. Use the collector revision
 that produced the evidence: older server logs lack the new boundary events
@@ -527,6 +536,10 @@ python3 -B crates/crab-http-server/deploy/cell-issue-fleet/action_traces.py \
 python3 -B -W error::ResourceWarning -m unittest discover \
   -s crates/crab-http-server/deploy/cell-issue-fleet -p 'test_*.py' -v
 ```
+
+The replay command also writes `replayed-actions.summary.json` beside its
+joined JSONL. Both paths must be new. Retain the raw joined actions alongside
+the summary so phase populations and proof selection remain inspectable.
 
 This qualifier consumes the server's default text formatter. Keep logs intact;
 rotation, filtering, malformed fields or formatter changes must cause a failed

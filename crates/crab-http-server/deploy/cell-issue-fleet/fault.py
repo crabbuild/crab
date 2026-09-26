@@ -355,14 +355,14 @@ def main():
                     "execution_owners": dict(Counter(value["owner"] for value in values)),
                     "proofs": dict(Counter(value["proof"] for value in values)),
                     "forwarded_writes": sum(value["entry"] != value["owner"] for value in values),
-                    "write_latency": load.percentiles([value["http_latency_ms"] for value in values]),
+                    "latency": action_traces.summarize(values),
                 }
             during = [sample for sample in samples if killed <= sample.get("started_ns", 0) <= recovered]
             healthy = [sample for sample in during if sample["cell"] in unaffected]
             after = [sample for sample in samples if sample.get("started_ns", 0) > recovered]
             report["during_recovery"] = {
                 "pairs": len(during), "initially_other_owner_outcomes": dict(Counter(sample["outcome"] for sample in healthy)),
-                "initially_other_owner_pair_latency": load.percentiles([sample["scheduled_latency_ms"] for sample in healthy
+                "initially_other_owner_pair_latency": action_traces.percentiles([sample["scheduled_latency_ms"] for sample in healthy
                                                                        if sample["outcome"] == "success"]),
                 "after_recovery_pairs": len(after),
             }

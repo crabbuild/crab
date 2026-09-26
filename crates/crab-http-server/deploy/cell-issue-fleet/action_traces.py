@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -44,6 +45,42 @@ def one(events: list[dict], name: str) -> dict:
     if len(selected) != 1:
         raise ValueError(f"expected one {name}, found {len(selected)}; attribution is incomplete or ambiguous")
     return selected[0]
+
+
+def percentiles(samples: list[float]) -> dict:
+    if not samples:
+        return {"count": 0}
+    ordered = sorted(samples)
+    result = {
+        f"p{percentile}_ms": round(ordered[math.ceil(len(ordered) * percentile / 100) - 1], 3)
+        for percentile in (50, 95, 99)
+    }
+    result["max_ms"] = round(ordered[-1], 3)
+    result["count"] = len(samples)
+    return result
+
+
+def summarize(actions: list[dict]) -> dict:
+    rows = []
+    phase_names = {key.removesuffix("_us") for action in actions for key in action["phases"]}
+    for action in actions:
+        row = {key.removesuffix("_us"): value / 1_000 for key, value in action["phases"].items()}
+        # Both durations are measured on the entry node, with invocation inside
+        # HTTP handling. Subtract per action, never across clocks or percentiles.
+        outside = row["http_response_ready"] - row["client_invocation"]
+        if outside < 0:
+            raise ValueError("nested HTTP invocation exceeds its enclosing request")
+        row.update(http=action["http_latency_ms"], http_outside_invocation=outside)
+        if action["captures"]:
+            row["capture"] = sum(capture["capture_ns"] for capture in action["captures"]) / 1_000_000
+        route = "local" if action["entry"] == action["owner"] else "forwarded"
+        rows.append(({"all", route, action["proof"]}, row))
+    names = sorted(phase_names | {"http", "http_outside_invocation", "capture", "proof_wait"})
+    return {
+        group: {name: percentiles([row[name] for groups, row in rows if group in groups and name in row])
+                for name in names}
+        for group in ("all", "local", "forwarded", "fleet", "object", "recorded")
+    }
 
 
 def join(samples: list[dict], events: list[dict]) -> list[dict]:
@@ -145,9 +182,16 @@ def main() -> None:
         events.extend(parse_log(Path(path).read_text(), node))
     samples = [json.loads(line) for line in args.samples.read_text().splitlines()]
     actions = join(samples, events)
+    summary = summarize(actions)
+    summary_path = args.output.with_suffix(".summary.json")
+    if summary_path.exists():
+        raise FileExistsError(summary_path)
     with args.output.open("x") as output:
         for action in actions:
             output.write(json.dumps(action) + "\n")
+    with summary_path.open("x") as output:
+        json.dump(summary, output, indent=2)
+        output.write("\n")
 
 
 if __name__ == "__main__":

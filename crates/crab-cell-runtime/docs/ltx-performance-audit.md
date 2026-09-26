@@ -101,6 +101,34 @@ identifying a service. Neither attempt supplies a latency or throughput sample.
 The retained attempt logs separate this infrastructure failure from runtime
 behavior. These attempts used the earlier schema-6 load harness.
 
+The 1,200 joined actions from successful run 36255479387 also provide matched
+phase evidence. The table reports p99 in milliseconds over 300 acknowledged
+writes per stage; its columns overlap and must not be added.
+
+| Nodes | HTTP write | SQL worker queue | SQL worker execution | Proof wait | HTTP outside typed invocation |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 3 | 41.127 | 0.129 | 3.699 | 22.427 | 13.804 |
+| 5 | 60.734 | 0.138 | 4.421 | 31.488 | 17.774 |
+| 10 | 68.222 | 0.127 | 4.084 | 31.362 | 25.989 |
+| 20 | 160.765 | 1.148 | 5.551 | 101.063 | 67.578 |
+
+At twenty nodes, capture p99 was 2.964 ms, inside worker execution. This
+low-offered-rate workload therefore points toward proof/publication and the
+HTTP request path for the next measurements. It does not support increasing
+SQL worker count as the first remedy. The HTTP remainder is computed per
+matched action on one entry node before taking percentiles; it does not isolate
+routing, enrichment, authentication or network cost. Those older logs lack
+the newer boundary events, and cannot supply their missing durations.
+
+The common [trace summarizer](../../crab-http-server/deploy/cell-issue-fleet/action_traces.py)
+now emits these distributions automatically in stage and fault reports, grouped
+by local/forwarded route and winning proof. Two focused cases protect matched
+subtraction and absent recorded-response observations; all 58 harness tests pass.
+Reprocessing the retained actions reproduced 72 independently computed phase
+percentiles. Source/summary SHA256 receipts and the summaries are retained in
+`fleet-36255479387/` beneath this checkout's external target. This is a new
+analysis of the earlier image, not current-runtime throughput qualification.
+
 ### Measurement contract
 
 Report separate latency distributions for resident local actions, forwarded

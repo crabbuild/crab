@@ -175,19 +175,6 @@ def load_request(gateway: str, nodes: int, method: str, path: str, payload: dict
     raise RuntimeError("load request retry loop did not terminate")
 
 
-def percentiles(samples: list[float]) -> dict:
-    if not samples:
-        return {"count": 0}
-    ordered = sorted(samples)
-    result = {
-        f"p{percentile}_ms": round(ordered[math.ceil(len(ordered) * percentile / 100) - 1], 3)
-        for percentile in (50, 95, 99)
-    }
-    result["max_ms"] = round(ordered[-1], 3)
-    result["count"] = len(samples)
-    return result
-
-
 def verify_acknowledged(gateway: str, nodes: int, samples: list[dict]) -> dict:
     acknowledged = [sample for sample in samples if "acknowledged" in sample]
     started = time.monotonic()
@@ -632,7 +619,7 @@ def main() -> int:
         "node_samples": nodes_path.name,
         "coverage_requests": len(coverage_samples),
         "node_cell_coverage": coverage,
-        "coverage_read_latency": percentiles([sample["latency_ms"] for sample in coverage_samples]),
+        "coverage_read_latency": action_traces.percentiles([sample["latency_ms"] for sample in coverage_samples]),
         "passed": False,
         "integrity_verified": False,
     }
@@ -670,10 +657,10 @@ def main() -> int:
             cell_offered_pairs=dict(Counter(sample["cell"] for sample in samples)),
             total_retries=sum(operation["retries"] for operation in operations),
             attempt_failures=dict(Counter(str(reason) for operation in operations for reason in operation["retry_reasons"])),
-            latency={operation: percentiles([sample["latency_ms"] for sample in successes if sample["operation"] == operation])
+            latency={operation: action_traces.percentiles([sample["latency_ms"] for sample in successes if sample["operation"] == operation])
                      for operation in ("write", "read")},
-            scheduled_pair_latency=percentiles([sample["scheduled_latency_ms"] for sample in samples if "scheduled_latency_ms" in sample]),
-            dispatch_delay=percentiles([sample["dispatch_delay_ms"] for sample in samples]),
+            scheduled_pair_latency=action_traces.percentiles([sample["scheduled_latency_ms"] for sample in samples if "scheduled_latency_ms" in sample]),
+            dispatch_delay=action_traces.percentiles([sample["dispatch_delay_ms"] for sample in samples]),
         )
         if summary["stopped_on_invariant"]:
             raise RuntimeError("load stopped on an application or transport contract failure; inspect raw samples")
@@ -695,6 +682,7 @@ def main() -> int:
             "proofs": dict(Counter(action["proof"] for action in actions)),
             "execution_owners": dict(Counter(action["owner"] for action in actions)),
             "forwarded_writes": sum(action["entry"] != action["owner"] for action in actions),
+            "latency": action_traces.summarize(actions),
         }
         report["acknowledgements_before_recovery"] = verify_acknowledged(gateway, args.nodes, samples)
         after = verify_roots(path, profiles, before, acknowledged)

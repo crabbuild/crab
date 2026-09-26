@@ -30,7 +30,9 @@ class CurvePointTests(unittest.TestCase):
                 summary = {"elapsed_seconds": 1, "planned_pairs": 3 if failure is None else 6,
                            "outcomes": {"success": 3}, "stopped_on_invariant": failure == "contract"}
                 controls = {index: {"root": {"commit_sequence": 1}} for index in range(1, 4)}
-                actions = [{"proof": "Object", "owner": name, "entry": name} for name in nodes]
+                actions = [{"proof": "object", "owner": name, "entry": name, "http_latency_ms": 1,
+                            "phases": {"http_response_ready_us": 900, "client_invocation_us": 600},
+                            "captures": [{"capture_ns": 1000}]} for name in nodes]
                 responses = {
                     "running_nodes": set(nodes), "image_provenance": {"image": "sha256:fixture"},
                     "owner_map": ({index: name for index, name in enumerate(nodes, 1)}, controls),
@@ -62,6 +64,7 @@ class CurvePointTests(unittest.TestCase):
                 if failure:
                     self.assertIn("error", receipt)
                 if failure in (None, "overload"):
+                    self.assertEqual(receipt["action_traces"]["latency"]["local"]["http"]["count"], 3)
                     mocks["verify_acknowledged"].assert_called_once()
                     mocks["recover_owner"].assert_called_once()
 
