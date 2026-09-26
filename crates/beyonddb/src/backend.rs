@@ -182,6 +182,9 @@ impl TableEngine for CellStorage {
                             ActivateTableRouteOutcome::AlreadyActive => StorageError::Transient(
                                 "table route changed during creation".into(),
                             ),
+                            ActivateTableRouteOutcome::TransactionConflict => {
+                                StorageError::Transient("table has prepared transactions".into())
+                            }
                             ActivateTableRouteOutcome::TableNotEmpty => {
                                 StorageError::TableNotActive(record.table_name.clone())
                             }
@@ -230,6 +233,11 @@ impl TableEngine for CellStorage {
                 Err(InvocationError::Rejected(committed)) => match committed.output.0 {
                     DeleteTableOutcome::TableNotFound => {
                         return Err(StorageError::TableNotFound(name));
+                    }
+                    DeleteTableOutcome::TransactionConflict => {
+                        return Err(StorageError::Transient(
+                            "table has prepared transactions".into(),
+                        ));
                     }
                     DeleteTableOutcome::DeletionProtected => {
                         return Err(StorageError::DeletionProtected(name));

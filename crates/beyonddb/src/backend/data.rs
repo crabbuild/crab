@@ -168,6 +168,9 @@ impl DataEngine for CellStorage {
                 .map_err(cell_error)?;
             match output.output.0 {
                 GetItemOutcome::Found(item) => Ok(item),
+                GetItemOutcome::Conflict => Err(StorageError::Transient(
+                    "item is locked by a transaction".into(),
+                )),
                 GetItemOutcome::TableNotFound => {
                     Err(StorageError::TableNotFound(key_info.table_name))
                 }
@@ -500,6 +503,9 @@ impl DataEngine for CellStorage {
                     items,
                     last_evaluated_key,
                 } => Ok((scan_segment(items, &key_info, segment)?, last_evaluated_key)),
+                ScanItemsOutcome::Conflict => Err(StorageError::Transient(
+                    "scan range is locked by a transaction".into(),
+                )),
                 ScanItemsOutcome::TableNotFound => {
                     Err(StorageError::TableNotFound(key_info.table_name))
                 }
@@ -580,6 +586,12 @@ impl DataEngine for CellStorage {
             };
             match outcome {
                 TransactionGetOutcome::Found(items) => Ok(items),
+                TransactionGetOutcome::Conflict { index } => Err(transaction_canceled(
+                    index,
+                    TransactionFailure::Conflict,
+                    routing.len(),
+                    &[],
+                )),
                 TransactionGetOutcome::InvalidCount => Err(StorageError::Validation(
                     "transaction read count must be 1..=100".into(),
                 )),
@@ -1022,6 +1034,9 @@ fn query_value(expr: &Expr, maps: &ExpressionMaps) -> Result<AttributeValue, Sto
 
 fn mutation_rejection(outcome: ItemMutationOutcome, table_name: &str) -> StorageError {
     match outcome {
+        ItemMutationOutcome::Conflict => {
+            StorageError::TransactionConflict("item is locked by a transaction".into())
+        }
         ItemMutationOutcome::TableNotFound => StorageError::TableNotFound(table_name.to_owned()),
         ItemMutationOutcome::InvalidItem => {
             StorageError::Validation("item violates table schema".into())
@@ -1036,6 +1051,9 @@ fn mutation_rejection(outcome: ItemMutationOutcome, table_name: &str) -> Storage
 
 fn update_rejection(outcome: UpdateItemOutcome, table_name: &str) -> StorageError {
     match outcome {
+        UpdateItemOutcome::Conflict => {
+            StorageError::TransactionConflict("item is locked by a transaction".into())
+        }
         UpdateItemOutcome::TableNotFound => StorageError::TableNotFound(table_name.to_owned()),
         UpdateItemOutcome::InvalidItem => {
             StorageError::Validation("item violates table schema".into())

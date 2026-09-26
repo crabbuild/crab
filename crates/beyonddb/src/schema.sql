@@ -81,3 +81,11 @@ CREATE INDEX ddb_transaction_applied_age ON ddb_transaction_applied (created_at_
 CREATE TABLE ddb_coordinator_shards (
     shard INTEGER PRIMARY KEY CHECK (shard BETWEEN 0 AND 4095)
 );
+
+CREATE TABLE ddb_account_transaction_locks (
+    table_id TEXT NOT NULL REFERENCES ddb_tables(table_id),
+    item_key BLOB NOT NULL,
+    transaction_id BLOB NOT NULL REFERENCES ddb_transactions(transaction_id),
+    PRIMARY KEY (table_id, item_key)
+);
+CREATE INDEX ddb_account_transaction_locks_owner ON ddb_account_transaction_locks (transaction_id);

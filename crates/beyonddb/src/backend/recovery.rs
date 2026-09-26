@@ -1,6 +1,6 @@
 //! Complete published cross-Cell decisions after a request or owner exits.
 
-use crab_cell_runtime::client::{InvocationError, Receipt};
+use crab_cell_runtime::client::{InvocationError, Observed, Receipt};
 use crab_cell_runtime::identity::CellTarget;
 use extenddb_storage::error::StorageError;
 
@@ -8,12 +8,13 @@ use super::{CellStorage, cell_error, mutation_identity};
 use crate::{
     CoordinatorDecision, CoordinatorParticipantTarget, CoordinatorPhaseInput,
     CoordinatorPhaseOutcome, DecideCrossCellTransaction, DecideCrossCellTransactionInput,
-    DecideCrossCellTransactionOutcome, Json, PendingTransactionState, ReadCrossCellTransaction,
-    ReadCrossCellTransactionInput, ReadPartitionTransaction, ReadPartitionTransactionInput,
-    ReadPartitionTransactionOutcome, ReadPendingCrossCellTransactions,
-    ReadPendingCrossCellTransactionsInput, ReadUnresolvedCoordinatorParticipants,
-    RecordParticipantResolution, ResolvePartitionTransaction, ResolvePartitionTransactionInput,
-    ResolvePartitionTransactionOutcome, coordinator_target, data_target,
+    DecideCrossCellTransactionOutcome, Json, NAMESPACE, ParticipantTransactionState,
+    PendingTransactionState, ReadAccountTransaction, ReadCrossCellTransaction,
+    ReadCrossCellTransactionInput, ReadPartitionTransaction, ReadPendingCrossCellTransactions,
+    ReadPendingCrossCellTransactionsInput, ReadTransactionInput,
+    ReadUnresolvedCoordinatorParticipants, RecordParticipantResolution, ResolveAccountTransaction,
+    ResolvePartitionTransaction, ResolveTransactionInput, ResolveTransactionOutcome,
+    account_target, coordinator_target, data_target,
 };
 
 impl CellStorage {
@@ -87,7 +88,7 @@ impl CellStorage {
         }
     }
 
-    /// Finish a published decision across its data Cell participants.
+    /// Finish a published decision across account and data Cell participants.
     ///
     /// Returns a retryable error while the decision or any participant outcome
     /// is uncertain. The caller must retry; it must not infer an abort.
@@ -134,11 +135,8 @@ impl CellStorage {
         for participant in participants {
             let position = participant.position;
             let target = match participant.target {
-                CoordinatorParticipantTarget::Account => {
-                    return Err(StorageError::Unsupported(
-                        "account Cell cross-Cell participant resolution".into(),
-                    ));
-                }
+                CoordinatorParticipantTarget::Account => account_target(account_id)
+                    .map_err(|error| StorageError::Internal(error.to_string()))?,
                 CoordinatorParticipantTarget::Data {
                     table_id,
                     partition_id,
@@ -147,7 +145,7 @@ impl CellStorage {
                     .map_err(|error| StorageError::Internal(error.to_string()))?,
             };
             let receipt = self
-                .resolve_data_participant(&target, &coordinator, transaction_id, commit)
+                .resolve_participant(&target, &coordinator, transaction_id, commit)
                 .await?;
             let recorded = self
                 .client
@@ -194,52 +192,51 @@ impl CellStorage {
         Ok(())
     }
 
-    async fn resolve_data_participant(
+    async fn resolve_participant(
         &self,
         target: &CellTarget,
         coordinator: &CellTarget,
         transaction_id: [u8; 16],
         commit: bool,
     ) -> Result<Receipt, StorageError> {
-        let input = ReadPartitionTransactionInput {
+        let input = ReadTransactionInput {
             transaction_id,
             coordinator_cell: *coordinator.cell_id().as_bytes(),
         };
-        let observed = self
-            .client
-            .query::<ReadPartitionTransaction>(target, None, Json(input.clone()))
-            .await
-            .map_err(cell_error)?;
+        let observed = self.participant_state(target, input.clone()).await?;
         match (commit, observed.output.0) {
-            (true, ReadPartitionTransactionOutcome::Committed)
-            | (false, ReadPartitionTransactionOutcome::Aborted) => return Ok(observed.receipt),
-            (true, ReadPartitionTransactionOutcome::Prepared)
-            | (false, ReadPartitionTransactionOutcome::Prepared)
-            | (false, ReadPartitionTransactionOutcome::Missing) => {}
+            (true, ParticipantTransactionState::Committed)
+            | (false, ParticipantTransactionState::Aborted) => return Ok(observed.receipt),
+            (true, ParticipantTransactionState::Prepared)
+            | (false, ParticipantTransactionState::Prepared)
+            | (false, ParticipantTransactionState::Missing) => {}
             _ => {
                 return Err(StorageError::Internal(
                     "participant state contradicts coordinator decision".into(),
                 ));
             }
         }
-        let result = self
-            .client
-            .command::<ResolvePartitionTransaction>(
-                target,
-                mutation_identity()?,
-                Json(ResolvePartitionTransactionInput {
-                    transaction_id,
-                    coordinator_cell: input.coordinator_cell,
-                    commit,
-                }),
-            )
-            .await;
+        let resolve = Json(ResolveTransactionInput {
+            transaction_id,
+            coordinator_cell: input.coordinator_cell,
+            commit,
+        });
+        let identity = mutation_identity()?;
+        let result = if target.namespace() == NAMESPACE {
+            self.client
+                .command::<ResolveAccountTransaction>(target, identity, resolve)
+                .await
+        } else {
+            self.client
+                .command::<ResolvePartitionTransaction>(target, identity, resolve)
+                .await
+        };
         match result {
             Ok(committed)
                 if matches!(
                     (commit, &committed.output.0),
-                    (true, ResolvePartitionTransactionOutcome::Committed)
-                        | (false, ResolvePartitionTransactionOutcome::Aborted)
+                    (true, ResolveTransactionOutcome::Committed)
+                        | (false, ResolveTransactionOutcome::Aborted)
                 ) =>
             {
                 Ok(committed.receipt)
@@ -248,15 +245,11 @@ impl CellStorage {
                 "participant rejected published transaction decision".into(),
             )),
             Err(InvocationError::Pending(_)) => {
-                let observed = self
-                    .client
-                    .query::<ReadPartitionTransaction>(target, None, Json(input))
-                    .await
-                    .map_err(cell_error)?;
+                let observed = self.participant_state(target, input).await?;
                 if matches!(
                     (commit, observed.output.0),
-                    (true, ReadPartitionTransactionOutcome::Committed)
-                        | (false, ReadPartitionTransactionOutcome::Aborted)
+                    (true, ParticipantTransactionState::Committed)
+                        | (false, ParticipantTransactionState::Aborted)
                 ) {
                     Ok(observed.receipt)
                 } else {
@@ -267,5 +260,22 @@ impl CellStorage {
             }
             Err(error) => Err(cell_error(error)),
         }
+    }
+
+    pub(super) async fn participant_state(
+        &self,
+        target: &CellTarget,
+        input: ReadTransactionInput,
+    ) -> Result<Observed<Json<ParticipantTransactionState>>, StorageError> {
+        let result = if target.namespace() == NAMESPACE {
+            self.client
+                .query::<ReadAccountTransaction>(target, None, Json(input))
+                .await
+        } else {
+            self.client
+                .query::<ReadPartitionTransaction>(target, None, Json(input))
+                .await
+        };
+        result.map_err(cell_error)
     }
 }

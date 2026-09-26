@@ -232,12 +232,13 @@ protocol cannot implement `TransactWriteItems`. See [the elastic topology
 design](SCALING.md) for split, routing, recovery, and validation requirements.
 The [cross-Cell transaction protocol](CROSS_CELL_TRANSACTIONS.md) specifies
 the decision, lock, visibility, and failure-recovery contract.
-Data Cells now persist prepared item images and exclusive key locks, apply or
-abort them idempotently, and refuse a split seal while locks remain. Ordinary
-data Cell writes check those locks. Sharded coordinator Cells can durably
+Account and data Cells now persist prepared item images and exclusive key
+locks using one shared participant state machine. Ordinary reads and writes
+respect those locks. Data Cells refuse split sealing; account Cells refuse
+table deletion and route activation while prepared intents remain. Sharded coordinator Cells can durably
 record a participant set, prepare receipts, one commit or abort decision, and
 resolution progress. An internal driver resumes published BEGIN records from
-stored participant payloads, handles prepare/decision ambiguity, and returns
+stored account/data participant payloads, handles prepare/decision ambiguity, and returns
 only after participant resolution. Coordinator token lookup preserves original
 participants across route changes and starts the ten-minute replay window only
 after all participants resolve. Public token admission still uses account
@@ -245,7 +246,9 @@ claims and awaits integration with this coordinator path. Fenced startup
 recovery discovers registered coordinators and their immutable participant owners, then resolves unfinished work before
 public traffic starts. Keyed reads, Query, Scan, and same-Cell transactional
 reads now reject unresolved intents; range checks include pending creates.
-These barriers fail closed and do not yet resolve decisions on demand.
+A mixed-participant host test restores account, data, and coordinator owners
+and finishes a pending transaction with concurrent drivers. These barriers
+fail closed and do not yet resolve decisions on demand.
 Continuous recovery, cross-Cell read snapshots, and adapter routing remain
 incomplete, so cross-Cell requests continue to fail explicitly.
 

@@ -318,6 +318,8 @@ fn decode_plan(rows: &SqlResultSet) -> Result<Option<SplitPlan>> {
 /// Outcome of publishing initial table placement.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ActivateTableRouteOutcome {
+    /// Prepared account transactions still own keys in the table.
+    TransactionConflict,
     /// This exact route is now durable.
     Activated,
     /// The table no longer exists in the account Cell.
@@ -356,6 +358,12 @@ impl Command for ActivateTableRoute {
         if !route.valid_for(&table) {
             return Ok(CommandResult::Rejected(Json(
                 ActivateTableRouteOutcome::InvalidRoute,
+            )));
+        }
+        // A prepared create has no live row yet, but its destination is fixed.
+        if crate::items::transaction::table_locked(context, &table.id)? {
+            return Ok(CommandResult::Rejected(Json(
+                ActivateTableRouteOutcome::TransactionConflict,
             )));
         }
         let account_items = context.sql(&statement(

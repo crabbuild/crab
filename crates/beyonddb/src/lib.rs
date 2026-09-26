@@ -6,6 +6,7 @@ mod catalog;
 mod credentials;
 mod expression_wire;
 mod items;
+mod participant;
 mod partition;
 mod provision;
 mod routing;
@@ -19,6 +20,10 @@ mod ttl;
 
 pub use expression_wire::WireCondition;
 pub use items::*;
+pub use participant::{
+    ParticipantTransactionState, PrepareTransactionOutcome, ReadTransactionInput,
+    ResolveTransactionInput, ResolveTransactionOutcome,
+};
 pub use partition::*;
 pub use provision::*;
 pub use routing::*;
@@ -64,7 +69,8 @@ const DATA_NAMESPACE: NamespaceId = NamespaceId::from_bytes([0x43; 16]);
 const APPLICATION: ApplicationId = ApplicationId::from_bytes([0x42; 16]);
 /// Stable Cell application identity for BeyondDB storage layouts.
 pub const APPLICATION_ID: ApplicationId = APPLICATION;
-const SCHEMA: &str = include_str!("schema.sql");
+static SCHEMA: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| format!("{}\n{}", participant::SCHEMA, include_str!("schema.sql")));
 const OPERATION_BYTES: u32 = 4 * 1024 * 1024 + 64 * 1024;
 
 static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
@@ -87,7 +93,7 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 18] = [
+static COMMANDS: [OperationDescriptor; 20] = [
     operation(1),
     operation(2),
     operation(3),
@@ -106,8 +112,10 @@ static COMMANDS: [OperationDescriptor; 18] = [
     operation(18),
     operation(19),
     operation(20),
+    operation(21),
+    operation(22),
 ];
-static QUERIES: [OperationDescriptor; 20] = [
+static QUERIES: [OperationDescriptor; 21] = [
     operation(4),
     operation(6),
     operation(7),
@@ -128,6 +136,7 @@ static QUERIES: [OperationDescriptor; 20] = [
     operation(22),
     operation(23),
     operation(24),
+    operation(25),
 ];
 
 /// Statically linked account application.
@@ -216,13 +225,13 @@ pub fn account_target(account_id: &str) -> Result<CellTarget> {
 
 /// Installs the initial account schema during Cell bootstrap.
 pub fn initialize_account(transaction: &crab_ltx::rusqlite::Transaction<'_>) -> Result<()> {
-    transaction.execute_batch(SCHEMA)?;
+    transaction.execute_batch(&SCHEMA)?;
     Ok(())
 }
 
 /// Installs a data partition's SQL schema during Cell bootstrap.
 pub fn initialize_partition(transaction: &crab_ltx::rusqlite::Transaction<'_>) -> Result<()> {
-    transaction.execute_batch(include_str!("partition_schema.sql"))?;
+    transaction.execute_batch(&partition::SCHEMA)?;
     Ok(())
 }
 
@@ -240,6 +249,8 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
                 source.update(include_bytes!("lib.rs"));
                 source.update(include_bytes!("table.rs"));
                 source.update(include_bytes!("items.rs"));
+                source.update(include_bytes!("items/transaction.rs"));
+                source.update(include_bytes!("participant.rs"));
                 source.update(include_bytes!("items/scan.rs"));
                 source.update(include_bytes!("expression_wire.rs"));
                 source.update(include_bytes!("routing.rs"));
@@ -257,7 +268,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
             schema_max: 1,
             migrations: Box::leak(Box::new([MigrationDescriptor {
                 version: 1,
-                sql: SCHEMA,
+                sql: &SCHEMA,
                 digest: Digest::from_bytes(*blake3::hash(SCHEMA.as_bytes()).as_bytes()),
             }])),
             commands: &COMMANDS,
@@ -273,6 +284,8 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<PutItem>()?;
         registry.bind_command::<DeleteItem>()?;
         registry.bind_command::<TransactWrite>()?;
+        registry.bind_command::<PrepareAccountTransaction>()?;
+        registry.bind_command::<ResolveAccountTransaction>()?;
         registry.bind_command::<DeleteTable>()?;
         registry.bind_command::<UpdateTable>()?;
         registry.bind_command::<UpdateItem>()?;
@@ -289,6 +302,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<RegisterCoordinatorShard>()?;
         registry.bind_query::<GetItem>()?;
         registry.bind_query::<TransactGet>()?;
+        registry.bind_query::<ReadAccountTransaction>()?;
         registry.bind_query::<DescribeTable>()?;
         registry.bind_query::<ListTables>()?;
         registry.bind_query::<DescribeTableById>()?;

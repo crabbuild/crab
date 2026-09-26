@@ -226,7 +226,7 @@ pub(crate) async fn assert_range_read_barriers(
         .command::<ResolvePartitionTransaction>(
             target,
             identity(202),
-            Json(ResolvePartitionTransactionInput {
+            Json(ResolveTransactionInput {
                 transaction_id,
                 coordinator_cell,
                 commit: false,
@@ -366,7 +366,7 @@ pub(crate) async fn assert_sdk_read_barrier(
         .command::<ResolvePartitionTransaction>(
             &target,
             identity(204),
-            Json(ResolvePartitionTransactionInput {
+            Json(ResolveTransactionInput {
                 transaction_id,
                 coordinator_cell,
                 commit: false,

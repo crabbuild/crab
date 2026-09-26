@@ -11,6 +11,7 @@ use super::{
     command_access, command_item, data_key_hash, decode_spec, item_key, query_access, statement,
     valid_item, valid_key, write_item,
 };
+use crate::PrepareTransactionOutcome;
 use crate::items::{TransactionFailure, TransactionWrite, decode_item};
 
 /// Ordered writes that must all address the same installed data Cell.
@@ -165,12 +166,12 @@ impl StageError {
         }
     }
 
-    fn prepare_outcome(self) -> PreparePartitionTransactionOutcome {
+    fn prepare_outcome(self) -> PrepareTransactionOutcome {
         match self {
-            Self::StaleRoute => PreparePartitionTransactionOutcome::StaleRoute,
-            Self::WrongPartition => PreparePartitionTransactionOutcome::WrongPartition,
+            Self::StaleRoute => PrepareTransactionOutcome::StaleRoute,
+            Self::WrongPartition => PrepareTransactionOutcome::WrongPartition,
             Self::Rejected { index, reason } => {
-                PreparePartitionTransactionOutcome::Rejected { index, reason }
+                PrepareTransactionOutcome::Rejected { index, reason }
             }
         }
     }

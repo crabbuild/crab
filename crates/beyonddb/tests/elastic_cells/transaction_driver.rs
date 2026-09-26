@@ -299,7 +299,7 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                 .command::<ResolvePartitionTransaction>(
                     &participants[1].0,
                     identity(190),
-                    Json(ResolvePartitionTransactionInput {
+                    Json(ResolveTransactionInput {
                         transaction_id: [190; 16],
                         coordinator_cell: *coordinator.cell_id().as_bytes(),
                         commit: false,

@@ -8,17 +8,17 @@ design, not a claim that the API works today. The adapter currently rejects
 cross-partition requests in `src/backend/data.rs`. A routed single-Cell write
 is one `PartitionTransactWrite` command and a single-Cell read is one
 `PartitionTransactGet` query. The account token claim records a retry
-destination, not a transaction outcome. Data Cells now have internal prepare,
+destination, not a transaction outcome. Account and data Cells now have internal prepare,
 lock, and resolution commands. Sharded coordinator Cells store immutable
 participant sets and terminal decisions. The ExtendDB adapter does not yet
 drive this protocol or acquire a cross-Cell read snapshot, so the API remains
-unsupported. Data Cell reads now reject unresolved intents instead of
+unsupported. Account and data Cell reads reject unresolved intents instead of
 returning live images that could predate an already-published commit.
 
 Each coordinator now indexes records with unresolved participants and exposes
 bounded cursor pages. A new owner can discover both undecided and decided
 work after restoring its published Cell state. An internal resolver can now
-finish a terminal decision across data Cell participants, using participant
+finish a terminal decision across account and data Cell participants, using participant
 state after an ambiguous reply and recording each resolution durably. An
 internal write driver can also resume a published `BEGIN`: it reads the
 immutable participant payloads, prepares in Cell order, records receipts,
@@ -35,8 +35,7 @@ split sources absent from the current table route. Participant payloads are
 stored separately, so target discovery does not read item images.
 The private peer listener is available during resolution so recovering nodes
 can reach one another; the public DynamoDB listener starts after recovery.
-Account Cell participants, changed-endpoint takeover, and the adapter path
-remain to be built.
+Changed-endpoint takeover and public adapter admission remain to be built.
 
 The ExtendDB `DataEngine` contract requires all writes, the account-scoped
 client token, and stream capture to commit together. Its engine validates up
@@ -287,9 +286,38 @@ The owner-restart test discovers the token before and after fenced recovery.
 SQL query plans use the token and transaction-ID indexes rather than scanning
 coordinator history.
 
+## Account participant boundary
+
+`src/participant.rs` owns the shared durable phase state machine and schema for
+both participant types: immutable prepare identity, replay/mismatch, abort
+before prepare, terminal decision conflicts, and staged-image retention.
+Account and data wrappers own their image format, local index updates, and
+lock release. Their completion callbacks and terminal marker run in the same
+Cell command savepoint. This replaces the data-only phase implementation;
+there is no second account decision protocol.
+
+Account prepares and account-local TransactWrite share staging and validation
+in `src/items/transaction.rs`. Put, Delete, Update, and ConditionCheck each
+lock `(table_id, item_key)`, including absent items. DeleteTable and initial
+route activation check the table's lock prefix: otherwise a prepared create
+could commit into a deleted table or an obsolete account destination. Table
+updates do not change primary-key schemas; tags and TTL configuration do not
+mutate account item images. Data Cell split and TTL write fences are unchanged.
+
+`tests/elastic_cells/account_participant.rs` runs a mixed account/data driver,
+restores all three Cell owners from their object-store roots with an account
+prepare pending, then races two resumes through COMMIT. It verifies staged
+Put/Delete/Update/ConditionCheck behavior, table-scoped conflicts, ordinary
+read/write and same-Cell transaction rejection, scan continuation, deletion
+and empty-table route fences, replay/mismatch, abort tombstones, prepared
+abort cleanup, and an account condition failure rolling back the data write.
+Existing data driver and read-barrier tests exercise the shared state machine
+through the other wrapper. This is host-level proof, not a signed public
+cross-Cell DynamoDB API acceptance test.
+
 ## Read-barrier evidence and limits
 
-The visibility policy belongs in the data Cell query handlers, where the
+The visibility policy belongs in the account and data Cell query handlers, where the
 lock lookup and item lookup share the serialized SQLite execution. The runtime
 executor refuses queries while its logical head is unpublished
 (`crates/crab-cell-runtime/src/cell/executor.rs`, `CellExecutor::query`).
@@ -305,9 +333,13 @@ and introduce a check/read race.
 | Split export | `SealPartition` refuses locks; `PartitionExport` requires sealed state | Existing seal, export, split, and recovery checks exercise this boundary. |
 
 These checks run in `tests/elastic_cells.rs` and its
-`elastic_cells/transaction_visibility.rs` module. The account read path has
-no prepared participant implementation yet; cross-Cell API admission remains
-closed. TTL candidate reads are internal hints; deletion still uses the
+`elastic_cells/transaction_visibility.rs` module. Account Get (also used
+by hash-only Query), Scan, and same-Cell TransactGet apply the same lock barrier, keyed
+by table ID and canonical item key. Account Scan conservatively fences the
+unvisited range, including pending creates without live rows. The account
+participant test checks these barriers and their persistence across owner
+restart; SQLite query plans use covering primary-key lookups for item, range,
+and table fences and an owner index for lock cleanup; cross-Cell API admission remains closed. TTL candidate reads are internal hints; deletion still uses the
 lock-aware item command. Usage/statistics queries do not expose item images.
 
 The prior branch behavior returned live images without checking intents.
@@ -321,12 +353,12 @@ gates remain necessary.
    coordinator now records a per-transaction unresolved count, indexed cursor
    pages, immutable `BEGIN`, and one terminal decision. The direct Cell test
    covers discovery of unfinished work after owner restart. Fenced startup
-   recovery consumes those pages and resolves data participants; continuous
+   recovery consumes those pages and resolves account and data participants; continuous
    serving-time recovery and changed-endpoint takeover remain outstanding.
 2. Add participant prepare, resolution, and key-lock records. Wire all
    mutation siblings and strong keyed reads through the conflict check before
-   allowing cross-Cell requests. Data Cell mutations and reads now check locks;
-   account Cell participants still need this protocol. Preserve the one-Cell
+   allowing cross-Cell requests. Account and data Cell mutations and reads now check locks; account
+   table deletion and initial route publication also reject prepared intents. Preserve the one-Cell
    fast path only if it obeys the same conflict and token rules.
 3. Make split seal reject outstanding intents, retain old owners until replay
    and resolution are safe, and prove restart at every split boundary.
