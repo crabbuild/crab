@@ -66,6 +66,7 @@ pub struct CellInitialPartitionProvisioner {
     directory: PathBuf,
     initial_partition_count: u16,
     transaction_recovery: transactions::CoordinatorRecovery,
+    admission: tokio::sync::Mutex<()>,
 }
 
 impl CellInitialPartitionProvisioner {
@@ -92,6 +93,7 @@ impl CellInitialPartitionProvisioner {
             directory,
             initial_partition_count: 1,
             transaction_recovery: Default::default(),
+            admission: Default::default(),
         })
     }
 
@@ -418,6 +420,8 @@ impl CellInitialPartitionProvisioner {
         proof: CatalogProof,
         nodes: &NodeDirectory,
     ) -> Result<CellHandle, StorageError> {
+        let _admission = self.admission.lock().await;
+        self.reclaim_coordinator_capacity().await?;
         let authority = CellAuthority::new(self.layout.clone());
         let observed = authority
             .load(target.cell_id())
@@ -459,10 +463,7 @@ impl CellInitialPartitionProvisioner {
             Limits::default(),
         )
         .map_err(|error| StorageError::Transient(error.to_string()))?;
-        let destination = self.directory.join(format!(
-            "{}.sqlite",
-            blake3::Hash::from_bytes(*target.cell_id().as_bytes()).to_hex()
-        ));
+        let destination = self.activation_destination(target)?;
         let handle = self
             .runtime
             .takeover_restored(
@@ -483,6 +484,20 @@ impl CellInitialPartitionProvisioner {
             .map_err(provision_error)?;
         self.track_coordinator(target)?;
         Ok(handle)
+    }
+
+    fn activation_destination(&self, target: &CellTarget) -> Result<PathBuf, StorageError> {
+        // Resume lookup consumes records in the destination directory. Isolate
+        // Cells and give each activation a fresh path: another Cell's release
+        // must not invalidate this Cell's local resume image.
+        let directory = self.directory.join(
+            blake3::Hash::from_bytes(*target.cell_id().as_bytes())
+                .to_hex()
+                .as_str(),
+        );
+        std::fs::create_dir_all(&directory)
+            .map_err(|error| StorageError::Connection(error.to_string()))?;
+        Ok(directory.join(format!("{}.sqlite", uuid::Uuid::now_v7())))
     }
 
     async fn cataloged(
@@ -710,8 +725,17 @@ impl CellInitialPartitionProvisioner {
                     max_database_bytes,
                     cursor.as_ref(),
                 )
-                .await?;
-            cursor = result.cursor;
+                .await;
+            match result {
+                Ok(result) => cursor = result.cursor,
+                // Admission and movement share bounded runtime budgets with
+                // foreground traffic. Keep the cursor and durable split plan
+                // for the next tick; temporary pressure must not kill serving.
+                Err(StorageError::Transient(error)) => {
+                    tracing::warn!(account_id, %error, "capacity sweep deferred");
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
 
@@ -1143,6 +1167,9 @@ impl CellInitialPartitionProvisioner {
         proof: CatalogProof,
         initialize: for<'a> fn(&rusqlite::Transaction<'a>) -> crab_cell_runtime::Result<()>,
     ) -> Result<CellHandle, StorageError> {
+        // Serialize local activation/reclamation. Authority CAS still decides
+        // ownership against other nodes; this guard never fences peers.
+        let _admission = self.admission.lock().await;
         let authority = CellAuthority::new(self.layout.clone());
         let owner = Owner {
             session: self.session,
@@ -1181,6 +1208,7 @@ impl CellInitialPartitionProvisioner {
             self.track_coordinator(target)?;
             return Ok(handle);
         }
+        self.reclaim_coordinator_capacity().await?;
         let replica = CellReplica::new(
             self.layout.clone(),
             *target.cell_id().as_bytes(),
@@ -1188,10 +1216,7 @@ impl CellInitialPartitionProvisioner {
             Limits::default(),
         )
         .map_err(|error| StorageError::Transient(error.to_string()))?;
-        let destination = self.directory.join(format!(
-            "{}.sqlite",
-            blake3::Hash::from_bytes(*target.cell_id().as_bytes()).to_hex()
-        ));
+        let destination = self.activation_destination(target)?;
         let handle = match observed.value().state {
             ControlState::Recovering
                 if observed.value().root.is_none()

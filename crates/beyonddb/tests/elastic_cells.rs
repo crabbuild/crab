@@ -1,5 +1,6 @@
 mod elastic_cells {
     mod account_participant;
+    mod coordinator_residency;
     mod coordinator_tokens;
     mod public_transactions;
     mod transaction_driver;
@@ -2049,18 +2050,31 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         .await
         .unwrap();
     credential_handle.drain().await.unwrap();
-    let credential_file = directory.path().join("data").join(format!(
-        "{}.sqlite",
-        blake3::Hash::from_bytes(*credential_target.cell_id().as_bytes()).to_hex()
-    ));
-    let stored_record: Vec<u8> = rusqlite::Connection::open(credential_file)
+    let credential_directory = directory.path().join("data").join(
+        blake3::Hash::from_bytes(*credential_target.cell_id().as_bytes())
+            .to_hex()
+            .as_str(),
+    );
+    let credential_files = std::fs::read_dir(credential_directory)
         .unwrap()
-        .query_row(
-            "SELECT record FROM ddb_credentials WHERE access_key_id = ?1",
-            [TEST_ACCESS_KEY],
-            |row| row.get(0),
-        )
-        .unwrap();
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "sqlite")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(credential_files.len(), 1);
+    let stored_record: Vec<u8> = rusqlite::Connection::open_with_flags(
+        &credential_files[0],
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT record FROM ddb_credentials WHERE access_key_id = ?1",
+        [TEST_ACCESS_KEY],
+        |row| row.get(0),
+    )
+    .unwrap();
     assert!(
         !stored_record
             .windows(TEST_SECRET_KEY.len())
@@ -4374,11 +4388,28 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         Digest::from_bytes([202; 32]),
         application.registry().release_digest(),
     );
-    let registered = restored_provisioner
-        .recover_registered_coordinators("123456789012", restored_account.clone(), &recovery_nodes)
+    // Inspect unfinished records before invoking the full startup resolver below.
+    restored_provisioner
+        .recover_owned_coordinator("123456789012", &transaction_id, &recovery_nodes)
         .await
         .unwrap();
-    assert!(registered.contains(&coordinator_target));
+    let registered = CellClient::local(application.registry(), restored_account.clone())
+        .query::<ListCoordinatorShards>(
+            &account,
+            None,
+            Json(ListCoordinatorShardsInput {
+                account_id: "123456789012".into(),
+                after: None,
+                limit: 100,
+            }),
+        )
+        .await
+        .unwrap()
+        .output
+        .0;
+    assert!(registered.contains(&u32::from_be_bytes(
+        coordinator_target.partition().try_into().unwrap()
+    )));
     let coordinator_proof = CellCatalog::new(layout.clone(), account.tenant())
         .lookup(coordinator_target.cell_id())
         .await
@@ -4941,11 +4972,10 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         after = page.last().copied();
         actual_shards.extend(page);
     }
-    let mut expected_shards: Vec<_> = registered
-        .iter()
-        .chain(std::iter::once(&second_target))
-        .map(|target| u32::from_be_bytes(target.partition().try_into().unwrap()))
-        .collect();
+    let mut expected_shards = registered;
+    expected_shards.push(u32::from_be_bytes(
+        second_target.partition().try_into().unwrap(),
+    ));
     expected_shards.sort_unstable();
     expected_shards.dedup();
     assert_eq!(actual_shards, expected_shards);

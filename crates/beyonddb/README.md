@@ -256,10 +256,13 @@ fail closed and do not yet resolve decisions on demand.
 A supervised serving worker now rotates through locally admitted coordinator
 shards, resumes abandoned BEGIN records, and finishes terminal decisions. It
 processes at most one pending transaction per tick, advances past failures,
-and revisits them on a bounded pass. Coordinator passivation, bounded
-transaction/read-image retention, and fleet placement remain incomplete. Production currently admits 64 active Cells
-per node; distinct coordinator shards can exhaust that pool. See SCALING.md
-for the unqualified 10,000-Cell, multi-TB target.
+and revisits them on a bounded pass. Cell admission reclaims settled
+coordinators at the active-Cell limit; idle shards restore before token lookup.
+Recovery reactivates released coordinators; startup resolves shards one at a
+time. General Cell placement/activation, bounded transaction/read-image
+retention, and fleet qualification remain incomplete. Production admits 64
+active Cells per node; busy coordinators apply retryable backpressure. See
+SCALING.md for the unqualified 10,000-Cell, multi-TB target.
 
 The signed SDK host test uses `CellNodeBuilder::build`, a published node
 advertisement, a renewing lease guard, and a task group. The lease task keeps
