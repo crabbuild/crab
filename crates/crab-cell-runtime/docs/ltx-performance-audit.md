@@ -41,6 +41,15 @@ from a measured critical path while retaining the existing authority and
 durability contracts. Raising concurrency or queue capacity alone does not
 meet that criterion.
 
+The [scheduled RustFS measurements at `c12b41ef638`](../../crab-http-server/deploy/cell-issue-fleet/qualification/2026-09-26-scheduled-baseline.md)
+now supply a fixed-20-Cell, 3/5/10/20-node series and one 20-node repeat at five
+create/read pairs per second. All 1,500 pairs passed without retries. However,
+20-node write p95 varied from 347 to 68 ms between runs, execution was spread
+across fewer nodes than ingress, and almost every sampled runtime response
+used object proof. These observations make placement/phase attribution and
+follower-path qualification the next measurement priorities; they do not
+establish the dominant bottleneck or qualify later compaction changes.
+
 ## Architecture decision after this audit
 
 Keep one SQLite writer per Cell and immutable, verified LTX roots behind the
@@ -826,6 +835,17 @@ unpublished tail, then lose the owner's process and local data. Keep selected
 followers available for that case. Run separate follower-loss, delayed-origin,
 and ambiguous-publication cases with their declared fault budgets; a combined
 fault beyond the durability contract cannot be labeled a supported scenario.
+
+**Missing attribution:** the HTTP issue handler's `command_output` discards
+the typed commit receipt. Its submission UUID is a durable application key;
+`mutation_identity` creates a different runtime request ID for each attempt.
+The runtime response trace includes Cell, sequence, and proof source, while
+`cells status` exposes the published root position. Aggregate response and
+uncovered-byte counters cannot join those positions to one HTTP submission.
+Before using them to trigger a fault, retain a structured submission/receipt
+correlation at the application boundary and match it to the owner proof trace.
+The trace alone is not an HTTP acknowledgement: the load generator must also
+have received and recorded that request's successful response.
 
 **Gate:** retain every acknowledged request ID and expected result, then query
 or resolve all of them through public handles after takeover. Count duplicate
