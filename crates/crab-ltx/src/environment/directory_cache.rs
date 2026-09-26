@@ -194,8 +194,9 @@ impl DirectoryCache {
             .map_err(|_| io::Error::other("cache fill lock poisoned"))?;
         let path = self.key_path(key);
         if !self.filesystem.exists(&path)? {
-            self.remove_entry(key);
-            self.persist_index();
+            if self.remove_entry(key) {
+                self.persist_index();
+            }
             return Ok(None);
         }
         if !safe_cache_entry(&self.filesystem, &self.root, &path)? {
@@ -251,7 +252,8 @@ impl DirectoryCache {
             ));
         }
         self.touch_entry(key, length);
-        self.persist_index();
+        // Recency lives only in memory. Persisting an unchanged membership map
+        // turns a verified disk-cache hit into an unnecessary durable write.
         Ok(Some(bytes))
     }
 
@@ -358,16 +360,18 @@ impl DirectoryCache {
         state.reservations.insert(key.to_owned(), reservation);
     }
 
-    pub(crate) fn remove_entry(&self, key: &str) {
+    pub(crate) fn remove_entry(&self, key: &str) -> bool {
         let mut state = match self.state.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if let Some(previous) = state.entries.remove(key) {
+        let previous = state.entries.remove(key);
+        if let Some(previous) = previous {
             state.bytes = state.bytes.saturating_sub(previous);
         }
         state.reservations.remove(key);
         state.order.retain(|entry| entry != key);
+        previous.is_some()
     }
 
     pub(crate) fn make_room(&self, required: u64) -> io::Result<()> {

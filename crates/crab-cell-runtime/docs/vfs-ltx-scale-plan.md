@@ -289,6 +289,13 @@ root coalescing and durability-mode changes behind their stronger recovery
 gates. Qualify the runtime's 8/32-segment compaction boundaries and the
 benchmark's periodic payload before using its cost rows as capacity evidence.
 
+The small-body and disk-cache changes are implemented with focused integrity,
+retry, restore, and cache-lifecycle tests. Bodies up to 256 KiB use a verified
+single PUT through one LTX transfer function; larger bodies retain streaming.
+Disk-cache hits no longer rewrite unchanged membership. These changes still
+need public-action and sustained-drain measurements before assigning a fleet
+latency benefit.
+
 The local [replica cost record](../../crab-ltx/perf/README.md#cell-publication-cost-per-command)
 measures about 0.3 ms for a small sparse deferred capture, but 87–139 ms
 at p50/p95 for a small successor-root preparation over loopback RustFS.

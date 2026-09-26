@@ -5,7 +5,7 @@
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
 | Scope | Source at `0f3f4f7617a`; LTX source matches the local `origin/main` snapshot `de0bb234abc` |
-| Status | Confirmed implementation costs; proposed improvements have no new latency qualification |
+| Status | Findings 1–2 implemented with focused proof; remaining findings and fleet latency qualification open |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
 
@@ -43,6 +43,21 @@ lost responses, existing same/different content, and both native and compaction
 uploads. Compare public action p95/p99 and publisher drain rate over RustFS.
 The current five-object small-write count is not five HTTP requests.
 
+**Implementation:** native, compacted, and bundled bodies now share a private
+LTX transfer function. Sources up to 256 KiB are length/digest verified into
+one buffer under the existing host I/O permit, then sent with `Store::put_exact`.
+That method retains exact staging paths, create-only writes, same-content
+reconciliation after an uncertain response, and different-content refusal.
+Larger sources retain multipart streaming. The generic storage multipart API
+has other overwrite, staging, and cancellation callers; it is unchanged.
+Recovery manifests also retain their existing transfer path.
+
+Focused tests count transfer calls and restore native, compacted, and bundled
+roots byte-for-byte for both sizes. They inject a lost response after a
+successful create and reject wrong lengths, changed digests, truncated sources,
+and conflicting existing content. These establish transfer semantics, not
+public-action latency or sustainable publication capacity.
+
 ### 2. Persistent directory-cache hits perform durable index writes
 
 **Confirmed:** [DirectoryCache::get](../../crab-ltx/src/environment/directory_cache.rs)
@@ -65,6 +80,13 @@ an absent unindexed key also makes zero writes. Preserve restart, corruption,
 symlink, concurrent-fill, eviction, and disk-accounting tests. Measure with
 the memory cache churned, a nearly full disk index, and concurrent Cells.
 This removes redundant work without changing cache durability policy.
+
+**Implementation:** verified hits now update only memory recency; absent keys
+persist the index only when indexed membership was actually removed. Durable
+installation, invalidation, and eviction retain their writes. A regression
+test reproduced the old hit write and now proves neither a hit nor an
+unindexed miss creates an index file. Existing restart, corrupt-entry, symlink,
+and accounting tests pass. Full-cache concurrent latency remains unmeasured.
 
 ### 3. Sparse writable activation still reads the complete checksum directory
 
