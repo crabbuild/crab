@@ -174,3 +174,71 @@ async fn activation_file_failures_cleanup_before_retry_and_preserve_existing_des
     paged.prepare_writable(&destination).await.unwrap();
     writer.close().unwrap();
 }
+
+#[tokio::test(start_paused = true)]
+async fn cold_activation_overlaps_leaf_reads_within_shared_io_admission() {
+    let (directory, _faults, _host, mut writer) = fixture();
+    writer
+        .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(zeroblob(10000000))"))
+        .unwrap();
+    let backend = InMemory::new();
+    let layout =
+        |store| CellStorageLayout::new(store, ObjectPath::from("activation-leaf-reads"), [84; 16]);
+    let replica = CellReplica::new(
+        layout(Store::new(Arc::new(backend.clone()))),
+        [85; 32],
+        [86; 16],
+        Limits::default(),
+    )
+    .unwrap();
+    let root = replica
+        .prepare(None, &writer.capture().unwrap(), 1, 1)
+        .await
+        .unwrap()
+        .root();
+    let delay = Duration::from_millis(100);
+    for slots in [1, 4, 16] {
+        let io = Arc::new(tokio::sync::Semaphore::new(slots));
+        let replica = CellReplica::new(
+            layout(Store::new(Arc::new(ThrottledStore::new(
+                backend.clone(),
+                ThrottleConfig {
+                    wait_get_per_call: delay,
+                    ..ThrottleConfig::default()
+                },
+            )))),
+            [85; 32],
+            [86; 16],
+            Limits::default(),
+        )
+        .unwrap()
+        .with_host(
+            Host::default()
+                .with_io_slots(io.clone())
+                .with_job_slots(Arc::new(tokio::sync::Semaphore::new(1))),
+        );
+        let verified = replica.open_root(&root).await.unwrap();
+        assert_eq!(verified.directory_height(), 1);
+        let paged = verified.paged();
+        let leaves = paged.page_count().div_ceil(256);
+        let destination = directory.path().join(format!("parallel-{slots}.sqlite"));
+        let started = tokio::time::Instant::now();
+        let prepared = paged.prepare_writable(&destination).await.unwrap();
+        let elapsed = started.elapsed();
+        // open_root already loaded the authenticated parent. Four shared slots
+        // overlap waits, while excess slots cannot exceed the eight-read ceiling.
+        assert_eq!(
+            elapsed,
+            delay * leaves.div_ceil(slots.min(8) as u32),
+            "slots={slots}, leaves={leaves}"
+        );
+        assert_eq!(io.available_permits(), slots);
+        let mut restored = prepared.open_writable(&destination).unwrap();
+        let count: u64 = restored
+            .query_with(|db| db.query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0)))
+            .unwrap();
+        assert_eq!(count, 2);
+        restored.close().unwrap();
+    }
+    writer.close().unwrap();
+}

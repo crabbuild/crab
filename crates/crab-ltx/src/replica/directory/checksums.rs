@@ -1,7 +1,11 @@
 use std::path::{Path, PathBuf};
 
+use futures_util::{StreamExt as _, stream};
+
 use super::{Header, Verification, read_node, verify_branch, verify_leaf};
 use crate::{CrabError, Host, Limits, Result, environment::FileIo, pages::PageChecksums};
+
+const LEAF_READS_IN_FLIGHT: usize = 8;
 
 pub(in crate::replica) async fn load_checksums(
     verification: Verification<'_>,
@@ -18,61 +22,76 @@ pub(in crate::replica) async fn load_checksums(
     }
     let mut writer = ChecksumWriter::create(verification.host, destination).await?;
     let result = async {
-        let mut pending = vec![(root, height, None)];
+        let mut pending = vec![vec![(root, height, None)]];
         let mut previous_page = 0u32;
         let mut seen = 0u64;
         let mut checksum = crate::CHECKSUM_FLAG;
-        while let Some((digest, remaining, expected)) = pending.pop() {
-            let bytes = read_node(&verification, digest).await?;
-            let header = Header::parse(&bytes)?;
-            if (remaining == 0) != (header.kind == 0) {
-                return Err(CrabError::LTXCorrupted);
-            }
-            if header.kind == 0 {
-                let (aggregate, entries) = verify_leaf(
-                    &bytes,
-                    &header,
-                    verification.page_size,
-                    verification.database_pages,
-                    verification.extents,
-                )?;
+        while let Some(batch) = pending.pop() {
+            // Batch only sibling leaves. Internal nodes remain depth first so
+            // prefetched branches cannot reorder page coverage or checksums.
+            // At most eight reads use the shared host I/O admission.
+            let mut reads = stream::iter(batch.into_iter().map(|(digest, remaining, expected)| {
+                let verification = &verification;
+                async move {
+                    read_node(verification, digest)
+                        .await
+                        .map(|bytes| (bytes, remaining, expected))
+                }
+            }))
+            .buffered(LEAF_READS_IN_FLIGHT);
+            while let Some(read) = reads.next().await {
+                let (bytes, remaining, expected) = read?;
+                let header = Header::parse(&bytes)?;
+                if (remaining == 0) != (header.kind == 0) {
+                    return Err(CrabError::LTXCorrupted);
+                }
+                if header.kind == 0 {
+                    let (aggregate, entries) = verify_leaf(
+                        &bytes,
+                        &header,
+                        verification.page_size,
+                        verification.database_pages,
+                        verification.extents,
+                    )?;
+                    if expected.is_some_and(|value| value != aggregate) {
+                        return Err(CrabError::ChecksumMismatch);
+                    }
+                    for entry in entries {
+                        let expected_page = previous_page
+                            .checked_add(1)
+                            .ok_or(CrabError::LTXCorrupted)?;
+                        let lock = crate::ltx::lock_pgno(verification.page_size);
+                        if expected_page == lock {
+                            writer.append(0).await?;
+                            previous_page = lock;
+                        }
+                        if entry.page
+                            != previous_page
+                                .checked_add(1)
+                                .ok_or(CrabError::LTXCorrupted)?
+                        {
+                            return Err(CrabError::LTXCorrupted);
+                        }
+                        writer.append(entry.checksum).await?;
+                        checksum = crate::CHECKSUM_FLAG | (checksum ^ entry.checksum);
+                        previous_page = entry.page;
+                        seen += 1;
+                    }
+                    continue;
+                }
+                let (aggregate, children) = verify_branch(&bytes, &header)?;
                 if expected.is_some_and(|value| value != aggregate) {
                     return Err(CrabError::ChecksumMismatch);
                 }
-                for entry in entries {
-                    let expected_page = previous_page
-                        .checked_add(1)
-                        .ok_or(CrabError::LTXCorrupted)?;
-                    let lock = crate::ltx::lock_pgno(verification.page_size);
-                    if expected_page == lock {
-                        writer.append(0).await?;
-                        previous_page = lock;
-                    }
-                    if entry.page
-                        != previous_page
-                            .checked_add(1)
-                            .ok_or(CrabError::LTXCorrupted)?
-                    {
-                        return Err(CrabError::LTXCorrupted);
-                    }
-                    writer.append(entry.checksum).await?;
-                    checksum = crate::CHECKSUM_FLAG | (checksum ^ entry.checksum);
-                    previous_page = entry.page;
-                    seen += 1;
-                }
-                continue;
+                let next = remaining.checked_sub(1).ok_or(CrabError::LTXCorrupted)?;
+                let batch_size = if next == 0 { super::FANOUT } else { 1 };
+                pending.extend(children.chunks(batch_size).rev().map(|children| {
+                    children
+                        .iter()
+                        .map(|child| (child.digest, next, Some(child.aggregate)))
+                        .collect()
+                }));
             }
-            let (aggregate, children) = verify_branch(&bytes, &header)?;
-            if expected.is_some_and(|value| value != aggregate) {
-                return Err(CrabError::ChecksumMismatch);
-            }
-            let next = remaining.checked_sub(1).ok_or(CrabError::LTXCorrupted)?;
-            pending.extend(
-                children
-                    .into_iter()
-                    .rev()
-                    .map(|child| (child.digest, next, Some(child.aggregate))),
-            );
         }
         let lock = crate::ltx::lock_pgno(verification.page_size);
         if previous_page < verification.database_pages {
