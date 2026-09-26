@@ -91,6 +91,23 @@ The worker transaction applies this procedure:
 
 Handler errors roll back the application savepoint. Runtime ledger updates still commit when the error is a durable business rejection. Every registered call reports its owning module, kind, outcome, and duration to the installed `CellTelemetry` sink from the thread that executed the handler, so the server can chart one primitive module without knowing its operations.
 
+### Bounded application BLOB writes
+
+`CommandContext::write_sql_blob` fills an already allocated BLOB at a byte offset,
+with at most 1 MiB of operation data per call. An application can allocate an
+image with SQL `zeroblob` and fill it in bounded slices without repeatedly
+allocating replacement images. Allocation, writes, and application indexes stay
+inside the command savepoint and publish through the normal LTX boundary.
+Propagate write errors so partial images roll back.
+
+The method opens only the main database, rejects runtime/primitive and SQLite
+internal table names, and closes the handle before returning. SQLite incremental
+I/O does not invoke the SQL authorizer, triggers, or CHECK constraints; applications
+must maintain their invariants explicitly in the same command. It cannot grow
+the BLOB. SQLite rejects unsupported table types and writable indexed columns.
+The SQL capability integration fixture covers bounds, protected names, rollback
+on rejection/error, and byte-for-byte recovery after publication.
+
 ## Publish before replying
 
 `PendingCommit` owns the request identity, predecessor control, encoded reply, commit sequence, and captured cuts. The actor doesn't accept the next mutation until this commit reaches a terminal publication result.

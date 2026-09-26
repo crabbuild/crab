@@ -1412,5 +1412,5 @@ fn write_item(
             ttl_epoch,
         ],
     ))?;
-    crate::item_storage::StoredItem::Partition(&key).append(context, item)
+    crate::item_storage::StoredItem::Partition(&key).write(context, item)
 }

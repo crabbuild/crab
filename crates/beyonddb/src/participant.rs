@@ -182,7 +182,7 @@ pub(crate) fn record_prepare<'a>(
                 transaction_id: &transaction_id,
                 position,
             }
-            .append(context, item)?;
+            .write(context, item)?;
         }
     }
     Ok(())
@@ -262,13 +262,14 @@ pub(crate) fn resolve(
     } else {
         None
     };
-    // Image application and lock release share the command savepoint with the
-    // terminal marker. A failed callback must leave the participant prepared.
-    finish(context, staged.as_deref())?;
+    // Reuse staged payload pages for live images instead of requiring both
+    // copies to fit. Deletion, apply, lock release, and the terminal marker
+    // share the command savepoint, so a failed apply restores the payload.
     context.sql(&statement(
         "DELETE FROM ddb_transaction_payloads WHERE transaction_id = ?1",
         vec![SqlValue::Blob(input.transaction_id.to_vec())],
     ))?;
+    finish(context, staged.as_deref())?;
     context.sql(&statement(
         "UPDATE ddb_transactions SET state = ?1, staged_chunks = NULL \
              WHERE transaction_id = ?2 AND state = 0",

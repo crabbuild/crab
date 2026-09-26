@@ -76,16 +76,29 @@ impl StoredItem<'_> {
         }
     }
 
-    // The caller first inserts/resets the item to X'' in this command. Every
-    // append and its indexes share the command savepoint; partial JSON is never
-    // published. BLOB casts keep substr byte-based across UTF-8 chunk boundaries.
-    pub(crate) fn append(&self, context: &CommandContext<'_, '_>, item: &Item) -> Result<()> {
+    // Preallocate once so growing JSON never needs two complete live BLOBs.
+    // The caller resets the previous image first; allocation, bounded writes,
+    // and index changes share the command savepoint and publish together.
+    pub(crate) fn write(&self, context: &CommandContext<'_, '_>, item: &Item) -> Result<()> {
         let (table, predicate, mut parameters) = self.address();
-        let query = format!("UPDATE {table} SET item = CAST(item || ?1 AS BLOB) WHERE {predicate}");
         let bytes = serde_json::to_vec(item)?;
-        for chunk in bytes.chunks(CHUNK_BYTES) {
-            parameters[0] = SqlValue::Blob(chunk.to_vec());
-            context.sql(&statement(&query, parameters.clone()))?;
+        parameters[0] = SqlValue::Integer(
+            i64::try_from(bytes.len()).map_err(|_| Error::Command("item size overflow"))?,
+        );
+        context.sql(&statement(
+            &format!("UPDATE {table} SET item = zeroblob(?1) WHERE {predicate}"),
+            parameters.clone(),
+        ))?;
+        // The row must have the exact allocation that the bounded writes fill.
+        let rows = context.sql(&statement(
+            &format!("SELECT rowid FROM {table} WHERE {predicate} AND length(item) = ?1"),
+            parameters,
+        ))?;
+        let Some([SqlValue::Integer(row_id)]) = rows[0].rows.first().map(Vec::as_slice) else {
+            return Err(Error::Command("missing stored item row"));
+        };
+        for (index, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
+            context.write_sql_blob(table, "item", *row_id, index * CHUNK_BYTES, chunk)?;
         }
         Ok(())
     }
