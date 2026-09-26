@@ -202,10 +202,15 @@ ambiguous result and keep their original request ID in the raw evidence.
 
 Before load, every Cell must be reachable through every active entry node.
 After load, the script waits for every node's uncovered publication bytes to
-reach zero, verifies acknowledged issues and newer RustFS roots, kills one
-owner, checks its acknowledged issue after takeover without root regression,
-and restarts it. This checks published-root recovery; follower-only tail loss
-is a separate fault gate. Successful ingress counts must be within 70–130% of
+reach zero, verifies every acknowledged issue and newer RustFS roots, and kills
+one owner. After takeover it checks the selected root has not regressed, then
+rechecks every acknowledged issue across all Cells before restarting the lost
+node. Verification uses at most eight concurrent reads and checks both issue
+number and title against each original request's recorded result. Summary
+fields `acknowledgements_before_recovery` and `owner_loss.acknowledgements`
+retain verified counts by Cell and verification duration. This checks
+published-root recovery; failure during outstanding follower-only tails is a
+separate fault gate. Successful ingress counts must be within 70–130% of
 an even split. The owner map used for forwarded counts is the pre-load snapshot;
 these counts do not attribute owner movement during the load.
 

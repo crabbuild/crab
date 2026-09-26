@@ -159,6 +159,34 @@ def percentiles(samples: list[float]) -> dict:
     return result
 
 
+def verify_acknowledged(gateway: str, nodes: int, samples: list[dict]) -> dict:
+    acknowledged = [sample for sample in samples if "acknowledged" in sample]
+    started = time.monotonic()
+
+    def verify(sample):
+        issue = sample["acknowledged"]
+        observed = load_request(gateway, nodes, "GET", issue_path(sample["cell"]) + f"/{issue['number']}")
+        body = observed.get("body", {})
+        if (observed["outcome"] != "success" or body.get("number") != issue["number"]
+                or body.get("title") != issue["title"]):
+            raise RuntimeError(
+                f"work-{sample['cell']:02d} lost or changed acknowledgement {sample['request_id']} "
+                f"(issue {issue['number']}): {observed.get('error', 'result mismatch')}"
+            )
+
+    # Verify outside the timed arrival phase, with bounded work even at the
+    # 100,000-arrival ceiling. Keep earlier results, not just each Cell's latest.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        for start in range(0, len(acknowledged), 8):
+            for _ in executor.map(verify, acknowledged[start:start + 8]):
+                pass
+    return {
+        "verified": len(acknowledged),
+        "by_cell": dict(Counter(sample["cell"] for sample in acknowledged)),
+        "elapsed_seconds": round(time.monotonic() - started, 3),
+    }
+
+
 def cover_routes(gateway: str, nodes: int, cells: int) -> tuple[dict, list[dict]]:
     coverage = {}
     samples = []
@@ -359,7 +387,7 @@ def observe_nodes(path: Path, profiles: tuple[str, ...], nodes: int, stop, outpu
 
 def recover_owner(
     path: Path, profiles: tuple[str, ...], gateway: str, nodes: int,
-    owner: str, before: dict, latest: dict, target: int,
+    owner: str, before: dict, latest: dict, target: int, samples: list[dict],
 ) -> dict:
     observer = "node-01" if owner != "node-01" else "node-02"
     for _ in range(60):
@@ -409,6 +437,7 @@ def recover_owner(
                 "recovery_seconds": round(time.monotonic() - started, 3),
                 "same_root": root == before["root"],
                 "entry_node": observed["entry"],
+                "acknowledgements": verify_acknowledged(gateway, nodes, samples),
             }
         raise RuntimeError("load-balanced owner recovery did not complete in 120 seconds")
     finally:
@@ -522,10 +551,7 @@ def main() -> None:
         report["publication_drain"] = drain_publication(path, profiles, args.nodes)
         if not report["publication_drain"]["drained"]:
             raise RuntimeError("publication backlog did not drain; inspect retained backlog samples")
-        for cell, issue in acknowledged.items():
-            observed = request(gateway, args.nodes, "GET", issue_path(cell) + f"/{issue['number']}")
-            if observed["body"].get("title") != issue["title"]:
-                raise RuntimeError(f"work-{cell:02d} lost an acknowledged issue")
+        report["acknowledgements_before_recovery"] = verify_acknowledged(gateway, args.nodes, samples)
         after = verify_roots(path, profiles, before, acknowledged)
         report["roots_advanced"] = bool(after)
         report["roots_before"] = {cell: value["root"] for cell, value in before.items()}
@@ -535,7 +561,7 @@ def main() -> None:
             target = max(acknowledged)
             report["owner_loss"] = recover_owner(
                 path, profiles, gateway, args.nodes, owners_at_recovery[target],
-                recovery_baseline[target], acknowledged[target], target,
+                recovery_baseline[target], acknowledged[target], target, samples,
             )
         report["passed"] = (balanced and not report["node_observations"]["errors"]
                             and summary["outcomes"].get("success", 0) == summary["planned_pairs"]

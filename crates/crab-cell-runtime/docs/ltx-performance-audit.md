@@ -779,7 +779,7 @@ offered load before accepting the hint and queue changes as a performance win.
 
 ### 16. Post-load recovery does not qualify acknowledged tails during load
 
-**Confirmed:** the scheduled
+**Confirmed at `c12b41ef638`:** the scheduled
 [load runner](../../crab-http-server/deploy/cell-issue-fleet/load.py) waits for
 `drain_publication` before `recover_owner`, which again requires zero uncovered
 node-log bytes. It then kills one owner and verifies the latest acknowledged
@@ -788,6 +788,16 @@ but the post-fault check does not revisit all successful request IDs. The
 existing README correctly labels this as published-root recovery. The separate
 [Compose cluster gate](../../crab-http-server/tests/qualify_compose_cluster.sh)
 exercises follower recovery, but it is not the scheduled capacity workload.
+
+**Acknowledgement follow-up:** the load runner now revisits every recorded
+acknowledgement before the fault and again after takeover, while the lost node
+is still stopped. It verifies exact issue number and title, limits verification
+to eight concurrent reads, and records counts by Cell. A real HTTP fixture
+keeps the latest issue intact while deleting or changing an earlier result:
+the previous recovery function silently accepts both cases, and the follow-up
+rejects each with the original request ID. All ten load/provenance tests pass.
+This closes the latest-only verification gap; a current-image fleet run and
+failure during sustained arrivals remain required.
 
 **Impact:** the current runner cannot establish that low response latency
 remains sustainable while publication is delayed, or that every earlier
