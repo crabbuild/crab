@@ -1,8 +1,8 @@
 //! Uploading prepared LTX artifacts, indexes, bodies, and bundles.
 //!
-//! Every write path here streams a prepared root to object storage under the
-//! replica's retry policy, and the capture sources below adapt a pinned local
-//! file into the multipart interface the store expects.
+//! Transfers use the replica's retry policy and shared I/O admission. Small
+//! bodies are verified before a single PUT; larger bodies stream from replayable
+//! sources, including pinned capture files.
 
 use super::*;
 
@@ -106,24 +106,11 @@ impl CellReplica {
             &digest,
             CellObjectKind::Bundle,
         );
-        let cancel = tokio_util::sync::CancellationToken::new();
         let _permit = self.host.io_permit().await?;
-        let upload = self
-            .layout
-            .store()
-            .put_multipart_source_retry(
-                &staged,
-                bundle.upload_source(),
-                bundle.len(),
-                digest,
-                MULTIPART_BYTES,
-                &cancel,
-                None,
-            )
-            .await;
+        let upload = put_source(self, &staged, bundle.upload_source(), bundle.len(), digest).await;
         if let Err(error) = upload {
             return match cleanup_staged(self.layout.store(), &staged).await {
-                Ok(()) => Err(error.into()),
+                Ok(()) => Err(error),
                 Err(cleanup_error) => Err(cleanup_error),
             };
         }
@@ -142,6 +129,48 @@ impl CellReplica {
 }
 
 const MULTIPART_BYTES: usize = 8 << 20;
+// Each caller holds a shared host I/O permit. Keep small-object buffering well
+// below one multipart chunk so many publishing Cells stay within node memory.
+const SINGLE_PUT_BYTES: u64 = 256 << 10;
+
+pub(super) async fn put_source(
+    replica: &CellReplica,
+    path: &object_store::path::Path,
+    source: Arc<dyn crab_storage::MultipartUploadSource>,
+    size: u64,
+    digest: [u8; 32],
+) -> Result<()> {
+    if size <= SINGLE_PUT_BYTES {
+        if source.byte_len().await? != size {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        let bytes = source.read_exact(0, size as usize).await?;
+        if bytes.len() as u64 != size
+            || *blake3::hash(&bytes).as_bytes() != digest
+            || source.byte_len().await? != size
+        {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        // Freeze verified bytes before provider I/O. Exact writes retain staged
+        // routing and reconcile an uncertain create without overwriting a conflict.
+        replica.layout.store().put_exact(path, bytes).await?;
+        return Ok(());
+    }
+    replica
+        .layout
+        .store()
+        .put_multipart_source_retry(
+            path,
+            source,
+            size,
+            digest,
+            MULTIPART_BYTES,
+            &tokio_util::sync::CancellationToken::new(),
+            None,
+        )
+        .await?;
+    Ok(())
+}
 
 async fn cleanup_staged(
     store: &crab_storage::Store,
@@ -272,12 +301,14 @@ fn pinned_storage_error(error: CrabError) -> crab_storage::StorageError {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::io::Read as _;
 
     use super::*;
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn pinned_capture_ignores_later_path_replacement() {
         let directory = tempfile::TempDir::new().unwrap();
@@ -296,5 +327,80 @@ mod tests {
         let mut observed = Vec::new();
         reader.read_to_end(&mut observed).unwrap();
         assert_eq!(observed, original);
+    }
+
+    #[tokio::test]
+    async fn small_source_checks_bytes_before_provider_writes_and_never_clobbers() {
+        use crab_storage::{RetryPolicy, Store};
+        use object_store::{ObjectStoreExt as _, memory::InMemory, path::Path};
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("capture");
+        let bytes = b"verified";
+        std::fs::write(&path, bytes).unwrap();
+        let backend = Arc::new(InMemory::new());
+        let store = Store::with_retry(
+            backend.clone(),
+            RetryPolicy {
+                max_attempts: 1,
+                base: std::time::Duration::ZERO,
+                cap: std::time::Duration::ZERO,
+            },
+        );
+        let replica = CellReplica::new(
+            CellStorageLayout::new(store, Path::from("test"), [1; 16]),
+            [2; 32],
+            [3; 16],
+            Limits::default(),
+        )
+        .unwrap();
+        let destination = Path::from("immutable.ltx");
+        let source = PinnedCapture::open(&Host::default(), path.clone(), bytes.len() as u64)
+            .await
+            .unwrap();
+        let digest = *blake3::hash(bytes).as_bytes();
+        for (size, expected) in [
+            (bytes.len() as u64 + 1, digest),
+            (bytes.len() as u64, [0; 32]),
+        ] {
+            assert!(matches!(
+                put_source(&replica, &destination, source.clone(), size, expected).await,
+                Err(CrabError::ChecksumMismatch)
+            ));
+            assert!(backend.head(&destination).await.is_err());
+        }
+        std::fs::write(&path, b"short").unwrap();
+        assert!(matches!(
+            put_source(
+                &replica,
+                &destination,
+                source.clone(),
+                bytes.len() as u64,
+                digest
+            )
+            .await,
+            Err(CrabError::ChecksumMismatch)
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        backend
+            .put(&destination, Bytes::from_static(b"different").into())
+            .await
+            .unwrap();
+        assert!(matches!(
+            put_source(&replica, &destination, source, bytes.len() as u64, digest).await,
+            Err(CrabError::Storage(
+                crab_storage::StorageError::StateConflict { .. }
+            ))
+        ));
+        assert_eq!(
+            backend
+                .get(&destination)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            Bytes::from_static(b"different")
+        );
     }
 }

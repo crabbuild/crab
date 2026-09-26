@@ -6,8 +6,6 @@ use crab_storage::{MultipartUploadSource, StorageError};
 use super::CellReplica;
 use crate::{CellObjectKind, CrabError, Host, Result};
 
-const MULTIPART_BYTES: usize = 8 << 20;
-
 pub(crate) async fn upload(
     replica: &CellReplica,
     source: &Path,
@@ -33,13 +31,8 @@ pub(crate) async fn upload_source(
         replica
             .layout
             .incarnation_object_path(&replica.cell, &replica.incarnation, digest, kind);
-    let cancel = tokio_util::sync::CancellationToken::new();
     let _permit = replica.host.io_permit().await?;
-    replica
-        .layout
-        .store()
-        .put_multipart_source_retry(&path, upload, size, *digest, MULTIPART_BYTES, &cancel, None)
-        .await?;
+    super::super::upload::put_source(replica, &path, upload, size, *digest).await?;
     replica.cost.record(size);
     Ok(())
 }

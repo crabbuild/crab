@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -56,6 +56,21 @@ fn directory_cache_survives_restart_and_evicts_by_bytes() {
     assert_eq!(cache.get("second", 64).unwrap(), Some(b"abcde".to_vec()));
     assert_eq!(cache.stats().entries(), 1);
     assert_eq!(cache.budget.used(), 5);
+}
+
+#[cfg(feature = "replica")]
+#[test]
+fn directory_cache_reads_do_not_rewrite_unchanged_membership() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let filesystem = Arc::new(FaultFs::default());
+    let cache = DirectoryCache::new(filesystem.clone(), directory.path().to_owned(), 64);
+    cache.put("present", b"verified", 64).unwrap();
+    filesystem.creates.store(0, Ordering::SeqCst);
+
+    for (key, expected) in [("present", Some(b"verified".to_vec())), ("absent", None)] {
+        assert_eq!(cache.get(key, 64).unwrap(), expected);
+        assert_eq!(filesystem.creates.load(Ordering::SeqCst), 0, "{key}");
+    }
 }
 
 #[cfg(feature = "replica")]
@@ -129,7 +144,11 @@ impl Clock for TestClock {
     }
 }
 
-struct FaultFs(AtomicBool);
+#[derive(Default)]
+struct FaultFs {
+    reject_create: AtomicBool,
+    creates: AtomicUsize,
+}
 impl FileSystem for FaultFs {
     fn open(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
         DirectFileSystem.open(path)
@@ -138,7 +157,8 @@ impl FileSystem for FaultFs {
         DirectFileSystem.open_rw(path)
     }
     fn create(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
-        if self.0.load(Ordering::SeqCst) {
+        self.creates.fetch_add(1, Ordering::SeqCst);
+        if self.reject_create.load(Ordering::SeqCst) {
             return Err(io::Error::new(
                 io::ErrorKind::StorageFull,
                 "injected artifact failure",
@@ -181,7 +201,7 @@ impl FileSystem for FaultFs {
 #[test]
 fn injected_clock_and_capture_filesystem_reach_real_sqlite_transactions() {
     let directory = tempfile::TempDir::new().unwrap();
-    let filesystem = Arc::new(FaultFs(AtomicBool::new(false)));
+    let filesystem = Arc::new(FaultFs::default());
     let host = Host::default()
         .with_clock(Arc::new(TestClock))
         .with_filesystem(filesystem.clone());
@@ -201,7 +221,7 @@ fn injected_clock_and_capture_filesystem_reach_real_sqlite_transactions() {
     );
     db.transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(2)"))
         .unwrap();
-    filesystem.0.store(true, Ordering::SeqCst);
+    filesystem.reject_create.store(true, Ordering::SeqCst);
     assert!(
         matches!(db.capture(), Err(crate::CrabError::Io(error)) if error.kind() == io::ErrorKind::StorageFull)
     );

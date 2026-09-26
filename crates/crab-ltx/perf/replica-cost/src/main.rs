@@ -253,7 +253,7 @@ fn open_store(
     Ok((store, label, prefix))
 }
 
-/// Deterministic, incompressible-enough payload for one command.
+/// Deterministic periodic payload retained for historical cost comparisons.
 fn payload(command: usize, bytes: usize) -> Vec<u8> {
     (0..bytes)
         .map(|index| ((command * 131 + index) % 251) as u8)
