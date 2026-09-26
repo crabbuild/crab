@@ -255,9 +255,22 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     let owner_runtime = runtime(owner_session);
     let receiver_reads = Arc::new(ReceiverReads::default());
     let owner_hints = crate::peer::PeerOwnerHints::default();
+    let activation_store = Arc::new(ThrottledStore::new(
+        Arc::clone(store.inner()),
+        ThrottleConfig::default(),
+    ));
+    let activation_reads = Arc::new(AtomicUsize::new(0));
+    let observed_activation_reads = Arc::clone(&activation_reads);
+    let activation_layout = CellStorageLayout::new(
+        Store::new(activation_store.clone()).with_read_request_observer(Arc::new(move |_| {
+            observed_activation_reads.fetch_add(1, Ordering::Relaxed);
+        })),
+        ObjectPath::from(format!("{root}/cells")),
+        *identity.application().as_bytes(),
+    );
     let owner_router = crate::cells::RepositoryCellRouter::new(
         identity,
-        cell_layout.clone(),
+        activation_layout,
         Arc::clone(&registry),
         owner_runtime.clone(),
         crate::cells::RepositoryCellPeer::new(
@@ -747,47 +760,55 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     }
     .encode(&mut input)
     .unwrap();
+    let input = input.finish();
     let description = owner_hints
         .description(target.cell_id(), crate::cells::unix_now_ms().unwrap())
         .unwrap();
-    let now = crate::cells::unix_now_ms().unwrap();
-    let timed_request = PeerSigner::new(
+    let signer = PeerSigner::new(
         ingress_session,
         registry.release_digest(),
         peer_tls.signing_key().clone(),
-    )
-    .sign(
-        PeerPrincipal {
-            issuer: local_operator.issuer.clone(),
-            subject: local_operator.subject.clone(),
-            actions: vec!["repository.read".into()],
-        },
-        now,
-        now + 10_000,
-        500,
-        PeerOperation::Read(wire::ReadRequest {
-            target: Some(wire::Target {
-                tenant_id: identity.tenant().as_bytes().to_vec(),
-                application_id: identity.application().as_bytes().to_vec(),
-                namespace_id: target.namespace().as_bytes().to_vec(),
-                partition: target.partition().to_vec(),
-            }),
-            timeout_ms: 500,
-            minimum: None,
-            expected: Some(wire::CellDescription {
-                cell_id: description.cell.as_bytes().to_vec(),
-                incarnation: description.incarnation.as_bytes().to_vec(),
-                code: description.code.as_bytes().to_vec(),
-                schema: description.schema,
-            }),
-            operation: Some(wire::read_request::Operation::CellQuery(wire::CellQuery {
-                query_id: crate::cells::repository::ListComments::ID,
-                codec_version: crate::cells::repository::ListComments::CODEC_VERSION,
-                input: input.finish(),
-            })),
-        }),
-    )
-    .unwrap();
+    );
+    let signed_read = |timeout_ms, activate| {
+        let now = crate::cells::unix_now_ms().unwrap();
+        let mut actions = vec!["repository.read".into()];
+        if activate {
+            actions.insert(0, "cell.activate".into());
+        }
+        signer
+            .sign(
+                PeerPrincipal {
+                    issuer: local_operator.issuer.clone(),
+                    subject: local_operator.subject.clone(),
+                    actions,
+                },
+                now,
+                now + 30_000,
+                timeout_ms,
+                PeerOperation::Read(wire::ReadRequest {
+                    target: Some(wire::Target {
+                        tenant_id: identity.tenant().as_bytes().to_vec(),
+                        application_id: identity.application().as_bytes().to_vec(),
+                        namespace_id: target.namespace().as_bytes().to_vec(),
+                        partition: target.partition().to_vec(),
+                    }),
+                    timeout_ms,
+                    minimum: None,
+                    expected: Some(wire::CellDescription {
+                        cell_id: description.cell.as_bytes().to_vec(),
+                        incarnation: description.incarnation.as_bytes().to_vec(),
+                        code: description.code.as_bytes().to_vec(),
+                        schema: description.schema,
+                    }),
+                    operation: Some(wire::read_request::Operation::CellQuery(wire::CellQuery {
+                        query_id: crate::cells::repository::ListComments::ID,
+                        codec_version: crate::cells::repository::ListComments::CODEC_VERSION,
+                        input: input.clone(),
+                    })),
+                }),
+            )
+            .unwrap()
+    };
     let peer_http = peer_tls
         .client_identity()
         .client(
@@ -795,6 +816,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             peer_tls.signing_key().verifying_key().to_bytes(),
         )
         .unwrap();
+    let timed_request = signed_read(500, false);
     resolver_store.config_mut(|config| config.wait_get_per_call = Duration::from_secs(2));
     let queries_before = receiver_reads.queries.load(Ordering::Relaxed);
     let deadline_reply = peer_http
@@ -820,6 +842,53 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .unwrap();
     assert_eq!(healthy_reply.status(), StatusCode::OK);
     assert!(receiver_reads.queries.load(Ordering::Relaxed) > queries_before);
+    // The resolver stays fast while the activation router waits on storage.
+    // Expiry must cancel that branch before SQL and release its routing guards.
+    owner_router.drain_local_target(&target).await.unwrap();
+    let idle = authority.load(target.cell_id()).await.unwrap().unwrap();
+    assert_eq!(
+        idle.value().state,
+        crab_cell_runtime::control::ControlState::Idle
+    );
+    let activation_reads_before = activation_reads.load(Ordering::Relaxed);
+    let queries_before = receiver_reads.queries.load(Ordering::Relaxed);
+    activation_store.config_mut(|config| config.wait_get_per_call = Duration::from_secs(2));
+    let expired_activation = peer_http
+        .post(format!("{management_endpoint}/internal/cells/v1/forward"))
+        .header(axum::http::header::CONTENT_TYPE, "application/x-protobuf")
+        .body(signed_read(500, true))
+        .send()
+        .await
+        .unwrap();
+    activation_store.config_mut(|config| config.wait_get_per_call = Duration::ZERO);
+    assert_eq!(expired_activation.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert!(activation_reads.load(Ordering::Relaxed) > activation_reads_before);
+    assert_eq!(
+        receiver_reads.queries.load(Ordering::Relaxed),
+        queries_before
+    );
+    assert_eq!(owner_runtime.stats().primitive_jobs(), 0);
+    assert_eq!(
+        authority
+            .load(target.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .value(),
+        idle.value()
+    );
+    let activated = peer_http
+        .post(format!("{management_endpoint}/internal/cells/v1/forward"))
+        .header(axum::http::header::CONTENT_TYPE, "application/x-protobuf")
+        .body(signed_read(10_000, true))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(activated.status(), StatusCode::OK);
+    assert_eq!(
+        receiver_reads.queries.load(Ordering::Relaxed),
+        queries_before + 1
+    );
     // Concurrent expiry may send callers through the existing slow path, but
     // it must not fabricate authority, amplify beyond those callers, or fail.
     tokio::time::sleep(Duration::from_millis(5_050)).await;

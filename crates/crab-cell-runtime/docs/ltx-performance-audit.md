@@ -1724,9 +1724,22 @@ The full public application regression passes against memory storage and real
 RustFS: concurrent hint expiry, owner takeover, restored collaboration state,
 and Git clone/tag reads. These are functional proofs, not measured p95 gains.
 
-**Remaining gate:** exercise expiration during activation and accepted-command
-completion under HTTP cancellation; retain the runtime stable-identity
-cancellation regression.
+The same public HTTP/mTLS fixture now separately delays the activation router
+after a clean Cell drain, while authentication and owner resolution use their
+normal stores. Activation reads receive a two-second injected delay against a
+500 ms received budget; the read counter proves that path was entered. The
+response is 504, no query handler runs, primitive
+job reservations return to zero, and the complete idle control value is
+unchanged. Removing the delay lets a fresh activation-enabled request execute
+exactly one query; subsequent public reads verify the persisted comment. Both
+the in-memory and real local RustFS application tests pass, including the later
+owner takeover and Git readback. The original same-envelope resolution retry
+case is retained. This closes early activation deadline coverage without
+changing production code; it does not prove cancellation midway through an
+already-dispatched restore or SQLite operation.
+
+**Remaining gate:** exercise accepted-command completion under HTTP cancellation;
+retain the runtime stable-identity cancellation regression.
 Measure admission wait, enrollment I/O, codec time, retries, 503s, and retained
 request bytes under the one-vCPU profile. Compare public p95/p99 at the same
 offered load before accepting the hint and queue changes as a performance win.
@@ -2883,8 +2896,24 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/<checkout>" \
   -- --exact --ignored --nocapture
 ```
 
-The full RustFS fleet recovery gate must be rerun on the corrected image;
-these focused regressions cannot replace the original process-loss scenario.
+Corrected-image [run 36272807534](https://github.com/crabbuild/crab/actions/runs/36272807534)
+passes startup, restore, crash recovery, restart and the three-node cluster
+faults at exact source `ce02ac2e0f7e95b08f551b8a46a6e13bb5ac7e33`. The ARM64
+image digest is
+`sha256:4193bb3ec8ff41960e0727c026d42fcc6541738acd52e4778a21e1cc1e362d3a`;
+receipt SHA256 is
+`b795e97c26f78be7cdd4dabea22ddee165bdb715575870377a43783708ca84bc`.
+The downloaded receipt also passes the canonical `validate-cluster` command
+on Rust 1.98 in source-only mode. This is process-loss evidence, including
+unpublished follower state, but does not replace the failed multi-Cell rate
+point or establish sustained capacity.
+
+Uniform [fleet run 36274405084](https://github.com/crabbuild/crab/actions/runs/36274405084)
+is running with that image: image and stage source `ce02ac2e0f7`, job/fault
+harness `4741628d0db`. It must complete the original 3/5/10/20-node arrival,
+full-body readback, publication drain and owner-loss gates. The stage source
+predates publication-attribution summaries; retain and rejoin its raw logs
+with the collector as described above. A dispatch is not a qualification result.
 
 ### 31. The archive check adds a serialized Cell invocation before mutations
 
