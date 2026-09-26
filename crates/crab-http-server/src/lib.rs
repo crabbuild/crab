@@ -35,8 +35,8 @@ mod storage_root;
 mod transfer_admission;
 
 pub use config::{
-    AuthProvider, BranchProtection, CellsConfig, Config, GitHubConfig, ImportConfig, OidcConfig,
-    RepositoryAccess, RepositoryConfig, RepositoryMember, StorageConfig,
+    AuthProvider, BranchProtection, CellDurabilityMode, CellsConfig, Config, GitHubConfig,
+    ImportConfig, OidcConfig, RepositoryAccess, RepositoryConfig, RepositoryMember, StorageConfig,
 };
 pub use server::{probe_storage, serve};
 pub use state_stream::state_observing_body;

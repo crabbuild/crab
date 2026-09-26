@@ -274,8 +274,8 @@ async fn exercise_replica_read(fixture: &Fixture) {
     };
     assert!(matches!(
         reader.query::<ReadCounter>(Some(minimum), 0).await,
-        Err(crab_cell_runtime::Error::ReplicaBehind { observed, minimum: requested })
-            if observed.commit_sequence < requested.commit_sequence && requested == minimum
+        Err(crab_cell_runtime::Error::ReplicaBehind { observed_sequence, minimum_sequence })
+            if observed_sequence < minimum_sequence && minimum_sequence == minimum.commit_sequence
     ));
 
     let refreshed_path = fixture._directory.path().join("refreshed.sqlite");

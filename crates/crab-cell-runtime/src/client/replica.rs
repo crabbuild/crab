@@ -179,7 +179,10 @@ impl CellReadReplica {
         if let Some(minimum) =
             minimum.filter(|minimum| observed.commit_sequence < minimum.commit_sequence)
         {
-            return Err(Error::ReplicaBehind { observed, minimum });
+            return Err(Error::ReplicaBehind {
+                observed_sequence: observed.commit_sequence,
+                minimum_sequence: minimum.commit_sequence,
+            });
         }
         let operation = self.registry.query_contract::<Q>(self.target.namespace())?;
         validate_description(&self.registry, Q::MODULE, self.expected, operation)?;

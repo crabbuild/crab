@@ -47,7 +47,7 @@ use uuid::Uuid;
 
 use crate::catalog::CatalogStore;
 use crate::{
-    Config, RepositoryConfig, Result, api, app, archive, assets, assignees,
+    CellDurabilityMode, Config, RepositoryConfig, Result, api, app, archive, assets, assignees,
     auth::{self, Authentication, Principal},
     branches, checks, contents, git, git_import, issues, labels, lfs, maintenance, pulls, receive,
     releases,
@@ -89,6 +89,24 @@ const CELL_COMPONENT_CATALOG: &str = "repository-catalog";
 const CELL_COMPONENT_SCHEDULER_STATUS: &str = "scheduler-status";
 const CELL_COMPONENT_RELEASE_STORE: &str = "release-store";
 const CELL_COMPONENT_CAPACITY: &str = "capacity-report";
+
+fn required_cell_components(mode: CellDurabilityMode) -> Vec<&'static str> {
+    let mut components = vec![
+        CELL_COMPONENT_REPOSITORY_ROUTER,
+        CELL_COMPONENT_PEER_RECEIVER,
+        FOLLOWER_STORE_COMPONENT,
+        CELL_COMPONENT_NODE_LOG_TRANSPORT,
+        CELL_COMPONENT_NODE_PUBLISHER,
+        CELL_COMPONENT_CATALOG,
+        CELL_COMPONENT_SCHEDULER_STATUS,
+        CELL_COMPONENT_RELEASE_STORE,
+        CELL_COMPONENT_CAPACITY,
+    ];
+    if mode == CellDurabilityMode::Fleet {
+        components.push(NODE_DURABILITY_PROVIDER_COMPONENT);
+    }
+    components
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CellRuntimeBudget {
@@ -1106,18 +1124,7 @@ pub async fn serve(config: Config) -> Result<()> {
                 crate::cells::repository_replica_limits(),
                 local_disk.clone(),
             )
-            .with_required_owned_components([
-                CELL_COMPONENT_REPOSITORY_ROUTER,
-                CELL_COMPONENT_PEER_RECEIVER,
-                FOLLOWER_STORE_COMPONENT,
-                CELL_COMPONENT_NODE_LOG_TRANSPORT,
-                CELL_COMPONENT_NODE_PUBLISHER,
-                NODE_DURABILITY_PROVIDER_COMPONENT,
-                CELL_COMPONENT_CATALOG,
-                CELL_COMPONENT_SCHEDULER_STATUS,
-                CELL_COMPONENT_RELEASE_STORE,
-                CELL_COMPONENT_CAPACITY,
-            ])?
+            .with_required_owned_components(required_cell_components(config.cells.durability))?
             .build()?,
     );
     let cell_tasks = cell_node.install_task_group(cancellation.clone(), node_shutdown.clone())?;
@@ -1161,18 +1168,20 @@ pub async fn serve(config: Config) -> Result<()> {
             .with_local_follower(node, (*follower_store).clone()),
         );
     node_publisher.install_node_log_transport(Arc::clone(&node_log_transport))?;
-    cell_node.install_node_durability_provider(
-        Arc::clone(&node_publisher),
-        NodeDurabilitySupervisorConfig::new(
-            startup.identity.application(),
-            crate::cells::repository_replica_limits(),
-            crate::cells::repository_replica_limits().max_capture_bytes,
-            1_024,
-            Duration::from_secs(3),
-            Duration::from_secs(5),
-            1_000_000,
-        )?,
-    )?;
+    if config.cells.durability == CellDurabilityMode::Fleet {
+        cell_node.install_node_durability_provider(
+            Arc::clone(&node_publisher),
+            NodeDurabilitySupervisorConfig::new(
+                startup.identity.application(),
+                crate::cells::repository_replica_limits(),
+                crate::cells::repository_replica_limits().max_capture_bytes,
+                1_024,
+                Duration::from_secs(3),
+                Duration::from_secs(5),
+                1_000_000,
+            )?,
+        )?;
+    }
     let recovery_artifacts = Arc::new(crate::cells::RecoveryArtifactRegistry::new(
         session_dir.join("recovery-artifacts"),
         crate::cells::repository_replica_limits(),
@@ -2372,6 +2381,16 @@ mod tests {
     use crab_cell_host::CellNodeTaskGroup;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[test]
+    fn object_proof_requires_recovery_but_no_follower_supervisor() {
+        let object = required_cell_components(CellDurabilityMode::Object);
+        let fleet = required_cell_components(CellDurabilityMode::Fleet);
+        assert!(object.contains(&FOLLOWER_STORE_COMPONENT));
+        assert!(object.contains(&CELL_COMPONENT_NODE_LOG_TRANSPORT));
+        assert!(!object.contains(&NODE_DURABILITY_PROVIDER_COMPONENT));
+        assert!(fleet.contains(&NODE_DURABILITY_PROVIDER_COMPONENT));
+    }
 
     #[test]
     fn projection_sweep_rotates_when_one_batch_covers_every_repository() {

@@ -57,8 +57,11 @@ and switches a shared snapshot after a fresh authority check; in-flight queries
 retain their exact old view until completion.
 The S3 desired-count object supports conditional create/update. These are
 library capabilities only: no server route, node-wide reconciler, sparse read
-view, object-only production profile, or warm-reader promotion preference is
-enabled. The current server still uses fleet durability and owner-only reads.
+view, warm-reader promotion preference, or production qualification is enabled.
+The server can select the existing object proof path with `[cells]
+durability = "object"` for a fresh deployment; fleet remains the default and
+the fleet-to-object drain and coverage barrier is not automated. Reads still
+route only to the owner.
 Do not claim the all-reader-loss guarantee or replica read scaling from these
 local tests.
 
@@ -274,7 +277,7 @@ RustFS tests cover capacity rejection, concurrent charges, and full release;
 these provisional limits still need measured 1 GiB/1 vCPU receipts before
 product enablement.
 An explicit local replica query whose view is behind a caller's minimum now
-returns `ReplicaBehind` with both exact receipts. The peer wire still maps
+returns `ReplicaBehind` with both sequence numbers. The peer wire still maps
 that error to generic unavailability until the replica read operation and its
 versioned error contract are added.
 The LTX restore install now removes a destination that its blocking worker
