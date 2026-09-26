@@ -385,30 +385,6 @@ for pair in \
   test "$delta" -le "$disk_probe_tolerance_bytes"
 done
 
-metrics_a="$("${compose[@]}" exec -T server crab-http-server \
-  --config /etc/crab/server.toml cells metrics)"
-metrics_b="$("${compose[@]}" exec -T server-b crab-http-server \
-  --config /etc/crab/server.toml cells metrics)"
-metrics_c="$("${compose[@]}" exec -T server-c crab-http-server \
-  --config /etc/crab/server.toml cells metrics)"
-metrics_d="$("${compose[@]}" exec -T server-d crab-http-server \
-  --config /etc/crab/server.toml cells metrics)"
-for pair in \
-  "$capacity_a|$metrics_a" \
-  "$capacity_b|$metrics_b" \
-  "$capacity_c|$metrics_c" \
-  "$capacity_d|$metrics_d"; do
-  capacity="${pair%%|*}"
-  metrics="${pair#*|}"
-  expected_disk="$(jq -r '.admission.local_disk_bytes' <<<"$capacity")"
-  expected_cells="$(jq -r '.admission.active_cells' <<<"$capacity")"
-  observed_disk="$(awk '$1 == "crab_http_server_cell_runtime_local_disk_capacity_bytes" { print $2; exit }' <<<"$metrics")"
-  observed_cells="$(awk '$1 == "crab_http_server_cell_runtime_active_cell_capacity" { print $2; exit }' <<<"$metrics")"
-  test -n "$observed_disk" && test -n "$observed_cells"
-  test "$observed_disk" = "$expected_disk"
-  test "$observed_cells" = "$expected_cells"
-done
-
 session_a="$(node_session server)"
 session_b="$(node_session server-b)"
 session_c="$(node_session server-c)"
@@ -417,14 +393,6 @@ session_d="$(node_session server-d)"
 [[ "$session_b" =~ ^[0-9a-f]{32}$ ]]
 [[ "$session_c" =~ ^[0-9a-f]{32}$ ]]
 [[ "$session_d" =~ ^[0-9a-f]{32}$ ]]
-node_a="$("${compose[@]}" exec -T server crab-http-server \
-  --config /etc/crab/server.toml cells node --session "$session_a" --json)"
-node_b="$("${compose[@]}" exec -T server-b crab-http-server \
-  --config /etc/crab/server.toml cells node --session "$session_b" --json)"
-node_c="$("${compose[@]}" exec -T server-c crab-http-server \
-  --config /etc/crab/server.toml cells node --session "$session_c" --json)"
-node_d="$("${compose[@]}" exec -T server-d crab-http-server \
-  --config /etc/crab/server.toml cells node --session "$session_d" --json)"
 
 node_id_for_session() {
   local expected_session="$1"
@@ -438,45 +406,23 @@ node_id_for_session() {
   return 1
 }
 
-assert_placement_parity() {
-  local capacity="$1"
-  local metrics="$2"
-  local node="$3"
-  local observed_active
-  observed_active="$(awk '$1 == "crab_http_server_cell_runtime_active_cells" { print $2; exit }' <<<"$metrics")"
-  test -n "$observed_active"
-  if ! jq --exit-status \
-    --argjson expected_memory "$(jq -r '.resources.memory_bytes' <<<"$capacity")" \
-    --argjson expected_disk "$(jq -r '.admission.local_disk_bytes' <<<"$capacity")" \
-    --argjson expected_cells "$(jq -r '.admission.active_cells' <<<"$capacity")" \
-    --argjson observed_active "$observed_active" \
-    '.live == true and .advertisement.placement != null and
-     .advertisement.placement.memory_capacity_bytes == $expected_memory and
-     .advertisement.placement.disk_capacity_bytes == $expected_disk and
-     .advertisement.placement.max_active_cells == $expected_cells and
-     .advertisement.placement.active_cells == $observed_active' \
-    <<<"$node" >/dev/null; then
-    # These observations are collected separately. Preserve their actual values
-    # on failure so a stale sample is distinguishable from a capacity defect.
-    jq --null-input \
-      --argjson capacity "$capacity" \
-      --argjson node "$node" \
-      --argjson observed_active "$observed_active" \
-      '{error: "placement parity failed", session: $node.session,
-        live: $node.live, expected: {
-          memory_capacity_bytes: $capacity.resources.memory_bytes,
-          disk_capacity_bytes: $capacity.admission.local_disk_bytes,
-          max_active_cells: $capacity.admission.active_cells,
-          active_cells: $observed_active},
-        advertised: $node.advertisement.placement}' >&2
-    return 1
-  fi
-}
-
-assert_placement_parity "$capacity_a" "$metrics_a" "$node_a"
-assert_placement_parity "$capacity_b" "$metrics_b" "$node_b"
-assert_placement_parity "$capacity_c" "$metrics_c" "$node_c"
-assert_placement_parity "$capacity_d" "$metrics_d" "$node_d"
+# Metrics are fresh runtime counts; placement is a signed heartbeat snapshot.
+# The collector refuses process changes and retains its trace in the run log.
+# The final receipt uses the matching metrics and advertisement it returns.
+placement=(python3 "${script_dir}/placement.py" --project "$project"
+  --compose "$compose_file" --compose "$cluster_file")
+placement_a="$("${placement[@]}" --service server --session "$session_a" --capacity "$capacity_a")"
+placement_b="$("${placement[@]}" --service server-b --session "$session_b" --capacity "$capacity_b")"
+placement_c="$("${placement[@]}" --service server-c --session "$session_c" --capacity "$capacity_c")"
+placement_d="$("${placement[@]}" --service server-d --session "$session_d" --capacity "$capacity_d")"
+node_a="$(jq --compact-output '.node' <<<"$placement_a")"
+node_b="$(jq --compact-output '.node' <<<"$placement_b")"
+node_c="$(jq --compact-output '.node' <<<"$placement_c")"
+node_d="$(jq --compact-output '.node' <<<"$placement_d")"
+metrics_a="$(jq --raw-output '.metrics' <<<"$placement_a")"
+metrics_b="$(jq --raw-output '.metrics' <<<"$placement_b")"
+metrics_c="$(jq --raw-output '.metrics' <<<"$placement_c")"
+metrics_d="$(jq --raw-output '.metrics' <<<"$placement_d")"
 
 # Exclude the spare from the first failover's live executor set. Both enrolled
 # followers survive the owner crash; a recovery claimant can differ from the
