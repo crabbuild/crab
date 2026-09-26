@@ -6,6 +6,10 @@ use crate::{Error, Result};
 pub(crate) const ACTIVE_CELL_NATIVE_BYTES: usize = 64 * 1024;
 /// Persistent database, WAL, SHM and capture descriptors reserved per active Cell.
 pub const ACTIVE_CELL_FILE_DESCRIPTORS: usize = 8;
+// These reserve the full restored SQLite view and one open connection until
+// measured per-node costs can replace the provisional admission charge.
+pub(crate) const READ_REPLICA_NATIVE_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const READ_REPLICA_FILE_DESCRIPTORS: usize = 4;
 pub(crate) const HYDRATION_JOB_CAPACITY: usize = 2;
 
 /// Bounded resources owned by one runtime admission token.

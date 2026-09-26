@@ -10,19 +10,22 @@ use crab_ltx::{CellReplica, ReadOnlyRoot};
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
 use super::*;
+use crate::cell::actor::CellRuntime;
 use crate::control::authority::CellAuthority;
 use crate::control::{Control, ControlState, Owner};
+use crate::fleet::resource::ResourceReservation;
 use crate::node::NodeDirectory;
 
 const QUERY_DEADLINE: Duration = Duration::from_secs(5);
 
 /// One immutable replica snapshot that serves explicit, position-tagged reads.
 ///
-/// The caller owns admission, routing, and authorization. Every successful
+/// The caller owns routing and authorization. Every successful
 /// query checks authoritative control and the owner's live session after SQL
 /// execution; a stale epoch or unavailable authority releases no output.
 #[derive(Clone)]
 pub struct CellReadReplica {
+    runtime: CellRuntime,
     registry: Arc<Registry>,
     authority: CellAuthority,
     directory: NodeDirectory,
@@ -39,14 +42,17 @@ struct ReplicaSnapshot {
     owner: Owner,
     epoch: u64,
     view: Arc<ReadOnlyRoot>,
+    _admission: Arc<ResourceReservation>,
 }
 
 impl CellReadReplica {
     /// Restores the exact S3 root currently named by one live serving owner.
     ///
-    /// The caller supplies a fresh private destination. Source Cell control
-    /// must stay serving under the same owner epoch through installation.
+    /// The caller supplies a fresh private destination and an admitting node
+    /// runtime. Source Cell control must stay serving under the same owner
+    /// epoch through installation.
     pub async fn open(
+        runtime: CellRuntime,
         registry: Arc<Registry>,
         authority: CellAuthority,
         directory: NodeDirectory,
@@ -54,6 +60,8 @@ impl CellReadReplica {
         target: CellTarget,
         destination: &Path,
     ) -> Result<Self> {
+        let admission = Arc::new(runtime.reserve_read_view()?);
+        let replica = runtime.replica_for_read(replica);
         let cell = target.cell_id();
         let observed = authority.load(cell).await?.ok_or(Error::CellNotActive)?;
         let control = observed.value();
@@ -88,8 +96,10 @@ impl CellReadReplica {
             owner,
             epoch: control.epoch,
             view,
+            _admission: admission,
         };
         let opened = Self {
+            runtime,
             registry,
             authority,
             directory,
@@ -116,6 +126,7 @@ impl CellReadReplica {
     /// The destination must be fresh and private. Concurrent refreshes are
     /// serialized; a failed or stale refresh leaves the serving view intact.
     pub async fn refresh(&self, destination: &Path) -> Result<Receipt> {
+        self.runtime.ensure_running()?;
         let _refresh = self.refresh_gate.lock().await;
         let current = self.snapshot.read().await.clone();
         self.confirm_authority(&current).await?;
@@ -135,6 +146,7 @@ impl CellReadReplica {
         if root == current.view.root() {
             return Ok(self.snapshot_receipt(&current));
         }
+        let admission = Arc::new(self.runtime.reserve_read_view()?);
         let verified = self.replica.open_root(&root).await?;
         if verified.schema() != self.expected.schema {
             return Err(Error::Fenced);
@@ -143,6 +155,7 @@ impl CellReadReplica {
             owner: current.owner.clone(),
             epoch: current.epoch,
             view: Arc::new(verified.open_read_only(destination).await?),
+            _admission: admission,
         };
         self.confirm_authority(&replacement).await?;
         let receipt = self.snapshot_receipt(&replacement);
@@ -159,6 +172,7 @@ impl CellReadReplica {
         minimum: Option<Receipt>,
         input: Q::Input,
     ) -> Result<Observed<Q::Output>> {
+        self.runtime.ensure_running()?;
         validate_minimum(self.expected, minimum)?;
         let snapshot = self.snapshot.read().await.clone();
         let observed = self.snapshot_receipt(&snapshot);
@@ -214,6 +228,7 @@ impl CellReadReplica {
         tokio::time::timeout_at(deadline.into(), self.confirm_authority(&snapshot))
             .await
             .map_err(|_| Error::Deadline)??;
+        self.runtime.ensure_running()?;
         Ok(Observed {
             output: decode_wire(&result, operation.output_limit)?,
             receipt: observed,

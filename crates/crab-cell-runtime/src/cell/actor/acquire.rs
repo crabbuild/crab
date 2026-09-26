@@ -636,7 +636,7 @@ impl CellRuntime {
         Ok(cell)
     }
 
-    pub(super) fn ensure_running(&self) -> crate::Result<()> {
+    pub(crate) fn ensure_running(&self) -> crate::Result<()> {
         if self.inner.shutting_down.load(Ordering::Acquire) {
             return Err(Error::RuntimeClosed);
         }

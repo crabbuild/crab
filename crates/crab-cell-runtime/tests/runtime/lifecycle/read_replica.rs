@@ -159,6 +159,12 @@ async fn rustfs_replica_reads_exact_root_and_policy_cas() {
 async fn exercise_replica_read(fixture: &Fixture) {
     let session = SessionId::from_bytes([4; 16]);
     let runtime = CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 << 20, session).unwrap();
+    let reader_runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 200).unwrap(),
+        8 << 20,
+        SessionId::from_bytes([14; 16]),
+    )
+    .unwrap();
     let handle = bootstrap_on(&runtime, fixture, session).await;
 
     let mut builder = RegistryBuilder::new(BuildDescriptor {
@@ -203,7 +209,29 @@ async fn exercise_replica_read(fixture: &Fixture) {
         .unwrap();
 
     let reader_path = fixture._directory.path().join("reader.sqlite");
+    let constrained = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        8 << 20,
+        SessionId::from_bytes([15; 16]),
+    )
+    .unwrap();
+    assert!(matches!(
+        CellReadReplica::open(
+            constrained.clone(),
+            Arc::clone(&registry),
+            CellAuthority::new(fixture.layout.clone()),
+            directory.clone(),
+            fixture.replica.clone(),
+            fixture.target.clone(),
+            &reader_path,
+        )
+        .await,
+        Err(crab_cell_runtime::Error::Capacity(_))
+    ));
+    assert!(!reader_path.exists());
+    constrained.shutdown().await.unwrap();
     let reader = CellReadReplica::open(
+        reader_runtime.clone(),
         Arc::clone(&registry),
         CellAuthority::new(fixture.layout.clone()),
         directory.clone(),
@@ -213,6 +241,10 @@ async fn exercise_replica_read(fixture: &Fixture) {
     )
     .await
     .unwrap();
+    assert_eq!(reader_runtime.stats().file_descriptors(), 4);
+    assert_eq!(reader_runtime.stats().resident_bytes(), 4 << 20);
+    let disk_bytes = reader_runtime.stats().local_disk_reserved_bytes();
+    assert!(disk_bytes > 0);
     assert_eq!(
         reader.query::<ReadCounter>(None, 0).await.unwrap().output,
         0
@@ -272,13 +304,17 @@ async fn exercise_replica_read(fixture: &Fixture) {
         committed.commit_sequence()
     );
     assert!(reader_path.exists());
+    let during_refresh = reader_runtime.stats();
     tokio::task::spawn_blocking(|| query_barriers().1.wait())
         .await
         .unwrap();
     let old = pending.await.unwrap().unwrap();
+    assert_eq!(during_refresh.file_descriptors(), 8);
     assert_eq!(old.output, 0);
     assert!(old.receipt.commit_sequence < refreshed.receipt().await.commit_sequence);
     assert!(!reader_path.exists());
+    assert_eq!(reader_runtime.stats().file_descriptors(), 4);
+    assert!(during_refresh.local_disk_reserved_bytes() > disk_bytes);
     assert_eq!(
         reader.query::<ReadCounter>(None, 0).await.unwrap().output,
         1
@@ -305,5 +341,9 @@ async fn exercise_replica_read(fixture: &Fixture) {
     drop(refreshed);
     assert!(!reader_path.exists());
     assert!(!refreshed_path.exists());
+    assert_eq!(reader_runtime.stats().file_descriptors(), 0);
+    assert_eq!(reader_runtime.stats().resident_bytes(), 0);
+    assert_eq!(reader_runtime.stats().local_disk_reserved_bytes(), 0);
+    reader_runtime.shutdown().await.unwrap();
     runtime.shutdown().await.unwrap();
 }

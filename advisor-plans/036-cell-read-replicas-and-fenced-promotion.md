@@ -266,6 +266,13 @@ The local in-memory and RustFS tests now also prove that a failed refresh
 leaves the old value readable and that an in-flight query returns its old
 snapshot after a newer view is installed. Runtime Clippy passed with warnings
 denied. These are local library checks, not an admitted product replica route.
+The reader now takes a node runtime on open. Each live snapshot reserves a
+provisional 4 MiB of resident memory and four descriptors in that runtime's
+ledger, and its restored SQLite file uses the runtime's local disk admission.
+Refresh reserves a second view until old in-flight queries finish. Local and
+RustFS tests cover capacity rejection, concurrent charges, and full release;
+these provisional limits still need measured 1 GiB/1 vCPU receipts before
+product enablement.
 The LTX restore install now removes a destination that its blocking worker
 successfully installed after the async read-view opener was cancelled;
 `cancelled_read_view_install_removes_its_unclaimed_destination` pauses at that
@@ -273,8 +280,7 @@ exact seam and checks both destination and scratch cleanup. A filesystem error
 after a no-clobber install remains ambiguous and cannot authorize deletion.
 Read-only views now apply the same 64 KiB page-cache target and disabled
 lookaside allocation as managed LTX connections; the exact-root view test
-checks the SQLite cache setting. Node-wide reader reservation still needs a
-measured memory and descriptor cost before product admission.
+checks the SQLite cache setting.
 `desired_readers_follow_live_distinct_nodes_and_replace_a_lost_member` proves
 the advisory directory selection at targets 0, 1, 2, and 4, with distinct
 physical nodes, failure-domain preference, an expired reader, and a new live

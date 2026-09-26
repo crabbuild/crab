@@ -581,6 +581,19 @@ impl CellRuntime {
         })
     }
 
+    pub(crate) fn reserve_read_view(&self) -> crate::Result<ResourceReservation> {
+        self.ensure_running()?;
+        self.inner.resources.try_reserve(
+            ResourceCost::zero()
+                .with_resident_bytes(crate::fleet::resource::READ_REPLICA_NATIVE_BYTES)
+                .with_file_descriptors(crate::fleet::resource::READ_REPLICA_FILE_DESCRIPTORS),
+        )
+    }
+
+    pub(crate) fn replica_for_read(&self, replica: crab_ltx::CellReplica) -> crab_ltx::CellReplica {
+        replica.with_host(self.inner.replica_host.clone())
+    }
+
     /// Tries to reserve one worker-job slot from the same ledger as SQL work.
     ///
     /// A full ledger returns `Ok(None)` so schedulers can leave durable work
