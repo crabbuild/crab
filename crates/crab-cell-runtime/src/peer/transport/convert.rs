@@ -225,7 +225,7 @@ pub(super) fn command_error(
     runtime_error(error)
 }
 
-pub(super) fn runtime_error(error: wire::Error) -> Error {
+pub(crate) fn runtime_error(error: wire::Error) -> Error {
     match wire::error::Code::try_from(error.code) {
         Ok(wire::error::Code::PermissionDenied) => {
             Error::PeerAuthorization("remote peer denied the principal")
@@ -235,6 +235,14 @@ pub(super) fn runtime_error(error: wire::Error) -> Error {
         Ok(wire::error::Code::SchemaIncompatible) => {
             Error::Registry("remote owner rejected the compiled operation")
         }
+        Ok(wire::error::Code::ReplicaBehind) => match error.application_details.as_slice() {
+            [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p] => Error::ReplicaBehind {
+                observed_sequence: u64::from_be_bytes([*a, *b, *c, *d, *e, *f, *g, *h]),
+                minimum_sequence: u64::from_be_bytes([*i, *j, *k, *l, *m, *n, *o, *p]),
+            },
+            _ => Error::Peer("remote read replica returned invalid position details"),
+        },
+        Ok(wire::error::Code::ReplicaUnavailable) => Error::ReplicaUnavailable,
         Ok(wire::error::Code::Unavailable | wire::error::Code::OutcomeUnknown) => {
             Error::CellNotActive
         }

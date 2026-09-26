@@ -19,6 +19,26 @@ from its stable encoding and the application's `CellType` descriptor.
 The reference application exercises generated calls through `CellNode` hosts;
 the macro documentation includes valid and compile-fail examples.
 
+## Explicit replica reads
+
+Typed queries default to `crab_cell_runtime::client::ReadPolicy::CurrentOwner`.
+Authors can pass `handle.with_read_policy(ReadPolicy::Replica)` to a generated
+client constructor. Its queries then return an admitted snapshot's actual
+receipt; an optional minimum still checks Cell, incarnation, and sequence.
+Missing readers return `ReplicaUnavailable`, and a lagging view returns
+`ReplicaBehind`. Neither outcome falls back to the owner. Commands, mutation
+resolution, state streams, and Queue/Effects/Workflow activity lease validation
+retain owner ordering. A stale view cannot prove a claim is still valid for
+external work.
+
+The host first wires `CellClient::with_read_replicas` with a shared
+`ReplicaReadRouter`, an authenticated `ReplicaPeerClient`, and optionally its
+local admitted-view resolver. The author handle receives none of those storage
+or transport capabilities. The router uses S3 desired counts and signed live
+membership, shares outstanding-attempt counts across client clones, and keeps
+selection and retries within one five-second deadline. The object durability
+profile is required for the all-node-loss guarantee.
+
 ## Module map
 
 | Module | Responsibility |

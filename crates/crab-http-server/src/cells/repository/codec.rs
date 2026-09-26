@@ -4,8 +4,8 @@ use super::{
     CommentKey, CommentPage, CommentRecord, CommitStatusCatalog, CommitStatusRecord,
     CommitStatusSubmissionKey, CreateCommentInput, CreateCommentOutcome, CreateCommitStatusInput,
     CreateCommitStatusOutcome, CreateIssueInput, CreateIssueOutcome, CreateLabelInput,
-    CreateLabelOutcome, DeleteLabelInput, DeleteLabelOutcome, IssuePage, IssueRecord, IssueSummary,
-    LabelCatalog, LabelRecord, ListCommentsInput, ListIssuesInput, RepositoryAuthor,
+    CreateLabelOutcome, DeleteLabelInput, DeleteLabelOutcome, IssueDetail, IssuePage, IssueRecord,
+    IssueSummary, LabelCatalog, LabelRecord, ListCommentsInput, ListIssuesInput, RepositoryAuthor,
     UpdateCommentInput, UpdateCommentOutcome, UpdateIssueInput, UpdateIssueOutcome,
     UpdateLabelInput, UpdateLabelOutcome,
 };
@@ -141,6 +141,20 @@ impl WireValue for LabelRecord {
             version: decoder.read_u64()?,
             created_at_ms: decoder.read_u64()?,
             updated_at_ms: decoder.read_u64()?,
+        })
+    }
+}
+
+impl WireValue for IssueDetail {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
+        self.issue.encode(encoder)?;
+        self.labels.encode(encoder)
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
+        Ok(Self {
+            issue: Option::<IssueRecord>::decode(decoder)?,
+            labels: LabelCatalog::decode(decoder)?,
         })
     }
 }

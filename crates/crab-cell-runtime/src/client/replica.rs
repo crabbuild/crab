@@ -1,0 +1,389 @@
+//! Explicit snapshot read path, gated against current Cell authority.
+
+use std::{
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use crab_ltx::{CellReplica, ReadOnlyRoot};
+use tokio::sync::{Mutex, RwLock, Semaphore};
+
+use super::*;
+use crate::cell::actor::CellRuntime;
+use crate::control::authority::CellAuthority;
+use crate::control::{Control, ControlState, Owner};
+use crate::fleet::resource::ResourceReservation;
+use crate::node::NodeDirectory;
+
+const QUERY_DEADLINE: Duration = Duration::from_secs(5);
+
+/// One immutable replica snapshot that serves explicit, position-tagged reads.
+///
+/// The caller owns routing and authorization. Every successful
+/// query checks authoritative control and the owner's live session after SQL
+/// execution; a stale epoch or unavailable authority releases no output.
+#[derive(Clone)]
+pub struct CellReadReplica {
+    runtime: CellRuntime,
+    registry: Arc<Registry>,
+    authority: CellAuthority,
+    directory: NodeDirectory,
+    replica: CellReplica,
+    target: CellTarget,
+    expected: CellDescription,
+    snapshot: Arc<RwLock<ReplicaSnapshot>>,
+    refresh_gate: Arc<Mutex<()>>,
+    query_gate: Arc<Semaphore>,
+}
+
+#[derive(Clone)]
+struct ReplicaSnapshot {
+    owner: Owner,
+    epoch: u64,
+    view: Arc<ReadOnlyRoot>,
+    _admission: Arc<ResourceReservation>,
+}
+
+impl CellReadReplica {
+    pub(crate) fn description(&self) -> CellDescription {
+        self.expected
+    }
+
+    /// Opens the exact S3 root currently named by one live serving owner.
+    ///
+    /// The caller supplies a fresh private destination and an admitting node
+    /// runtime. Source Cell control must stay serving under the same owner
+    /// epoch through installation.
+    pub async fn open(
+        runtime: CellRuntime,
+        registry: Arc<Registry>,
+        authority: CellAuthority,
+        directory: NodeDirectory,
+        replica: CellReplica,
+        target: CellTarget,
+        destination: &Path,
+    ) -> Result<Self> {
+        let admission = Arc::new(runtime.reserve_read_view()?);
+        let replica = runtime.replica_for_read(replica);
+        let cell = target.cell_id();
+        let observed = authority.load(cell).await?.ok_or(Error::CellNotActive)?;
+        let control = observed.value();
+        let owner = control.owner.as_ref().ok_or(Error::Fenced)?.clone();
+        if control.state != ControlState::Serving || control.recovery.is_some() {
+            return Err(Error::Fenced);
+        }
+        let (module, _) = registry
+            .namespace_contract(target.namespace())
+            .ok_or(Error::Registry("replica namespace is not registered"))?;
+        if !registry.supports_module_code(module, control.code, control.schema) {
+            return Err(Error::Registry("replica module or code is unsupported"));
+        }
+        if !directory.is_live(owner.session, unix_time_ms()?).await? {
+            return Err(Error::Fenced);
+        }
+        let root = control.ltx_root().ok_or(Error::Fenced)?;
+        let verified = replica.open_root(&root).await?;
+        if verified.schema() != control.schema {
+            return Err(Error::Fenced);
+        }
+        let expected = CellDescription {
+            cell,
+            incarnation: control.incarnation,
+            code: control.code,
+            schema: control.schema,
+        };
+        let view = open_view(&runtime, verified, destination, Arc::clone(&admission)).await?;
+        let snapshot = ReplicaSnapshot {
+            owner,
+            epoch: control.epoch,
+            view,
+            _admission: admission,
+        };
+        let opened = Self {
+            runtime,
+            registry,
+            authority,
+            directory,
+            replica,
+            target,
+            expected,
+            snapshot: Arc::new(RwLock::new(snapshot.clone())),
+            refresh_gate: Arc::new(Mutex::new(())),
+            query_gate: Arc::new(Semaphore::new(1)),
+        };
+        opened.confirm_authority(&snapshot).await?;
+        Ok(opened)
+    }
+
+    /// Returns the exact snapshot position this reader serves.
+    #[must_use]
+    pub async fn receipt(&self) -> Receipt {
+        let snapshot = self.snapshot.read().await;
+        self.snapshot_receipt(&snapshot)
+    }
+
+    /// Returns the verified position and whether the original owner is still live.
+    ///
+    /// A false readiness bit is advisory warm state only; it never permits a
+    /// query or takeover. Changed authority or closed admission rejects it.
+    pub async fn readiness(&self) -> Result<(Receipt, bool)> {
+        self.runtime.ensure_running()?;
+        let snapshot = self.snapshot.read().await.clone();
+        self.confirm_snapshot(&snapshot).await?;
+        let live = self
+            .directory
+            .is_live(snapshot.owner.session, unix_time_ms()?)
+            .await?;
+        Ok((self.snapshot_receipt(&snapshot), live))
+    }
+
+    /// Closes reader admission across every clone before eviction or writable activation.
+    pub fn close(&self) {
+        self.query_gate.close();
+    }
+
+    /// Installs a newer exact root without disrupting queries using the old view.
+    ///
+    /// The destination must be fresh and private. Concurrent refreshes are
+    /// serialized; a failed or stale refresh leaves the serving view intact.
+    pub async fn refresh(&self, destination: &Path) -> Result<Receipt> {
+        self.runtime.ensure_running()?;
+        let _refresh = self.refresh_gate.lock().await;
+        let current = self.snapshot.read().await.clone();
+        self.confirm_authority(&current).await?;
+        let observed = self
+            .authority
+            .load(self.expected.cell)
+            .await?
+            .ok_or(Error::Fenced)?;
+        let control = observed.value();
+        if !self.same_owner_and_code(control, &current) {
+            return Err(Error::Fenced);
+        }
+        let root = control.ltx_root().ok_or(Error::Fenced)?;
+        if root.commit_sequence < current.view.root().commit_sequence {
+            return Err(Error::Fenced);
+        }
+        if root == current.view.root() {
+            return Ok(self.snapshot_receipt(&current));
+        }
+        let admission = Arc::new(self.runtime.reserve_read_view()?);
+        let verified = self.replica.open_root(&root).await?;
+        if verified.schema() != self.expected.schema {
+            return Err(Error::Fenced);
+        }
+        let replacement = ReplicaSnapshot {
+            owner: current.owner.clone(),
+            epoch: current.epoch,
+            view: open_view(&self.runtime, verified, destination, Arc::clone(&admission)).await?,
+            _admission: admission,
+        };
+        self.confirm_authority(&replacement).await?;
+        let receipt = self.snapshot_receipt(&replacement);
+        *self.snapshot.write().await = replacement;
+        Ok(receipt)
+    }
+
+    /// Executes one compiled typed query against this read-only snapshot.
+    ///
+    /// A minimum newer than this view fails rather than returning an older
+    /// value. Authority is checked after SQL before any result is released.
+    pub async fn query<Q: Query>(
+        &self,
+        minimum: Option<Receipt>,
+        input: Q::Input,
+    ) -> Result<Observed<Q::Output>> {
+        let operation = self.registry.query_contract::<Q>(self.target.namespace())?;
+        validate_description(&self.registry, Q::MODULE, self.expected, operation)?;
+        let input = encode_wire(&input, operation.input_limit)?;
+        let observed = self
+            .query_encoded(EncodedQuery {
+                target: self.target.clone(),
+                expected: self.expected,
+                minimum,
+                now_ms: unix_time_ms()?,
+                module: Q::MODULE,
+                operation_id: Q::ID,
+                codec_version: Q::CODEC_VERSION,
+                input,
+                input_limit: operation.input_limit,
+                output_limit: operation.output_limit,
+            })
+            .await?;
+        Ok(Observed {
+            output: decode_wire(&observed.output, operation.output_limit)?,
+            receipt: observed.receipt,
+        })
+    }
+
+    pub(crate) async fn query_encoded(&self, query: EncodedQuery) -> Result<EncodedObservation> {
+        self.runtime.ensure_running()?;
+        if self.query_gate.is_closed() {
+            return Err(Error::Fenced);
+        }
+        if query.target != self.target || query.expected != self.expected {
+            return Err(Error::Fenced);
+        }
+        validate_minimum(self.expected, query.minimum)?;
+        let (module, operation) = self.registry.routed_query_contract(
+            self.target.namespace(),
+            query.operation_id,
+            query.codec_version,
+        )?;
+        if module != query.module
+            || operation.input_limit != query.input_limit
+            || operation.output_limit != query.output_limit
+        {
+            return Err(Error::Registry("replica query contract changed"));
+        }
+        validate_description(&self.registry, module, self.expected, operation)?;
+        let snapshot = self.snapshot.read().await.clone();
+        let observed = self.snapshot_receipt(&snapshot);
+        if let Some(minimum) = query
+            .minimum
+            .filter(|minimum| observed.commit_sequence < minimum.commit_sequence)
+        {
+            return Err(Error::ReplicaBehind {
+                observed_sequence: observed.commit_sequence,
+                minimum_sequence: minimum.commit_sequence,
+            });
+        }
+        let input = query.input;
+        let deadline = Instant::now() + QUERY_DEADLINE;
+        let permit = tokio::time::timeout_at(
+            deadline.into(),
+            Arc::clone(&self.query_gate).acquire_owned(),
+        )
+        .await
+        .map_err(|_| Error::Deadline)?
+        .map_err(|_| Error::Fenced)?;
+        let job = tokio::time::timeout_at(deadline.into(), self.runtime.reserve_sql_job())
+            .await
+            .map_err(|_| Error::Deadline)??;
+        let interrupt = snapshot.view.connection()?.get_interrupt_handle();
+        let active_snapshot = snapshot.clone();
+        let registry = Arc::clone(&self.registry);
+        let cell = self.expected.cell;
+        let schema = self.expected.schema;
+        let sequence = observed.commit_sequence;
+        let now_ms = unix_time_ms()?;
+        let mut task = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let _job = job;
+            // Caller cancellation can drop the reader while SQL is running.
+            // Keep its view and admission together, releasing them before the
+            // job charge that node drain waits on.
+            let snapshot = active_snapshot;
+            let view = &snapshot.view;
+            let connection = view.connection()?;
+            view.take_io_error();
+            crab_ltx::with_paged_io_deadline(deadline, || {
+                if local::current_sequence(&connection)? != sequence {
+                    return Err(Error::Fenced);
+                }
+                registry.execute_query(
+                    &connection,
+                    QueryInvocation {
+                        module,
+                        operation_id: query.operation_id,
+                        codec_version: query.codec_version,
+                        schema,
+                        cell,
+                        commit_sequence: sequence,
+                        now_ms,
+                        input: &input,
+                    },
+                )
+            })
+            .map_err(|error| match view.take_io_error() {
+                Some(crab_ltx::CrabError::Deadline) => Error::Deadline,
+                Some(source) => Error::from(source),
+                None => error,
+            })
+        });
+        let result = match tokio::time::timeout_at(deadline.into(), &mut task).await {
+            Ok(result) => result.map_err(Error::WorkerJoin)?,
+            Err(_) => {
+                interrupt.interrupt();
+                let _ = task.await;
+                return Err(Error::Deadline);
+            }
+        }?;
+        tokio::time::timeout_at(deadline.into(), self.confirm_authority(&snapshot))
+            .await
+            .map_err(|_| Error::Deadline)??;
+        self.runtime.ensure_running()?;
+        Ok(EncodedObservation {
+            output: result,
+            receipt: observed,
+        })
+    }
+
+    fn snapshot_receipt(&self, snapshot: &ReplicaSnapshot) -> Receipt {
+        receipt(self.expected, snapshot.view.root().commit_sequence)
+    }
+
+    async fn confirm_snapshot(&self, snapshot: &ReplicaSnapshot) -> Result<()> {
+        if self.query_gate.is_closed() {
+            return Err(Error::Fenced);
+        }
+        let current = self
+            .authority
+            .load(self.expected.cell)
+            .await?
+            .ok_or(Error::Fenced)?;
+        if !self.same_owner_and_code(current.value(), snapshot) {
+            return Err(Error::Fenced);
+        }
+        Ok(())
+    }
+
+    async fn confirm_authority(&self, snapshot: &ReplicaSnapshot) -> Result<()> {
+        self.confirm_snapshot(snapshot).await?;
+        if !self
+            .directory
+            .is_live(snapshot.owner.session, unix_time_ms()?)
+            .await?
+        {
+            return Err(Error::Fenced);
+        }
+        Ok(())
+    }
+
+    fn same_owner_and_code(&self, current: &Control, snapshot: &ReplicaSnapshot) -> bool {
+        current.state == ControlState::Serving
+            && current.recovery.is_none()
+            && current.epoch == snapshot.epoch
+            && current.incarnation == self.expected.incarnation
+            && current.code == self.expected.code
+            && current.schema == self.expected.schema
+            && current.owner.as_ref() == Some(&snapshot.owner)
+            && current
+                .root
+                .as_ref()
+                .is_some_and(|root| root.commit_sequence >= snapshot.view.root().commit_sequence)
+    }
+}
+
+async fn open_view(
+    runtime: &CellRuntime,
+    verified: crab_ltx::VerifiedRoot,
+    destination: &Path,
+    admission: Arc<ResourceReservation>,
+) -> Result<Arc<ReadOnlyRoot>> {
+    let job = runtime.reserve_sql_job().await?;
+    let destination = destination.to_owned();
+    // VFS faults need LTX's blocking pool for directory-cache I/O. SQLite must
+    // use separate SQL admission, retaining both charges if its waiter cancels.
+    tokio::task::spawn_blocking(move || {
+        let _job = job;
+        let _admission = admission;
+        crab_ltx::with_paged_io_deadline(Instant::now() + QUERY_DEADLINE, || {
+            verified.open_read_only(&destination).map(Arc::new)
+        })
+    })
+    .await
+    .map_err(Error::WorkerJoin)?
+    .map_err(Error::from)
+}

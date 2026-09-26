@@ -5,12 +5,12 @@ use axum::{
     extract::{Path, Query, State, rejection::JsonRejection},
     http::StatusCode,
     middleware,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::get,
 };
 use crab_cell_runtime::cell::executor::MutationIdentity;
-use crab_cell_runtime::client::{Committed, InvocationError, Observed};
-use crab_cell_runtime::identity::RequestId;
+use crab_cell_runtime::client::{Committed, InvocationError, Observed, Receipt};
+use crab_cell_runtime::identity::{IncarnationId, RequestId};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -24,7 +24,7 @@ use crate::{
         repository::{
             CommentKey, CommentPage, CommentRecord, CreateComment, CreateCommentInput,
             CreateCommentOutcome, CreateIssue, CreateIssueInput, CreateIssueOutcome, GetComment,
-            GetIssue, IssueRecord, IssueSummary, ListComments, ListCommentsInput, ListIssues,
+            GetIssueDetail, IssueRecord, IssueSummary, ListComments, ListCommentsInput, ListIssues,
             ListIssuesInput, RepositoryAuthor, UpdateComment, UpdateCommentInput,
             UpdateCommentOutcome, UpdateIssue, UpdateIssueInput, UpdateIssueOutcome,
         },
@@ -276,31 +276,122 @@ async fn create(
     ))
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DetailParameters {
+    read: Option<String>,
+    after_incarnation: Option<String>,
+    after_sequence: Option<u64>,
+}
+
 async fn detail(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path((owner, name, id)): Path<(String, String, u64)>,
-) -> Result<Json<Value>> {
+    Query(params): Query<DetailParameters>,
+) -> Result<Response> {
     let repo = repository(&server, &principal, &(owner, name))?;
     let author = actor(&principal)?;
-    let routed = route(&server, &repo, &author, "repository.read").await?;
-    let issue = query_output(
-        routed
-            .client
-            .query::<GetIssue>(&routed.target, None, number(id)?)
-            .await,
-    )?
-    .ok_or(Error::NotFound)?;
-    let labels = labels::catalog(&server, &repo, &author).await?;
+    let (issue, receipt, reader_node, labels) = match params.read.as_deref() {
+        None | Some("owner") => {
+            if params.after_incarnation.is_some() || params.after_sequence.is_some() {
+                return Err(Error::Invalid("Replica receipt requires read=replica"));
+            }
+            let routed = route(&server, &repo, &author, "repository.read").await?;
+            let issue = query_output(
+                routed
+                    .client
+                    .query::<GetIssueDetail>(&routed.target, None, number(id)?)
+                    .await,
+            )?;
+            (issue.issue, None, None, issue.labels.labels)
+        }
+        Some("replica") => {
+            let router = server.repository_cells().ok_or(Error::CellUnavailable)?;
+            let minimum = match (params.after_incarnation.as_deref(), params.after_sequence) {
+                (None, None) => None,
+                (Some(incarnation), Some(commit_sequence)) => {
+                    if incarnation.len() != 32
+                        || !incarnation
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                    {
+                        return Err(Error::Invalid("Invalid replica receipt incarnation"));
+                    }
+                    let bytes = u128::from_str_radix(incarnation, 16)
+                        .map_err(|_| Error::Invalid("Invalid replica receipt incarnation"))?
+                        .to_be_bytes();
+                    Some(Receipt {
+                        cell: router
+                            .repository_target(repo.id)
+                            .map_err(Error::Cell)?
+                            .cell_id(),
+                        incarnation: IncarnationId::from_bytes(bytes),
+                        commit_sequence,
+                    })
+                }
+                _ => {
+                    return Err(Error::Invalid(
+                        "Replica receipt requires incarnation and sequence",
+                    ));
+                }
+            };
+            let local = server
+                .peer_receiver()
+                .and_then(|receiver| receiver.read_replicas())
+                .ok_or(Error::Cell(crab_cell_runtime::Error::ReplicaUnavailable))?;
+            let (observed, reader_node) = router
+                .query_replica::<GetIssueDetail>(repo.id, &author, &local, minimum, number(id)?)
+                .await
+                .map_err(Error::Cell)?;
+            (
+                observed.output.issue,
+                Some(observed.receipt),
+                Some(reader_node),
+                observed.output.labels.labels,
+            )
+        }
+        Some(_) => return Err(Error::Invalid("Read mode must be owner or replica")),
+    };
+    let issue = issue.ok_or(Error::NotFound)?;
     let assignees = assignees::available(&repo, &author);
-    Ok(Json(issue_view(
+    let mut response = Json(issue_view(
         &issue,
         &author,
         &labels,
         &assignees,
         principal.can_write(&repo.config),
         true,
-    )))
+    ))
+    .into_response();
+    if let Some(receipt) = receipt {
+        response.headers_mut().insert(
+            "x-crab-cell-incarnation",
+            format!(
+                "{:032x}",
+                u128::from_be_bytes(*receipt.incarnation.as_bytes())
+            )
+            .parse()
+            .map_err(|_| Error::CellContract("replica receipt header failed"))?,
+        );
+        response.headers_mut().insert(
+            "x-crab-cell-sequence",
+            receipt
+                .commit_sequence
+                .to_string()
+                .parse()
+                .map_err(|_| Error::CellContract("replica sequence header failed"))?,
+        );
+    }
+    if let Some(reader_node) = reader_node {
+        response.headers_mut().insert(
+            "x-crab-cell-reader",
+            format!("{:032x}", u128::from_be_bytes(*reader_node.as_bytes()))
+                .parse()
+                .map_err(|_| Error::CellContract("replica reader header failed"))?,
+        );
+    }
+    Ok(response)
 }
 
 #[derive(Deserialize)]

@@ -192,6 +192,7 @@ async fn recover_sql_on_second_node(fixture: &PerfFixture) -> (ReferenceClient, 
         .await
         .direct_takeover()
         .unwrap();
+    let limits = reference_limits(target.namespace()).unwrap();
     let recovered_directory = tempfile::TempDir::new().unwrap();
     let recovered = fixture.nodes[1]
         .runtime()
@@ -201,13 +202,13 @@ async fn recover_sql_on_second_node(fixture: &PerfFixture) -> (ReferenceClient, 
                 layout.clone(),
                 *target.cell_id().as_bytes(),
                 *IncarnationId::from_bytes([40; 16]).as_bytes(),
-                Limits::default(),
+                limits,
             )
             .unwrap(),
             authority,
             observed,
             fence,
-            RecoveryManifestStore::new(layout.clone(), Limits::default()),
+            RecoveryManifestStore::new(layout.clone(), limits),
             recovered_directory.path().join("recovered-sql.sqlite"),
             Owner {
                 session: node_session(1),

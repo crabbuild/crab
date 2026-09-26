@@ -92,6 +92,7 @@ impl IdentityFiles {
             peer_certificate: self.certificate.clone(),
             peer_private_key: self.private_key.clone(),
             peer_ca: self.ca.clone(),
+            durability: crate::CellDurabilityMode::Fleet,
         }
     }
 }

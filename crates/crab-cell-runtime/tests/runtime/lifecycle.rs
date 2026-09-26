@@ -53,6 +53,7 @@ pub mod durability;
 pub mod execution;
 pub mod idle;
 pub mod ownership;
+pub mod read_replica;
 pub mod residency;
 
 #[derive(Debug)]

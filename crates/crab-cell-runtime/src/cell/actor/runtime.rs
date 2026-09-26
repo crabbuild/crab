@@ -401,6 +401,20 @@ impl CellRuntime {
         response.await.map_err(|_| Error::RuntimeClosed)?
     }
 
+    /// Lists active, non-draining catalog entries for bounded owner maintenance.
+    pub async fn active_catalog_entries(
+        &self,
+    ) -> crate::Result<Vec<crate::cell::catalog::CatalogEntry>> {
+        self.ensure_running()?;
+        let (reply, response) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Message::ActiveCatalogEntries { reply })
+            .await
+            .map_err(|_| Error::RuntimeClosed)?;
+        response.await.map_err(|_| Error::RuntimeClosed)?
+    }
+
     /// Counts live and transitioning Cells until their release has completed.
     pub async fn unreleased_cell_count(&self) -> crate::Result<usize> {
         self.ensure_running()?;
@@ -577,6 +591,46 @@ impl CellRuntime {
                 error => error,
             })?;
         Ok(NodeByteReservation {
+            _reservation: reservation,
+        })
+    }
+
+    pub(crate) fn reserve_read_view(&self) -> crate::Result<ResourceReservation> {
+        self.ensure_running()?;
+        self.inner.resources.try_reserve(
+            ResourceCost::zero()
+                .with_resident_bytes(crate::fleet::resource::READ_REPLICA_NATIVE_BYTES)
+                .with_file_descriptors(crate::fleet::resource::READ_REPLICA_FILE_DESCRIPTORS),
+        )
+    }
+
+    pub(crate) fn replica_for_read(&self, replica: crab_ltx::CellReplica) -> crab_ltx::CellReplica {
+        replica.with_host(self.inner.replica_host.clone())
+    }
+
+    pub(crate) async fn reserve_sql_job(
+        &self,
+    ) -> crate::Result<crate::cell::worker::WorkerJobReservation> {
+        self.ensure_running()?;
+        self.inner.pool.reserve_job().await
+    }
+
+    /// Waits for one primitive worker slot within the caller's deadline.
+    pub async fn reserve_worker_job(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> crate::Result<NodeJobReservation> {
+        self.ensure_running()?;
+        let reservation = tokio::time::timeout_at(
+            deadline,
+            self.inner
+                .resources
+                .reserve(ResourceCost::zero().with_primitive_jobs(1)),
+        )
+        .await
+        .map_err(|_| Error::Deadline)??;
+        self.ensure_running()?;
+        Ok(NodeJobReservation {
             _reservation: reservation,
         })
     }

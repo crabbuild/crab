@@ -32,6 +32,7 @@ Position
 PreparedRoot
 PublicationCost
 QueryError
+ReadOnlyRoot
 RecoveryOverlay
 Result
 RootObjectRef

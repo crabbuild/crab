@@ -160,7 +160,18 @@ pub(super) fn wire_receipt(value: Receipt) -> wire::Receipt {
     }
 }
 
-pub(super) fn error_reply(error: Error) -> wire::PeerReply {
+pub(crate) fn error_reply(error: Error) -> wire::PeerReply {
+    let application_details = match &error {
+        Error::ReplicaBehind {
+            observed_sequence,
+            minimum_sequence,
+        } => [
+            observed_sequence.to_be_bytes(),
+            minimum_sequence.to_be_bytes(),
+        ]
+        .concat(),
+        _ => Vec::new(),
+    };
     let (code, outcome, message, retry_after_ms) = match error {
         Error::RequestConflict => (
             wire::error::Code::RequestIdConflict,
@@ -184,6 +195,18 @@ pub(super) fn error_reply(error: Error) -> wire::PeerReply {
             wire::error::Code::ResourceExhausted,
             wire::error::Outcome::NotStarted,
             "Cell runtime capacity is exhausted",
+            100,
+        ),
+        Error::ReplicaBehind { .. } => (
+            wire::error::Code::ReplicaBehind,
+            wire::error::Outcome::NotStarted,
+            "Cell read replica is behind the requested receipt",
+            100,
+        ),
+        Error::ReplicaUnavailable => (
+            wire::error::Code::ReplicaUnavailable,
+            wire::error::Outcome::NotStarted,
+            "Cell read replica is unavailable",
             100,
         ),
         Error::Fenced
@@ -270,7 +293,7 @@ pub(super) fn error_reply(error: Error) -> wire::PeerReply {
             outcome: outcome as i32,
             message: message.into(),
             retry_after_ms,
-            application_details: Vec::new(),
+            application_details,
         })),
     }
 }

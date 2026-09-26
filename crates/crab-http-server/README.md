@@ -49,6 +49,20 @@ OIDC logout tokens. The exact API, catalog migration, and rollout contracts are 
 
 ## Build and run
 
+For a new S3-backed Cell deployment that requires every acknowledged mutation
+to have an exact object root, set `durability = "object"` in `[cells]` on every
+node. This uses the existing object publication proof and does not recruit
+durability-log followers. The default `fleet` profile can acknowledge a
+follower-fsynced cut before the object root is published. Switching a running
+fleet requires draining its old owner sessions, proving object coverage of
+their accepted cuts, and retiring their logs before relying on the all-node-loss
+contract. Read-replica routing remains under
+[Plan 036](../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md).
+Explicit issue-detail replica reads prefer the selected reader with the fewest
+outstanding attempts at this ingress, rotating ties. Selection and retries
+share one five-second request deadline. The count spans this ingress's Cells
+and is released on cancellation; it does not represent fleet-wide query load.
+
 For the fastest local start, use Docker Engine with Compose v2:
 
 ```sh

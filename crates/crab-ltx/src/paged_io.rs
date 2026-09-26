@@ -65,42 +65,53 @@ fn deadline() -> Instant {
 #[derive(Clone)]
 pub(crate) enum Database {
     Cell(CellWritableDatabase),
+    Snapshot(crate::CellPagedDatabase),
 }
 
 impl Database {
+    pub(crate) fn read_only(&self) -> bool {
+        matches!(self, Self::Snapshot(_))
+    }
+
     pub(crate) fn host(&self) -> crate::Host {
         match self {
             Self::Cell(database) => database.host(),
+            Self::Snapshot(database) => database.host(),
         }
     }
 
     pub(crate) fn limits(&self) -> crate::Limits {
         match self {
             Self::Cell(database) => database.limits(),
+            Self::Snapshot(database) => database.limits(),
         }
     }
 
     pub(crate) fn page_size(&self) -> u32 {
         match self {
             Self::Cell(database) => database.page_size(),
+            Self::Snapshot(database) => database.page_size(),
         }
     }
 
     pub(crate) fn page_count(&self) -> u32 {
         match self {
             Self::Cell(database) => database.page_count(),
+            Self::Snapshot(database) => database.page_count(),
         }
     }
 
     pub(crate) fn position(&self) -> crate::Position {
         match self {
             Self::Cell(database) => database.position(),
+            Self::Snapshot(database) => database.position(),
         }
     }
 
     pub(crate) fn checksums(&self) -> Result<crate::pages::PageChecksums> {
         match self {
             Self::Cell(database) => Ok(database.checksums()),
+            Self::Snapshot(_) => Err(CrabError::InvalidState("snapshot has no capture index")),
         }
     }
 
@@ -112,6 +123,7 @@ impl Database {
     ) -> Result<Pages> {
         match self {
             Self::Cell(database) => database.read_run(first, max_pages, origin).await,
+            Self::Snapshot(database) => database.read_run(first, max_pages, origin).await,
         }
     }
 }

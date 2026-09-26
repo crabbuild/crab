@@ -171,6 +171,12 @@ let observed = issues
 
 Queries run on the owning SQL worker under a read-only application boundary. They don't produce LTX, modify control, or bypass namespace and schema checks.
 
+Replica SQL shares the owner's bounded SQL worker admission pool. Its slot
+stays charged until the blocking query exits, including cancellation. Cell peer
+codecs use the node primitive-job ledger with deadline-bounded waiting; S3
+session enrollment runs outside the CPU reservation so provider latency does
+not reject otherwise idle concurrent reads.
+
 ## Apply one absolute operation deadline
 
 Native commands and queries receive a five-second wall deadline. The same deadline covers:
@@ -306,11 +312,22 @@ flowchart TD
     Sql[Close SQLite handles]
     Release[Release owned controls]
     Pool[Close and join SQL and blocking pools]
+    Log[Close the object-covered node log]
+    Session[Stop heartbeats and withdraw the session]
 
-    Close --> Requests --> Schedulers --> Publish --> Sql --> Release --> Pool
+    Close --> Requests --> Schedulers --> Publish --> Sql --> Release --> Pool --> Log --> Session
 ```
 
-Readiness closes as soon as terminal drain starts. Remaining runtime, pool, or handle clones stay permanently closed after shutdown.
+Readiness closes as soon as terminal drain starts. Lease maintenance continues
+through Cell publication and the node-log close barrier; early withdrawal
+fences that authority and makes the drain fail. Work and lease tasks share one
+bounded supervisor and one absolute shutdown deadline. Remaining runtime,
+pool, or handle clones stay permanently closed after shutdown.
+The SQL pool also waits for admitted immutable-reader queries and snapshot
+opens running on blocking tasks. Closing reader admission and joining the
+dedicated SQL threads alone does not drain those tasks. Their existing job
+charges remain held until execution exits, including after caller cancellation;
+offline retention cannot proceed through a successful node drain before then.
 
 ## Preserve these invariants
 

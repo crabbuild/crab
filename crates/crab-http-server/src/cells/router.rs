@@ -1,3 +1,7 @@
+mod replicas;
+
+pub(crate) use replicas::ReadReplicaStatus;
+
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
@@ -16,24 +20,27 @@ use crab_cell_runtime::cell::application::ApplicationIdentity;
 use crab_cell_runtime::cell::catalog::CatalogRole;
 use crab_cell_runtime::cell::catalog::{CatalogProof, CellCatalog};
 use crab_cell_runtime::cell::worker::ACTIVE_CELL_PAGE_CACHE_BYTES;
-use crab_cell_runtime::client::CellClient;
-use crab_cell_runtime::client::CellDescription;
+use crab_cell_runtime::client::{
+    CellClient, CellDescription, Observed, Receipt, ReplicaReadRouter,
+};
 use crab_cell_runtime::control::authority::{CellAuthority, VersionedControl};
 use crab_cell_runtime::control::{ControlState, Owner};
 use crab_cell_runtime::fleet::placement::{
     CellTransferDemand, FleetBalance, PlacementObservation, PlacementPlanner,
 };
-use crab_cell_runtime::identity::CellTarget;
+use crab_cell_runtime::identity::{CellTarget, NodeId};
 use crab_cell_runtime::ltx::CellReplica;
 use crab_cell_runtime::ltx::CellStorageLayout;
-use crab_cell_runtime::node::NodeDirectory;
+use crab_cell_runtime::node::{NodeAdvertisement, NodeDirectory};
 use crab_cell_runtime::peer::{
-    EffectPeerClient, MigrationPeerClient, PeerOperation, PeerPrincipal, PeerRoundTrip, PeerSigner,
-    wire as peer_wire,
+    EffectPeerClient, MigrationPeerClient, PeerOperation, PeerPrincipal, PeerReplicaResolver,
+    PeerRoundTrip, PeerSigner, ReplicaPeerClient, wire as peer_wire,
 };
 use crab_cell_runtime::primitives::maintenance::PersistedWorkInventory;
 use crab_cell_runtime::primitives::workflow::MAX_ACTIVITY_PAYLOAD_BYTES;
+use crab_cell_runtime::read_policy::ReadPolicyStore;
 use crab_cell_runtime::recovery::release::{ReleaseState, ReleaseStore};
+use crab_cell_runtime::registry::Query;
 use crab_cell_runtime::registry::Registry;
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -79,6 +86,8 @@ pub(crate) struct RepositoryCellRouter {
     // sampled at or before it may predate the released ownership, so the whole
     // fleet view is discarded until every member samples again.
     rebalance_settled_at_ms: Arc<AtomicI64>,
+    replica_routing: ReplicaReadRouter,
+    read_replicas: Option<super::ReadReplicaManager>,
 }
 
 #[derive(Clone)]
@@ -124,6 +133,7 @@ impl RepositoryCellRouter {
                 "repository Cell routing requires an absolute session directory and endpoint",
             ));
         }
+        let authority = CellAuthority::with_telemetry(layout.clone(), runtime.telemetry_handle());
         Ok(Self {
             identity,
             catalog: CellCatalog::with_telemetry(
@@ -131,7 +141,8 @@ impl RepositoryCellRouter {
                 identity.tenant(),
                 runtime.telemetry_handle(),
             ),
-            authority: CellAuthority::with_telemetry(layout.clone(), runtime.telemetry_handle()),
+            replica_routing: ReplicaReadRouter::new(authority.clone(), peer.directory.clone()),
+            authority,
             layout,
             registry,
             runtime,
@@ -149,6 +160,7 @@ impl RepositoryCellRouter {
                 .into(),
             rebalance_evidence: Arc::new(Mutex::new(HashMap::new())),
             rebalance_settled_at_ms: Arc::new(AtomicI64::new(0)),
+            read_replicas: None,
         })
     }
 
@@ -342,12 +354,7 @@ impl RepositoryCellRouter {
         action: &'static str,
     ) -> crate::Result<RepositoryCell> {
         validate_action(action)?;
-        let target = CellTarget::new(
-            self.identity.tenant(),
-            self.identity.application(),
-            REPOSITORY_NAMESPACE,
-            repository.as_bytes(),
-        )?;
+        let target = self.repository_target(repository)?;
         self.route_target(
             target,
             PeerPrincipal {
@@ -358,6 +365,18 @@ impl RepositoryCellRouter {
         )
         .await
         .map(|scheduled| scheduled.cell)
+    }
+
+    pub(crate) fn repository_target(
+        &self,
+        repository: Uuid,
+    ) -> crab_cell_runtime::Result<CellTarget> {
+        CellTarget::new(
+            self.identity.tenant(),
+            self.identity.application(),
+            REPOSITORY_NAMESPACE,
+            repository.as_bytes(),
+        )
     }
 
     pub(crate) async fn route_scheduler_target(
@@ -784,6 +803,8 @@ impl RepositoryCellRouter {
                 .await?
         {
             node
+        } else if let Some(node) = self.preferred_warm_reader(target, observed).await? {
+            node
         } else {
             let Some(score) = self
                 .peer
@@ -962,6 +983,11 @@ impl RepositoryCellRouter {
             return Err(crab_cell_runtime::Error::Fenced.into());
         }
 
+        if let Some(readers) = &self.read_replicas {
+            readers.remove(target.cell_id()).await;
+        }
+        // Writable recovery always opens a fresh session from authoritative
+        // roots; a warm read-only SQLite connection is never promoted in place.
         let replica = CellReplica::new(
             self.layout.clone(),
             *target.cell_id().as_bytes(),
@@ -1112,6 +1138,54 @@ impl RepositoryCellRouter {
 }
 
 impl RepositoryCellPeer {
+    async fn activate_read_replica(
+        &self,
+        target: CellTarget,
+        node: crab_cell_runtime::node::NodeAdvertisement,
+    ) -> crate::Result<()> {
+        // A bounded fanout can queue longer than the discovery lease. Reload
+        // the exact session before dispatch; another boot cannot inherit it.
+        let observed = self
+            .directory
+            .load(node.session(), super::unix_now_ms()?)
+            .await?
+            .ok_or(crab_cell_runtime::Error::CellNotActive)?;
+        let node = observed.advertisement().clone();
+        let now_ms = super::unix_now_ms()?;
+        let principal = PeerPrincipal {
+            issuer: format!(
+                "crab-runtime:{}",
+                encode_hex(self.directory.fleet().as_bytes())
+            ),
+            subject: encode_hex(self.owner.session.as_bytes()),
+            actions: vec!["cell.replica.activate".to_owned()],
+        };
+        let request = self.signer.sign(
+            principal,
+            now_ms,
+            now_ms.saturating_add(60_000),
+            30_000,
+            PeerOperation::Read(peer_wire::ReadRequest {
+                target: Some(peer_target(&target)),
+                timeout_ms: 30_000,
+                minimum: None,
+                operation: Some(peer_wire::read_request::Operation::ReplicaActivate(true)),
+            }),
+        )?;
+        let reply = self
+            .round_trip
+            .send_to_node(target.clone(), node, request, 30_000)
+            .await?;
+        let reply = crab_cell_runtime::peer::decode_peer_reply(&reply)?;
+        match reply.outcome {
+            Some(peer_wire::peer_reply::Outcome::Read(peer_wire::ReadReply {
+                receipt: Some(receipt),
+                result: Some(peer_wire::read_reply::Result::ReplicaReady(true)),
+            })) if receipt.cell_id == target.cell_id().as_bytes() => Ok(()),
+            _ => Err(crab_cell_runtime::Error::Peer("read replica did not become ready").into()),
+        }
+    }
+
     pub(crate) fn new(
         directory: NodeDirectory,
         signer: Arc<PeerSigner>,

@@ -106,7 +106,7 @@ impl CellNode {
             first_error = Some(error);
         }
         if let Ok(Some(task_group)) = task_group.as_ref() {
-            task_group.cancel();
+            task_group.cancel_work();
         }
         match facilities {
             Err(error) if first_error.is_none() => first_error = Some(error),
@@ -117,7 +117,7 @@ impl CellNode {
                         // The task group is a retained owner, so its join must share the
                         // node deadline; an unbounded callback could strand shutdown.
                         match task_group.as_ref() {
-                            Ok(Some(task_group)) => task_group.drain_until(deadline).await,
+                            Ok(Some(task_group)) => task_group.drain_work_until(deadline).await,
                             _ => drain().await,
                         }
                     } else {
@@ -154,6 +154,17 @@ impl CellNode {
         };
         if first_error.is_none() {
             first_error = runtime_result.err();
+        }
+        // Session withdrawal fences the log authority. Keep its heartbeat live
+        // until runtime publication and the durable log-close barrier finish.
+        if let Ok(Some(task_group)) = task_group
+            && let Err(source) = task_group.drain_until(deadline).await
+            && first_error.is_none()
+        {
+            first_error = Some(Error::Facility {
+                name: "cell-coordination-tasks",
+                source,
+            });
         }
         let result = match first_error {
             Some(error) => Err(error),

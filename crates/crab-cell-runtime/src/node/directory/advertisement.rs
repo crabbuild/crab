@@ -6,7 +6,163 @@
 
 use super::*;
 
+const READER_MEMBERSHIP_TTL: std::time::Duration = std::time::Duration::from_secs(1);
+
+pub(super) struct ReaderMembership {
+    started: tokio::time::Instant,
+    observed_at_ms: i64,
+    nodes: Arc<Vec<NodeAdvertisement>>,
+}
+
+impl ReaderMembership {
+    fn current(&self, now_ms: i64) -> bool {
+        self.started.elapsed() < READER_MEMBERSHIP_TTL
+            && now_ms >= self.observed_at_ms
+            && now_ms.saturating_sub(self.observed_at_ms) < 1_000
+    }
+}
+
 impl NodeDirectory {
+    /// Selects advisory read-replica destinations from signed live nodes.
+    ///
+    /// A destination must still reserve its own resources and verify Cell
+    /// authority before opening a snapshot; this selection grants no read or
+    /// ownership capability. Discovery is shared across clones for at most one
+    /// second; expired advertisements are excluded on every selection.
+    pub async fn select_readers(
+        &self,
+        cell: crate::CellId,
+        owner: SessionId,
+        code: Digest,
+        desired: usize,
+        now_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<NodeAdvertisement>> {
+        let live = self.reader_membership(now_ms, limit).await?;
+        // An expired owner still identifies the excluded physical node.
+        // Selection is advisory and must survive owner death so warm readers
+        // remain discoverable; query and takeover gates enforce liveness.
+        // Node identity and failure domain cannot change within a boot session.
+        // Reuse their signed discovery proof for exclusion; this grants no
+        // liveness, which the query's final authority gate checks independently.
+        let owner_advertisement = match live.iter().find(|node| node.session() == owner) {
+            Some(owner) => Some(owner.clone()),
+            None => self.inspect_advertisement(owner, now_ms).await?,
+        };
+        let owner_node = if let Some(advertisement) = &owner_advertisement {
+            advertisement.node()
+        } else {
+            let path = self.layout.node_path(owner.as_bytes());
+            match self.load_record_at(&path).await? {
+                Some((NodeRecord::Tombstone(tombstone), _)) => tombstone.node,
+                _ => return Err(Error::Node("read-replica owner record is missing")),
+            }
+        };
+        let mut zones = owner_advertisement
+            .as_ref()
+            .and_then(|owner| owner.failure_domain().zone())
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let mut hosts = owner_advertisement
+            .as_ref()
+            .and_then(|owner| owner.failure_domain().host())
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let mut eligible = live
+            .iter()
+            .filter(|candidate| {
+                let capacity = candidate.capacity();
+                candidate.expires_at_ms() > now_ms
+                    && candidate.node() != owner_node
+                    && candidate.module_digests().contains(&code)
+                    && capacity.free_memory_bytes
+                        >= crate::fleet::resource::READ_REPLICA_NATIVE_BYTES as u64
+                    && capacity.free_disk_bytes > 0
+                    && capacity.job_credits > 0
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut selected = Vec::with_capacity(desired.min(eligible.len()));
+        while selected.len() < desired && !eligible.is_empty() {
+            let index = eligible
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, candidate)| {
+                    let zone = candidate.failure_domain().zone();
+                    let host = candidate.failure_domain().host();
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.update(b"crab-cell-read-replica-placement-v1");
+                    hasher.update(cell.as_bytes());
+                    hasher.update(candidate.node().as_bytes());
+                    (
+                        u8::from(zone.is_some_and(|value| !zones.contains(value))),
+                        u8::from(host.is_some_and(|value| !hosts.contains(value))),
+                        *hasher.finalize().as_bytes(),
+                    )
+                })
+                .map(|(index, _)| index)
+                .ok_or(Error::Node("read-replica placement lost its candidate"))?;
+            let candidate = eligible.swap_remove(index);
+            if let Some(zone) = candidate.failure_domain().zone() {
+                zones.insert(zone.to_owned());
+            }
+            if let Some(host) = candidate.failure_domain().host() {
+                hosts.insert(host.to_owned());
+            }
+            selected.push(candidate);
+        }
+        Ok(selected)
+    }
+
+    async fn reader_membership(
+        &self,
+        now_ms: i64,
+        limit: usize,
+    ) -> Result<Arc<Vec<NodeAdvertisement>>> {
+        if limit == 0 {
+            return Err(Error::Node("live node limit must be nonzero"));
+        }
+        let cached = self.reader_membership.read().await;
+        if let Some(snapshot) = cached.as_ref().filter(|snapshot| snapshot.current(now_ms)) {
+            if snapshot
+                .nodes
+                .iter()
+                .filter(|node| node.expires_at_ms() > now_ms)
+                .count()
+                > limit
+            {
+                return Err(Error::Node("live node directory exceeds its limit"));
+            }
+            return Ok(Arc::clone(&snapshot.nodes));
+        }
+        drop(cached);
+        // One bounded scan serves concurrent requests across Cells. Never use
+        // an expired observation when its refresh fails or is cancelled.
+        let mut cached = self.reader_membership.write().await;
+        if let Some(snapshot) = cached.as_ref().filter(|snapshot| snapshot.current(now_ms)) {
+            if snapshot
+                .nodes
+                .iter()
+                .filter(|node| node.expires_at_ms() > now_ms)
+                .count()
+                > limit
+            {
+                return Err(Error::Node("live node directory exceeds its limit"));
+            }
+            return Ok(Arc::clone(&snapshot.nodes));
+        }
+        let started = tokio::time::Instant::now();
+        let nodes = Arc::new(self.live(now_ms, limit).await?);
+        *cached = Some(ReaderMembership {
+            started,
+            observed_at_ms: now_ms,
+            nodes: Arc::clone(&nodes),
+        });
+        Ok(nodes)
+    }
+
     /// Streams and verifies every currently live boot-session advertisement.
     ///
     /// Expired records do not count against `limit`; malformed, misplaced, or
@@ -315,7 +471,7 @@ impl NodeDirectory {
             None,
             None,
         )?;
-        match self
+        let result = match self
             .layout
             .store()
             .update(
@@ -339,18 +495,19 @@ impl NodeDirectory {
                     Err(Error::Node("advertisement changed during node withdrawal"))
                 }
             },
-        }
+        };
+        self.reader_membership.write().await.take();
+        result
     }
 
-    /// Authenticates one request against its live advertisement and mTLS leaf digest.
-    pub async fn verify_peer_request(
+    /// Binds a request verifier to a live session and its mTLS leaf identity.
+    pub async fn peer_verifier(
         &self,
-        input: &[u8],
+        session: SessionId,
         certificate: Digest,
         certificate_public_key: [u8; 32],
         now_ms: i64,
-    ) -> Result<crate::peer::VerifiedPeerRequest> {
-        let session = crate::peer::claimed_peer_session(input)?;
+    ) -> Result<crate::peer::PeerVerifier> {
         let enrolled = self
             .load(session, now_ms)
             .await?
@@ -365,12 +522,11 @@ impl NodeDirectory {
                 "mTLS certificate key does not match peer session",
             ));
         }
-        crate::peer::PeerVerifier::new(
+        Ok(crate::peer::PeerVerifier::new(
             session,
             self.release,
             enrolled.advertisement.verifying_key()?,
-        )
-        .verify(input, now_ms)
+        ))
     }
 
     /// Conditionally publishes the next heartbeat for the same boot session.

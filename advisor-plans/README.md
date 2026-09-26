@@ -835,3 +835,27 @@ and update its ledger in the plan after its named evidence passes.
 | Plan | Priority | Depends on | Status |
 | --- | --- | --- | --- |
 | [035](035-cell-runtime-continuous-hardening.md) | P0 safety/capacity; P1 optimization | Plans 009, 012, 015, 024, 032, 034 as named by slice | IN PROGRESS — local durability, hydration/retention, resource-accounting, seven-Cell/two-shard reuse, and CI proof expanded; protected qualification still required |
+
+## Cell read replicas and promotion
+
+[036](036-cell-read-replicas-and-fenced-promotion.md) proposes a variable
+number of S3-rooted read replicas on live nodes. An acknowledged write in this
+profile must reach the exact S3 control root, so loss of every reader does not
+discard acknowledged state. A replacement reader restores from S3, and a
+successor becomes the only writer through the existing new-epoch takeover CAS.
+Owner reads remain the default. The object durability profile now wires
+read-only exact-root snapshots, atomic refresh, node admission, S3 target CAS,
+signed reader reconciliation, administrator readiness status, and explicit
+issue-detail replica reads. Typed and generated application clients can choose
+replica policy through the shared runtime router; primitive lease validation
+retains owner ordering. Warm readers may be preferred after owner death,
+with existing session fencing, old-log recovery, and ownership CAS intact.
+Local RustFS and multi-container qualification are recorded in the plan;
+the offline fleet-to-object rollout also passes. Read views now fault
+authenticated pages through an immutable VFS with bounded caching. Storage-cost
+measurements, broader faults, platform rolling upgrades, and production
+qualification remain open.
+
+| Plan | Priority | Effort | Depends on | Status |
+| --- | --- | --- | --- | --- |
+| [036](036-cell-read-replicas-and-fenced-promotion.md) | P1 read scaling / P0 safety | XL | 032 and 035 recovery implementation; their protected gates before production enablement | PARTIAL — object-profile product read replicas, target/status APIs, and fenced warm promotion; 3/5/10/20-node RustFS fault qualification passes; production gates open |

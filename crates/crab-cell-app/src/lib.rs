@@ -403,6 +403,18 @@ impl<A: CellApplication> ApplicationHandle<A> {
         })
     }
 
+    /// Returns an application capability with an explicit typed-query read policy.
+    ///
+    /// Replica policy requires host-configured readers and never falls back to
+    /// owner reads. Commands, outcome resolution, streams and primitive lease
+    /// validation retain owner order.
+    #[must_use]
+    pub fn with_read_policy(&self, policy: crab_cell_runtime::client::ReadPolicy) -> Self {
+        let mut handle = self.clone();
+        handle.client = handle.client.with_read_policy(policy);
+        handle
+    }
+
     /// Returns a handle whose Blob capability uses the configured object store.
     #[must_use]
     pub fn with_blob_artifact_store(&self, store: BlobArtifactStore) -> Self {

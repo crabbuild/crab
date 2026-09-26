@@ -289,6 +289,7 @@ fn enable_catalog_readiness(server: &mut Arc<Server>) {
         Arc::new(releases),
         resolver,
         Arc::new(UnavailableRoundTrip),
+        None,
     ));
     server.catalog_healthy.store(true, Ordering::Release);
     server.node_healthy.store(true, Ordering::Release);

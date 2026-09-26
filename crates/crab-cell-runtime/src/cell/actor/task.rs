@@ -643,6 +643,18 @@ pub(super) fn handle_message(
                 .collect();
             let _ = reply.send(Ok(candidates));
         }
+        Message::ActiveCatalogEntries { reply } => {
+            if node_lease.check().is_err() {
+                let _ = reply.send(Err(Error::Fenced));
+                return;
+            }
+            let entries = cells
+                .values()
+                .filter(|active| !active.draining())
+                .map(|active| active.catalog.entry().clone())
+                .collect();
+            let _ = reply.send(Ok(entries));
+        }
         Message::UnreleasedCellCount { reply } => {
             let _ = reply.send(Ok(cells.len().saturating_add(transitioning.len())));
         }
@@ -785,6 +797,9 @@ pub(super) fn reject_fenced_message(message: Message) {
             let _ = reply.send(Err(Error::Fenced));
         }
         Message::IdleTransferCandidates { reply } => {
+            let _ = reply.send(Err(Error::Fenced));
+        }
+        Message::ActiveCatalogEntries { reply } => {
             let _ = reply.send(Err(Error::Fenced));
         }
         Message::UnreleasedCellCount { reply } => {

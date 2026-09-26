@@ -79,7 +79,7 @@ pub use node_frame::{NodeFrameScope, VerifiedNodeFrame, encode_node_frame, inspe
 #[cfg(feature = "replica")]
 pub use replica::{
     CellPagedDatabase, CellReplica, CellWritableDatabase, PreparedRoot, PublicationCost,
-    RecoveryOverlay, RootObjectRef, RootRef, VerifiedRoot,
+    ReadOnlyRoot, RecoveryOverlay, RootObjectRef, RootRef, VerifiedRoot,
 };
 #[cfg(feature = "replica")]
 pub use writable_vfs::Hydration;

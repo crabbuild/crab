@@ -290,6 +290,43 @@ pub enum ReadConsistency {
 `After(receipt)` additionally requires the same Cell and incarnation and a
 commit sequence at or beyond the receipt. The framework does not expose an
 unfenced local-file read or a global timestamp spanning Cells.
+The implemented client API uses `client::ReadPolicy::{CurrentOwner, Replica}`
+on a cloned capability and an optional minimum `Receipt` on each typed query.
+`CellClient::with_read_policy` and `ApplicationHandle::with_read_policy` select
+the policy; generated clients retain it when deriving scoped accessors.
+Commands, resolution, state streams, and Queue/Effects/Workflow activity lease
+validation still use the owner. Replica queries
+report their actual snapshot receipt, reject a newer minimum with
+`ReplicaBehind`, and never fall back when readers are unavailable.
+
+Host code supplies `CellClient::with_read_replicas` with the shared runtime
+`ReplicaReadRouter` built from its existing instrumented `CellAuthority` and
+live directory, an authenticated peer client, and an optional local
+admitted-view resolver. The same router serves explicit HTTP issue-detail
+reads. It loads authority and the S3 desired count concurrently, rejects a
+policy from a different incarnation, and consults signed live membership. It
+prefers lower ingress-observed in-flight load, and bounds selection and all
+attempts by one five-second deadline. Peer attempts carry the remaining budget.
+Advisory reader discovery shares a bounded one-second membership snapshot
+across directory clones and Cells, with one concurrent refresh. Selection
+filters expired advertisements each time; a failed expired refresh returns an
+error. Successful local enrollment and withdrawal invalidate this discovery
+snapshot.
+The same signed snapshot supplies the owner's immutable boot identity for
+physical-node exclusion; an absent owner is inspected directly, including its
+retirement tombstone. Authority, peer authentication, and offline maintenance
+scans remain fresh.
+The author handle does not expose storage, local files, or routing internals.
+Fresh authority checks remain mandatory before a replica releases a result.
+Blob queries hydrate content-addressed parts with digest and length checks;
+missing or reclaimed parts fail instead of returning unverified bytes.
+The object durability profile supplies the all-node-loss contract;
+[Plan 036](../../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md)
+tracks remaining qualification work. Replica views now fault authenticated
+pages from their exact root, with no full local database restore. Each view
+provisionally reserves 12 MiB and four descriptors, including a conservative
+charge for the shared page cache; refresh retains both views until old queries
+finish. Sparse I/O uses the query deadline and preserves its source error.
 
 ## Generate an application client
 

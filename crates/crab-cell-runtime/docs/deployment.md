@@ -17,6 +17,54 @@ public traffic. Object-root publication remains a valid alternative proof, and
 all recovery still goes through the existing claim, witness, pin, control-CAS,
 and fresh-database activation gates described in
 [Follower durability and warm failover](failover-and-followers.md).
+Owner queries remain the default. In object durability mode, the server
+reconciles a desired-reader policy and serves explicit authenticated reads
+from admitted, verified snapshots. The issue-detail route below is the first
+public product consumer. This is local implementation evidence for
+[Plan 036](../../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md),
+not a qualified production deployment. Fleet-only acknowledgements do not
+provide the plan's all-secondary-loss guarantee.
+
+An administrator can set a repository Cell's desired read-replica count with
+`PUT /api/repos/{owner}/{name}/settings/read-replicas`, sending
+`{"expected_revision":0,"desired_readers":1}` for the first policy and the
+returned revision for later changes. `GET` on the same path returns the current
+target and revision. A successful update means the S3 policy CAS completed;
+the update's `convergence` field is `pending`. `GET` probes the selected nodes
+and reports selected, proven-ready, and unverified reader counts plus the
+lowest proven sequence. Readiness probes use at most 16 concurrent requests
+inside a five-second budget and do not activate views. Failed or timed-out
+probes remain unverified; a selected-node count below the target is a placement
+`shortfall`. The server sends an authenticated owner hint after the
+CAS and also reconciles owned Cells periodically. A stale revision returns
+HTTP 409. This API is available only in the object durability profile.
+
+For repository issue detail, `GET /api/repos/{owner}/{name}/issues/{number}?read=replica`
+selects an admitted reader and returns `x-crab-cell-reader`,
+`x-crab-cell-incarnation`, and `x-crab-cell-sequence` headers naming the
+serving node and the issue query's observed position. Supply
+both `after_incarnation` (32 lowercase hex digits) and `after_sequence` on a
+later replica request to require at least that position. The route reports
+`replica_behind` (409) or `replica_unavailable` (503) and never runs the issue
+query on the owner as a fallback. The default issue route still reads from the
+owner. Issue and label metadata use one typed query against the same snapshot; assignee metadata comes from the authorized repository configuration.
+
+After the owner session expires, verified snapshots remain warm but cannot
+answer queries. Recovery probes the selected live nodes and prefers a warm
+reader, after any mandatory durability-log successor. The destination closes
+reader admission, proves predecessor death, wins the normal Cell-control CAS,
+and opens a fresh writable database from the authoritative root. It never
+turns a read-only connection into a writer. A missing warm reader only removes
+the placement preference; the existing cold recovery path retains every
+session, old-log, and authority gate.
+
+On shutdown, the host cancels work producers and closes reader admission,
+then drains accepted runtime work and seals the covered node log. This includes
+admitted replica SQL and snapshot-open jobs whose callers were cancelled.
+Heartbeat maintenance remains live through that barrier. Session withdrawal follows
+runtime drain; withdrawing earlier fences the log authority and prevents a
+clean fleet-to-object transition. Every phase uses the same absolute shutdown
+deadline. A failed drain must not authorize a durability-mode change.
 
 ## Configure one process per node
 
@@ -285,7 +333,13 @@ listed, candidate, reachable, grace, eligible, and deleted counts.
 If eligible objects exceed the selected deletion bound, the command returns an
 incomplete-retention error and deliberately leaves the release in
 `Maintenance`. Repeat the identical activation command and expected revision;
-the operation re-marks authority before deleting the next bounded batch. Start
+the operation re-marks authority before deleting the next bounded batch. Each
+retry selects the same next unused session identity as competing executors;
+conditional creation admits only one. It advances past permanently retired
+identities and never revives a withdrawn session. After advertising, it checks
+the exact maintenance release again before opening any Cell. The executor
+closes its runtime through its owning `CellNode` before collecting objects;
+final host cleanup is idempotent. Start
 the fleet only after the activation returns a `Ready` release.
 
 ## Deploy on Kubernetes

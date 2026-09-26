@@ -522,6 +522,33 @@ impl Command for CreateComment {
     }
 }
 
+pub(crate) struct IssueDetail {
+    pub(crate) issue: Option<IssueRecord>,
+    pub(crate) labels: LabelCatalog,
+}
+
+pub(crate) struct GetIssueDetail;
+
+impl Query for GetIssueDetail {
+    const MODULE: &'static str = RepositoryModule::NAME;
+    const ID: u32 = 36;
+    const CODEC_VERSION: u32 = 1;
+    type Input = u64;
+    type Output = IssueDetail;
+
+    fn execute(
+        context: &mut QueryContext<'_>,
+        number: u64,
+    ) -> crab_cell_runtime::Result<IssueDetail> {
+        // Detail metadata shares the issue's observation point and routing
+        // decision, so one HTTP request consumes exactly one reader turn.
+        Ok(IssueDetail {
+            issue: GetIssue::execute(context, number)?,
+            labels: ListLabels::execute(context, ())?,
+        })
+    }
+}
+
 pub(crate) struct GetIssue;
 
 impl Query for GetIssue {
@@ -625,6 +652,7 @@ pub(crate) fn register(registry: &mut RegistryBuilder) -> crab_cell_runtime::Res
     registry.bind_command::<AttachReleaseAsset>()?;
     registry.bind_command::<DeleteReleaseAsset>()?;
     registry.bind_query::<GetIssue>()?;
+    registry.bind_query::<GetIssueDetail>()?;
     registry.bind_query::<GetComment>()?;
     registry.bind_query::<ListIssues>()?;
     registry.bind_query::<ListComments>()?;

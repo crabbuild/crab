@@ -295,7 +295,7 @@ async fn node_owns_one_task_group_and_drains_it() {
     let task_finished = Arc::clone(&finished);
     let task_shutdown = node_shutdown.clone();
     tasks
-        .spawn(async move {
+        .spawn_lease_maintenance(async move {
             task_shutdown.cancelled().await;
             task_finished.store(true, Ordering::Release);
             Ok::<(), Error>(())
@@ -331,6 +331,11 @@ async fn task_group_rejects_tasks_above_bound() {
         })
         .unwrap_err();
     assert!(matches!(error, Error::Capacity(_)));
+
+    assert!(matches!(
+        tasks.spawn_lease_maintenance(async { Ok::<(), Error>(()) }),
+        Err(Error::Capacity(_))
+    ));
 
     tasks.drain().await.unwrap();
 }

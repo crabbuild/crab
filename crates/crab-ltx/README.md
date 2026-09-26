@@ -83,6 +83,20 @@ The safe write path is:
 Recovery reverses the boundary: load the authority-pinned `RootRef`, verify its
 complete immutable object graph, then restore it or activate sparse SQL.
 
+`VerifiedRoot::open_read_only` opens a fresh immutable SQLite view over the
+exact root's authenticated pages. Call this synchronous opener on a SQLite
+worker, separately from the LTX blocking-I/O pool used by page fetches.
+The private local file is an empty placeholder; page bodies use the existing
+8 MiB shared bounded cache and the managed 64 KiB SQLite cache. No capture
+session, WAL, checksum sidecar, or writable database handle is created.
+SQLite's immutable VFS flag and read-only handle enforce the boundary even
+if a caller disables `query_only`. The owned view closes SQLite before
+removing its placeholder. A dispatched opener whose waiter is cancelled must
+retain ownership until completion, then drop the unclaimed view.
+Use `with_paged_io_deadline` around blocking SQL and `take_io_error` to retain
+the provider/checksum cause behind SQLite's I/O error. Cell authority and
+freshness checks remain the embedding runtime's responsibility.
+
 ### What Cell authority does
 
 Cell authority is the publication boundary implemented by `crab-cell-runtime`,

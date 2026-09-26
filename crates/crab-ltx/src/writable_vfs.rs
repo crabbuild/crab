@@ -1,4 +1,4 @@
-//! Writable sparse-file adaptation of Celld paged_vfs.rs; see UPSTREAM.md.
+//! Sparse-file and immutable snapshot adaptation of Celld paged_vfs.rs; see UPSTREAM.md.
 //! A static VFS and per-open Arc ownership keep SQLite discovery memory-safe.
 
 use crate::{CrabError, Result, paged_io::Io};
@@ -41,6 +41,7 @@ struct App {
     page_size: u32,
     count: u32,
     local_disk: crate::DiskReservation,
+    read_only: bool,
     state: Mutex<State>,
     error: Mutex<Option<CrabError>>,
 }
@@ -55,6 +56,7 @@ pub(crate) struct Registration {
     app: Arc<App>,
     cursor: u32,
     vfs: &'static str,
+    cleanup: Option<crate::Host>,
 }
 
 impl Registration {
@@ -83,31 +85,49 @@ impl Registration {
                 "sparse activation already registered",
             ));
         }
-        // Only a fresh file can receive a cut's missing-page map. An interrupted
-        // activation is quarantined, never reopened as though its holes were data.
-        let mut file = host.filesystem.create(&path)?;
-        file.set_len(u64::from(count) * u64::from(page_size))?;
-        file.sync_all()?;
-        host.filesystem.sync_parent(&path)?;
+        let read_only = database.read_only();
         let app = Arc::new(App {
             io: Io::new(database)?,
             page_size,
             count,
             local_disk: host.reserve_local_disk(0)?,
+            read_only,
             state: Mutex::new(State {
-                present: vec![false; count as usize],
+                present: if read_only {
+                    Vec::new()
+                } else {
+                    vec![false; count as usize]
+                },
                 ceiling: count,
                 resolved: 0,
                 faults: 0,
             }),
             error: Mutex::new(None),
         });
+        // Only a fresh file can receive a cut's missing-page map. Immutable
+        // views keep an empty placeholder: authenticated pages stay in memory.
+        let mut file = host.filesystem.create(&path)?;
+        let initialized = (|| -> Result<()> {
+            if !read_only {
+                file.set_len(u64::from(count) * u64::from(page_size))?;
+            }
+            file.sync_all()?;
+            host.filesystem.sync_parent(&path)?;
+            Ok(())
+        })();
+        drop(file);
+        if let Err(error) = initialized {
+            // Creation succeeded, so this registration owns the failed install.
+            let _ = host.filesystem.remove_file(&path);
+            return Err(error);
+        }
         registry.insert(path.clone(), app.clone());
         Ok(Self {
             path,
             app,
             cursor: 1,
             vfs,
+            cleanup: read_only.then_some(host),
         })
     }
 
@@ -163,6 +183,9 @@ impl Drop for Registration {
     fn drop(&mut self) {
         if let Ok(mut registry) = views().lock() {
             registry.remove(&self.path);
+        }
+        if let Some(host) = &self.cleanup {
+            let _ = host.filesystem.remove_file(&self.path);
         }
     }
 }
@@ -276,6 +299,27 @@ unsafe fn guarded(
     }
 }
 
+fn read_snapshot(app: &App, offset: u64, output: &mut [u8]) -> Result<bool> {
+    let size = u64::from(app.count) * u64::from(app.page_size);
+    let available = size.saturating_sub(offset).min(output.len() as u64) as usize;
+    // SQLite requires a zero-filled tail on short reads, including reads at EOF.
+    output[available..].fill(0);
+    let mut copied = 0;
+    while copied < available {
+        let position = offset + copied as u64;
+        let page = (position / u64::from(app.page_size) + 1) as u32;
+        let within = (position % u64::from(app.page_size)) as usize;
+        let bytes = app.io.page(page)?;
+        if bytes.len() != app.page_size as usize {
+            return Err(CrabError::LTXCorrupted);
+        }
+        let count = (available - copied).min(bytes.len() - within);
+        output[copied..copied + count].copy_from_slice(&bytes[within..within + count]);
+        copied += count;
+    }
+    Ok(available < output.len())
+}
+
 unsafe extern "C" fn x_read(
     file: *mut ffi::sqlite3_file,
     buffer: *mut c_void,
@@ -289,6 +333,27 @@ unsafe extern "C" fn x_read(
             return ffi::SQLITE_OK;
         }
         if !(*file).app.is_null() {
+            let app = &*(*file).app;
+            if app.read_only {
+                if amount < 0 || offset < 0 {
+                    return ffi::SQLITE_IOERR_READ;
+                }
+                let output = std::slice::from_raw_parts_mut(buffer.cast::<u8>(), amount as usize);
+                let mut short = false;
+                let rc = guarded(
+                    file,
+                    || {
+                        short = read_snapshot(app, offset as u64, output)?;
+                        Ok(())
+                    },
+                    ffi::SQLITE_IOERR_READ,
+                );
+                return if rc == ffi::SQLITE_OK && short {
+                    ffi::SQLITE_IOERR_SHORT_READ
+                } else {
+                    rc
+                };
+            }
             let rc = guarded(
                 file,
                 || {
@@ -324,6 +389,9 @@ unsafe extern "C" fn x_write(
                 Some(call) => call(base, buffer, amount, offset),
                 None => ffi::SQLITE_IOERR_WRITE,
             };
+        }
+        if (*(*file).app).read_only {
+            return ffi::SQLITE_READONLY;
         }
         if amount == 0 {
             return ffi::SQLITE_OK;
@@ -380,6 +448,9 @@ unsafe extern "C" fn x_truncate(file: *mut ffi::sqlite3_file, size: i64) -> c_in
         };
         if (*file).app.is_null() {
             return truncate(base, size);
+        }
+        if (*(*file).app).read_only {
+            return ffi::SQLITE_READONLY;
         }
         guarded(
             file,
@@ -438,7 +509,22 @@ macro_rules! forward_io {
     };
 }
 forward_io!(x_sync, xSync, (flags: c_int), ffi::SQLITE_IOERR_FSYNC);
-forward_io!(x_size, xFileSize, (size: *mut i64), ffi::SQLITE_IOERR_FSTAT);
+unsafe extern "C" fn x_size(file: *mut ffi::sqlite3_file, size: *mut i64) -> c_int {
+    // SAFETY: SQLite supplies an open wrapper and writable output pointer.
+    unsafe {
+        let file = file.cast::<File>();
+        if !(*file).app.is_null() && (*(*file).app).read_only {
+            let app = &*(*file).app;
+            *size = i64::from(app.count) * i64::from(app.page_size);
+            return ffi::SQLITE_OK;
+        }
+        let base = (*file).base;
+        match (*(*base).pMethods).xFileSize {
+            Some(call) => call(base, size),
+            None => ffi::SQLITE_IOERR_FSTAT,
+        }
+    }
+}
 forward_io!(x_lock, xLock, (lock: c_int), ffi::SQLITE_IOERR_LOCK);
 forward_io!(x_unlock, xUnlock, (lock: c_int), ffi::SQLITE_IOERR_UNLOCK);
 forward_io!(x_reserved, xCheckReservedLock, (out: *mut c_int), ffi::SQLITE_IOERR_CHECKRESERVEDLOCK);
@@ -448,7 +534,14 @@ forward_io!(x_shm_map, xShmMap, (page: c_int, size: c_int, extend: c_int, out: *
 forward_io!(x_shm_lock, xShmLock, (offset: c_int, n: c_int, flags: c_int), ffi::SQLITE_IOERR_SHMLOCK);
 forward_io!(x_shm_unmap, xShmUnmap, (delete: c_int), ffi::SQLITE_IOERR);
 
-unsafe extern "C" fn x_characteristics(_: *mut ffi::sqlite3_file) -> c_int {
+unsafe extern "C" fn x_characteristics(file: *mut ffi::sqlite3_file) -> c_int {
+    // SAFETY: the open file owns its registration's Arc until xClose.
+    unsafe {
+        let app = (*file.cast::<File>()).app;
+        if !app.is_null() && (*app).read_only {
+            return ffi::SQLITE_IOCAP_IMMUTABLE;
+        }
+    }
     // Sparse faults can write during reads. Do not inherit atomic/batch-write
     // optimizations that can bypass the wrapper's bookkeeping.
     0
@@ -498,7 +591,7 @@ unsafe extern "C" fn x_open(
     unsafe {
         (*file).pMethods = std::ptr::null();
         let app = if flags & ffi::SQLITE_OPEN_MAIN_DB != 0 {
-            if name.is_null() || flags & ffi::SQLITE_OPEN_READWRITE == 0 {
+            if name.is_null() {
                 return ffi::SQLITE_CANTOPEN;
             }
             let Ok(path) = CStr::from_ptr(name).to_str() else {
@@ -510,6 +603,14 @@ unsafe extern "C" fn x_open(
             let Some(app) = registry.get(Path::new(path)).cloned() else {
                 return ffi::SQLITE_CANTOPEN;
             };
+            let mode = if app.read_only {
+                ffi::SQLITE_OPEN_READONLY
+            } else {
+                ffi::SQLITE_OPEN_READWRITE
+            };
+            if flags & (ffi::SQLITE_OPEN_READONLY | ffi::SQLITE_OPEN_READWRITE) != mode {
+                return ffi::SQLITE_CANTOPEN;
+            }
             Some(app)
         } else {
             None

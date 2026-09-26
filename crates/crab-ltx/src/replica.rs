@@ -18,12 +18,14 @@ mod compaction;
 pub(crate) mod directory;
 mod merge;
 mod prepare;
+mod read_only;
 mod restore;
 pub(crate) mod root;
 mod upload;
 mod verify;
 
 use directory::{DirectoryEntry, DirectorySpan, DirectoryTree, ObjectExtent};
+pub use read_only::ReadOnlyRoot;
 use root::{
     RootDocument, SegmentDescriptor, decode_root, decode_segment_page, encode_root,
     encode_segment_page,
@@ -294,6 +296,15 @@ impl VerifiedRoot {
             .observe_ltx_logical_read(crate::LtxReadOrigin::Cold);
         restore::run(&self.pages, destination).await
     }
+
+    /// Opens this exact root as an authenticated, sparse read-only SQLite view.
+    ///
+    /// The destination and its sidecars must not exist. The view removes its
+    /// empty placeholder when the last owner drops; page bodies use a bounded cache.
+    /// Call on a SQLite worker: opening can block on authenticated page faults.
+    pub fn open_read_only(&self, destination: &Path) -> Result<ReadOnlyRoot> {
+        ReadOnlyRoot::open(self, destination)
+    }
 }
 
 /// Lazy authenticated page access through one immutable Cell root.
@@ -354,6 +365,14 @@ pub struct CellWritableDatabase {
 }
 
 impl CellPagedDatabase {
+    pub(crate) fn host(&self) -> Host {
+        self.replica.host.clone()
+    }
+
+    pub(crate) fn limits(&self) -> Limits {
+        self.replica.limits
+    }
+
     /// Returns the position this root publishes.
     #[must_use]
     pub fn position(&self) -> Position {
@@ -493,7 +512,7 @@ impl CellPagedDatabase {
         Ok(bytes)
     }
 
-    async fn read_run(
+    pub(crate) async fn read_run(
         &self,
         first: u32,
         max_pages: u32,

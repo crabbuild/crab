@@ -69,6 +69,19 @@ pub struct CellsConfig {
     pub peer_certificate: PathBuf,
     pub peer_private_key: PathBuf,
     pub peer_ca: PathBuf,
+    #[serde(default)]
+    pub durability: CellDurabilityMode,
+}
+
+/// Proof required before the Cell runtime acknowledges a mutation.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CellDurabilityMode {
+    /// Allow fsynced node followers to prove a cut before object publication.
+    #[default]
+    Fleet,
+    /// Require the exact S3 root and Cell-control CAS before acknowledgement.
+    Object,
 }
 
 /// One resolved repository from the durable application catalog.
@@ -537,6 +550,18 @@ mod tests {
         ] {
             assert!(local_config(url).validate().is_err(), "{url}");
         }
+    }
+
+    #[test]
+    fn cell_durability_defaults_to_fleet_and_accepts_object_proof() {
+        let config = local_config("s3://bucket/repositories");
+        assert_eq!(config.cells.durability, CellDurabilityMode::Fleet);
+        let object = CELLS.replace("peer_ca=", "durability='object'\npeer_ca=");
+        let config: Config = toml::from_str(&format!(
+            "listen='127.0.0.1:8788'\nmanagement_listen='127.0.0.1:8789'\n[storage]\nurl='s3://bucket/repositories'{object}"
+        ))
+        .unwrap();
+        assert_eq!(config.cells.durability, CellDurabilityMode::Object);
     }
 
     #[test]

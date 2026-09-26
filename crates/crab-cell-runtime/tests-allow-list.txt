@@ -6,6 +6,7 @@ cell/executor.rs  # declares crate-private test modules
 cell/schema.rs  # compares the private RUNTIME_SCHEMA constant
 cell/worker/tests.rs  # exercises private worker admission and bootstrap
 cell/worker.rs  # declares crate-private test modules
+client/routing.rs  # exercises private in-flight selection and cancellation guards
 client/tests.rs  # exercises the private transport/encoding seam
 client.rs  # declares crate-private test modules
 codec.rs  # declares the shared bounded wire round trip for in-src codec tests

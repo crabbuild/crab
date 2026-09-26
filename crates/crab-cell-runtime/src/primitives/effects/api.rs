@@ -223,7 +223,10 @@ impl<M: EffectModule> EffectSource<M> {
         claimed: Vec<EffectClaim>,
         minimum: Receipt,
     ) -> std::result::Result<Observed<bool>, InvocationError<bool>> {
+        // Lease checks gate external work; a stale snapshot cannot prove that
+        // the owner has not revoked or replaced the claim.
         self.client
+            .with_read_policy(crate::client::ReadPolicy::CurrentOwner)
             .query::<EffectValidateClaimQuery<M>>(
                 &self.target,
                 Some(minimum),

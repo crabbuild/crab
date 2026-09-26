@@ -3,10 +3,12 @@
 use super::*;
 
 use crab_cell_runtime::cell::application::ApplicationIdentity;
+use crab_cell_runtime::client::CellDescription;
 use crab_cell_runtime::control::authority::CellAuthority;
 use crab_cell_runtime::identity::{ApplicationId, Digest, SessionId, TenantId};
 use crab_cell_runtime::ltx::CellStorageLayout;
 use crab_cell_runtime::node::NodeDirectory;
+use crab_cell_runtime::peer::{PeerPrincipal, PeerReplicaResolver, ReplicaPeerClient};
 use crab_storage::{ObjectStoreCredentials, build_explicit_store};
 use object_store::{memory::InMemory, path::Path as ObjectPath};
 use serde_json::Value;
@@ -134,6 +136,11 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         "https://localhost:{}",
         management_listener.local_addr().unwrap().port()
     );
+    let ingress_management_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ingress_management_endpoint = format!(
+        "https://localhost:{}",
+        ingress_management_listener.local_addr().unwrap().port()
+    );
     let identity_files = IdentityFiles::generate();
     let peer_tls = Arc::new(
         LoadedPeerTls::load(&identity_files.config(url::Url::parse(&management_endpoint).unwrap()))
@@ -155,7 +162,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             directory.clone(),
             peer_tls.signing_key().clone(),
             ingress_session,
-            "https://localhost:2".into(),
+            ingress_management_endpoint.clone(),
             crab_cell_runtime::node::NodeFailureDomain::default(),
             peer_tls.fleet(),
             peer_tls.certificate(),
@@ -205,7 +212,13 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
                 registry.release_digest(),
                 peer_tls.signing_key().clone(),
             )),
-            Arc::new(UnavailablePeer),
+            Arc::new(PeerHttpRoundTrip::new(
+                identity,
+                CellAuthority::new(cell_layout.clone()),
+                directory.clone(),
+                peer_tls.client_identity(),
+                owner_session,
+            )),
             crab_cell_runtime::control::Owner {
                 session: owner_session,
                 endpoint: management_endpoint,
@@ -241,11 +254,20 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .root
         .clone();
 
+    let owner_read_replicas = crate::cells::ReadReplicaManager::new(
+        owner_runtime.clone(),
+        Arc::clone(&registry),
+        cell_layout.clone(),
+        directory.clone(),
+        owner_session,
+        owner_dir.path().join("read-replicas"),
+    );
+
     let owner_server = server(
         Arc::clone(&repository),
         store.clone(),
         owner_runtime.clone(),
-        None,
+        Some(owner_router.clone()),
         Some(PeerReceiver::new(
             owner_node,
             owner_session,
@@ -260,6 +282,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             ),
             LocalCellResolver::new(cell_layout.clone(), identity, owner_runtime.clone()),
             Arc::new(UnavailablePeer),
+            Some(owner_read_replicas.clone()),
         )),
     );
     let owner_heartbeat_stop = CancellationToken::new();
@@ -282,7 +305,20 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .unwrap();
     });
 
-    let ingress_runtime = runtime(ingress_session);
+    let ingress_runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 512).unwrap(),
+        16 * 1024 * 1024,
+        ingress_session,
+    )
+    .unwrap();
+    let reader = crate::cells::ReadReplicaManager::new(
+        ingress_runtime.clone(),
+        Arc::clone(&registry),
+        cell_layout.clone(),
+        directory.clone(),
+        ingress_session,
+        ingress_dir.path().join("read-replicas"),
+    );
     let round_trip: Arc<dyn PeerRoundTrip> = Arc::new(PeerHttpRoundTrip::new(
         identity,
         authority.clone(),
@@ -302,22 +338,52 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
                 registry.release_digest(),
                 peer_tls.signing_key().clone(),
             )),
-            round_trip,
+            Arc::clone(&round_trip),
             crab_cell_runtime::control::Owner {
                 session: ingress_session,
-                endpoint: "https://localhost:2".into(),
+                endpoint: ingress_management_endpoint.clone(),
             },
         ),
         ingress_session_dir,
     )
-    .unwrap();
+    .unwrap()
+    .with_read_replicas(Some(reader.clone()));
     let ingress_server = server(
         repository,
         store,
         ingress_runtime.clone(),
         Some(ingress_router),
-        None,
+        Some(PeerReceiver::new(
+            ingress_publisher.node(),
+            ingress_session,
+            directory.clone(),
+            Arc::clone(&registry),
+            Arc::new(
+                crab_cell_runtime::recovery::release::ReleaseStore::new(
+                    cell_layout.clone(),
+                    identity,
+                )
+                .unwrap(),
+            ),
+            LocalCellResolver::new(cell_layout.clone(), identity, ingress_runtime.clone()),
+            round_trip,
+            Some(reader.clone()),
+        )),
     );
+    let ingress_management = management_router(Arc::clone(&ingress_server));
+    let (ingress_management_stop, ingress_management_done) = tokio::sync::oneshot::channel();
+    let ingress_management_tls = Arc::clone(&peer_tls);
+    let ingress_management_task = tokio::spawn(async move {
+        axum::serve(
+            ingress_management_tls.listener(ingress_management_listener),
+            ingress_management.into_make_service_with_connect_info::<PeerTlsIdentity>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = ingress_management_done.await;
+        })
+        .await
+        .unwrap();
+    });
     let ingress_heartbeat_stop = CancellationToken::new();
     let ingress_heartbeat_task = tokio::spawn(
         Arc::clone(&ingress_publisher)
@@ -596,26 +662,229 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .clone();
     assert_ne!(root_after, root_before);
 
+    let current = authority.load(target.cell_id()).await.unwrap().unwrap();
+    let readers_url = format!("{public_origin}/api/repos/team/repo/settings/read-replicas");
+    let initial_target = json_get(&client, readers_url.as_str()).await;
+    assert_eq!(initial_target.0, StatusCode::OK);
+    assert_eq!(initial_target.1["desired_readers"], 0);
+    let one_reader = json_request(
+        &client,
+        reqwest::Method::PUT,
+        readers_url.as_str(),
+        serde_json::json!({"expected_revision":0,"desired_readers":1}),
+    )
+    .await;
+    assert_eq!(one_reader.0, StatusCode::ACCEPTED);
+    assert_eq!(one_reader.1["revision"], 1);
+    let target_status = json_get(&client, readers_url.as_str()).await;
+    assert_eq!(target_status.1["convergence"], "ready");
+    assert_eq!(target_status.1["readiness"]["ready_readers"], 1);
+    let remote_status = owner_router
+        .read_replica_status(&target, &owner_read_replicas)
+        .await
+        .unwrap();
+    assert_eq!(remote_status.ready_readers, 1);
+    let ready = reader
+        .resolve(target.clone())
+        .await
+        .unwrap()
+        .receipt()
+        .await;
+    let observed = reader
+        .resolve(target.clone())
+        .await
+        .unwrap()
+        .query::<crate::cells::repository::GetIssue>(Some(ready), 1)
+        .await
+        .unwrap();
+    assert_eq!(observed.output.unwrap().title, "Remote Cell");
+    let replica_url = format!("{public_origin}/api/repos/team/repo/issues/1?read=replica");
+    let replica_response = client.get(&replica_url).send().await.unwrap();
+    let replica_status = replica_response.status();
+    let replica_headers = replica_response.headers().clone();
+    let replica_bytes = replica_response.bytes().await.unwrap();
+    assert_eq!(
+        replica_status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&replica_bytes)
+    );
+    assert_eq!(
+        replica_headers
+            .get("x-crab-cell-reader")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .len(),
+        32
+    );
+    let incarnation = replica_headers
+        .get("x-crab-cell-incarnation")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let sequence = replica_headers
+        .get("x-crab-cell-sequence")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    let replica_body: Value = serde_json::from_slice(&replica_bytes).unwrap();
+    assert_eq!(replica_body["title"], "Remote Cell");
+    assert_eq!(replica_body["labels"][0]["id"], 1);
+    let behind_url = format!(
+        "{replica_url}&after_incarnation={incarnation}&after_sequence={}",
+        sequence + 1
+    );
+    let behind = json_get(&client, behind_url.as_str()).await;
+    assert_eq!(behind.0, StatusCode::CONFLICT);
+    assert_eq!(behind.1["error"]["code"], "replica_behind");
+    let selected_reader = directory
+        .load(ingress_session, crate::cells::unix_now_ms().unwrap())
+        .await
+        .unwrap()
+        .unwrap()
+        .advertisement()
+        .clone();
+    let replica_peer = ReplicaPeerClient::new(
+        Arc::clone(&registry),
+        Arc::new(crab_cell_runtime::peer::PeerSigner::new(
+            owner_session,
+            registry.release_digest(),
+            peer_tls.signing_key().clone(),
+        )),
+        PeerPrincipal {
+            issuer: local_operator.issuer.clone(),
+            subject: local_operator.subject.clone(),
+            actions: vec!["repository.read".into()],
+        },
+        Arc::new(PeerHttpRoundTrip::new(
+            identity,
+            authority.clone(),
+            directory.clone(),
+            peer_tls.client_identity(),
+            owner_session,
+        )),
+    );
+    let exact = CellDescription {
+        cell: target.cell_id(),
+        incarnation: current.value().incarnation,
+        code: current.value().code,
+        schema: current.value().schema,
+    };
+    let remote = replica_peer
+        .query::<crate::cells::repository::GetIssue>(
+            &target,
+            selected_reader.clone(),
+            exact,
+            Some(ready),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(remote.output.unwrap().title, "Remote Cell");
+
+    use futures_util::StreamExt as _;
+    let concurrent = futures_util::stream::iter(0..32)
+        .map(|_| {
+            owner_router.query_replica::<crate::cells::repository::GetIssue>(
+                repository_id,
+                &local_operator,
+                &owner_read_replicas,
+                Some(ready),
+                1,
+            )
+        })
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+    assert!(
+        concurrent
+            .iter()
+            .all(|result| result.as_ref().is_ok_and(|(observed, node)| {
+                *node == selected_reader.node()
+                    && observed
+                        .output
+                        .as_ref()
+                        .is_some_and(|issue| issue.title == "Remote Cell")
+            })),
+        "concurrent replica reads: {concurrent:?}"
+    );
+
+    let stale_update = json_request(
+        &client,
+        reqwest::Method::PUT,
+        readers_url.as_str(),
+        serde_json::json!({"expected_revision":0,"desired_readers":0}),
+    )
+    .await;
+    assert_eq!(stale_update.0, StatusCode::CONFLICT);
+    let two_readers = json_request(
+        &client,
+        reqwest::Method::PUT,
+        readers_url.as_str(),
+        serde_json::json!({"expected_revision":1,"desired_readers":2}),
+    )
+    .await;
+    assert_eq!(two_readers.0, StatusCode::ACCEPTED);
+    let shortfall = json_get(&client, readers_url.as_str()).await;
+    assert_eq!(shortfall.1["convergence"], "shortfall");
+    assert_eq!(shortfall.1["readiness"]["selected_readers"], 1);
+    let zero_readers = json_request(
+        &client,
+        reqwest::Method::PUT,
+        readers_url.as_str(),
+        serde_json::json!({"expected_revision":2,"desired_readers":0}),
+    )
+    .await;
+    assert_eq!(zero_readers.0, StatusCode::ACCEPTED);
+    let stop_readers = CancellationToken::new();
+    let running_reader = reader.clone();
+    let running_stop = stop_readers.clone();
+    let reader_task = tokio::spawn(async move { running_reader.run(running_stop).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if reader.resolve(target.clone()).await.is_err() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    stop_readers.cancel();
+    reader_task.await.unwrap().unwrap();
+    assert_eq!(ingress_runtime.stats().file_descriptors(), 0);
+    let unavailable = json_get(&client, replica_url.as_str()).await;
+    assert_eq!(unavailable.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(unavailable.1["error"]["code"], "replica_unavailable");
+    let restored_target = json_request(
+        &client,
+        reqwest::Method::PUT,
+        readers_url.as_str(),
+        serde_json::json!({"expected_revision":3,"desired_readers":1}),
+    )
+    .await;
+    assert_eq!(restored_target.0, StatusCode::ACCEPTED);
+    assert!(reader.resolve(target.clone()).await.is_ok());
+
     management_stop.send(()).unwrap();
     management_task.await.unwrap();
     owner_heartbeat_stop.cancel();
     owner_heartbeat_task.await.unwrap().unwrap();
     let stale_owner = authority.load(target.cell_id()).await.unwrap().unwrap();
-    let takeover = stale_owner
-        .value()
-        .takeover(crab_cell_runtime::control::Owner {
-            session: ingress_session,
-            endpoint: "https://localhost:2".into(),
-        })
-        .unwrap();
-    authority
-        .transition(
-            &stale_owner,
-            takeover,
-            crab_cell_runtime::control::Transition::Takeover,
-        )
-        .await
-        .unwrap();
+    let stale_reader = reader.resolve(target.clone()).await.unwrap();
+    let (warm, ready) = reader.status(target.clone()).await.unwrap();
+    assert!(!ready);
+    assert_eq!(warm.incarnation, stale_owner.value().incarnation);
+    assert!(matches!(
+        stale_reader
+            .query::<crate::cells::repository::GetIssue>(None, 1)
+            .await,
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
     std::fs::remove_dir_all(owner_dir.path()).unwrap();
 
     let restored = client
@@ -626,6 +895,21 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .await
         .unwrap();
     assert_eq!(restored.status(), StatusCode::OK);
+    let promoted = authority.load(target.cell_id()).await.unwrap().unwrap();
+    assert_eq!(
+        promoted.value().owner.as_ref().unwrap().session,
+        ingress_session
+    );
+    assert!(promoted.value().epoch > stale_owner.value().epoch);
+    assert!(reader.resolve(target.clone()).await.is_err());
+    assert!(matches!(
+        stale_reader
+            .query::<crate::cells::repository::GetIssue>(None, 1)
+            .await,
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
+    drop(stale_reader);
+
     let restored: Value = serde_json::from_slice(&restored.bytes().await.unwrap()).unwrap();
     assert_eq!(restored["items"][0]["title"], "Remote Cell");
     assert_eq!(restored["items"][0]["labels"][0]["name"], "remote");
@@ -708,7 +992,24 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     );
     eprintln!("qualified restored collaboration matrix");
     let taken_over = authority.load(target.cell_id()).await.unwrap().unwrap();
-    assert_eq!(taken_over.value().root, root_after);
+    // Idle compaction may replace the manifest after the last mutation.
+    // Takeover must preserve the exact authority root observed at owner death,
+    // while that root still identifies the acknowledged database position.
+    assert_eq!(taken_over.value().root, stale_owner.value().root);
+    let acknowledged = root_after.as_ref().unwrap();
+    let recovered = taken_over.value().root.as_ref().unwrap();
+    assert_eq!(
+        (
+            recovered.txid,
+            recovered.checksum,
+            recovered.commit_sequence
+        ),
+        (
+            acknowledged.txid,
+            acknowledged.checksum,
+            acknowledged.commit_sequence
+        )
+    );
     assert_eq!(
         taken_over.value().owner.as_ref().unwrap().session,
         ingress_session
@@ -780,6 +1081,8 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
 
     public_stop.send(()).unwrap();
     public_task.await.unwrap();
+    ingress_management_stop.send(()).unwrap();
+    ingress_management_task.await.unwrap();
     ingress_heartbeat_stop.cancel();
     ingress_heartbeat_task.await.unwrap().unwrap();
     ingress_server.receives.close();

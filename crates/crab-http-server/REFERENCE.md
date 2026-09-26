@@ -146,6 +146,14 @@ peer_ca = "/run/secrets/crab-peer/ca.crt"
 url = "s3://your-bucket/repositories"
 ```
 
+`[cells] durability` defaults to `"fleet"`, which permits follower-fsynced
+proof before an exact object root is published. For a fresh S3 deployment that
+requires object-root proof before every acknowledgement, set
+`durability = "object"` on every node. The object profile still retains the
+follower store and log transport for recovery of older log epochs. Do not roll
+an active fleet to object mode until all fleet owners have drained, every
+accepted ticket has exact object coverage, and their node logs have retired.
+
 Choose exactly one URL form per deployment:
 
 | Provider | URL | Ambient credential source |

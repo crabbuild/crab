@@ -664,6 +664,7 @@ mod tests {
                 peer_certificate: "/run/secrets/crab/peer/tls.crt".into(),
                 peer_private_key: "/run/secrets/crab/peer/tls.key".into(),
                 peer_ca: "/run/secrets/crab/peer/ca.crt".into(),
+                durability: crab_http_server::CellDurabilityMode::Fleet,
             },
             import: crab_http_server::ImportConfig::default(),
             auth: None,

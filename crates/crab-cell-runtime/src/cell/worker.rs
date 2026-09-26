@@ -630,7 +630,7 @@ impl SqlWorkerPool {
         receive(response).await
     }
 
-    /// Closes the empty pool and joins every SQL worker thread.
+    /// Closes the empty pool and drains every admitted SQL job and worker thread.
     ///
     /// All Cells must first be drained and deactivated. Once shutdown starts,
     /// every clone is permanently closed and a second call returns
@@ -661,7 +661,7 @@ impl SqlWorkerPool {
             lifecycle.workers.clear();
             std::mem::take(&mut lifecycle.threads)
         };
-        tokio::task::spawn_blocking(move || {
+        let joined = tokio::task::spawn_blocking(move || {
             let mut panicked = false;
             for thread in threads {
                 if thread.join().is_err() {
@@ -675,7 +675,16 @@ impl SqlWorkerPool {
             }
         })
         .await
-        .map_err(Error::WorkerJoin)?
+        .map_err(Error::WorkerJoin)?;
+        // Immutable replica SQL runs outside the dedicated worker threads.
+        // Wait for its existing admission charges before node withdrawal can
+        // let offline retention remove objects still being read.
+        let _drained = self
+            .inner
+            .resources
+            .reserve(ResourceCost::zero().with_worker_jobs(self.inner.worker_count))
+            .await?;
+        joined
     }
 
     async fn send(&self, cell: CellId, command: WorkerCommand) -> Result<()> {
@@ -694,6 +703,18 @@ impl SqlWorkerPool {
     }
 
     async fn send_worker_job(&self, cell: CellId, command: WorkerCommand) -> Result<()> {
+        let reservation = self.reserve_job().await?;
+        self.send(
+            cell,
+            WorkerCommand::Reserved {
+                command: Box::new(command),
+                reservation,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn reserve_job(&self) -> Result<WorkerJobReservation> {
         let worker_permits = {
             let lifecycle = self
                 .inner
@@ -709,21 +730,24 @@ impl SqlWorkerPool {
             .acquire_owned()
             .await
             .map_err(|_| Error::RuntimeClosed)?;
+        let lifecycle = self
+            .inner
+            .lifecycle
+            .lock()
+            .map_err(|_| Error::RuntimeClosed)?;
+        if lifecycle.closing {
+            return Err(Error::RuntimeClosed);
+        }
+        // Serialize the final admission with shutdown's close. A permit won
+        // just before closure must not create work after the drain barrier.
         let reservation = self
             .inner
             .resources
             .try_reserve(ResourceCost::zero().with_worker_jobs(1))?;
-        self.send(
-            cell,
-            WorkerCommand::Reserved {
-                command: Box::new(command),
-                reservation: WorkerJobReservation {
-                    _reservation: reservation,
-                    _permit: permit,
-                },
-            },
-        )
-        .await
+        Ok(WorkerJobReservation {
+            _reservation: reservation,
+            _permit: permit,
+        })
     }
 
     pub(crate) fn reserve_activation(&self) -> Result<CellReservation> {
@@ -961,7 +985,7 @@ enum WorkerCommand {
     },
 }
 
-struct WorkerJobReservation {
+pub(crate) struct WorkerJobReservation {
     _reservation: ResourceReservation,
     _permit: OwnedSemaphorePermit,
 }

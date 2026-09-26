@@ -430,7 +430,10 @@ impl<M: WorkflowActivityModule> WorkflowActivities<M> {
         let target = self
             .shard_target(shard)
             .map_err(InvocationError::NotStarted)?;
+        // Lease checks gate external work; a stale snapshot cannot prove that
+        // the owner has not revoked or replaced the claim.
         self.client
+            .with_read_policy(crate::client::ReadPolicy::CurrentOwner)
             .query::<WorkflowActivityValidateQuery<M>>(
                 &target,
                 Some(minimum),

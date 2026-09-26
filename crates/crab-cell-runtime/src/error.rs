@@ -98,6 +98,17 @@ pub enum Error {
     /// A command failed validation or its handler refused it.
     #[error("invalid Cell command: {0}")]
     Command(&'static str),
+    /// A read replica has not reached the requested Cell position.
+    #[error("Cell read replica is behind the requested receipt")]
+    ReplicaBehind {
+        /// Commit sequence the replica can currently serve.
+        observed_sequence: u64,
+        /// Minimum commit sequence required by the caller.
+        minimum_sequence: u64,
+    },
+    /// No selected local read replica can currently serve the Cell.
+    #[error("Cell read replica is unavailable")]
+    ReplicaUnavailable,
     /// The request ID was already used with different command bytes.
     #[error("request ID was already used for different command bytes")]
     RequestConflict,

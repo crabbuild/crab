@@ -6,6 +6,12 @@ LTX publication, follower durability, fleet placement, and qualification
 receipts. HTTP, authentication, and provider construction stay in
 `crab-http-server`.
 
+An opt-in library read path can open an exact S3-rooted, read-only Cell view
+through `CellReadReplica`. Its view and replacement refresh are charged to the
+node runtime's memory, descriptor, and disk ledgers. The charges are provisional;
+product routing and measured capacity qualification remain open under
+[Plan 036](../../advisor-plans/036-cell-read-replicas-and-fenced-promotion.md).
+
 ## Module map
 
 | Module | Responsibility |

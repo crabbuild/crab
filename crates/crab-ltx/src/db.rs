@@ -948,9 +948,13 @@ pub(crate) fn open_connection(path: &Path, vfs: Option<&str>) -> rusqlite::Resul
         Some(vfs) => Connection::open_with_flags_and_vfs(path, rusqlite::OpenFlags::default(), vfs),
         None => Connection::open(path),
     }?;
-    disable_lookaside(&connection)?;
-    connection.pragma_update(None, "cache_size", -MANAGED_CONNECTION_PAGE_CACHE_KIB)?;
+    configure_managed_connection(&connection)?;
     Ok(connection)
+}
+
+pub(crate) fn configure_managed_connection(connection: &Connection) -> rusqlite::Result<()> {
+    disable_lookaside(connection)?;
+    connection.pragma_update(None, "cache_size", -MANAGED_CONNECTION_PAGE_CACHE_KIB)
 }
 
 fn disable_lookaside(connection: &Connection) -> rusqlite::Result<()> {
@@ -959,8 +963,8 @@ fn disable_lookaside(connection: &Connection) -> rusqlite::Result<()> {
     // SQLite's default lookaside arena reserves memory per connection. Managed
     // LTX connections use a small, stable statement vocabulary, so keeping
     // that arena only adds resident cost across a dense Cell fleet.
-    // SAFETY: the connection was opened immediately above and no SQLite
-    // operation has run, so no lookaside slot can be in use.
+    // SAFETY: callers configure a newly opened connection before any SQLite
+    // operation, so no lookaside slot can be in use.
     let result = unsafe {
         ffi::sqlite3_db_config(
             connection.handle(),

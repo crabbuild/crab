@@ -25,6 +25,9 @@ use std::{
 };
 
 #[cfg(feature = "replica")]
+use std::sync::OnceLock;
+
+#[cfg(feature = "replica")]
 struct DelayedExecutor {
     delay: Duration,
 }
@@ -69,6 +72,24 @@ struct Faults {
     file_syncs: Arc<AtomicUsize>,
     parent_syncs: Arc<AtomicUsize>,
     track_all: Arc<AtomicBool>,
+    #[cfg(feature = "replica")]
+    create_pause: Arc<OnceLock<Arc<InstallPause>>>,
+}
+
+#[cfg(feature = "replica")]
+struct InstallPause {
+    entered: std::sync::Barrier,
+    release: std::sync::Barrier,
+}
+
+#[cfg(feature = "replica")]
+impl InstallPause {
+    fn new() -> Self {
+        Self {
+            entered: std::sync::Barrier::new(2),
+            release: std::sync::Barrier::new(2),
+        }
+    }
 }
 
 impl Faults {
@@ -183,8 +204,14 @@ impl FileSystem for Faults {
     }
     fn create(&self, path: &Path) -> io::Result<Box<dyn FileIo>> {
         self.check("create")?;
+        let inner = DirectFileSystem.create(path)?;
+        #[cfg(feature = "replica")]
+        if let Some(pause) = self.create_pause.get() {
+            pause.entered.wait();
+            pause.release.wait();
+        }
         Ok(Box::new(File {
-            inner: DirectFileSystem.create(path)?,
+            inner,
             faults: self.clone(),
             track: self.track_all.load(Ordering::Relaxed)
                 || path.to_string_lossy().contains(".ltx"),
@@ -207,7 +234,11 @@ impl FileSystem for Faults {
         DirectFileSystem.sync_parent(path)
     }
     filesystem_operation!(persist_new(path: &Path, bytes: &[u8]) -> ());
-    filesystem_operation!(persist_file_new(source: &Path, destination: &Path) -> ());
+    fn persist_file_new(&self, source: &Path, destination: &Path) -> io::Result<()> {
+        self.check("persist_file_new")?;
+        DirectFileSystem.persist_file_new(source, destination)?;
+        Ok(())
+    }
 }
 
 fn fixture() -> (tempfile::TempDir, Arc<Faults>, Host, Db) {
