@@ -186,6 +186,67 @@ class ImageProvenanceTests(unittest.TestCase):
                 qualify.main()
 
 
+class PlacementTests(unittest.TestCase):
+    def run_placement(self, mode):
+        clock = [0]
+        receipt = {}
+
+        def owner(cell):
+            if mode == "collapsed" or clock[0] < 30:
+                return "session1"
+            if mode == "weighted":
+                return "session1" if cell == 1 else "session2" if cell <= 3 else "session3"
+            return f"session{(cell - 1) // 2 + 1}"
+
+        def control(_path, _profiles, cell):
+            if mode == "transient" and clock[0] == 45:
+                raise RuntimeError("Cell is recovering")
+            epoch = int(clock[0] // 15) if mode == "changing_epoch" else 2
+            return {"incarnation": "fixed", "epoch": epoch, "owner": {"session": owner(cell)}}
+
+        def compose(*args):
+            self.assertEqual(args[-4:-2], ("node", "--session"))
+            session = args[-2]
+            count = sum(owner(cell) == session for cell in range(1, 7))
+            if mode == "stale_counts":
+                count = 6 if session == "session1" else 0
+            return json.dumps({"live": True, "advertisement": {
+                "generation": 1 if mode == "stale_generation" else int(clock[0] // 15) + 1,
+                "placement": {"active_cells": count,
+                              "max_active_cells": int(session[-1]) if mode == "weighted" else 8},
+            }})
+
+        with patch.object(load, "prove_node", side_effect=lambda _p, _f, n: (f"session{n}", {}, "container")), \
+                patch.object(load, "compose", side_effect=compose), \
+                patch.object(load, "status", side_effect=control), \
+                patch.object(load.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(load.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            try:
+                owners, _ = load.wait_for_placement(Path("fixture"), (), 3, 6, receipt)
+                return receipt, owners
+            except RuntimeError:
+                return receipt, None
+
+    def test_convergence_requires_fresh_consistent_weighted_ownership(self):
+        for mode in ("uniform", "weighted", "transient"):
+            with self.subTest(mode=mode):
+                receipt, owners = self.run_placement(mode)
+                self.assertTrue(receipt["passed"])
+                self.assertEqual(receipt["elapsed_seconds"], 90 if mode == "transient" else 60)
+                self.assertEqual(sorted(Counter(owners.values()).values()), [1, 2, 3] if mode == "weighted" else [2, 2, 2])
+                if mode == "transient":
+                    self.assertTrue(any("error" in sample for sample in receipt["samples"]))
+
+    def test_healthy_ingress_or_stale_balanced_views_cannot_qualify_placement(self):
+        for mode in ("collapsed", "stale_counts", "stale_generation", "changing_epoch"):
+            with self.subTest(mode=mode):
+                receipt, owners = self.run_placement(mode)
+                self.assertIsNone(owners)
+                self.assertFalse(receipt["passed"])
+                self.assertEqual(receipt["elapsed_seconds"], 600)
+                self.assertEqual(len(receipt["samples"]), 41)
+
+
 class ResourceObservationTests(unittest.TestCase):
     def test_deliberate_loss_keeps_survivor_samples_and_unexpected_loss_still_fails(self):
         for intentional in (False, True):
@@ -541,6 +602,7 @@ class LoadTests(unittest.TestCase):
                         patch.object(qualify, "render", return_value=path), \
                         patch.object(qualify, "pin_image", return_value={}), \
                         patch.object(qualify, "run_stage", side_effect=lambda *args: {"nodes": args[3], "owners": {"work-20": "node-03"}}), \
+                        patch.object(load, "wait_for_placement", return_value=({20: "node-03"}, {})), \
                         patch.object(qualify, "prove_owner_loss", side_effect=recovery), \
                         patch.object(qualify.subprocess, "run", side_effect=RuntimeError("load failed")), \
                         self.assertRaisesRegex(RuntimeError, "load failed" if load_stages else "restart failed"):

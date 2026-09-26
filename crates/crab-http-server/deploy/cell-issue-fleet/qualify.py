@@ -369,7 +369,7 @@ def main() -> None:
     parser.add_argument("--load-max-in-flight", type=int, default=64)
     args = parser.parse_args()
     # Import after module initialization: load uses the same Compose helpers.
-    from load import Workload
+    from load import Workload, wait_for_placement
     try:
         Workload(args.cells, args.load_rate, args.load_duration, args.load_max_in_flight, 0)
     except ValueError as error:
@@ -408,6 +408,11 @@ def main() -> None:
         for size, profiles in phases:
             stage = run_stage(path, profiles, previous, size, args.gateway_port, args.node_port_base, args.cells)
             report["stages"].append(stage)
+            (path.parent / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+            stage["placement"] = {}
+            owners, _ = wait_for_placement(path, profiles, size, args.cells, stage["placement"])
+            stage["owners"] = {f"work-{cell:02d}": owner for cell, owner in owners.items()}
+            stage["distinct_owners"] = len(set(owners.values()))
             (path.parent / "report.json").write_text(json.dumps(report, indent=2) + "\n")
             print(f"Verified {size} nodes and {args.cells} Cell-backed issue services", flush=True)
             if args.load_stages:

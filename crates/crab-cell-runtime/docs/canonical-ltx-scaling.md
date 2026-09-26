@@ -133,6 +133,13 @@ the path should be replaced.
 | Warm request latency | `RepositoryCellRouter::route_existing` first asks the actor-owned resident lookup; sparse activation selects and installs bounded background page batches on the SQL worker while fetching asynchronously outside it. The zero-origin post-promotion qualification is still outstanding. | Actor-owned resident lookup before remote metadata, plus bounded background hydration. A fully hydrated local read performs zero object-store operations from route through SQL result. | An instrumented store observes zero calls for qualified resident reads; cold, sparse, hydrating, resident, local-write, fleet-proof, and object-proof latency are reported separately. |
 | Fleet balancing | Signed versioned placement observations carry measured node headroom, Cell/job counts, and three backlog counters. The private server loop plans bounded transfers, the actor confirms exact settled releases, and the receiver restores through ordinary authority acquisition. Ownership counts now balance by weighted share beside the material headroom-gain path: one elected donor per complete snapshot, a two-percent receiver deadband, and batch, surplus, and room bounds. Cold activation also sends one authenticated hint to a preferred live node. Local, planner, and process race tests cover exact-root preservation, stale-owner fencing/recovery, donation without headroom gain, refusal to mix pre-batch counts, convergence at target, and failed receiver rollback; protected multi-process movement proof remains. | Deterministic weighted placement over signed live capacity, actor-approved quiescent release, idle eviction, cgroup-aware pressure tiers, hysteresis, and paced drains. Placement remains advisory; existing control CAS remains authoritative. | Skew, membership change, stale samples, pressure, receiver death, rolling drain, and oscillation tests preserve authority and converge within declared movement and latency bounds. |
 
+The ownership margin reserves only whole Cells: `floor(target * 2 / 100)`.
+Rounding it up makes an empty receiver ineligible at a one-Cell target.
+Each donation also consumes the receiver's projected room within its batch;
+fleet-wide room alone cannot prevent a preferred receiver from overshooting.
+The 3/5/10/20-node convergence regression covers these small targets, while
+the existing stale-view, settlement and resource gates remain in force.
+
 The Celld comparison is pinned to upstream commit `10cb1303dac710dcb3b557e318e08c855261f68b`.
 Its documentation reports about 1.1 ms p50 and 7 ms p99 for one fixed-host
 warm resident request. Those numbers are a comparison baseline, not a Crab

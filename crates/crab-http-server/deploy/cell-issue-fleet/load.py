@@ -342,6 +342,70 @@ def owner_map(path: Path, profiles: tuple[str, ...], nodes: int, cells: int) -> 
     return owners, statuses
 
 
+def wait_for_placement(path: Path, profiles: tuple[str, ...], nodes: int, cells: int, receipt: dict) -> tuple[dict, dict]:
+    # Public actions refresh last-used time and prevent idle movement. Inspect
+    # authority and signed advertisements only while the runtime converges.
+    receipt.update({"passed": False, "timeout_seconds": 600, "stable_seconds": 30, "samples": []})
+    started = time.monotonic()
+    sessions = {prove_node(path, profiles, index)[0]: node_name(index) for index in range(1, nodes + 1)}
+    if len(sessions) != nodes:
+        raise RuntimeError("placement requires distinct live node sessions")
+    stable = None
+    while True:
+        sample = {}
+        try:
+            placements, generations = {}, {}
+            for session, name in sessions.items():
+                observed = json.loads(compose(
+                    path, profiles, "exec", "-T", "node-01", "crab-http-server", "--config", CONFIG,
+                    "cells", "node", "--session", session, "--json",
+                ))
+                advertisement = observed.get("advertisement") or {}
+                placement = advertisement.get("placement")
+                if not observed.get("live") or not placement or placement["max_active_cells"] < 1:
+                    raise RuntimeError(f"{name} lacks a live placement advertisement")
+                placements[name] = placement
+                generations[name] = advertisement["generation"]
+            sample["placements"] = placements
+            sample["generations"] = generations
+            controls = {cell: status(path, profiles, cell) for cell in range(1, cells + 1)}
+            owners = {cell: sessions[control["owner"]["session"]] for cell, control in controls.items()}
+            counts = Counter(owners.values())
+            weight = sum(value["max_active_cells"] for value in placements.values())
+            bounds = {name: (cells * value["max_active_cells"] // weight,
+                             (cells * value["max_active_cells"] + weight - 1) // weight)
+                      for name, value in placements.items()}
+            balanced = all(low <= counts[name] <= high and placements[name]["active_cells"] == counts[name]
+                           for name, (low, high) in bounds.items())
+            sample.update({"owners": owners, "controls": controls, "owner_counts": dict(counts),
+                           "weighted_bounds": bounds, "balanced": balanced})
+            signature = [(cell, value["incarnation"], value["epoch"], value["owner"]["session"])
+                         for cell, value in controls.items()]
+            now = time.monotonic()
+            if not balanced:
+                stable = None
+            elif stable is None or stable[0] != signature:
+                stable = signature, now, generations
+            sample["stable_seconds"] = 0 if stable is None else now - stable[1]
+            receipt["passed"] = (balanced and sample["stable_seconds"] >= receipt["stable_seconds"]
+                                 and all(generations[name] > stable[2][name] for name in generations))
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
+            # Idle/recovering controls are expected during transfer. Keep each
+            # incomplete view, reset stability, and fail if it never settles.
+            sample["error"] = f"{type(error).__name__}: {error}"
+            stable = None
+        elapsed = time.monotonic() - started
+        sample["elapsed_seconds"] = elapsed
+        receipt["samples"].append(sample)
+        receipt["elapsed_seconds"] = elapsed
+        if elapsed >= receipt["timeout_seconds"]:
+            receipt["passed"] = False
+            raise RuntimeError("Cell ownership did not converge in 600 seconds; placement samples retained")
+        if receipt["passed"]:
+            return owners, controls
+        time.sleep(15)
+
+
 def verify_roots(path: Path, profiles: tuple[str, ...], before: dict, cells) -> dict:
     after = {}
     for cell in cells:

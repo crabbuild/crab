@@ -4,7 +4,7 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `e47d1fc2c48`, plus the sealed-overlay release recorded below. The latest three-node action trace uses predecessor `e50055c48bb`. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
+| Scope | Initial baseline `0f3f4f7617a`; follow-up evidence through `d8ce1fa202b`, plus the placement correction recorded below. The latest 3/5/10/20-node traces use `a3638ef7e55`. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
 | Status | Hydration fetch, sparse registration, persistent-cache construction isolation, conditional issue enrichment, recovery receipt preservation, range-proportional compaction, bounded asynchronous cache fills and local checksum read/merge improvements are implemented. Loaded scale-out cannot assume idle ownership transfer. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
@@ -21,15 +21,17 @@ harness separately.
 
 ## Current-head audit: remaining work and evidence
 
-At `e47d1fc2c48`, the design retains the right authority boundary: one fenced
+The design retains the right authority boundary: one fenced
 SQLite writer, authenticated immutable roots, ordered publication and explicit
 durability proofs. Current evidence does not establish a supported high-throughput,
-low-latency profile. The strongest additional finding is historical allocation
-in the checksum overlay; eliminating the dense-array copy did not eliminate
-all database-history-dependent allocation from small cuts.
+low-latency profile. The latest fleet run exposed concentrated ownership;
+source-derived regressions now reproduce both a small-target donation failure
+and receiver overshoot. Checksum allocation, synchronous demand I/O and ordered
+publication retain their separate performance gates.
 
 | Priority | Gap | Next decision and proof |
 | --- | --- | --- |
+| High, reproduced placement defect | Rounding the receiver margin up prevents donation at a one-Cell target; a batch can also overfill its preferred receiver (26) | Round the margin to whole Cells and recheck projected receiver room. Both regressions now pass; qualify idle convergence and exact recovery in the real 3/5/10/20-node fleet. |
 | High, implemented mechanism; latency unqualified | The baseline empty checksum overlay retained its largest allocation and cloned that capacity (25) | Sealed merges now consume the overlay. Compare large-cut → repeated one-page-cut allocation and latency for both bases, retaining failure fencing and recovery-plan clone semantics. |
 | High, latency isolation | Demand faults, page installation, confirmation and cleanup still own a shared SQL worker (9–10, 19) | Measure cold and resident Cells on the same one-vCPU worker. Bound maintenance batches; consider moving only idle executors after measuring demand stalls. An active SQLite callback cannot yield its connection. |
 | High, recovery scaling | Writable activation still walks all authenticated checksum leaves (3, 14) | Measure first query and first mutation during concurrent recovery. Prototype demand-loaded existing directory leaves only with an aggregate/truncation integrity design and bounded old-checksum availability for capture. |
@@ -1089,6 +1091,25 @@ capacity measurement and retain an explicit failure report if it cannot
 converge. Qualify scale-out under uninterrupted arrivals separately through
 the public application boundary.
 
+**Placement preflight implementation:** the stage qualifier and fault driver
+now share a status-only convergence gate. It requires serving roots, distinct
+live sessions, Cell counts within each node's floor/ceiling capacity-weighted
+share, and agreement with advertised active counts. Session, incarnation and
+ownership epoch must stay stable for 30 seconds while every advertisement
+generation advances. The gate retains incomplete views and retries for up to
+ten minutes; failure stops before the workload or fault and retains samples.
+It does not bypass the production idle, settlement or authority gates. Tests
+reject concentrated owners, stale signed counts, stale generations and changing
+epochs; transient transfer resets the window. A fault-preflight failure now
+retains its report without constructing the destructive driver. Live convergence
+at 20 nodes remains required; this is a prerequisite for settled capacity, not
+an implementation of scale-out under arrivals.
+
+All 42 Python harness tests pass, including the retained preflight failure.
+Runtime documentation validation passes 28 schema/protocol assertions and 194
+local links. The gate's ten-minute retry window is a qualification timeout,
+not a supported placement SLO.
+
 ### 13. A streaming decoder still retains avoidable metadata
 
 **Confirmed at audited revision:** [codec::Decoder](../../crab-ltx/src/codec.rs) accumulates the
@@ -2060,6 +2081,46 @@ also passes through owner takeover, collaboration readback and Git reads.
 These results establish the
 allocation-lifetime change and integrity; fleet action latency and aggregate
 RSS remain unqualified.
+
+### 26. Small ownership targets cannot absorb a rounded-up deadband
+
+**Confirmed after the fleet run:** the
+[planner](../src/fleet/placement.rs) computed receiver room as
+`target - ceil(target * 2 / 100) - active_cells`. With twenty Cells and twenty
+equal nodes, the target is one and even an empty receiver has zero room. With
+targets two through forty-nine, the margin reserves more than two percent of
+the target. This defect exists in `origin/main` at `de0bb234abc`; a longer idle
+wait alone cannot qualify uniform ownership. Headroom-driven and urgent moves
+have independent gates, so this is specifically a count-balancing defect.
+
+The public planner regression starts twenty Cells on one owner, repeatedly
+applies settled transfer intents, and supplies fresh complete observations.
+Before the fix, it stopped at **8/6/6** for three nodes, **8/3/3/3/3** for five,
+**11/1/1/1/1/1/1/1/1/1** for ten, and **20/0/…/0** for twenty. Thus the failure
+does not depend on the HTTP load keeping Cells active. The earlier live run
+still cannot attribute the p99 increase to this arithmetic alone.
+
+Rounding the percentage down to whole Cells fixes that starvation. A second
+regression then exposed a sibling gap: the planner bounded fleet-wide room,
+but did not consume each receiver's room across the batch. With counts 5/1/0
+and equal weights, both donations went to a preferred receiver, producing
+3/3/0 instead of 3/2/1. The planner now filters receivers without room and
+checks their projected counts before accepting each donation. Urgent shedding
+and material headroom-gain transfers retain their own policy; donor election,
+freshness, residence, resource admission, actor settlement and control CAS are
+unchanged. The existing nonzero-margin test uses a target of 100 and still
+requires the two-percent margin to limit the batch to one donation.
+
+**Best-fix assessment:** correcting both integer quantization and batch
+projection is preferable to forcing placement from the harness or weakening
+inactivity and fencing. The production caller is the HTTP router's periodic
+rebalance loop; its callee still releases through the actor and activates the
+receiver through ordinary authority acquisition. All seven public planner cases,
+fifteen private planner cases, and both server transfer/readback tests pass.
+Runtime and HTTP all-target Clippy pass with warnings denied. Exact-source
+Compose proof must still verify the real fleet effect. The status-only
+preflight in finding 12 retains failures instead of calling unbalanced ingress
+a capacity result. Loaded scale-out remains a separate design gap.
 
 ### Re-audit decision and proof gaps
 
