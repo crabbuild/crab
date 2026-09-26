@@ -13,6 +13,10 @@ lock, and resolution commands. Sharded coordinator Cells store immutable
 participant sets and terminal decisions. The ExtendDB adapter does not yet
 drive this protocol or enforce its cross-Cell read rules, so the API remains
 unsupported.
+Each coordinator now indexes records with unresolved participants and exposes
+bounded cursor pages. A new owner can discover both undecided and decided
+work after restoring its published Cell state. Discovery alone does not drive
+resolution; the owner recovery worker and adapter path remain to be built.
 
 The ExtendDB `DataEngine` contract requires all writes, the account-scoped
 client token, and stream capture to commit together. Its engine validates up
@@ -193,9 +197,11 @@ not permission to discard a prepared transaction.
 
 ## Required implementation and proof
 
-1. Add coordinator schema/commands and a bounded recovery cursor. Prove
-   immutable `BEGIN`, exactly one terminal decision, stable token replay, and
-   restart from a published LTX root.
+1. Add coordinator schema/commands and a bounded recovery cursor. The
+   coordinator now records a per-transaction unresolved count, indexed cursor
+   pages, immutable `BEGIN`, and one terminal decision. The direct Cell test
+   covers discovery of unfinished work after owner restart. A worker still
+   needs to consume those pages and drive resolution.
 2. Add participant prepare, resolution, and key-lock records. Wire all
    mutation siblings and strong keyed reads through the conflict check before
    allowing cross-Cell requests. Preserve current one-Cell fast path only if

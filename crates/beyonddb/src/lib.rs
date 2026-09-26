@@ -29,6 +29,7 @@ pub use server::{
 pub use split::*;
 pub use table::*;
 pub use transaction_coordinator::*;
+pub use transaction_token::TransactionToken;
 pub use ttl::*;
 
 pub use authorization::CellAuthorizationStore;

@@ -300,6 +300,11 @@ impl Command for RecordParticipantResolution {
                 SqlValue::Integer(i64::from(input.position)),
             ],
         ))?;
+        context.sql(&statement(
+            "UPDATE ddb_coordinator_transactions SET unresolved_count = unresolved_count - 1 \
+             WHERE transaction_id = ?1 AND unresolved_count > 0",
+            vec![SqlValue::Blob(input.transaction_id.to_vec())],
+        ))?;
         Ok(CommandResult::Success(Json(
             CoordinatorPhaseOutcome::Recorded,
         )))
@@ -407,5 +412,103 @@ impl Query for ReadCoordinatorParticipant {
         };
         let participants: Vec<CoordinatorParticipant> = serde_json::from_slice(bytes)?;
         Ok(Json(participants.get(usize::from(input.position)).cloned()))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PendingTransactionCursor {
+    pub created_at_ms: i64,
+    pub transaction_id: [u8; 16],
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReadPendingCrossCellTransactionsInput {
+    pub after: Option<PendingTransactionCursor>,
+    pub limit: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PendingCrossCellTransaction {
+    pub account_id: String,
+    pub transaction_id: [u8; 16],
+    pub routing_key: Vec<u8>,
+    pub cursor: PendingTransactionCursor,
+    pub state: PendingTransactionState,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PendingTransactionState {
+    Begin,
+    Commit,
+    Abort,
+}
+
+/// Page unresolved transactions through one coordinator Cell's pending index.
+pub struct ReadPendingCrossCellTransactions;
+
+impl Query for ReadPendingCrossCellTransactions {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 3;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<ReadPendingCrossCellTransactionsInput>;
+    type Output = Json<Vec<PendingCrossCellTransaction>>;
+
+    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
+        if input.limit == 0 || input.limit > 100 {
+            return Err(Error::Command("invalid pending transaction page limit"));
+        }
+        let (after_ms, after_id) = input.after.map_or((i64::MIN, [0; 16]), |cursor| {
+            (cursor.created_at_ms, cursor.transaction_id)
+        });
+        let rows = context.sql(&statement(
+            "SELECT transaction_id, account_id, token, state, created_at_ms \
+             FROM ddb_coordinator_transactions INDEXED BY ddb_coordinator_pending \
+             WHERE unresolved_count > 0 AND (created_at_ms, transaction_id) > (?1, ?2) \
+             ORDER BY created_at_ms, transaction_id LIMIT ?3",
+            vec![
+                SqlValue::Integer(after_ms),
+                SqlValue::Blob(after_id.to_vec()),
+                SqlValue::Integer(i64::from(input.limit)),
+            ],
+        ))?;
+        let mut pending = Vec::with_capacity(rows[0].rows.len());
+        for row in &rows[0].rows {
+            let [
+                SqlValue::Blob(id),
+                SqlValue::Text(account_id),
+                token,
+                SqlValue::Integer(state),
+                SqlValue::Integer(created_at_ms),
+            ] = row.as_slice()
+            else {
+                return Err(Error::Command("invalid pending transaction record"));
+            };
+            let transaction_id: [u8; 16] = id
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::Command("invalid pending transaction ID"))?;
+            let routing_key = match token {
+                SqlValue::Null => transaction_id.to_vec(),
+                SqlValue::Text(token) => token.as_bytes().to_vec(),
+                _ => return Err(Error::Command("invalid pending transaction token")),
+            };
+            let state = match state {
+                0 => PendingTransactionState::Begin,
+                1 => PendingTransactionState::Commit,
+                2 => PendingTransactionState::Abort,
+                _ => return Err(Error::Command("invalid pending transaction state")),
+            };
+            pending.push(PendingCrossCellTransaction {
+                account_id: account_id.clone(),
+                transaction_id,
+                routing_key,
+                cursor: PendingTransactionCursor {
+                    created_at_ms: *created_at_ms,
+                    transaction_id,
+                },
+                state,
+            });
+        }
+        Ok(Json(pending))
     }
 }
