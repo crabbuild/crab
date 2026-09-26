@@ -7,6 +7,10 @@ use crate::{
 };
 use std::path::PathBuf;
 
+pub(crate) fn decode_file(bytes: &[u8]) -> crate::Result<ltx::DecodedFile> {
+    ltx::inspect_reader(std::io::Cursor::new(bytes)).map(|(file, _, _)| file)
+}
+
 /// Page body the external vectors were generated with.
 ///
 /// `tests/vectors/generate` writes the same pattern, so a change to one side
@@ -333,7 +337,7 @@ fn valid_outer_checksums_do_not_hide_bad_page_order_or_index() {
         let sum = pages.iter().fold(CHECKSUM_FLAG, |sum, (pgno, data)| {
             CHECKSUM_FLAG | (sum ^ page_sum(*pgno, data))
         });
-        assert!(ltx::decode_file(&fixture(&pages, commit, sum, bias, false)).is_err());
+        assert!(decode_file(&fixture(&pages, commit, sum, bias, false)).is_err());
     }
 }
 
@@ -356,7 +360,7 @@ fn footer_checks_the_original_varint_encoding_and_exact_length() {
         hashed.extend_from_slice(&bytes[625..bytes.len() - 8]);
         let len = bytes.len();
         bytes[len - 8..].copy_from_slice(&(CHECKSUM_FLAG | crc(&hashed)).to_be_bytes());
-        let decoded = ltx::decode_file(&bytes);
+        let decoded = decode_file(&bytes);
         if correct_size {
             decoded.unwrap();
         } else {
@@ -370,7 +374,7 @@ fn every_truncated_prefix_is_rejected_without_panicking() {
     let data = vec![8; 512];
     let bytes = fixture(&[(1, data.clone())], 1, page_sum(1, &data), 0, false);
     for end in 0..bytes.len() {
-        assert!(ltx::decode_file(&bytes[..end]).is_err());
+        assert!(decode_file(&bytes[..end]).is_err());
     }
 }
 
@@ -386,7 +390,7 @@ fn exact_restore_rejects_checksum_disabled_file() {
     hashed.extend_from_slice(&bytes[625..bytes.len() - 8]);
     let len = bytes.len();
     bytes[len - 8..].copy_from_slice(&(CHECKSUM_FLAG | crc(&hashed)).to_be_bytes());
-    let file = ltx::decode_file(&bytes).unwrap();
+    let file = decode_file(&bytes).unwrap();
     let info = SegmentInfo::from_decoded(&bytes, &file);
     let path = temp.path().join("unchecked.ltx");
     std::fs::write(&path, bytes).unwrap();
@@ -442,7 +446,7 @@ fn altered_delta_predecessor_or_post_state_is_rejected_with_valid_file_crc() {
     let after = vec![2; 512];
     let first = fixture(&[(1, before.clone())], 1, page_sum(1, &before), 0, false);
     let select = |name: &str, bytes: Vec<u8>| {
-        let decoded = ltx::decode_file(&bytes).unwrap();
+        let decoded = decode_file(&bytes).unwrap();
         let info = SegmentInfo::from_decoded(&bytes, &decoded);
         let path = temp.path().join(name);
         std::fs::write(&path, bytes).unwrap();

@@ -647,7 +647,7 @@ mod tests {
         ));
 
         assert_eq!(actual, expected);
-        ltx::decode_file(&actual).unwrap();
+        crate::ltx::inspect_reader(std::io::Cursor::new(&actual)).unwrap();
     }
 }
 

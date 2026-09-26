@@ -317,11 +317,6 @@ pub struct DecodedFile {
 
 type DecodedPages = Vec<(u32, Vec<u8>)>;
 
-#[cfg(test)]
-pub fn decode_file(bytes: &[u8]) -> Result<DecodedFile> {
-    decode_file_inner(bytes, false).map(|(file, _)| file)
-}
-
 pub(crate) fn inspect_reader(reader: impl std::io::Read) -> Result<(DecodedFile, u64, [u8; 32])> {
     let (file, _, size, digest) = decode_reader_inner(reader, false)?;
     Ok((file, size, digest))
