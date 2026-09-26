@@ -4,7 +4,7 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; follow-up evidence through `d8ce1fa202b`, plus the placement correction recorded below. The latest 3/5/10/20-node traces use `a3638ef7e55`. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
+| Scope | Initial baseline `0f3f4f7617a`; follow-up production changes through `c248fcaad78`, plus the demand-interference diagnostic recorded below. The latest 3/5/10/20-node traces use `a3638ef7e55`. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
 | Status | Hydration fetch, sparse registration, persistent-cache construction isolation, conditional issue enrichment, recovery receipt preservation, range-proportional compaction, bounded asynchronous cache fills and local checksum read/merge improvements are implemented. Loaded scale-out cannot assume idle ownership transfer. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
@@ -33,7 +33,7 @@ publication retain their separate performance gates.
 | --- | --- | --- |
 | High, reproduced placement defect | Rounding the receiver margin up prevents donation at a one-Cell target; a batch can also overfill its preferred receiver (26) | Round the margin to whole Cells and recheck projected receiver room. Both regressions now pass; qualify idle convergence and exact recovery in the real 3/5/10/20-node fleet. |
 | High, implemented mechanism; latency unqualified | The baseline empty checksum overlay retained its largest allocation and cloned that capacity (25) | Sealed merges now consume the overlay. Compare large-cut → repeated one-page-cut allocation and latency for both bases, retaining failure fencing and recovery-plan clone semantics. |
-| High, latency isolation | Demand faults, page installation, confirmation and cleanup still own a shared SQL worker (9–10, 19) | Measure cold and resident Cells on the same one-vCPU worker. Bound maintenance batches; consider moving only idle executors after measuring demand stalls. An active SQLite callback cannot yield its connection. |
+| High, reproduced latency interference | Demand faults block a resident sibling on the same SQL worker; installation, confirmation and cleanup also use that worker (9–10, 19) | Local RustFS release diagnostics show 43–45 ms median sibling delay without injected latency and 414–416 ms with 20 ms per GET. Qualify public actions on one vCPU before selecting bounded executor scheduling or prefetch. An active SQLite callback cannot yield its connection. |
 | High, recovery scaling | Writable activation still walks all authenticated checksum leaves (3, 14) | Measure first query and first mutation during concurrent recovery. Prototype demand-loaded existing directory leaves only with an aggregate/truncation integrity design and bounded old-checksum availability for capture. |
 | High, sustained throughput | One ordered publisher must drain every acknowledged commit; compaction shares that path (4–5, 17) | Measure published commit-sequence advance, oldest uncovered acknowledgement and retained bytes. Evaluate bounded consecutive-root coalescing only if the measured publisher cannot drain; preserve separate receipts and effect order. |
 | Medium, resource interference | Optional cache fills share blocking jobs with required work; read-ahead may fetch pages never used (6, 8, 18, 21) | Pause cache syncs while another Cell activates or publishes. Measure useful/fetched bytes and unused prefetch eviction before adding priority or changing cache policy. |
@@ -866,6 +866,75 @@ tests. The final RustFS diagnostic (`hydration-rustfs-final.log`) measured
 and 1,010.155 ms for hydration plus queries, with two origin reads. This remains
 a single injected-delay diagnostic. It does not establish service percentiles
 or a throughput change across different random database fixtures.
+
+**Demand-fault follow-up, 2026-09-26:** the ignored
+`rustfs_sparse_reads_report_worker_interference` diagnostic now distinguishes
+background hydration from a foreground full-payload read. It uses real RustFS,
+three Cells and two SQL workers. Two resident Cells each contain a 256 KiB
+payload; one shares the cold Cell's worker. The cold Cell contains a 4 MiB
+random BLOB. Each process reopens the same authenticated root into six fresh
+sparse destinations, alternating added GET delays `0, 20, 20, 0, 0, 20` ms.
+Root metadata and the provider remain warm; activation precedes the measured
+interval. The observer wakes the sibling queries on the first actual origin
+read, with no stale notification carried between trials.
+
+Three release processes at production source `c248fcaad78` plus the diagnostic
+patch produced the following **per-process medians**, three trials per delay:
+
+| Process | Same-worker query, no added delay | Same-worker query, +20 ms/GET | Largest same-worker query, +20 ms/GET | Other-worker query medians, no delay / +20 ms |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 42.709 ms | 413.709 ms | 414.202 ms | 0.029 / 0.027 ms |
+| 2 | 44.896 ms | 416.460 ms | 1,013.702 ms | 0.034 / 0.027 ms |
+| 3 | 44.359 ms | 416.378 ms | 418.517 ms | 0.033 / 0.029 ms |
+
+The same-worker query's SQLite callback took 31–50 microseconds across all
+18 trials. Nearly all its delay preceded callback entry, establishing shared
+worker interference rather than slow resident SQL. The one-second sample is
+retained; the current trace cannot attribute its additional delay to provider
+retry, host scheduling or another cause. No p99 is inferred from nine samples
+per condition. In the separate 500 ms/GET background-hydration phase, the
+same-worker query took 0.031–0.039 ms while hydration took 1.009–1.012 seconds.
+The asynchronous hydration improvement therefore does not remove demand stalls.
+
+Every cold payload query performed 16 observed origin read operations and
+transferred 4,008,092 bytes. Its returned payload digest matched the original
+source database. Repeating that full-payload query made zero new origin read
+requests and returned the same digest in 2.964–3.303 ms.
+Those full-payload timings include reading and hashing all 4 MiB; they are not
+point-query costs. The locked `object_store` 0.14.1 throttle adds its per-call
+delay before GET; it does not replace the RustFS provider. The linked SQLite
+version was 3.49.1.
+
+Run against an existing isolated RustFS bucket with credentials in the process
+environment:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
+TMPDIR="$HOME/Workspace/crabbuild-target/crab-8bc8/tmp" RUSTC_WRAPPER= \
+CRAB_LTX_TEST_ENDPOINT=http://127.0.0.1:19010 \
+CRAB_LTX_TEST_BUCKET=crab-cell-issue-fleet \
+cargo test -p crab-cell-runtime --release --locked --lib \
+  cell::worker::tests::rustfs_sparse_reads_report_worker_interference \
+  -- --ignored --exact --nocapture
+```
+
+Choose the external target directory for the actual checkout. Evidence lives in
+`demand-interference-20260926/` beneath that checkout's external target:
+`release-{1,2,3}.log`, the extracted JSON records, `source.patch`, and
+`source.json` with parent/source/binary hashes. This was an unconstrained macOS
+ARM64 process on a 12-logical-CPU host, using Docker-hosted RustFS. It does not
+qualify the requested one-vCPU/one-GiB profile, public application handles,
+first activation, confirmation latency, fragmented roots or independent hosts.
+
+**Next design decision:** compare bounded scheduling of idle Cell executors
+with prefetch that reduces demand faults, using the same-worker diagnostic and
+public action traces. A scheduler needs available execution capacity; moving
+idle executors alone cannot help a one-worker node. Qualify any additional
+blocking workers under the one-vCPU memory/CPU envelope. Preserve exclusive
+connection ownership and per-Cell order; do not attempt to move an executing
+connection or turn a VFS error into a resumable SQL result. SQLite's
+[VFS method contract](https://www.sqlite.org/c3ref/io_methods.html) returns an
+I/O result synchronously, and Crab's `paged_io::receive` waits for that result.
 
 ### 10. Published-cut cleanup occupies the SQL worker after durability
 
