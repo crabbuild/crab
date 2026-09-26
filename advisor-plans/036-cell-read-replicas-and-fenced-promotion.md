@@ -2,7 +2,8 @@
 
 Status: PARTIAL IMPLEMENTATION — exact-root views, S3 desired-count policy,
 private peer activation/query, object-mode reconciliation, an operator
-target API, and explicit issue-detail replica reads exist; no production qualification
+target API, and explicit issue-detail replica reads exist; 3/5/10/20-node local RustFS
+qualification passes; no production qualification
 Base: `origin/main` at `de0bb234abc` (2026-09-25); Cell/LTX source compared with the planning checkout at `fa182c94c7e`
 Priority: P1 read scaling; P0 safety for any enabled deployment. Effort: XL. Risk: HIGH.
 Depends on: the recovery implementations tracked by plans 032 and 035;
@@ -73,8 +74,9 @@ and enters the existing fenced takeover and fresh writable restore path.
 The server can select the existing object proof path with `[cells]
 durability = "object"` for a fresh deployment; fleet remains the default and
 the fleet-to-object drain and coverage barrier is not automated. Issue-detail replica reads are explicit; other public product reads use the owner.
-Do not claim the all-reader-loss guarantee or replica read scaling from these
-local tests.
+The local Compose fault receipt proves recovery after all three Cell disks are
+lost in this object-mode fixture. It does not establish production durability
+or throughput scaling; measured replica throughput is below owner throughput.
 
 Today the durability-log ensemble has one follower in a two-node fleet and
 two in a fleet of three or more. A failed member stops fleet proof for the
@@ -271,8 +273,9 @@ target CAS with owner hint and bounded readiness status exist; broader churn qua
 remains; 4 typed local and peer queries, position
 errors, receipt checks, authority gates, and explicit issue-detail routing exist,
 but other product reads remain owner-only; 5 has warm-reader preference and
-local automatic takeover coverage; 6 has an initial Compose slice, with final
-source-bound fault and performance qualification still open. Private peer replica requests are accepted only in
+local automatic takeover coverage; 6 has a source/image-bound 3/5/10/20-node Compose run with reader replacement,
+warm promotion, all-reader disk loss, and authority outage; broader capacity
+and fault qualification remain open. Private peer replica requests are accepted only in
 the object-durability server profile.
 
 The ignored `rustfs_replica_reads_exact_root_and_policy_cas` test also passed
@@ -283,7 +286,7 @@ nor protected-provider evidence.
 The local in-memory and RustFS tests now also prove that a failed refresh
 leaves the old value readable and that an in-flight query returns its old
 snapshot after a newer view is installed. Runtime Clippy passed with warnings
-denied. These are local library checks, not an admitted product replica route.
+denied. These library checks complement the admitted product route and Compose proof below.
 Replica SQL now shares the existing node SQL worker admission pool, retaining
 its job reservation until blocking execution exits. Concurrent peer codecs
 wait within a deadline on the existing primitive-job ledger; S3 enrollment
@@ -294,8 +297,8 @@ provisional 4 MiB of resident memory and four descriptors in that runtime's
 ledger, and its restored SQLite file uses the runtime's local disk admission.
 Refresh reserves a second view until old in-flight queries finish. Local and
 RustFS tests cover capacity rejection, concurrent charges, and full release;
-these provisional limits still need measured 1 GiB/1 vCPU receipts before
-product enablement.
+the Compose receipt below samples resources under 1 GiB/1 vCPU limits.
+Peak-resource and sustained-capacity qualification remain open.
 An explicit local or peer replica query whose view is behind a caller's minimum
 returns `ReplicaBehind` with both sequence numbers. The private peer wire has
 an explicit read operation and distinct behind/unavailable error codes.
@@ -320,21 +323,24 @@ mTLS peer route, the policy change to zero releases reader admission, and the
 old view is fenced after the owner epoch changes. This is one-process test
 wiring, not the required independent Pod qualification.
 
-A local Compose slice at runtime source `5f6c121494c` also passed against RustFS
-with 3, 5, 10, and 20 independent containers, each limited to 1 CPU / 1 GiB.
-The reader targets 2, 4, 9, and 19 all served the original issue. Measured
-per-reader counts were 10/10, four times 10, 9–11, and nineteen times 10.
-At 20 nodes, the runner killed one Cell's owner and both readers, removed their
-three local volumes, and recovered the issue and label from the identical
-published root on a surviving node. It then observed two replacement readers.
-This receipt uses image `sha256:d46b4d06971a608da9fd326fe6e7c482919e0313cd2d1efe798124990ba664bf`;
-the raw report is outside the checkout under
-`$HOME/.codex/cell-issue-fleet/plan036-local-1/read-replica-report.json`.
-It predates the compound issue-detail query that also reads label metadata
-from the same snapshot. A later live run exposed cursor aliasing when issue
-and label reads each advanced one shared round-robin cursor; the compound
-query removes that second routing decision.
-It proves a local functional slice, not a production capacity or protected-provider gate.
+The final uninterrupted local Compose run used runtime source `75b6da1a97d`,
+runner `f8b164094e3`, and image
+`sha256:921dc5c7ec9ba004df65430a03a8cb9f1a0957e62a253f4578c876ed4e66b2ce`.
+At 3/5/10/20 nodes, all 2/4/9/19 selected readers served correct issue details;
+200 concurrent reads per stage distributed as 100, 50, 22–23, and 10–11 per
+reader, with no request errors. A killed reader was replaced without changing
+the writer or epoch. Primary-only failure promoted a verified warm reader
+and acknowledged a new comment. Deleting the owner's and both readers' local
+volumes recovered the identical root and recruited two replacements. A RustFS
+outage returned `replica_unavailable` without data, then recovered without
+receipt regression. RustFS descriptor admission was explicit and verified.
+
+[Source-bound measurements and fault receipts](../crates/crab-http-server/deploy/cell-issue-fleet/qualification/2026-09-25-read-replicas.md)
+record timings, per-node distribution, sampled resources, raw-report hash,
+and limits. Replica reads were slower than owner reads in this single-host
+workload; membership scans and fresh authority gates remain in the request
+path. No production capacity, throughput-scaling, protected-provider, or
+independent-host claim follows from this receipt.
 
 | Slice | Change owner | Implementation and focused gate | Completion evidence |
 | --- | --- | --- | --- |

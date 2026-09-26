@@ -853,4 +853,4 @@ sparse views, rollout automation, and production qualification remain open.
 
 | Plan | Priority | Effort | Depends on | Status |
 | --- | --- | --- | --- | --- |
-| [036](036-cell-read-replicas-and-fenced-promotion.md) | P1 read scaling / P0 safety | XL | 032 and 035 recovery implementation; their protected gates before production enablement | PARTIAL — object-profile product read replicas, target/status APIs, and fenced warm promotion; local qualification in progress, production gates open |
+| [036](036-cell-read-replicas-and-fenced-promotion.md) | P1 read scaling / P0 safety | XL | 032 and 035 recovery implementation; their protected gates before production enablement | PARTIAL — object-profile product read replicas, target/status APIs, and fenced warm promotion; 3/5/10/20-node RustFS fault qualification passes; production gates open |

@@ -5,8 +5,8 @@ import argparse
 import hashlib
 import json
 import subprocess
-import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -65,8 +65,17 @@ def main() -> None:
         "initial_stage": run_stage(path, (), 0, 3, args.gateway_port, args.node_port_base),
     }
     nodes = [node_name(index) for index in range(1, 4)]
-    deadline = time.monotonic() + 60
-    while True:
+    # A quiet local store can win every initial proof race. Activation follows
+    # follower fsync during a mutation; polling idle logs cannot exercise it.
+    for attempt in range(5):
+        def write_probe(offset):
+            index = offset % 3 + 1
+            return request_json(
+                "POST", node_url(index, args.node_port_base) + issue_path(index) + "/1/comments",
+                {"request_id": str(uuid.uuid4()), "body": f"fleet activation {attempt}:{offset}"},
+            )
+        with ThreadPoolExecutor(max_workers=6) as workers:
+            list(workers.map(write_probe, range(18)))
         enrolled = []
         for index in range(1, 4):
             session, _, _ = prove_node(path, (), index)
@@ -75,9 +84,8 @@ def main() -> None:
             enrolled.append(status["advertisement"])
         if all(node and node["log"] and node["log"]["active"] for node in enrolled):
             break
-        if time.monotonic() >= deadline:
-            raise RuntimeError("fleet proof did not become active on all three nodes")
-        time.sleep(1)
+    else:
+        raise RuntimeError("fleet proof did not become active on all three nodes")
     fleet_body = "acknowledged before the fleet-to-object drain"
     if comment(args.node_port_base, fleet_body)["body"] != fleet_body:
         raise RuntimeError("fleet comment was not acknowledged")

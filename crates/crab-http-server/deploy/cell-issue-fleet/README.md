@@ -142,6 +142,10 @@ selects the unique live advertised boot session, including after restarts.
 The report proves local RustFS side effects and observed reader distribution
 on one host; it does not replace protected-provider evidence.
 
+The completed [local qualification receipt](qualification/2026-09-25-read-replicas.md)
+records exact runtime/runner/image identities, distribution, latency, resources,
+and fault results.
+
 ## Fleet-to-object rollout qualification
 
 Use a fresh disposable project for the three-node mode transition:
