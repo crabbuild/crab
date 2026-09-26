@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from qualify import command, compose, issue_path, node_url, prove_node, request_json, run_stage
-from render import CONFIG, MEMORY_LIMIT, ROOT, node_name, render
+from render import CONFIG, MEMORY_LIMIT, ROOT, RUSTFS_NOFILE_LIMIT, node_name, render
 
 
 def replica_issue(url: str, index: int) -> tuple[str, int, str]:
@@ -325,6 +325,14 @@ def main() -> None:
                 "local_cell_disk_kib": int(compose(path, profiles, "exec", "-T", service, "du", "-sk", "/var/lib/crab/cells").split()[0]),
                 "metrics": compose(path, profiles, "exec", "-T", service, "crab-http-server", "--config", CONFIG, "cells", "metrics"),
             }
+        provider_limits = compose(path, profiles, "exec", "-T", "rustfs", "cat", "/proc/1/limits")
+        nofile = next(line.split()[3:5] for line in provider_limits.splitlines() if line.startswith("Max open files"))
+        if nofile != [str(RUSTFS_NOFILE_LIMIT), str(RUSTFS_NOFILE_LIMIT)]:
+            raise RuntimeError(f"unexpected RustFS descriptor limits: {nofile}")
+        stage["rustfs_resources"] = {
+            "process_limits": provider_limits,
+            "open_descriptors": len(compose(path, profiles, "exec", "-T", "rustfs", "ls", "/proc/1/fd").splitlines()),
+        }
         report["stages"].append(stage)
         (path.parent / "read-replica-report.json").write_text(json.dumps(report, indent=2) + "\n")
         print(f"Verified {size} nodes and {target} distinct S3-rooted issue readers", flush=True)

@@ -100,6 +100,11 @@ To stop this **disposable** project while preserving its data, use `down`
 without `--volumes`. Removing its volumes deletes the RustFS data, peer
 identity, and every node's local Cell volume.
 
+The RustFS service has an explicit 65,536 descriptor limit; the qualification
+runner verifies it and records provider descriptor counts. The earlier 1,024
+soft limit exhausted during post-churn membership scans and produced S3 500
+errors. This fixture limit is independent of Crab node resource admission.
+
 The 1 GiB profile is an evaluation profile. This single-machine Compose run
 cannot establish a supported production Cell count, recovery SLO, cloud-store
 durability, independent network failure behavior, or multi-host throughput.
@@ -129,5 +134,10 @@ successfully publish a new comment afterward.
 At 20 nodes the runner also kills a Cell's owner and two observed
 readers, removes those three disposable local Cell volumes, and requires a
 survivor to recover the acknowledged issue and recruit two new readers from
-RustFS. The report proves local RustFS side effects and observed reader
-distribution on one host; it does not replace protected-provider evidence.
+RustFS. Finally it pauses RustFS, requires explicit replica reads to return
+`replica_unavailable` without data, resumes the provider, and verifies recovery
+without a receipt regression. Each fault phase first establishes a serving
+Cell because an earlier killed reader can own other Cells. Node inspection
+selects the unique live advertised boot session, including after restarts.
+The report proves local RustFS side effects and observed reader distribution
+on one host; it does not replace protected-provider evidence.

@@ -16,6 +16,7 @@ BUCKET = "crab-cell-issue-fleet"
 CONFIG = "/etc/crab/server.toml"
 CPU_LIMIT = 1_000_000_000
 MEMORY_LIMIT = 1_073_741_824
+RUSTFS_NOFILE_LIMIT = 65_536
 
 
 def node_name(index: int) -> str:
@@ -98,7 +99,7 @@ def compose(state: Path, project: str, gateway_port: int, node_port_base: int) -
                 "RUSTFS_OBS_LOG_DIRECTORY": "/data/logs",
             },
             "volumes": ["rustfs-data:/data"],
-            "ulimits": {"nofile": {"soft": 65536, "hard": 65536}},
+            "ulimits": {"nofile": {"soft": RUSTFS_NOFILE_LIMIT, "hard": RUSTFS_NOFILE_LIMIT}},
             "healthcheck": {
                 "test": ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:9000/health/ready"],
                 "interval": "2s",
