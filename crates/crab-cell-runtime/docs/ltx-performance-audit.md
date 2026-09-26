@@ -25,7 +25,7 @@ harness separately.
 | --- | --- | --- |
 | P1 | Peer admission changes still need load qualification (15) | Measure concurrent hint expiry, activation delay, retained request bytes, and accepted-command cancellation through HTTP |
 | P1 | Cross-Cell SQL worker blocking (9) | Slow one sparse Cell while reading a resident Cell on the same worker; repeat on different workers |
-| P1 | Directory-cache fills extend reads and retain origin admission (18) | Pause a cache fsync with one I/O permit; separate provider completion, cache installation, and sibling request progress |
+| P1 | Directory-cache fills still extend reads and occupy shared blocking jobs (18) | Measure remaining cache-install wait and sibling foreground interference after origin admission isolation |
 | P1 | Whole-graph compaction and serial publication debt (4–5) | Sustained updates through repeated debt thresholds; compare response rate with publication rate |
 | P1 | Buffered compaction still needs sustained-load qualification (17) | Measure async task progress, foreground interference, and publisher drain through repeated compaction boundaries |
 | P1 | Cleanup on the SQL worker and decoder memory (10, 13) | Body/footer buffering and unused replica indexes removed; measure remaining index, confirmation time, RSS, and sibling-Cell latency |
@@ -363,7 +363,8 @@ across page faults, uploads, and compaction. Compaction and restore also share
 recovery admission. [Paged I/O](../../crab-ltx/src/paged_io.rs) has 32 active
 jobs, a 256-request queue, an 8 MiB cache, and a per-view gate. These provide
 bounds; no latency-priority guarantee follows from those bounds. Directory
-origin reads also retain their I/O permit while awaiting disk-cache insertion.
+origin reads now release their I/O permit before admitted disk-cache insertion;
+the reader still waits for that insertion and its blocking job remains shared.
 
 **Change to evaluate:** measure permit wait and background interference before
 changing concurrency. Release provider permits when transfer/verification no
@@ -1058,6 +1059,29 @@ read/first mutation, cache fill queue age, blocking-job wait and foreground
 p99 with empty and churned caches under the 1-vCPU/1-GiB profile. Network
 permit isolation alone does not establish foreground latency isolation from
 the shared blocking executor or cache-index rewrite cost.
+
+**Implementation follow-up:** origin admission now ends after the bounded
+download and digest check. Cache fills take immediate blocking-job admission;
+when the pool is busy they skip optional persistence instead of retaining
+verified buffers in an unbounded wait queue. Admitted fills share the same
+dispatch/ledger/cancellation owner as other host jobs. Cache-hit reads,
+invalidation, digest checks, and persistent installation are unchanged. Skips
+may increase origin reads after a restart; cache contents remain derived data.
+
+Both new regressions failed before the change. With a cache fsync paused, a
+separate cold origin read now completes using the same one-permit I/O pool;
+aborting the first reader retains its blocking slot until the fsync finishes.
+The second root restores into a fresh SQLite file with the captured row
+visible. The same test passes against real RustFS and is retained as an
+explicitly invoked host test, documented in the
+[LTX verification runbook](../../crab-ltx/README.md#verification). A private
+admission regression proves that busy job slots do not queue fill buffers and
+that a subsequent admitted fill persists normally.
+
+The reader performing an admitted fill still waits for local persistence.
+Disk-cache lookups also use the shared blocking pool. Host-owned write-behind,
+foreground isolation, cache-fill hit-rate effects and public action latency
+remain open; this change does not claim those gates.
 
 ## Safety and proof retained by the audit
 
