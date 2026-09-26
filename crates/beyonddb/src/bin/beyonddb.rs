@@ -289,7 +289,7 @@ async fn serve_ready(
             .recover_owned_account(account_id, &directory)
             .await?;
         provisioner
-            .recover_local_partitions(account_id, account.clone(), &directory)
+            .recover_registered_partitions(account_id, account.clone(), &directory)
             .await?;
         provisioner.install_account_capacity_loop(
             &tasks,

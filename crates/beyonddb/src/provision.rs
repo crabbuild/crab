@@ -234,8 +234,58 @@ impl CellInitialPartitionProvisioner {
         self.admit_module(target, module, initialize).await
     }
 
-    /// Restore ranges that were served from this peer endpoint before its crash.
-    pub async fn recover_local_partitions(
+    async fn recover_discovered_owner(
+        &self,
+        target: &CellTarget,
+        module: &'static str,
+        initialize: for<'a> fn(
+            &crab_ltx::rusqlite::Transaction<'a>,
+        ) -> crab_cell_runtime::Result<()>,
+        nodes: &NodeDirectory,
+    ) -> Result<bool, StorageError> {
+        let observed = CellAuthority::new(self.layout.clone())
+            .load(target.cell_id())
+            .await
+            .map_err(provision_error)?
+            .ok_or_else(|| StorageError::Transient("discovered Cell has no authority".into()))?;
+        let former = observed
+            .value()
+            .owner
+            .as_ref()
+            .map(|owner| (owner.session, owner.endpoint.clone()));
+        match former {
+            Some((session, _)) if session == self.session => {}
+            Some((session, endpoint)) => {
+                if endpoint == self.endpoint {
+                    wait_for_expired(nodes, session).await?;
+                } else if nodes
+                    .is_live(session, lease_time_ms()?)
+                    .await
+                    .map_err(provision_error)?
+                {
+                    return Ok(false);
+                }
+                // Discovery can select a new endpoint after the old lease expires.
+                // Takeover rechecks the exact session and Cell authority so a
+                // renewal or competing successor cannot be overwritten.
+                let proof = self.cataloged(target, module).await?;
+                self.takeover_expired(target, proof, nodes).await?;
+            }
+            None if observed.value().root.is_some() => {
+                let proof = self.cataloged(target, module).await?;
+                self.admit_initialized(target, proof, initialize).await?;
+            }
+            _ => return Ok(false),
+        }
+        self.track_coordinator(target)?;
+        Ok(true)
+    }
+
+    /// Recover idle or expired routed ranges for a configured account.
+    ///
+    /// The caller selects this node as the account's recovery owner. Live remote
+    /// owners remain in place; local capacity and fenced takeover still gate admission.
+    pub async fn recover_registered_partitions(
         &self,
         account_id: &str,
         account_handle: CellHandle,
@@ -271,7 +321,7 @@ impl CellInitialPartitionProvisioner {
                 else {
                     continue;
                 };
-                self.recover_local_table(account_id, &account, &client, &table.id, nodes)
+                self.recover_routed_table(account_id, &account, &client, &table.id, nodes)
                     .await?;
             }
             let Some(next) = page.last_evaluated else {
@@ -281,7 +331,7 @@ impl CellInitialPartitionProvisioner {
         }
     }
 
-    async fn recover_local_table(
+    async fn recover_routed_table(
         &self,
         account_id: &str,
         account: &CellTarget,
@@ -324,27 +374,8 @@ impl CellInitialPartitionProvisioner {
             for partition in partitions {
                 let target = data_target(account_id, table_id, &partition.partition_id)
                     .map_err(provision_error)?;
-                let observed = CellAuthority::new(self.layout.clone())
-                    .load(target.cell_id())
-                    .await
-                    .map_err(provision_error)?;
-                let Some(former) = observed
-                    .as_ref()
-                    .and_then(|control| control.value().owner.as_ref())
-                    .filter(|owner| {
-                        owner.session != self.session && owner.endpoint == self.endpoint
-                    })
-                else {
-                    continue;
-                };
-                wait_for_expired(nodes, former.session).await?;
-                self.takeover_expired_partition(
-                    account_id,
-                    table_id,
-                    &partition.partition_id,
-                    nodes,
-                )
-                .await?;
+                self.recover_discovered_owner(&target, DATA_MODULE, initialize_partition, nodes)
+                    .await?;
             }
             if !has_more {
                 return Ok(());
@@ -438,13 +469,7 @@ impl CellInitialPartitionProvisioner {
                 "Cell cannot be taken over from this owner state".into(),
             ));
         }
-        let now_ms = i64::try_from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|_| StorageError::Internal("system clock predates Unix epoch".into()))?
-                .as_millis(),
-        )
-        .map_err(|_| StorageError::Internal("system clock exceeds lease range".into()))?;
+        let now_ms = lease_time_ms()?;
         let takeover = match nodes
             .takeover_proof(former.session, self.session, now_ms)
             .await
@@ -1242,16 +1267,20 @@ impl CellInitialPartitionProvisioner {
     }
 }
 
+fn lease_time_ms() -> Result<i64, StorageError> {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| StorageError::Internal("system clock predates Unix epoch".into()))?
+            .as_millis(),
+    )
+    .map_err(|_| StorageError::Internal("system clock exceeds lease range".into()))
+}
+
 async fn wait_for_expired(nodes: &NodeDirectory, former: SessionId) -> Result<(), StorageError> {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            let now_ms = i64::try_from(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|_| StorageError::Internal("system clock predates Unix epoch".into()))?
-                    .as_millis(),
-            )
-            .map_err(|_| StorageError::Internal("system clock exceeds lease range".into()))?;
+            let now_ms = lease_time_ms()?;
             if !nodes
                 .is_live(former, now_ms)
                 .await

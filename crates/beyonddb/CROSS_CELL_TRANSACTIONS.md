@@ -30,7 +30,8 @@ authority. Definitive condition, lock, or routing failures request an abort;
 an already-published terminal decision wins. Transport uncertainty leaves
 recoverable work and never becomes cancellation. Shard admission now registers a fixed shard number in the account Cell before it
 returns to a caller. On startup, the server pages that account-owned registry,
-recovers shards previously served at its endpoint, then aborts unfinished
+recovers idle shards and shards whose owner lease expired, including when the
+replacement uses a different endpoint, then aborts unfinished
 `BEGIN` records and completes terminal decisions before accepting traffic.
 It first reacquires the participants named by those records, including retained
 split sources absent from the current table route. Participant payloads are
@@ -40,8 +41,8 @@ can reach one another; the public DynamoDB listener starts after recovery.
 After startup, a supervised serving worker revisits coordinators admitted or
 restored by the local provisioner, including shards created after the worker
 starts. It resumes BEGIN using the same immutable driver as requests and
-finishes COMMIT/ABORT resolution. Changed-endpoint coordinator takeover remains
-unimplemented.
+finishes COMMIT/ABORT resolution. Startup recovery now supports a changed peer
+endpoint; recurring fleet-wide discovery of failed remote owners remains open.
 
 The ExtendDB `DataEngine` contract requires all writes, the account-scoped
 client token, and stream capture to commit together. Its engine validates up
@@ -789,7 +790,7 @@ fleet-availability findings remain open.
 | Reads | Get/Query/Scan barriers and `backend/transaction_read.rs` | Pending creates, partial COMMIT, shared snapshots, saved images; full concurrent-history/fault matrix remains open. |
 | Sibling writers | Ordinary item commands, conditional TTL delete, split seal, account table deletion | Key and split fences exist. TTL excludes prepared locks before candidate selection and defers conflicts acquired before deletion; the regression covers later-item/table progress and deletion after ABORT. Routed table deletion needs its own lifecycle qualification, beyond the account lock test. |
 | Durability | Cell command savepoint → runtime publication → owner authority | `Committed<T>` releases after publication; `CellExecutor::query` refuses an unpublished head. Restart/peer tests exercise this dependency. |
-| Recovery discovery | Account shard registry → provisioner → serving/startup resolver | Same-endpoint restart and coordinator reactivation; unattended replacement at a different endpoint is still missing. |
+| Recovery discovery | Account shard registry → provisioner → serving/startup resolver | Changed-endpoint startup, live-owner isolation, and coordinator reactivation; recurring fleet-wide failure discovery remains missing. |
 
 BeyondDB source paths in the table are relative to `crates/beyonddb/src/`.
 Read the driver, both participant wrappers, coordinator, and provisioner
@@ -877,6 +878,51 @@ and item/saved-read SQL transfers. Increasing the database limit alone would
 not fix this failure. JSON/peer
 encoding also needs explicit qualification: encoded bytes may exceed DynamoDB
 item bytes, especially for binary values and escaped strings.
+
+### Recovery after a peer endpoint changes
+
+The startup path previously filtered data ranges and coordinator/participant
+owners by exact endpoint equality. A replacement could recover its configured
+account and credentials but leave data and transaction authority pointing at the
+expired session. The network regression replaced manual per-Cell takeover with
+startup discovery and failed because a data range still named the former owner.
+
+`recover_registered_partitions` and the coordinator/participant discovery paths
+now share `recover_discovered_owner`. A live remote session is left in place.
+An expired session reaches the existing `takeover_expired` path, which rechecks
+the current Cell owner, obtains a fenced node takeover proof, restores the
+published root, and changes authority through the runtime's CAS. A missing or
+invalid node record cannot authorize takeover. An active unpublished node log
+still requires fleet log recovery. Same-endpoint startup retains its bounded
+wait for the previous lease to expire.
+
+The signed network fixture leaves a COMMIT on the failed owner after one
+participant apply but before recording that apply receipt. A replacement at a
+new endpoint discovers the ranges and registered coordinator, completes the
+original decision, and exposes both items through SDK reads. A second live
+owner retains its ranges. The separate process fixture changes the peer address
+after killing the server and checks SDK data, transaction reads, and token replay
+through the replacement.
+
+**Is this the best fix here?** Owner recovery belongs in the provisioner, where
+catalog identity, capacity admission, node fencing, and Cell authority already
+meet. Sharing that path removes the divergent endpoint filter without adding a
+routing alias, weakening peer authentication, or changing the transaction state
+machine. The runtime's node directory and takeover implementation remain the
+authority; no dependency or persisted schema changes are needed.
+
+Verification: the network regression failed before the fix (50.19 seconds)
+and passed afterward (86.15 seconds). All 19 account/elastic tests and strict
+all-target Clippy passed. The separate SDK/RustFS process smoke passed in
+368.03 seconds, including changed-address hard restart, token replay, and an
+existing-item read after graceful restart from Idle authority. Format and diff
+checks passed; no binary rebuild occurred during the process smoke.
+
+This is startup recovery for configured accounts. The node must have capacity
+for the recovered ranges; no new placement policy distributes them among other
+nodes. Data-only-node discovery, recurring scans for failed remote owners, and
+recovery throughput at 10,000 Cells remain separate work. Startup scans still
+resolve coordinator shards sequentially before public admission.
 
 ### Apply capacity after a durable COMMIT
 
@@ -976,8 +1022,9 @@ of which bytes the public API counts.
 ### Availability and scale constraints
 
 - **Blocking decision authority.** An unreachable coordinator preserves safety
-  by retaining locks. Endpoint-independent owner replacement and bounded
-  recovery latency are required for service availability.
+  by retaining locks. Startup now recovers configured accounts at a changed
+  endpoint. Recurring discovery of failed remote owners, placement, and bounded
+  recovery latency remain required for service availability.
 - **Recovery throughput.** One worker selects one coordinator and at most one
   pending transaction per 250-ms tick. With negligible work this is nominally
   four selections per second. A pass over 4,096 tracked local shards takes
@@ -1014,7 +1061,7 @@ of which bytes the public API counts.
    receipt, decision, apply, and final receipt. Assert no mixed successful
    TransactGet, no double apply, no opposing terminal decisions, and eventual
    lock release after recoverable failures.
-4. Add bounded history collection and endpoint-independent failover. Then
+4. Add bounded history collection and recurring fleet-wide failover. Then
    parallelize participant/recovery work with explicit concurrency limits and
    the same failure tests; preserve one durable decision authority.
 5. Measure p50/p95/p99 latency by participant count, conflict rate, retained
@@ -1029,8 +1076,9 @@ failures; it does not justify production readiness or unlimited scaling.
 
 ## Remaining implementation and proof
 
-1. Add fleet placement, general data-owner activation, and changed-endpoint
-   coordinator takeover. Measure historical startup scans and the
+1. Add fleet placement, general data-owner activation, and recurring remote-owner
+   failure discovery. Changed-endpoint startup takeover is implemented for
+   configured accounts. Measure historical startup scans and the
    movement/admission backlog. Coordinator reclamation now lets history exceed
    active slots, but does not qualify the 10,000-Cell, multi-TB target.
 2. Qualify pending read-owner recovery and concurrent read/write histories
