@@ -3,14 +3,13 @@
 use crate::participant::StagedEffect;
 use std::collections::HashSet;
 
-use crab_cell_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use crab_cell_runtime::registry::{Command, CommandContext, CommandResult, QueryContext};
 use extenddb_core::types::{Item, KeySchemaElement};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AccessState, DATA_MODULE, Json, PartitionGetInput, PartitionSpec, Result, SqlValue,
-    command_access, command_item, data_key_hash, decode_spec, item_key, query_access, statement,
-    valid_item, valid_key, write_item,
+    AccessState, DATA_MODULE, Json, PartitionSpec, Result, SqlValue, command_access, command_item,
+    data_key_hash, decode_spec, item_key, statement, valid_item, valid_key, write_item,
 };
 use crate::PrepareTransactionOutcome;
 use crate::items::{TransactionFailure, TransactionOperation};
@@ -320,81 +319,4 @@ pub(super) fn read_key_conflict(
     key: &[u8],
 ) -> Result<Option<crate::TransactionReadConflict>> {
     crate::participant::read_conflict(context, &context.sql(&lock_query(key, true))?[0])
-}
-
-/// Result of one consistent read from a routed data Cell.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum PartitionTransactGetOutcome {
-    /// All keys were read from one Cell snapshot.
-    Found(Vec<Option<Item>>),
-    /// The request must contain between one and one hundred keys.
-    InvalidCount,
-    /// The Cell has no installed partition.
-    NotInstalled,
-    /// Table identity or routing epoch changed.
-    StaleRoute,
-    /// The source has been sealed for a split.
-    Sealed,
-    /// An import-only child is not yet serving.
-    NotReady,
-    /// A key is outside this partition's range.
-    WrongPartition,
-    /// The key violates the table schema.
-    InvalidKey { index: usize },
-    /// A requested key has an unresolved transaction intent.
-    Conflict { index: usize },
-}
-
-/// Read several keys in one data Cell snapshot.
-pub struct PartitionTransactGet;
-
-impl Query for PartitionTransactGet {
-    const MODULE: &'static str = DATA_MODULE;
-    const ID: u32 = 6;
-    const CODEC_VERSION: u32 = 1;
-    type Input = Json<Vec<PartitionGetInput>>;
-    type Output = Json<PartitionTransactGetOutcome>;
-
-    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
-        if input.is_empty() || input.len() > 100 {
-            return Ok(Json(PartitionTransactGetOutcome::InvalidCount));
-        }
-        let rows = context.sql(&statement(
-            "SELECT spec FROM ddb_partition WHERE singleton = 1",
-            vec![],
-        ))?;
-        let Some(spec) = decode_spec(&rows[0])? else {
-            return Ok(Json(PartitionTransactGetOutcome::NotInstalled));
-        };
-        match query_access(context)? {
-            AccessState::Serving => {}
-            AccessState::Sealed => return Ok(Json(PartitionTransactGetOutcome::Sealed)),
-            AccessState::Importing => return Ok(Json(PartitionTransactGetOutcome::NotReady)),
-        }
-        let mut output = Vec::with_capacity(input.len());
-        for (index, request) in input.into_iter().enumerate() {
-            if spec.table.id != request.table_id || spec.epoch != request.epoch {
-                return Ok(Json(PartitionTransactGetOutcome::StaleRoute));
-            }
-            if !valid_key(&request.key, &spec.table) {
-                return Ok(Json(PartitionTransactGetOutcome::InvalidKey { index }));
-            }
-            let key = item_key(&request.key, &spec.table.key_schema)?;
-            if !spec.contains(data_key_hash(
-                &spec.table.id,
-                &request.key,
-                &spec.table.key_schema,
-            )?) {
-                return Ok(Json(PartitionTransactGetOutcome::WrongPartition));
-            }
-            if read_key_conflict(context, &key)?.is_some() {
-                return Ok(Json(PartitionTransactGetOutcome::Conflict { index }));
-            }
-            output.push(
-                crate::item_storage::StoredItem::Partition(&key)
-                    .read(|batch| context.sql(batch))?,
-            );
-        }
-        Ok(Json(PartitionTransactGetOutcome::Found(output)))
-    }
 }

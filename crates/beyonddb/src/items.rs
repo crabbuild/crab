@@ -410,62 +410,6 @@ pub use transaction::{
 mod scan;
 pub use scan::*;
 
-/// A consistent, account-local read of several keys across tables.
-pub struct TransactGet;
-
-/// Result of one all-or-error transactional read.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum TransactionGetOutcome {
-    /// An unresolved transaction holds one requested key.
-    Conflict { index: usize },
-    /// All requested keys were valid and read from one Cell snapshot.
-    Found(Vec<Option<Item>>),
-    /// The request must contain between one and one hundred keys.
-    InvalidCount,
-    /// A requested table does not exist.
-    TableNotFound { index: usize },
-    /// A requested key violates its table contract.
-    InvalidKey { index: usize },
-}
-
-impl Query for TransactGet {
-    const MODULE: &'static str = MODULE;
-    const ID: u32 = 6;
-    const CODEC_VERSION: u32 = 1;
-    type Input = Json<Vec<GetItemInput>>;
-    type Output = Json<TransactionGetOutcome>;
-
-    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
-        if input.is_empty() || input.len() > 100 {
-            return Ok(Json(TransactionGetOutcome::InvalidCount));
-        }
-        let mut output = Vec::with_capacity(input.len());
-        for (index, request) in input.into_iter().enumerate() {
-            let Some(table) = query_unrouted_table(context, &request.table_name)? else {
-                return Ok(Json(TransactionGetOutcome::TableNotFound { index }));
-            };
-            if table.id != request.table_id {
-                return Ok(Json(TransactionGetOutcome::TableNotFound { index }));
-            }
-            if !valid_key(&request.key, &table) {
-                return Ok(Json(TransactionGetOutcome::InvalidKey { index }));
-            }
-            let key = item_key(&request.key, &table.key_schema)?;
-            if transaction::read_key_conflict(context, &table.id, &key)?.is_some() {
-                return Ok(Json(TransactionGetOutcome::Conflict { index }));
-            }
-            output.push(
-                crate::item_storage::StoredItem::Account {
-                    table_id: &table.id,
-                    key: &key,
-                }
-                .read(|batch| context.sql(batch))?,
-            );
-        }
-        Ok(Json(TransactionGetOutcome::Found(output)))
-    }
-}
-
 pub(crate) fn valid_item(item: &Item, table: &TableRecord) -> bool {
     let limits = LimitsConfig::default();
     validation::validate_item_keys(item, &table.key_schema, &table.attribute_definitions).is_ok()

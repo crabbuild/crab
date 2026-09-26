@@ -117,9 +117,8 @@ static COMMANDS: [OperationDescriptor; 19] = [
     operation(21),
     operation(22),
 ];
-static QUERIES: [OperationDescriptor; 22] = [
+static QUERIES: [OperationDescriptor; 21] = [
     operation(4),
-    operation(6),
     operation(7),
     operation(8),
     operation(9),
@@ -305,7 +304,6 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<ttl::AdvanceTtlSchedule>()?;
         registry.bind_command::<RegisterCoordinatorShard>()?;
         registry.bind_query::<GetItem>()?;
-        registry.bind_query::<TransactGet>()?;
         registry.bind_query::<ReadAccountTransaction>()?;
         registry.bind_query::<ReadAccountTransactionResult>()?;
         registry.bind_query::<DescribeTable>()?;

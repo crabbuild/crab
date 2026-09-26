@@ -2,6 +2,7 @@
 """Compare transaction-size semantics on an explicitly selected DynamoDB endpoint."""
 
 import argparse
+import base64
 import json
 import os
 from pathlib import Path
@@ -17,7 +18,7 @@ def main():
     endpoint.add_argument("--profile", help="AWS profile for a temporary cloud reference table")
     parser.add_argument("--region", default="us-east-1")
     args = parser.parse_args()
-    command = ["aws", "--region", args.region, "--output", "json"]
+    command = ["aws", "--region", args.region, "--output", "json", "--cli-binary-format", "base64"]
     environment = dict(os.environ, AWS_PAGER="")
     if args.endpoint_url:
         command += ["--endpoint-url", args.endpoint_url]
@@ -84,6 +85,23 @@ def main():
                         raise RuntimeError(f"{kind}: stored result disagrees with transaction outcome")
                 print(json.dumps({"case": kind, "accepted": accepted, "error": result.stderr.strip() or None,
                                   "all_item_results_verified": True}), flush=True)
+            for kind, count, value in (
+                ("read_binary", 10, {"B": base64.b64encode(bytes([0xa5]) * (380 * 1024)).decode()}),
+                ("read_escaped", 4, {"S": "\0" * (380 * 1024)}),
+            ):
+                read_items = [{**key, "payload": value} for key in keys[:count]]
+                seeded = json.loads(call("batch-write-item", {"RequestItems": {table: [{"PutRequest": {"Item": item}} for item in read_items]}}).stdout)
+                if seeded.get("UnprocessedItems"):
+                    raise RuntimeError("Reference seed was throttled; no size verdict is valid")
+                reads = [{"Get": {"TableName": table, "Key": key}} for key in reversed(keys[:count])]
+                result = call("transact-get-items", {"TransactItems": reads}, check=False)
+                if result.returncode == 0:
+                    actual = [response.get("Item") for response in json.loads(result.stdout)["Responses"]]
+                    if actual != list(reversed(read_items)):
+                        raise RuntimeError(f"{kind}: read result differs from seeded images")
+                print(json.dumps({"case": kind, "accepted": result.returncode == 0,
+                                  "error": result.stderr.strip() or None,
+                                  "all_item_results_verified": result.returncode == 0}), flush=True)
         finally:
             result = call("delete-table", {"TableName": table}, check=False)
             if result.returncode and "ResourceNotFoundException" not in result.stderr:

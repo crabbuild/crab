@@ -62,13 +62,12 @@ static COMMANDS: [OperationDescriptor; 13] = [
     operation(12),
     operation(13),
 ];
-static QUERIES: [OperationDescriptor; 11] = [
+static QUERIES: [OperationDescriptor; 10] = [
     operation(1),
     operation(2),
     operation(3),
     operation(4),
     operation(5),
-    operation(6),
     operation(7),
     operation(8),
     operation(9),
@@ -149,7 +148,6 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
         registry.bind_query::<PartitionExport>()?;
         registry.bind_query::<ReadPartitionState>()?;
         registry.bind_query::<PartitionQuery>()?;
-        registry.bind_query::<PartitionTransactGet>()?;
         registry.bind_query::<PartitionUsage>()?;
         registry.bind_query::<ReadExpiredPartition>()?;
         registry.bind_query::<ReadPartitionTtl>()?;

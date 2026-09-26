@@ -5,9 +5,8 @@ use beyonddb::{
     CellInitialPartitionProvisioner, CellStorage, CreateTable, CreateTableOutcome, DeleteItem,
     DeleteItemInput, DescribeTable, GetItem, GetItemInput, GetItemOutcome, ItemMutationOutcome,
     Json, ListTables, ListTablesInput, ListTablesOutcome, PutItem, PutItemInput, ReadTtlSchedule,
-    ReadTtlSweep, TableSpec, TransactGet, TransactWrite, TransactWriteInput, TransactionGetOutcome,
-    TransactionOperation, TransactionOutcome, UpdateTtl, UpdateTtlInput, account_target,
-    initialize_account,
+    ReadTtlSweep, TableSpec, TransactWrite, TransactWriteInput, TransactionOperation,
+    TransactionOutcome, UpdateTtl, UpdateTtlInput, account_target, initialize_account,
 };
 use crab_cell_app::CellApplication;
 use crab_cell_host::CellNodeBuilder;
@@ -540,28 +539,21 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .await
         .unwrap();
     assert_eq!(committed.output.0, TransactionOutcome::Applied);
-    let read = client
-        .query::<TransactGet>(
-            &target,
-            Some(committed.receipt),
-            Json(vec![
-                GetItemInput {
-                    table_name: "Books".into(),
-                    table_id: book_table_id.clone(),
-                    key: book_key.clone(),
-                },
-                GetItemInput {
-                    table_name: "Authors".into(),
-                    table_id: author_table_id.clone(),
-                    key: author_key.clone(),
-                },
-            ]),
-        )
-        .await
-        .unwrap();
     assert_eq!(
-        read.output.0,
-        TransactionGetOutcome::Found(vec![Some(book_key.clone()), Some(author_key)])
+        storage
+            .transact_get_items(&[
+                TransactGetOp {
+                    key_info: &books,
+                    key: &book_key
+                },
+                TransactGetOp {
+                    key_info: &authors,
+                    key: &author_key
+                },
+            ])
+            .await
+            .unwrap(),
+        vec![Some(book_key.clone()), Some(author_key)]
     );
     let rolled_back = Item::from([("id".into(), AttributeValue::S("rolled-back".into()))]);
     let conditional_tx = storage
@@ -833,6 +825,32 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             .await,
         Err(StorageError::IdempotentMismatch)
     ));
+    // Ten legal images fit DynamoDB's 4 MiB aggregate but their base64
+    // representation exceeds one Cell response. All keys share the account Cell.
+    let large_keys = (0..10)
+        .map(|i| Item::from([("id".into(), AttributeValue::S(format!("large-read-{i}")))]))
+        .collect::<Vec<_>>();
+    let mut large_items = Vec::new();
+    for key in &large_keys {
+        let mut item = key.clone();
+        item.insert("payload".into(), AttributeValue::B(vec![0xa5; 380 * 1024]));
+        storage
+            .put_item(&books, item.clone(), false, None, &maps, None)
+            .await
+            .unwrap();
+        large_items.push(Some(item));
+    }
+    let reads = large_keys
+        .iter()
+        .map(|key| TransactGetOp {
+            key_info: &books,
+            key,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        storage.transact_get_items(&reads).await.unwrap(),
+        large_items
+    );
     handle.drain().await.unwrap();
     host.shutdown().await.unwrap();
 

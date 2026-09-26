@@ -11,9 +11,9 @@ published. Token lookup precedes current table routing and uses that same
 coordinator authority. The earlier account claims and local token receipts
 have been removed.
 
-`TransactGetItems` uses one local snapshot when all requested keys share a
-Cell. Cross-Cell reads use the same durable coordinator with shared key locks
-and immutable participant images. Account and data reads reject unresolved
+`TransactGetItems` uses the same durable coordinator for every request, with
+shared key locks and immutable participant images. Saved images are fetched
+individually, including when all requested keys share one Cell. Account and data reads reject unresolved
 write intents instead of returning images that could predate a published
 commit. Full DynamoDB compatibility and fleet-scale qualification remain open.
 
@@ -99,9 +99,9 @@ matters as much as item count. Independent transactions can use different
 coordinator shards, but participant phases within one transaction currently
 run sequentially. Adding nodes cannot remove that per-request latency.
 
-Cross-Cell reads pay the same phase cost and persist their captured images;
-assembly additionally queries each saved item. Same-Cell reads use one local
-snapshot. Before optimizing the protocol, measure publication latency,
+All transactional reads pay the same phase cost and persist their captured
+images; assembly additionally queries each saved item. A same-Cell read therefore
+requires six durable commands plus its result queries. Before optimizing the protocol, measure publication latency,
 participant count, hot-key conflicts, recovery competition, and retained bytes.
 Batching coordinator progress or parallelizing participant work requires new
 failure/concurrency proof; neither optimization is implemented here.
@@ -180,7 +180,7 @@ byte-based `substr` on BLOBs under the same serialized command/query context.
 This keeps the existing item JSON format and prevents prepare from succeeding
 only to hit the SQL parameter limit when applying its image after COMMIT.
 The same path serves account/data mutations, saved transactional read images,
-Get, local TransactGet, Query, Scan/export, TTL backfill, and TTL candidate reads.
+Get, Query, Scan/export, TTL backfill, and TTL candidate reads.
 Query and TTL select bounded key batches before fetching item images; they no
 longer place several large images in one SQL result.
 
@@ -205,6 +205,99 @@ external APIs are unchanged. Encoded Cell RPC limits are still finite: a valid
 4-MiB DynamoDB transaction whose complete JSON encoding exceeds the Cell wire
 limit still needs a bounded admission/transport design. Aggregate evaluated
 Update size, capacity reservation, and history collection remain separate gaps.
+
+## Cell wire payloads and transactional reads
+
+The runtime bounds a command or query payload at 4 MiB + 64 KiB, including its
+codec framing. BeyondDB's `Json<T>` serializes ExtendDB attribute values as
+DynamoDB JSON. Binary values become base64; control characters can expand to
+six JSON bytes per source byte. SQL chunking does not change that outer limit.
+
+The former same-Cell read optimization returned every requested image in one
+query. A host reproduction stored ten 380-KiB binary values successfully, then
+failed `TransactGetItems` with `Cell wire codec failed`. The aggregate raw
+payload was 3,891,200 bytes, below 4 MiB; its base64 alone was 5,188,280 bytes.
+The signed SDK reproduction against a remote data owner returned HTTP 503.
+Neither failure demonstrates partial writes: both occurred during a read.
+
+All transactional reads now use shared prepare, durable decision, resolution,
+and individual saved-image retrieval. The account and data aggregate snapshot
+queries and the adapter's route-dependent branch are removed. The public API
+retains one ordered, serializable result; HTTP response assembly happens above
+the Cell wire boundary. A saved image remains immutable after lock release,
+so fetching its siblings later cannot mix newer live versions into the result.
+The adapter and participant still enforce the raw 4-MiB read limit.
+
+**Is this the best fix here?** Reusing the existing prepare/resolve and saved-image
+lifecycle removes the failing path without adding a separate snapshot retention
+protocol. It deliberately trades the former optimization for one recovery path.
+
+**Cost:** same-Cell reads now publish six commands and retain recovery/image
+records. They depend on coordinator availability and contend with writes during
+prepare. This is a correctness tradeoff, not a read performance optimization.
+A future fast path needs a bounded snapshot handle and explicit retention and
+recovery rules; repeatedly reading live pages would violate the transaction.
+
+`tests/account_cell.rs` covers ten binary images on an account participant.
+The shared signed SDK fixture covers ten 380-KiB binary values and four 380-KiB
+control-character strings, each group deliberately routed to one data Cell.
+It checks every byte in reversed request order and repeats reads after owner
+replacement and hard process restart. Existing conflict, absent-image,
+projection, and cross-Cell tests exercise the same read protocol. The expanded
+`scripts/probe-transaction-size.py` also ran both read cases against the verified
+DynamoDB Local 3.3.1 reference: both succeeded, all returned images matched, and
+the temporary table was deleted. This supplements the
+[DynamoDB transactional read contract](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_TransactGetItems.html);
+it does not qualify all cloud behavior.
+
+### Remaining write transport design
+
+BEGIN still carries the complete write request, participant queries return an
+entire participant's operations, and prepare carries those operations again.
+Fixing just BEGIN would move the size failure into recovery or prepare. A valid
+large binary/escaped write can still exceed these boundaries. Individual item
+RPCs also need encoded-size qualification; this read change does not prove all
+possible attribute shapes fit one response.
+
+The next transport change needs these properties before replacing the current
+write path:
+
+1. Upload immutable bounded chunks with an identity, declared byte length,
+   count, and content digest. Retries of a chunk must accept identical bytes
+   and reject conflicting bytes. Bound both individual and aggregate uploads.
+2. Seal a complete request atomically at the coordinator. Validate every chunk,
+   original operation index, target/epoch, and request fingerprint before BEGIN
+   becomes recoverable work. An incomplete upload must not acquire key locks.
+3. Claim the client token with the sealed BEGIN. Concurrent token proposals
+   must converge on the original transaction and participant set. Lost replies
+   must use token/status lookup, including after route changes.
+4. Fetch coordinator operations and transfer participant inputs in bounded
+   pieces too. The participant must verify and assemble the complete immutable
+   input before atomically checking conditions, taking locks, saving evaluated
+   images, and recording PREPARED. Chunk arrival is never a prepare vote.
+5. Keep COMMIT/ABORT as the sole decision authority. A prepared participant
+   cannot expire its required chunks on an upload timeout. Recovery must finish
+   from published data without the original frontend or request body.
+6. Collect abandoned pre-BEGIN uploads separately from decided transaction
+   history. Expiry races need a durable terminal fence so delayed uploads or
+   prepares cannot resurrect discarded work. Budget upload, prepared, saved
+   result, and eventual apply bytes before admitting more work.
+
+The runtime Blob capability does not directly provide this atomic SQL handoff.
+It requires a Blob-role namespace and hydrates object-store parts asynchronously
+in `BlobNamespace`; application `CommandContext` handlers expose synchronous
+bounded SQL. Reusing Blob storage would require a verified handoff/retention
+contract across those owners. Compression may reduce common payloads, but does
+not establish a bound for every legal attribute shape and is not a substitute
+for the protocol above.
+
+Acceptance must cover dropped chunk/seal/prepare replies, duplicate and missing
+chunks, differing bytes under one identity, concurrent token retries, upload
+expiry races, owner replacement before and after sealing, and abort during
+participant transfer. Run the same near-limit binary and escaped requests
+through signed SDK calls, recovery, and token replay. The pinned ExtendDB HTTP
+router also imposes a 16-MiB request body limit, which must be qualified separately
+from both DynamoDB's raw item accounting and the Cell transport limit.
 
 ## Write state machine
 
@@ -315,7 +408,7 @@ Those APIs may mix committed versions across the response, consistent with
 their read-committed contract, but must never expose a prepared value.
 
 The implemented barrier fails closed until a participant resolves. `GetItem`
-checks its canonical key; a same-Cell `TransactGetItems` checks every requested
+checks its canonical key; transactional read prepare checks every requested
 key and returns an ordered `TransactionConflict` cancellation reason.
 `Query` probes an intent index using the same HASH key, numeric sort bounds,
 direction, and continuation as its live-row query. `Scan` checks locks after
@@ -339,7 +432,7 @@ Each Cell query helps at most one transaction, bounded by the existing
 100-participant limit. A routed Scan can help once per Cell query/page, so the
 whole request may resolve multiple transactions. Another blocker or a new concurrent writer remains a
 retryable conflict on the repeated read. BatchGet inherits the keyed path;
-same-Cell TransactGet and cross-Cell read prepares retain their ordered
+transactional read prepares retain their ordered
 transaction-conflict cancellation behavior. They do not independently help
 blocking writes. Shared read locks do not block ordinary reads.
 
@@ -352,9 +445,8 @@ unshipped schema/wire changes; there is no compatibility reader.
 Read barriers ignore shared read locks; writes, TTL deletion, table deletion,
 route activation, and split sealing continue to respect every lock.
 
-Running independent `PartitionTransactGet` queries is insufficient: a write
-can commit between them and produce a mixed result. The implemented cross-Cell
-read uses this protocol:
+Running independent queries is insufficient: a write can commit between them
+and produce a mixed result. Every transactional read uses this protocol:
 
 ```text
 publish BEGIN with original keys, operation indexes, and participant targets
@@ -597,15 +689,15 @@ and introduce a check/read race.
 | Surface | Entry and enforcement | Evidence |
 | --- | --- | --- |
 | Keyed read | `CellStorage::get_item` → `PartitionGet` → canonical lock lookup | Two-Cell commit with only the first participant applied; the other returns a transient error. |
-| Transactional read | `CellStorage::transact_get_items` → `PartitionTransactGet` | Ordered cancellation through a signed AWS SDK request, then successful read after abort resolution. |
+| Transactional read | `CellStorage::transact_get_items` → shared participant prepare | Ordered cancellation through a signed AWS SDK request, then successful read after abort resolution. |
 | Query | `PartitionQuery` probes the intent range index before live rows | Pending create/delete, numeric equivalence, forward/reverse cursors, unrelated HASH and sort ranges. |
 | Scan | `PartitionScan` probes unvisited intent keys | Pending create without a live row, continuation past locks, and restored locks after owner restart. |
 | Split export | `SealPartition` refuses locks; `PartitionExport` requires sealed state | Existing seal, export, split, and recovery checks exercise this boundary. |
 
 These checks run in `tests/elastic_cells.rs` and its
 `elastic_cells/transaction_visibility.rs` module. Account Get (also used
-by hash-only Query), Scan, and same-Cell TransactGet apply the same lock barrier, keyed
-by table ID and canonical item key. Account Scan conservatively fences the
+by hash-only Query) and Scan apply the same lock barrier, keyed by table ID and
+canonical item key. Account transactional reads enforce it during shared prepare. Account Scan conservatively fences the
 unvisited range, including pending creates without live rows. The account
 participant test checks these barriers and their persistence across owner
 restart; SQLite query plans use covering primary-key lookups for item, range,

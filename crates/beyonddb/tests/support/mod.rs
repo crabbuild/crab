@@ -221,3 +221,77 @@ impl PayloadTransaction {
         }
     }
 }
+
+/// Verify legal read images whose aggregate JSON exceeds a Cell wire response.
+pub struct LargeRead {
+    cases: Vec<ReadImages>,
+}
+
+struct ReadImages {
+    reads: Vec<TransactGetItem>,
+    expected: Vec<HashMap<String, AttributeValue>>,
+}
+
+impl LargeRead {
+    pub async fn seed(sdk: &Client, table: &str, keys: Vec<String>) -> Self {
+        assert_eq!(keys.len(), 14);
+        let mut cases = Vec::new();
+        for (ids, payload) in [
+            (
+                &keys[..10],
+                AttributeValue::B(vec![0xa5; 380 * 1024].into()),
+            ),
+            (&keys[10..], AttributeValue::S("\0".repeat(380 * 1024))),
+        ] {
+            let mut reads = Vec::new();
+            let mut expected = Vec::new();
+            for id in ids {
+                let item = HashMap::from([
+                    ("id".into(), AttributeValue::S(id.clone())),
+                    ("payload".into(), payload.clone()),
+                ]);
+                sdk.put_item()
+                    .table_name(table)
+                    .set_item(Some(item.clone()))
+                    .send()
+                    .await
+                    .unwrap();
+                reads.push(
+                    TransactGetItem::builder()
+                        .get(
+                            Get::builder()
+                                .table_name(table)
+                                .key("id", AttributeValue::S(id.clone()))
+                                .build()
+                                .unwrap(),
+                        )
+                        .build(),
+                );
+                expected.push(item);
+            }
+            // Reverse the request order to prove saved images retain request
+            // positions, independently of key ordering or page assembly.
+            reads.reverse();
+            expected.reverse();
+            cases.push(ReadImages { reads, expected });
+        }
+        let test = Self { cases };
+        test.assert_read(sdk).await;
+        test
+    }
+
+    pub async fn assert_read(&self, sdk: &Client) {
+        for ReadImages { reads, expected } in &self.cases {
+            let result = sdk
+                .transact_get_items()
+                .set_transact_items(Some(reads.clone()))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(result.responses().len(), expected.len());
+            for (response, item) in result.responses().iter().zip(expected) {
+                assert_eq!(response.item(), Some(item));
+            }
+        }
+    }
+}

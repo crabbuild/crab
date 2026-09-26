@@ -28,13 +28,11 @@ use crate::{
     ItemMutationOutcome, Json, PartitionDelete, PartitionDeleteInput, PartitionDeleteOutcome,
     PartitionGet, PartitionGetInput, PartitionGetOutcome, PartitionPut, PartitionPutInput,
     PartitionPutOutcome, PartitionQuery, PartitionQueryInput, PartitionQueryOutcome,
-    PartitionTransactGet, PartitionTransactGetOutcome, PartitionUpdate, PartitionUpdateInput,
-    PartitionUpdateOutcome, PutItem, PutItemInput, ScanItems, ScanItemsInput, ScanItemsOutcome,
-    SortComparison, SortPredicate, TransactGet, TransactionFailure, TransactionGetOutcome,
+    PartitionUpdate, PartitionUpdateInput, PartitionUpdateOutcome, PutItem, PutItemInput,
+    ScanItems, ScanItemsInput, ScanItemsOutcome, SortComparison, SortPredicate, TransactionFailure,
     TransactionOperation, UpdateItem, UpdateItemInput, UpdateItemOutcome, data_key_hash,
 };
 use crab_cell_runtime::client::InvocationError;
-use crab_cell_runtime::identity::CellTarget;
 
 impl DataEngine for CellStorage {
     fn put_item(
@@ -516,82 +514,9 @@ impl DataEngine for CellStorage {
             .collect();
         Box::pin(async move {
             let (account_id, inputs) = prepared?;
-            let mut destination: Option<Option<(CellTarget, u64)>> = None;
-            for (key_info, key) in &routing {
-                let next = self.transaction_destination(key_info, key).await?;
-                if destination.as_ref().is_some_and(|current| current != &next) {
-                    return self.cross_cell_read(&account_id, inputs, routing).await;
-                }
-                destination = Some(next);
-            }
-            let outcome = if let Some(Some((target, epoch))) = destination {
-                let requests = inputs
-                    .into_iter()
-                    .map(|input| PartitionGetInput {
-                        table_id: input.table_id,
-                        epoch,
-                        key: input.key,
-                    })
-                    .collect();
-                let output = self
-                    .client
-                    .query::<PartitionTransactGet>(&target, None, Json(requests))
-                    .await
-                    .map_err(cell_error)?;
-                match output.output.0 {
-                    PartitionTransactGetOutcome::Found(items) => {
-                        return super::transaction_read::validate_read_size(items);
-                    }
-                    PartitionTransactGetOutcome::Conflict { index } => {
-                        let mut reasons = vec![CancellationReason::none(); routing.len()];
-                        reasons[index] = CancellationReason {
-                            code: "TransactionConflict".into(),
-                            message: Some("item is locked by a transaction".into()),
-                            item: None,
-                        };
-                        return Err(StorageError::TransactionCanceled(reasons));
-                    }
-                    PartitionTransactGetOutcome::InvalidCount => {
-                        TransactionGetOutcome::InvalidCount
-                    }
-                    PartitionTransactGetOutcome::InvalidKey { index } => {
-                        TransactionGetOutcome::InvalidKey { index }
-                    }
-                    PartitionTransactGetOutcome::NotInstalled
-                    | PartitionTransactGetOutcome::StaleRoute
-                    | PartitionTransactGetOutcome::Sealed
-                    | PartitionTransactGetOutcome::NotReady
-                    | PartitionTransactGetOutcome::WrongPartition => return Err(stale_partition()),
-                }
-            } else {
-                let target = target(&account_id)?;
-                self.client
-                    .query::<TransactGet>(&target, None, Json(inputs))
-                    .await
-                    .map_err(cell_error)?
-                    .output
-                    .0
-            };
-            match outcome {
-                TransactionGetOutcome::Found(items) => {
-                    super::transaction_read::validate_read_size(items)
-                }
-                TransactionGetOutcome::Conflict { index } => Err(transaction_canceled(
-                    index,
-                    TransactionFailure::Conflict,
-                    routing.len(),
-                    &[],
-                )),
-                TransactionGetOutcome::InvalidCount => Err(StorageError::Validation(
-                    "transaction read count must be 1..=100".into(),
-                )),
-                TransactionGetOutcome::TableNotFound { index } => Err(StorageError::TableNotFound(
-                    format!("transaction item {index}"),
-                )),
-                TransactionGetOutcome::InvalidKey { index } => Err(StorageError::Validation(
-                    format!("invalid transaction key at {index}"),
-                )),
-            }
+            // Saved participant images keep a legal aggregate read from crossing
+            // one Cell response. Use the same serialization boundary for every route.
+            self.transaction_read(&account_id, inputs, routing).await
         })
     }
 
@@ -677,16 +602,6 @@ impl DataEngine for CellStorage {
         _max_age_seconds: i64,
     ) -> BoxedFuture<'_, Result<u64, StorageError>> {
         Box::pin(async { Ok(0) })
-    }
-}
-
-impl CellStorage {
-    async fn transaction_destination(
-        &self,
-        key_info: &TableKeyInfo,
-        key: &Item,
-    ) -> Result<Option<(CellTarget, u64)>, StorageError> {
-        self.routed_owner(key_info, key).await
     }
 }
 
