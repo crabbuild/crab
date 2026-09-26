@@ -4,7 +4,7 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `65b359d8dc2`, plus the range-compaction change recorded below. The latest three-node action trace uses predecessor `e50055c48bb`. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
+| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `17a3333ec7a`, including range-proportional compaction. The latest three-node action trace uses predecessor `e50055c48bb`. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
 | Status | Hydration fetch, sparse registration, persistent-cache construction isolation, conditional issue enrichment, recovery receipt preservation and range-proportional compaction are implemented. Loaded scale-out cannot assume idle ownership transfer. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
@@ -21,25 +21,19 @@ harness separately.
 
 ## Priority after the implemented changes
 
-| Priority | Remaining gap | First experiment |
+The following is the current execution order. Numbered findings below retain
+their original baseline and subsequent implementation evidence.
+
+| Order | Remaining gap | Decision and acceptance gate |
 | --- | --- | --- |
-| P1 | Empty-selection label queries are removed; their service latency benefit remains unmeasured (24) | Compare the same public actions and durability mode; retain validation and retry coverage |
-| P1 | Shared Compose disk headroom prevented node restart; recovery and restart outcomes are now retained separately (23) | Preflight the actual mount and provision disk before repeating scale stages |
-| P1 | Hydration fetch isolation is implemented; service latency remains unqualified (19) | Measure same-Cell and sibling-Cell tails under arrivals, fragmented fetches and slow page installation |
-| P1 | Sparse activation registry isolation is implemented; recovery-storm performance remains unqualified (20) | Concurrent activation under constrained disk IOPS; measure worker occupancy and shared bridge startup |
-| P1 | Persistent-cache construction is admitted and its quadratic byte summation is removed; service recovery remains unqualified (22) | Repeat concurrent recovery with slow metadata I/O and measure unrelated foreground latency |
-| P1 | Peer admission changes still need load qualification (15) | Measure concurrent hint expiry, activation delay, retained request bytes, and accepted-command cancellation through HTTP |
-| P1 | Cross-Cell SQL worker blocking (9) | Background fetch passes the same-worker probe; qualify demand faults, installation, confirmation and cleanup separately |
-| P1 | Directory-cache fills still extend reads and occupy shared blocking jobs (18) | Measure remaining cache-install wait and sibling foreground interference after origin admission isolation |
-| P1 | Range-proportional compaction is implemented; serial publication capacity remains unqualified (4–5) | Sustained updates through repeated debt thresholds; compare response rate with publication rate |
-| P1 | Buffered compaction still needs sustained-load qualification (17) | Measure async task progress, foreground interference, and publisher drain through repeated compaction boundaries |
-| P1 | Cleanup on the SQL worker and decoder memory (10, 13) | Body/footer buffering and unused replica indexes removed; measure remaining index, confirmation time, RSS, and sibling-Cell latency |
-| P1 | Execution load is not proven balanced; continued traffic prevents the idle-transfer gate (12) | Separate settled capacity from scale-out during arrivals; record owner/execution distribution in both |
-| P1 | Capacity runs do not fault outstanding follower-only acknowledgements (16) | Kill an owner during sustained arrivals with a proven unpublished tail; verify every acknowledged request after takeover |
-| P2 | Eager checksum metadata and demand read amplification (3, 8) | First query **and first mutation**, point/random/scan workloads, cold and churned caches |
-| P2 | Hydration cache reuse is restored; fragmentation and concurrent duplicate fetches remain (21) | Fixed-root random/scan workloads; count duplicate range bytes, fetch waves and total hydration time |
-| P2 | Checksum maintenance differs between fresh and restored Cells (14) | Hold database and changed-page count fixed; compare capture, clean handoff, host I/O calls, and allocations in both states |
-| P2 | Checkpoint tail cost and shared maintenance resources (6, 11) | Long update runs with checkpoint, hydration, and compaction interference |
+| 1 | Current-source capacity and recovery evidence (5, 12, 16, 23) | Provision the actual Compose disk budget, then run fixed-workload and offered-rate curves. Count executed owners, successful responses and published commit coverage separately. Fault an acknowledged follower-only tail during arrivals. |
+| 2 | An admitted directory-cache fill still delays the reader (18) | Return authenticated bytes before optional persistence using host-owned, bounded fill work. Prove byte/job/disk accounting, shutdown and corruption handling; measure foreground latency with cache syncs paused. |
+| 3 | Synchronous demand faults, installation and cleanup block a shared SQL worker (9–10, 19) | Run cold and resident Cells on the same worker. Separate origin wait, installation and confirmation; evaluate scheduling changes only after that attribution. |
+| 4 | Writable activation and fresh checksum maintenance scale with total page count (3, 14, 20, 22) | First bound local checksum-block work; evaluate lazy authenticated metadata separately. Measure first query, first mutation and recovery storms at fixed changed-page count. |
+| 5 | Ordered root preparation and compaction constrain hot-Cell publication (4–5, 17) | Measure provider GET/HEAD/PUT phases and publisher queue age across repeated debt thresholds. Reuse verified unchanged metadata or coalesce roots only if those measurements justify it. |
+| 6 | Fixed read-ahead and fragmented hydration amplify object reads (8, 21) | Compare point, random and scan workloads on one fixed root; count useful/fetched bytes and concurrent duplicate ranges before changing the window. |
+| 7 | Checkpoint and full-image tails remain insufficiently sampled (6, 11, 13) | Sustained updates/deletes, pinned readers, large changes and simultaneous maintenance under 1 GiB; preserve checkpoint ordering and exact recovery. |
+| 8 | Application and transport improvements lack a controlled latency comparison (15, 24) | Repeat the same typed public actions, durability mode and topology; include peer hint expiry, retries and response enrichment. |
 
 These priorities identify code-supported risks and missing evidence. One
 three-node phase now has per-action attribution, but current-HEAD scale and
@@ -47,6 +41,72 @@ saturation measurements are still missing. The best next fix should remove work
 from a measured critical path while retaining the existing authority and
 durability contracts. Raising concurrency or queue capacity alone does not
 meet that criterion.
+
+### Design refinements required before the next implementation
+
+**Is this the best fix, rather than only a plausible one?** Keep the existing
+single writer, authenticated directory and ordered publisher. Range compaction
+has a reproduced amplification problem and now has selected-range proof.
+Choose the next change by the path it improves: cache completion for cold reads,
+checksum blocks for activation/capture, or publication work for a hot Cell.
+These costs need separate experiments; a queue-size increase addresses none
+of their underlying work.
+
+1. **Make checksum optimization two bounded changes.**
+   [Capture persistence](../../crab-ltx/src/pages.rs) still allocates and copies
+   the complete fresh-memory base after every cut; restored capture still reads
+   each overwritten checksum through an eight-byte positional read. Start with
+   bounded blocks and transactional overlays using the existing format. Then
+   evaluate loading authenticated checksum information from the existing
+   directory leaves on demand. Each leaf already binds checksums and locators;
+   a second remote checksum-object graph needs evidence that those leaves are
+   insufficient. Prove truncate/regrow, aggregate checksums, post-seal failure
+   fencing and the minimal-feature local path in both steps. Lazy loading must
+   not merely move the full activation scan into the first mutation or add
+   unbounded network waits to synchronous capture.
+2. **Specify cache work ownership before removing the await.**
+   [Directory reads](../../crab-ltx/src/replica/directory.rs) currently await
+   admitted persistence before returning verified origin bytes. The
+   [cache](../../crab-ltx/src/environment/directory_cache.rs) syncs each fill
+   and rewrites the membership index; recency updates also scan the entry queue.
+   A host-owned fill mechanism must bound retained bytes, deduplicate keys and
+   retain admission through dispatched work. Batch or reconstruct membership
+   only with restart and disk-accounting proof. Cache persistence is derived
+   state, so losing an optional fill must cause a verified origin read, never
+   loss of an acknowledged command. Keep this policy within the LTX host.
+3. **Do not treat asynchronous hydration as asynchronous SQLite.**
+   [Demand reads](../../crab-ltx/src/paged_io.rs) still wait in `recv_timeout`
+   while the [SQL worker](../src/cell/worker/run.rs) owns the connection.
+   SQLite's [I/O methods](https://www.sqlite.org/c3ref/io_methods.html) return
+   synchronously. Prefetch or moving an idle executor can reduce interference;
+   neither can preempt an in-progress callback. Any worker policy must preserve
+   connection ownership, per-Cell order, deadlines and fencing. Existing
+   hydration-fetch isolation tests do not prove demand-read isolation.
+4. **Measure publication in logical commits as well as roots.**
+   [Compaction](../src/publication.rs) publishes a representation change at the
+   same commit sequence. Counting roots/s as commands/s therefore overstates
+   progress; future root coalescing would change the ratio in the other
+   direction. Track the authority's published commit-sequence advance, oldest
+   uncovered acknowledged command, retained bytes and response-proof winner.
+   Steady accepted work must drain without growing backlog. Preserve each
+   stable receipt, effect order and exact predecessor when evaluating coalescing.
+5. **Use complete action traces for the architecture decision.**
+   The latest attributed run offered only five pairs/s and observed one pair
+   in flight; all 300 writes used object proof. It is a latency probe for that
+   revision. Require sustained update/delete/skew workloads and repeated
+   3/5/10/20-node stages before declaring high throughput. The public
+   `CellNode`/application-handle suite must retain stable-ID descriptor and
+   compile-fail proof, duplicate delivery, ambiguous results, compatible
+   rollout and owner-loss readback. Independent-host qualification follows
+   the shared-host Compose evidence.
+
+Review evidence connects the public HTTP/CellNode entry points to actor and
+worker ownership, `Db` capture, replica preparation, immutable storage and
+authority CAS. Sibling paths include fresh/resumed capture, native/shared-bundle
+compaction, cold/resident queries and command/effect confirmation. The detailed
+findings name their tests and compared main behavior. Current-source service
+percentiles, sustained drain and independent failure domains remain missing;
+this audit makes no production latency or throughput claim.
 
 The [scheduled RustFS measurements at `c12b41ef638`](../../crab-http-server/deploy/cell-issue-fleet/qualification/2026-09-26-scheduled-baseline.md)
 now supply a fixed-20-Cell, 3/5/10/20-node series and one 20-node repeat at five
