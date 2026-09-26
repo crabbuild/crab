@@ -7,14 +7,86 @@ use extenddb_storage::error::StorageError;
 use super::{CellStorage, cell_error, mutation_identity};
 use crate::{
     CoordinatorDecision, CoordinatorParticipantTarget, CoordinatorPhaseInput,
-    CoordinatorPhaseOutcome, Json, ReadCoordinatorParticipant, ReadCoordinatorParticipantInput,
-    ReadCrossCellTransaction, ReadCrossCellTransactionInput, ReadPartitionTransaction,
-    ReadPartitionTransactionInput, ReadPartitionTransactionOutcome, RecordParticipantResolution,
-    ResolvePartitionTransaction, ResolvePartitionTransactionInput,
+    CoordinatorPhaseOutcome, DecideCrossCellTransaction, DecideCrossCellTransactionInput,
+    DecideCrossCellTransactionOutcome, Json, PendingTransactionState, ReadCoordinatorParticipant,
+    ReadCoordinatorParticipantInput, ReadCrossCellTransaction, ReadCrossCellTransactionInput,
+    ReadPartitionTransaction, ReadPartitionTransactionInput, ReadPartitionTransactionOutcome,
+    ReadPendingCrossCellTransactions, ReadPendingCrossCellTransactionsInput,
+    RecordParticipantResolution, ResolvePartitionTransaction, ResolvePartitionTransactionInput,
     ResolvePartitionTransactionOutcome, coordinator_target, data_target,
 };
 
 impl CellStorage {
+    /// Resolve every pending record of a coordinator recovered from a fenced owner.
+    ///
+    /// Only call this after the former owner has lost its node lease. An active
+    /// request may still be preparing while its coordinator remains at `BEGIN`.
+    pub async fn recover_fenced_coordinator(
+        &self,
+        coordinator: &CellTarget,
+    ) -> Result<(), StorageError> {
+        let mut after = None;
+        loop {
+            let page = self
+                .client
+                .query::<ReadPendingCrossCellTransactions>(
+                    coordinator,
+                    None,
+                    Json(ReadPendingCrossCellTransactionsInput { after, limit: 100 }),
+                )
+                .await
+                .map_err(cell_error)?
+                .output
+                .0;
+            if page.is_empty() {
+                return Ok(());
+            }
+            after = page.last().map(|entry| entry.cursor.clone());
+            for entry in page {
+                if entry.state == PendingTransactionState::Begin {
+                    let decision = self
+                        .client
+                        .command::<DecideCrossCellTransaction>(
+                            coordinator,
+                            mutation_identity()?,
+                            Json(DecideCrossCellTransactionInput {
+                                account_id: entry.account_id.clone(),
+                                transaction_id: entry.transaction_id,
+                                routing_key: entry.routing_key.clone(),
+                                decision: CoordinatorDecision::Abort {
+                                    index: None,
+                                    reason: None,
+                                },
+                            }),
+                        )
+                        .await;
+                    match decision {
+                        Ok(committed)
+                            if matches!(
+                                committed.output.0,
+                                DecideCrossCellTransactionOutcome::Decided(_)
+                            ) => {}
+                        Err(InvocationError::Rejected(committed))
+                            if committed.output.0
+                                == DecideCrossCellTransactionOutcome::DecisionConflict => {}
+                        Ok(_) | Err(InvocationError::Rejected(_)) => {
+                            return Err(StorageError::Internal(
+                                "coordinator refused recovery decision".into(),
+                            ));
+                        }
+                        Err(error) => return Err(cell_error(error)),
+                    }
+                }
+                self.finish_decided_cross_cell_transaction(
+                    &entry.account_id,
+                    &entry.routing_key,
+                    entry.transaction_id,
+                )
+                .await?;
+            }
+        }
+    }
+
     /// Finish a published decision across its data Cell participants.
     ///
     /// Returns a retryable error while the decision or any participant outcome

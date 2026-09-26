@@ -4137,6 +4137,17 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         recovery_prepare.output.0,
         PreparePartitionTransactionOutcome::Prepared
     );
+    let mut recovery_participant = participants
+        .iter()
+        .find(|participant| {
+            matches!(
+                &participant.target,
+                CoordinatorParticipantTarget::Data { partition_id, .. } if *partition_id == left_id
+            )
+        })
+        .unwrap()
+        .clone();
+    recovery_participant.operations[0].index = 0;
     let pending_id = (0..=u16::MAX)
         .map(|suffix| {
             let mut id = transaction_id;
@@ -4156,7 +4167,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
                 account_id: "123456789012".into(),
                 transaction_id: pending_id,
                 token: None,
-                participants: participants.clone(),
+                participants: vec![recovery_participant.clone()],
             }),
         )
         .await
@@ -4181,7 +4192,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
                     token: token_value.clone(),
                     fingerprint: "recovery-request".into(),
                 }),
-                participants: participants.clone(),
+                participants: vec![recovery_participant.clone()],
             }),
         )
         .await
@@ -4198,17 +4209,6 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
                 && beyonddb::coordinator_target("123456789012", id).unwrap() == coordinator_target
         })
         .unwrap();
-    let mut abort_participant = participants
-        .iter()
-        .find(|participant| {
-            matches!(
-                &participant.target,
-                CoordinatorParticipantTarget::Data { partition_id, .. } if *partition_id == left_id
-            )
-        })
-        .unwrap()
-        .clone();
-    abort_participant.operations[0].index = 0;
     client
         .command::<BeginCrossCellTransaction>(
             &coordinator_target,
@@ -4217,7 +4217,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
                 account_id: "123456789012".into(),
                 transaction_id: abort_id,
                 token: None,
-                participants: vec![abort_participant],
+                participants: vec![recovery_participant],
             }),
         )
         .await
@@ -4508,6 +4508,26 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .0
         .unwrap();
     assert_eq!(abort_status.resolved_count, 1);
+    restored_storage
+        .recover_fenced_coordinator(&coordinator_target)
+        .await
+        .unwrap();
+    assert!(
+        restored_client
+            .query::<ReadPendingCrossCellTransactions>(
+                &coordinator_target,
+                None,
+                Json(ReadPendingCrossCellTransactionsInput {
+                    after: None,
+                    limit: 1,
+                }),
+            )
+            .await
+            .unwrap()
+            .output
+            .0
+            .is_empty()
+    );
     let restored_participant = restored_client
         .query::<ReadCoordinatorParticipant>(
             &coordinator_target,
