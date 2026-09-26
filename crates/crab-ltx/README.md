@@ -255,7 +255,10 @@ reverifies the local file through a buffered stream and unlinks it without
 making that deletion an acknowledgement barrier. A session always uses a fresh
 metadata directory, so crash-resurrected cleanup residue remains quarantined.
 Streaming avoids retaining the complete compressed file; verification still
-decodes all pages and retains page-index metadata on the caller's worker.
+decodes all pages and retains the observed page index on the caller's worker.
+Verification streams the footer through a bounded buffer and builds replica
+lookup entries only when the caller requests them; memory still grows with the
+number of observed pages.
 
 ## Checkpoint without losing capture boundaries
 

@@ -329,8 +329,8 @@ pub(crate) fn inspect_reader(reader: impl std::io::Read) -> Result<(DecodedFile,
 
 /// Decodes one complete LTX stream and summarizes what it carries.
 ///
-/// Page bodies are never retained, so the memory cost stays at one page plus
-/// the compressed scratch regardless of file size.
+/// Page bodies are never retained. Scratch includes one page, its compressed
+/// bytes, a bounded footer buffer, and an observed entry per page.
 pub(crate) fn inspect_bytes(bytes: &[u8]) -> Result<crate::internal::InspectedLtx> {
     let mut decoder = crate::codec::Decoder::new(std::io::Cursor::new(bytes));
     decoder.decode_header()?;
@@ -365,7 +365,7 @@ pub(crate) fn inspect_bytes(bytes: &[u8]) -> Result<crate::internal::InspectedLt
 pub(crate) fn inspect_reader_with_index(
     reader: impl std::io::Read,
 ) -> Result<(DecodedFile, u64, [u8; 32], Vec<crate::codec::EncodedPage>)> {
-    let mut decoder = crate::codec::Decoder::new(reader);
+    let mut decoder = crate::codec::Decoder::new_with_index(reader);
     decoder.decode_header()?;
     let mut data = vec![0; decoder.header.page_size as usize];
     while decoder.decode_page(&mut data)?.is_some() {}
@@ -378,7 +378,7 @@ pub(crate) fn inspect_reader_with_index(
         },
         size,
         digest,
-        decoder.replica_index().to_vec(),
+        decoder.into_replica_index()?,
     ))
 }
 

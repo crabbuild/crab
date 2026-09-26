@@ -4,8 +4,8 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; follow-up through `0c898097e95` plus streaming cleanup below; compared with `origin/main` at `de0bb234abc` |
-| Status | Findings 1–2 and streaming cleanup implemented; activation overlap and phase probes added; worker isolation, decoder memory, checkpoint tails, and balanced execution qualification remain open |
+| Scope | Initial baseline `0f3f4f7617a`; follow-up through `a16c8efcc2b` plus decoder changes below; compared with `origin/main` at `de0bb234abc` |
+| Status | Findings 1–2, streaming cleanup, and redundant decoder metadata removed; activation overlap and phase probes added; worker isolation, memory qualification, checkpoint tails, and balanced execution qualification remain open |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
 
@@ -25,7 +25,7 @@ harness separately.
 | --- | --- | --- |
 | P1 | Cross-Cell SQL worker blocking (9) | Slow one sparse Cell while reading a resident Cell on the same worker; repeat on different workers |
 | P1 | Whole-graph compaction and serial publication debt (4–5) | Sustained updates through repeated debt thresholds; compare response rate with publication rate |
-| P1 | Cleanup on the SQL worker and decoder memory (10, 13) | Streaming removes the body buffer; measure remaining indexes, confirmation time, RSS, and sibling-Cell latency |
+| P1 | Cleanup on the SQL worker and decoder memory (10, 13) | Body/footer buffering and unused replica indexes removed; measure remaining index, confirmation time, RSS, and sibling-Cell latency |
 | P1 | Execution load is not proven balanced (12) | Record owner/execution distribution and fixed offered load at every scale stage |
 | P2 | Eager checksum metadata and demand read amplification (3, 8) | First query **and first mutation**, point/random/scan workloads, cold and churned caches |
 | P2 | Checkpoint tail cost and shared maintenance resources (6, 11) | Long update runs with checkpoint, hydration, and compaction interference |
@@ -509,7 +509,7 @@ service; issue creation alone does not exercise those service compositions.
 
 ### 13. A streaming decoder still retains avoidable metadata
 
-**Confirmed:** [codec::Decoder](../../crab-ltx/src/codec.rs) accumulates the
+**Confirmed at audited revision:** [codec::Decoder](../../crab-ltx/src/codec.rs) accumulates the
 decoded page/offset/size index and, whenever `replica` is enabled, a second
 `EncodedPage` index with frame hashes and page checksums. The latter is built
 even when cleanup or ordinary inspection never asks for it. At close, the
@@ -535,6 +535,30 @@ Run the independent Celld/Superfly vectors, bundle and node-frame verification,
 exact restore, and sparse publication. A bounded individual `read` does not
 prove bounded accumulated decoder memory.
 
+**Implementation:** ordinary verification now collects only the observed
+page/offset/size index. Explicit replica inspection collects the frame hashes
+and checksums needed for page lookup and moves that index to its caller instead
+of cloning it. Footer entries are compared directly with the observed index
+through a 64 KiB buffer; neither the complete footer nor a second decoded copy
+is retained. CRC and encoded-length checks use the original varint bytes,
+including previously accepted nonminimal encodings. Actual I/O failures retain
+their source and classification; clean EOF within the footer is corruption.
+
+The long-tail regression fails before this change and passes afterward for
+both an early page-end marker and bytes appended after a complete valid file.
+Each malformed case reads less than 128 KiB rather than draining its 8 MiB
+tail. Independent format vectors retain exact digest, CRC, ordering, coverage,
+and restore checks. This bounds excess footer buffering, not total decoder
+memory: the observed index still grows with page count, explicit replica
+inspection needs additional metadata, and the caller may retain input bytes.
+Concurrent peak RSS and same-worker response latency remain open gates.
+
+The [exploratory RustFS comparison](../../crab-ltx/perf/README.md#streaming-footer-and-optional-replica-index-2026-09-26)
+observed a 140.5 to 101.9 ms median cleanup for the largest batch across three
+processes per implementation. Baseline compilation and unrelated host activity
+limit attribution; overlapping whole-process RSS ranges do not prove a memory
+improvement. This evidence does not qualify public-action latency or capacity.
+
 ## Safety and proof retained by the audit
 
 The follow-up audit reran the LTX prune-accounting fault test and the runtime
@@ -552,6 +576,13 @@ emit the pre-existing unused capture/checksum warnings; no warning baseline or
 policy inventory changed. The cost runner built in release mode and completed
 the real RustFS comparison above. Remaining decoder memory and fleet latency
 gates are explicitly open.
+
+The decoder follow-up passed 62 focused cases: seven replica codec, eleven
+independent format/restore, 26 sparse/exact-root, two external-vector replay,
+six minimal-feature codec, six bundle, two node-frame, and two public cleanup
+cases. Replica all-target Clippy with warnings denied and the release cost
+runner build passed; the same minimal-feature warnings remain. Deep decoder
+fuzzing and the broader runtime paths are delegated to the existing CI gates.
 
 Current-source ARM64
 [CI run 36216278190](https://github.com/crabbuild/crab/actions/runs/36216278190)
