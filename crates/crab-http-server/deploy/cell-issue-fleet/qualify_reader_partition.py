@@ -50,7 +50,7 @@ def qualify(path: Path, port: int) -> dict:
     # Preserve the signed Host and path. Compression is disabled so S3 range
     # reads keep their original byte representation through the HTTP proxy.
     proxy_file.write_text("{\n admin off\n auto_https off\n}\n"
-                          "127.0.0.1:8190 {\n reverse_proxy http://rustfs:9000 {\n"
+                          "http://127.0.0.1:8190 {\n reverse_proxy http://rustfs:9000 {\n"
                           "  transport http {\n   compression off\n  }\n }\n}\n")
     proxy["volumes"] = [f"{proxy_file}:/etc/caddy/Caddyfile:ro"]
     config["services"]["store-proxy"] = proxy
@@ -105,6 +105,11 @@ def qualify(path: Path, port: int) -> dict:
             raise RuntimeError("healthy successor did not publish the acknowledged write")
         result.update(after=after, after_write=after_write,
                       recovery_and_write_seconds=round(time.monotonic() - started, 3))
+    except Exception:
+        log = compose(partition_path, profiles, "logs", "--no-color", "--tail", "100", isolated, "store-proxy")
+        failure = path.parent / f"partition-failure-{time.time_ns()}.log"
+        failure.write_text(log + "\n")
+        raise
     finally:
         if paused:
             compose(partition_path, profiles, "unpause", "store-proxy")
