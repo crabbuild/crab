@@ -384,7 +384,12 @@ async fn serve_ready(
                 .recover_registered_coordinators(account_id, &client, &storage, &directory)
                 .await?;
         }
-        provisioner.install_transaction_recovery_loop(&tasks, storage)
+        provisioner.install_transaction_recovery_loop(
+            &tasks,
+            storage,
+            directory.clone(),
+            config.owned_accounts.clone(),
+        )
     }
     .await;
     if let Err(error) = recovery {

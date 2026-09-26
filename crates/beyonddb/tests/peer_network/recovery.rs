@@ -161,15 +161,21 @@ pub(crate) async fn abandon_commit(
 
 pub(crate) async fn assert_abandoned_commit(
     provisioner: &Arc<CellInitialPartitionProvisioner>,
-    tasks: &CellNodeTaskGroup,
     client: &CellClient,
     sdk: &aws_sdk_dynamodb::Client,
+    nodes: &NodeDirectory,
 ) {
     let account_id = "123456789012";
     let transaction_id = [105; 16];
     let (coordinator, _) = abandon_commit(provisioner, client, transaction_id, "abandoned").await;
+    let tasks = CellNodeTaskGroup::new(CancellationToken::new(), CancellationToken::new());
     provisioner
-        .install_transaction_recovery_loop(tasks, CellStorage::new(client.clone(), "us-east-1"))
+        .install_transaction_recovery_loop(
+            &tasks,
+            CellStorage::new(client.clone(), "us-east-1"),
+            nodes.clone(),
+            vec![],
+        )
         .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {

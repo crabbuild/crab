@@ -86,8 +86,10 @@ pages the account's routes and coordinator registry. Idle or expired owners can
 be recovered at a new peer endpoint; live remote owners remain in place. Every
 takeover still requires node-session fencing and a Cell authority CAS. This
 requires the account to be configured on the replacement and enough local
-capacity for its recovered ranges. Data-only-node discovery and recurring
-fleet-wide owner replacement still need a recovery scheduler.
+capacity for its recovered ranges. While serving, it also discovers expired
+coordinator owners through configured accounts and restores their original
+participants. Data-only-node discovery and general fleet placement still need
+a recovery scheduler.
 Automatic placement, fleet-wide unattended takeover, multi-node capacity loops,
 management APIs, and the remaining DynamoDB operations are still required
 before this is a complete service. A public node with no locally owned account
@@ -278,10 +280,13 @@ and finishes a pending transaction with concurrent drivers. The Cell barriers
 fail closed; the adapter helps resolve a blocking terminal decision before
 retrying Get, Query, or Scan. An undecided or unavailable coordinator remains
 a retryable error.
-A supervised serving worker now rotates through locally admitted coordinator
-shards, resumes abandoned BEGIN records, and finishes terminal decisions. It
-processes at most one pending transaction per tick, advances past failures,
-and revisits them on a bounded pass. Cell admission reclaims settled
+A supervised serving worker rotates through locally admitted coordinators and
+discovers one registered shard per tick across configured accounts. It fences
+expired coordinator/participant owners, resumes abandoned BEGIN records, and
+finishes terminal decisions. It processes at most one pending transaction per
+tick, advances past failures, and revisits them on a bounded pass. Discovery
+skips a completed Idle root only when it matches an observed empty-work receipt;
+new or changed roots remain discoverable. Cell admission reclaims settled
 coordinators at the active-Cell limit; idle shards restore before token lookup.
 Recovery reactivates released coordinators; startup resolves shards one at a
 time. General Cell placement/activation, bounded transaction/read-image

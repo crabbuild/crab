@@ -38,11 +38,12 @@ split sources absent from the current table route. Participant payloads are
 stored separately, so target discovery does not read item images.
 The private peer listener is available during resolution so recovering nodes
 can reach one another; the public DynamoDB listener starts after recovery.
-After startup, a supervised serving worker revisits coordinators admitted or
-restored by the local provisioner, including shards created after the worker
-starts. It resumes BEGIN using the same immutable driver as requests and
-finishes COMMIT/ABORT resolution. Startup recovery now supports a changed peer
-endpoint; recurring fleet-wide discovery of failed remote owners remains open.
+After startup, a supervised serving worker revisits locally admitted coordinators
+and pages the durable registry for configured accounts, including shards created
+remotely after the worker starts. It fences expired coordinator and participant
+owners, resumes BEGIN using the same immutable driver as requests, and finishes
+COMMIT/ABORT resolution. General fleet placement and recovery of Cells outside
+this configured-account transaction discovery remain open.
 
 The ExtendDB `DataEngine` contract requires all writes, the account-scoped
 client token, and stream capture to commit together. Its engine validates up
@@ -622,11 +623,21 @@ coordinator history.
 `CellInitialPartitionProvisioner::install_transaction_recovery_loop` installs
 one retained task after startup recovery and before the public listener. The
 provisioner's successful admission, restoration, and takeover paths register
-local coordinator targets. The worker does not scan every account or data Cell
-on each tick. Startup rebuilds this in-memory schedule from the durable account
-registry; the transaction records remain the recovery authority.
+local coordinator targets. Startup rebuilds this in-memory schedule from the
+account registry; the transaction records remain the recovery authority.
 
-Every 250 ms, with missed ticks skipped, the worker selects the next coordinator
+Every 250 ms, with missed ticks skipped, discovery reads one registered shard
+from one configured account. Accounts rotate even after failed lookups; each
+account's cursor advances before owner activation and wraps to find later
+registrations. Live remote owners stay in place. Idle or expired owners use the
+same catalog validation, node fencing, and Cell authority CAS as startup.
+A cached empty-work receipt skips an Idle shard only when its incarnation and
+published commit sequence match. Unknown or changed roots must be inspected;
+completed history must not continuously churn the active-Cell pool. This cache
+is an in-memory optimization bounded by the configured accounts' registries.
+Discovery errors do not suppress that tick's local transaction recovery.
+
+The worker then selects the next local coordinator
 by Cell ID and reads at most one pending record through the existing indexed
 cursor query. An indexed reverse lookup captures the highest pending
 `(created_at_ms, transaction_id)` at the start of each pass. The worker advances
@@ -636,6 +647,11 @@ earlier failures to retry despite new arrivals. The boundary comes from durable
 records, so a Cell's logical clock being ahead of wall time cannot hide work. Each selected request
 is bounded by the protocol's 100-operation/participant limit; its wall time
 still depends on the normal Cell invocation deadlines and participant latency.
+
+Before driving a selected record, recovery reads its unresolved original targets
+and reacquires Idle or expired participant owners. It never substitutes current
+table routes for those targets, including retained split sources. Account and
+data participants share this restoration path with startup.
 
 Serving-time recovery resumes BEGIN rather than inferring an abort from age.
 It may race the original request; prepare identity, terminal decisions, and
@@ -650,11 +666,19 @@ finishes healthy work, retains the unavailable BEGIN, then completes it when
 connectivity returns without a client retry. A newly admitted shard's prepared
 ABORT is also resolved without exposing its staged image. The two-owner mTLS
 test abandons a published COMMIT after one apply, then verifies worker completion
-and signed SDK reads across owner replacement.
+and signed SDK reads across owner replacement. It also starts discovery on the
+survivor before creating a new remote shard, verifies that the live owner stays
+in place, stops that owner, and waits for resolution without another mutation
+or a survivor restart. Signed SDK reads then verify both recovered images.
 
-This is one serial worker per serving node. Its backlog drain rate and worst-case
-latency at 10,000 Cells remain unmeasured. Fleet-wide discovery and unattended owner replacement, data-only-node startup,
-and history collection remain separate requirements.
+This is one serial worker per serving node. At one discovery per 250 ms, a full
+4,096-shard registry needs over 17 minutes even before I/O, activation, multiple
+accounts, and transaction work. Discovery of an expired owner is therefore not
+a recovery-time guarantee. Its backlog drain rate and worst-case latency at
+10,000 Cells remain unmeasured. The configured account must stay reachable and
+the survivor must have capacity for recovered participants. Fleet placement,
+general data/account/credential activation, data-only-node startup, active node
+log recovery, and history collection remain separate requirements.
 
 ## Coordinator residency
 
@@ -790,7 +814,7 @@ fleet-availability findings remain open.
 | Reads | Get/Query/Scan barriers and `backend/transaction_read.rs` | Pending creates, partial COMMIT, shared snapshots, saved images; full concurrent-history/fault matrix remains open. |
 | Sibling writers | Ordinary item commands, conditional TTL delete, split seal, account table deletion | Key and split fences exist. TTL excludes prepared locks before candidate selection and defers conflicts acquired before deletion; the regression covers later-item/table progress and deletion after ABORT. Routed table deletion needs its own lifecycle qualification, beyond the account lock test. |
 | Durability | Cell command savepoint → runtime publication → owner authority | `Committed<T>` releases after publication; `CellExecutor::query` refuses an unpublished head. Restart/peer tests exercise this dependency. |
-| Recovery discovery | Account shard registry → provisioner → serving/startup resolver | Changed-endpoint startup, live-owner isolation, and coordinator reactivation; recurring fleet-wide failure discovery remains missing. |
+| Recovery discovery | Account shard registry → provisioner → serving/startup resolver | Changed-endpoint startup and serving discovery for configured accounts, live-owner isolation, and coordinator reactivation; fleet placement and measured recovery capacity remain missing. |
 
 BeyondDB source paths in the table are relative to `crates/beyonddb/src/`.
 Read the driver, both participant wrappers, coordinator, and provisioner
@@ -918,11 +942,11 @@ all-target Clippy passed. The separate SDK/RustFS process smoke passed in
 existing-item read after graceful restart from Idle authority. Format and diff
 checks passed; no binary rebuild occurred during the process smoke.
 
-This is startup recovery for configured accounts. The node must have capacity
-for the recovered ranges; no new placement policy distributes them among other
-nodes. Data-only-node discovery, recurring scans for failed remote owners, and
-recovery throughput at 10,000 Cells remain separate work. Startup scans still
-resolve coordinator shards sequentially before public admission.
+This startup path requires capacity for the recovered ranges; no placement
+policy distributes them among other nodes. The serving discovery described
+above adds recurring transaction recovery for configured accounts. Data-only
+node discovery and recovery throughput at 10,000 Cells remain separate work.
+Startup scans still resolve coordinator shards sequentially before public admission.
 
 ### Apply capacity after a durable COMMIT
 
@@ -1098,3 +1122,52 @@ failures; it does not justify production readiness or unlimited scaling.
 
 Public writes must continue to wait for all participant resolutions: success after the decision alone could expose partial application;
 cancellation after an ambiguous decision could hide a committed transaction.
+
+
+## Recovery while the survivor keeps serving
+
+A network regression left a durable COMMIT with one participant applied and its
+resolution receipt unrecorded. Its coordinator was registered on a remote owner
+after the survivor's worker started. The old worker never discovered the shard;
+resolution timed out after 45 seconds following owner failure.
+
+The serving loop now combines bounded account-registry discovery with its local
+pending-record cursor. Startup and serving recovery share original-participant
+restoration and the existing fenced owner acquisition. A live foreign lease
+still prevents takeover; missing or foreign node records and active unpublished
+node logs still fail closed in the runtime. Serving BEGIN recovery uses the
+normal driver, so no new timeout-based abort rule is introduced.
+
+**Is this the best fix here?** The provisioner already owns catalog validation,
+local capacity, activation, and node fencing. Extending its discovery loop keeps
+ownership recovery at that boundary and shares participant restoration with
+startup. The transaction driver and participant decision protocol need no second
+implementation. The added registry cursor and exact-root empty-work cache let
+historical shards exceed resident capacity without continual reacquisition.
+
+| Evidence surface | Entry, boundary, and proof |
+| --- | --- |
+| Serving wiring | Binary supplies its existing configured accounts, peer client, and NodeDirectory to the retained task. |
+| Discovery | Account `ListCoordinatorShards` uses an ordered SQL cursor; at most one registered target is inspected each tick. |
+| Ownership | Provisioner delegates expired-session fencing to NodeDirectory and exact authority takeover to CellRuntime. |
+| Participants | Startup and serving both query `ReadUnresolvedCoordinatorParticipants`; account/data targets come from immutable records. |
+| Decision | Existing `resume_cross_cell_transaction` drives BEGIN and terminal resolution; COMMIT cannot become ABORT. |
+| Capacity sibling | Foreground coordinator admission still reclaims only proven settled work; discovery skips only a matching empty Idle root. |
+| Tests | Two-owner signed SDK failover, local failed-participant cursor fairness, released read recovery, history exceeding three resident slots, and process restart. |
+| Main | Current `origin/main` has no BeyondDB implementation; this remains a draft feature branch. |
+
+Verification: the network regression passed in 89.06 seconds after the
+45-second failure-window timeout reproduced the gap. The 19 account/elastic
+tests and strict all-target Clippy passed. Disabling the empty-root cache made
+the residency test fail from continuous reacquisition; with the cache restored
+it passed in 20.37 seconds. The separate signed SDK/RustFS process smoke passed
+in 415.02 seconds, including 70 historical coordinator shards, changed-address
+hard restart, token replay, and graceful restart. Its previous run took 368.03
+seconds; this fixture duration is not a throughput benchmark, and the added
+discovery/activation cost still needs scale measurement. No binary rebuild
+occurred during that smoke. Format and diff checks passed.
+
+This closes configured-account transaction discovery during serving. It does
+not qualify 10,000 Cells, multi-TB storage, fleet placement, or bounded recovery
+time. General apply-space reservation and transaction/read-history collection
+also remain required before a production transaction guarantee.

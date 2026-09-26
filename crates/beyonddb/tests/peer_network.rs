@@ -263,7 +263,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     let remote_session = SessionId::from_bytes([96; 16]);
     let remote_signing_key = client_tls.signing_key().clone();
     let remote_lease = CancellationToken::new();
-    let (remote, remote_tasks) = start_node(
+    let (remote, _remote_tasks) = start_node(
         Arc::clone(&application),
         peer_directory.clone(),
         remote_session,
@@ -552,7 +552,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .unwrap();
     assert_eq!(read.item(), Some(&item));
     recovery::assert_read_triggered_commit(&remote_provisioner, &client, &sdk).await;
-    recovery::assert_abandoned_commit(&remote_provisioner, &remote_tasks, &client, &sdk).await;
+    recovery::assert_abandoned_commit(&remote_provisioner, &client, &sdk, &peer_directory).await;
     let transaction_items = ["NetworkData", "RemoteTable"]
         .into_iter()
         .map(|table| {
@@ -642,7 +642,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     let replacement_tls =
         LoadedPeerTls::load(&owner_certificate, &owner_key, &ca, "localhost").unwrap();
     let replacement_session = SessionId::from_bytes([100; 16]);
-    let (replacement, _replacement_tasks) = start_node(
+    let (replacement, replacement_tasks) = start_node(
         Arc::clone(&application),
         peer_directory.clone(),
         replacement_session,
@@ -753,6 +753,14 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         )
         .await
         .unwrap();
+    beyonddb::CoordinatorProvisioner::ensure(
+        replacement_provisioner.as_ref(),
+        &replacement_client,
+        "123456789012",
+        &restart_id,
+    )
+    .await
+    .unwrap();
     let recovered_transaction = replacement_client
         .query::<beyonddb::ReadCrossCellTransaction>(
             &restart_coordinator,
@@ -788,8 +796,8 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     );
     let replacement_state = build_http_state(
         &replacement,
-        replacement_client,
-        layout,
+        replacement_client.clone(),
+        layout.clone(),
         Arc::clone(&replacement_provisioner),
         ENCRYPTION_KEY,
         "us-east-1",
@@ -870,21 +878,84 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
             .await
             .is_err()
     );
+    // Install before this shard exists. Discovery must see later registrations
+    // without taking a live owner, then recover after that owner stops renewing.
+    replacement_provisioner
+        .install_transaction_recovery_loop(
+            &replacement_tasks,
+            beyonddb::CellStorage::new(replacement_client.clone(), "us-east-1"),
+            peer_directory.clone(),
+            vec!["123456789012".into()],
+        )
+        .unwrap();
+    let failover_id = loop {
+        let id = *uuid::Uuid::now_v7().as_bytes();
+        let target = beyonddb::coordinator_target("123456789012", &id).unwrap();
+        if CellAuthority::new(layout.clone())
+            .load(target.cell_id())
+            .await
+            .unwrap()
+            .is_none()
+        {
+            break id;
+        }
+    };
+    let (failover_coordinator, _) = recovery::abandon_commit(
+        &remote_provisioner,
+        &replacement_client,
+        failover_id,
+        "serving-failover",
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let live = CellAuthority::new(layout.clone())
+        .load(failover_coordinator.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(live.value().owner.as_ref().unwrap().session, remote_session);
     public_server.abort();
     remote_shutdown.send(()).unwrap();
     remote_server.await.unwrap().unwrap();
     remote_lease.cancel();
-    tokio::time::sleep(std::time::Duration::from_secs(11)).await;
-    for partition in route.partitions {
-        replacement_provisioner
-            .takeover_expired_partition(
-                "123456789012",
-                &table.id,
-                &partition.partition_id,
-                &peer_directory,
-            )
+    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        loop {
+            if let Ok(status) = replacement_client
+                .query::<beyonddb::ReadCrossCellTransaction>(
+                    &failover_coordinator,
+                    None,
+                    Json(beyonddb::ReadCrossCellTransactionInput {
+                        account_id: "123456789012".into(),
+                        transaction_id: failover_id,
+                        routing_key: failover_id.to_vec(),
+                    }),
+                )
+                .await
+            {
+                let status = status.output.0.unwrap();
+                assert_eq!(status.decision, beyonddb::CoordinatorDecision::Commit);
+                if status.resolved_count == 2 {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("serving worker must discover and resolve the failed owner's transaction");
+    for table in ["NetworkData", "RemoteTable"] {
+        let result = replacement_sdk
+            .get_item()
+            .table_name(table)
+            .key("id", AwsAttributeValue::S("serving-failover".into()))
+            .consistent_read(true)
+            .send()
             .await
             .unwrap();
+        assert_eq!(
+            result.item().unwrap().get("value"),
+            Some(&AwsAttributeValue::S("recovered".into()))
+        );
     }
     let moved_owner_read = replacement_sdk
         .get_item()
@@ -898,11 +969,11 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     replacement_server.await.unwrap().unwrap();
     replacement_public_server.abort();
     owner.shutdown().await.unwrap();
-    // Unlike its transferred data Cell, the coordinator still names this
-    // expired session. Drain must not release ownership with a dead lease.
+    // Recovery may have transferred all shards before drain; any remaining
+    // authority still naming this expired session must reject release.
     assert!(matches!(
         remote.shutdown().await,
-        Err(crab_cell_runtime::Error::Fenced)
+        Ok(()) | Err(crab_cell_runtime::Error::Fenced)
     ));
     replacement.shutdown().await.unwrap();
 }

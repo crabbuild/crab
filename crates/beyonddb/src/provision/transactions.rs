@@ -1,14 +1,14 @@
 //! Restore coordinator and participant owners from durable transaction records.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashSet, VecDeque},
     ops::Bound::{Excluded, Unbounded},
     sync::{Arc, RwLock},
     time::Duration,
 };
 
 use crab_cell_host::CellNodeTaskGroup;
-use crab_cell_runtime::client::CellClient;
+use crab_cell_runtime::client::{CellClient, Receipt};
 use crab_cell_runtime::control::authority::CellAuthority;
 use crab_cell_runtime::identity::CellTarget;
 use crab_cell_runtime::node::NodeDirectory;
@@ -19,10 +19,10 @@ use super::{CellInitialPartitionProvisioner, provision_error};
 use crate::backend::cell_error;
 use crate::{
     CellStorage, CoordinatorParticipantTarget, Json, ListCoordinatorShards,
-    ListCoordinatorShardsInput, PendingTransactionCursor, ReadCrossCellTransactionInput,
-    ReadPendingCrossCellTransactions, ReadPendingCrossCellTransactionsInput,
-    ReadUnresolvedCoordinatorParticipants, account_target, data_target, initialize_account,
-    initialize_coordinator, initialize_partition,
+    ListCoordinatorShardsInput, PendingCrossCellTransaction, PendingTransactionCursor,
+    ReadCrossCellTransactionInput, ReadPendingCrossCellTransactions,
+    ReadPendingCrossCellTransactionsInput, ReadUnresolvedCoordinatorParticipants, account_target,
+    data_target, initialize_account, initialize_coordinator, initialize_partition,
 };
 
 type Initialize = for<'a> fn(&crab_ltx::rusqlite::Transaction<'a>) -> crab_cell_runtime::Result<()>;
@@ -146,36 +146,23 @@ impl CellInitialPartitionProvisioner {
         ))
     }
 
-    async fn activate_tracked_coordinator(
-        &self,
-        target: &CellTarget,
-    ) -> Result<bool, StorageError> {
-        let observed = CellAuthority::new(self.layout.clone())
-            .load(target.cell_id())
-            .await
-            .map_err(provision_error)?
-            .ok_or_else(|| StorageError::Transient("coordinator has no authority".into()))?;
-        if let Some(owner) = &observed.value().owner {
-            return Ok(owner.session == self.session);
-        }
-        let proof = self
-            .cataloged(target, crate::transaction_coordinator::MODULE)
-            .await?;
-        self.admit_initialized(target, proof, initialize_coordinator)
-            .await?;
-        Ok(true)
-    }
-
-    /// Supervise recovery of abandoned transactions on locally admitted coordinators.
+    /// Discover and recover abandoned transactions for configured accounts.
     ///
     /// Install once after startup recovery, using the same provisioner as public
-    /// admission. Each tick visits one shard and at most one pending transaction.
-    /// BEGIN is resumed alongside active requests, never aborted based on age.
+    /// admission. Each tick discovers one registered shard and visits at most one
+    /// pending transaction. Live remote owners remain in place; expired owners
+    /// require fenced takeover and local capacity. BEGIN is resumed, never aged out.
     pub fn install_transaction_recovery_loop(
         self: &Arc<Self>,
         tasks: &CellNodeTaskGroup,
         storage: CellStorage,
+        nodes: NodeDirectory,
+        accounts: Vec<String>,
     ) -> Result<(), StorageError> {
+        for account_id in &accounts {
+            account_target(account_id).map_err(provision_error)?;
+        }
+        let mut accounts: VecDeque<_> = accounts.into_iter().map(|id| (id, None)).collect();
         let provisioner = Arc::clone(self);
         let cancellation = tasks.cancellation_token();
         tasks
@@ -183,14 +170,29 @@ impl CellInitialPartitionProvisioner {
                 let mut ticks = tokio::time::interval(Duration::from_millis(250));
                 ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 let mut after = None;
+                let mut settled = BTreeMap::new();
                 loop {
                     tokio::select! {
                         () = cancellation.cancelled() => return Ok::<(), StorageError>(()),
                         _ = ticks.tick() => {}
                     }
+                    if let Some((account, mut cursor)) = accounts.pop_front() {
+                        let result = tokio::select! {
+                            () = cancellation.cancelled() => return Ok(()),
+                            result = provisioner.discover_coordinator(
+                                &account, storage.client(), &nodes, &mut cursor, &mut settled,
+                            ) => result,
+                        };
+                        // Rotate accounts even after a failed lookup. Discovery must
+                        // neither starve other accounts nor suppress local recovery.
+                        accounts.push_back((account, cursor));
+                        if let Err(error) = result {
+                            tracing::warn!(%error, "coordinator discovery deferred");
+                        }
+                    }
                     let result = tokio::select! {
                         () = cancellation.cancelled() => return Ok(()),
-                        result = provisioner.recover_next_transaction(&storage, &mut after) => result,
+                        result = provisioner.recover_next_transaction(&storage, &nodes, &mut after) => result,
                     };
                     if let Err(error) = result {
                         tracing::warn!(%error, "transaction recovery deferred");
@@ -200,9 +202,89 @@ impl CellInitialPartitionProvisioner {
             .map_err(|error| StorageError::Internal(error.to_string()))
     }
 
+    async fn discover_coordinator(
+        &self,
+        account_id: &str,
+        client: &CellClient,
+        nodes: &NodeDirectory,
+        after: &mut Option<u32>,
+        settled: &mut BTreeMap<[u8; 32], Receipt>,
+    ) -> Result<(), StorageError> {
+        let account = account_target(account_id).map_err(provision_error)?;
+        let page = client
+            .query::<ListCoordinatorShards>(
+                &account,
+                None,
+                Json(ListCoordinatorShardsInput {
+                    account_id: account_id.to_owned(),
+                    after: *after,
+                    limit: 1,
+                }),
+            )
+            .await
+            .map_err(cell_error)?
+            .output
+            .0;
+        // Advance before activation, including when capacity or takeover fails.
+        // Wrapping an empty page also discovers later registrations behind us.
+        *after = page.first().copied();
+        let Some(shard) = *after else {
+            return Ok(());
+        };
+        let target = CellTarget::new(
+            account.tenant(),
+            crate::APPLICATION,
+            crate::transaction_coordinator::NAMESPACE,
+            &partition_for_shard(shard),
+        )
+        .map_err(provision_error)?;
+        let cell = target.cell_id();
+        if let Some(receipt) = settled.get(cell.as_bytes()) {
+            let observed = CellAuthority::new(self.layout.clone())
+                .load(cell)
+                .await
+                .map_err(provision_error)?;
+            if observed.as_ref().is_some_and(|record| {
+                let control = record.value();
+                control.owner.is_none()
+                    && control.incarnation == receipt.incarnation
+                    && control
+                        .root
+                        .as_ref()
+                        .is_some_and(|root| root.commit_sequence == receipt.commit_sequence)
+            }) {
+                // Only the exact published empty root can skip reactivation.
+                // Unknown Idle roots may contain BEGIN or unfinished decisions;
+                // repeatedly acquiring completed history would churn scarce slots.
+                return Ok(());
+            }
+        }
+        if self
+            .recover_discovered_owner(
+                &target,
+                crate::transaction_coordinator::MODULE,
+                initialize_coordinator,
+                nodes,
+            )
+            .await?
+        {
+            let pending = client
+                .query::<crate::ReadPendingTransactionBoundary>(&target, None, Json(()))
+                .await
+                .map_err(cell_error)?;
+            if pending.output.0.is_none() {
+                settled.insert(*cell.as_bytes(), pending.receipt);
+            } else {
+                settled.remove(cell.as_bytes());
+            }
+        }
+        Ok(())
+    }
+
     async fn recover_next_transaction(
         &self,
         storage: &CellStorage,
+        nodes: &NodeDirectory,
         after: &mut Option<[u8; 32]>,
     ) -> Result<(), StorageError> {
         let selected = {
@@ -221,7 +303,15 @@ impl CellInitialPartitionProvisioner {
         // Advance even on failure: an unreachable shard or participant must not
         // prevent unrelated transactions from releasing their locks.
         *after = Some(cell);
-        if !self.activate_tracked_coordinator(&shard.target).await? {
+        if !self
+            .recover_discovered_owner(
+                &shard.target,
+                crate::transaction_coordinator::MODULE,
+                initialize_coordinator,
+                nodes,
+            )
+            .await?
+        {
             self.transaction_recovery
                 .shards
                 .write()
@@ -244,8 +334,16 @@ impl CellInitialPartitionProvisioner {
             .shards
             .write()
             .map_err(|_| StorageError::Internal("coordinator recovery lock poisoned".into()))?
-            .insert(cell, shard);
+            .insert(cell, shard.clone());
         if let Some((entry, _)) = pending {
+            self.recover_pending_participants(
+                &shard.target,
+                &entry,
+                storage.client(),
+                nodes,
+                &mut HashSet::new(),
+            )
+            .await?;
             storage
                 .resume_cross_cell_transaction(
                     &entry.account_id,
@@ -359,46 +457,59 @@ impl CellInitialPartitionProvisioner {
             // Bound deduplication memory to one page, even for a large backlog.
             let mut visited = HashSet::new();
             for entry in page {
-                let targets = client
-                    .query::<ReadUnresolvedCoordinatorParticipants>(
-                        coordinator,
-                        None,
-                        Json(ReadCrossCellTransactionInput {
-                            account_id: entry.account_id.clone(),
-                            transaction_id: entry.transaction_id,
-                            routing_key: entry.routing_key,
-                        }),
-                    )
-                    .await
-                    .map_err(cell_error)?
-                    .output
-                    .0;
-                for participant in targets {
-                    let (target, module, initialize): (CellTarget, &'static str, Initialize) =
-                        match participant.target {
-                            CoordinatorParticipantTarget::Account => (
-                                account_target(&entry.account_id).map_err(provision_error)?,
-                                crate::MODULE,
-                                initialize_account,
-                            ),
-                            CoordinatorParticipantTarget::Data {
-                                table_id,
-                                partition_id,
-                                ..
-                            } => (
-                                data_target(&entry.account_id, &table_id, &partition_id)
-                                    .map_err(provision_error)?,
-                                crate::DATA_MODULE,
-                                initialize_partition,
-                            ),
-                        };
-                    if visited.insert(target.cell_id()) {
-                        self.recover_discovered_owner(&target, module, initialize, nodes)
-                            .await?;
-                    }
-                }
+                self.recover_pending_participants(coordinator, &entry, client, nodes, &mut visited)
+                    .await?;
             }
         }
+    }
+
+    async fn recover_pending_participants(
+        &self,
+        coordinator: &CellTarget,
+        entry: &PendingCrossCellTransaction,
+        client: &CellClient,
+        nodes: &NodeDirectory,
+        visited: &mut HashSet<crab_cell_runtime::identity::CellId>,
+    ) -> Result<(), StorageError> {
+        let targets = client
+            .query::<ReadUnresolvedCoordinatorParticipants>(
+                coordinator,
+                None,
+                Json(ReadCrossCellTransactionInput {
+                    account_id: entry.account_id.clone(),
+                    transaction_id: entry.transaction_id,
+                    routing_key: entry.routing_key.clone(),
+                }),
+            )
+            .await
+            .map_err(cell_error)?
+            .output
+            .0;
+        for participant in targets {
+            let (target, module, initialize): (CellTarget, &'static str, Initialize) =
+                match participant.target {
+                    CoordinatorParticipantTarget::Account => (
+                        account_target(&entry.account_id).map_err(provision_error)?,
+                        crate::MODULE,
+                        initialize_account,
+                    ),
+                    CoordinatorParticipantTarget::Data {
+                        table_id,
+                        partition_id,
+                        ..
+                    } => (
+                        data_target(&entry.account_id, &table_id, &partition_id)
+                            .map_err(provision_error)?,
+                        crate::DATA_MODULE,
+                        initialize_partition,
+                    ),
+                };
+            if visited.insert(target.cell_id()) {
+                self.recover_discovered_owner(&target, module, initialize, nodes)
+                    .await?;
+            }
+        }
+        Ok(())
     }
 }
 

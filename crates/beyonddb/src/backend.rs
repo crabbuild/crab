@@ -64,6 +64,10 @@ pub struct CellStorage {
 }
 
 impl CellStorage {
+    pub(crate) fn client(&self) -> &CellClient {
+        &self.client
+    }
+
     /// Binds ExtendDB operations to a Cell client and AWS region.
     ///
     /// The server must provision and activate each account Cell before routing

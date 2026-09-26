@@ -81,11 +81,18 @@ owner is live, then fences its expired boot session, restores the data Cell,
 and reads the committed item from object storage. Placement,
 fleet-wide unattended crash takeover, and multi-node capacity control remain unimplemented,
 so this is not production multi-node service proof. A separate process smoke
-now proves signed SDK writes and same-endpoint recovery through the serving
-binary against RustFS after an unclean exit. Startup recovers configured account
-and credential Cells and the routed data Cells formerly served at that peer
-endpoint. Data-only nodes and replacement endpoints still need a recovery
-scheduler. This does not prove aggregate capacity or fleet-wide failover.
+now proves signed SDK writes and recovery at a changed peer endpoint through the
+serving binary against RustFS after an unclean exit. Startup recovers configured
+account and credential Cells, routed data Cells, registered coordinators, and
+their original participants. Live remote owners remain in place. A recurring
+worker also discovers one registered coordinator per tick across configured
+accounts and fences expired owners during serving, including original
+participants. An exact-root empty-work cache prevents unchanged Idle history
+from repeatedly consuming active slots. At a 250-ms tick, scanning 4,096 shards
+takes over 17 minutes before I/O and recovery work; recovery time at the target
+scale is unqualified. Data-only nodes, general Cell activation, fleet placement,
+and capacity control still need a scheduler. This does not prove aggregate
+capacity or fleet-wide failover.
 Increasing a Cell's database budget does not increase
 write parallelism or provide online repartitioning. Both Cell types declare a
 512 MiB database budget and 64 MiB capture budget; host admission supplies
