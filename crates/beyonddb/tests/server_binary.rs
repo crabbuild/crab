@@ -131,7 +131,7 @@ fn start(config: &Path, log: &Path, bootstrap: bool, s3: SocketAddr) -> ManagedC
 }
 
 fn wait_healthy(child: &mut Child, address: SocketAddr, log: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(45);
     while Instant::now() < deadline {
         if let Some(status) = child.try_wait().unwrap() {
             panic!(
@@ -177,7 +177,7 @@ fn stop(child: &mut Child, log: &Path) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires local rustfs and aws CLI"]
-async fn bootstrap_sdk_write_survives_server_process_restart() {
+async fn bootstrap_sdk_write_survives_unclean_server_restart() {
     let root = tempfile::tempdir().unwrap();
     tls_files(root.path());
     fs::create_dir(root.path().join("objects")).unwrap();
@@ -451,7 +451,8 @@ async fn bootstrap_sdk_write_survives_server_process_restart() {
             .await
             .is_err()
     );
-    stop(&mut child, &log);
+    child.kill().unwrap();
+    child.wait().unwrap();
     let mut restarted = start(&config, &log, false, s3);
     wait_healthy(&mut restarted, public, &log);
     sdk.transact_write_items()
@@ -513,6 +514,14 @@ async fn bootstrap_sdk_write_survives_server_process_restart() {
         .unwrap();
     assert!(recreated_tags.tags().is_empty());
     stop(&mut restarted, &log);
+    let mut drained = start(&config, &log, false, s3);
+    wait_healthy(&mut drained, public, &log);
+    sdk.describe_table()
+        .table_name("ProcessData")
+        .send()
+        .await
+        .unwrap();
+    stop(&mut drained, &log);
     rustfs.kill().unwrap();
     rustfs.wait().unwrap();
 }

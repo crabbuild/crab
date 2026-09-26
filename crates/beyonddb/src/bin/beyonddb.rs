@@ -283,7 +283,12 @@ async fn serve_ready(
         .with_initial_partition_count(config.initial_partitions)?,
     );
     for account_id in &config.owned_accounts {
-        let account = provisioner.admit_account(account_id).await?;
+        let account = provisioner
+            .recover_owned_account(account_id, &directory)
+            .await?;
+        provisioner
+            .recover_local_partitions(account_id, account.clone(), &directory)
+            .await?;
         provisioner.install_account_capacity_loop(
             &tasks,
             account_id.clone(),
@@ -293,7 +298,9 @@ async fn serve_ready(
         )?;
     }
     for key_id in &config.owned_access_keys {
-        provisioner.admit_credential(key_id).await?;
+        provisioner
+            .recover_owned_credential(key_id, &directory)
+            .await?;
     }
     let client = build_peer_client(node, layout.clone(), directory.clone(), session, &tls)?;
     if let (Some(bootstrap), Some(secret)) = (config.bootstrap.as_ref(), bootstrap_secret) {
