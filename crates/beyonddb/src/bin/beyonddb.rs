@@ -309,12 +309,6 @@ async fn serve_ready(
             .await?;
     }
     let client = build_peer_client(node, layout.clone(), directory.clone(), session, &tls)?;
-    if !recovered_coordinators.is_empty() {
-        let storage = CellStorage::new(client.clone(), config.region.clone());
-        for coordinator in recovered_coordinators {
-            storage.recover_fenced_coordinator(&coordinator).await?;
-        }
-    }
     if let (Some(bootstrap), Some(secret)) = (config.bootstrap.as_ref(), bootstrap_secret) {
         let policy = std::fs::read_to_string(&bootstrap.policy_file)?;
         CellCredentialStore::new(client.clone(), layout.clone(), encryption_key)
@@ -366,9 +360,9 @@ async fn serve_ready(
     }
     let mut state = build_http_state(
         node,
-        client,
+        client.clone(),
         layout.clone(),
-        provisioner,
+        provisioner.clone(),
         encryption_key,
         &config.region,
         config.public_endpoint.clone(),
@@ -376,7 +370,9 @@ async fn serve_ready(
     state.tls_enabled = public_tls.is_some();
     let peer_cancel = CancellationToken::new();
     let peer_shutdown = peer_cancel.clone();
-    let peer_router = peer_router(node, layout, directory);
+    let peer_router = peer_router(node, layout, directory.clone());
+    // Other recovering nodes may need these local participants. Start private
+    // routing before resolving decisions, while public requests remain gated.
     let mut peer_server = tokio::spawn(async move {
         axum::serve(
             tls.listener(peer_listener),
@@ -385,6 +381,22 @@ async fn serve_ready(
         .with_graceful_shutdown(async move { peer_shutdown.cancelled().await })
         .await
     });
+    let recovery: Result<(), extenddb_storage::error::StorageError> = async {
+        let storage = CellStorage::new(client.clone(), config.region.clone());
+        for coordinator in recovered_coordinators {
+            provisioner
+                .recover_transaction_participants(&coordinator, &client, &directory)
+                .await?;
+            storage.recover_fenced_coordinator(&coordinator).await?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = recovery {
+        peer_cancel.cancel();
+        peer_server.await??;
+        return Err(error.into());
+    }
     let mut public_server = tokio::spawn(extenddb_server::start_server(
         public_listener,
         state,

@@ -23,6 +23,11 @@ admission now registers a fixed shard number in the account Cell before it
 returns to a caller. On startup, the server pages that account-owned registry,
 recovers shards previously served at its endpoint, then aborts unfinished
 `BEGIN` records and completes terminal decisions before accepting traffic.
+It first reacquires the participants named by those records, including retained
+split sources absent from the current table route. Participant payloads are
+stored separately, so target discovery does not read item images.
+The private peer listener is available during resolution so recovering nodes
+can reach one another; the public DynamoDB listener starts after recovery.
 Account Cell participants, changed-endpoint takeover, and the adapter path
 remain to be built.
 

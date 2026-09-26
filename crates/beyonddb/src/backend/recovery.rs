@@ -8,10 +8,10 @@ use super::{CellStorage, cell_error, mutation_identity};
 use crate::{
     CoordinatorDecision, CoordinatorParticipantTarget, CoordinatorPhaseInput,
     CoordinatorPhaseOutcome, DecideCrossCellTransaction, DecideCrossCellTransactionInput,
-    DecideCrossCellTransactionOutcome, Json, PendingTransactionState, ReadCoordinatorParticipant,
-    ReadCoordinatorParticipantInput, ReadCrossCellTransaction, ReadCrossCellTransactionInput,
-    ReadPartitionTransaction, ReadPartitionTransactionInput, ReadPartitionTransactionOutcome,
-    ReadPendingCrossCellTransactions, ReadPendingCrossCellTransactionsInput,
+    DecideCrossCellTransactionOutcome, Json, PendingTransactionState, ReadCrossCellTransaction,
+    ReadCrossCellTransactionInput, ReadPartitionTransaction, ReadPartitionTransactionInput,
+    ReadPartitionTransactionOutcome, ReadPendingCrossCellTransactions,
+    ReadPendingCrossCellTransactionsInput, ReadUnresolvedCoordinatorParticipants,
     RecordParticipantResolution, ResolvePartitionTransaction, ResolvePartitionTransactionInput,
     ResolvePartitionTransactionOutcome, coordinator_target, data_target,
 };
@@ -124,26 +124,15 @@ impl CellStorage {
         if status.resolved_count == status.participant_count {
             return Ok(());
         }
-        for position in 0..status.participant_count {
-            let participant = self
-                .client
-                .query::<ReadCoordinatorParticipant>(
-                    &coordinator,
-                    None,
-                    Json(ReadCoordinatorParticipantInput {
-                        account_id: account_id.to_owned(),
-                        transaction_id,
-                        routing_key: routing_key.to_vec(),
-                        position,
-                    }),
-                )
-                .await
-                .map_err(cell_error)?
-                .output
-                .0
-                .ok_or_else(|| {
-                    StorageError::Internal("coordinator participant is missing".into())
-                })?;
+        let participants = self
+            .client
+            .query::<ReadUnresolvedCoordinatorParticipants>(&coordinator, None, Json(read()))
+            .await
+            .map_err(cell_error)?
+            .output
+            .0;
+        for participant in participants {
+            let position = participant.position;
             let target = match participant.target {
                 CoordinatorParticipantTarget::Account => {
                     return Err(StorageError::Unsupported(

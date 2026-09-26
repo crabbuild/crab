@@ -4,7 +4,6 @@ CREATE TABLE ddb_coordinator_transactions (
     token TEXT,
     fingerprint TEXT NOT NULL,
     request_digest BLOB NOT NULL,
-    participants BLOB NOT NULL,
     state INTEGER NOT NULL CHECK (state IN (0, 1, 2)),
     unresolved_count INTEGER NOT NULL CHECK (unresolved_count BETWEEN 0 AND 100),
     abort_reason BLOB,
@@ -22,6 +21,8 @@ CREATE TABLE ddb_coordinator_participants (
     transaction_id BLOB NOT NULL REFERENCES ddb_coordinator_transactions(transaction_id),
     position INTEGER NOT NULL,
     cell_id BLOB NOT NULL,
+    target BLOB NOT NULL,
+    operations BLOB NOT NULL,
     prepared_sequence INTEGER,
     resolved_sequence INTEGER,
     PRIMARY KEY (transaction_id, position)
