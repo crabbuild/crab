@@ -228,7 +228,11 @@ same object-store and authority model before they can be compared fairly.
 the Cell object store when it publishes an immutable root. Each measured command
 commits one SQLite transaction, captures one LTX cut, and prepares one successor
 root through `CellReplica` over an in-memory `object_store`, which reports the
-objects and bytes a provider would receive.
+objects and bytes a provider would receive. Supply `--endpoint` and the bucket
+arguments below to measure real RustFS requests. Both fresh and sparse modes
+use the same measured host, deferred capture and exact-cut pruning. The runner
+restores the final root from the provider into a fresh destination and verifies
+every committed payload byte before emitting a report.
 
 ```bash
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-ltx-replica-cost" \
@@ -245,17 +249,60 @@ real sparse writer through `open_root().paged().prepare_writable()` and
 successor, and prunes its local cut after preparation. It reports SQLite commit,
 capture, checksum-sidecar sync count/time, root preparation, WAL bytes read, and
 peak WAL-image allocation separately. The sidecar sync measurement wraps only
-the local `FileSystem`; it does not include SQLite VFS syncs. The fresh mode
-retains its original immediate-capture workload. Neither mode measures runtime
+the local `FileSystem`; it does not include SQLite VFS syncs. In the original
+baseline, fresh mode used immediate capture and retained cuts. That historical
+comparison also changed the barrier and cleanup workload; the matched runner
+described below removes those differences. Neither mode measures runtime
 response proof latency or grants authority merely by preparing a root.
 
 The runner also emits per-command `capture_*_us` fields for all phases in
 `CaptureTiming`. They distinguish WAL transfer, page collection, cut encoding,
 checkpoint maintenance, and LTX reinspection during batch collection.
-`prune_us` measures sparse-mode cleanup after root preparation; it is null in
-fresh mode, which retains cuts. `captured_bytes` is the total LTX length in that
+`prune_us` measures cleanup after root preparation in both modes; historical
+fresh reports have null because they retained cuts. `captured_bytes` is the total LTX length in that
 command's batch, including any checkpoint cut. Preparation timing excludes
 cleanup, and neither timing includes the runtime authority CAS.
+
+### Matched capture and provider restore (2026-09-26)
+
+The follow-up to `3ced0777a6f` opens fresh databases through `CellReplica` so
+both histories share the instrumented host. Both capture deferred cuts and
+prune after preparing each successor, including the bootstrap. Final restore
+and payload verification run outside the timed phases; `restored_rows` must
+equal the configured command count.
+
+Three release processes per history used local RustFS, 32 transactions, four
+warmups, and 4 KiB command-seeded random payloads. Run order alternated between
+fresh and sparse. Every process restored all 32 rows byte-for-byte and prepared
+five immutable objects per measured command.
+
+| Repeat | Fresh capture p50 / p95, µs | Sparse capture p50 / p95, µs | Fresh prepare p50 / p95, µs | Sparse prepare p50 / p95, µs |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 342 / 463 | 723 / 1,812 | 3,648 / 4,666 | 4,377 / 6,391 |
+| 2 | 322 / 426 | 616 / 803 | 3,761 / 6,009 | 3,603 / 4,815 |
+| 3 | 336 / 471 | 618 / 911 | 3,774 / 5,392 | 3,597 / 5,210 |
+
+These small-database, shared-host diagnostics do not isolate checksum
+representation from all sparse VFS work, measure activation latency, or
+establish service capacity. No before/after performance gain is inferred.
+Deferred rename time remains in `capture_parent_sync_us`; that field is a
+phase duration, not proof that a directory sync occurred. SQLite's own syncs
+are separate from the deferred LTX barrier.
+
+Retained evidence is under the external per-checkout target's
+`matched-capture-20260926/`: six JSON reports, stderr, source diff, and source
+and binary SHA-256 values. Reproduce each history with a fresh process; add
+`--sparse` for the restored history:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
+TMPDIR="$HOME/Workspace/crabbuild-target/crab-8bc8/tmp" \
+  cargo run --release --locked \
+  --manifest-path crates/crab-ltx/perf/replica-cost/Cargo.toml -- \
+  --random-payload --payload-bytes 4096 --commands 32 --warmup 4 \
+  --endpoint http://127.0.0.1:19010 --bucket crab-cell-issue-fleet \
+  --access-key crab --secret-key crab
+```
 
 ### Streaming published-cut cleanup (2026-09-26)
 

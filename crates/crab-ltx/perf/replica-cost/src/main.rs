@@ -13,7 +13,7 @@
 mod filesystem;
 mod storage;
 
-use crab_ltx::{CellReplica, CellStorageLayout, Db, Host, Limits};
+use crab_ltx::{CellReplica, CellStorageLayout, Host, Limits};
 use crab_storage::{ObjectStoreCredentials, Store};
 use object_store::{memory::InMemory, path::Path, ObjectStore};
 use serde::Serialize;
@@ -60,7 +60,7 @@ struct Sample {
     wal_snapshot_reads: u32,
     wal_full_reads: u32,
     elapsed_us: u64,
-    prune_us: Option<u64>,
+    prune_us: u64,
     captured_bytes: u64,
     preparation_io: Vec<storage::BackendCost>,
 }
@@ -74,6 +74,7 @@ struct Report {
     payload_bytes: usize,
     payload_pattern: &'static str,
     measured_commands: usize,
+    restored_rows: usize,
     bootstrap_capture_us: u64,
     bootstrap_parent_sync_us: u64,
     objects_per_command: u64,
@@ -107,7 +108,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(max_capture_bytes) = config.max_capture_bytes {
         limits.max_capture_bytes = max_capture_bytes;
     }
-    let mut database = Db::open(&database_path, limits)?;
     let (store, store_label, prefix) = open_store(&config)?;
     let backend = Arc::new(storage::StorageCosts::default());
     let store = store.with_storage_observer(backend.clone());
@@ -122,6 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         limits,
     )?
     .with_host(host);
+    let mut database = replica.open_new(&database_path)?;
 
     database.transaction(|transaction| {
         transaction
@@ -132,6 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bootstrap_capture_us = bootstrap_started.elapsed().as_micros() as u64;
     let bootstrap_parent_sync_us = first.timing.parent_sync_nanos / 1_000;
     let mut root = Some(replica.prepare(None, &first, 1, 1).await?.root());
+    database.prune_captured(&first)?;
     let _bootstrap = replica.take_publication_cost();
 
     let mut database = if config.sparse {
@@ -162,11 +164,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
         let commit_us = commit_started.elapsed().as_micros() as u64;
         let capture_started = Instant::now();
-        let batch = if config.sparse {
-            database.capture_deferred()?
-        } else {
-            database.capture()?
-        };
+        // Compare activation histories under the runtime's same capture and
+        // cleanup boundaries; immediate capture would add another barrier.
+        let batch = database.capture_deferred()?;
         let capture_us = capture_started.elapsed().as_micros() as u64;
         let (checksum_sync_calls, checksum_sync_us) = syncs.take();
         // Exclude bootstrap, activation, and sparse reads during commit/capture.
@@ -179,13 +179,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let preparation_io = backend.take();
         let cost = replica.take_publication_cost();
         root = Some(prepared.root());
-        let prune_us = if config.sparse {
-            let started = Instant::now();
-            database.prune_captured(&batch)?;
-            Some(started.elapsed().as_micros() as u64)
-        } else {
-            None
-        };
+        let started = Instant::now();
+        database.prune_captured(&batch)?;
+        let prune_us = started.elapsed().as_micros() as u64;
         if command >= config.warmup {
             samples.push(Sample {
                 command,
@@ -224,6 +220,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     database.close()?;
 
+    // Validate the final selected root independently of the writer and its
+    // pruned local cuts. This work stays outside all measured phases.
+    let restored = directory.path().join("restored.sqlite");
+    replica
+        .open_root(root.as_ref().ok_or("final root missing")?)
+        .await?
+        .restore(&restored)
+        .await?;
+    let connection = crab_ltx::rusqlite::Connection::open_with_flags(
+        restored,
+        crab_ltx::rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let mut statement = connection.prepare("SELECT id, value FROM payload ORDER BY id")?;
+    let mut rows = statement.query([])?;
+    let mut restored_rows = 0;
+    while let Some(row) = rows.next()? {
+        let id: u64 = row.get(0)?;
+        let value: Vec<u8> = row.get(1)?;
+        if id != restored_rows as u64 + 1
+            || value != payload(restored_rows, config.payload_bytes, config.random_payload)
+        {
+            return Err("restored root changed a committed payload".into());
+        }
+        restored_rows += 1;
+    }
+    if restored_rows != config.commands {
+        return Err("restored root lost committed payloads".into());
+    }
+
     if samples.is_empty() {
         return Err("at least one measured command is required".into());
     }
@@ -233,6 +258,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &samples,
         bootstrap_capture_us,
         bootstrap_parent_sync_us,
+        restored_rows,
     );
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -307,6 +333,7 @@ fn summarize(
     samples: &[Sample],
     bootstrap_capture_us: u64,
     bootstrap_parent_sync_us: u64,
+    restored_rows: usize,
 ) -> Report {
     let objects: Vec<u64> = samples.iter().map(|sample| sample.objects).collect();
     let bytes: Vec<u64> = samples.iter().map(|sample| sample.bytes).collect();
@@ -326,7 +353,7 @@ fn summarize(
         workload: if config.sparse {
             "sparse deferred capture"
         } else {
-            "fresh immediate capture"
+            "fresh deferred capture"
         },
         payload_bytes: config.payload_bytes,
         payload_pattern: if config.random_payload {
@@ -335,6 +362,7 @@ fn summarize(
             "periodic-251"
         },
         measured_commands: samples.len(),
+        restored_rows,
         bootstrap_capture_us,
         bootstrap_parent_sync_us,
         objects_per_command: total_objects / samples.len() as u64,

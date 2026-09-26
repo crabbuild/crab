@@ -39,10 +39,14 @@ all database-history-dependent allocation from small cuts.
 
 Report separate latency distributions for resident local actions, forwarded
 actions, cold first query, cold first mutation, and recovery. Hold the database,
-changed pages, payload entropy and durability contract fixed. In particular,
-the replica-cost runner currently uses `capture()` for fresh databases and
-`capture_deferred()` for sparse ones; that comparison changes the barrier as
-well as the checksum representation. It cannot isolate a representation win.
+changed pages, payload entropy and durability contract fixed. The replica-cost
+runner previously used immediate capture for fresh databases and deferred
+capture for sparse ones, confounding the comparison. The follow-up to
+`3ced0777a6f` uses the same instrumented host, deferred capture and exact-cut
+pruning for both. Six local RustFS runs independently restored every payload
+from the final root. Their [matched measurements](../../crab-ltx/perf/README.md#matched-capture-and-provider-restore-2026-09-26)
+are small-database diagnostics, not a service latency or representation-only
+performance claim.
 
 **Is this the best fix, rather than only a plausible one?** Releasing a merged
 checksum overlay is the smallest newly reproduced allocation opportunity.
@@ -96,7 +100,8 @@ Both exact-source container gates now pass at `a3638ef7e55`:
 [ARM64](https://github.com/crabbuild/crab/actions/runs/36249443776). They include
 the corrected acknowledging-cohort receipt check. They neither establish the
 cause of the earlier ARM failure nor provide a saturation curve. The separate
-deep property run remains queued at this observation.
+[deep property run](https://github.com/crabbuild/crab/actions/runs/36249445675)
+also passed at that revision.
 
 The local exact-source fleet attempt at the same revision stopped before
 serving traffic: the Docker volume had 29,724,612 KiB free and the node reported
@@ -122,6 +127,14 @@ use this harness revision before those observations close a measurement gate.
 The missing-statistics regression also fails against `6fc1bbc1ceb`: the previous
 observer accepted an empty Docker stats response without reporting an error.
 All 39 Python harness tests and the documentation checks pass after the change.
+
+The [fresh-worker fleet run](https://github.com/crabbuild/crab/actions/runs/36251209972)
+completed all fixed-load stages at `a3638ef7e55`, then failed the fault driver's
+precondition: every Cell was on one owner. The source and per-stage results in
+finding 12 show why healthy nodes and balanced ingress do not qualify balanced
+execution. Recovery during arrivals remains unqualified; the fault was never
+injected. That run used the `6fc1bbc1ceb` fault harness and therefore also
+predates the survivor-observation additions at `3ced0777a6f`.
 
 ## Priority after the implemented changes
 
@@ -1044,6 +1057,37 @@ Existing `fleet_rebalance_donates_ownership_surplus_without_headroom_gain` and
 settled transfer. Add continuous-arrival convergence and unaffected-Cell tail
 latency to the public service gate; do not reduce production idle guards merely
 to obtain an even benchmark chart.
+
+**Live follow-up:** [CI run 36251209972](https://github.com/crabbuild/crab/actions/runs/36251209972)
+used the qualified ARM64 image at `a3638ef7e55` with that revision's clean stage
+and load harness. All stages retained the same 20 Cells, scheduled five
+create/read pairs per second for 60 seconds, and verified all 300 acknowledged
+writes after the stage's post-drain owner loss. Each container was limited to
+one vCPU and 1 GiB on one shared GitHub runner.
+
+| Nodes | Executing owners: acknowledged writes | Write p50 / p99, ms | Read p50 / p99, ms | Post-drain recovery, s |
+| ---: | --- | ---: | ---: | ---: |
+| 3 | node-01: 105; node-02: 90; node-03: 105 | 24.938 / 49.403 | 7.828 / 17.298 | 9.789 |
+| 5 | node-02: 195; node-03: 105 | 31.823 / 65.027 | 12.464 / 24.086 | 8.835 |
+| 10 | node-03: 105; node-05: 195 | 33.593 / 91.335 | 14.937 / 41.780 | 10.968 |
+| 20 | node-03: 300 | 41.334 / 248.667 | 34.195 / 138.631 | 9.162 |
+
+The stages killed node-01, node-02, node-05, and node-03 in that order. The
+next stage's owner maps show consolidation after those recoveries. No rebalance
+completion was recorded in the retained final logs. Continued public checks
+and load keep Cells active, and the runner has no idle-convergence phase.
+This explains why this experiment cannot establish balanced scale-out; it does
+not isolate the causes of the higher p99 from shared-host contention, observer
+overhead, peer forwarding or provider work. All but one write used object proof;
+peak in-flight pairs were 1, 1, 2, and 3. It was not a saturation experiment.
+
+The subsequent `6fc1bbc1ceb` fault driver refused to kill an owner because no
+Cell remained on an unaffected owner. Its failure is retained in `fault.log`;
+no fault report or during-arrivals recovery result was produced. Keep this
+refusal. Add non-activating, bounded placement convergence before uniform
+capacity measurement and retain an explicit failure report if it cannot
+converge. Qualify scale-out under uninterrupted arrivals separately through
+the public application boundary.
 
 ### 13. A streaming decoder still retains avoidable metadata
 
