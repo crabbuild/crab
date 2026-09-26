@@ -182,7 +182,8 @@ def main() -> None:
     report["deleted_keys"] = deleted
     report["after_inventory"] = after
     report["verified_pin"] = cli("backup", "verify", "--pin", pin)
-    compose(path, (), "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300", *nodes)
+    compose(path, (), "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300",
+            "gateway", *nodes)
     report["after_values"] = values(args.node_port_base)
     if report["before_values"] != report["after_values"]:
         raise RuntimeError("retention changed acknowledged issue data")
