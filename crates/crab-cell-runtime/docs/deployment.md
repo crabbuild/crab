@@ -337,7 +337,9 @@ the operation re-marks authority before deleting the next bounded batch. Each
 retry selects the same next unused session identity as competing executors;
 conditional creation admits only one. It advances past permanently retired
 identities and never revives a withdrawn session. After advertising, it checks
-the exact maintenance release again before opening any Cell. Start
+the exact maintenance release again before opening any Cell. The executor
+closes its runtime through its owning `CellNode` before collecting objects;
+final host cleanup is idempotent. Start
 the fleet only after the activation returns a `Ready` release.
 
 ## Deploy on Kubernetes

@@ -6,8 +6,7 @@ use std::{
 };
 
 use crab_cell_app::{ApplicationBuilder, CellApplication, CellType, CompiledApplication};
-use crab_cell_host::CellNodeBuilder;
-use crab_cell_runtime::cell::actor::CellRuntime;
+use crab_cell_host::{CellNode, CellNodeBuilder};
 use crab_cell_runtime::cell::application::{ApplicationIdentity, ApplicationIdentityStore};
 use crab_cell_runtime::cell::catalog::CatalogRole;
 use crab_cell_runtime::cell::catalog::CellCatalog;
@@ -1511,7 +1510,7 @@ pub(crate) async fn enter_maintenance(
         &registry,
         &directory,
         &router,
-        &runtime,
+        &cell_node,
         lease,
         advertised,
         maintenance,
@@ -1556,7 +1555,7 @@ async fn complete_maintenance_inventory(
     registry: &Registry,
     directory: &NodeDirectory,
     router: &RepositoryCellRouter,
-    runtime: &CellRuntime,
+    cell_node: &CellNode,
     lease: OfflineAdvertisement,
     advertised: VersionedNodeAdvertisement,
     maintenance: ReleaseRecord,
@@ -1578,7 +1577,9 @@ async fn complete_maintenance_inventory(
         }
         let migrated =
             migrate_maintenance_inventory(layout, identity, router, inspect_persisted_work).await;
-        let shutdown = runtime.shutdown().await;
+        // The host owns terminal shutdown. Closing its runtime directly would
+        // leave the host active and make final cleanup shut the runtime twice.
+        let shutdown = cell_node.shutdown().await;
         migrated?;
         shutdown?;
         let advertised_sessions = directory
@@ -1636,7 +1637,7 @@ async fn complete_maintenance_inventory(
                 Ok(result) => result,
                 Err(error) => Err(error.into()),
             };
-            let shutdown = runtime.shutdown().await;
+            let shutdown = cell_node.shutdown().await;
             lease_result?;
             shutdown?;
             return Err(Error::Config("Cell maintenance executor stopped unexpectedly"));
@@ -2300,12 +2301,32 @@ mod tests {
     }
 
     fn rollover_registry() -> Registry {
-        let mut builder = RegistryBuilder::new(BuildDescriptor {
-            source_revision: "rollover-test".into(),
-            cargo_lock_digest: Digest::from_bytes([34; 32]),
-        });
+        rollover_application().registry().as_ref().clone()
+    }
+
+    fn rollover_application() -> Arc<CompiledApplication> {
+        let mut builder = ApplicationBuilder::new(
+            "rollover-test",
+            BuildDescriptor {
+                source_revision: "rollover-test".into(),
+                cargo_lock_digest: Digest::from_bytes([34; 32]),
+            },
+        )
+        .unwrap();
         builder.register(RolloverModule).unwrap();
-        builder.finish().unwrap()
+        builder
+            .cell_type(
+                CellType::new(
+                    RolloverModule::NAME,
+                    "rollover",
+                    ROLLOVER_NAMESPACE,
+                    CatalogRole::Sql,
+                    1,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        Arc::new(builder.finish().unwrap())
     }
 
     #[test]
@@ -2781,12 +2802,12 @@ mod tests {
             .unwrap();
         tokio::time::sleep(Duration::from_millis(5)).await;
         let session = SessionId::from_bytes([65; 16]);
-        let runtime = CellRuntime::new(
-            SqlWorkerPool::new(1, 1).unwrap(),
-            MAINTENANCE_RUNTIME_BYTES,
-            session,
-        )
-        .unwrap();
+        let cell_node = CellNodeBuilder::new(compiled_application().unwrap())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), MAINTENANCE_RUNTIME_BYTES)
+            .with_session(session)
+            .build_unleased_for_maintenance()
+            .unwrap();
+        let runtime = cell_node.runtime();
         let scratch = tempfile::tempdir().unwrap();
         let signing_key = SigningKey::from_bytes(&[66; 32]);
         let router = RepositoryCellRouter::new(
@@ -2831,7 +2852,7 @@ mod tests {
             &registry,
             &directory,
             &router,
-            &runtime,
+            &cell_node,
             lease,
             advertised,
             maintenance,
@@ -2845,6 +2866,7 @@ mod tests {
         )
         .await
         .unwrap();
+        cell_node.shutdown().await.unwrap();
         let encoded: Value = serde_json::from_slice(&completed).unwrap();
         assert_eq!(encoded["state"], "ready");
         assert!(matches!(
@@ -2959,12 +2981,12 @@ mod tests {
         .await
         .unwrap();
         let session = SessionId::from_bytes([77; 16]);
-        let runtime = CellRuntime::new(
-            SqlWorkerPool::new(1, 1).unwrap(),
-            MAINTENANCE_RUNTIME_BYTES,
-            session,
-        )
-        .unwrap();
+        let cell_node = CellNodeBuilder::new(rollover_application())
+            .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), MAINTENANCE_RUNTIME_BYTES)
+            .with_session(session)
+            .build_unleased_for_maintenance()
+            .unwrap();
+        let runtime = cell_node.runtime();
         let scratch = tempfile::tempdir().unwrap();
         let signing_key = SigningKey::from_bytes(&[78; 32]);
         let router = RepositoryCellRouter::new(
@@ -3009,7 +3031,7 @@ mod tests {
             &registry,
             &directory,
             &router,
-            &runtime,
+            &cell_node,
             lease,
             advertised,
             maintenance,
@@ -3020,6 +3042,7 @@ mod tests {
         )
         .await
         .unwrap();
+        cell_node.shutdown().await.unwrap();
         let record: Value = serde_json::from_slice(&completed).unwrap();
         assert_eq!(record["state"], "ready");
         let migrated = authority.load(target.cell_id()).await.unwrap().unwrap();
