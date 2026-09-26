@@ -57,7 +57,7 @@ Shard counts are powers of two from 1 through 4,096. An existing namespace canno
 cells/v1/identity.json
 cells/v1/apps/<app>/release.json
 cells/v1/apps/<app>/releases/<digest>.json
-cells/v1/apps/<app>/catalog/<00..ff>/head.json
+cells/v1/apps/<app>/catalog/tenants/<tenant>/<00..ff>/head.json
 cells/v1/apps/<app>/catalog/objects/<digest>.json
 cells/v1/apps/<app>/cells/<cell>/control.json
 cells/v1/apps/<app>/cells/<cell>/inc/<inc>/objects/<digest>.<kind>
@@ -244,7 +244,14 @@ replacement before the next append.
 
 ## Catalog Cells before creating control
 
-The catalog has 256 shards selected by the first Cell-ID byte. Each shard head names at most 256 immutable pages, and each page contains at most 256 sorted entries.
+Each tenant catalog has 256 shards selected by the first Cell-ID byte. Head paths include the tenant because entry identity validation is tenant scoped; immutable pages remain content addressed within the application. Each shard head names at most 256 immutable pages, and each page contains at most 256 sorted entries.
+
+Tenant-scoped catalog heads do not make release or backup management multi-tenant.
+Offline retention marks one tenant and sweeps the application prefix, so it
+rejects a root containing another tenant's catalog before deleting any objects.
+This unreleased head layout replaces application-only heads; development roots
+using the old layout require reprovisioning. There is no fallback reader.
+
 
 A version-two head is the shard locator as well as the page list: every page
 appears with its digest and the first Cell ID it can contain. Routing

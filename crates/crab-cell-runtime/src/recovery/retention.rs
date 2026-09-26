@@ -175,6 +175,7 @@ impl CellGarbageCollector {
         policy: GarbageCollectionPolicy,
     ) -> Result<GarbageCollectionReport> {
         self.require_maintenance(maintenance).await?;
+        self.require_single_tenant_catalog().await?;
         let marks = MarkStore::open(scratch_dir).await?;
         let releases = ReleaseStore::new(self.layout.clone(), self.identity)?;
         let mut current_controls = 0u64;
@@ -219,6 +220,25 @@ impl CellGarbageCollector {
             .await?;
         self.require_maintenance(maintenance).await?;
         Ok(report)
+    }
+
+    async fn require_single_tenant_catalog(&self) -> Result<()> {
+        // Sweep spans the application, but this collector marks one tenant.
+        // Reject shared roots before deleting any unmarked tenant's objects.
+        let prefix = self.layout.catalog_tenants_prefix();
+        let expected = crate::identity::encode_hex(self.identity.tenant().as_bytes());
+        let mut heads = self.layout.store().list_stream(&prefix);
+        while let Some(head) = heads.next().await {
+            let head = head?;
+            if relative_path(&prefix, &head.location).and_then(|path| path.split('/').next())
+                != Some(expected.as_str())
+            {
+                return Err(Error::Retention(
+                    "maintenance collection requires a single-tenant catalog",
+                ));
+            }
+        }
+        Ok(())
     }
 
     async fn require_maintenance(&self, expected: &ReleaseRecord) -> Result<()> {
