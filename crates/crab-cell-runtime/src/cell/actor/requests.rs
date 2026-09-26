@@ -251,7 +251,7 @@ pub(super) async fn execute_command(
 
 pub(super) async fn prove_command(
     pool: SqlWorkerPool,
-    command: Box<QueuedCommand>,
+    mut command: Box<QueuedCommand>,
     outcome: StoredOutcome,
     commit_sequence: u64,
     durability: Option<PendingDurability>,
@@ -259,32 +259,39 @@ pub(super) async fn prove_command(
     generation: u64,
     effect_id: u64,
 ) -> TaskResult {
+    use crate::node::log::DurabilitySource;
+
     let proof = match durability {
         Some(durability) => {
             let fleet_or_object = durability.prove();
             tokio::pin!(fleet_or_object);
             tokio::select! {
                 object = &mut object => match receive_publication_proof(object) {
-                    Ok(()) => Ok(()),
+                    Ok(()) => Ok(DurabilitySource::Object),
                     // Object publication failure does not invalidate an
                     // independently fsynced follower proof for this cut.
-                    Err(_) => fleet_or_object.await.map(|_| ()),
+                    Err(_) => fleet_or_object.await,
                 },
                 result = &mut fleet_or_object => match result {
-                    Ok(()) => Ok(()),
+                    Ok(source) => Ok(source),
                     // Losing the follower path does not invalidate the same
                     // cut's object publication, which remains the fallback.
-                    Err(_) => receive_publication_proof(object.await),
+                    Err(_) => receive_publication_proof(object.await).map(|()| DurabilitySource::Object),
                 }
             }
         }
-        None => receive_publication_proof(object.await),
+        None => receive_publication_proof(object.await).map(|()| DurabilitySource::Object),
     };
     let result = match proof {
-        Ok(()) => pool
-            .confirm_durable(command.cell, commit_sequence)
-            .await
-            .map(|()| outcome),
+        Ok(source) => {
+            let confirmation = std::time::Instant::now();
+            pool.confirm_durable(command.cell, commit_sequence)
+                .await
+                .map(|()| {
+                    command.response_proof = Some((source, confirmation.elapsed()));
+                    outcome
+                })
+        }
         Err(error) => Err(error),
     };
     let fenced = result.is_err();

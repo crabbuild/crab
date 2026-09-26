@@ -379,7 +379,7 @@ compressibility matters more than its size.
 
 A hot Cell offering 100 commands per second would demand roughly 500-1,300
 logical immutable-object uploads per second at these measured costs. These
-are not HTTP request counts: native LTX bodies use multipart even when small,
+are not HTTP request counts: at that revision native LTX bodies used multipart even when small,
 and retries, metadata reads, and authority CAS add requests. The runtime admits
 against one pending-publication byte high-water mark per Cell plus the
 32-segment compaction debt that folds the
@@ -401,6 +401,86 @@ maximum sample. Retain these rows as a reproducible historical workload;
 qualify entropy, sustained publication debt, and application latency separately.
 The [LTX performance audit](../../crab-cell-runtime/docs/ltx-performance-audit.md)
 records source-backed optimization candidates and their acceptance gates.
+
+### Small-body transfer experiment
+
+On 2026-09-25, seven independent release processes before (`a7091fd7138`)
+and after (`85a3bf684d3`) the bounded single-PUT change used the same loopback
+RustFS container. Each process ran `--sparse --payload-bytes 4096 --commands 32
+--warmup 4`: 28 measured preparations of the historical periodic payload.
+Values below are the median of the seven per-run statistics, in microseconds:
+
+| Measurement | Before | After |
+| --- | ---: | ---: |
+| Root preparation p50 | 6,642 | 6,163 |
+| Root preparation p95 | 10,951 | 12,142 |
+| SQLite commit p50 | 463 | 550 |
+| Capture p50 | 542 | 653 |
+| Logical objects / command | 5 | 5 |
+| Mean bytes / command | 13,046 | 13,046 |
+
+Raw samples and source/binary SHA-256 metadata are retained outside the
+checkout under `$HOME/.codex/cell-vfs-ltx-scale/ltx-upload-a7091fd/`, with
+`before-0.json` through `before-6.json` and matching `after-*` files.
+The store image is the pinned RustFS `1.0.0-beta.8-glibc` from the Compose
+example; the harness uses `object_store` 0.14.2 and bundled SQLite 3.49.1.
+
+This is an inconclusive latency comparison: phases ran sequentially on one
+shared host, p95 worsened, and the unchanged commit/capture paths also slowed.
+The baseline itself differs substantially from the earlier RustFS table.
+Do not attribute that historical difference to this patch or claim a p99,
+fleet throughput, or latency SLO. This harness does not install the persistent
+directory cache, so it cannot measure removal of cache-index writes.
+
+Focused transport tests prove the narrower change: native, compacted, and
+bundled bodies up to 256 KiB use single PUT; larger bodies keep multipart;
+lost responses reconcile; conflicting bytes are refused; restored databases
+are identical. A real RustFS public HTTP/peer test also passed mutations and
+restoration after takeover. Public-action p95/p99 and sustained publication
+drain remain the performance acceptance gates.
+
+### Backend calls and payload entropy
+
+The runner now uses the existing `Store::with_storage_observer` boundary.
+Each sample's `preparation_io` records backend operation/outcome, calls,
+accumulated duration, bytes read, and bytes written for root preparation.
+Bootstrap, activation, and commit/capture reads are excluded. Calls retried
+by `Store` appear separately; retries inside the provider client do not.
+These are logical backend calls, not a wire-level HTTP request counter.
+Concurrent call durations overlap and must not be added to infer wall time.
+
+The default report labels its historical data `periodic-251`.
+`--random-payload` selects deterministic command-seeded xorshift64 bytes and
+labels them `xorshift64-command-seeded`. Generation is outside the timed SQL
+transaction. This is workload data, not a cryptographic random generator.
+
+```sh
+TMPDIR="$HOME/Workspace/crabbuild-target/crab-8bc8/tmp" \
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
+  cargo run --release --locked --manifest-path \
+  crates/crab-ltx/perf/replica-cost/Cargo.toml -- \
+  --sparse --random-payload --payload-bytes 300000 --commands 12 --warmup 4 \
+  --endpoint http://127.0.0.1:19010 --bucket crab-cell-issue-fleet \
+  --access-key crab --secret-key crab
+```
+
+Three real RustFS smoke runs, each with eight measured preparations after four
+warmups, produced these aggregate counts:
+
+| Payload | HEAD | PUT | Multipart start / part / complete | Mean logical bytes / root |
+| --- | ---: | ---: | ---: | ---: |
+| 4 KiB periodic | 16 | 40 | 0 / 0 / 0 | 7,468 |
+| 4 KiB random | 16 | 40 | 0 / 0 / 0 | 13,627 |
+| 300,000 bytes random | 16 | 51 | 8 / 8 / 8 | 356,575 |
+
+All calls completed successfully. The small-root path still performs two
+metadata presence checks and five immutable PUTs per measured command. The
+larger body crosses the bounded single-PUT threshold. Raw `io-*.json` samples
+and source/binary metadata are retained beside the small-body comparison above.
+These short runs verify observation wiring and expose payload sensitivity;
+they do not establish tail latency, runtime CAS cost, compaction cost, or
+sustainable throughput. Keep the missing-root-metadata refusal invariant when
+evaluating those two HEADs.
 
 The runners also use the implementations' pinned bundled SQLite versions:
 Crab currently links SQLite 3.49.1 while the pinned Celld revision links SQLite

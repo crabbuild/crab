@@ -316,6 +316,14 @@ workloads before and after each change:
 | 4 | Tiny steady writes hide checkpoint, full-image fallback, and sparse activation tails. A capture can read the whole WAL or emit a full database image, while the shared paged I/O driver has a bounded request queue and jobs. | Run hot and skewed Cells across checkpoint and compaction thresholds, a pinned reader, large changed-page sets, and simultaneous cold opens. Attribute checkpoint runs/busy/restarts, full WAL reads, full-image bytes, page-fault queue and deadline errors, cache misses, provider I/O, and p99. Test with the 1 GiB node limit; retain exact-root and disk-admission fault tests. |
 | 5 | SQLite uses `synchronous=FULL` on managed connections even though the Cell response waits for an external proof. The local sync might be visible in write latency, but no power-loss equivalence has been established. | Benchmark SQLite commit and response latency with the current mode as control. Consider a different mode only in an isolated experiment that proves no response can use an unverified local WAL or continuation after power loss, including failure before capture, after follower proof, and during object publication. Keep the current mode until crash and recovery qualification justifies a contract change. |
 
+Response-winner instrumentation is now wired through the final command/effect
+reply boundary and exported as `crab_cell_command_responses_total`,
+`crab_cell_command_response_seconds`, and
+`crab_cell_command_confirmation_seconds`, with only `recorded|fleet|object`
+source labels. Lost-response reconciliation, follower-first replies followed
+by object publication, and canceled callers have focused assertions. Full
+action phase attribution and sustained arrival-rate curves are still open.
+
 The replica's `cold` origin counter includes predecessor-graph reads made by
 publication, so it cannot by itself measure cold activation. Add a finite
 operation/phase distinction instead of Cell-ID labels. Keep the existing

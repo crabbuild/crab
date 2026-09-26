@@ -114,7 +114,35 @@ pub(super) fn send_command_reply(
     result: crate::Result<StoredOutcome>,
 ) {
     if let Some(reply) = command.reply.take() {
-        let _ = reply.send(result);
+        let sequence = result.as_ref().ok().map(StoredOutcome::commit_sequence);
+        if reply.send(result).is_ok()
+            && let Some(commit_sequence) = sequence
+        {
+            use crate::fleet::telemetry::CommandResponseSource;
+            use crate::node::log::DurabilitySource;
+
+            let (source, confirmation) = match command.response_proof {
+                Some((DurabilitySource::Fleet, elapsed)) => (CommandResponseSource::Fleet, elapsed),
+                Some((DurabilitySource::Object, elapsed)) => {
+                    (CommandResponseSource::Object, elapsed)
+                }
+                None => (CommandResponseSource::Recorded, std::time::Duration::ZERO),
+            };
+            // Final admission may refuse a proven command. Observe at the one
+            // reply boundary so failed or later object proofs cannot add winners.
+            let elapsed = command.queued_at.elapsed();
+            tracing::debug!(
+                cell = ?command.cell,
+                commit_sequence,
+                source = ?source,
+                response_us = elapsed.as_micros(),
+                confirmation_us = confirmation.as_micros(),
+                "Cell command response released"
+            );
+            command
+                .telemetry
+                .command_response(source, elapsed, confirmation);
+        }
     }
 }
 
