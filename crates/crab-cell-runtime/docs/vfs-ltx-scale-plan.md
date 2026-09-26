@@ -140,6 +140,14 @@ latency or Cell-count limit from one shared-host Compose run.
 run with the same profile. A report with retries is valid evidence but is
 not an error-free service result.
 
+The qualifier now builds a clean committed Git archive, verifies the image's
+revision label even with `--skip-build`, and pins every server service to the
+inspected image ID. Running containers must match that ID. Load reports record
+server revision/platform separately from generator source; imported images
+still require their CI source/checksum receipts. Wrong-source refusal and real
+Docker archive/tag-retention proof pass. Four current-source stage curves and
+a repeated 20-node run are still required.
+
 ## Work packet 2: remove redundant peer resolution
 
 The entry [router](../../crab-http-server/src/cells/router.rs) checks for an

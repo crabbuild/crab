@@ -542,13 +542,32 @@ failure domains before choosing supported limits. Run Entity, Shard, Workflow,
 and read-model actions through public application handles as well as this issue
 service; issue creation alone does not exercise those service compositions.
 
-There is also a provenance gap in the local runner: both `qualify.py` and
+At the audited revision there was also a provenance gap: both `qualify.py` and
 `load.py` record the harness checkout's `git rev-parse HEAD` independently of
 the image ID. `--skip-build` does not verify that the selected image was built
 from that revision, and HEAD does not describe dirty build input. Require a
 clean build or retained source-tree digest, and verify image provenance before
 calling a comparison current-source evidence. Distinguish an OCI manifest
 digest from its configuration digest when comparing Docker engines.
+
+**Implementation:** qualification now requires a clean checkout and builds
+from its committed Git archive, so ignored files or edits during the build do
+not alter the attributed source. Local and CI source builds set the same
+revision label as release builds. The runner rejects a missing or mismatched
+label before startup, pins every server service and release bootstrap to the
+inspected image ID, retains a tag for that image, and checks each running node.
+Schema 3 load reports separate server source/platform/image from harness source.
+Labels remain producer metadata; imported images still need their CI source
+and checksum receipts.
+
+The wrong-source regression fails on the previous runner and passes after the
+change. Nine scheduler/provenance cases pass. A real Docker fixture builds from
+a committed archive while its working file differs, extracts the committed
+bytes from the image, moves the build tag, and verifies the retained image and
+wrong-source refusal. All Compose profiles validate. The first Docker trial
+exposed image-index disappearance after retagging; retaining the qualification
+tag fixes that observed failure. This verifies evidence binding, not service
+latency; current-source fleet curves remain open.
 
 ### 13. A streaming decoder still retains avoidable metadata
 
@@ -734,9 +753,12 @@ The repository's pinned actionlint v1.7.11 rejects the previous file at that
 expression. Moving the existing target-directory setting to both Cargo steps
 passes the same check and preserves the 1,000-case workload. The repaired
 [property run 36222852526](https://github.com/crabbuild/crab/actions/runs/36222852526)
-passed both runtime and LTX suites at `8586757a6eb`. It predates the worker
-admission change above; that change still needs fresh broad proof. The separate
-app-to-host dev-dependency policy failure remains open.
+passed both runtime and LTX suites at `8586757a6eb`. The follow-up
+[property run 36224241056](https://github.com/crabbuild/crab/actions/runs/36224241056)
+passes at worker-admission revision `b8798fdcfdc`.
+[Native ARM64 container run 36222681957](https://github.com/crabbuild/crab/actions/runs/36222681957)
+passes at `7b20ebe484f`; it predates worker admission and image-provenance
+enforcement. The separate app-to-host dev-dependency policy failure remains open.
 
 Seven existing tests passed locally with real SQLite and in-memory object
 storage: four `environment::tests::directory_cache` cases, missing cached-root
