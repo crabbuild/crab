@@ -11,7 +11,9 @@ use crate::{Error, Json, Result, SqlValue};
 
 pub(crate) const CHUNK_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_BYTES: usize = 32 * 1024 * 1024;
-const MAX_LIFETIME_MS: i64 = 60_000;
+// Runtime mutation and peer authorization permit five minutes of sender skew.
+// Add that tolerance to the adapter's one-minute absolute upload deadline.
+const MAX_FUTURE_EXPIRY_MS: i64 = 6 * 60_000;
 
 pub(crate) const fn upload_operation(id: u32) -> crab_cell_runtime::registry::OperationDescriptor {
     crab_cell_runtime::registry::OperationDescriptor {
@@ -64,7 +66,7 @@ impl TransactionPayloadRef {
         if self.bytes == 0
             || self.bytes as usize > MAX_BYTES
             || self.expires_at_ms <= now_ms
-            || self.expires_at_ms > now_ms.saturating_add(MAX_LIFETIME_MS)
+            || self.expires_at_ms > now_ms.saturating_add(MAX_FUTURE_EXPIRY_MS)
         {
             return Err(Error::Command("invalid or expired transaction upload"));
         }

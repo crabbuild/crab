@@ -275,8 +275,11 @@ retry accepts identical bytes and rejects changed bytes. Each input and the
 aggregate temporary payload per Cell are capped at 32 MiB. This bounds serialized
 transport; it does not change DynamoDB's item/request limits. A sealing handler
 assembles the complete serialized input in memory, so per-worker peak memory
-still needs measurement and admission proof before fleet qualification. Upload references
-expire within 60 seconds. Each arriving chunk collects at most eight expired
+still needs measurement and admission proof before fleet qualification. The
+adapter gives upload references a 60-second absolute deadline. The receiver
+allows deadlines up to six minutes ahead of its logical clock, accounting for
+the runtime's five-minute sender-clock tolerance. Already expired references
+are rejected. Each arriving chunk collects at most eight expired
 rows; the deadline is part of the identity, so a delayed expired upload cannot
 recreate collected input. Collection is demand-driven, not a background history
 collector.
@@ -297,8 +300,11 @@ chunk; lost phase replies still use the original coordinator/participant outcome
 rules. Expired input can be uploaded again under a fresh reference while the
 published transaction identity and decision remain unchanged.
 
-The host regression covers duplicate, conflicting, incomplete, expired, and
-forged input, then resumes an unsealed upload on a replacement owner. It also
+The host regression covers duplicate, conflicting, incomplete, expired,
+excessively future, and forged input, then resumes an unsealed upload on a
+replacement owner. Its sender clock is 30 seconds ahead: this reproduced a
+first-chunk rejection before the receiver's deadline bound included runtime
+clock tolerance. It also
 seals two independent uploads with identical bytes and deadlines; both converge
 on the same durable transaction. The mixed
 account/data fixture drops upload and phase replies. Signed SDK fixtures include
@@ -308,8 +314,16 @@ The two-node fixture has also exposed retryable coordinator movement-budget
 exhaustion under its eight-Cell admission cap; this is an availability boundary,
 not evidence of a conflicting transaction decision.
 
-Remaining transport qualification includes abort while an upload is in flight,
-sustained temporary-capacity pressure, and deadline clock skew. Prepared/apply headroom and retained transaction history need separate
+A second host regression publishes and resolves ABORT after both an account
+participant and a data participant receive their first input chunk. It then
+delivers the remaining chunks and delayed prepares. Both prepares reject with
+`Aborted`; no staged item becomes visible, ordinary writes succeed, and the
+coordinator retains ABORT with both resolution receipts. This covers the shared
+upload path and both participant tombstone checks.
+
+Remaining transport qualification includes sustained temporary-capacity
+pressure and clocks at the tolerance boundary or moving during transfer.
+Prepared/apply headroom and retained transaction history need separate
 admission and collection work. The pinned ExtendDB HTTP router also imposes a
 16-MiB request body limit; the internal 32-MiB transfer ceiling does not remove it.
 Individual item RPCs still need qualification for all encoded attribute shapes.

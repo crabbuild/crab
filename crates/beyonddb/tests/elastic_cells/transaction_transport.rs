@@ -2,9 +2,13 @@ use crate::*;
 use beyonddb::{TransactionPayloadRef, UploadTransactionPayload};
 
 fn mutation() -> MutationIdentity {
+    let identity = identity(246);
+    // A sender thirty seconds ahead is inside the runtime's five-minute
+    // tolerance. Its one-minute absolute upload deadline must remain usable.
     MutationIdentity {
         request_id: RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes()),
-        ..identity(246)
+        issued_at_ms: identity.issued_at_ms + 30_000,
+        expires_at_ms: identity.expires_at_ms + 30_000,
     }
 }
 
@@ -124,20 +128,22 @@ async fn upload_seals_only_complete_immutable_inputs_after_owner_replacement() {
             .0
             .is_none()
     );
-    // Neither an already-expired reference nor a complete but forged digest
+    // Neither an invalid deadline nor a complete but forged digest
     // can turn an upload into a durable transaction.
-    let mut expired = chunks[0].clone();
-    expired.reference.expires_at_ms = 1;
-    assert!(
-        client
-            .command::<UploadTransactionPayload<BeginCrossCellTransaction>>(
-                &coordinator,
-                mutation(),
-                expired
-            )
-            .await
-            .is_err()
-    );
+    for deadline in [1, mutation().expires_at_ms + 6 * 60_000] {
+        let mut invalid = chunks[0].clone();
+        invalid.reference.expires_at_ms = deadline;
+        assert!(
+            client
+                .command::<UploadTransactionPayload<BeginCrossCellTransaction>>(
+                    &coordinator,
+                    mutation(),
+                    invalid
+                )
+                .await
+                .is_err()
+        );
+    }
     let mut forged = TransactionPayloadRef::new(b"{}", mutation().expires_at_ms).unwrap();
     forged.digest[0] ^= 1;
     client
@@ -297,4 +303,272 @@ async fn upload_seals_only_complete_immutable_inputs_after_owner_replacement() {
         CoordinatorDecision::Begin
     );
     replacement.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abort_during_upload_fences_delayed_account_and_data_prepares() {
+    use beyonddb::{PrepareAccountTransaction, PrepareAccountTransactionInput};
+    let application = Arc::new(
+        Beyonddb::compile(BuildDescriptor {
+            source_revision: "abort-during-upload".into(),
+            cargo_lock_digest: Digest::from_bytes([1; 32]),
+        })
+        .unwrap(),
+    );
+    let account_id = "123456789012";
+    let account = account_target(account_id).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let layout = CellStorageLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        object_store::path::Path::from("abort-during-upload"),
+        *account.application().as_bytes(),
+    );
+    let session = SessionId::from_bytes([249; 16]);
+    let host = CellNodeBuilder::new(application.clone())
+        .with_runtime(SqlWorkerPool::new(1, 8).unwrap(), 16 * 1024 * 1024)
+        .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
+        .with_session(session)
+        .build_unleased_for_maintenance()
+        .unwrap();
+    let provisioner = Arc::new(
+        CellInitialPartitionProvisioner::new(
+            host.runtime(),
+            application.clone(),
+            layout.clone(),
+            session,
+            "https://abort-upload.internal".into(),
+            directory.path().into(),
+        )
+        .unwrap(),
+    );
+    provisioner.admit_account(account_id).await.unwrap();
+    let client = CellClient::local_runtime(application.registry(), host.runtime(), layout);
+    let stores = [
+        CellStorage::new(client.clone(), "us-east-1"),
+        CellStorage::new(client.clone(), "us-east-1").with_initial_partitions(provisioner.clone()),
+    ];
+    let mut infos = Vec::new();
+    for (store, name) in stores.iter().zip(["UploadAccount", "UploadData"]) {
+        store
+            .create_table(
+                account_id,
+                serde_json::from_value(serde_json::json!({
+                    "TableName": name,
+                    "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        infos.push(store.table_key_info(account_id, name).await.unwrap());
+    }
+    let partition = client
+        .query::<ReadTableRoute>(&account, None, Json(infos[1].table_id.clone()))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap()
+        .partitions
+        .remove(0);
+    let data = data_target(account_id, &infos[1].table_id, &partition.partition_id).unwrap();
+    let targets = [&account, &data];
+    let transaction_id = [249; 16];
+    provisioner
+        .admit_coordinator(account_id, &transaction_id)
+        .await
+        .unwrap();
+    let coordinator = coordinator_target(account_id, &transaction_id).unwrap();
+    let operations: Vec<_> = infos
+        .iter()
+        .map(|info| {
+            TransactionOperation::Put(PutItemInput {
+                table_name: info.table_name.clone(),
+                table_id: info.table_id.clone(),
+                item: Item::from([
+                    ("id".into(), AttributeValue::S("delayed".into())),
+                    ("payload".into(), AttributeValue::S("\0".repeat(96 * 1024))),
+                ]),
+                condition: None,
+            })
+        })
+        .collect();
+    let mut participants: Vec<_> = [
+        CoordinatorParticipantTarget::Account,
+        CoordinatorParticipantTarget::Data {
+            table_id: infos[1].table_id.clone(),
+            partition_id: partition.partition_id,
+            epoch: partition.epoch,
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, target)| CoordinatorParticipant {
+        target,
+        operations: vec![IndexedTransactionOperation {
+            index: index as u8,
+            operation: operations[index].clone(),
+        }],
+    })
+    .collect();
+    participants.sort_by_key(|p| {
+        *targets[usize::from(p.operations[0].index)]
+            .cell_id()
+            .as_bytes()
+    });
+    transaction_command!(
+        client,
+        BeginCrossCellTransaction,
+        &coordinator,
+        mutation(),
+        Json(BeginCrossCellTransactionInput {
+            account_id: account_id.into(),
+            transaction_id,
+            token: None,
+            participants,
+        })
+    )
+    .await
+    .unwrap();
+    let coordinator_cell = *coordinator.cell_id().as_bytes();
+    let bytes = [
+        serde_json::to_vec(&PrepareAccountTransactionInput {
+            transaction_id,
+            coordinator_cell,
+            coordinator_key: transaction_id.to_vec(),
+            operations: vec![operations[0].clone()],
+        })
+        .unwrap(),
+        serde_json::to_vec(&PreparePartitionTransactionInput {
+            table_id: infos[1].table_id.clone(),
+            epoch: partition.epoch,
+            transaction_id,
+            coordinator_cell,
+            coordinator_key: transaction_id.to_vec(),
+            operations: vec![operations[1].clone()],
+        })
+        .unwrap(),
+    ];
+    let references: Vec<_> = bytes
+        .iter()
+        .map(|bytes| TransactionPayloadRef::new(bytes, mutation().expires_at_ms).unwrap())
+        .collect();
+    let chunks: Vec<Vec<_>> = references
+        .iter()
+        .zip(&bytes)
+        .map(|(reference, bytes)| reference.chunks(bytes).collect())
+        .collect();
+    assert!(chunks.iter().all(|chunks| chunks.len() > 1));
+    let decision = CoordinatorDecision::Abort {
+        index: None,
+        reason: None,
+    };
+    for position in 0..chunks.iter().map(Vec::len).max().unwrap() {
+        if position == 1 {
+            client
+                .command::<DecideCrossCellTransaction>(
+                    &coordinator,
+                    mutation(),
+                    Json(DecideCrossCellTransactionInput {
+                        account_id: account_id.into(),
+                        transaction_id,
+                        routing_key: transaction_id.to_vec(),
+                        decision: decision.clone(),
+                    }),
+                )
+                .await
+                .unwrap();
+            // Resolve the durable coordinator decision while neither participant
+            // has enough input to prepare. Later chunks must not recreate locks.
+            stores[0]
+                .finish_decided_cross_cell_transaction(account_id, &transaction_id, transaction_id)
+                .await
+                .unwrap();
+        }
+        for (index, target) in targets.iter().enumerate() {
+            let Some(chunk) = chunks[index].get(position).cloned() else {
+                continue;
+            };
+            if index == 0 {
+                client
+                    .command::<UploadTransactionPayload<PrepareAccountTransaction>>(
+                        target,
+                        mutation(),
+                        chunk,
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                client
+                    .command::<UploadTransactionPayload<PreparePartitionTransaction>>(
+                        target,
+                        mutation(),
+                        chunk,
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+    for (index, target) in targets.iter().enumerate() {
+        let result = if index == 0 {
+            client
+                .command::<PrepareAccountTransaction>(
+                    target,
+                    mutation(),
+                    Json(references[index].clone()),
+                )
+                .await
+        } else {
+            client
+                .command::<PreparePartitionTransaction>(
+                    target,
+                    mutation(),
+                    Json(references[index].clone()),
+                )
+                .await
+        };
+        assert!(
+            matches!(result, Err(InvocationError::Rejected(result)) if result.output.0 == PrepareTransactionOutcome::Aborted)
+        );
+        let key = Item::from([("id".into(), AttributeValue::S("delayed".into()))]);
+        assert_eq!(
+            stores[index].get_item(&infos[index], &key).await.unwrap(),
+            None
+        );
+        stores[index]
+            .put_item(
+                &infos[index],
+                key.clone(),
+                false,
+                None,
+                &ExpressionMaps::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            stores[index].get_item(&infos[index], &key).await.unwrap(),
+            Some(key)
+        );
+    }
+    let status = client
+        .query::<ReadCrossCellTransaction>(
+            &coordinator,
+            None,
+            Json(ReadCrossCellTransactionInput {
+                account_id: account_id.into(),
+                transaction_id,
+                routing_key: transaction_id.to_vec(),
+            }),
+        )
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    assert_eq!((status.decision, status.resolved_count), (decision, 2));
+    host.shutdown().await.unwrap();
 }
