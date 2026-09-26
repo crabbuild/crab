@@ -1659,7 +1659,7 @@ keeps its original decision and one unresolved receipt until retry completes.
 | Receipt | `RecordParticipantResolution` records the matching participant's publication sequence and decrements unresolved count once; canceled tokens release only after the last receipt. |
 | Public error contract | The admission driver propagates resolution errors. Pinned ExtendDB maps `StorageError::Transient` to `ServiceUnavailable`; transactional writes forward this mapping instead of returning cancellation or success. |
 | Siblings | Transactional reads use the same resolution loop and retain immutable committed images. Prepare remains fail-closed: it cannot proceed past uncertainty to invent a terminal decision. Existing read, lost-reply, token, capacity, and owner-replacement tests cover these paths. |
-| Admission boundary | Provisioning still requires fenced owner recovery before invoking the driver. A catalog, lease, or activation failure there can defer resolution; this change does not bypass admission or startup readiness. A live remote owner is left in place and reached through the peer client. |
+| Admission boundary | The subsequent admission-progress change below lets already-decided work resolve healthy participants after another admission fails. Fenced takeover and startup readiness remain required. A live remote owner is left in place and reached through the peer client. |
 | Previous behavior | Current main has no BeyondDB. The preceding draft returned immediately on the first resolution error; the regression observed the second participant still PREPARED. |
 
 **Is this the best fix?** Keep per-participant completion in one helper and
@@ -1672,9 +1672,9 @@ from the loop's progress policy.
 
 The loop remains sequential and visits at most 100 participants. Progress
 requires a failed attempt to return and the caller to remain alive; cancellation
-or a slow owner can still interrupt the pass. Bounded parallelism, independent
-owner-admission progress, persistent history collection, and 10,000-Cell/multi-TB
-qualification remain separate work. No API, schema, wire format, dependency,
+or a slow owner can still interrupt the pass. The next section addresses
+owner-admission progress. Bounded parallelism, persistent history collection,
+and 10,000-Cell/multi-TB qualification remain separate work. No API, schema, wire format, dependency,
 or lockfile changes are required for this fix.
 
 Verification: 24 tests passed across the account, elastic-Cell, and signed
@@ -1687,3 +1687,78 @@ The injected cuts run in the signed loopback regression; the process smoke
 checks the deployed request/recovery path without those injected cuts. Strict
 all-target Clippy, formatting, diff, and Cell/LTX layout checks passed. These
 are functional proofs; they do not qualify full API coverage or fleet scale.
+
+
+## Participant admission must not strand decided healthy work
+
+At `b2452818e01`, the provisioner returned on the first participant owner-admission
+error, before calling the terminal resolver. Continuing after participant RPC
+errors therefore did not help when control-store reads, fencing, or activation
+failed first. Startup additionally stopped its coordinator pass at the first
+unresolved transaction, retaining healthy locks in later records.
+
+Participant admission now visits the captured target list and retains the first
+error. Only successful admission checks enter the page-local deduplication set;
+a failed target remains eligible for a later attempt. This uses the original
+immutable participants, including retained split sources, and does not derive
+replacement owners from current table routes.
+
+Serving recovery keeps BEGIN behind successful participant admission. For a
+published COMMIT or ABORT, it attempts the existing terminal resolver even after
+an admission error. The resolver rechecks the coordinator and uses ordinary
+Cell routing and authority checks; it cannot command an unfenced replacement.
+Healthy applies and receipts survive, while the admission error remains an error.
+
+The binary starts private peer routing before registered data/coordinator
+recovery. Both the binary and fault fixture call `recover_registered_account`,
+which retains a routed-partition admission error while still attempting
+coordinator recovery; a preceding table-range failure cannot skip this phase.
+Capacity workers start only after that account's recovery succeeds; TTL
+workers start after all configured accounts recover.
+
+Startup owns a fenced coordinator and can durably abort BEGIN. It attempts
+participant admission across its pending pages, then runs fenced resolution even
+if admission reported an error. Resolution advances through later pending records
+after a failed transaction. Both phases retain errors: startup readiness fails
+until a subsequent pass completes successfully. Initial account-registry and
+coordinator authority reads are still prerequisites; this does not make discovery
+possible when those authorities are unavailable.
+
+| Evidence boundary | Proof |
+| --- | --- |
+| Entry points | `bin/beyonddb.rs` starts private peer routing, then calls `recover_registered_account`; `provision/transactions.rs` owns registered-account startup and serving recovery. |
+| Owner admission | `recover_discovered_owner` still requires exact control state, node-lease fencing, and normal activation; its ownership contract is unchanged. |
+| Resolution | `backend/recovery.rs` uses one terminal resolver for foreground, read helping, serving, and startup. Startup's per-record helper preserves the existing fenced BEGIN-abort rule. |
+| Siblings | Both account and data targets pass through the same admission loop. Existing mixed-participant resolution tests cover their shared apply/receipt contract; the new control-store outage fixture uses two routed data Cells so account-registry discovery remains available. |
+| Regression | `tests/elastic_cells/recovery_admission.rs` covers startup and serving across BEGIN, COMMIT, and ABORT with the first participant's control reads blocked. Raw participant state checks avoid read-triggered helping. A later healthy record in the same shard also settles. |
+| Completion | Startup still returns an error during the outage; serving leaves BEGIN undecided and does not prepare its unprepared healthy participant. After restoring reads, both paths finish. A newer write on a resolved participant survives retry. |
+| Baseline | Main has no BeyondDB. The preceding draft exits before healthy resolution when owner admission fails. |
+
+**Is this the best fix?** Keep admission and resolution owned by their existing
+layers. Continuing bounded work and preserving errors closes this failure path
+without a new authority, retry service, timeout-based decision, or wire format.
+The per-record startup helper allows error retention across a page while
+keeping decision handling in the backend. The registered-account entry point
+owns the data-admission/coordinator-recovery ordering used by both the binary
+and its fault fixture. The production change adds 76 net lines for this error
+retention and lifecycle ordering. No production dependency or lockfile
+changes are needed; tests enable the existing storage fault-instrumentation feature.
+
+Progress still requires each failed attempt to return. Sequential phase latency,
+startup stopping at an unsettled coordinator shard, fleet placement, durable
+history collection, WAL/disk/heap admission, and 10,000-Cell/multi-TB qualification
+remain open. This is a recovery availability improvement, not a new ACID proof
+or a claim of complete DynamoDB compatibility.
+
+
+Verification: both regressions failed on the preceding draft: startup observed
+BEGIN with zero resolved participants; serving observed COMMIT with zero resolved
+participants. With the fix, 26 tests passed across account, elastic-Cell, and
+signed two-owner network suites (24 elastic tests in 120.69 seconds; peer test
+in 94.25 seconds). After wiring the binary through registered-account recovery,
+the two fault tests passed again in 8.89 seconds, covering all six scenarios.
+The explicitly enabled signed SDK/RustFS server-process smoke passed on the final
+binary in 358.24 seconds, including hard restart, replay, and TTL recovery.
+The process smoke does not inject the control-store outage; that cut is covered
+by the shared-entry-point fixture. Strict all-target Clippy, formatting, diff,
+and Cell/LTX layout checks passed. API coverage and fleet scale remain unqualified.
