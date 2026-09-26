@@ -39,6 +39,8 @@ def request_json(method: str, url: str, payload: dict | None = None) -> dict:
             with urllib.request.urlopen(request, timeout=15) as response:
                 return json.load(response)
         except (OSError, urllib.error.HTTPError, ValueError) as error:
+            if isinstance(error, urllib.error.HTTPError):
+                error.close()
             if attempt == 89:
                 raise RuntimeError(f"{method} {url} failed after 90 attempts") from error
             time.sleep(1)
@@ -144,7 +146,7 @@ def object_count(path: Path, profiles: tuple[str, ...]) -> int:
     return result["KeyCount"]
 
 
-def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, gateway_port: int, node_port_base: int) -> dict:
+def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, gateway_port: int, node_port_base: int, cells: int) -> dict:
     print(f"Starting {size} Cell nodes", flush=True)
     started = time.monotonic()
     compose(path, profiles, "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300")
@@ -161,14 +163,15 @@ def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, g
     if len(sessions) != size:
         raise RuntimeError("nodes did not publish distinct boot sessions")
 
-    for index in range(previous + 1, size + 1):
+    initial_cells = range(1, cells + 1) if previous == 0 else ()
+    for index in initial_cells:
         create_repository(path, profiles, index)
         issue = request_json(
             "POST",
-            node_url(index, node_port_base) + issue_path(index),
+            node_url((index - 1) % size + 1, node_port_base) + issue_path(index),
             {
                 "request_id": f"00000000-0000-4000-8000-{index:012x}",
-                "title": f"Cell issue on node {index}",
+                "title": f"Cell issue {index}",
                 "body": "Durable issue created through a constrained Cell node",
             },
         )
@@ -176,7 +179,7 @@ def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, g
             raise RuntimeError(f"node {index} did not create the expected issue: {issue}")
         label = request_json(
             "POST",
-            node_url(index, node_port_base) + f"/api/repos/demo/work-{index:02d}/labels",
+            node_url((index - 1) % size + 1, node_port_base) + f"/api/repos/demo/work-{index:02d}/labels",
             {
                 "request_id": f"00000000-0000-4000-9000-{index:012x}",
                 "name": "distributed",
@@ -188,9 +191,9 @@ def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, g
             raise RuntimeError(f"node {index} did not create its label: {label}")
 
     owners = {}
-    for index in range(1, size + 1):
+    for index in range(1, cells + 1):
         visible = request_json("GET", gateway + issue_path(index) + "/1")
-        if visible.get("title") != f"Cell issue on node {index}":
+        if visible.get("title") != f"Cell issue {index}":
             raise RuntimeError(f"gateway did not read Cell {index} after stage {size}")
         labels = request_json("GET", gateway + f"/api/repos/demo/work-{index:02d}/labels")
         if len(labels.get("items", [])) != 1 or labels["items"][0]["name"] != "distributed":
@@ -204,7 +207,7 @@ def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, g
         owners[f"work-{index:02d}"] = sessions[owner]
     for index in range(previous + 1, size + 1):
         visible = request_json("GET", node_url(index, node_port_base) + issue_path(1) + "/1")
-        if visible.get("title") != "Cell issue on node 1":
+        if visible.get("title") != "Cell issue 1":
             raise RuntimeError(f"new node {index} could not route to the original Cell")
     stored_objects = object_count(path, profiles)
     if stored_objects < 1:
@@ -215,7 +218,7 @@ def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, g
     ]
     return {
         "nodes": size,
-        "cells": size,
+        "cells": cells,
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "node_capacity_active_cells": capacities,
         "owners": owners,
@@ -225,9 +228,9 @@ def run_stage(path: Path, profiles: tuple[str, ...], previous: int, size: int, g
     }
 
 
-def prove_owner_loss(path: Path, profiles: tuple[str, ...], owner: str, gateway_port: int) -> dict:
+def prove_owner_loss(path: Path, profiles: tuple[str, ...], owner: str, gateway_port: int, cell: int) -> dict:
     observer = "node-01" if owner != "node-01" else "node-02"
-    status_args = ("exec", "-T", observer, "crab-http-server", "--config", CONFIG, "cells", "status", "--owner", "demo", "--name", "work-20")
+    status_args = ("exec", "-T", observer, "crab-http-server", "--config", CONFIG, "cells", "status", "--owner", "demo", "--name", f"work-{cell:02d}")
     for _ in range(60):
         metrics = compose(path, profiles, "exec", "-T", owner, "crab-http-server", "--config", CONFIG, "cells", "metrics")
         uncovered = next((line.split()[-1] for line in metrics.splitlines() if line.startswith("crab_cell_node_log_uncovered_bytes ")), None)
@@ -249,7 +252,7 @@ def prove_owner_loss(path: Path, profiles: tuple[str, ...], owner: str, gateway_
                 # An idle Cell is acquired by a request, so drive the public
                 # read before checking whether another owner has claimed it.
                 with urllib.request.urlopen(
-                    f"http://127.0.0.1:{gateway_port}{issue_path(20)}/1", timeout=5
+                    f"http://127.0.0.1:{gateway_port}{issue_path(cell)}/1", timeout=5
                 ) as response:
                     issues = json.load(response)
                 after = json.loads(compose(path, profiles, *status_args))
@@ -257,7 +260,7 @@ def prove_owner_loss(path: Path, profiles: tuple[str, ...], owner: str, gateway_
                 if session is None or session == before["owner"]["session"]:
                     time.sleep(1)
                     continue
-                if issues.get("title") != "Cell issue on node 20":
+                if issues.get("title") != f"Cell issue {cell}":
                     raise RuntimeError("recovered owner did not return the acknowledged issue")
                 root = after.get("root") or {}
                 if root.get("commit_sequence", -1) < before["root"]["commit_sequence"] or root.get("txid", -1) < before["root"]["txid"]:
@@ -287,10 +290,17 @@ def main() -> None:
     parser.add_argument("--rustfs-port", type=int, default=19010)
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--load-stages", action="store_true", help="run gateway load while each stage is active")
-    parser.add_argument("--load-pairs-per-cell", type=int, default=10)
+    parser.add_argument("--cells", type=int, default=20, help="fixed Cell count across every node stage")
+    parser.add_argument("--load-rate", type=float, default=5, help="scheduled create/read pairs per second")
+    parser.add_argument("--load-duration", type=float, default=60)
+    parser.add_argument("--load-max-in-flight", type=int, default=64)
     args = parser.parse_args()
-    if not 1 <= args.load_pairs_per_cell <= 100:
-        parser.error("--load-pairs-per-cell must be between 1 and 100")
+    # Import after module initialization: load uses the same Compose helpers.
+    from load import Workload
+    try:
+        Workload(args.cells, args.load_rate, args.load_duration, args.load_max_in_flight, 0)
+    except ValueError as error:
+        parser.error(str(error))
     command("docker", "info", "--format", "{{.ServerVersion}}")
     label = f"label=com.docker.compose.project={args.project}"
     existing = [
@@ -317,10 +327,10 @@ def main() -> None:
     previous = 0
     last_load = None
     for size, profiles in phases:
-        stage = run_stage(path, profiles, previous, size, args.gateway_port, args.node_port_base)
+        stage = run_stage(path, profiles, previous, size, args.gateway_port, args.node_port_base, args.cells)
         report["stages"].append(stage)
         (path.parent / "report.json").write_text(json.dumps(report, indent=2) + "\n")
-        print(f"Verified {size} nodes and {size} Cell-backed issue services", flush=True)
+        print(f"Verified {size} nodes and {args.cells} Cell-backed issue services", flush=True)
         if args.load_stages:
             output = path.parent / f"load-{size}-stage.json"
             subprocess.run([
@@ -329,7 +339,10 @@ def main() -> None:
                 "--state", str(path.parent),
                 "--nodes", str(size),
                 "--gateway-port", str(args.gateway_port),
-                "--pairs-per-cell", str(args.load_pairs_per_cell),
+                "--cells", str(args.cells),
+                "--rate", str(args.load_rate),
+                "--duration", str(args.load_duration),
+                "--max-in-flight", str(args.load_max_in_flight),
                 "--output", str(output),
             ], check=True)
             stage["load_report"] = output.name
@@ -340,7 +353,7 @@ def main() -> None:
         report["owner_loss"] = json.loads(last_load.read_text())["owner_loss"]
         report["owner_loss_source"] = last_load.name
     else:
-        report["owner_loss"] = prove_owner_loss(path, phases[-1][1], report["stages"][-1]["owners"]["work-20"], args.gateway_port)
+        report["owner_loss"] = prove_owner_loss(path, phases[-1][1], report["stages"][-1]["owners"][f"work-{args.cells:02d}"], args.gateway_port, args.cells)
     (path.parent / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(path.parent / "report.json")
 
