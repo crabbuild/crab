@@ -97,7 +97,7 @@ jobs:
           python3 -B -W error::ResourceWarning -m unittest discover \
             -s crates/crab-http-server/deploy/cell-issue-fleet -p test_load.py -v
           python3 -B -m unittest discover \
-            -s crates/crab-http-server/tests -p test_recovery_work.py -v
+            -s crates/crab-http-server/tests -p 'test_*.py' -v
           docker compose \
             --file crates/crab-http-server/deploy/compose.yaml \
             --file crates/crab-http-server/deploy/compose.cluster.yaml \
