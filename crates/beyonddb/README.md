@@ -68,8 +68,9 @@ Cell drain. Crashed sessions may leave scratch directories for operator cleanup.
 The process smoke test starts RustFS, bootstraps a key, sends AWS SDK table and
 item requests, kills the server without draining it, then restarts it and reads
 the committed item after lease expiry and fenced Cell takeover. It also verifies
-BatchWriteItem, BatchGetItem, and paginated parallel Scan across four initial
-data Cells before the crash and checks batch reads after recovery. Run it in a
+BatchWriteItem, BatchGetItem, paginated parallel Scan, and TTL expiry across four
+initial data Cells before the crash. It checks batch reads and TTL configuration
+after recovery. Run it in a
 dedicated environment with `rustfs`, `aws`, and `openssl` available:
 
 ```bash
@@ -89,9 +90,13 @@ or credential Cells can forward signed requests to live owners through mTLS.
 
 The account Cell, independently owned data-range Cells, and a partial ExtendDB
 `StorageEngine` adapter are implemented today. Table and item operations have
-Cell paths; most remaining traits return explicit unsupported errors. The
-exceptions are the disabled TTL description and synchronous table-transition
-worker. Table resource tags now have Cell-backed CreateTable, TagResource, UntagResource,
+Cell paths; most remaining traits return explicit unsupported errors. TTL settings
+are committed in the account Cell. The serving binary sweeps enabled tables,
+configures a fixed expiry index in each routed data Cell, backfills old items in
+bounded commands, and conditionally deletes expired items. An owner restart
+restores the settings, backfill cursor, and index state. The global TTL listing
+trait remains unsupported; the worker lists tables by locally owned account.
+The synchronous table-transition worker is also implemented. Table resource tags now have Cell-backed CreateTable, TagResource, UntagResource,
 and ListTagsOfResource paths; DeleteTable removes their rows. The RustFS
 process test verifies these requests through the AWS SDK across a server
 restart and verifies that a recreated table starts without the old tags.
@@ -291,7 +296,7 @@ real host, range and epoch rejection, route validation and publication,
 partitioned adapter CRUD, Scan, and same-Cell transactions, rollback and
 cross-Cell rejection, account write fencing, and restoration of
 both a data Cell and the route's account Cell from object storage. These tests
-do not prove live repartitioning, complete IAM, indexes, streams, TTL, or backups. The
+do not prove live repartitioning, complete IAM, secondary indexes, Streams, or backups. The
 elastic test also verifies
 sealed-source export, two import-only children, activation by source-derived
 fingerprint, a delayed-copy fence, host-backed split resumption, atomic route

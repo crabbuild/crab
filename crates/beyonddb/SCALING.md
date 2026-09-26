@@ -30,6 +30,13 @@ and splits at most one range above a SQLite database-image threshold. The
 ordinary sweep selects the next range by indexed lower boundary and checks
 ownership by partition ID without loading the full route. The
 measurement includes indexes and runtime tables but excludes WAL/LTX files.
+TTL has a separate per-account worker. Its fixed data Cell expiry index accepts
+new writes immediately and backfills existing items with a durable cursor in
+bounded Cell commands. It only deletes an item if its TTL attribute is still
+expired at deletion. Today each worker tick reads every TTL table's route and
+queries every partition, with at most two expiry candidates per partition.
+This needs a distributed scheduler, bounded per-tick partition budget, and
+measured catch-up rate before qualification at 10,000 Cells.
 The provisioner can install this loop in a node task group, and the serving
 binary installs it for every locally admitted account. There is no merge controller, and the account
 directory remains bounded.
