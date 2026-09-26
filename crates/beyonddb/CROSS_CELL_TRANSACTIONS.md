@@ -60,6 +60,29 @@ committed versions. Use `TransactGetItems` for an atomic multi-key view.
 barriers must still cover prepared creates and deletes absent from live rows.
 These distinctions follow the [AWS isolation contract](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis.html).
 
+### Condition checks must prevent write skew
+
+Let A and B be enabled items in different data Cells. T1 checks A is enabled
+and disables B; T2 checks B is enabled and disables A. Both committing would
+violate the invariant that at least one item remains enabled. Evaluating each
+condition correctly is insufficient if its checked key can change before the
+transaction finishes.
+
+`tests/elastic_cells/transaction_write_skew.rs` holds T1 after preparing its
+`ConditionCheck` on A. T2 must abort with a conflict when it tries to disable A.
+T1 then commits. A separately admitted T2 attempt must evaluate B at prepare
+and abort with the old image showing B disabled, even though its BEGIN predates
+T1's COMMIT. Raw participant reads verify A remains enabled and B is disabled;
+subsequent writes verify both terminal paths released their locks.
+
+The driver fixture exercises this deterministic interleaving through actual
+coordinator/participant commands and published Cell state. Removing condition
+check locks temporarily makes the regression fail: T2 commits instead of
+conflicting. The production source is restored unchanged. The account sibling
+already tests that checked keys reject ordinary puts and deletes while prepared.
+This adds a specific write-skew regression, not a general serializable-history
+checker, cloud API comparison, or fleet-scale proof.
+
 ### Evidence map and trust boundary
 
 | Boundary | Owner and code | Evidence or remaining limit |

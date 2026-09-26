@@ -357,6 +357,15 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
             );
         }
     }
+    super::transaction_write_skew::assert_condition_checks_prevent_write_skew(
+        &client,
+        &storage,
+        &bootstrap,
+        directory.path(),
+        &table,
+        &participants,
+    )
+    .await;
     super::transaction_recovery::assert_background_recovery(
         &host,
         application,

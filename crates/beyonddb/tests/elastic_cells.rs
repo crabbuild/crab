@@ -14,6 +14,7 @@ mod elastic_cells {
     mod transaction_resolution;
     mod transaction_transport;
     pub(crate) mod transaction_visibility;
+    mod transaction_write_skew;
     mod ttl_transactions;
 }
 
