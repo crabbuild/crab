@@ -2323,6 +2323,8 @@ mod tests {
                     CatalogRole::Sql,
                     1,
                 )
+                .unwrap()
+                .with_limits(REPOSITORY_MAX_DATABASE_BYTES, REPOSITORY_MAX_CAPTURE_BYTES)
                 .unwrap(),
             )
             .unwrap();
@@ -2804,6 +2806,7 @@ mod tests {
         let session = SessionId::from_bytes([65; 16]);
         let cell_node = CellNodeBuilder::new(compiled_application().unwrap())
             .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), MAINTENANCE_RUNTIME_BYTES)
+            .with_replica_host(ReplicaHost::default())
             .with_session(session)
             .build_unleased_for_maintenance()
             .unwrap();
@@ -2983,6 +2986,7 @@ mod tests {
         let session = SessionId::from_bytes([77; 16]);
         let cell_node = CellNodeBuilder::new(rollover_application())
             .with_runtime(SqlWorkerPool::new(1, 1).unwrap(), MAINTENANCE_RUNTIME_BYTES)
+            .with_replica_host(ReplicaHost::default())
             .with_session(session)
             .build_unleased_for_maintenance()
             .unwrap();
