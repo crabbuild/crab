@@ -456,7 +456,7 @@ on Cell nodes. The existing filter controls this diagnostic overhead; include
 it in comparisons and measure with and without tracing before setting limits.
 The load report records each node's configured filter.
 
-Scheduled `load.py` reports use schema 4. Raw samples retain each HTTP attempt,
+Scheduled `load.py` reports use schema 5. Raw samples retain each HTTP attempt,
 its status, server request ID and latency, including retries. Successful write
 samples are joined to the stable submission, runtime attempt, Cell/incarnation,
 owner/session, commit sequence and winning `object`, `fleet` or `recorded`
@@ -464,6 +464,15 @@ response source. A `<report>.traces/` directory retains per-node logs and
 `actions.jsonl` before the owner-loss test. Missing or ambiguous attribution
 fails qualification. This includes duplicate owner responses for the same
 runtime attempt: the collector refuses to guess which response arrived.
+
+Recovery and old-owner restart have separate outcomes. `owner_loss` retains
+takeover and acknowledgement checks completed before cleanup;
+`owner_loss.restart` records whether restarting the killed node succeeded.
+When both recovery and restart fail, the original recovery error remains
+alongside the restart error. Either failure fails qualification. The parent
+`report.json` also retains a failed load stage's artifact path. These receipts
+do not qualify faults during an unpublished follower tail: the current
+scheduled fault still waits for publication to drain before killing its owner.
 
 | Timing | Measurement boundary |
 | --- | --- |
@@ -1411,6 +1420,13 @@ Members can list and read issues. Members can create issues and comments. Author
 Identity uses the exact OIDC issuer and subject. Display names do not establish ownership. The loopback server uses one trusted operator identity.
 
 Lists accept `state=open|closed|all`, a case-insensitive `q`, `limit`, and exclusive numeric `before`. They return newest items first.
+
+Issue responses load the label catalog only when returned issues have selected
+labels or an edit needs to validate nonempty label input. Repository archive
+checks and label permissions still apply, including when clearing labels.
+A retried creation returns the existing issue with its current labels.
+Response enrichment may fail after a mutation commits; retry creations with
+the original submission ID, or reload an edited issue and reconcile its version.
 
 ### Work with pull requests and reviews
 

@@ -195,7 +195,6 @@ async fn list(
 ) -> Result<Json<Value>> {
     let repo = repository(&server, &principal, &key)?;
     let author = actor(&principal)?;
-    let labels = labels::catalog(&server, &repo, &author).await?;
     let assignees = assignees::available(&repo, &author);
     let can_manage_metadata = principal.can_write(&repo.config);
     let routed = route(&server, &repo, &author, "repository.read").await?;
@@ -214,6 +213,11 @@ async fn list(
             )
             .await,
     )?;
+    let labels = if page.items.iter().all(|issue| issue.label_ids.is_empty()) {
+        vec![]
+    } else {
+        labels::catalog(&server, &repo, &author).await?
+    };
     let items = page
         .items
         .iter()
@@ -261,7 +265,13 @@ async fn create(
         CreateIssueOutcome::Created(issue) => issue,
         CreateIssueOutcome::RequestConflict => return Err(Error::RequestConflict),
     };
-    let labels = labels::catalog(&server, &repo, &author).await?;
+    // A replay returns the issue's current state, which may have acquired labels
+    // since creation. Decide from that result, not from the create input.
+    let labels = if issue.label_ids.is_empty() {
+        vec![]
+    } else {
+        labels::catalog(&server, &repo, &author).await?
+    };
     let assignees = assignees::available(&repo, &author);
     Ok((
         StatusCode::CREATED,
@@ -291,7 +301,11 @@ async fn detail(
             .await,
     )?
     .ok_or(Error::NotFound)?;
-    let labels = labels::catalog(&server, &repo, &author).await?;
+    let labels = if issue.label_ids.is_empty() {
+        vec![]
+    } else {
+        labels::catalog(&server, &repo, &author).await?
+    };
     let assignees = assignees::available(&repo, &author);
     Ok(Json(issue_view(
         &issue,
@@ -338,7 +352,11 @@ async fn edit(
     if input.assignees.is_some() && !can_manage_metadata {
         return Err(Error::AssigneePermission);
     }
-    let labels = labels::catalog(&server, &repo, &author).await?;
+    let labels = if input.label_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
+        labels::catalog(&server, &repo, &author).await?
+    } else {
+        vec![]
+    };
     let assignees = assignees::available(&repo, &author);
     let title = input.title.as_deref().map(title).transpose()?;
     if let Some(value) = input.body.as_deref() {
@@ -385,6 +403,13 @@ async fn edit(
         }
         UpdateIssueOutcome::AssigneeForbidden => return Err(Error::AssigneePermission),
         UpdateIssueOutcome::Conflict => return Err(Error::Conflict),
+    };
+    // An edit without label changes can return existing selections. Reuse any
+    // catalog fetched for validation; otherwise fetch only for actual rendering.
+    let labels = if labels.is_empty() && !issue.label_ids.is_empty() {
+        labels::catalog(&server, &repo, &author).await?
+    } else {
+        labels
     };
     Ok(Json(issue_view(
         &issue,

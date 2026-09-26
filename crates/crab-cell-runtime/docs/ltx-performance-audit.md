@@ -4,8 +4,8 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `2861b0064b1`. The latest three-node action trace uses predecessor `e50055c48bb`. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
-| Status | Hydration fetch, sparse registration and persistent-cache construction isolation are implemented. Loaded scale-out cannot assume idle ownership transfer. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
+| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `2861b0064b1`, plus the issue-query and recovery-receipt changes recorded below. The latest three-node action trace uses predecessor `e50055c48bb`. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
+| Status | Hydration fetch, sparse registration, persistent-cache construction isolation, conditional issue enrichment and recovery receipt preservation are implemented. Loaded scale-out cannot assume idle ownership transfer. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
 
@@ -23,8 +23,8 @@ harness separately.
 
 | Priority | Remaining gap | First experiment |
 | --- | --- | --- |
-| P1 | The public action performs avoidable response-enrichment work after committing (24) | Skip catalog reads for empty selections; count actual peer queries and measure the same public action, including retries after a committed mutation |
-| P1 | Shared Compose disk headroom prevented node restart; the receipt lost the earlier recovery outcome (23) | Preflight the actual mount and retain separate takeover, acknowledgement and restart results before repeating scale stages |
+| P1 | Empty-selection label queries are removed; their service latency benefit remains unmeasured (24) | Compare the same public actions and durability mode; retain validation and retry coverage |
+| P1 | Shared Compose disk headroom prevented node restart; recovery and restart outcomes are now retained separately (23) | Preflight the actual mount and provision disk before repeating scale stages |
 | P1 | Hydration fetch isolation is implemented; service latency remains unqualified (19) | Measure same-Cell and sibling-Cell tails under arrivals, fragmented fetches and slow page installation |
 | P1 | Sparse activation registry isolation is implemented; recovery-storm performance remains unqualified (20) | Concurrent activation under constrained disk IOPS; measure worker occupancy and shared bridge startup |
 | P1 | Persistent-cache construction is admitted and its quadratic byte summation is removed; service recovery remains unqualified (22) | Repeat concurrent recovery with slow metadata I/O and measure unrelated foreground latency |
@@ -77,7 +77,7 @@ phase percentiles or a controlled experiment.
 
 The immediate measured-work sequence is therefore:
 
-1. Eliminate the provably unnecessary label query for empty selections (24),
+1. Measure the removal of the unnecessary label query for empty selections (24),
    and add routing/query/enrichment attribution to locate the remaining HTTP
    time. Keep the generated typed client and committed receipt as the app
    boundary. This is the smallest code-supported optimization of the measured
@@ -1547,6 +1547,22 @@ provisioned disk. Independent disk faults require independent storage. The
 observed restart failure is an environment/qualification limit, not evidence
 that LTX lost an acknowledged mutation.
 
+**Implementation:** both the scheduled and functional qualifiers now write
+takeover results into caller-owned receipts before restarting the old owner.
+The shared cleanup boundary records the restart outcome and preserves an
+earlier recovery/readback error if cleanup also fails. A restart failure after
+successful recovery still fails the run. The parent qualifier saves its failed
+report in `finally` and retains a failed load stage's artifact path. Scheduled
+reports use schema 5 for the separate `owner_loss.restart` outcome.
+
+The regression reproduced cleanup replacing an acknowledged-data failure.
+Twenty-six fleet tests now pass, including successful readback plus failed
+restart, failed readback plus failed restart, full success, and persistence of
+failed functional/load-stage reports. These tests use controlled HTTP and
+Compose fixtures; they do not rerun the real disk-threshold fault or establish
+successful recovery in the earlier missing receipt. Disk provisioning and a
+fresh full fleet run remain required.
+
 ### 24. Application response enrichment adds an avoidable query after commit
 
 **Confirmed:** [issue creation](../../crab-http-server/src/issues.rs) always
@@ -1588,7 +1604,34 @@ Retry an ambiguous create after subsequently labeling the issue and require
 the existing issue plus current label rendering. Compare local and forwarded
 HTTP actions over RustFS with the same workload and count peer operations.
 Existing issue/label and peer takeover tests establish functional contracts;
-they do not currently prove the zero-query property or its latency benefit.
+query-count proof and the remaining latency gate are recorded below.
+
+**Implementation:** create, detail and list load the catalog only if returned
+issues contain label IDs. Edit retains nonempty selection validation and
+reuses that catalog for rendering; otherwise it fetches only if the committed
+result contains labels. Permissions still apply to an explicit empty selection,
+and the runtime still validates selected IDs atomically. The pull handlers
+already use conditional enrichment and are unchanged.
+
+The public HTTP/mTLS regression failed before the change and passes with both
+in-memory storage and real RustFS. It counts owner-side executed queries:
+unlabeled create/edit performs one required repository-archive query, with no
+label query; unlabeled list/detail performs only its requested query. A labeled
+mutation or create replay performs the archive query plus one catalog query.
+Replaying a committed create after assigning labels returns the existing issue
+with its current labels. This proves replay behavior, not an injected dropped
+HTTP response. The same test covers owner loss, restored collaboration state,
+local actions on the successor, and native Git readback. Seven issue/label auth
+tests pass, including unknown/duplicate selections and forbidden label clearing.
+
+An edit retaining existing labels can now perform enrichment after committing.
+If that read fails, the write can have succeeded: reload the resource and use
+its current version to resolve the outcome. Creation retries retain the stable
+submission ID. No authority, durability, wire format, or label-validation rule
+changed. Logs under the external target include `label-query-before-corrected.log`,
+`label-query-after.log`, `label-query-auth.log` and `label-query-rustfs.log`.
+These prove removed work and application behavior; a fixed-workload release
+comparison is still needed to quantify latency or throughput improvement.
 
 ### Re-audit decision and proof gaps
 

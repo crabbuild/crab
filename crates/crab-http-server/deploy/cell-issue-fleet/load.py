@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 
-from qualify import BUCKET, CONFIG, MEMORY_LIMIT, ROOT, command, compose, image_provenance, issue_path, node_name, prove_node
+from qualify import BUCKET, CONFIG, MEMORY_LIMIT, ROOT, command, compose, image_provenance, issue_path, node_name, prove_node, restart_after_fault
 import action_traces
 
 
@@ -416,8 +416,8 @@ def observe_nodes(path: Path, profiles: tuple[str, ...], nodes: int, stop, outpu
 
 def recover_owner(
     path: Path, profiles: tuple[str, ...], gateway: str, nodes: int,
-    owner: str, before: dict, latest: dict, target: int, samples: list[dict],
-) -> dict:
+    owner: str, before: dict, latest: dict, target: int, samples: list[dict], receipt: dict,
+) -> None:
     observer = "node-01" if owner != "node-01" else "node-02"
     for _ in range(60):
         metrics = compose(path, profiles, "exec", "-T", owner, "crab-http-server", "--config", CONFIG, "cells", "metrics")
@@ -436,7 +436,8 @@ def recover_owner(
         raise RuntimeError("owner moved before the owner-loss fault")
     before = live
     started = time.monotonic()
-    try:
+    restart = lambda: compose(path, profiles, "up", "--detach", "--no-build", "--wait", owner)
+    with restart_after_fault(receipt, restart):
         compose(path, profiles, "kill", "--signal", "SIGKILL", owner)
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
@@ -460,17 +461,16 @@ def recover_owner(
             if (root.get("commit_sequence", -1) < before["root"]["commit_sequence"]
                     or root.get("txid", -1) < before["root"]["txid"]):
                 raise RuntimeError("recovered owner regressed the published RustFS root")
-            return {
+            receipt.update({
                 "lost_node": owner,
                 "new_session": new_session,
                 "recovery_seconds": round(time.monotonic() - started, 3),
                 "same_root": root == before["root"],
                 "entry_node": observed["entry"],
-                "acknowledgements": verify_acknowledged(gateway, nodes, samples),
-            }
+            })
+            receipt["acknowledgements"] = verify_acknowledged(gateway, nodes, samples)
+            return
         raise RuntimeError("load-balanced owner recovery did not complete in 120 seconds")
-    finally:
-        compose(path, profiles, "up", "--detach", "--no-build", "--wait", owner)
 
 
 def main() -> None:
@@ -511,7 +511,7 @@ def main() -> None:
     _, before = owner_map(path, profiles, args.nodes, args.cells)
     coverage, coverage_samples = cover_routes(gateway, args.nodes, args.cells)
     report = {
-        "schema": 4,
+        "schema": 5,
         "source": command("git", "-C", str(ROOT), "rev-parse", "HEAD"),
         "source_role": "load_generator",
         "source_dirty": bool(command("git", "-C", str(ROOT), "status", "--porcelain")),
@@ -605,9 +605,10 @@ def main() -> None:
         if acknowledged:
             owners_at_recovery, recovery_baseline = owner_map(path, profiles, args.nodes, args.cells)
             target = max(acknowledged)
-            report["owner_loss"] = recover_owner(
+            report["owner_loss"] = {}
+            recover_owner(
                 path, profiles, gateway, args.nodes, owners_at_recovery[target],
-                recovery_baseline[target], acknowledged[target], target, samples,
+                recovery_baseline[target], acknowledged[target], target, samples, report["owner_loss"],
             )
         report["passed"] = (balanced and not report["node_observations"]["errors"]
                             and summary["outcomes"].get("success", 0) == summary["planned_pairs"]

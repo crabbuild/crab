@@ -441,18 +441,17 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     crate::server::receive_tests::success(source_path, &["push", &git_url, "feature"]).await;
     eprintln!("qualified native Git main and feature pushes");
 
+    let submission = serde_json::json!({
+        "request_id": "00000000-0000-4000-8000-000000000001",
+        "title": "Remote Cell",
+        "body": "Written on the owner node"
+    });
+    let queries_before = receiver_reads.queries.load(Ordering::Relaxed);
     let create_started = Instant::now();
     let created = client
         .post(format!("{public_origin}/api/repos/team/repo/issues"))
         .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(
-            serde_json::json!({
-                "request_id": "00000000-0000-4000-8000-000000000001",
-                "title": "Remote Cell",
-                "body": "Written on the owner node"
-            })
-            .to_string(),
-        )
+        .body(submission.to_string())
         .send()
         .await
         .unwrap();
@@ -471,6 +470,11 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     );
     let created: Value = serde_json::from_slice(&created_bytes).unwrap();
     assert_eq!(created["number"], 1);
+    assert_eq!(
+        receiver_reads.queries.load(Ordering::Relaxed) - queries_before,
+        1,
+        "an unlabeled create needs the archive check but no label catalog query",
+    );
     eprintln!(
         "action-sample {}",
         serde_json::json!({
@@ -481,6 +485,39 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
                 "attempts": [{"status": 201, "http_request_id": created_request_id, "latency_ms": create_ms}]}],
         })
     );
+    for suffix in ["issues", "issues/1", "issues?q=absent"] {
+        let before = receiver_reads.queries.load(Ordering::Relaxed);
+        let (status, _) = json_get(
+            &client,
+            format!("{public_origin}/api/repos/team/repo/{suffix}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            receiver_reads.queries.load(Ordering::Relaxed) - before,
+            1,
+            "{suffix} must issue only its requested query without labels",
+        );
+    }
+    let mut issue_version = created["version"].as_u64().unwrap();
+    for mut input in [
+        serde_json::json!({"body": "Edited without labels"}),
+        serde_json::json!({"label_ids": []}),
+    ] {
+        input["version"] = issue_version.into();
+        let before = receiver_reads.queries.load(Ordering::Relaxed);
+        let (status, issue) = json_request(
+            &client,
+            reqwest::Method::PATCH,
+            format!("{public_origin}/api/repos/team/repo/issues/1"),
+            input,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(issue["labels"], serde_json::json!([]));
+        issue_version = issue["version"].as_u64().unwrap();
+        assert_eq!(receiver_reads.queries.load(Ordering::Relaxed) - before, 1);
+    }
     let label = client
         .post(format!("{public_origin}/api/repos/team/repo/labels"))
         .header(axum::http::header::CONTENT_TYPE, "application/json")
@@ -499,16 +536,50 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     assert_eq!(label.status(), StatusCode::CREATED);
     let label: Value = serde_json::from_slice(&label.bytes().await.unwrap()).unwrap();
     assert_eq!(label["id"], 1);
+    let queries_before = receiver_reads.queries.load(Ordering::Relaxed);
     let assigned = client
         .patch(format!("{public_origin}/api/repos/team/repo/issues/1"))
         .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(serde_json::json!({"version":1,"label_ids":[1]}).to_string())
+        .body(serde_json::json!({"version":issue_version,"label_ids":[1]}).to_string())
         .send()
         .await
         .unwrap();
     assert_eq!(assigned.status(), StatusCode::OK);
     let assigned: Value = serde_json::from_slice(&assigned.bytes().await.unwrap()).unwrap();
     assert_eq!(assigned["labels"][0]["name"], "remote");
+    assert_eq!(
+        receiver_reads.queries.load(Ordering::Relaxed) - queries_before,
+        2
+    );
+    // Retrying the committed submission must render its current labels, even
+    // though the original create had none and its caller might have lost the reply.
+    let queries_before = receiver_reads.queries.load(Ordering::Relaxed);
+    let replay = json_request(
+        &client,
+        reqwest::Method::POST,
+        format!("{public_origin}/api/repos/team/repo/issues"),
+        submission,
+    )
+    .await;
+    assert_eq!(replay, (StatusCode::CREATED, assigned.clone()));
+    assert_eq!(
+        receiver_reads.queries.load(Ordering::Relaxed) - queries_before,
+        2
+    );
+    let queries_before = receiver_reads.queries.load(Ordering::Relaxed);
+    let edited = json_request(
+        &client,
+        reqwest::Method::PATCH,
+        format!("{public_origin}/api/repos/team/repo/issues/1"),
+        serde_json::json!({"version":assigned["version"],"body":"Labels retained"}),
+    )
+    .await;
+    assert_eq!(edited.0, StatusCode::OK);
+    assert_eq!(edited.1["labels"], assigned["labels"]);
+    assert_eq!(
+        receiver_reads.queries.load(Ordering::Relaxed) - queries_before,
+        2
+    );
     eprintln!("qualified issue and label mutations");
     let comment = json_request(
         &client,
@@ -1010,6 +1081,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         ingress_session
     );
 
+    let queries_before = ingress_reads.queries.load(Ordering::Relaxed);
     let continued = client
         .post(format!("{public_origin}/api/repos/team/repo/issues"))
         .header(axum::http::header::CONTENT_TYPE, "application/json")
@@ -1027,6 +1099,20 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     assert_eq!(continued.status(), StatusCode::CREATED);
     let continued: Value = serde_json::from_slice(&continued.bytes().await.unwrap()).unwrap();
     assert_eq!(continued["number"], 2);
+    assert_eq!(
+        ingress_reads.queries.load(Ordering::Relaxed) - queries_before,
+        1
+    );
+    for suffix in ["issues/2", "issues?q=Recovered"] {
+        let before = ingress_reads.queries.load(Ordering::Relaxed);
+        let (status, _) = json_get(
+            &client,
+            format!("{public_origin}/api/repos/team/repo/{suffix}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ingress_reads.queries.load(Ordering::Relaxed) - before, 1);
+    }
     let continued_control = authority.load(target.cell_id()).await.unwrap().unwrap();
     assert!(
         continued_control
