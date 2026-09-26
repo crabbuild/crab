@@ -773,11 +773,6 @@ impl DataEngine for CellStorage {
                         PartitionTransactWriteOutcome::Mismatch => {
                             Err(StorageError::IdempotentMismatch)
                         }
-                        PartitionTransactWriteOutcome::Conflict => {
-                            Err(StorageError::TransactionConflict(
-                                "item is locked by a transaction".into(),
-                            ))
-                        }
                         PartitionTransactWriteOutcome::NotInstalled
                         | PartitionTransactWriteOutcome::StaleRoute
                         | PartitionTransactWriteOutcome::Sealed
@@ -889,6 +884,11 @@ fn transaction_canceled(
     let mut reasons = vec![CancellationReason::none(); count];
     if let Some(slot) = reasons.get_mut(index) {
         *slot = match reason {
+            TransactionFailure::Conflict => CancellationReason {
+                code: "TransactionConflict".into(),
+                message: Some("transaction conflicts with another operation".into()),
+                item: None,
+            },
             TransactionFailure::Validation(message) => {
                 CancellationReason::validation_error(message)
             }

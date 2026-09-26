@@ -52,8 +52,6 @@ pub enum PartitionTransactWriteOutcome {
     NotReady,
     /// A key is outside this partition's range.
     WrongPartition,
-    /// Another prepared transaction owns a key in this request.
-    Conflict,
 }
 
 /// Commit a batch to one data Cell or roll back every staged write.
@@ -150,7 +148,6 @@ struct StagedImage {
 enum StageError {
     StaleRoute,
     WrongPartition,
-    Conflict,
     Rejected {
         index: usize,
         reason: TransactionFailure,
@@ -162,7 +159,6 @@ impl StageError {
         match self {
             Self::StaleRoute => PartitionTransactWriteOutcome::StaleRoute,
             Self::WrongPartition => PartitionTransactWriteOutcome::WrongPartition,
-            Self::Conflict => PartitionTransactWriteOutcome::Conflict,
             Self::Rejected { index, reason } => {
                 PartitionTransactWriteOutcome::Rejected { index, reason }
             }
@@ -173,7 +169,6 @@ impl StageError {
         match self {
             Self::StaleRoute => PreparePartitionTransactionOutcome::StaleRoute,
             Self::WrongPartition => PreparePartitionTransactionOutcome::WrongPartition,
-            Self::Conflict => PreparePartitionTransactionOutcome::Conflict,
             Self::Rejected { index, reason } => {
                 PreparePartitionTransactionOutcome::Rejected { index, reason }
             }
@@ -224,7 +219,10 @@ fn stage_operations(
             )));
         }
         if key_locked(context, &key)? {
-            return Ok(Err(StageError::Conflict));
+            return Ok(Err(StageError::Rejected {
+                index,
+                reason: TransactionFailure::Conflict,
+            }));
         }
         let old = command_item(context, &key)?;
         if let Some(condition) = condition {

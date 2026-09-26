@@ -327,6 +327,41 @@ pub(crate) async fn assert_sdk_read_barrier(
             .collect::<Vec<_>>(),
         vec![Some("None"), Some("TransactionConflict")]
     );
+    let write_error = sdk
+        .transact_write_items()
+        .set_transact_items(Some(
+            ["1.5", "8"]
+                .into_iter()
+                .map(|sk| {
+                    aws_sdk_dynamodb::types::TransactWriteItem::builder()
+                        .put(
+                            aws_sdk_dynamodb::types::Put::builder()
+                                .table_name(&partition.table.table_name)
+                                .item("pk", AwsAttributeValue::S("same".into()))
+                                .item("sk", AwsAttributeValue::N(sk.into()))
+                                .item("uncommitted", AwsAttributeValue::Bool(true))
+                                .build()
+                                .unwrap(),
+                        )
+                        .build()
+                })
+                .collect(),
+        ))
+        .send()
+        .await
+        .unwrap_err()
+        .into_service_error();
+    let aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError::TransactionCanceledException(write_error) = write_error else {
+        panic!("unexpected SDK write error: {write_error:?}");
+    };
+    assert_eq!(
+        write_error
+            .cancellation_reasons()
+            .iter()
+            .map(|reason| reason.code())
+            .collect::<Vec<_>>(),
+        vec![Some("None"), Some("TransactionConflict")]
+    );
     client
         .command::<ResolvePartitionTransaction>(
             &target,
@@ -340,6 +375,12 @@ pub(crate) async fn assert_sdk_read_barrier(
         .await
         .unwrap();
     let response = request().send().await.unwrap();
+    assert!(
+        response
+            .responses()
+            .iter()
+            .all(|item| !item.item().unwrap().contains_key("uncommitted"))
+    );
     assert_eq!(
         response
             .responses()
