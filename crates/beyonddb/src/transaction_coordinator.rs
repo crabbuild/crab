@@ -137,7 +137,7 @@ pub enum CoordinatorParticipantTarget {
 }
 
 impl CoordinatorParticipantTarget {
-    fn cell_id(&self, account_id: &str) -> Result<[u8; 32]> {
+    pub(crate) fn cell_id(&self, account_id: &str) -> Result<[u8; 32]> {
         let target = match self {
             Self::Account => account_target(account_id)?,
             Self::Data {

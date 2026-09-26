@@ -229,6 +229,7 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                     Arc::new(TestPeerAuthorizer),
                 )),
                 lost: lost.clone(),
+                enabled: 3,
             };
             let remote = CellStorage::new(
                 CellClient::runtime_with_peer(
@@ -335,10 +336,11 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
     host.shutdown().await.unwrap();
 }
 
-struct DropPhaseReplies {
-    verifier: Arc<PeerVerifier>,
-    dispatcher: Arc<PeerDispatcher>,
-    lost: Arc<std::sync::atomic::AtomicU8>,
+pub(super) struct DropPhaseReplies {
+    pub(super) verifier: Arc<PeerVerifier>,
+    pub(super) dispatcher: Arc<PeerDispatcher>,
+    pub(super) lost: Arc<std::sync::atomic::AtomicU8>,
+    pub(super) enabled: u8,
 }
 
 impl PeerRoundTrip for DropPhaseReplies {
@@ -353,6 +355,7 @@ impl PeerRoundTrip for DropPhaseReplies {
         let verifier = self.verifier.clone();
         let dispatcher = self.dispatcher.clone();
         let lost = self.lost.clone();
+        let enabled = self.enabled;
         Box::pin(async move {
             use crab_cell_runtime::peer::wire::{mutation_request, peer_request};
             let now_ms = i64::try_from(
@@ -368,8 +371,10 @@ impl PeerRoundTrip for DropPhaseReplies {
                 Some(peer_request::Operation::Mutate(mutation)) => match &mutation.operation {
                     Some(mutation_request::Operation::CellCommand(command)) => {
                         match command.command_id {
-                            12 => 1,
+                            12 | 21 => 1,
                             3 => 2,
+                            1 => 4,
+                            13 | 22 => 8,
                             _ => 0,
                         }
                     }
@@ -377,6 +382,7 @@ impl PeerRoundTrip for DropPhaseReplies {
                 },
                 _ => 0,
             };
+            let phase = phase & enabled;
             let response = dispatcher.dispatch_bytes(&verified, now_ms).await?;
             if phase != 0 && lost.fetch_or(phase, Ordering::SeqCst) & phase == 0 {
                 return Err(crab_cell_runtime::Error::PeerTransportUnknown {

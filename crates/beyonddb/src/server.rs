@@ -112,8 +112,11 @@ pub fn build_http_state(
             "BeyondDB Cell node is not ready to serve".into(),
         ));
     }
-    let storage: Arc<dyn StorageEngine> =
-        Arc::new(CellStorage::new(client.clone(), region).with_initial_partitions(provisioner));
+    let storage: Arc<dyn StorageEngine> = Arc::new(
+        CellStorage::new(client.clone(), region)
+            .with_transaction_coordinators(provisioner.clone())
+            .with_initial_partitions(provisioner),
+    );
     let credentials = CellCredentialStore::new(client.clone(), layout, encryption_key);
     let catalog = Arc::new(CellCatalogStore::new(client));
     let authz_cache = Arc::new(CachedAuthzStore::pass_through(

@@ -2,11 +2,12 @@ use std::{collections::HashMap, sync::Arc, time::UNIX_EPOCH};
 
 use beyonddb::{
     AdvanceTtlSchedule, AdvanceTtlScheduleInput, AdvanceTtlSweep, AdvanceTtlSweepInput, Beyonddb,
-    CellStorage, CreateTable, CreateTableOutcome, DeleteItem, DeleteItemInput, DescribeTable,
-    GetItem, GetItemInput, GetItemOutcome, ItemMutationOutcome, Json, ListTables, ListTablesInput,
-    ListTablesOutcome, PutItem, PutItemInput, ReadTtlSchedule, ReadTtlSweep, TableSpec,
-    TransactGet, TransactWrite, TransactWriteInput, TransactionGetOutcome, TransactionOutcome,
-    TransactionWrite, UpdateTtl, UpdateTtlInput, account_target, initialize_account,
+    CellInitialPartitionProvisioner, CellStorage, CreateTable, CreateTableOutcome, DeleteItem,
+    DeleteItemInput, DescribeTable, GetItem, GetItemInput, GetItemOutcome, ItemMutationOutcome,
+    Json, ListTables, ListTablesInput, ListTablesOutcome, PutItem, PutItemInput, ReadTtlSchedule,
+    ReadTtlSweep, TableSpec, TransactGet, TransactWrite, TransactWriteInput, TransactionGetOutcome,
+    TransactionOutcome, TransactionWrite, UpdateTtl, UpdateTtlInput, account_target,
+    initialize_account,
 };
 use crab_cell_app::CellApplication;
 use crab_cell_host::CellNodeBuilder;
@@ -116,7 +117,22 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .await
         .unwrap();
     let cell_client = CellClient::local(registry, handle.clone());
-    let storage = CellStorage::new(cell_client.clone(), "us-east-1");
+    let provisioner = Arc::new(
+        CellInitialPartitionProvisioner::new(
+            host.runtime(),
+            application.clone(),
+            layout.clone(),
+            session,
+            "https://beyonddb.internal:8081".into(),
+            directory.path().join("coordinators"),
+        )
+        .unwrap(),
+    );
+    let storage = CellStorage::new(
+        CellClient::local_runtime(application.registry(), host.runtime(), layout.clone()),
+        "us-east-1",
+    )
+    .with_transaction_coordinators(provisioner);
     let client = host
         .application_handle::<Beyonddb>(cell_client, target.tenant(), target.application())
         .unwrap();
@@ -477,7 +493,6 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
                         condition: None,
                     }),
                 ],
-                idempotency: None,
             }),
         )
         .await;
@@ -520,7 +535,6 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
                         condition: None,
                     }),
                 ],
-                idempotency: None,
             }),
         )
         .await
@@ -653,7 +667,6 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             identity(11),
             Json(TransactWriteInput {
                 operations: bulk_writes,
-                idempotency: None,
             }),
         )
         .await

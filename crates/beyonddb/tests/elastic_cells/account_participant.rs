@@ -65,7 +65,19 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
         )
         .await;
     let client = CellClient::local_runtime(registry.clone(), host.runtime(), layout.clone());
-    let storage = CellStorage::new(client.clone(), "us-east-1");
+    let provisioner = Arc::new(
+        CellInitialPartitionProvisioner::new(
+            host.runtime(),
+            application.clone(),
+            layout.clone(),
+            session,
+            "https://beyonddb-partition.internal:8081".into(),
+            directory.path().join("admitted"),
+        )
+        .unwrap(),
+    );
+    let storage =
+        CellStorage::new(client.clone(), "us-east-1").with_transaction_coordinators(provisioner);
     let mut tables = Vec::new();
     for name in ["AccountItems", "DataItems", "OtherItems", "EmptyItems"] {
         let result = client
@@ -619,5 +631,28 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
         .put_item(&info, key("aborted-create"), false, None, &maps, None)
         .await
         .unwrap();
+    let data_info = storage
+        .table_key_info(account_id, &data_table.table_name)
+        .await
+        .unwrap();
+    let admission = Arc::new(
+        CellInitialPartitionProvisioner::new(
+            restored.runtime(),
+            application.clone(),
+            layout.clone(),
+            next_session,
+            "https://restored.internal:8081".into(),
+            directory.path().join("public-admission"),
+        )
+        .unwrap(),
+    );
+    super::public_transactions::assert_lost_replies_and_canceled_token_reuse(
+        &restored,
+        registry,
+        layout,
+        admission,
+        [info, data_info],
+    )
+    .await;
     restored.shutdown().await.unwrap();
 }

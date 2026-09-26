@@ -1,6 +1,7 @@
 mod elastic_cells {
     mod account_participant;
     mod coordinator_tokens;
+    mod public_transactions;
     mod transaction_driver;
     pub(crate) mod transaction_visibility;
 }
@@ -914,7 +915,8 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
         CellClient::local_runtime(application.registry(), host.runtime(), layout.clone()),
         "us-east-1",
     )
-    .with_initial_partitions(provisioner);
+    .with_initial_partitions(provisioner.clone())
+    .with_transaction_coordinators(provisioner);
     assert_eq!(
         adapter
             .table_key_info("123456789012", "MoreRanges")
@@ -1007,7 +1009,7 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         *account.application().as_bytes(),
     );
     let host = CellNodeBuilder::new(Arc::clone(&application))
-        .with_runtime(SqlWorkerPool::new(1, 8).unwrap(), 16 * 1024 * 1024)
+        .with_runtime(SqlWorkerPool::new(1, 32).unwrap(), 16 * 1024 * 1024)
         .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
         .with_session(session)
         .build()
@@ -1042,7 +1044,8 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         CellClient::local(Arc::clone(&registry), account_handle.clone()),
         "us-east-1",
     )
-    .with_initial_partitions(provisioner.clone());
+    .with_initial_partitions(provisioner.clone())
+    .with_transaction_coordinators(provisioner.clone());
     let created = creator
         .create_table(
             "123456789012",
@@ -1109,14 +1112,11 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         .unwrap()
         .unwrap();
     let storage = CellStorage::new(
-        CellClient::local_many(
-            Arc::clone(&registry),
-            [account_handle.clone(), data_handle.clone()],
-        )
-        .unwrap(),
+        CellClient::local_runtime(Arc::clone(&registry), host.runtime(), layout.clone()),
         "us-east-1",
     )
-    .with_initial_partitions(provisioner.clone());
+    .with_initial_partitions(provisioner.clone())
+    .with_transaction_coordinators(provisioner.clone());
     let key_info = storage
         .table_key_info("123456789012", "Numbers")
         .await
@@ -1536,7 +1536,8 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
             CellClient::local_runtime(Arc::clone(&registry), host.runtime(), layout.clone()),
             "us-east-1",
         )
-        .with_initial_partitions(provisioner.clone()),
+        .with_initial_partitions(provisioner.clone())
+        .with_transaction_coordinators(provisioner.clone()),
     );
     assert_eq!(
         routed.get_item(&key_info, &left_token_item).await.unwrap(),
@@ -1585,7 +1586,7 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let peer_session = SessionId::from_bytes([77; 16]);
     let peer_runtime = CellRuntime::new(
-        SqlWorkerPool::new(1, 8).unwrap(),
+        SqlWorkerPool::new(1, 32).unwrap(),
         16 * 1024 * 1024,
         peer_session,
     )
@@ -2069,7 +2070,7 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
 
     let next_session = SessionId::from_bytes([75; 16]);
     let restored_host = CellNodeBuilder::new(application.clone())
-        .with_runtime(SqlWorkerPool::new(1, 8).unwrap(), 16 * 1024 * 1024)
+        .with_runtime(SqlWorkerPool::new(1, 32).unwrap(), 16 * 1024 * 1024)
         .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
         .with_session(next_session)
         .build_unleased_for_maintenance()
@@ -2281,7 +2282,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         *account.application().as_bytes(),
     );
     let host = CellNodeBuilder::new(Arc::clone(&application))
-        .with_runtime(SqlWorkerPool::new(1, 8).unwrap(), 16 * 1024 * 1024)
+        .with_runtime(SqlWorkerPool::new(1, 32).unwrap(), 16 * 1024 * 1024)
         .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
         .with_session(session)
         .build_unleased_for_maintenance()
@@ -2386,17 +2387,10 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .admit_coordinator("123456789012", &transaction_id)
         .await
         .unwrap();
-    let cell_client = CellClient::local_many(
-        Arc::clone(&registry),
-        [
-            account_handle.clone(),
-            left_handle.clone(),
-            right_handle.clone(),
-            coordinator_handle.clone(),
-        ],
-    )
-    .unwrap();
-    let storage = CellStorage::new(cell_client.clone(), "us-east-1");
+    let cell_client =
+        CellClient::local_runtime(Arc::clone(&registry), host.runtime(), layout.clone());
+    let storage = CellStorage::new(cell_client.clone(), "us-east-1")
+        .with_transaction_coordinators(Arc::new(coordinator_admission));
     let client = host
         .application_handle::<Beyonddb>(cell_client, account.tenant(), account.application())
         .unwrap();
@@ -3318,11 +3312,15 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             None,
         )
         .await;
-    assert!(matches!(cross_write, Err(StorageError::Unsupported(_))));
+    cross_write.unwrap();
     assert_eq!(
         storage.get_item(&key_info, &rolled_back).await.unwrap(),
-        None
+        Some(rolled_back.clone())
     );
+    storage
+        .delete_item(&key_info, &rolled_back, false, None, &tx_maps, None)
+        .await
+        .unwrap();
     let (first_range, continuation) = storage
         .scan(&key_info, Some(2), None, None, None, None)
         .await
@@ -3572,7 +3570,6 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
                 table_id: table.id.clone(),
                 epoch: 1,
                 operations: prepare_input.operations.clone(),
-                idempotency: None,
             }),
         )
         .await;
@@ -4320,7 +4317,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
 
     let next_session = SessionId::from_bytes([21; 16]);
     let restored_host = CellNodeBuilder::new(Arc::clone(&application))
-        .with_runtime(SqlWorkerPool::new(1, 8).unwrap(), 16 * 1024 * 1024)
+        .with_runtime(SqlWorkerPool::new(1, 32).unwrap(), 16 * 1024 * 1024)
         .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
         .with_session(next_session)
         .build_unleased_for_maintenance()
@@ -4376,7 +4373,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .recover_registered_coordinators("123456789012", restored_account.clone(), &recovery_nodes)
         .await
         .unwrap();
-    assert_eq!(registered, vec![coordinator_target.clone()]);
+    assert!(registered.contains(&coordinator_target));
     let coordinator_proof = CellCatalog::new(layout.clone(), account.tenant())
         .lookup(coordinator_target.cell_id())
         .await
@@ -4667,13 +4664,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             .unwrap()
             .output
             .0,
-        beyonddb::ReadCoordinatorTokenOutcome::Found {
-            transaction_id: token_id,
-            decision: CoordinatorDecision::Abort {
-                index: None,
-                reason: None
-            }
-        }
+        beyonddb::ReadCoordinatorTokenOutcome::Missing
     );
     let restored_participant = restored_client
         .query::<ReadCoordinatorParticipant>(
@@ -4922,40 +4913,37 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .admit_coordinator("123456789012", second_key.as_bytes())
         .await
         .unwrap();
-    let first_shard = restored_client
-        .query::<ListCoordinatorShards>(
-            &account,
-            None,
-            Json(ListCoordinatorShardsInput {
-                account_id: "123456789012".into(),
-                after: None,
-                limit: 1,
-            }),
-        )
-        .await
-        .unwrap()
-        .output
-        .0;
-    let second_shard = restored_client
-        .query::<ListCoordinatorShards>(
-            &account,
-            None,
-            Json(ListCoordinatorShardsInput {
-                account_id: "123456789012".into(),
-                after: first_shard.first().copied(),
-                limit: 1,
-            }),
-        )
-        .await
-        .unwrap()
-        .output
-        .0;
-    let mut expected_shards = [
-        u32::from_be_bytes(coordinator_target.partition().try_into().unwrap()),
-        u32::from_be_bytes(second_target.partition().try_into().unwrap()),
-    ];
+    let mut actual_shards = Vec::new();
+    let mut after = None;
+    loop {
+        let page = restored_client
+            .query::<ListCoordinatorShards>(
+                &account,
+                None,
+                Json(ListCoordinatorShardsInput {
+                    account_id: "123456789012".into(),
+                    after,
+                    limit: 1,
+                }),
+            )
+            .await
+            .unwrap()
+            .output
+            .0;
+        if page.is_empty() {
+            break;
+        }
+        after = page.last().copied();
+        actual_shards.extend(page);
+    }
+    let mut expected_shards: Vec<_> = registered
+        .iter()
+        .chain(std::iter::once(&second_target))
+        .map(|target| u32::from_be_bytes(target.partition().try_into().unwrap()))
+        .collect();
     expected_shards.sort_unstable();
-    assert_eq!([first_shard[0], second_shard[0]], expected_shards);
+    expected_shards.dedup();
+    assert_eq!(actual_shards, expected_shards);
     restored_host.shutdown().await.unwrap();
 }
 
@@ -5130,7 +5118,8 @@ async fn create_table_retries_two_data_cells_before_reporting_active() {
         .unwrap(),
         "us-east-1",
     )
-    .with_initial_partitions(provisioner);
+    .with_initial_partitions(provisioner.clone())
+    .with_transaction_coordinators(provisioner);
     let key_info = storage
         .table_key_info("123456789012", "Books")
         .await

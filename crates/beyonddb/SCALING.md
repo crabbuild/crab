@@ -12,22 +12,17 @@ The current implementation does **not** meet that target. Unactivated tables
 still store items in one account SQL Cell (`src/lib.rs`, `src/schema.sql`). Once
 an empty table's initial route is published, the ExtendDB adapter uses
 independently owned data-range Cells for keyed CRUD and Scan. Account item
-commands are then fenced. Transactions confined to one routed data Cell
-commit their item writes in one Cell command or read one snapshot. Client
-request tokens first claim an account Cell record and then commit an applied
-receipt with the data mutation. A committed replay reads that claim before
-current routing, so a split cannot apply it in another Cell. A claimed request
-without an applied receipt still needs safe relocation if its source seals.
-Transactions across Cells remain rejected until
-the adapter admits requests through the durable coordinator driver. Data Cells
-now have durable prepare,
-key-lock, commit, and abort commands. Account-scoped coordinator shards can
-persist the participant set, prepare receipts, one decision, and resolution
-receipts. An internal driver resumes published BEGIN records, prepares immutable
-participants, records one decision, and resolves all participants. Public
-transaction admission is not yet wired through the ExtendDB adapter;
-continuous recovery scheduling and read-triggered decision resolution still
-need implementation. Data Cell reads now fail retryably on unresolved intents;
+commands are then fenced. Every public TransactWriteItems request now uses
+an account-scoped coordinator shard, including requests confined to one Cell.
+Token lookup precedes current routing and preserves the original participant
+set. Account and data participants durably prepare and lock keys; the
+coordinator publishes one decision and the driver resolves every participant
+before returning. Successful tokens replay for ten minutes after completion;
+canceled tokens are released only after all abort resolutions publish.
+The signed SDK process test writes two keys in distinct Cells and verifies
+replay and values after an unclean server exit. Cross-Cell TransactGetItems,
+continuous recovery scheduling, and read-triggered decision resolution still
+need implementation. Reads fail retryably on unresolved intents; same-Cell
 transactional reads return ordered cancellation reasons. A
 host-backed provisioner can create 1–256
 independent, evenly spaced initial data Cells during CreateTable and retry
@@ -82,7 +77,7 @@ write parallelism or provide online repartitioning. Both Cell types declare a
 512 MiB database budget and 64 MiB capture budget; host admission supplies
 and enforces its own limits.
 
-The current framework has two further bounds that affect the design:
+The current framework has further bounds that affect the design:
 
 - `crab-cell-app` declares fixed namespace shard counts of 1–4,096. BeyondDB's
   data Cell uses entity-partition mode to validate distinct partition targets.
@@ -104,6 +99,14 @@ Cross-Cell transaction decisions use up to 4,096 account-scoped coordinator
 shards selected by client token or transaction ID. Only used shards are
 admitted. This is another finite per-account writer budget; shard expansion
 needs a versioned routing and token-replay migration before saturation.
+
+The serving binary configures only 64 active Cells per node, shared by data,
+account, credential, and coordinator Cells. Coordinator shards currently stay
+resident, with no passivation or fleet placement. Distinct transaction tokens
+can therefore exhaust this pool even without table growth. Startup also
+restores every registered shard assigned to its endpoint. Bounded residency,
+on-demand recovery, history collection, and distributed placement are required
+before this path can sustain the stated scale target.
 
 ## Target ownership
 
@@ -214,8 +217,9 @@ for a committed request without a durable fence.
 The full state machine, visibility rules, split fence, and recovery proof are
 specified in [the cross-Cell transaction protocol](CROSS_CELL_TRANSACTIONS.md).
 
-One-partition transactions continue to use one Cell command. A transaction
-across data Cells needs a durable coordinator and participant protocol:
+Low-level local transactions use one Cell command. All public transactional
+writes use the coordinator protocol; the full target also requires read
+coordination and continuous recovery:
 
 1. Order participants by Cell ID; each prepares its writes and locks the
    affected keys under a transaction ID, routing epoch, and deadline. Prepared

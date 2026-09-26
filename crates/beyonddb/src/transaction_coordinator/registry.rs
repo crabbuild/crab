@@ -90,3 +90,27 @@ impl Query for ListCoordinatorShards {
         Ok(Json(shards))
     }
 }
+
+/// Test shard registration without publishing a receipt on every transaction.
+pub struct ReadCoordinatorRegistration;
+
+impl Query for ReadCoordinatorRegistration {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 26;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<RegisterCoordinatorShardInput>;
+    type Output = Json<bool>;
+
+    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
+        if account_target(&input.account_id)?.cell_id() != context.cell_id()
+            || input.shard >= SHARDS
+        {
+            return Err(Error::Identity("invalid coordinator registration lookup"));
+        }
+        let rows = context.sql(&statement(
+            "SELECT 1 FROM ddb_coordinator_shards WHERE shard = ?1",
+            vec![SqlValue::Integer(i64::from(input.shard))],
+        ))?;
+        Ok(Json(!rows[0].rows.is_empty()))
+    }
+}

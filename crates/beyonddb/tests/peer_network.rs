@@ -10,10 +10,10 @@ use std::{
 use aws_credential_types::Credentials;
 use aws_sdk_dynamodb::types::AttributeValue as AwsAttributeValue;
 use beyonddb::{
-    Beyonddb, BeyonddbPeerScope, CellAuthorizationStore, CellCredentialStore,
-    CellInitialPartitionProvisioner, CreateTable, CreateTableOutcome, DescribeTable, Json,
-    NodeLeasePublisher, ReadTableRoute, TableSpec, account_target, build_http_state,
-    build_peer_client, peer_router,
+    ActivateTableRoute, Beyonddb, BeyonddbPeerScope, CellAuthorizationStore, CellCredentialStore,
+    CellInitialPartitionProvisioner, CreateTable, CreateTableOutcome, DescribeTable,
+    InitialPartitionProvisioner, Json, NodeLeasePublisher, ReadTableRoute, TableRoute, TableSpec,
+    account_target, build_http_state, build_peer_client, peer_router,
 };
 use crab_cell_app::CellApplication;
 use crab_cell_host::{CellNode, CellNodeBuilder};
@@ -341,6 +341,27 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .0
         .unwrap();
     assert_eq!(read.table_name, "RemoteTable");
+    let other_table = read;
+    let other_partitions = provisioner
+        .provision("123456789012", &other_table)
+        .await
+        .unwrap();
+    remote_account
+        .command::<ActivateTableRoute>(
+            &account,
+            crab_cell_runtime::MutationIdentity {
+                request_id: crab_cell_runtime::identity::RequestId::from_bytes([104; 16]),
+                issued_at_ms: now_ms(),
+                expires_at_ms: now_ms() + 60_000,
+            },
+            Json(TableRoute {
+                table_id: other_table.id.clone(),
+                epoch: 1,
+                partitions: other_partitions.clone(),
+            }),
+        )
+        .await
+        .unwrap();
     let wrong_principal = CellClient::runtime_with_peer(
         application.registry(),
         remote.runtime(),
@@ -411,7 +432,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
                 "Statement": [{
                     "Effect": "Allow",
                     "Action": "dynamodb:*",
-                    "Resource": "arn:aws:dynamodb:us-east-1:123456789012:table/NetworkData"
+                    "Resource": ["arn:aws:dynamodb:us-east-1:123456789012:table/NetworkData", "arn:aws:dynamodb:us-east-1:123456789012:table/RemoteTable"]
                 }]
             })
             .to_string(),
@@ -487,6 +508,41 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .await
         .unwrap();
     assert_eq!(read.item(), Some(&item));
+    let transaction_items = ["NetworkData", "RemoteTable"]
+        .into_iter()
+        .map(|table| {
+            aws_sdk_dynamodb::types::TransactWriteItem::builder()
+                .put(
+                    aws_sdk_dynamodb::types::Put::builder()
+                        .table_name(table)
+                        .item("id", AwsAttributeValue::S("transaction-other".into()))
+                        .item("value", AwsAttributeValue::S("atomic".into()))
+                        .condition_expression("attribute_not_exists(id)")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+        })
+        .collect::<Vec<_>>();
+    sdk.transact_write_items()
+        .client_request_token("peer-two-owner")
+        .set_transact_items(Some(transaction_items.clone()))
+        .send()
+        .await
+        .unwrap();
+    for table in ["NetworkData", "RemoteTable"] {
+        let result = sdk
+            .get_item()
+            .table_name(table)
+            .key("id", AwsAttributeValue::S("transaction-other".into()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            result.item().unwrap().get("value"),
+            Some(&AwsAttributeValue::S("atomic".into()))
+        );
+    }
     shutdown_tx.send(()).unwrap();
     server.await.unwrap().unwrap();
     owner_lease.cancel();
@@ -523,6 +579,17 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .takeover_expired_account("123456789012", &peer_directory)
         .await
         .unwrap();
+    for partition in &other_partitions {
+        replacement_provisioner
+            .takeover_expired_partition(
+                "123456789012",
+                &other_table.id,
+                &partition.partition_id,
+                &peer_directory,
+            )
+            .await
+            .unwrap();
+    }
     let local_account = replacement
         .application_handle::<Beyonddb>(
             CellClient::local(application.registry(), replacement_account),
@@ -623,6 +690,26 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .load()
         .await;
     let replacement_sdk = aws_sdk_dynamodb::Client::new(&replacement_sdk_config);
+    // The restored account's registry leads a new frontend to the existing
+    // coordinator on the other node, preserving the original token outcome.
+    replacement_sdk
+        .transact_write_items()
+        .client_request_token("peer-two-owner")
+        .set_transact_items(Some(transaction_items))
+        .send()
+        .await
+        .unwrap();
+    let restored_other = replacement_sdk
+        .get_item()
+        .table_name("RemoteTable")
+        .key("id", AwsAttributeValue::S("transaction-other".into()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        restored_other.item().unwrap().get("value"),
+        Some(&AwsAttributeValue::S("atomic".into()))
+    );
     let cross_owner_read = replacement_sdk
         .get_item()
         .table_name("NetworkData")
@@ -670,6 +757,11 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     replacement_server.await.unwrap().unwrap();
     replacement_public_server.abort();
     owner.shutdown().await.unwrap();
-    remote.shutdown().await.unwrap();
+    // Unlike its transferred data Cell, the coordinator still names this
+    // expired session. Drain must not release ownership with a dead lease.
+    assert!(matches!(
+        remote.shutdown().await,
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
     replacement.shutdown().await.unwrap();
 }

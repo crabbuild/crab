@@ -1,5 +1,6 @@
 //! ExtendDB table operations routed to account Cells.
 
+mod admission;
 mod data;
 mod recovery;
 mod remaining;
@@ -41,11 +42,23 @@ pub trait InitialPartitionProvisioner: Send + Sync {
     ) -> BoxedFuture<'a, Result<Vec<PartitionSpec>, StorageError>>;
 }
 
+/// Admits a discoverable coordinator before any transaction record is written.
+pub trait CoordinatorProvisioner: Send + Sync {
+    /// Ensure the shard is published and registered through the account owner.
+    fn ensure<'a>(
+        &'a self,
+        client: &'a CellClient,
+        account_id: &'a str,
+        routing_key: &'a [u8],
+    ) -> BoxedFuture<'a, Result<(), StorageError>>;
+}
+
 /// ExtendDB table backend over already-provisioned and routable account Cells.
 pub struct CellStorage {
     client: CellClient,
     region: String,
     initial_partitions: Option<Arc<dyn InitialPartitionProvisioner>>,
+    coordinators: Option<Arc<dyn CoordinatorProvisioner>>,
 }
 
 impl CellStorage {
@@ -58,7 +71,18 @@ impl CellStorage {
             client,
             region: region.into(),
             initial_partitions: None,
+            coordinators: None,
         }
+    }
+
+    /// Enables transaction writes through durably registered coordinator shards.
+    #[must_use]
+    pub fn with_transaction_coordinators(
+        mut self,
+        provisioner: Arc<dyn CoordinatorProvisioner>,
+    ) -> Self {
+        self.coordinators = Some(provisioner);
+        self
     }
 
     /// Requires initial data Cell provisioning before a table is active.

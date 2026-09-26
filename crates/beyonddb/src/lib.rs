@@ -38,7 +38,7 @@ pub use transaction_token::TransactionToken;
 pub use ttl::*;
 
 pub use authorization::CellAuthorizationStore;
-pub use backend::{CellStorage, InitialPartitionProvisioner};
+pub use backend::{CellStorage, CoordinatorProvisioner, InitialPartitionProvisioner};
 pub use catalog::CellCatalogStore;
 pub use credentials::{CellCredentialStore, credential_target, initialize_credentials};
 
@@ -93,7 +93,7 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 20] = [
+static COMMANDS: [OperationDescriptor; 19] = [
     operation(1),
     operation(2),
     operation(3),
@@ -107,7 +107,6 @@ static COMMANDS: [OperationDescriptor; 20] = [
     operation(13),
     operation(14),
     operation(15),
-    operation(16),
     operation(17),
     operation(18),
     operation(19),
@@ -130,13 +129,13 @@ static QUERIES: [OperationDescriptor; 21] = [
     operation(16),
     operation(17),
     operation(18),
-    operation(19),
     operation(20),
     operation(21),
     operation(22),
     operation(23),
     operation(24),
     operation(25),
+    operation(26),
 ];
 
 /// Statically linked account application.
@@ -298,7 +297,6 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<ttl::UpdateTtl>()?;
         registry.bind_command::<ttl::AdvanceTtlSweep>()?;
         registry.bind_command::<ttl::AdvanceTtlSchedule>()?;
-        registry.bind_command::<transaction_token::ClaimTransactionToken>()?;
         registry.bind_command::<RegisterCoordinatorShard>()?;
         registry.bind_query::<GetItem>()?;
         registry.bind_query::<TransactGet>()?;
@@ -319,7 +317,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<ttl::ListTtlTables>()?;
         registry.bind_query::<ttl::ReadTtlSweep>()?;
         registry.bind_query::<ttl::ReadTtlSchedule>()?;
-        registry.bind_query::<transaction_token::ReadTransactionClaim>()?;
+        registry.bind_query::<ReadCoordinatorRegistration>()?;
         registry.bind_query::<ListCoordinatorShards>()
     }
 }

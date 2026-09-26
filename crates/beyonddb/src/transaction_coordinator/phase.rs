@@ -301,8 +301,11 @@ impl Command for RecordParticipantResolution {
                 SqlValue::Integer(i64::from(input.position)),
             ],
         ))?;
+        // ExtendDB rolls back token claims on canceled writes. Release the slot
+        // only after every abort resolution, so retries cannot race old intents.
         context.sql(&statement(
             "UPDATE ddb_coordinator_transactions SET unresolved_count = unresolved_count - 1, \
+             token = CASE WHEN unresolved_count = 1 AND state = 2 THEN NULL ELSE token END, \
              completed_at_ms = CASE WHEN unresolved_count = 1 THEN ?2 ELSE completed_at_ms END \
              WHERE transaction_id = ?1 AND unresolved_count > 0",
             vec![

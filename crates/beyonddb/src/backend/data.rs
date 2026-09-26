@@ -21,23 +21,17 @@ use extenddb_storage::{
 };
 
 use super::{CellStorage, cell_error, mutation_identity, target, unsupported};
+use crate::TransactionToken;
 use crate::expression_wire::{WireCondition, WireUpdate};
-use crate::transaction_token::{
-    ClaimTransactionToken, ClaimTransactionTokenInput, ClaimTransactionTokenOutcome,
-    ReadTransactionClaim, ReadTransactionClaimOutcome, TransactionDestination, TransactionToken,
-};
 use crate::{
-    APPLICATION, ConditionCheckInput, DATA_NAMESPACE, DeleteItem, DeleteItemInput, GetItem,
-    GetItemInput, GetItemOutcome, ItemMutationOutcome, Json, PartitionDelete, PartitionDeleteInput,
-    PartitionDeleteOutcome, PartitionGet, PartitionGetInput, PartitionGetOutcome, PartitionPut,
-    PartitionPutInput, PartitionPutOutcome, PartitionQuery, PartitionQueryInput,
-    PartitionQueryOutcome, PartitionTransactGet, PartitionTransactGetOutcome,
-    PartitionTransactWrite, PartitionTransactWriteInput, PartitionTransactWriteOutcome,
-    PartitionUpdate, PartitionUpdateInput, PartitionUpdateOutcome, PutItem, PutItemInput,
-    ScanItems, ScanItemsInput, ScanItemsOutcome, SortComparison, SortPredicate, TransactGet,
-    TransactWrite, TransactWriteInput, TransactionFailure, TransactionGetOutcome,
-    TransactionOutcome, TransactionWrite, UpdateItem, UpdateItemInput, UpdateItemOutcome,
-    data_key_hash,
+    ConditionCheckInput, DeleteItem, DeleteItemInput, GetItem, GetItemInput, GetItemOutcome,
+    ItemMutationOutcome, Json, PartitionDelete, PartitionDeleteInput, PartitionDeleteOutcome,
+    PartitionGet, PartitionGetInput, PartitionGetOutcome, PartitionPut, PartitionPutInput,
+    PartitionPutOutcome, PartitionQuery, PartitionQueryInput, PartitionQueryOutcome,
+    PartitionTransactGet, PartitionTransactGetOutcome, PartitionUpdate, PartitionUpdateInput,
+    PartitionUpdateOutcome, PutItem, PutItemInput, ScanItems, ScanItemsInput, ScanItemsOutcome,
+    SortComparison, SortPredicate, TransactGet, TransactionFailure, TransactionGetOutcome,
+    TransactionWrite, UpdateItem, UpdateItemInput, UpdateItemOutcome, data_key_hash,
 };
 use crab_cell_runtime::client::InvocationError;
 use crab_cell_runtime::identity::CellTarget;
@@ -660,174 +654,22 @@ impl DataEngine for CellStorage {
                     "transaction token account differs from items".into(),
                 ));
             }
-            let account = target(&account_id)?;
-            // A prior claim must be read before current routing: a split may
-            // scatter the keys, while the original Cell still holds the receipt.
-            let claimed = if let Some(token) = token.as_ref() {
-                let response = self
-                    .client
-                    .query::<ReadTransactionClaim>(&account, None, Json(token.clone()))
-                    .await
-                    .map_err(cell_error)?;
-                match response.output.0 {
-                    ReadTransactionClaimOutcome::Missing => None,
-                    ReadTransactionClaimOutcome::Claimed(destination) => Some(destination),
-                    ReadTransactionClaimOutcome::Mismatch => {
-                        return Err(StorageError::IdempotentMismatch);
-                    }
-                }
-            } else {
-                None
-            };
-            let mut current: Option<Option<(CellTarget, u64)>> = None;
-            if claimed.is_none() {
-                for (key_info, key) in &routing {
-                    let next = self.transaction_destination(key_info, key).await?;
-                    if current.as_ref().is_some_and(|current| current != &next) {
-                        return Err(unsupported("cross-partition TransactWriteItems"));
-                    }
-                    current = Some(next);
-                }
-            }
-            let proposed = match current.flatten() {
-                Some((cell, epoch)) => TransactionDestination::Data {
-                    partition: cell.partition().to_vec(),
-                    epoch,
-                },
-                None => TransactionDestination::Account,
-            };
-            let chosen = if let Some(destination) = claimed {
-                destination
-            } else if let Some(token) = token.as_ref() {
-                // The account claim fixes one destination for this token, so retries
-                // cannot apply the same request to another Cell after a route change.
-                let claim = self
-                    .client
-                    .command::<ClaimTransactionToken>(
-                        &account,
-                        mutation_identity()?,
-                        Json(ClaimTransactionTokenInput {
-                            token: token.clone(),
-                            destination: proposed,
-                        }),
-                    )
-                    .await;
-                match claim {
-                    Ok(committed) => match committed.output.0 {
-                        ClaimTransactionTokenOutcome::Claimed(destination) => destination,
-                        ClaimTransactionTokenOutcome::Mismatch => {
-                            return Err(StorageError::Internal(
-                                "unexpected successful token mismatch".into(),
-                            ));
-                        }
-                    },
-                    Err(InvocationError::Rejected(committed))
-                        if committed.output.0 == ClaimTransactionTokenOutcome::Mismatch =>
-                    {
-                        return Err(StorageError::IdempotentMismatch);
-                    }
-                    Err(InvocationError::Rejected(_)) => {
-                        return Err(StorageError::Internal(
-                            "unexpected rejected token claim".into(),
-                        ));
-                    }
-                    Err(error) => return Err(cell_error(error)),
-                }
-            } else {
-                proposed
-            };
-            let destination = match chosen {
-                TransactionDestination::Account => None,
-                TransactionDestination::Data { partition, epoch } => {
-                    let cell =
-                        CellTarget::new(account.tenant(), APPLICATION, DATA_NAMESPACE, &partition)
-                            .map_err(|error| StorageError::Internal(error.to_string()))?;
-                    Some((cell, epoch))
-                }
-            };
             let count = operations.len();
-            if let Some((target, epoch)) = destination {
-                let table_id = match &operations[0] {
-                    TransactionWrite::Put(input) => input.table_id.clone(),
-                    TransactionWrite::Delete(input) => input.table_id.clone(),
-                    TransactionWrite::Update(input) => input.table_id.clone(),
-                    TransactionWrite::ConditionCheck(input) => input.table_id.clone(),
-                };
-                return match self
-                    .client
-                    .command::<PartitionTransactWrite>(
-                        &target,
-                        mutation_identity()?,
-                        Json(PartitionTransactWriteInput {
-                            table_id,
-                            epoch,
-                            operations,
-                            idempotency: token,
-                        }),
-                    )
-                    .await
-                {
-                    Ok(committed)
-                        if committed.output.0 == PartitionTransactWriteOutcome::Applied =>
-                    {
-                        Ok(())
-                    }
-                    Ok(_) => Err(StorageError::Internal(
-                        "unexpected successful partition transaction result".into(),
-                    )),
-                    Err(InvocationError::Rejected(committed)) => match committed.output.0 {
-                        PartitionTransactWriteOutcome::Rejected { index, reason } => Err(
-                            transaction_canceled(index, reason, count, &return_old_on_failure),
-                        ),
-                        PartitionTransactWriteOutcome::Replay => {
-                            Err(StorageError::IdempotentReplay)
-                        }
-                        PartitionTransactWriteOutcome::Mismatch => {
-                            Err(StorageError::IdempotentMismatch)
-                        }
-                        PartitionTransactWriteOutcome::NotInstalled
-                        | PartitionTransactWriteOutcome::StaleRoute
-                        | PartitionTransactWriteOutcome::Sealed
-                        | PartitionTransactWriteOutcome::NotReady
-                        | PartitionTransactWriteOutcome::WrongPartition => Err(stale_partition()),
-                        PartitionTransactWriteOutcome::Applied => Err(StorageError::Internal(
-                            "unexpected rejected partition transaction result".into(),
-                        )),
-                    },
-                    Err(error) => Err(cell_error(error)),
-                };
-            }
-            match self
-                .client
-                .command::<TransactWrite>(
-                    &account,
-                    mutation_identity()?,
-                    Json(TransactWriteInput {
-                        operations,
-                        idempotency: token,
-                    }),
-                )
-                .await
-            {
-                Ok(committed) => match committed.output.0 {
-                    TransactionOutcome::Applied => Ok(()),
-                    _ => Err(StorageError::Internal(
-                        "unexpected successful transaction result".into(),
-                    )),
-                },
-                Err(InvocationError::Rejected(committed)) => {
-                    match committed.output.0 {
-                        TransactionOutcome::Rejected { index, reason } => Err(
-                            transaction_canceled(index, reason, count, &return_old_on_failure),
-                        ),
-                        TransactionOutcome::Replay => Err(StorageError::IdempotentReplay),
-                        TransactionOutcome::Mismatch => Err(StorageError::IdempotentMismatch),
-                        _ => Err(StorageError::Internal(
-                            "unexpected rejected transaction result".into(),
-                        )),
-                    }
-                }
-                Err(error) => Err(cell_error(error)),
+            let (decision, replay) = self
+                .admit_transaction(&account_id, token, operations, routing)
+                .await?;
+            match decision {
+                crate::CoordinatorDecision::Commit if replay => Err(StorageError::IdempotentReplay),
+                crate::CoordinatorDecision::Commit => Ok(()),
+                crate::CoordinatorDecision::Abort { index, reason } => Err(transaction_canceled(
+                    usize::from(index.unwrap_or(0)),
+                    reason.unwrap_or(TransactionFailure::Conflict),
+                    count,
+                    &return_old_on_failure,
+                )),
+                crate::CoordinatorDecision::Begin => Err(StorageError::Transient(
+                    "transaction decision remains pending".into(),
+                )),
             }
         })
     }

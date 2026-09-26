@@ -364,8 +364,6 @@ pub struct ConditionCheckInput {
 pub struct TransactWriteInput {
     /// Ordered operations, which may address distinct tables in this account.
     pub operations: Vec<TransactionWrite>,
-    /// Client request token committed with the item mutations.
-    pub idempotency: Option<crate::transaction_token::TransactionToken>,
 }
 
 /// Result of an account-local transaction.
@@ -373,10 +371,6 @@ pub struct TransactWriteInput {
 pub enum TransactionOutcome {
     /// Every operation committed.
     Applied,
-    /// This token and payload already committed in this Cell.
-    Replay,
-    /// This token belongs to another request payload.
-    Mismatch,
     /// Nothing committed; the operation at this position failed validation.
     Rejected {
         /// Position of the failing operation.
@@ -411,28 +405,9 @@ impl Command for TransactWrite {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        if let Some(token) = input.idempotency.as_ref() {
-            if account_target(&token.account_id)? != *context.target() {
-                return Err(Error::Identity(
-                    "transaction token reached the wrong account",
-                ));
-            }
-            match crate::transaction_token::applied_token(context, token)? {
-                crate::transaction_token::AppliedToken::Fresh => {}
-                crate::transaction_token::AppliedToken::Replay => {
-                    return Ok(CommandResult::Rejected(Json(TransactionOutcome::Replay)));
-                }
-                crate::transaction_token::AppliedToken::Mismatch => {
-                    return Ok(CommandResult::Rejected(Json(TransactionOutcome::Mismatch)));
-                }
-            }
-        }
         let outcome = transaction::write(context, input.operations)?;
         if outcome != TransactionOutcome::Applied {
             return Ok(CommandResult::Rejected(Json(outcome)));
-        }
-        if let Some(token) = input.idempotency.as_ref() {
-            crate::transaction_token::record_applied_token(context, token)?;
         }
         Ok(CommandResult::Success(Json(TransactionOutcome::Applied)))
     }

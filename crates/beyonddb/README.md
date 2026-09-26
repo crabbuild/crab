@@ -105,14 +105,15 @@ The synchronous table-transition worker is also implemented. Table resource tags
 and ListTagsOfResource paths; DeleteTable removes their rows. The RustFS
 process test verifies these requests through the AWS SDK across a server
 restart and verifies that a recreated table starts without the old tags.
-Single-Cell TransactWriteItems accepts Put, Delete, Update, and ConditionCheck.
-Its account Cell claims client request tokens across data Cells, and the
-selected Cell commits an applied-token receipt with the item writes. The SDK
-process test verifies replay, token mismatch, rollback, and recovery.
-Committed-token replays read the original Cell's receipt before consulting the
-current route, including after a split. Transactions spanning data Cells still
-need a coordinator. A token claimed but not applied before its source seals can
-fail transiently; relocation of that claim remains unfinished.
+TransactWriteItems accepts Put, Delete, Update, and ConditionCheck across
+account and data Cells. Every public write transaction uses one durable
+coordinator for admission, token lookup, prepare, decision, and resolution.
+Matching tokens find the original participant set before consulting current
+routes. Successful tokens replay for ten minutes after all participants
+resolve; canceled tokens are released only after every abort resolves.
+The signed SDK process test writes two primary keys in distinct data Cells,
+checks replay, mismatch and rollback, then verifies replay and both values
+after a hard kill and restart. Cross-Cell TransactGetItems remains unsupported.
 Once a table's initial route is published, keyed CRUD and Scan use its data
 Cells; unactivated tables
 still use the account Cell unless a provisioner is configured. The host-backed
@@ -216,9 +217,9 @@ Table status checks use a bounded route page. Scan reads at most 64 owner ranges
 per directory page and pins the route epoch while advancing through pages in
 one request. Query reads the HASH key's owner Cell through a local ordered
 RANGE-key index, including numeric sort keys and page continuation.
-Transactional Put/Delete and Get operations
-whose keys share one routed data Cell run in one Cell transaction or snapshot;
-cross-Cell transactions fail explicitly until the adapter drives the complete protocol. Split
+Public transactional writes share the coordinator protocol for single-Cell and
+cross-Cell requests. Transactional reads confined to one Cell use one snapshot;
+cross-Cell transactional reads fail explicitly. Split
 plans persist only the source range, two children, and expected epoch; route
 publication does not rewrite a route-sized blob. Host split selection,
 publication checks, and results use indexed rows and compact plans. The account Cell's
@@ -237,20 +238,22 @@ locks using one shared participant state machine. Ordinary reads and writes
 respect those locks. Data Cells refuse split sealing; account Cells refuse
 table deletion and route activation while prepared intents remain. Sharded coordinator Cells can durably
 record a participant set, prepare receipts, one commit or abort decision, and
-resolution progress. An internal driver resumes published BEGIN records from
+resolution progress. The public write driver resumes published BEGIN records from
 stored account/data participant payloads, handles prepare/decision ambiguity, and returns
 only after participant resolution. Coordinator token lookup preserves original
 participants across route changes and starts the ten-minute replay window only
-after all participants resolve. Public token admission still uses account
-claims and awaits integration with this coordinator path. Fenced startup
+after all participants resolve. The old account claims and Cell-local token
+receipts have been removed. Fenced startup
 recovery discovers registered coordinators and their immutable participant owners, then resolves unfinished work before
 public traffic starts. Keyed reads, Query, Scan, and same-Cell transactional
 reads now reject unresolved intents; range checks include pending creates.
 A mixed-participant host test restores account, data, and coordinator owners
 and finishes a pending transaction with concurrent drivers. These barriers
 fail closed and do not yet resolve decisions on demand.
-Continuous recovery, cross-Cell read snapshots, and adapter routing remain
-incomplete, so cross-Cell requests continue to fail explicitly.
+Continuous recovery, cross-Cell read snapshots, coordinator passivation, and
+fleet placement remain incomplete. Production currently admits 64 active Cells
+per node; distinct coordinator shards can exhaust that pool. See SCALING.md
+for the unqualified 10,000-Cell, multi-TB target.
 
 The signed SDK host test uses `CellNodeBuilder::build`, a published node
 advertisement, a renewing lease guard, and a task group. The lease task keeps
@@ -308,19 +311,19 @@ hash intervals to segments and skips data Cell ranges outside each interval;
 cells crossing an interval boundary still scan and filter their items. Query
 supports hash-only tables
 and sort-key tables once their initial data route is published.
-Account-local transactional put/delete/get operations work before route
-activation. After activation, transactions confined to one data Cell use that
-Cell and are fenced by its routing epoch; cross-Cell transactions are rejected.
-Account-local sort-key Query, index operations, streamed writes, and
-cross-Cell transactions remain unsupported by the adapter. These are internal Cell operations,
-not a DynamoDB HTTP API. `tests/account_cell.rs` exercises them through a real
+Low-level account and partition commands support local atomic transactions.
+The public adapter routes all transactional writes through the coordinator,
+including account participants before route activation. Same-Cell transactional
+reads use a local snapshot; cross-Cell reads remain unsupported. Account-local
+sort-key Query, index operations, and streamed writes remain unsupported.
+`tests/account_cell.rs` exercises them through a real
 `CellNodeBuilder` and in-memory object store, including request replay,
 receipt-based reads, conditional writes, update expressions, scan pagination, rollback of a
 multi-table write, and restoration from the published object-store root on a
 new host. `tests/elastic_cells.rs` exercises two distinct data Cells through a
 real host, range and epoch rejection, route validation and publication,
-partitioned adapter CRUD, Scan, and same-Cell transactions, rollback and
-cross-Cell rejection, account write fencing, and restoration of
+partitioned adapter CRUD, Scan, same-Cell and cross-Cell writes, rollback and
+cross-Cell read rejection, account write fencing, and restoration of
 both a data Cell and the route's account Cell from object storage. These tests
 do not prove live repartitioning, complete IAM, secondary indexes, Streams, or backups. The
 elastic test also verifies
