@@ -445,7 +445,7 @@ assert_placement_parity() {
   local observed_active
   observed_active="$(awk '$1 == "crab_http_server_cell_runtime_active_cells" { print $2; exit }' <<<"$metrics")"
   test -n "$observed_active"
-  jq --exit-status \
+  if ! jq --exit-status \
     --argjson expected_memory "$(jq -r '.resources.memory_bytes' <<<"$capacity")" \
     --argjson expected_disk "$(jq -r '.admission.local_disk_bytes' <<<"$capacity")" \
     --argjson expected_cells "$(jq -r '.admission.active_cells' <<<"$capacity")" \
@@ -455,7 +455,22 @@ assert_placement_parity() {
      .advertisement.placement.disk_capacity_bytes == $expected_disk and
      .advertisement.placement.max_active_cells == $expected_cells and
      .advertisement.placement.active_cells == $observed_active' \
-    <<<"$node" >/dev/null
+    <<<"$node" >/dev/null; then
+    # These observations are collected separately. Preserve their actual values
+    # on failure so a stale sample is distinguishable from a capacity defect.
+    jq --null-input \
+      --argjson capacity "$capacity" \
+      --argjson node "$node" \
+      --argjson observed_active "$observed_active" \
+      '{error: "placement parity failed", session: $node.session,
+        live: $node.live, expected: {
+          memory_capacity_bytes: $capacity.resources.memory_bytes,
+          disk_capacity_bytes: $capacity.admission.local_disk_bytes,
+          max_active_cells: $capacity.admission.active_cells,
+          active_cells: $observed_active},
+        advertised: $node.advertisement.placement}' >&2
+    return 1
+  fi
 }
 
 assert_placement_parity "$capacity_a" "$metrics_a" "$node_a"
