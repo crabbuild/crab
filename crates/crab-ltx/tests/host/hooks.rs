@@ -92,6 +92,9 @@ struct Faults {
     calls: Arc<Mutex<BTreeSet<&'static str>>>,
     largest_read: Arc<AtomicUsize>,
     read_calls: Arc<AtomicUsize>,
+    checksum_reads: Arc<AtomicUsize>,
+    checksum_read_bytes: Arc<AtomicUsize>,
+    largest_checksum_read: Arc<AtomicUsize>,
     largest_write: Arc<AtomicUsize>,
     write_calls: Arc<AtomicUsize>,
     file_syncs: Arc<AtomicUsize>,
@@ -139,6 +142,7 @@ struct File {
     inner: Box<dyn FileIo>,
     faults: Faults,
     track: bool,
+    checksum: bool,
 }
 
 impl FileIo for File {
@@ -169,6 +173,15 @@ impl FileIo for File {
         self.inner.write_all_at(offset, bytes)
     }
     fn read_exact_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        if self.checksum {
+            self.faults.checksum_reads.fetch_add(1, Ordering::Relaxed);
+            self.faults
+                .checksum_read_bytes
+                .fetch_add(len, Ordering::Relaxed);
+            self.faults
+                .largest_checksum_read
+                .fetch_max(len, Ordering::Relaxed);
+        }
         if self.track {
             self.faults.largest_read.fetch_max(len, Ordering::Relaxed);
             self.faults.read_calls.fetch_add(1, Ordering::Relaxed);
@@ -205,6 +218,7 @@ impl FileSystem for Faults {
         Ok(Box::new(File {
             inner: DirectFileSystem.open(path)?,
             faults: self.clone(),
+            checksum: path.to_string_lossy().ends_with(".crab-ltx-checksums"),
             track: self.track_all.load(Ordering::Relaxed)
                 || path.to_string_lossy().contains(".ltx"),
         }))
@@ -214,6 +228,7 @@ impl FileSystem for Faults {
         Ok(Box::new(File {
             inner: DirectFileSystem.open_rw(path)?,
             faults: self.clone(),
+            checksum: path.to_string_lossy().ends_with(".crab-ltx-checksums"),
             track: self.track_all.load(Ordering::Relaxed)
                 || path.to_string_lossy().contains(".ltx"),
         }))
@@ -223,6 +238,7 @@ impl FileSystem for Faults {
         Ok(Box::new(File {
             inner: DirectFileSystem.create(path)?,
             faults: self.clone(),
+            checksum: path.to_string_lossy().ends_with(".crab-ltx-checksums"),
             track: self.track_all.load(Ordering::Relaxed)
                 || path.to_string_lossy().contains(".ltx"),
         }))

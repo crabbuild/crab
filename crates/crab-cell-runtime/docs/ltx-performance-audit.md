@@ -4,8 +4,8 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `1a8c4ad670c`, plus bounded asynchronous cache fills recorded below. The latest three-node action trace uses predecessor `e50055c48bb`. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
-| Status | Hydration fetch, sparse registration, persistent-cache construction isolation, conditional issue enrichment, recovery receipt preservation, range-proportional compaction and bounded asynchronous cache fills are implemented. Loaded scale-out cannot assume idle ownership transfer. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
+| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `e1d4052b28e`, plus checksum ownership/read-window changes recorded below. The latest three-node action trace uses predecessor `e50055c48bb`. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
+| Status | Hydration fetch, sparse registration, persistent-cache construction isolation, conditional issue enrichment, recovery receipt preservation, range-proportional compaction, bounded asynchronous cache fills and local checksum read/merge improvements are implemented. Loaded scale-out cannot assume idle ownership transfer. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
 
@@ -29,7 +29,7 @@ their original baseline and subsequent implementation evidence.
 | 1 | Current-source capacity and recovery evidence (5, 12, 16, 23) | Provision the actual Compose disk budget, then run fixed-workload and offered-rate curves. Count executed owners, successful responses and published commit coverage separately. Fault an acknowledged follower-only tail during arrivals. |
 | 2 | Cache fills return verified reads before persistence; service benefit is unqualified (18) | Measure first mutation, required host-job interference, skipped-cache origin traffic and foreground tails with slow local syncs. |
 | 3 | Synchronous demand faults, installation and cleanup block a shared SQL worker (9–10, 19) | Run cold and resident Cells on the same worker. Separate origin wait, installation and confirmation; evaluate scheduling changes only after that attribution. |
-| 4 | Writable activation and fresh checksum maintenance scale with total page count (3, 14, 20, 22) | First bound local checksum-block work; evaluate lazy authenticated metadata separately. Measure first query, first mutation and recovery storms at fixed changed-page count. |
+| 4 | Writable activation and checksum residency scale with total page count (3, 14, 20, 22) | Qualify the local read/merge change; evaluate lazy authenticated metadata separately. Measure first query, first mutation and recovery storms at fixed changed-page count. |
 | 5 | Ordered root preparation and compaction constrain hot-Cell publication (4–5, 17) | Measure provider GET/HEAD/PUT phases and publisher queue age across repeated debt thresholds. Reuse verified unchanged metadata or coalesce roots only if those measurements justify it. |
 | 6 | Fixed read-ahead and fragmented hydration amplify object reads (8, 21) | Compare point, random and scan workloads on one fixed root; count useful/fetched bytes and concurrent duplicate ranges before changing the window. |
 | 7 | Checkpoint and full-image tails remain insufficiently sampled (6, 11, 13) | Sustained updates/deletes, pinned readers, large changes and simultaneous maintenance under 1 GiB; preserve checkpoint ordering and exact recovery. |
@@ -53,10 +53,10 @@ These costs need separate experiments; a queue-size increase addresses none
 of their underlying work.
 
 1. **Make checksum optimization two bounded changes.**
-   [Capture persistence](../../crab-ltx/src/pages.rs) still allocates and copies
-   the complete fresh-memory base after every cut; restored capture still reads
-   each overwritten checksum through an eight-byte positional read. Start with
-   bounded blocks and transactional overlays using the existing format. Then
+   The baseline [capture persistence](../../crab-ltx/src/pages.rs) copied the
+   full fresh-memory base after each cut and read restored checksums eight bytes
+   at a time. The local change below reuses the owned array and bounds read
+   windows without changing the format. Qualify those changes, then
    evaluate loading authenticated checksum information from the existing
    directory leaves on demand. Each leaf already binds checksums and locators;
    a second remote checksum-object graph needs evidence that those leaves are
@@ -1055,10 +1055,46 @@ folds the persisted checksum blocks before clean handoff. These operation-count
 tests use local files; their unused replica transport is in memory. They do not
 measure RustFS latency or isolate checksum writes from all capture writes.
 
-Fresh-memory full-array copies, old-checksum reads during capture, and work on
-the shared SQL worker remain open. Multi-buffer overlays, disjoint writes, and
-truncate/regrow tests preserve byte equality. Public-action percentiles,
-allocation peak, and eviction interference still need qualification.
+**Local merge and read-window follow-up:** the capture owner now adopts the
+isolated candidate only after the LTX file is sealed, retiring its reference to
+the old base before merging. Fixed-size updates mutate the uniquely owned
+`Vec` instead of allocating and copying the whole array. Retained immutable
+memory snapshots still use Rust's
+[`Arc::make_mut` copy-on-write contract](https://doc.rust-lang.org/std/sync/struct.Arc.html#method.make_mut).
+Growth may reallocate. Truncation releases capacity when it exceeds twice the
+live entry count; memory residency still scales with database size. The old
+owner remains unchanged on errors before sealing, and errors while merging a
+file-backed sidecar still fence `Db` before another capture.
+
+Restored capture retains one 4 KiB checksum window for each ordered page
+application. A new cut starts with an empty window so a prior merge cannot
+leave stale checksums. The read ends at the base's page count. Sparse edits
+can read up to one block per touched checksum, so this trades extra local
+bytes for fewer calls; it adds no remote reads or cross-cut cache. Truncation
+and clean handoff keep their existing 64 KiB sequential scans.
+
+Both performance regressions failed on the preceding implementation. A
+one-page update reused the original base allocation at 1,024 and 32,768 pages
+after the change. The 32 MiB resumed SQLite fixture produced two cuts, including
+checkpoint maintenance: checksum reads fell from **8,208 to 18**, with bytes
+changing from **65,664 to 69,776** and a maximum 4 KiB transfer. A point edit can
+touch separate checksum blocks for SQLite metadata and its data page; its
+bound is based on independently decoded changed-page counts. Repeated point
+edits and dense handoff exercise invalidation between cuts. Memory snapshot
+isolation and truncate/regrow pass at 512/4096-byte page sizes with and without
+`replica`. These are allocation-reuse and I/O-count proofs, not latency SLOs.
+
+Verification also covers the independent full-database CRC oracle, same-length
+database/sidecar corruption refusal, post-seal sidecar failure fencing, exact
+sparse publication, truncate/regrow directory selection and process-exit clean
+continuation. The public HTTP/mTLS collaboration test passes against real
+RustFS through owner takeover and Git readback. Replica and minimal-feature
+all-target Clippy, formatting and documentation checks are required for this
+change; full-suite CI results must match its source revision.
+
+Public-action percentiles, allocation peak, fragmented-update tradeoffs and
+eviction interference still need qualification. Eager authenticated activation
+metadata and work on the shared SQL worker remain separate open gates.
 
 ### 15. Peer verification couples provider latency to scarce CPU admission
 

@@ -664,6 +664,15 @@ after restore, resume, or compaction; services that build several plans at once
 must admit their combined decoded size rather than only their compressed LTX
 input size.
 
+Checksum candidates retain an isolated overlay until their LTX cut is sealed.
+The successful merge retires the predecessor and reuses an exclusively owned
+memory array for fixed-size updates. Growth and retained shared snapshots may
+still allocate; large truncations release excess capacity. Restored capture
+reads overwritten checksums through one 4 KiB local window per cut, while
+truncation and clean-handoff scans retain their 64 KiB sequential buffers.
+A failed sidecar merge fences the session. This changes local bookkeeping,
+not the LTX format or the authenticated metadata walk required for activation.
+
 Each open `Db` retains three SQLite connections with a 64 KiB page-cache
 target per connection. `Host` can share disk, I/O, blocking-job, recovery,
 dirty-job, scratch, and telemetry admission across many databases. Sparse page

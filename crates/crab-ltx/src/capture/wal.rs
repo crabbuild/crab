@@ -397,7 +397,7 @@ impl CaptureEngine {
             commit,
             !self.defer_durability,
         );
-        let (mut checksums, size_bytes, digest, captured_index) = match write_result {
+        let (checksums, size_bytes, digest, captured_index) = match write_result {
             Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 if let Some(parent) = &parent {
                     self.host.create_dir_all(parent)?;
@@ -425,10 +425,10 @@ impl CaptureEngine {
             self.sync_l0_ancestors()?;
         }
         let post_checksum = checksums.checksum();
-        // The checksum candidate remains isolated until the cut is durable. A
-        // failed local index update fences the owning Db, so partially
-        // updated ephemeral state can never authorize another capture.
-        checksums.persist()?;
+        // The candidate stays isolated until the cut is sealed. Retiring the
+        // predecessor lets the owner reuse its memory base; a failed sidecar
+        // update fences Db before partially updated state can be used again.
+        self.checksums.commit(checksums)?;
         // The next verify reads exactly these fields back; caching them —
         // plus the final consumed WAL frame for the page check — is what
         // spares it re-reading the file it just watched being written.
@@ -475,9 +475,8 @@ impl CaptureEngine {
         #[cfg(not(feature = "replica"))]
         let _ = captured_index;
 
-        // Advance cursor and checksum state together, only after the file is sealed.
+        // Advance only after both the sealed cut and checksum merge succeed.
         self.position = Pos::new(tx_id, post_checksum);
-        self.checksums = checksums;
 
         // Track the logical end of WAL content for checkpoint decisions
         // (db.go:1704-1718, issues #997/#927).
