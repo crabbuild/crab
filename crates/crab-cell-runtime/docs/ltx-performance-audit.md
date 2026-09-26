@@ -4,7 +4,7 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `e50055c48bb` and the cache-construction change recorded below. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
+| Scope | Initial baseline `0f3f4f7617a`; follow-up source audit through `2861b0064b1`. The latest three-node action trace uses predecessor `e50055c48bb`. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
 | Status | Hydration fetch, sparse registration and persistent-cache construction isolation are implemented. Loaded scale-out cannot assume idle ownership transfer. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
@@ -23,6 +23,8 @@ harness separately.
 
 | Priority | Remaining gap | First experiment |
 | --- | --- | --- |
+| P1 | The public action performs avoidable response-enrichment work after committing (24) | Skip catalog reads for empty selections; count actual peer queries and measure the same public action, including retries after a committed mutation |
+| P1 | Shared Compose disk headroom prevented node restart; the receipt lost the earlier recovery outcome (23) | Preflight the actual mount and retain separate takeover, acknowledgement and restart results before repeating scale stages |
 | P1 | Hydration fetch isolation is implemented; service latency remains unqualified (19) | Measure same-Cell and sibling-Cell tails under arrivals, fragmented fetches and slow page installation |
 | P1 | Sparse activation registry isolation is implemented; recovery-storm performance remains unqualified (20) | Concurrent activation under constrained disk IOPS; measure worker occupancy and shared bridge startup |
 | P1 | Persistent-cache construction is admitted and its quadratic byte summation is removed; service recovery remains unqualified (22) | Repeat concurrent recovery with slow metadata I/O and measure unrelated foreground latency |
@@ -39,9 +41,9 @@ harness separately.
 | P2 | Checksum maintenance differs between fresh and restored Cells (14) | Hold database and changed-page count fixed; compare capture, clean handoff, host I/O calls, and allocations in both states |
 | P2 | Checkpoint tail cost and shared maintenance resources (6, 11) | Long update runs with checkpoint, hydration, and compaction interference |
 
-These priorities identify code-supported risks and missing evidence. They do
-not rank measured contributions to public p99: current-source fleet phase
-measurements are still missing. The best next fix should remove work
+These priorities identify code-supported risks and missing evidence. One
+three-node phase now has per-action attribution, but current-HEAD scale and
+saturation measurements are still missing. The best next fix should remove work
 from a measured critical path while retaining the existing authority and
 durability contracts. Raising concurrency or queue capacity alone does not
 meet that criterion.
@@ -54,6 +56,40 @@ across fewer nodes than ingress, and almost every sampled runtime response
 used object proof. These observations make placement/phase attribution and
 follower-path qualification the next measurement priorities; they do not
 establish the dominant bottleneck or qualify later compaction changes.
+
+### Latest action evidence changes the next experiment
+
+The [attributed RustFS run at `e50055c48bb`](../../crab-http-server/deploy/cell-issue-fleet/qualification/2026-09-26-action-audit.md)
+completed 300 create/read pairs across 20 Cells and three nodes at five pairs/s.
+Write p50/p95/p99 was 20.738/35.213/38.973 ms; read p50/p95/p99 was
+6.561/11.445/21.322 ms. Every write joined to an object-proof response;
+122 were local and 178 forwarded. The later owner restart failed its disk
+budget, leaving the overall qualification failed and 5/10/20 stages unrun.
+
+At this offered rate, SQL-worker queue p99 was 0.068 ms while proof-task wait
+p99 was 20.073 ms. Local write p95 was 23.188 ms; forwarded write p95 was
+37.750 ms. Within each action, HTTP time outside the typed invocation had
+forwarded p50/p95 of 7.482/14.065 ms. That interval includes routing and
+response enrichment, not just transport. Twenty captures contained checkpoint
+work; their capture p95 was 7.696 ms versus 0.510 ms for the other 280.
+These are overlapping measurements and observational groups, not additive
+phase percentiles or a controlled experiment.
+
+The immediate measured-work sequence is therefore:
+
+1. Eliminate the provably unnecessary label query for empty selections (24),
+   and add routing/query/enrichment attribution to locate the remaining HTTP
+   time. Keep the generated typed client and committed receipt as the app
+   boundary. This is the smallest code-supported optimization of the measured
+   action; an A/B run must establish its latency benefit.
+2. Restore a valid qualification environment and complete fixed-workload scale
+   stages, then offered-rate curves. All 300 winners were object proof; this
+   run does not assess the follower response path or publication backlog under
+   saturation. Queue expansion has no supporting evidence from this load.
+3. For sustained write capacity, make compaction metadata and scratch grow with
+   the selected range (4–5). For recovery-size scaling, use authenticated
+   checksum blocks (3, 14). Cold-demand worker isolation (9), cache fills (18)
+   and placement under continuous traffic (12) require their own workloads.
 
 ## Architecture decision after this audit
 
@@ -139,8 +175,9 @@ log submission and actor scheduling. Authentication/routing/activation, query
 phases, individual provider attempts, and proof submission need further
 attribution before a complete latency decomposition. Replaying a shared-process
 test log proves the correlation fields and parser, not cross-container collection.
-Current-source Compose load, trace-overhead comparison, and saturation curves
-remain required. See the [action trace runbook](../../crab-http-server/REFERENCE.md#attribute-acknowledged-cell-writes).
+The later three-node Compose run joined all 300 writes across container logs,
+as recorded above. Current-HEAD scale, trace-overhead comparison, query phases
+and saturation curves remain required. See the [action trace runbook](../../crab-http-server/REFERENCE.md#attribute-acknowledged-cell-writes).
 
 Keep checkpoint execution serialized with the managed writer when exploring
 background work. The workspace pins `rusqlite` 0.34.0 / `libsqlite3-sys` 0.32.0;
@@ -1475,6 +1512,77 @@ pass. The real RustFS HTTP/mTLS collaboration/takeover test and public CellNode
 primitive takeover test pass, including the acknowledgement trace join in the
 HTTP case. Replica/runtime all-target Clippy, formatting and documentation
 validation pass. These checks do not qualify fleet recovery percentiles.
+
+### 23. Shared disk headroom prevents restart and cleanup can hide recovery evidence
+
+**Reproduced:** the three-node `e50055c48bb` run completed its offered load but
+the killed owner's restart exited at the server's disk-budget check. The
+[budget](../../crab-http-server/src/server.rs) subtracts at least 10 GiB from
+available disk and requires 20 GiB remaining. The
+[Compose renderer](../../crab-http-server/deploy/cell-issue-fleet/render.py)
+caps the measured disk at 30 GiB, while all node volumes and RustFS consume one
+VM filesystem. Named volumes isolate paths, not capacity or failure domains.
+The later surviving-node mount sample was already below 30 GiB free. This does
+not identify which workload consumed the missing space.
+
+The [recovery runner](../../crab-http-server/deploy/cell-issue-fleet/load.py)
+restarts the old owner in `finally`. A restart exception overrides either its
+earlier return value or the original failure, so the report has no `owner_loss`
+receipt. Existing recovery tests prove that acknowledged results are checked
+before restarting the old owner, but always let the restart succeed. They do
+not cover combined recovery/restart failure. The startup budget and shared-
+volume topology also exist in the compared main snapshot; the attributed
+load receipt is branch-specific.
+
+**Change to evaluate:** use the existing capacity probe to preflight actual
+mount headroom and record shared-disk topology. Keep takeover, all-acknowledgement
+verification and restart results separately; any required failure still fails
+the overall run. Retain the original failure alongside cleanup failure.
+Provision test disk before retrying rather than weakening production reserves.
+
+**Gate:** successful takeover plus failed restart, failed takeover plus failed
+restart, and full success must preserve distinct receipts. Test with a disk
+budget crossing the startup threshold; then repeat the real RustFS run on a
+provisioned disk. Independent disk faults require independent storage. The
+observed restart failure is an environment/qualification limit, not evidence
+that LTX lost an acknowledged mutation.
+
+### 24. Application response enrichment adds an avoidable query after commit
+
+**Confirmed:** [issue creation](../../crab-http-server/src/issues.rs) always
+awaits `labels::catalog` after `CreateIssue` returns a committed result.
+[The catalog](../../crab-http-server/src/labels.rs) routes and executes a typed
+`ListLabels` query. For a returned issue with no selected label IDs, the
+response selection is necessarily empty, so this query contributes no output.
+A label-query error can also turn an already committed create into an HTTP
+failure, making stable submission-ID retry essential.
+
+The sibling issue list/detail/edit paths make the same unconditional catalog
+call; [pull views](../../crab-http-server/src/pulls.rs) already skip it for an
+empty label selection. This behavior is present on the compared main snapshot.
+It is application composition, outside the LTX codec, yet inside the public
+action's measured latency.
+
+The new trace measures 7.482 ms median and 14.065 ms p95 outside the typed
+invocation for forwarded writes. That difference includes other work: the
+invocation timer starts in `PreparedCommand::execute`, after description and
+encoding in [command preparation](../src/client.rs), and HTTP response readiness
+follows enrichment. The trace does **not** assign all of this time to labels.
+
+**Change to evaluate:** condition catalog retrieval on whether the returned
+records contain selected IDs, matching the pull-view rule. Apply the same
+rule to list/detail/edit; do not special-case the create operation because a
+duplicate submission can return an existing issue that now has labels.
+Instrument query, routing and enrichment boundaries before larger batching or
+cached-description changes. Keep action authorization and receipt validation.
+
+**Gate:** public create/read/list/update with empty selections must issue zero
+label queries; selected labels retain their names/colors and permissions.
+Retry an ambiguous create after subsequently labeling the issue and require
+the existing issue plus current label rendering. Compare local and forwarded
+HTTP actions over RustFS with the same workload and count peer operations.
+Existing issue/label and peer takeover tests establish functional contracts;
+they do not currently prove the zero-query property or its latency benefit.
 
 ### Re-audit decision and proof gaps
 
