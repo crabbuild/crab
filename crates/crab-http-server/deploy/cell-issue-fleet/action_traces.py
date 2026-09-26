@@ -15,6 +15,8 @@ EVENTS = {
     "cell_worker_started", "cell_worker_completed", "cell_capture_completed",
     "cell_proof_completed", "cell_command_response", "cell_publication_started",
     "cell_publication_completed",
+    "http_authentication_completed", "http_archive_check_completed",
+    "repository_route_completed", "cell_command_prepared", "application_response_prepared",
 }
 
 
@@ -64,13 +66,22 @@ def join(samples: list[dict], events: list[dict]) -> list[dict]:
                 raise ValueError(f"acknowledgement has no matching successful HTTP attempt: {request_id}")
             entry = http[request_id]
             submission = one(entry, "application_submission")
+            authentication = one(entry, "http_authentication_completed")
+            archive = one(entry, "http_archive_check_completed")
+            prepared = one(entry, "cell_command_prepared")
+            enrichment = one(entry, "application_response_prepared")
+            routes = [event for event in entry if event["event"] == "repository_route_completed"]
+            route = one([event for event in routes if event["action"] == "repository.issue.create"], "repository_route_completed")
             invocation = one(entry, "cell_invocation_completed")
             response = one(entry, "http_response_ready")
             if submission["submission_id"] != sample["request_id"] or response["status"] != 201 or invocation["outcome"] != "committed":
                 raise ValueError(f"HTTP acknowledgement does not match its submission: {request_id}")
-            if any(event["node"] != write["entry"] for event in (submission, invocation, response)):
+            if any(event["node"] != write["entry"] for event in (submission, invocation, response, authentication, archive, prepared, enrichment, *routes)):
                 raise ValueError(f"HTTP acknowledgement changed entry node: {request_id}")
             key = tuple(invocation[field] for field in ("cell", "incarnation", "mutation_request_id"))
+            preparation_matches = all(prepared[field] == invocation[field] for field in ("cell", "incarnation", "mutation_request_id", "module", "operation_id"))
+            if not preparation_matches or route["succeeded"] is not True:
+                raise ValueError(f"acknowledgement does not match its prepared route: {request_id}")
             owner = mutations[key]
             released = one(owner, "cell_command_response")
             if released["commit_sequence"] != invocation["commit_sequence"] or released["source"] not in ("Object", "Fleet", "Recorded"):
@@ -83,6 +94,11 @@ def join(samples: list[dict], events: list[dict]) -> list[dict]:
                 raise ValueError(f"acknowledged mutation has failed execution: {request_id}")
             phases = {
                 "http_response_ready_us": response["elapsed_us"],
+                "authentication_us": authentication["elapsed_us"],
+                "archive_check_us": archive["elapsed_us"],
+                "command_route_us": route["elapsed_us"],
+                "client_preparation_us": prepared["elapsed_us"],
+                "response_enrichment_us": enrichment["elapsed_us"],
                 "client_invocation_us": invocation["elapsed_us"],
                 "actor_queue_us": one(owner, "cell_execution_started")["actor_queue_us"],
                 "worker_queue_us": one(owner, "cell_worker_started")["worker_queue_us"],
@@ -110,6 +126,7 @@ def join(samples: list[dict], events: list[dict]) -> list[dict]:
                 "owner_session": released["owner_session"], "proof": released["source"].lower(),
                 "http_latency_ms": write["latency_ms"], "attempts": write["attempts"],
                 "phases": phases, "captures": captures,
+                "repository_routes": [{key: event[key] for key in ("action", "elapsed_us", "succeeded")} for event in routes],
             })
         return actions
     except (KeyError, StopIteration) as error:

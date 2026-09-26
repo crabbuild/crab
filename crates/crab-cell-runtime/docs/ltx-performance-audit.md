@@ -4,7 +4,7 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; follow-up production changes through `c248fcaad78`, plus the demand-interference diagnostic recorded below. The latest 3/5/10/20-node traces use `a3638ef7e55`. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
+| Scope | Initial baseline `0f3f4f7617a`; follow-up production changes through `c248fcaad78`, plus the boundary-attribution implementation and demand-interference diagnostic recorded below. The latest completed 3/5/10/20-node traces use `a3638ef7e55`. Each diagnostic identifies its source separately. Compared with `origin/main` snapshot `de0bb234abc`, not a fresh main qualification. |
 | Status | Hydration fetch, sparse registration, persistent-cache construction isolation, conditional issue enrichment, recovery receipt preservation, range-proportional compaction, bounded asynchronous cache fills and local checksum read/merge improvements are implemented. Loaded scale-out cannot assume idle ownership transfer. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
@@ -1192,6 +1192,37 @@ concentrated, lightly loaded `a3638ef7e55` fleet, not a current-source capacity
 result. Add separate timings for authorization/catalog work, client preparation,
 owner resolution, response enrichment and provider attempts before choosing
 the next service-latency fix; repeat after actual ownership convergence.
+
+**Boundary-attribution implementation:** HTTP principal resolution and the
+pre-mutation archive policy now report separate durations. Repository routing
+reports its static action, result and elapsed time; client preparation binds
+its duration to the exact Cell, incarnation and mutation request. Issue creation
+reports its conditional label/assignee enrichment and response-value construction.
+The collector requires these events for each acknowledgement and retains nested
+routes separately: lifecycle routing belongs inside the archive-check interval,
+not the command route. These changes observe the existing execution order and
+add no authority cache or bypass. Provider attempt timing, query execution phases
+and tracing-overhead qualification remain separate work.
+
+The 44 Python harness cases pass. A missing archive phase was accepted by the
+previous collector and is now rejected; mismatched preparation identities or
+operation IDs, missing phases and failed routes also fail attribution. The
+HTTP/mTLS behavior test and isolated RustFS test pass through owner loss and
+restored readback. The latter's default text logs and actual received-response
+sample pass the updated join CLI. Runtime/server all-target Clippy also passes.
+
+One debug action at source `15b608452d9` plus the boundary patch measured
+31.165 ms at the client, 30.489 ms to response readiness, 6.292 ms in the archive
+check, 0.064 ms in the command route, 0.329 ms in preparation, 20.204 ms in
+invocation and 0.022 ms in response enrichment. It used local-operator
+authentication, which measured below one microsecond. The lifecycle route's
+0.066 ms belongs inside the archive-check interval. This proves phase capture
+on the real provider path; it is one shared-process diagnostic, not a comparison
+with the earlier fleet percentile or an authenticated-user latency target.
+`action-boundary-rustfs.log`, `.samples.jsonl`, `.actions.jsonl`, `.source.patch`
+and `.source.json` in the external target retain the received acknowledgement,
+logs, source and binary binding. The source patch includes the pre-existing
+staged test relocation; that relocation remains excluded from these commits.
 
 The subsequent `6fc1bbc1ceb` fault driver refused to kill an owner because no
 Cell remained on an unaffected owner. Its failure is retained in `fault.log`;

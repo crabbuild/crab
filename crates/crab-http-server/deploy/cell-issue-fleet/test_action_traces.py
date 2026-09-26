@@ -9,13 +9,18 @@ import action_traces as traces
 
 class TraceTests(unittest.TestCase):
     def setUp(self):
-        identity = {"cell": "CellId(11)", "incarnation": "IncarnationId(22)", "mutation_request_id": "RequestId(33)"}
+        identity = {"cell": "CellId(11)", "incarnation": "IncarnationId(22)", "mutation_request_id": "RequestId(33)", "module": "repository", "operation_id": 1}
         http = {"request_id": "http-attempt", "node": "node-01"}
         owner = {**identity, "node": "node-02", "owner_session": "SessionId(44)"}
         self.events = [
             {**http, "event": "application_submission", "submission_id": "submission"},
             {**http, **identity, "event": "cell_invocation_completed", "outcome": "committed", "commit_sequence": 7, "elapsed_us": 20},
             {**http, "event": "http_response_ready", "status": 201, "elapsed_us": 30},
+            {**http, "event": "http_authentication_completed", "elapsed_us": 1},
+            {**http, "event": "http_archive_check_completed", "elapsed_us": 2},
+            {**http, "event": "repository_route_completed", "action": "repository.issue.create", "elapsed_us": 3, "succeeded": True},
+            {**http, **identity, "event": "cell_command_prepared", "elapsed_us": 1},
+            {**http, "event": "application_response_prepared", "elapsed_us": 2},
             {**owner, "event": "cell_execution_started", "actor_queue_us": 1},
             {**owner, "event": "cell_worker_started", "worker_queue_us": 2},
             {**owner, "event": "cell_worker_completed", "worker_execute_us": 3, "succeeded": True},
@@ -42,12 +47,32 @@ class TraceTests(unittest.TestCase):
                     traces.join(self.samples, self.events[:omitted] + self.events[omitted + 1:])
 
     def test_missing_identity_or_timing_has_an_actionable_error(self):
-        for index, field in ((1, "cell"), (1, "incarnation"), (1, "elapsed_us"), (5, "worker_execute_us"), (9, "response_us")):
+        for name, field in (("cell_invocation_completed", "cell"), ("cell_invocation_completed", "incarnation"), ("cell_invocation_completed", "elapsed_us"), ("cell_worker_completed", "worker_execute_us"), ("cell_command_response", "response_us"), ("cell_command_prepared", "elapsed_us")):
             with self.subTest(field=field):
                 events = copy.deepcopy(self.events)
-                del events[index][field]
+                del next(event for event in events if event["event"] == name)[field]
                 with self.assertRaisesRegex(ValueError, "incomplete.*" + field):
                     traces.join(self.samples, events)
+
+    def test_preparation_must_match_the_acknowledged_mutation(self):
+        for field in ("cell", "incarnation", "mutation_request_id", "module", "operation_id"):
+            with self.subTest(field=field):
+                events = copy.deepcopy(self.events)
+                next(event for event in events if event["event"] == "cell_command_prepared")[field] = 2 if field == "operation_id" else "different"
+                with self.assertRaisesRegex(ValueError, "prepared route"):
+                    traces.join(self.samples, events)
+
+    def test_command_route_is_separate_from_nested_archive_and_enrichment_routes(self):
+        events = self.events + [{"request_id": "http-attempt", "node": "node-01", "event": "repository_route_completed", "action": "repository.read", "elapsed_us": 7, "succeeded": True}]
+        joined = traces.join(self.samples, events)[0]
+        self.assertEqual(joined["phases"]["command_route_us"], 3)
+        self.assertEqual([route["elapsed_us"] for route in joined["repository_routes"]], [3, 7])
+        for field, value in (("succeeded", False), ("node", "different")):
+            with self.subTest(field=field):
+                invalid = copy.deepcopy(events)
+                next(event for event in invalid if event.get("action") == "repository.issue.create")[field] = value
+                with self.assertRaises(ValueError):
+                    traces.join(self.samples, invalid)
 
     def test_acknowledgement_must_name_its_successful_http_attempt(self):
         for attempts in ([], [{"status": 503, "http_request_id": "http-attempt"}], [{"status": 201, "http_request_id": "different"}]):

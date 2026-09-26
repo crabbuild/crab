@@ -354,18 +354,28 @@ impl RepositoryCellRouter {
         principal: &Identity,
         action: &'static str,
     ) -> crate::Result<RepositoryCell> {
+        let started = std::time::Instant::now();
         validate_action(action)?;
         let target = self.repository_target(repository)?;
-        self.route_target(
-            target,
-            PeerPrincipal {
-                issuer: principal.issuer.clone(),
-                subject: principal.subject.clone(),
-                actions: vec![action.to_owned()],
-            },
-        )
-        .await
-        .map(|scheduled| scheduled.cell)
+        let result = self
+            .route_target(
+                target,
+                PeerPrincipal {
+                    issuer: principal.issuer.clone(),
+                    subject: principal.subject.clone(),
+                    actions: vec![action.to_owned()],
+                },
+            )
+            .await
+            .map(|scheduled| scheduled.cell);
+        tracing::debug!(
+            target: "crab_http_server::action",
+            event = "repository_route_completed",
+            action,
+            elapsed_us = started.elapsed().as_micros(),
+            succeeded = result.is_ok(),
+        );
+        result
     }
 
     pub(crate) fn repository_target(

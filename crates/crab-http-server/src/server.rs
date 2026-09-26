@@ -2250,6 +2250,7 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     let git_request = request.uri().path().starts_with("/git/");
     let integration_request = integration_api_path(request.uri().path());
     let token_request = integration_request && request.headers().contains_key("authorization");
+    let authentication_started = Instant::now();
     let principal = if internal_import {
         Principal::Local
     } else {
@@ -2261,6 +2262,11 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
             None => Principal::Local,
         }
     };
+    tracing::debug!(
+        target: "crab_http_server::action",
+        event = "http_authentication_completed",
+        elapsed_us = authentication_started.elapsed().as_micros(),
+    );
     let protected =
         request.uri().path().starts_with("/api/") && request.uri().path() != "/api/session";
     // Membership's handler hides absent and non-admin repositories uniformly.
@@ -2298,11 +2304,17 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
             .auth
             .as_ref()
             .is_some_and(|auth| !auth.accepts_mutation(&principal, request.headers()));
+    let archive_check_started = Instant::now();
     let archived_response = if !denied && !rejected_mutation && unsafe_method && !git_request {
         archived_mutation_response(&server, &principal, request.uri().path()).await
     } else {
         None
     };
+    tracing::debug!(
+        target: "crab_http_server::action",
+        event = "http_archive_check_completed",
+        elapsed_us = archive_check_started.elapsed().as_micros(),
+    );
     request.extensions_mut().insert(principal);
     let mut response = if denied && git_request {
         (

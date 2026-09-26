@@ -803,6 +803,7 @@ impl CellClient {
         identity: MutationIdentity,
         input: C::Input,
     ) -> std::result::Result<PreparedCommand<C>, InvocationError<C::Output>> {
+        let started = Instant::now();
         let now_ms = unix_time_ms().map_err(InvocationError::NotStarted)?;
         identity
             .validate(now_ms)
@@ -832,6 +833,16 @@ impl CellClient {
             input_limit: operation.input_limit,
             output_limit: operation.output_limit,
         };
+        tracing::debug!(
+            target: "crab_cell_runtime::action",
+            event = "cell_command_prepared",
+            cell = ?description.cell,
+            incarnation = ?description.incarnation,
+            mutation_request_id = ?identity.request_id,
+            module = C::MODULE,
+            operation_id = C::ID,
+            elapsed_us = started.elapsed().as_micros(),
+        );
         Ok(PreparedCommand {
             client: self.clone(),
             request,

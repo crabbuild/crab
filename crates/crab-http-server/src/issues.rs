@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use axum::{
     Extension, Json, Router,
@@ -265,6 +265,7 @@ async fn create(
         CreateIssueOutcome::Created(issue) => issue,
         CreateIssueOutcome::RequestConflict => return Err(Error::RequestConflict),
     };
+    let enrichment_started = Instant::now();
     // A replay returns the issue's current state, which may have acquired labels
     // since creation. Decide from that result, not from the create input.
     let labels = if issue.label_ids.is_empty() {
@@ -273,7 +274,7 @@ async fn create(
         labels::catalog(&server, &repo, &author).await?
     };
     let assignees = assignees::available(&repo, &author);
-    Ok((
+    let response = (
         StatusCode::CREATED,
         Json(issue_view(
             &issue,
@@ -283,7 +284,13 @@ async fn create(
             principal.can_write(&repo.config),
             true,
         )),
-    ))
+    );
+    tracing::debug!(
+        target: "crab_http_server::action",
+        event = "application_response_prepared",
+        elapsed_us = enrichment_started.elapsed().as_micros(),
+    );
+    Ok(response)
 }
 
 #[derive(Default, Deserialize)]

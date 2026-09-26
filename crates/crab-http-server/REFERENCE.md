@@ -486,7 +486,12 @@ scheduled fault still waits for publication to drain before killing its owner.
 | --- | --- |
 | Client HTTP latency | Retry-inclusive request through decoded response body; individual attempts retained separately |
 | HTTP response readiness | Entry handler lifetime, excluding later body delivery |
+| Authentication | HTTP principal resolution, including session/token storage when used |
+| Archive check | Pre-handler repository lifecycle policy, including its nested route and query; zero-work branches still record the interval |
+| Command route | Issue-create route resolution and activation before client preparation |
+| Client preparation | Description, contract/input validation, wire encoding and request digest before invocation |
 | Typed invocation | Transport invocation and result decoding after request validation |
+| Response enrichment | Issue-create label/assignee enrichment and response-value construction after the command; excludes later JSON encoding/body delivery |
 | Actor queue | Admitted command construction until its execution task starts |
 | Worker queue / execution | Worker admission and queue wait / synchronous command and capture |
 | Capture | LTX total and encode, write, sync, checkpoint observations within worker execution |
@@ -500,9 +505,17 @@ has no new proof/capture requirement. The client sample supplies acknowledgement
 an owner reply or handler-ready log alone does not prove receipt by the client.
 Reads retain HTTP samples but do not yet have joined query phases. The report's
 execution-owner and forwarded-write counts come from acknowledged writes only.
+`repository_routes` retains every entry-node route with its static application
+action and outcome. The archive-check and enrichment intervals may contain
+their own routes; only `repository.issue.create` supplies `command_route_us`.
+Preparation must match the exact acknowledged Cell, incarnation, mutation
+request, module and stable operation ID. Missing preparation or boundary events
+fail the current join.
 
 Replay retained evidence from the repository root, with one `--node-log` for
-every participating node and a new output path:
+every participating node and a new output path. Use the collector revision
+that produced the evidence: older server logs lack the new boundary events
+and cannot qualify their timings with the current collector.
 
 ```sh
 python3 -B crates/crab-http-server/deploy/cell-issue-fleet/action_traces.py \

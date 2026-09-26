@@ -24,6 +24,10 @@ impl Visit for Fields {
         self.0.insert(field.name().into(), value.into());
     }
 
+    fn record_u128(&mut self, field: &tracing::field::Field, value: u128) {
+        self.record_u64(field, u64::try_from(value).unwrap());
+    }
+
     fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
         self.0.insert(field.name().into(), value.into());
     }
@@ -111,6 +115,38 @@ impl Events {
             .find(|event| event["event"] == "http_response_ready")
             .unwrap();
         assert_eq!(response["status"], 201);
+        for name in [
+            "http_authentication_completed",
+            "http_archive_check_completed",
+            "cell_command_prepared",
+            "application_response_prepared",
+        ] {
+            let phases = http
+                .clone()
+                .filter(|event| event["event"] == name)
+                .collect::<Vec<_>>();
+            assert_eq!(phases.len(), 1, "missing or ambiguous {name}");
+            assert!(
+                phases[0]["elapsed_us"].as_u64().unwrap()
+                    <= response["elapsed_us"].as_u64().unwrap()
+            );
+        }
+        let prepared = http
+            .clone()
+            .find(|event| event["event"] == "cell_command_prepared")
+            .unwrap();
+        for field in ["cell", "incarnation", "mutation_request_id"] {
+            assert_eq!(prepared[field], invocation[field]);
+        }
+        let route = http
+            .clone()
+            .filter(|event| {
+                event["event"] == "repository_route_completed"
+                    && event["action"] == "repository.issue.create"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(route.len(), 1);
+        assert_eq!(route[0]["succeeded"], true);
         let owner = events
             .iter()
             .filter(|event| {
