@@ -2,6 +2,7 @@
 
 import io
 import json
+import subprocess
 import tempfile
 import tarfile
 import threading
@@ -183,6 +184,79 @@ class ImageProvenanceTests(unittest.TestCase):
                 patch.object(qualify, "run_stage", side_effect=AssertionError("started wrong-source node")):
             with self.assertRaisesRegex(RuntimeError, "source revision"):
                 qualify.main()
+
+
+class ResourceObservationTests(unittest.TestCase):
+    def test_deliberate_loss_keeps_survivor_samples_and_unexpected_loss_still_fails(self):
+        for intentional in (False, True):
+            with self.subTest(intentional=intentional):
+                raw = io.StringIO()
+                stop = threading.Event()
+                stop.set()
+
+                def run(args, **_):
+                    if "ps" in args:
+                        return subprocess.CompletedProcess(args, 0, "first\nsecond\n")
+                    if args[1] == "stats":
+                        return subprocess.CompletedProcess(args, 0, '{"Name":"node-01"}\n{"Name":"node-02"}\n')
+                    if "node-03" in args:
+                        raise subprocess.CalledProcessError(1, args)
+                    return subprocess.CompletedProcess(args, 0, "metric 1\n")
+
+                with patch.object(load.subprocess, "run", side_effect=run):
+                    summary = load.observe_nodes(Path("compose.yaml"), (), 3, stop, raw,
+                                                 lambda: {"node-03"} if intentional else set())
+                sample = json.loads(raw.getvalue())
+                self.assertEqual(set(sample["metrics"]), {"node-01", "node-02"})
+                self.assertEqual(bool(summary["errors"]), not intentional)
+                self.assertEqual(sample["excluded_nodes"], ["node-03"] if intentional else [])
+                self.assertLessEqual(sample["started_ns"], sample["completed_ns"])
+                if intentional:
+                    self.assertEqual(len(sample["containers"]), 2)
+
+    def test_kill_during_stats_retries_survivors_without_hiding_another_node_failure(self):
+        for bad_survivor in (False, True):
+            with self.subTest(bad_survivor=bad_survivor):
+                raw = io.StringIO()
+                stop, killing = threading.Event(), threading.Event()
+                stop.set()
+                stats_calls = []
+
+                def run(args, **_):
+                    if "ps" in args:
+                        ids = "first\nsecond\n" if killing.is_set() else "first\nsecond\nthird\n"
+                        return subprocess.CompletedProcess(args, 0, ids)
+                    if args[1] == "stats":
+                        stats_calls.append(args)
+                        if not killing.is_set():
+                            killing.set()
+                            raise subprocess.CalledProcessError(1, args)
+                        return subprocess.CompletedProcess(args, 0, '{}\n{}\n')
+                    if bad_survivor and "node-02" in args:
+                        raise subprocess.CalledProcessError(1, args)
+                    return subprocess.CompletedProcess(args, 0, "metric 1\n")
+
+                with patch.object(load.subprocess, "run", side_effect=run):
+                    summary = load.observe_nodes(Path("compose.yaml"), (), 3, stop, raw,
+                                                 lambda: {"node-03"} if killing.is_set() else set())
+                sample = json.loads(raw.getvalue())
+                self.assertEqual(len(stats_calls), 2)
+                self.assertNotIn("third", stats_calls[-1])
+                self.assertEqual(sample["retries"][0]["excluded_after"], ["node-03"])
+                self.assertEqual(bool(summary["errors"]), bad_survivor)
+                self.assertIn("node-01", sample["metrics"])
+
+    def test_missing_stats_fail_even_when_the_container_listing_is_complete(self):
+        raw = io.StringIO()
+        stop = threading.Event()
+        stop.set()
+
+        def run(args, **_):
+            return subprocess.CompletedProcess(args, 0, "a\nb\nc\n" if "ps" in args else "")
+
+        with patch.object(load.subprocess, "run", side_effect=run):
+            summary = load.observe_nodes(Path("compose.yaml"), (), 3, stop, raw)
+        self.assertIn("lost container statistics", summary["errors"][0])
 
 
 class LoadTests(unittest.TestCase):

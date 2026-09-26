@@ -383,7 +383,7 @@ def drain_publication(path: Path, profiles: tuple[str, ...], nodes: int) -> dict
         time.sleep(1)
 
 
-def observe_nodes(path: Path, profiles: tuple[str, ...], nodes: int, stop, output) -> dict:
+def observe_nodes(path: Path, profiles: tuple[str, ...], nodes: int, stop, output, expected_absent=None) -> dict:
     names = [node_name(index) for index in range(1, nodes + 1)]
     flags = [flag for profile in profiles for flag in ("--profile", profile)]
     prefix = ["docker", "compose", "--file", str(path), *flags]
@@ -393,24 +393,52 @@ def observe_nodes(path: Path, profiles: tuple[str, ...], nodes: int, stop, outpu
     def read(*args):
         return subprocess.run(args, check=True, capture_output=True, text=True, timeout=15).stdout
 
+    def excluded():
+        return set(expected_absent()) if expected_absent else set()
+
     def metrics(node):
-        return read(*prefix, "exec", "-T", node, "crab-http-server", "--config", CONFIG, "cells", "metrics")
+        try:
+            return node, read(*prefix, "exec", "-T", node, "crab-http-server", "--config", CONFIG, "cells", "metrics"), None
+        except (OSError, subprocess.SubprocessError) as error:
+            return node, None, str(error)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, nodes)) as readers:
         while True:
-            sample = {"started_at": datetime.now(timezone.utc).isoformat()}
+            sample = {"started_at": datetime.now(timezone.utc).isoformat(), "started_ns": time.monotonic_ns(),
+                      "metrics": {}, "errors": [], "retries": []}
             started = time.monotonic()
-            try:
-                containers = read(*prefix, "ps", "--quiet", *names).split()
-                if len(containers) != nodes:
-                    raise RuntimeError("resource observation lost an expected node")
-                sample["containers"] = [json.loads(line) for line in read(
-                    "docker", "stats", "--no-stream", "--format", "{{json .}}", *containers,
-                ).splitlines()]
-                sample["metrics"] = dict(zip(names, readers.map(metrics, names)))
-            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
-                sample["error"] = str(error)
-                errors.append(str(error))
+            # A deliberate kill may race this snapshot. Retry only when the
+            # fault boundary advanced; an unrelated missing node still fails.
+            for attempt in range(2):
+                omitted = excluded()
+                observed = [name for name in names if name not in omitted]
+                try:
+                    if not observed or not omitted.issubset(names):
+                        raise RuntimeError("resource observation has an invalid fault exclusion")
+                    containers = read(*prefix, "ps", "--quiet", *observed).split()
+                    if len(containers) != len(observed):
+                        raise RuntimeError("resource observation lost an expected node")
+                    sample["containers"] = [json.loads(line) for line in read(
+                        "docker", "stats", "--no-stream", "--format", "{{json .}}", *containers,
+                    ).splitlines()]
+                    if len(sample["containers"]) != len(containers):
+                        raise RuntimeError("resource observation lost container statistics")
+                    break
+                except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                    if attempt == 0 and excluded() != omitted:
+                        sample["retries"].append({"error": str(error), "excluded_before": sorted(omitted),
+                                                  "excluded_after": sorted(excluded())})
+                        continue
+                    sample["errors"].append(str(error))
+                    break
+            for node, value, error in readers.map(metrics, [name for name in names if name not in excluded()]):
+                if error is None:
+                    sample["metrics"][node] = value
+                elif node not in excluded():
+                    sample["errors"].append(f"{node}: {error}")
+            sample["excluded_nodes"] = sorted(excluded())
+            errors.extend(sample["errors"])
+            sample["completed_ns"] = time.monotonic_ns()
             sample["elapsed_seconds"] = time.monotonic() - started
             output.write(json.dumps(sample) + "\n")
             output.flush()

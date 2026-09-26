@@ -108,6 +108,21 @@ using the image source's stage runner and separately identified fault harness.
 This provides a reproducible environment for the pending live proof without
 lowering the runtime's disk admission requirement.
 
+The fault driver now also retains survivor CPU/memory snapshots and runtime
+metrics while the selected owner is absent. The ordinary load path still
+requires every node; deliberate absence is limited to the fault driver's owner
+after its kill begins. A snapshot racing that transition may retry once with
+the cause retained; unrelated loss or missing statistics fails the gate. Every
+received write joins to its actual execution owner using surviving logs and the
+removed owner's saved log, with before/during/after counts based on client
+dispatch time. Read and failed-attempt owner attribution remain open. The four
+new regressions cover deliberate versus unexpected loss, snapshot/kill races,
+missing statistics and retained removed-owner traces. Live qualification must
+use this harness revision before those observations close a measurement gate.
+The missing-statistics regression also fails against `6fc1bbc1ceb`: the previous
+observer accepted an empty Docker stats response without reporting an error.
+All 39 Python harness tests and the documentation checks pass after the change.
+
 ## Priority after the implemented changes
 
 The following is the current execution order. Numbered findings below retain
