@@ -131,6 +131,17 @@ analysis of the earlier image, not current-runtime throughput qualification.
 
 ### Measurement contract
 
+The fleet workflow budgets orchestration separately from application latency:
+ten minutes for image import, 200 for all sixteen rate points, fifteen for the
+unpublished-tail fault, and five each for evidence collection and upload, within
+a 240-minute job. Each point includes placement convergence, complete
+acknowledgement readback and owner recovery in addition to its timed arrivals.
+Explicit step limits leave artifact time if a phase stalls; a phase timeout
+fails qualification, and partial reports cannot establish completed capacity.
+The existing arrival durations, placement and recovery deadlines, integrity
+checks and overload classification remain the acceptance gates. GitHub defines
+[step timeouts as process limits and job timeouts as job cancellation](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepstimeout-minutes).
+
 Report separate latency distributions for resident local actions, forwarded
 actions, cold first query, cold first mutation, and recovery. Hold the database,
 changed pages, payload entropy and durability contract fixed. The replica-cost

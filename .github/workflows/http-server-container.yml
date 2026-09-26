@@ -1003,7 +1003,9 @@ jobs:
     name: Qualify scheduled fleet traffic and owner loss
     if: ${{ inputs.fleet_image_run }}
     runs-on: ${{ inputs.arm64 && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
-    timeout-minutes: 120
+    # Bound each phase below the job ceiling so a stalled measurement leaves
+    # time to retain completed points, raw samples and node logs.
+    timeout-minutes: 240
     permissions:
       contents: read
       actions: read
@@ -1017,6 +1019,7 @@ jobs:
           ref: ${{ inputs.source_ref || github.sha }}
           persist-credentials: false
       - name: Verify harness and import qualified image
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           [[ "$IMAGE_RUN" =~ ^[0-9]+$ ]]
@@ -1039,6 +1042,7 @@ jobs:
           docker info --format '{{json .}}' > "${RUNNER_TEMP}/fleet-evidence/docker-info.json"
           df -k /var/lib/docker > "${RUNNER_TEMP}/fleet-evidence/disk-before.txt"
       - name: Measure offered-rate curves at 3, 5, 10 and 20 nodes
+        timeout-minutes: 200
         run: |
           set -euo pipefail
           # The existing qualifier requires a clean checkout matching the
@@ -1071,6 +1075,7 @@ jobs:
                       summary.write(f'| {stage["nodes"]} | {point["rate"]} | {point["passed"]} | {point["report"]} |\n')
           PY
       - name: Lose an acknowledged unpublished owner during arrivals
+        timeout-minutes: 15
         run: |
           set -euo pipefail
           python3 -B crates/crab-http-server/deploy/cell-issue-fleet/fault.py \
@@ -1080,6 +1085,7 @@ jobs:
             2>&1 | tee "${RUNNER_TEMP}/fleet-evidence/fault.log"
       - name: Retain stage reports and final node logs
         if: always()
+        timeout-minutes: 5
         run: |
           set -euo pipefail
           evidence="${RUNNER_TEMP}/fleet-evidence"
@@ -1096,6 +1102,7 @@ jobs:
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
+        timeout-minutes: 5
         with:
           name: cell-fleet-qualification-${{ github.run_id }}
           path: ${{ runner.temp }}/fleet-evidence
