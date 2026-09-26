@@ -318,13 +318,14 @@ impl PageChecksums {
                 pages as usize * page_size as usize,
             )?;
             for (index, (stored, bytes)) in checksums
-                .chunks_exact(8)
+                .as_chunks::<8>()
+                .0
+                .iter()
                 .zip(image.chunks_exact(page_size as usize))
                 .enumerate()
             {
                 let page = (first + index as u64) as u32;
-                let expected =
-                    u64::from_be_bytes(stored.try_into().map_err(|_| CrabError::LTXCorrupted)?);
+                let expected = u64::from_be_bytes(*stored);
                 if page == ltx::lock_pgno(page_size) {
                     if expected != 0 {
                         return Err(CrabError::ChecksumMismatch);
