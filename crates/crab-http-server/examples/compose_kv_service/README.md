@@ -3,7 +3,7 @@
 This example runs the same tenant-scoped KV service in 3, then 5, 10, and 20
 containers. Each node owns one tenant Cell and has a Docker limit of **1 vCPU and
 1 GiB memory**. The service uses `CellApplication`, `CellNodeBuilder`, the
-registered KV primitive, SQLite/LTX publication, and a shared RustFS object
+registered KV primitive, SQLite/LTX publication, and a shared RustFS 1.0.0 GA object
 store. A session lease is created and renewed with RustFS conditional writes;
 loss of that lease closes readiness. Any healthy node accepts a request for any
 tenant. It reads the Cell's owner from RustFS and forwards the request to that

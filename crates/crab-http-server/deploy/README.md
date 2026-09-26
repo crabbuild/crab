@@ -169,6 +169,14 @@ therefore creates a new, empty Cell fleet. The defaults need no
 | `CRAB_TMP_SIZE` | `2g` | Bounded receive-pack and index scratch space |
 | `CRAB_HTTP_SERVER_IMAGE` | `crab-http-server:local` | Server image name or prebuilt image reference |
 
+The local Compose stack, Cell issue fleet, KV example and Cell/LTX recovery
+CI pin RustFS `1.0.0-glibc` GA by its multi-platform image digest. Use a fresh
+project and volume for qualification; earlier beta.8 records retain their original
+provider identity and do not qualify GA. The GA image has passed local
+Colima startup, bucket creation, peer certificate initialization and the
+HTTP/mTLS remote-owner publication/recovery test. Full GA fleet measurements
+remain a separate gate.
+
 The dependency images are version- and digest-pinned. `RUSTFS_IMAGE`,
 `AWS_CLI_IMAGE`, and `CADDY_IMAGE` exist for controlled mirrors; keep them
 pinned when overriding. To use a prebuilt server image, set

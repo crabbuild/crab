@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
 HERE = Path(__file__).resolve().parent
-RUSTFS_IMAGE = "ghcr.io/rustfs/rustfs:1.0.0-beta.8-glibc@sha256:040304b66e029a5cde4bed140b41513e925909839a9b912a40a98340610d1f66"
+RUSTFS_IMAGE = "ghcr.io/rustfs/rustfs:1.0.0-glibc@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858"
 AWS_IMAGE = "public.ecr.aws/aws-cli/aws-cli:2.27.41@sha256:1c2d7a51b1ff4f460bc3f1e1ee46a6cef47c7429ad9089ef99012a95e472a1a5"
 CADDY_IMAGE = "caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d"
 BUCKET = "crab-cell-issue-fleet"
