@@ -173,12 +173,10 @@ head, catalog page, and control read per healthy forwarded request.
 The receiver now passes its verified local handle into the canonical dispatch
 path. The mTLS public-host test counts one catalog head, one page, and one
 control read for each peer operation, and continues through owner loss over
-both in-memory storage and local RustFS. A public comment read makes **two**
-peer operations: the typed client sends
-`Describe` before `Query`. It therefore makes two receiver resolutions even
-after this fix. The direct dispatcher test proves it does not resolve again
-when supplied a handle. This is a remaining request-path cost, not evidence
-of a second receiver lookup.
+both in-memory storage and local RustFS. The first receiver change still left
+two peer operations per public comment read: `Describe` followed by `Query`.
+The direct dispatcher test proves it does not resolve again when supplied a
+handle.
 
 The sender has a separate cost: `PeerHttpRoundTrip::send_inner` calls
 `owner()` for each operation, and `owner()` reads exact control and the signed
@@ -186,15 +184,19 @@ node advertisement. A router-only hint would leave those reads in place.
 Count sender control/directory reads and peer round trips per public action
 before changing this path; the receiver counts above do not include them.
 
-Before adding an ingress owner hint, measure those two peer round trips and
-their metadata reads. A candidate is to pass the exact description already
-read from Cell control into the routed typed client. The owner must still
-compare expected incarnation, code, and schema at admission; a stale route
-must fail closed, and mutation digest/resolve behavior must stay stable.
-Keep the existing `Describe` path for clients without an authoritative route
-observation. Accept such a change only if the same public action removes one
-peer round trip and one receiver catalog/control read without increasing
-ambiguous outcomes or weakening rollout and takeover tests.
+The routed client now receives the exact description already read from Cell
+control and skips `Describe`. Its signed command/query/resolve payload carries
+the expected Cell ID, incarnation, code, and schema. The owner compares those
+fields before execution; actor fencing and product authorization still apply.
+Focused tests reject each stale field, retain signature binding, and preserve
+mutation digest, duplicate delivery, and unknown-result evidence. Clients
+without an observed route still obtain a description through their transport.
+The public comment-read test now proves one peer operation and one receiver
+catalog/control resolution through HTTP and mTLS over both in-memory storage
+and real RustFS, including owner loss and restored application data. Fourteen
+typed client/effect tests and the three public-host ambiguity, recovery, and
+compatible-rollout cases pass. Current-image fleet latency qualification and
+packet 3's entry-router reads remain open.
 
 ## Work packet 3: give ingress a bounded owner hint
 
@@ -275,6 +277,15 @@ define the ownership constraints and focused failure tests for changing these
 paths. The [RustFS cleanup comparison](../../crab-ltx/perf/README.md#streaming-published-cut-cleanup-2026-09-26)
 measures this first change separately from public response latency.
 
+Hold database size and changed pages fixed while comparing fresh, sparse,
+resident-after-hydration, and clean-resumed Cells. [Audit finding 14](ltx-performance-audit.md#14-checksum-bookkeeping-depends-on-activation-history-and-uses-tiny-file-io)
+identifies a full checksum-array copy per cut in fresh sessions, individual
+checksum file I/O in restored sessions, and per-page reads during clean handoff.
+Measure checksum calls/bytes, allocations, eviction, and reactivation before
+choosing a common bounded block strategy. Benchmark first mutation and repeated
+updates in each state; a sparse-only capture result does not cover the fresh
+path. Preserve failure fencing and exact continuation verification.
+
 For writes, attribute SQLite command time, LTX capture, follower append
 and fsync, root preparation, object CAS, queue wait, and final proof source.
 The runtime already supports follower and object proofs. Tune batching or
@@ -337,6 +348,15 @@ stay depth first. Delayed-provider tests prove overlap and the ceiling, while
 corruption and multi-parent tests preserve ordered validation. The metadata
 walk remains eager, and the larger activation and interference qualification
 in packet 4 remains open.
+
+Checksum persistence now coalesces adjacent changed entries into writes capped
+at 64 KiB; clean handoff buffers dense checksum reads to the same bound. Local
+real-SQLite tests reproduce the old per-entry I/O and verify reduced host calls,
+exact sidecar bytes, corruption refusal, and post-seal failure fencing. Fresh
+Cells still copy their dense memory index per cut, and restored Cells still
+read overwritten old checksums individually. The fresh/restored comparison,
+allocation and handoff measurements, and sibling-Cell latency gate in
+[audit finding 14](ltx-performance-audit.md) remain open.
 
 The local [replica cost record](../../crab-ltx/perf/README.md#cell-publication-cost-per-command)
 measures about 0.3 ms for a small sparse deferred capture, but 87–139 ms

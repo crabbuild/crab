@@ -261,3 +261,81 @@ fn published_deferred_capture_is_pruned_without_a_local_durability_barrier() {
     assert_eq!(faults.file_syncs.load(Ordering::Relaxed), 0);
     assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 0);
 }
+
+fn resumed_checksum_fixture() -> (tempfile::TempDir, Arc<Faults>, Db) {
+    let (directory, faults, host, mut source) = fixture();
+    source
+        .transaction(|tx| tx.execute("INSERT INTO t VALUES(zeroblob(33554432))", []))
+        .unwrap();
+    source.capture().unwrap();
+    source.persist_continuation().unwrap();
+    source.close().unwrap();
+    faults.track_all.store(true, Ordering::Relaxed);
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("checksum-handoff"),
+            [4; 16],
+        ),
+        [5; 32],
+        [6; 16],
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(host);
+    let resumed = replica
+        .open_resumed(
+            &directory.path().join("source.sqlite"),
+            &directory.path().join("resumed.sqlite"),
+        )
+        .unwrap();
+    (directory, faults, resumed)
+}
+
+#[test]
+fn checksum_handoff_batches_reads_and_preserves_the_dense_sidecar() {
+    let (directory, faults, resumed) = resumed_checksum_fixture();
+    let sidecar = directory.path().join("resumed.sqlite.crab-ltx-checksums");
+    let before = std::fs::read(&sidecar).unwrap();
+    faults.read_calls.store(0, Ordering::Relaxed);
+    faults.largest_read.store(0, Ordering::Relaxed);
+
+    resumed.persist_continuation().unwrap();
+
+    assert!(
+        faults.read_calls.load(Ordering::Relaxed) <= before.len().div_ceil(64 * 1024),
+        "checksum handoff made {} reads for {} bytes",
+        faults.read_calls.load(Ordering::Relaxed),
+        before.len()
+    );
+    assert!(faults.largest_read.load(Ordering::Relaxed) <= 64 * 1024);
+    assert_eq!(std::fs::read(sidecar).unwrap(), before);
+    resumed.close().unwrap();
+}
+
+#[test]
+fn checksum_capture_batches_adjacent_updates() {
+    let (_directory, faults, mut resumed) = resumed_checksum_fixture();
+    resumed
+        .transaction(|tx| tx.execute("UPDATE t SET v=randomblob(length(v))", []))
+        .unwrap();
+    faults.write_calls.store(0, Ordering::Relaxed);
+    faults.largest_write.store(0, Ordering::Relaxed);
+
+    let captured = resumed.capture_deferred().unwrap();
+
+    assert!(
+        faults.write_calls.load(Ordering::Relaxed) < 1024,
+        "capture made {} writes for {} cut bytes",
+        faults.write_calls.load(Ordering::Relaxed),
+        captured
+            .segments
+            .iter()
+            .map(|cut| cut.info().size_bytes)
+            .sum::<u64>()
+    );
+    assert!(faults.largest_write.load(Ordering::Relaxed) <= 64 * 1024);
+    // Re-read and fold the persisted blocks before allowing a clean handoff.
+    resumed.persist_continuation().unwrap();
+    resumed.close().unwrap();
+}
