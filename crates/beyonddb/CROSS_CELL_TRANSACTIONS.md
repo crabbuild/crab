@@ -18,9 +18,10 @@ Each coordinator now indexes records with unresolved participants and exposes
 bounded cursor pages. A new owner can discover both undecided and decided
 work after restoring its published Cell state. An internal resolver can now
 finish a terminal decision across data Cell participants, using participant
-state after an ambiguous reply and recording each resolution durably. It
-does not handle account Cell participants or undecided `BEGIN` records yet;
-the owner recovery worker and adapter path remain to be built.
+state after an ambiguous reply and recording each resolution durably. A
+bounded sweep can abort unfinished `BEGIN` records and complete terminal
+decisions after an owner is fenced. Automatic coordinator discovery at
+startup, account Cell participants, and the adapter path remain to be built.
 
 The ExtendDB `DataEngine` contract requires all writes, the account-scoped
 client token, and stream capture to commit together. Its engine validates up
