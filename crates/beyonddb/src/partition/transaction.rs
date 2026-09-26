@@ -3,13 +3,13 @@
 use std::collections::HashSet;
 
 use crab_cell_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
-use extenddb_core::types::Item;
+use extenddb_core::types::{Item, KeySchemaElement};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AccessState, DATA_MODULE, Json, PartitionGetInput, Result, SqlValue, command_access,
-    command_item, data_key_hash, decode_spec, item_key, query_access, statement, valid_item,
-    valid_key, write_item,
+    AccessState, DATA_MODULE, Json, PartitionGetInput, PartitionSpec, Result, SqlValue,
+    command_access, command_item, data_key_hash, decode_spec, item_key, query_access, statement,
+    valid_item, valid_key, write_item,
 };
 use crate::items::{TransactionFailure, TransactionWrite, decode_item};
 
@@ -52,6 +52,8 @@ pub enum PartitionTransactWriteOutcome {
     NotReady,
     /// A key is outside this partition's range.
     WrongPartition,
+    /// Another prepared transaction owns a key in this request.
+    Conflict,
 }
 
 /// Commit a batch to one data Cell or roll back every staged write.
@@ -109,85 +111,11 @@ impl Command for PartitionTransactWrite {
             ));
         }
 
-        let mut touched = HashSet::with_capacity(input.operations.len());
-        for (index, operation) in input.operations.into_iter().enumerate() {
-            let (table_id, item, condition) = match &operation {
-                TransactionWrite::Put(input) => {
-                    (&input.table_id, &input.item, input.condition.as_ref())
-                }
-                TransactionWrite::Delete(input) => {
-                    (&input.table_id, &input.key, input.condition.as_ref())
-                }
-                TransactionWrite::Update(input) => {
-                    (&input.table_id, &input.key, input.condition.as_ref())
-                }
-                TransactionWrite::ConditionCheck(input) => {
-                    (&input.table_id, &input.key, Some(&input.condition))
-                }
-            };
-            if *table_id != spec.table.id {
-                return Ok(rejected(PartitionTransactWriteOutcome::StaleRoute));
-            }
-            let valid = match operation {
-                TransactionWrite::Put(_) => valid_item(item, &spec.table),
-                _ => valid_key(item, &spec.table),
-            };
-            if !valid {
-                return Ok(validation(index, "item violates table schema"));
-            }
-            let key = item_key(item, &spec.table.key_schema)?;
-            if !spec.contains(data_key_hash(&spec.table.id, item, &spec.table.key_schema)?) {
-                return Ok(rejected(PartitionTransactWriteOutcome::WrongPartition));
-            }
-            if !touched.insert(key.clone()) {
-                return Ok(validation(
-                    index,
-                    "more than one operation addresses the same item",
-                ));
-            }
-            if let Some(condition) = condition {
-                let old = command_item(context, &key)?;
-                let empty = Item::new();
-                match condition.evaluate(old.as_ref().unwrap_or(&empty)) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        return Ok(rejected(PartitionTransactWriteOutcome::Rejected {
-                            index,
-                            reason: TransactionFailure::ConditionFailed(old),
-                        }));
-                    }
-                    Err(reason) => return Ok(validation(index, &reason)),
-                }
-            }
-            match operation {
-                TransactionWrite::Put(input) => {
-                    write_item(context, key, &input.item, &spec.table.key_schema)?;
-                }
-                TransactionWrite::Delete(_) => {
-                    context.sql(&statement(
-                        "DELETE FROM ddb_partition_items WHERE item_key = ?1",
-                        vec![SqlValue::Blob(key)],
-                    ))?;
-                }
-                TransactionWrite::Update(input) => {
-                    let old = command_item(context, &key)?;
-                    let mut new = old.unwrap_or(input.key);
-                    if let Err(reason) = input
-                        .update
-                        .apply(&mut new, &spec.table.attribute_definitions)
-                    {
-                        return Ok(validation(index, &reason));
-                    }
-                    if !valid_item(&new, &spec.table)
-                        || item_key(&new, &spec.table.key_schema)? != key
-                    {
-                        return Ok(validation(index, "item violates table schema"));
-                    }
-                    write_item(context, key, &new, &spec.table.key_schema)?;
-                }
-                TransactionWrite::ConditionCheck(_) => {}
-            }
-        }
+        let staged = match stage_operations(context, &spec, input.operations)? {
+            Ok(staged) => staged,
+            Err(reason) => return Ok(rejected(reason.single_outcome())),
+        };
+        apply_staged(context, &spec.table.key_schema, staged)?;
         if let Some(token) = input.idempotency.as_ref() {
             crate::transaction_token::record_applied_token(context, token)?;
         }
@@ -208,6 +136,177 @@ fn validation(index: usize, message: &str) -> CommandResult<Json<PartitionTransa
         index,
         reason: TransactionFailure::Validation(message.into()),
     })
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct StagedImage {
+    key: Vec<u8>,
+    image: Option<Item>,
+    write: bool,
+}
+
+enum StageError {
+    StaleRoute,
+    WrongPartition,
+    Conflict,
+    Rejected {
+        index: usize,
+        reason: TransactionFailure,
+    },
+}
+
+impl StageError {
+    fn single_outcome(self) -> PartitionTransactWriteOutcome {
+        match self {
+            Self::StaleRoute => PartitionTransactWriteOutcome::StaleRoute,
+            Self::WrongPartition => PartitionTransactWriteOutcome::WrongPartition,
+            Self::Conflict => PartitionTransactWriteOutcome::Conflict,
+            Self::Rejected { index, reason } => {
+                PartitionTransactWriteOutcome::Rejected { index, reason }
+            }
+        }
+    }
+
+    fn prepare_outcome(self) -> PreparePartitionTransactionOutcome {
+        match self {
+            Self::StaleRoute => PreparePartitionTransactionOutcome::StaleRoute,
+            Self::WrongPartition => PreparePartitionTransactionOutcome::WrongPartition,
+            Self::Conflict => PreparePartitionTransactionOutcome::Conflict,
+            Self::Rejected { index, reason } => {
+                PreparePartitionTransactionOutcome::Rejected { index, reason }
+            }
+        }
+    }
+}
+
+fn stage_operations(
+    context: &mut CommandContext<'_, '_>,
+    spec: &PartitionSpec,
+    operations: Vec<TransactionWrite>,
+) -> Result<std::result::Result<Vec<StagedImage>, StageError>> {
+    let mut touched = HashSet::with_capacity(operations.len());
+    let mut staged = Vec::with_capacity(operations.len());
+    for (index, operation) in operations.into_iter().enumerate() {
+        let (table_id, item, condition) = match &operation {
+            TransactionWrite::Put(input) => {
+                (&input.table_id, &input.item, input.condition.as_ref())
+            }
+            TransactionWrite::Delete(input) => {
+                (&input.table_id, &input.key, input.condition.as_ref())
+            }
+            TransactionWrite::Update(input) => {
+                (&input.table_id, &input.key, input.condition.as_ref())
+            }
+            TransactionWrite::ConditionCheck(input) => {
+                (&input.table_id, &input.key, Some(&input.condition))
+            }
+        };
+        if *table_id != spec.table.id {
+            return Ok(Err(StageError::StaleRoute));
+        }
+        let valid = match operation {
+            TransactionWrite::Put(_) => valid_item(item, &spec.table),
+            _ => valid_key(item, &spec.table),
+        };
+        if !valid {
+            return Ok(Err(stage_validation(index, "item violates table schema")));
+        }
+        let key = item_key(item, &spec.table.key_schema)?;
+        if !spec.contains(data_key_hash(&spec.table.id, item, &spec.table.key_schema)?) {
+            return Ok(Err(StageError::WrongPartition));
+        }
+        if !touched.insert(key.clone()) {
+            return Ok(Err(stage_validation(
+                index,
+                "more than one operation addresses the same item",
+            )));
+        }
+        if key_locked(context, &key)? {
+            return Ok(Err(StageError::Conflict));
+        }
+        let old = command_item(context, &key)?;
+        if let Some(condition) = condition {
+            let empty = Item::new();
+            match condition.evaluate(old.as_ref().unwrap_or(&empty)) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Ok(Err(StageError::Rejected {
+                        index,
+                        reason: TransactionFailure::ConditionFailed(old),
+                    }));
+                }
+                Err(reason) => return Ok(Err(stage_validation(index, &reason))),
+            }
+        }
+        let (image, write) = match operation {
+            TransactionWrite::Put(input) => (Some(input.item), true),
+            TransactionWrite::Delete(_) => (None, true),
+            TransactionWrite::Update(input) => {
+                let mut new = old.unwrap_or(input.key);
+                if let Err(reason) = input
+                    .update
+                    .apply(&mut new, &spec.table.attribute_definitions)
+                {
+                    return Ok(Err(stage_validation(index, &reason)));
+                }
+                if !valid_item(&new, &spec.table) || item_key(&new, &spec.table.key_schema)? != key
+                {
+                    return Ok(Err(stage_validation(index, "item violates table schema")));
+                }
+                (Some(new), true)
+            }
+            TransactionWrite::ConditionCheck(_) => (None, false),
+        };
+        staged.push(StagedImage { key, image, write });
+    }
+    Ok(Ok(staged))
+}
+
+fn stage_validation(index: usize, message: &str) -> StageError {
+    StageError::Rejected {
+        index,
+        reason: TransactionFailure::Validation(message.into()),
+    }
+}
+
+fn apply_staged(
+    context: &mut CommandContext<'_, '_>,
+    schema: &[KeySchemaElement],
+    staged: Vec<StagedImage>,
+) -> Result<()> {
+    for image in staged {
+        if !image.write {
+            continue;
+        }
+        if let Some(item) = image.image {
+            write_item(context, image.key, &item, schema)?;
+        } else {
+            context.sql(&statement(
+                "DELETE FROM ddb_partition_items WHERE item_key = ?1",
+                vec![SqlValue::Blob(image.key)],
+            ))?;
+        }
+    }
+    Ok(())
+}
+
+mod participant;
+pub use participant::*;
+
+pub(super) fn key_locked(context: &mut CommandContext<'_, '_>, key: &[u8]) -> Result<bool> {
+    let rows = context.sql(&statement(
+        "SELECT 1 FROM ddb_partition_transaction_locks WHERE item_key = ?1",
+        vec![SqlValue::Blob(key.to_vec())],
+    ))?;
+    Ok(!rows[0].rows.is_empty())
+}
+
+pub(super) fn has_transaction_locks(context: &mut CommandContext<'_, '_>) -> Result<bool> {
+    let rows = context.sql(&statement(
+        "SELECT 1 FROM ddb_partition_transaction_locks LIMIT 1",
+        vec![],
+    ))?;
+    Ok(!rows[0].rows.is_empty())
 }
 
 /// Result of one consistent read from a routed data Cell.

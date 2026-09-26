@@ -235,6 +235,9 @@ pub(super) fn partition_put_rejection(outcome: PartitionPutOutcome) -> StorageEr
         }
         PartitionPutOutcome::ConditionFailed(old) => StorageError::ConditionFailed(old),
         PartitionPutOutcome::InvalidExpression(message) => StorageError::Validation(message),
+        PartitionPutOutcome::TransactionConflict => {
+            StorageError::TransactionConflict("item is locked by a transaction".into())
+        }
         PartitionPutOutcome::NotInstalled
         | PartitionPutOutcome::StaleRoute
         | PartitionPutOutcome::Sealed
@@ -253,6 +256,9 @@ pub(super) fn partition_delete_rejection(outcome: PartitionDeleteOutcome) -> Sto
         }
         PartitionDeleteOutcome::ConditionFailed(old) => StorageError::ConditionFailed(old),
         PartitionDeleteOutcome::InvalidExpression(message) => StorageError::Validation(message),
+        PartitionDeleteOutcome::TransactionConflict => {
+            StorageError::TransactionConflict("item is locked by a transaction".into())
+        }
         PartitionDeleteOutcome::NotInstalled
         | PartitionDeleteOutcome::StaleRoute
         | PartitionDeleteOutcome::Sealed
@@ -271,6 +277,9 @@ pub(super) fn partition_update_rejection(outcome: PartitionUpdateOutcome) -> Sto
         }
         PartitionUpdateOutcome::ConditionFailed(old) => StorageError::ConditionFailed(old),
         PartitionUpdateOutcome::InvalidExpression(message) => StorageError::Validation(message),
+        PartitionUpdateOutcome::TransactionConflict => {
+            StorageError::TransactionConflict("item is locked by a transaction".into())
+        }
         PartitionUpdateOutcome::NotInstalled
         | PartitionUpdateOutcome::StaleRoute
         | PartitionUpdateOutcome::Sealed

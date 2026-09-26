@@ -22,13 +22,17 @@ use beyonddb::{
     PartitionImportInput, PartitionImportOutcome, PartitionInstall, PartitionLookupInput,
     PartitionLookupOutcome, PartitionPut, PartitionPutInput, PartitionPutOutcome, PartitionScan,
     PartitionScanInput, PartitionScanOutcome, PartitionSeal, PartitionSpec, PartitionState,
+    PartitionTransactWrite, PartitionTransactWriteInput, PartitionTransactWriteOutcome,
     PartitionUpdate, PartitionUpdateInput, PartitionUpdateOutcome, PartitionUsage,
-    PublishedNodeLease, PutItem, PutItemInput, ReadPartitionRoute, ReadPartitionState,
-    ReadRoutePage, ReadSplitPlan, ReadSplitRoute, ReadTableRoute, ReadTtlSchedule, ReadTtlSweep,
-    RoutePageInput, RoutePageOutcome, SealPartition, SealPartitionOutcome, SplitPlan,
-    SplitRouteState, TableRoute, TableSpec, UpdateTtl, UpdateTtlInput, account_target,
-    build_http_state, credential_target, data_key_hash, data_target, initialize_account,
-    initialize_partition,
+    PreparePartitionTransaction, PreparePartitionTransactionInput,
+    PreparePartitionTransactionOutcome, PublishedNodeLease, PutItem, PutItemInput,
+    ReadPartitionRoute, ReadPartitionState, ReadPartitionTransaction,
+    ReadPartitionTransactionInput, ReadPartitionTransactionOutcome, ReadRoutePage, ReadSplitPlan,
+    ReadSplitRoute, ReadTableRoute, ReadTtlSchedule, ReadTtlSweep, ResolvePartitionTransaction,
+    ResolvePartitionTransactionInput, ResolvePartitionTransactionOutcome, RoutePageInput,
+    RoutePageOutcome, SealPartition, SealPartitionOutcome, SplitPlan, SplitRouteState, TableRoute,
+    TableSpec, TransactionWrite, UpdateTtl, UpdateTtlInput, account_target, build_http_state,
+    credential_target, data_key_hash, data_target, initialize_account, initialize_partition,
 };
 use crab_cell_app::CellApplication;
 use crab_cell_host::CellNodeBuilder;
@@ -3034,6 +3038,219 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         left_partition_id: next_route.partitions[0].partition_id,
         right_partition_id: next_route.partitions[1].partition_id,
     };
+    let intent_item = key_in_range(&table.id, &table.key_schema, true, 800);
+    let prepare_input = PreparePartitionTransactionInput {
+        table_id: table.id.clone(),
+        epoch: 1,
+        transaction_id: [90; 16],
+        coordinator_cell: *account.cell_id().as_bytes(),
+        operations: vec![TransactionWrite::Put(PutItemInput {
+            table_name: table.table_name.clone(),
+            table_id: table.id.clone(),
+            item: intent_item.clone(),
+            condition: None,
+        })],
+    };
+    let prepared = client
+        .command::<PreparePartitionTransaction>(
+            &left_target,
+            identity(90),
+            Json(prepare_input.clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        prepared.output.0,
+        PreparePartitionTransactionOutcome::Prepared
+    );
+    let prepared_state = client
+        .query::<ReadPartitionTransaction>(
+            &left_target,
+            Some(prepared.receipt),
+            Json(ReadPartitionTransactionInput {
+                transaction_id: prepare_input.transaction_id,
+                coordinator_cell: prepare_input.coordinator_cell,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        prepared_state.output.0,
+        ReadPartitionTransactionOutcome::Prepared
+    );
+    let hidden = client
+        .query::<PartitionGet>(
+            &left_target,
+            Some(prepared.receipt),
+            Json(PartitionGetInput {
+                table_id: table.id.clone(),
+                epoch: 1,
+                key: intent_item.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hidden.output.0, PartitionGetOutcome::Found(None));
+    let conflicting_write = client
+        .command::<PartitionPut>(
+            &left_target,
+            identity(91),
+            Json(PartitionPutInput {
+                table_id: table.id.clone(),
+                epoch: 1,
+                item: intent_item.clone(),
+                condition: None,
+            }),
+        )
+        .await;
+    assert!(matches!(
+        conflicting_write,
+        Err(InvocationError::Rejected(result))
+            if result.output.0 == PartitionPutOutcome::TransactionConflict
+    ));
+    let conflicting_transaction = client
+        .command::<PartitionTransactWrite>(
+            &left_target,
+            identity(100),
+            Json(PartitionTransactWriteInput {
+                table_id: table.id.clone(),
+                epoch: 1,
+                operations: prepare_input.operations.clone(),
+                idempotency: None,
+            }),
+        )
+        .await;
+    assert!(matches!(
+        conflicting_transaction,
+        Err(InvocationError::Rejected(result))
+            if result.output.0 == PartitionTransactWriteOutcome::Conflict
+    ));
+    let premature_seal = client
+        .command::<SealPartition>(&left_target, identity(92), Json(seal.clone()))
+        .await;
+    assert!(matches!(
+        premature_seal,
+        Err(InvocationError::Rejected(result))
+            if result.output.0 == SealPartitionOutcome::InFlightTransaction
+    ));
+    let abort = client
+        .command::<ResolvePartitionTransaction>(
+            &left_target,
+            identity(93),
+            Json(ResolvePartitionTransactionInput {
+                transaction_id: prepare_input.transaction_id,
+                coordinator_cell: prepare_input.coordinator_cell,
+                commit: false,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(abort.output.0, ResolvePartitionTransactionOutcome::Aborted);
+    let retry_after_abort = client
+        .command::<PreparePartitionTransaction>(&left_target, identity(94), Json(prepare_input))
+        .await;
+    assert!(matches!(
+        retry_after_abort,
+        Err(InvocationError::Rejected(result))
+            if result.output.0 == PreparePartitionTransactionOutcome::Aborted
+    ));
+    let late_prepare = PreparePartitionTransactionInput {
+        table_id: table.id.clone(),
+        epoch: 1,
+        transaction_id: [98; 16],
+        coordinator_cell: *account.cell_id().as_bytes(),
+        operations: vec![TransactionWrite::Put(PutItemInput {
+            table_name: table.table_name.clone(),
+            table_id: table.id.clone(),
+            item: intent_item.clone(),
+            condition: None,
+        })],
+    };
+    client
+        .command::<ResolvePartitionTransaction>(
+            &left_target,
+            identity(98),
+            Json(ResolvePartitionTransactionInput {
+                transaction_id: late_prepare.transaction_id,
+                coordinator_cell: late_prepare.coordinator_cell,
+                commit: false,
+            }),
+        )
+        .await
+        .unwrap();
+    let fenced_late_prepare = client
+        .command::<PreparePartitionTransaction>(&left_target, identity(99), Json(late_prepare))
+        .await;
+    assert!(matches!(
+        fenced_late_prepare,
+        Err(InvocationError::Rejected(result))
+            if result.output.0 == PreparePartitionTransactionOutcome::Aborted
+    ));
+    let committed_input = PreparePartitionTransactionInput {
+        table_id: table.id.clone(),
+        epoch: 1,
+        transaction_id: [95; 16],
+        coordinator_cell: *account.cell_id().as_bytes(),
+        operations: vec![TransactionWrite::Put(PutItemInput {
+            table_name: table.table_name.clone(),
+            table_id: table.id.clone(),
+            item: intent_item.clone(),
+            condition: None,
+        })],
+    };
+    client
+        .command::<PreparePartitionTransaction>(
+            &left_target,
+            identity(95),
+            Json(committed_input.clone()),
+        )
+        .await
+        .unwrap();
+    let commit = client
+        .command::<ResolvePartitionTransaction>(
+            &left_target,
+            identity(96),
+            Json(ResolvePartitionTransactionInput {
+                transaction_id: committed_input.transaction_id,
+                coordinator_cell: committed_input.coordinator_cell,
+                commit: true,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        commit.output.0,
+        ResolvePartitionTransactionOutcome::Committed
+    );
+    let visible = client
+        .query::<PartitionGet>(
+            &left_target,
+            Some(commit.receipt),
+            Json(PartitionGetInput {
+                table_id: table.id.clone(),
+                epoch: 1,
+                key: intent_item.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        visible.output.0,
+        PartitionGetOutcome::Found(Some(intent_item.clone()))
+    );
+    client
+        .command::<PartitionDelete>(
+            &left_target,
+            identity(97),
+            Json(PartitionDeleteInput {
+                table_id: table.id.clone(),
+                epoch: 1,
+                key: intent_item,
+                condition: None,
+            }),
+        )
+        .await
+        .unwrap();
     let sealed = client
         .command::<SealPartition>(&left_target, identity(44), Json(seal.clone()))
         .await
@@ -3531,6 +3748,29 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         visible.output.0,
         PartitionGetOutcome::Found(Some(changed_item.clone()))
     );
+    let recovery_prepare = child_client
+        .command::<PreparePartitionTransaction>(
+            &child_targets[first_child],
+            identity(101),
+            Json(PreparePartitionTransactionInput {
+                table_id: table.id.clone(),
+                epoch: 3,
+                transaction_id: [101; 16],
+                coordinator_cell: *account.cell_id().as_bytes(),
+                operations: vec![TransactionWrite::Put(PutItemInput {
+                    table_name: table.table_name.clone(),
+                    table_id: table.id.clone(),
+                    item: changed_item.clone(),
+                    condition: None,
+                })],
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        recovery_prepare.output.0,
+        PreparePartitionTransactionOutcome::Prepared
+    );
     for handle in child_handles {
         handle.drain().await.unwrap();
     }
@@ -3656,6 +3896,69 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             left_target.application(),
         )
         .unwrap();
+    let recovered_intent = restored_client
+        .query::<ReadPartitionTransaction>(
+            restored_child_target,
+            None,
+            Json(ReadPartitionTransactionInput {
+                transaction_id: [101; 16],
+                coordinator_cell: *account.cell_id().as_bytes(),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        recovered_intent.output.0,
+        ReadPartitionTransactionOutcome::Prepared
+    );
+    let recovered_conflict = restored_client
+        .command::<PartitionPut>(
+            restored_child_target,
+            identity(102),
+            Json(PartitionPutInput {
+                table_id: table.id.clone(),
+                epoch: 3,
+                item: changed_item.clone(),
+                condition: None,
+            }),
+        )
+        .await;
+    assert!(matches!(
+        recovered_conflict,
+        Err(InvocationError::Rejected(result))
+            if result.output.0 == PartitionPutOutcome::TransactionConflict
+    ));
+    let recovered_abort = restored_client
+        .command::<ResolvePartitionTransaction>(
+            restored_child_target,
+            identity(103),
+            Json(ResolvePartitionTransactionInput {
+                transaction_id: [101; 16],
+                coordinator_cell: *account.cell_id().as_bytes(),
+                commit: false,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        recovered_abort.output.0,
+        ResolvePartitionTransactionOutcome::Aborted
+    );
+    let restored_transaction = restored_client
+        .query::<ReadPartitionTransaction>(
+            &left_target,
+            None,
+            Json(ReadPartitionTransactionInput {
+                transaction_id: [95; 16],
+                coordinator_cell: *account.cell_id().as_bytes(),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        restored_transaction.output.0,
+        ReadPartitionTransactionOutcome::Committed
+    );
     let persisted = restored_client
         .query::<PartitionGet>(
             &left_target,

@@ -33,3 +33,20 @@ CREATE TABLE ddb_transaction_applied (
     PRIMARY KEY (account_id, token)
 );
 CREATE INDEX ddb_transaction_applied_age ON ddb_transaction_applied (created_at_ms);
+
+CREATE TABLE ddb_partition_transactions (
+    transaction_id BLOB PRIMARY KEY,
+    coordinator_cell BLOB NOT NULL,
+    request_digest BLOB,
+    state INTEGER NOT NULL CHECK (state IN (0, 1, 2)),
+    table_id TEXT,
+    epoch INTEGER,
+    staged BLOB
+);
+
+CREATE TABLE ddb_partition_transaction_locks (
+    item_key BLOB PRIMARY KEY,
+    transaction_id BLOB NOT NULL REFERENCES ddb_partition_transactions(transaction_id)
+);
+CREATE INDEX ddb_partition_transaction_locks_owner
+    ON ddb_partition_transaction_locks (transaction_id);

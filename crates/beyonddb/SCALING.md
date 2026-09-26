@@ -19,7 +19,10 @@ receipt with the data mutation. A committed replay reads that claim before
 current routing, so a split cannot apply it in another Cell. A claimed request
 without an applied receipt still needs safe relocation if its source seals.
 Transactions across Cells remain rejected until
-a durable coordinator exists. A host-backed provisioner can create 1–256
+a durable coordinator exists. Data Cells now have durable prepare, key-lock,
+commit, and abort commands. Those commands are not exposed through the
+ExtendDB adapter; coordinator decisions and post-decision reads still need
+implementation. A host-backed provisioner can create 1–256
 independent, evenly spaced initial data Cells during CreateTable and retry
 interrupted setup. This raises initial aggregate capacity and write parallelism.
 The host can plan a midpoint split of a serving range and repeat it on an
