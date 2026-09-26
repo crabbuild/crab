@@ -8,16 +8,26 @@ use crab_cell_runtime::identity::{CellId, Digest, NodeId, SessionId};
 use crab_cell_runtime::node::{NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain};
 use crab_ltx::CellStorageLayout;
 use crab_storage::Store;
-use object_store::{memory::InMemory, path::Path};
+use object_store::{
+    memory::InMemory,
+    path::Path,
+    throttle::{ThrottleConfig, ThrottledStore},
+};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_reader_selection_shares_discovery_across_cells() {
     let reads = Arc::new(AtomicUsize::new(0));
     let counted = reads.clone();
-    let store =
-        Store::new(Arc::new(InMemory::new())).with_read_request_observer(Arc::new(move |_| {
-            counted.fetch_add(1, Ordering::Relaxed);
-        }));
+    let store = Store::new(Arc::new(ThrottledStore::new(
+        InMemory::new(),
+        ThrottleConfig {
+            wait_get_per_call: std::time::Duration::from_millis(5),
+            ..ThrottleConfig::default()
+        },
+    )))
+    .with_read_request_observer(Arc::new(move |_| {
+        counted.fetch_add(1, Ordering::Relaxed);
+    }));
     let directory = NodeDirectory::new(
         CellStorageLayout::new(store, Path::from("shared-reader-discovery"), [1; 16]),
         Digest::from_bytes([6; 32]),
@@ -146,9 +156,12 @@ async fn advisory_discovery_preserves_expiry_fresh_authority_and_failed_refresh(
         )
         .await
         .unwrap();
+    // Even a caller holding the same wall-clock sample cannot extend discovery
+    // beyond its monotonic lifetime or use it after a failed provider refresh.
+    tokio::time::sleep(std::time::Duration::from_millis(1_050)).await;
     assert!(
         directory
-            .select_readers(cell, owner, code, 4, 4_000, 16)
+            .select_readers(cell, owner, code, 4, 3_000, 16)
             .await
             .is_err()
     );

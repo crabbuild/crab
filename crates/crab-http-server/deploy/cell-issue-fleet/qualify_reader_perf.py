@@ -10,7 +10,7 @@ from pathlib import Path
 from qualify import command, compose, issue_path, node_url, request_json
 from qualify_read_replicas import cost_delta, cost_snapshot, node_inventory, prove_readers, set_reader_target
 from qualify_reader_load import measure, resources
-from render import node_name
+from render import CONFIG, node_name
 
 
 def main():
@@ -64,7 +64,10 @@ def main():
               "rounds": [], "scope": "single host; same retained fixture and 1 vCPU/1 GiB nodes; "
               "8 closed-loop clients through two ingresses; 60 seconds per mode; alternating order"}
     for index in range(args.rounds):
-        pair = {}
+        status = ("exec", "-T", "node-01", "crab-http-server", "--config", CONFIG,
+                  "cells", "status", "--owner", "demo", "--name", "work-01")
+        control = json.loads(compose(path, ("five",), *status))
+        pair = {"control_before": control}
         report["rounds"].append(pair)
         for mode in (("owner", "replica") if index % 2 == 0 else ("replica", "owner")):
             before = cost_snapshot(path, ("five",), 5)
@@ -85,6 +88,11 @@ def main():
             "p50_ratio": pair["replica"]["p50_ms"] / pair["owner"]["p50_ms"],
             "p99_ratio": pair["replica"]["p99_ms"] / pair["owner"]["p99_ms"],
         }
+        current = json.loads(compose(path, ("five",), *status))
+        pair["control_after"] = current
+        if any(current[key] != control[key] for key in ("owner", "epoch", "incarnation")):
+            args.report.write_text(json.dumps(report, indent=2) + "\n")
+            raise RuntimeError("owner changed within a measured pair; report retained")
         print(json.dumps({"round": index + 1, **pair["comparison"]}), flush=True)
     report["similar_performance"] = all(
         pair["comparison"]["throughput_ratio"] >= .8
