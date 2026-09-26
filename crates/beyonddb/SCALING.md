@@ -197,6 +197,9 @@ for a committed request without a durable fence.
 
 ## Transactions and reads
 
+The full state machine, visibility rules, split fence, and recovery proof are
+specified in [the cross-Cell transaction protocol](CROSS_CELL_TRANSACTIONS.md).
+
 One-partition transactions continue to use one Cell command. A transaction
 across data Cells needs a durable coordinator and participant protocol:
 

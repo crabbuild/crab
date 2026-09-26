@@ -230,6 +230,8 @@ intents, one authoritative decision record, idempotent resolution, and
 recovery after owner loss. Routing writes to several Cells without that
 protocol cannot implement `TransactWriteItems`. See [the elastic topology
 design](SCALING.md) for split, routing, recovery, and validation requirements.
+The [cross-Cell transaction protocol](CROSS_CELL_TRANSACTIONS.md) specifies
+the decision, lock, visibility, and failure-recovery contract.
 
 The signed SDK host test uses `CellNodeBuilder::build`, a published node
 advertisement, a renewing lease guard, and a task group. The lease task keeps
