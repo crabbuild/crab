@@ -302,22 +302,25 @@ def main():
     server = image_provenance(deployment["services"]["node-01"]["image"])
     if any(deployment["services"][name]["image"] != server["image"] for name in expected):
         raise RuntimeError("all node services must pin the same server image ID; run qualify.py first")
-    owners, controls = load.owner_map(path, profiles, args.nodes, args.cells)
-    target = 1
-    unaffected = {cell for cell, owner in owners.items() if owner != owners[target]}
-    if not unaffected:
-        raise RuntimeError("fault requires Cells on another owner to measure unaffected service")
-    if not load.drain_publication(path, profiles, args.nodes)["drained"]:
-        raise RuntimeError("baseline publication did not drain before the fault workload")
-    fault = TailFault(path, profiles, args.nodes, gateway, target, owners[target], controls[target], output)
     run_id = uuid.uuid4().hex[:12]
     report = {"schema": 1, "server": server, "project": project,
               "source": command("git", "-C", str(ROOT), "rev-parse", "HEAD"),
               "source_dirty": bool(command("git", "-C", str(ROOT), "status", "--porcelain")),
               "workload": vars(workload), "run_id": run_id,
-              "owners_before": owners, "fault": fault.receipt, "passed": False}
-    restart = lambda: compose(path, profiles, "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300", owners[target])
+              "placement": {}, "passed": False}
     try:
+        owners, controls = load.wait_for_placement(path, profiles, args.nodes, args.cells, report["placement"])
+        report["owners_before"] = owners
+        target = 1
+        unaffected = {cell for cell, owner in owners.items() if owner != owners[target]}
+        if not unaffected:
+            raise RuntimeError("fault requires Cells on another owner to measure unaffected service")
+        report["baseline_publication_drain"] = load.drain_publication(path, profiles, args.nodes)
+        if not report["baseline_publication_drain"]["drained"]:
+            raise RuntimeError("baseline publication did not drain before the fault workload")
+        fault = TailFault(path, profiles, args.nodes, gateway, target, owners[target], controls[target], output)
+        report["fault"] = fault.receipt
+        restart = lambda: compose(path, profiles, "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300", owners[target])
         with restart_after_fault(fault.receipt, restart):
             with fault.publication_denied():
                 with ((output / "samples.jsonl").open("x") as raw,

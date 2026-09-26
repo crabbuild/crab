@@ -3,6 +3,7 @@
 import copy
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,6 +30,30 @@ class TailFaultTests(unittest.TestCase):
                        "proof": "fleet", "commit_sequence": 9}
         self.driver = fault.TailFault(self.path, (), 3, "http://fixture", 1, "node-03", self.control, self.output)
         self.sample = {"cell": 1, "acknowledged": {"number": 1, "title": "received"}, "operations": []}
+
+    def test_failed_placement_is_reported_before_any_fault_mutation(self):
+        image = "sha256:" + "1" * 64
+        nodes = {f"node-{index:02d}" for index in range(1, 4)}
+        self.path.write_text(json.dumps({"name": self.project, "services": {name: {"image": image} for name in nodes}}))
+        output = self.output / "failed-run"
+
+        def failed_placement(_path, _profiles, _nodes, _cells, receipt):
+            receipt.update({"passed": False, "samples": [{"owner_counts": {"node-01": 20}}]})
+            raise RuntimeError("ownership did not converge")
+
+        with patch.object(sys, "argv", ["fault.py", "--state", str(self.output), "--nodes", "3", "--output", str(output)]), \
+                patch.object(fault.load, "running_nodes", return_value=nodes), \
+                patch.object(fault, "image_provenance", return_value={"image": image, "source": "a" * 40}), \
+                patch.object(fault, "command", return_value="a" * 40), \
+                patch.object(fault.load, "wait_for_placement", side_effect=failed_placement), \
+                patch.object(fault, "TailFault") as driver, \
+                self.assertRaisesRegex(RuntimeError, "ownership did not converge"):
+            fault.main()
+        driver.assert_not_called()
+        report = json.loads((output / "report.json").read_text())
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["placement"]["samples"][0]["owner_counts"], {"node-01": 20})
+        self.assertEqual(report["error"], "RuntimeError: ownership did not converge")
 
     def test_acknowledgement_must_be_unpublished_and_bound_to_an_active_cohort(self):
         fault.unpublished_acknowledgement(self.action, self.control, "node-03", self.node)

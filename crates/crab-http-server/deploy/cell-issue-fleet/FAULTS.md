@@ -24,7 +24,9 @@ all failed, rejected and missed arrivals before comparing latency.
 
 1. All nodes run the same immutable image with the example's 1-vCPU and 1-GiB
    limits. The report identifies the server revision separately from the
-   Python harness revision and its dirty state.
+   Python harness revision and its dirty state. Before arrivals, a placement
+   preflight waits up to ten minutes for stable weighted ownership. It invokes
+   only control/status inspection, so it does not reset Cell inactivity.
 2. Existing publication drains. A temporary RustFS policy denies immutable
    object PUTs for the target Cell incarnation. An explicit `AccessDenied`
    probe must confirm it; a timeout or a missing bucket does not count.
@@ -60,6 +62,16 @@ snapshot racing the deliberate kill may retry once, retaining the first error;
 unexpected node loss or missing statistics still fails qualification.
 An interrupted run requires inspection of its report and bucket policy before
 the fixture is reused.
+
+`placement.samples` retains each authority map, live advertised Cell count,
+capacity weight and advertisement generation, including incomplete views.
+Each node must own between the floor and ceiling of its weighted share of the
+fixed Cell population, and its advertised count must agree. The ownership
+session, incarnation and epoch must remain unchanged for 30 seconds while all
+advertisement generations advance. A transfer or incomplete view restarts the
+stability window. Failure retains `report.json` and occurs before policy or
+container mutation. This qualifies a settled starting topology; it does not
+qualify redistribution under uninterrupted traffic.
 
 ## Interpretation
 

@@ -283,7 +283,7 @@ fn balance_elects_one_weighted_donor_and_orders_receivers() {
         .unwrap();
     assert_eq!(left, right);
     assert_eq!(left.donor, dense.session);
-    // Twelve Cells over target, eleven Cells of receiver room, and a
+    // Twelve Cells over target, thirteen Cells of receiver room, and a
     // two-Cell batch: the batch is the binding limit.
     assert_eq!(left.surplus, 2);
     assert_eq!(left.receivers, vec![wide.session, small.session]);
@@ -313,10 +313,10 @@ fn balance_breaks_a_density_tie_by_node_identity() {
 #[test]
 fn balance_deadband_bounds_the_donation() {
     let planner = PlacementPlanner::default();
-    let donor = owned(1, 4, 10);
-    let roomy = owned(2, 0, 10);
-    // Two equal members own four Cells, so each targets two. The receiver
-    // fills to its deadband one below that target, so one Cell may move.
+    let donor = owned(1, 103, 200);
+    let roomy = owned(2, 97, 200);
+    // Each member targets 100 Cells. The receiver's two-Cell margin leaves
+    // one donation slot, even though the donor could fill the two-Cell batch.
     let balance = planner
         .fleet_balance(100_000, &[donor, roomy], 0)
         .unwrap()

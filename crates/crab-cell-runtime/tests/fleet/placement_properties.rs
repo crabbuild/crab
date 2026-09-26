@@ -120,6 +120,123 @@ fn a_dense_member_hands_over_to_an_empty_one() {
     assert_eq!(intents[0].cell, demand.cell);
 }
 
+#[test]
+fn small_fleets_converge_after_owner_loss_with_fresh_settled_views() {
+    let planner = PlacementPlanner::default();
+    let mut unconverged = Vec::new();
+    for nodes in [3u8, 5, 10, 20] {
+        let mut observations = (0..nodes)
+            .map(|index| {
+                observation(
+                    index,
+                    if index == 0 { 20 } else { 0 },
+                    64,
+                    PlacementPressure::Normal,
+                    false,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut owners = vec![session(0); 20];
+        for tick in 0..40 {
+            let now = NOW_MS + tick * 120_000;
+            for value in &mut observations {
+                value.observed_at_ms = now;
+            }
+            let Some(balance) = planner.fleet_balance(now, &observations, now - 1).unwrap() else {
+                break;
+            };
+            let demands = owners
+                .iter()
+                .enumerate()
+                .filter(|(_, owner)| **owner == balance.donor)
+                .map(|(cell, owner)| CellTransferDemand {
+                    cell: CellId::from_bytes([cell as u8; 32]),
+                    source: *owner,
+                    generation: 1,
+                    memory_bytes: 1 << 20,
+                    disk_bytes: 1 << 20,
+                    job_credits: 1,
+                    resident_since_ms: now - 120_000,
+                    last_moved_at_ms: None,
+                    stable_observations: 3,
+                    settled: true,
+                })
+                .collect::<Vec<_>>();
+            let intents = planner
+                .plan_transfers(now, &observations, &demands, Some(&balance))
+                .unwrap();
+            for intent in intents {
+                owners[intent.cell.as_bytes()[0] as usize] = intent.destination;
+                observations
+                    .iter_mut()
+                    .find(|node| node.session == intent.source)
+                    .unwrap()
+                    .active_cells -= 1;
+                observations
+                    .iter_mut()
+                    .find(|node| node.session == intent.destination)
+                    .unwrap()
+                    .active_cells += 1;
+            }
+        }
+        let counts = observations
+            .iter()
+            .map(|node| node.active_cells)
+            .collect::<Vec<_>>();
+        if counts.iter().any(|count| {
+            *count < 20 / u32::from(nodes) || *count > 20u32.div_ceil(u32::from(nodes))
+        }) {
+            unconverged.push((nodes, counts));
+        }
+    }
+    assert!(
+        unconverged.is_empty(),
+        "ownership did not converge: {unconverged:?}"
+    );
+}
+
+#[test]
+fn donations_do_not_overfill_a_preferred_receivers_weighted_share() {
+    let planner = PlacementPlanner::default();
+    let mut observations = [5, 1, 0]
+        .into_iter()
+        .enumerate()
+        .map(|(index, count)| observation(index as u8, count, 64, PlacementPressure::Normal, false))
+        .collect::<Vec<_>>();
+    // The first receiver has enough headroom advantage to rank first for both
+    // Cells, but neither receiver exceeds the source's sticky score.
+    observations[0].free_memory_bytes = 1 << 30;
+    observations[1].free_memory_bytes = 3 << 28;
+    let demands = (0..4)
+        .map(|index| CellTransferDemand {
+            cell: CellId::from_bytes([index; 32]),
+            source: session(0),
+            generation: 1,
+            memory_bytes: 1,
+            disk_bytes: 1,
+            job_credits: 1,
+            resident_since_ms: NOW_MS - 120_000,
+            last_moved_at_ms: None,
+            stable_observations: 3,
+            settled: true,
+        })
+        .collect::<Vec<_>>();
+    // Its whole-Cell margin is zero at target two; the existing Cell leaves
+    // room for only one more donation in this snapshot.
+    let balance = planner
+        .fleet_balance(NOW_MS, &observations, NOW_MS - 1)
+        .unwrap()
+        .unwrap();
+    let intents = planner
+        .plan_transfers(NOW_MS, &observations, &demands, Some(&balance))
+        .unwrap();
+    let destinations = intents
+        .iter()
+        .map(|intent| intent.destination)
+        .collect::<Vec<_>>();
+    assert_eq!(destinations, vec![session(1), session(2)]);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 32, ..ProptestConfig::default() })]
 
