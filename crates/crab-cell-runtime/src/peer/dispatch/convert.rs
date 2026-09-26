@@ -9,6 +9,21 @@ pub(super) fn validate_effect_incarnation(value: &[u8], expected: CellDescriptio
     Ok(())
 }
 
+pub(super) fn validate_expected(
+    observed: Option<&wire::CellDescription>,
+    current: CellDescription,
+) -> Result<()> {
+    let observed = observed.ok_or(Error::Peer("expected Cell description is missing"))?;
+    if observed.cell_id.as_slice() != current.cell.as_bytes()
+        || observed.incarnation.as_slice() != current.incarnation.as_bytes()
+        || observed.code.as_slice() != current.code.as_bytes()
+        || observed.schema != current.schema
+    {
+        return Err(Error::Fenced);
+    }
+    Ok(())
+}
+
 pub(super) fn exact_effect_id(identity: &wire::EffectIdentity) -> Result<[u8; 32]> {
     let effect_id = <[u8; 32]>::try_from(identity.effect_id.as_slice())
         .map_err(|_| Error::Peer("invalid effect ID length"))?;
@@ -132,15 +147,6 @@ pub(super) fn resolve_reply(
             state: wire::resolve_reply::State::Expired as i32,
             reply: None,
         },
-    }
-}
-
-pub(super) fn description(value: CellDescription) -> wire::CellDescription {
-    wire::CellDescription {
-        cell_id: value.cell.as_bytes().to_vec(),
-        incarnation: value.incarnation.as_bytes().to_vec(),
-        code: value.code.as_bytes().to_vec(),
-        schema: value.schema,
     }
 }
 

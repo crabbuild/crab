@@ -17,7 +17,7 @@ use crate::primitives::effects::InboxDelivery;
 use crate::registry::{CommandInvocation, Registry};
 use crate::{Error, Result};
 
-use super::{VerifiedPeerRequest, wire};
+use super::{VerifiedPeerRequest, wire, wire_description};
 
 const MAX_RESULT_BYTES: usize = 1024 * 1024;
 
@@ -172,6 +172,7 @@ impl PeerDispatcher {
         now_ms: i64,
     ) -> Result<StoredOutcome> {
         let expected = local_description(&transport.handle);
+        validate_expected(request.expected.as_ref(), expected)?;
         let identity = mutation_identity(
             request
                 .identity
@@ -228,7 +229,7 @@ impl PeerDispatcher {
         let expected = local_description(&transport.handle);
         let result = match request.operation.as_ref() {
             Some(wire::read_request::Operation::Describe(true)) => {
-                wire::read_reply::Result::Description(description(expected))
+                wire::read_reply::Result::Description(wire_description(expected))
             }
             Some(wire::read_request::Operation::CellQuery(query)) => {
                 match self
@@ -266,6 +267,7 @@ impl PeerDispatcher {
         expected: CellDescription,
         now_ms: i64,
     ) -> Result<EncodedObservation> {
+        validate_expected(request.expected.as_ref(), expected)?;
         let target = request_target(request.target.as_ref())?;
         let (module, descriptor) = self.registry.routed_query_contract(
             target.namespace(),
@@ -303,6 +305,7 @@ impl PeerDispatcher {
     ) -> wire::PeerReply {
         let expected = local_description(&transport.handle);
         let result = async {
+            validate_expected(request.expected.as_ref(), expected)?;
             let identity = mutation_identity(
                 request
                     .identity
@@ -481,7 +484,7 @@ impl PeerDispatcher {
         match result {
             Ok(current) => wire::PeerReply {
                 outcome: Some(wire::peer_reply::Outcome::Migration(wire::MigrationReply {
-                    description: Some(description(current)),
+                    description: Some(wire_description(current)),
                 })),
             },
             Err(error) => error_reply(error),

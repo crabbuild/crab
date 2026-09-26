@@ -472,6 +472,7 @@ pub(super) trait CellTransport: Send + Sync + 'static {
 pub struct CellClient {
     registry: Arc<Registry>,
     transport: Arc<dyn CellTransport>,
+    observed_description: Option<CellDescription>,
     blob_artifact_store: Option<crate::BlobArtifactStore>,
 }
 
@@ -481,6 +482,7 @@ impl CellClient {
         Self {
             registry,
             transport,
+            observed_description: None,
             blob_artifact_store: None,
         }
     }
@@ -489,6 +491,18 @@ impl CellClient {
     #[must_use]
     pub fn registry_digest(&self) -> Digest {
         self.registry.release_digest()
+    }
+
+    /// Binds this client to an already observed Cell contract for a routed request.
+    ///
+    /// The host supplies a description read from authority or the owner. Calls
+    /// skip Describe and must target this exact Cell. Receiver authorization,
+    /// contract validation, and actor admission still apply; stale observations
+    /// refuse execution and require the host to resolve a fresh route.
+    #[must_use]
+    pub fn with_observed_description(mut self, description: CellDescription) -> Self {
+        self.observed_description = Some(description);
+        self
     }
 
     /// Returns a client clone wired to the configured object-store Blob data.
@@ -831,11 +845,14 @@ impl CellClient {
         &self,
         target: &CellTarget,
     ) -> std::result::Result<CellDescription, InvocationError<T>> {
-        let description = self
-            .transport
-            .describe(target.clone())
-            .await
-            .map_err(InvocationError::NotStarted)?;
+        let description = match self.observed_description {
+            Some(description) => description,
+            None => self
+                .transport
+                .describe(target.clone())
+                .await
+                .map_err(InvocationError::NotStarted)?,
+        };
         if description.cell != target.cell_id() {
             return Err(InvocationError::NotStarted(Error::Command(
                 "transport described a different Cell",

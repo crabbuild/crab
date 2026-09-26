@@ -18,7 +18,7 @@ use crate::primitives::effects::EffectClaim;
 use crate::registry::MigrationPlan;
 use crate::{Error, Result};
 
-use super::{PeerOperation, PeerPrincipal, PeerSigner, decode_peer_reply, wire};
+use super::{PeerOperation, PeerPrincipal, PeerSigner, decode_peer_reply, wire, wire_description};
 
 mod convert;
 
@@ -287,6 +287,7 @@ impl CellTransport for PeerClientTransport {
                         target: Some(wire_target(&target)),
                         timeout_ms: DEFAULT_TIMEOUT_MS,
                         minimum: None,
+                        expected: None,
                         operation: Some(wire::read_request::Operation::Describe(true)),
                     }),
                 )
@@ -319,6 +320,7 @@ impl CellTransport for PeerClientTransport {
                     expires_at_ms,
                     PeerOperation::Mutate(wire::MutationRequest {
                         target: Some(wire_target(&command.target)),
+                        expected: Some(wire_description(command.expected)),
                         identity: Some(wire_identity(
                             command.identity,
                             command.expected.incarnation,
@@ -375,6 +377,7 @@ impl CellTransport for PeerClientTransport {
                     expires_at_ms,
                     PeerOperation::Read(wire::ReadRequest {
                         target: Some(wire_target(&query.target)),
+                        expected: Some(wire_description(query.expected)),
                         timeout_ms: DEFAULT_TIMEOUT_MS,
                         minimum: query.minimum.map(wire_receipt),
                         operation: Some(wire::read_request::Operation::CellQuery(
@@ -418,6 +421,7 @@ impl CellTransport for PeerClientTransport {
                     expires_at_ms,
                     PeerOperation::Resolve(wire::ResolveRequest {
                         target: Some(wire_target(&resolve.target)),
+                        expected: Some(wire_description(resolve.expected)),
                         identity: Some(wire_identity(
                             resolve.identity,
                             resolve.expected.incarnation,

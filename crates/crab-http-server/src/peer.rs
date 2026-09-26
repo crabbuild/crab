@@ -1947,6 +1947,15 @@ mod tests {
         }
     }
 
+    fn expected_description() -> peer_wire::CellDescription {
+        peer_wire::CellDescription {
+            cell_id: vec![9; 32],
+            incarnation: vec![8; 16],
+            code: vec![10; 32],
+            schema: 1,
+        }
+    }
+
     fn verified(command_id: u32, actions: Vec<String>) -> VerifiedPeerRequest {
         let key = SigningKey::from_bytes(&[1; 32]);
         let signer = PeerSigner::new(
@@ -1971,6 +1980,7 @@ mod tests {
                 NOW_MS + 60_000,
                 30_000,
                 PeerOperation::Mutate(peer_wire::MutationRequest {
+                    expected: Some(expected_description()),
                     target: Some(target),
                     identity: Some(peer_wire::MutationIdentity {
                         request_id: RequestId::from_bytes([7; 16]).as_bytes().to_vec(),
@@ -2016,6 +2026,7 @@ mod tests {
                 NOW_MS + 60_000,
                 30_000,
                 PeerOperation::Read(peer_wire::ReadRequest {
+                    expected: Some(expected_description()),
                     target: Some(peer_wire::Target {
                         tenant_id: vec![4; 16],
                         application_id: vec![5; 16],
@@ -2271,6 +2282,7 @@ mod tests {
         let registry = crate::cells::compiled_registry().unwrap();
         for operation in operations {
             let request = verify(PeerOperation::Read(peer_wire::ReadRequest {
+                expected: Some(expected_description()),
                 target: Some(target.clone()),
                 timeout_ms: 30_000,
                 minimum: None,
@@ -2283,6 +2295,7 @@ mod tests {
             assert!(authorize_runtime_action(fleet, &request, "repository.projection").is_ok());
         }
         let request = verify(PeerOperation::Mutate(peer_wire::MutationRequest {
+            expected: Some(expected_description()),
             target: Some(target),
             identity: Some(peer_wire::MutationIdentity {
                 request_id: RequestId::from_bytes([7; 16]).as_bytes().to_vec(),

@@ -892,7 +892,7 @@ impl RepositoryCellRouter {
             // Only a missing or canonically expired session can begin takeover.
             // Corrupt or foreign directory state must fail closed.
             return if self.remote_owner_is_live(owner).await? {
-                Ok(Some(self.peer(target.clone(), principal.clone())))
+                Ok(Some(self.peer(target.clone(), principal.clone(), &control)))
             } else {
                 Ok(None)
             };
@@ -934,7 +934,7 @@ impl RepositoryCellRouter {
         let takeover = if let Some(owner) = remote_owner {
             if self.remote_owner_is_live(owner).await? {
                 return Ok(ScheduledRepositoryCell {
-                    cell: self.peer(target, principal.clone()),
+                    cell: self.peer(target, principal.clone(), &observed),
                     release_after: false,
                 });
             }
@@ -1035,7 +1035,19 @@ impl RepositoryCellRouter {
         })
     }
 
-    fn peer(&self, target: CellTarget, principal: PeerPrincipal) -> RepositoryCell {
+    fn peer(
+        &self,
+        target: CellTarget,
+        principal: PeerPrincipal,
+        observed: &VersionedControl,
+    ) -> RepositoryCell {
+        let control = observed.value();
+        let description = CellDescription {
+            cell: control.cell,
+            incarnation: control.incarnation,
+            code: control.code,
+            schema: control.schema,
+        };
         RepositoryCell {
             target,
             client: CellClient::peer(
@@ -1043,7 +1055,8 @@ impl RepositoryCellRouter {
                 Arc::clone(&self.peer.signer),
                 principal,
                 Arc::clone(&self.peer.round_trip),
-            ),
+            )
+            .with_observed_description(description),
             handle: None,
             _operation: None,
         }
@@ -1157,6 +1170,7 @@ impl RepositoryCellPeer {
                 target: Some(peer_target(&target)),
                 timeout_ms: 30_000,
                 minimum: None,
+                expected: None,
                 operation: Some(peer_wire::read_request::Operation::Describe(true)),
             }),
         )?;

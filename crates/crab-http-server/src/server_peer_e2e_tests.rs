@@ -518,15 +518,15 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     assert_eq!(comments_status, StatusCode::OK);
     assert_eq!(comments["items"][0]["body"], "Durable issue comment");
     let reads_after = receiver_reads.snapshot();
-    // The typed client sends Describe and Query as separate peer operations.
-    // Each must resolve catalog and control once on the receiver.
+    // Ingress already read the exact Cell description while routing. Reusing
+    // it leaves one receiver resolution for Query, without a Describe round trip.
     assert_eq!(
         (
             reads_after.0 - reads_before.0,
             reads_after.1 - reads_before.1,
             reads_after.2 - reads_before.2,
         ),
-        (2, 2, 2),
+        (1, 1, 1),
     );
     let status = json_request(
         &client,

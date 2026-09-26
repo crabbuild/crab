@@ -255,6 +255,7 @@ async fn request_requires_the_live_sessions_mtls_certificate_and_signing_key() {
             NOW_MS + 10_000,
             5_000,
             PeerOperation::Read(peer_wire::ReadRequest {
+                expected: None,
                 target: Some(peer_wire::Target {
                     tenant_id: target.tenant().as_bytes().to_vec(),
                     application_id: target.application().as_bytes().to_vec(),

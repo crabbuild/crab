@@ -236,6 +236,7 @@ pub(super) fn validate_decoded_operation(
 
 pub(super) fn validate_mutation(request: &wire::MutationRequest, now_ms: i64) -> Result<()> {
     validate_target_wire(request.target.as_ref())?;
+    validate_expected_description(request.expected.as_ref())?;
     validate_timeout(request.timeout_ms)?;
     let identity = request
         .identity
@@ -271,7 +272,7 @@ pub(super) fn validate_read(request: &wire::ReadRequest) -> Result<()> {
         Some(wire::read_request::Operation::CellQuery(query))
             if query.query_id != 0 && query.codec_version != 0 =>
         {
-            Ok(())
+            validate_expected_description(request.expected.as_ref())
         }
         Some(wire::read_request::Operation::CellQuery(_)) => {
             Err(Error::Peer("invalid Cell query identifier"))
@@ -282,6 +283,7 @@ pub(super) fn validate_read(request: &wire::ReadRequest) -> Result<()> {
 
 pub(super) fn validate_resolve(request: &wire::ResolveRequest, now_ms: i64) -> Result<()> {
     validate_target_wire(request.target.as_ref())?;
+    validate_expected_description(request.expected.as_ref())?;
     let identity = request
         .identity
         .as_ref()
@@ -358,6 +360,10 @@ pub(super) fn validate_description_wire(description: &wire::CellDescription) -> 
         return Err(Error::Peer("invalid peer Cell description"));
     }
     Ok(())
+}
+
+fn validate_expected_description(expected: Option<&wire::CellDescription>) -> Result<()> {
+    validate_description_wire(expected.ok_or(Error::Peer("expected Cell description is missing"))?)
 }
 
 pub(super) fn validate_effect_identity(identity: &wire::EffectIdentity, now_ms: i64) -> Result<()> {

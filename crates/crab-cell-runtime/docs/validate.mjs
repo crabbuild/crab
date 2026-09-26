@@ -91,13 +91,14 @@ try {
   assertions++;
   const target = 'target { tenant_id: "tenant0000000001" application_id: "app0000000000001" namespace_id: "sql0000000000001" partition: "p" }';
   const identity = 'identity { request_id: "1234567890123456" incarnation: "abcdefghijklmnop" issued_at_ms: 1 expires_at_ms: 2 }';
+  const expected = 'expected { cell_id: "cccccccccccccccccccccccccccccccc" incarnation: "abcdefghijklmnop" code: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" schema: 1 }';
   // Serialization fixtures only; they do not prove authentication or signature validation.
   const fixtures = [
     {
       type: 'PeerRequest',
       input: 'version: 1 hop_count: 1 remaining_ms: 1000 authorization { origin_session: "session000000001" actions: "comment.write" } mutate {'
-        + target + identity + 'cell_command { command_id: 17 codec_version: 2 input: "comment" } }',
-      expected: /cell_command \{\s+command_id: 17\s+codec_version: 2\s+input: "comment"/,
+        + target + identity + expected + 'cell_command { command_id: 17 codec_version: 2 input: "comment" } }',
+      expected: /expected \{\s+cell_id: "cccccccccccccccccccccccccccccccc"\s+incarnation: "abcdefghijklmnop"\s+code: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\s+schema: 1\s+\}\s+cell_command \{\s+command_id: 17\s+codec_version: 2\s+input: "comment"/,
     },
     {
       type: 'MigrationRequest',
