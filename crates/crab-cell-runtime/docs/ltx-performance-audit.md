@@ -4,7 +4,7 @@
 | --- | --- |
 | Content type | Design audit and acceptance gates |
 | Audience | LTX, runtime, storage, and qualification contributors |
-| Scope | Initial baseline `0f3f4f7617a`; follow-up production changes through `c248fcaad78`, plus the boundary-attribution implementation and demand-interference diagnostic recorded below. The latest completed 3/5/10/20-node traces use `c248fcaad78`, with fault harness `15b608452d9`. The read-view RustFS diagnostic in finding 28 uses `5bbc7021c46`. Each diagnostic identifies its source separately. Historical comparisons use `origin/main` snapshot `de0bb234abc`. The follow-up integrates read replicas from `396e0ab1b40`. The newer offered-rate run uses `8e61bcf3ad2` and stops on a ten-node recovery failure; it does not qualify the full combined fleet. |
+| Scope | Initial baseline `0f3f4f7617a`; each follow-up diagnostic identifies its source below. Historical comparisons use `origin/main` snapshot `de0bb234abc`; the follow-up integrates read replicas from `396e0ab1b40`. The latest completed 3/5/10/20-node rate sweep uses `e9e238b17b3` and pinned RustFS 1.0 GA. It predates shared scheduler discovery, clean-resume preservation and the later peer/fixture fixes through `a62df00a644`. |
 | Status | Hydration fetch, sparse registration, persistent-cache construction isolation, conditional issue enrichment, recovery receipt preservation, range-proportional compaction, bounded asynchronous cache fills and local checksum read/merge improvements are implemented. Loaded scale-out cannot assume idle ownership transfer. Demand faults, installation latency, recovery storms, sustained publication and fleet performance remain open. |
 
 [Scaling plan](vfs-ltx-scale-plan.md) · [Recorded measurements](../../crab-ltx/perf/README.md)
@@ -32,8 +32,8 @@ their separate performance gates.
 
 | Priority | Gap | Next decision and proof |
 | --- | --- | --- |
-| Highest, fixed in focused tests; fleet open | An inactive-log node claim blocked other successors restoring that node's Cells (30) | Permanent fencing evidence now permits independent Cell CAS; active-tail recovery stays exclusive. The two-Cell RustFS regression passes. Re-run the failed fleet point. |
-| High, observed setup race | A newly provisioned repository reached an entry node before its peer's catalog refresh; the latest fleet stopped with HTTP 403 before timing (32) | Provision benchmark fixtures before serving nodes. Dynamic creation still needs a version-aware readiness contract; do not convert authorization errors into retries. |
+| Corrected; GA published-root recovery passes | An inactive-log node claim blocked other successors restoring that node's Cells (30) | Permanent fencing evidence now permits independent Cell CAS; active-tail recovery stays exclusive. The two-Cell RustFS regression and all sixteen later GA published-root recovery points pass. The separate unpublished-tail fault remains unqualified. |
+| High, observed setup race | A newly provisioned repository reached an entry node before its peer's catalog refresh; an earlier fleet stopped with HTTP 403 before timing (32) | The later GA sweep provisions fixtures before serving nodes. Dynamic creation still needs a version-aware readiness contract; do not convert authorization errors into retries. |
 | High, measured application round trip | Covered repository mutations pay an archive-state query before their command; saturated ten-node p99 is 1,448.518 ms (31) | Evaluate checking writable state in the same command transaction. Cover archive/unarchive ordering, retries, all mutation siblings and external-write policy before removing the HTTP check. |
 | Implemented and fixed-load verified | Rounding the receiver margin up prevented donation at a one-Cell target; a batch could also overfill its preferred receiver (26) | Whole-Cell margins and projected receiver room pass both regressions. The latest 3/5/10/20-node run uses every execution owner; skew, sustained load and the combined source remain unqualified. |
 | High, implemented mechanism; latency unqualified | The baseline empty checksum overlay retained its largest allocation and cloned that capacity (25) | Sealed merges now consume the overlay. Compare large-cut → repeated one-page-cut allocation and latency for both bases, retaining failure fencing and recovery-plan clone semantics. |
@@ -44,9 +44,40 @@ their separate performance gates.
 | High, replica read path | Warm snapshots still require routing and response authority reads; refresh uses a new demand-cache view identity (27) | Count provider operations per successful replica read and bytes fetched after refresh. Preserve fencing while evaluating coalesced metadata observations and verified immutable-frame reuse. |
 | High, implemented and range-verified; service latency open | A fragmented root's demand read-ahead fetched 55 pages already cached in that same view (28) | Demand misses now stop before a cached suffix. Exact-range regressions pass at 512/4096-byte pages in memory and RustFS; cross-view reuse and public-action latency benefit remain unmeasured. |
 | Release gate | Current-source saturation, recovery under arrivals and independent-host evidence are incomplete (12, 16, 23) | Run fixed-workload then offered-rate curves at 3/5/10/20 nodes, with actual owner distribution, cgroup/host resources and every acknowledged result checked after failure. |
-| High, verifier corrected; combined fleet open | Earlier fleet acknowledgement checks ignored issue bodies (29) | The stronger harness verified complete bodies after recovery at eleven offered-rate points; the twelfth failed availability (30). Earlier receipts remain ID/title evidence. Complete the corrected-source fleet before claiming full payload recovery qualification. |
+| Verifier corrected; current-source fleet open | Earlier fleet acknowledgement checks ignored issue bodies (29) | All sixteen later GA rate points verify complete acknowledged payloads before and after published-root owner loss. Earlier receipts remain ID/title evidence. The separate unpublished-tail fault never reached final payload verification. |
 
-### Latest offered-rate evidence: recovery and capacity gates failed
+### Latest completed RustFS GA rate evidence
+
+The [complete GA rate report](../../crab-http-server/deploy/cell-issue-fleet/qualification/2026-09-27-ga-rate-curves.md)
+records runtime/harness `e9e238b17b3`, the pinned image/provider identities,
+all sixteen points and independently recomputed raw-sample results. The sweep
+finished at 3/5/10/20 nodes, each capped at one vCPU and 1 GiB, on one four-CPU
+host. Ten offered-load points passed; six failed. All sixteen passed exact
+acknowledged-payload readback, published-root owner loss and restart checks,
+covering 16,906 successful create/read pairs out of 19,200 scheduled.
+
+At twenty nodes and twenty pairs/s, write p99 was 8,236.080 ms; at fifty
+pairs/s only 1,456 of 3,000 scheduled pairs completed successfully. Actor queue,
+archive check and durability-proof wait remain measured investigation targets:
+their p99 values at twenty pairs/s were 3,929.068, 4,634.662 and 1,245.374 ms,
+while WAL/LTX capture p99 was 10.006 ms. These overlapping distributions cannot
+be added or subtracted. They do not isolate CPU, provider or background-work
+contention, and this shared host cannot establish independent-node capacity.
+
+The following unpublished-tail fault rejected its owner/state/epoch guard
+before SIGKILL or disk deletion. It therefore provides no acknowledged-tail
+recovery proof. The later fault-harness change retains the rejected control
+observations; the original artifact cannot identify which field changed.
+
+**Major qualification gaps remain.** Repeat the rate and fault gates on the
+combined source, resolve the retained availability failures, and qualify hot
+Cells, recovery storms and independent failure domains before assigning
+supported throughput or latency limits. The
+[twelve subsequent GA activation-history runs](../../crab-ltx/perf/README.md#rustfs-ga-verification-2026-09-27)
+verify fresh/sparse/hydrated/resumed payload recovery separately; they do not
+replace application load or fleet recovery evidence.
+
+### Earlier offered-rate evidence: recovery and capacity gates failed
 
 [Run 36265830657](https://github.com/crabbuild/crab/actions/runs/36265830657)
 finished with failure. Its image and stage runner use `8e61bcf3ad2`; the job
@@ -413,10 +444,12 @@ their original baseline and subsequent implementation evidence.
 | 8 | Fixed read-ahead and fragmented hydration amplify object reads (8, 21, 28) | Compare point, random and scan workloads on one fixed root; count useful/fetched bytes, refresh reuse and concurrent duplicate ranges before changing the window. |
 | 9 | Checkpoint and full-image tails remain insufficiently sampled (6, 11, 13) | Sustained updates/deletes, pinned readers, large changes and simultaneous maintenance under 1 GiB; preserve checkpoint ordering and exact recovery. |
 
-These priorities identify code-supported risks and missing evidence. The latest
-run attributes 13,507 writes at 3/5/10 nodes, including saturation, but failed
-recovery and never reached twenty nodes. Corrected-source scale and saturation
-proof remain open. The best next fix should remove work
+These priorities identify code-supported risks and missing evidence. The earlier
+trace analysis attributes 13,507 writes at 3/5/10 nodes, including saturation,
+but that run failed recovery and never reached twenty nodes. The later GA sweep
+completed all four node counts and published-root recovery; its six load-gate
+failures and rejected unpublished-tail fault remain failures. Combined-source
+scale and saturation proof remain open. The best next fix should remove work
 from a measured critical path while retaining the existing authority and
 durability contracts. Raising concurrency or queue capacity alone does not
 meet that criterion.
