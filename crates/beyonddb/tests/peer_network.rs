@@ -802,7 +802,9 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .output
         .0
         .unwrap();
-    let route = crate::single_leaf_route(&client, &account, &table.id.clone())
+    // Startup inspection precedes the replacement listener. Resolve its local
+    // account directly while retaining peer routing for independently owned leaves.
+    let route = crate::single_leaf_route(&replacement_client, &account, &table.id.clone())
         .await
         .unwrap();
     for partition in &route.partitions {

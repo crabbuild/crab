@@ -1,7 +1,7 @@
 //! Restore coordinator and participant owners from durable transaction records.
 
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     ops::Bound::{Excluded, Unbounded},
     sync::{Arc, RwLock},
     time::Duration,
@@ -71,34 +71,39 @@ impl CellInitialPartitionProvisioner {
         if self.release_retired_directory().await? {
             return Ok(());
         }
-        let mut candidates = self
+        let active = self
             .runtime
-            .idle_transfer_candidates()
+            .active_cell_targets()
             .await
             .map_err(provision_error)?;
-        candidates.sort_by_key(|(_, _, last_used, _)| *last_used);
-        let candidates = {
+        let targets: HashMap<_, _> = {
             let shards =
                 self.transaction_recovery.shards.read().map_err(|_| {
                     StorageError::Internal("coordinator recovery lock poisoned".into())
                 })?;
-            candidates
+            active
                 .into_iter()
-                .filter_map(|(cell, generation, _, _)| {
-                    shards
-                        .get(cell.as_bytes())
-                        .map(|shard| (cell, generation, shard.target.clone()))
+                .filter(|resident| {
+                    resident.cell_id() != target.cell_id()
+                        && shards.contains_key(resident.cell_id().as_bytes())
                 })
-                .collect::<Vec<_>>()
+                .map(|target| (target.cell_id(), target))
+                .collect()
         };
+        // Completed coordinators need the same inventory settlement as data
+        // owners. Retained recovery entries alone do not prove local residency.
+        let candidates = self.settled_admission_candidates(&targets).await?;
         let client = CellClient::local_runtime(
             self.application.registry(),
             self.runtime.clone(),
             self.layout.clone(),
         );
-        for (cell, generation, target) in candidates {
+        for (cell, generation) in candidates {
+            let Some(target) = targets.get(&cell) else {
+                continue;
+            };
             let pending = client
-                .query::<crate::ReadPendingTransactionBoundary>(&target, None, Json(()))
+                .query::<crate::ReadPendingTransactionBoundary>(target, None, Json(()))
                 .await
                 .map_err(cell_error)?;
             if pending.output.0.is_some() {

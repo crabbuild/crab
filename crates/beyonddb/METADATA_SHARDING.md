@@ -737,4 +737,28 @@ full Linux qualification remains required.
 
 The same CI run also exposed coordinator-history admission exhaustion, an old
 directory test's refusal expectation, and a generation-four deletion timeout.
-Those failures remain open and are not attributed to this split-publication fix.
+They are not attributed to the split-publication fix. The coordinator/directory
+follow-up below addresses the first two; the deletion timeout remains unproven.
+
+### Coordinator inventory and fresh range admission
+
+The coordinator-history failure reproduced locally in 3.93 s. A diagnostic run
+failed in 0.23 s with an empty idle-candidate snapshot despite two tracked
+coordinators. Coordinator reclamation had bypassed the inventory-settlement wait
+used for data owners. Both paths now share that bounded wait and least-recently
+used ordering. Coordinator selection intersects the recovery registry with actual
+resident targets, so historical registry entries do not cause pointless waits.
+Pending transaction checks and exact released-root verification still gate
+coordinator retirement; an admitted target is never its own release candidate.
+
+The unchanged twelve-shard/three-slot history scenario now passes (20.35 s),
+including concurrent token replay and abandoned-read recovery. All three native
+coordinator-residency tests pass together (20.90 s), including fresh data growth
+and movement backpressure. The checkpoint/restart/later-BEGIN test passes (0.87 s).
+
+The directory-retirement fixture now exercises fresh data admission, which must
+refuse a full pool of live directories before publishing an ownership claim.
+After retirement it reclaims exactly one retired directory, preserves the live
+directory, restores the retired root and verifies its stale-install fence
+(0.61 s). Its former account-admission refusal contradicted the live-directory
+recovery policy; metadata recovery remains covered by signed SDK residency tests.
