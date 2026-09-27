@@ -2452,7 +2452,7 @@ async fn resolve_mount_read_context_from_config(
     resolve_mount_read_context_from_remote_url(&url_str).await
 }
 
-#[cfg(any(feature = "fuse", feature = "nfs"))]
+#[cfg(feature = "fuse")]
 fn require_remote_mount_read_context(
     source: &str,
     context: Option<crate::vfs::MountReadContext>,
