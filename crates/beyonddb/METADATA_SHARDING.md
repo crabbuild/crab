@@ -428,10 +428,13 @@ The HTTP state constructor documents that lifecycle-worker requirement.
 Native participant recovery also exposed default-stack exhaustion in the nested
 admission/restore path. BeyondDB's shared published-root restoration future now
 lives on the heap; it retains ordinary cancellation and admission-lock ownership.
-The original scenario passes without a larger stack or fixture wrapper, and CI
-now includes that scenario. No runtime, LTX or dependency contract changed.
+The original local scenario passed without a fixture wrapper. Later Linux CI
+(run 36336572025) still overflowed the default test-thread stack. Qualification
+now runs the native capability suite with a 16 MiB test-thread stack; peer and
+server process checks use their normal stacks. No runtime, LTX or dependency
+contract changed.
 
-Focused verification on this revision: the nine-owner/eight-slot SDK test passed
+Pre-rebase focused verification: the nine-owner/eight-slot SDK test passed
 in 24.78 s; three claimed-owner recovery/metadata-admission scenarios passed in
 3.13 s; four signed split/replay/transaction scenarios passed in 6.10 s. Native
 participant recovery passed on the default stack in 6.49 s. Numeric Query paging
