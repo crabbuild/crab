@@ -82,9 +82,10 @@ knob.
 
 The implemented `CellType::with_entity_partitions` mode addresses distinct
 entity Cells by a stable 33-byte partition digest under a namespace declared
-with one shard. `CellType::entity_partition` derives the partition from the
-entity identity, and `ApplicationHandle` checks its encoding. This provides
-an application-validated target for an application's own split protocol; it
+with one shard. Generated accessors and `ApplicationHandle::target_for_scope`
+derive that partition from the entity key. `CellType::entity_partition` exposes
+the same derivation for provisioning, and `ApplicationHandle` checks its encoding.
+This provides an application-validated target for an application's own split protocol; it
 does not repartition or migrate data automatically.
 
 ## Separate the author and operator APIs
@@ -353,8 +354,9 @@ The current Rust `crab_cell_app::cell_client!` binding generates namespace
 accessors and typed command, prepare, query, and resolution methods from
 explicit stable IDs. Construction checks the compiled registry and operation
 traits; each accessor accepts a declared `CellKey` whose canonical bytes feed
-the compiled `CellType` shard contract. The
-reference application's independent descriptor-byte test, compile-fail
+the compiled `CellType` entity or fixed-shard contract. Namespace-level primitive
+helpers require fixed shards; explicitly targeted SQL and effect handles accept
+entity Cells. The reference application's independent descriptor-byte test, compile-fail
 examples, and three-node `CellNode` suite cover this initial binding. The
 rollout test adds a generated query and retains predecessor code while old and
 new clients overlap. It then publishes a code-only migration, rejects stale

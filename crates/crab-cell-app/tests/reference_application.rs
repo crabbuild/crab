@@ -68,6 +68,7 @@ use object_store::memory::InMemory;
 mod reference_application {
     pub mod application;
     pub mod commit;
+    pub mod entities;
     pub mod fleet;
     pub mod harness;
     pub mod performance;

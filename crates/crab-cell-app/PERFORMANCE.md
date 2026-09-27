@@ -1,5 +1,32 @@
 # Cell primitive end-to-end performance
 
+## Entity targeting correctness
+
+The entity-ledger gate provisions twelve independent SQL Cells, four on each
+of three public `CellNode` hosts. Generated clients use a signed TCP balancer
+to prepare commands, resolve durable outcomes, replay duplicates, and read
+each Cell at its returned receipt. Reusing one request identity across all
+twelve Cells must produce twelve independent records. Stored authority must
+confirm 4/4/4 ownership and published roots covering the receipts; each gateway
+must execute local and forwarded calls. All node sessions renew and withdraw.
+
+Run against an isolated RustFS bucket with a fresh prefix:
+
+```sh
+AWS_ACCESS_KEY_ID=crab AWS_SECRET_ACCESS_KEY=crab \
+CRAB_CELL_TEST_ENDPOINT=http://127.0.0.1:9000 \
+CRAB_CELL_TEST_BUCKET=crab-reference-app \
+CRAB_CELL_TEST_PREFIX=entity-ledgers-unique-run \
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/<checkout>" \
+  cargo test -p crab-cell-app --locked --test reference_application \
+  entity_ledgers_are_isolated_across_three_rustfs_hosts -- --ignored --nocapture
+```
+
+The Compose workflow runs this gate as `driver entities`, retaining
+`entities.log`, binary identity, and kernel counters. Its three hosts share
+one process and have separate SQLite/cache directories. This is a correctness
+check, not a throughput measurement or the many-Cell 3/5/10/20 process profile.
+
 ## Additive application release correctness
 
 The public-host rollout test compiles a successor SQL module with a new typed

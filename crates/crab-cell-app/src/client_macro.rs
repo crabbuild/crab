@@ -105,7 +105,7 @@ macro_rules! cell_client {
             }
 
             $(
-                /// Selects a Cell using the descriptor's canonical shard function.
+                /// Selects a Cell using the descriptor's canonical partition function.
                 $cell_visibility fn $accessor(&self, $scope: &$key) -> crab_cell_runtime::Result<$cell> {
                     let key = <$key as $crate::CellKey>::canonical_bytes($scope);
                     Ok($cell {
