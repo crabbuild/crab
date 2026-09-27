@@ -14,7 +14,9 @@ mod codec;
 #[cfg(feature = "storage")]
 mod storage;
 
-use codec::{decode_layer, encode_layer};
+#[cfg(any(feature = "storage", test))]
+use codec::decode_layer;
+use codec::encode_layer;
 #[cfg(feature = "storage")]
 pub use storage::{
     load_path_state, load_path_state_checkpoint, load_path_state_checkpoint_record,
@@ -24,9 +26,6 @@ pub use storage::{
 const LAYER_MAGIC: &[u8; 8] = b"CRABPS02";
 const LAYER_VERSION: u32 = 2;
 const LAYER_HEADER_BYTES: usize = 24;
-const RECORD_FIXED_BYTES: usize = 48;
-const NODE_FIXED_BYTES: usize = 8;
-const CHILD_FIXED_BYTES: usize = 12;
 const MAX_AUTHOR_BYTES: usize = 16 * 1024;
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_PATH_BYTES: usize = 1024 * 1024;
@@ -830,6 +829,7 @@ fn corrupt<T>(reason: &str) -> Result<T> {
     Err(corruption(reason))
 }
 
+#[cfg(any(feature = "storage", test))]
 fn corrupt_at<T>(path: &str, reason: &str) -> Result<T> {
     Err(MetadataError::CorruptObject {
         path: path.to_owned(),

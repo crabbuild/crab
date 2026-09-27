@@ -58,6 +58,8 @@ budget before buffering, then admit each layer against its authenticated size
 and the remaining aggregate budget. All bodies still require hash and exact
 length verification; malformed provider sizes cannot bypass the encoded-byte
 ceiling. Decoded index structures require separate memory qualification.
+Path-state construction and in-memory validation need no storage feature;
+encoded-layer decoding is private to storage loading and codec tests.
 Current file lookup selects the protocol from the root alone: only an absent
 v2 root permits v1 lookup. A missing v2 dependency remains an error, and failed
 shared-session initialization can retry after that dependency is repaired.

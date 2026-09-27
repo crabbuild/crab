@@ -1,11 +1,13 @@
+#[cfg(any(feature = "storage", test))]
 use std::collections::BTreeMap;
 
+#[cfg(any(feature = "storage", test))]
 use super::{
-    CHILD_FIXED_BYTES, LAYER_HEADER_BYTES, LAYER_MAGIC, LAYER_VERSION, MAX_AUTHOR_BYTES,
-    MAX_CHILDREN_PER_NODE, MAX_MESSAGE_BYTES, MAX_PATH_BYTES, NODE_FIXED_BYTES, PathStateLayer,
-    PathStateLayerRef, PathStateNode, PathStateNodeRef, PathStateRecord, RECORD_FIXED_BYTES,
-    Result, corrupt_at, corruption,
+    LAYER_HEADER_BYTES, MAX_AUTHOR_BYTES, MAX_CHILDREN_PER_NODE, MAX_MESSAGE_BYTES, MAX_PATH_BYTES,
+    PathStateLayerRef, PathStateNode, PathStateNodeRef, PathStateRecord, corrupt_at, corruption,
 };
+use super::{LAYER_MAGIC, LAYER_VERSION, PathStateLayer, Result};
+#[cfg(any(feature = "storage", test))]
 use crate::error::MetadataError;
 
 pub(super) fn encode_layer(layer: &PathStateLayer) -> Result<Vec<u8>> {
@@ -39,11 +41,18 @@ pub(super) fn encode_layer(layer: &PathStateLayer) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+// Only storage loads encoded layers; payload builders keep their validated index.
+// Unit tests still exercise the decoder without enabling storage dependencies.
+#[cfg(any(feature = "storage", test))]
 pub(super) fn decode_layer(
     bytes: &[u8],
     reference: &PathStateLayerRef,
     path: &str,
 ) -> Result<PathStateLayer> {
+    const RECORD_FIXED_BYTES: usize = 48;
+    const NODE_FIXED_BYTES: usize = 8;
+    const CHILD_FIXED_BYTES: usize = 12;
+
     if bytes.len() < LAYER_HEADER_BYTES || &bytes[..8] != LAYER_MAGIC {
         return corrupt_at(path, "invalid path-state layer header");
     }
@@ -147,6 +156,7 @@ pub(super) fn decode_layer(
     })
 }
 
+#[cfg(any(feature = "storage", test))]
 fn read_vec(bytes: &[u8], cursor: &mut usize, length: usize, path: &str) -> Result<Vec<u8>> {
     let end = cursor
         .checked_add(length)
@@ -161,14 +171,17 @@ fn read_vec(bytes: &[u8], cursor: &mut usize, length: usize, path: &str) -> Resu
     Ok(value.to_vec())
 }
 
+#[cfg(any(feature = "storage", test))]
 fn read_u32(bytes: &[u8], cursor: &mut usize, path: &str) -> Result<u32> {
     Ok(u32::from_le_bytes(read_array(bytes, cursor, path)?))
 }
 
+#[cfg(any(feature = "storage", test))]
 fn read_i64(bytes: &[u8], cursor: &mut usize, path: &str) -> Result<i64> {
     Ok(i64::from_le_bytes(read_array(bytes, cursor, path)?))
 }
 
+#[cfg(any(feature = "storage", test))]
 fn read_array<const N: usize>(bytes: &[u8], cursor: &mut usize, path: &str) -> Result<[u8; N]> {
     let end = cursor
         .checked_add(N)
