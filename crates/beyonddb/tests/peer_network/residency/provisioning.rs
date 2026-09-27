@@ -114,6 +114,119 @@ pub(super) fn sdk_without_retries(fixture: &Fixture) -> aws_sdk_dynamodb::Client
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_read_recovers_expired_directory_and_data_owners() {
+    let fixture = Fixture::with_partition_count(1).await;
+    let remote = Remote::new(&fixture).await;
+    let sdk = sdk_without_retries(&fixture);
+    let table_id = table_id(&fixture, "Residency").await;
+    let targets = [
+        beyonddb::directory_target(
+            "123456789012",
+            &beyonddb::DirectorySpec::root(table_id.clone()),
+        )
+        .unwrap(),
+        beyonddb::data_target("123456789012", &table_id, &[0; 16]).unwrap(),
+    ];
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let expected = &fixture.data[0].1;
+    for target in &targets {
+        let proof = CellCatalog::new(fixture.layout.clone(), target.tenant())
+            .lookup(target.cell_id())
+            .await
+            .unwrap()
+            .unwrap();
+        let current = authority.load(target.cell_id()).await.unwrap().unwrap();
+        fixture
+            .node
+            .runtime()
+            .local_handle(proof, &current)
+            .await
+            .unwrap()
+            .unwrap()
+            .drain()
+            .await
+            .unwrap();
+        let idle = authority.load(target.cell_id()).await.unwrap().unwrap();
+        let claim = idle
+            .value()
+            .takeover(Owner {
+                session: remote.session,
+                endpoint: remote.endpoint.clone(),
+            })
+            .unwrap();
+        authority
+            .transition(
+                &idle,
+                claim,
+                crab_cell_runtime::control::Transition::Takeover,
+            )
+            .await
+            .unwrap();
+        // The SDK path must finish the claimed activation on the live peer.
+        let read = sdk
+            .get_item()
+            .table_name("Residency")
+            .key("id", expected["id"].clone())
+            .consistent_read(true)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(read.item.as_ref(), Some(expected));
+        let current = authority.load(target.cell_id()).await.unwrap().unwrap();
+        assert_eq!(
+            current.value().state,
+            crab_cell_runtime::control::ControlState::Serving
+        );
+        assert_eq!(
+            current.value().owner.as_ref().unwrap().session,
+            remote.session
+        );
+    }
+    remote.stop_listener();
+    assert!(
+        sdk.get_item()
+            .table_name("Residency")
+            .key("id", expected["id"].clone())
+            .consistent_read(true)
+            .send()
+            .await
+            .is_err()
+    );
+    for target in &targets {
+        let current = authority.load(target.cell_id()).await.unwrap().unwrap();
+        assert_eq!(
+            current.value().owner.as_ref().unwrap().session,
+            remote.session
+        );
+    }
+    remote.lease.cancel();
+    wait_for_expiry(&fixture, remote.session).await;
+    // No projection or transaction work exists to discover these owners. An
+    // ordinary signed read must restore both its lookup path and committed data.
+    let read = sdk
+        .get_item()
+        .table_name("Residency")
+        .key("id", expected["id"].clone())
+        .consistent_read(true)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read.item.as_ref(), Some(expected));
+    for target in &targets {
+        let current = authority.load(target.cell_id()).await.unwrap().unwrap();
+        assert_eq!(
+            current.value().owner.as_ref().unwrap().session,
+            fixture.session
+        );
+    }
+    assert!(matches!(
+        remote.node.shutdown().await,
+        Ok(()) | Err(crab_cell_runtime::Error::Fenced)
+    ));
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sdk_initial_base_and_index_ranges_use_remote_owners() {
     let fixture = Fixture::new().await;
     let sdk = sdk_without_retries(&fixture);
@@ -536,6 +649,7 @@ async fn unpublished(
             &account_target("123456789012").unwrap(),
             mutation(),
             Json(TableSpec {
+                table_class: Default::default(),
                 placement: beyonddb::TablePlacement::Routed {
                     initial_partitions: 2,
                 },

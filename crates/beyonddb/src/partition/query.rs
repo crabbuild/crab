@@ -10,7 +10,7 @@ use super::{
 };
 use crate::Error;
 use crate::items::{item_key, valid_key};
-use crate::table::statement;
+use crate::table::{TableRecord, statement};
 
 /// One normalized comparison on a table RANGE key.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -140,145 +140,173 @@ impl Query for PartitionQuery {
             AccessState::Sealed => return Ok(Json(PartitionQueryOutcome::Sealed)),
             AccessState::Importing => return Ok(Json(PartitionQueryOutcome::NotReady)),
         }
+        match data_key_hash(&spec.table.id, &input.partition_key, &spec.table.key_schema) {
+            Ok(hash) if spec.contains(hash) => {}
+            Ok(_) => return Ok(Json(PartitionQueryOutcome::WrongPartition)),
+            Err(_) => return Ok(Json(PartitionQueryOutcome::InvalidKey)),
+        }
         if input.index_name.is_some() {
-            match data_key_hash(&spec.table.id, &input.partition_key, &spec.table.key_schema) {
-                Ok(hash) if spec.contains(hash) => {}
-                Ok(_) => return Ok(Json(PartitionQueryOutcome::WrongPartition)),
-                Err(_) => return Ok(Json(PartitionQueryOutcome::InvalidKey)),
-            }
             return crate::secondary_index::query(context, &spec.table, input, true);
         }
-        if input.limit == 0 {
-            return Ok(Json(PartitionQueryOutcome::InvalidLimit));
-        }
-        let hash_attributes: Vec<_> = spec
-            .table
-            .key_schema
-            .iter()
-            .filter(|element| element.key_type == KeyType::Hash)
-            .collect();
-        if input.partition_key.len() != hash_attributes.len()
-            || hash_attributes
-                .iter()
-                .any(|element| !input.partition_key.contains_key(&element.attribute_name))
-        {
-            return Ok(Json(PartitionQueryOutcome::InvalidKey));
-        }
-        let range_attributes: Vec<_> = spec
-            .table
-            .key_schema
-            .iter()
-            .filter(|element| element.key_type == KeyType::Range)
-            .collect();
-        if input.sort.as_ref().is_some_and(|sort| {
-            range_attributes
-                .first()
-                .map(|element| element.attribute_name.as_str())
-                != Some(sort.attribute())
-        }) || input.extra_range_equals.iter().any(|(name, _)| {
-            !range_attributes
-                .iter()
-                .skip(1)
-                .any(|element| &element.attribute_name == name)
-        }) {
-            return Ok(Json(PartitionQueryOutcome::InvalidCondition));
-        }
-        if !spec.contains(data_key_hash(
-            &spec.table.id,
-            &input.partition_key,
-            &spec.table.key_schema,
-        )?) {
-            return Ok(Json(PartitionQueryOutcome::WrongPartition));
-        }
-        let partition_key = partition_key_bytes(&input.partition_key, &spec.table.key_schema)?;
-        let mut cursor = match &input.exclusive_start_key {
-            Some(start) if valid_key(start, &spec.table) => {
-                if partition_key_bytes(start, &spec.table.key_schema)? != partition_key {
-                    return Ok(Json(PartitionQueryOutcome::InvalidKey));
-                }
-                Some((
-                    super::key::index_key(start, &spec.table.key_schema)?.1,
-                    item_key(start, &spec.table.key_schema)?,
-                ))
-            }
-            Some(_) => return Ok(Json(PartitionQueryOutcome::InvalidKey)),
-            None => None,
-        };
-        let mut items = Vec::new();
-        let mut last_returned = None;
-        let mut bytes = 0_usize;
-        let limit = input.limit.min(10_000) as usize;
-        let bounds = if range_attributes.len() == 1 {
-            match input.sort.as_ref().map(index_bounds).transpose() {
-                Ok(Some(bounds)) => bounds,
-                Ok(None) => Vec::new(),
-                Err(_) => return Ok(Json(PartitionQueryOutcome::InvalidCondition)),
-            }
-        } else {
-            Vec::new()
-        };
-        // Probe the intent index itself: a prepared insert has no live row.
-        // Multi-attribute RANGE predicates conservatively fence the HASH group.
-        let (predicate, parameters) =
-            range_predicate(&partition_key, &bounds, &cursor, input.forward);
-        let locks = context.sql(&statement(
-            &format!("SELECT transaction_id FROM ddb_partition_transaction_locks {predicate} AND write_lock = 1 LIMIT 1"),
-            parameters,
-        ))?;
-        if let Some(conflict) = crate::participant::read_conflict(context, &locks[0])? {
-            return Ok(Json(PartitionQueryOutcome::Conflict(conflict)));
-        }
-        loop {
-            let (predicate, parameters) =
-                range_predicate(&partition_key, &bounds, &cursor, input.forward);
-            let mut sql = format!("SELECT item_key, sort_key FROM ddb_partition_items {predicate}");
-            let order = if input.forward { "ASC" } else { "DESC" };
-            sql.push_str(&format!(
-                " ORDER BY sort_key {order}, item_key {order} LIMIT 64"
-            ));
-            let rows = context.sql(&statement(&sql, parameters))?;
-            let page = &rows[0].rows;
-            if page.is_empty() {
-                break;
-            }
-            for row in page {
-                let [SqlValue::Blob(key), SqlValue::Blob(sort)] = row.as_slice() else {
-                    return Err(Error::Command("invalid partition query row"));
-                };
-                let item = crate::item_storage::StoredValue::Partition(key)
-                    .read(|batch| context.sql(batch))?
-                    .ok_or(Error::Command("query key has no item"))?;
-                if matches_item(&input, &item)? {
-                    if items.len() >= limit {
-                        return Ok(Json(PartitionQueryOutcome::Page {
-                            items,
-                            last_evaluated_key: last_returned,
-                        }));
-                    }
-                    let encoded_bytes =
-                        serde_json::to_vec(&item)?.len().max(item_size_bytes(&item));
-                    let next_bytes = bytes.saturating_add(encoded_bytes).saturating_add(128);
-                    if !items.is_empty() && next_bytes > 900_000 {
-                        return Ok(Json(PartitionQueryOutcome::Page {
-                            items,
-                            last_evaluated_key: last_returned,
-                        }));
-                    }
-                    bytes = next_bytes;
-                    last_returned = Some(extract_key(&item, &spec.table.key_schema));
-                    items.push(item);
-                }
-                cursor = Some((sort.clone(), key.clone()));
-            }
-            if page.len() < 64 {
-                break;
-            }
-        }
-        Ok(Json(PartitionQueryOutcome::Page {
-            items,
-            last_evaluated_key: None,
-        }))
+        query_ordered(context, &spec.table, input, QuerySource::Partition)
     }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum QuerySource {
+    Account,
+    Partition,
+}
+
+pub(crate) fn query_ordered(
+    context: &mut QueryContext<'_>,
+    table: &TableRecord,
+    input: PartitionQueryInput,
+    source: QuerySource,
+) -> Result<Json<PartitionQueryOutcome>> {
+    if input.limit == 0 {
+        return Ok(Json(PartitionQueryOutcome::InvalidLimit));
+    }
+    let hash_attributes: Vec<_> = table
+        .key_schema
+        .iter()
+        .filter(|element| element.key_type == KeyType::Hash)
+        .collect();
+    if input.partition_key.len() != hash_attributes.len()
+        || hash_attributes
+            .iter()
+            .any(|element| !input.partition_key.contains_key(&element.attribute_name))
+    {
+        return Ok(Json(PartitionQueryOutcome::InvalidKey));
+    }
+    let range_attributes: Vec<_> = table
+        .key_schema
+        .iter()
+        .filter(|element| element.key_type == KeyType::Range)
+        .collect();
+    if input.sort.as_ref().is_some_and(|sort| {
+        range_attributes
+            .first()
+            .map(|element| element.attribute_name.as_str())
+            != Some(sort.attribute())
+    }) || input.extra_range_equals.iter().any(|(name, _)| {
+        !range_attributes
+            .iter()
+            .skip(1)
+            .any(|element| &element.attribute_name == name)
+    }) {
+        return Ok(Json(PartitionQueryOutcome::InvalidCondition));
+    }
+    let partition_key = partition_key_bytes(&input.partition_key, &table.key_schema)?;
+    let mut cursor = match &input.exclusive_start_key {
+        Some(start) if valid_key(start, table) => {
+            if partition_key_bytes(start, &table.key_schema)? != partition_key {
+                return Ok(Json(PartitionQueryOutcome::InvalidKey));
+            }
+            Some((
+                super::key::index_key(start, &table.key_schema)?.1,
+                item_key(start, &table.key_schema)?,
+            ))
+        }
+        Some(_) => return Ok(Json(PartitionQueryOutcome::InvalidKey)),
+        None => None,
+    };
+    let mut items = Vec::new();
+    let mut last_returned = None;
+    let mut bytes = 0_usize;
+    let limit = input.limit.min(10_000) as usize;
+    let bounds = if range_attributes.len() == 1 {
+        match input.sort.as_ref().map(index_bounds).transpose() {
+            Ok(Some(bounds)) => bounds,
+            Ok(None) => Vec::new(),
+            Err(_) => return Ok(Json(PartitionQueryOutcome::InvalidCondition)),
+        }
+    } else {
+        Vec::new()
+    };
+    // Probe the intent index itself: a prepared insert has no live row.
+    // Multi-attribute RANGE predicates conservatively fence the HASH group.
+    let locks = match source {
+            QuerySource::Account => context.sql(&statement(
+                "SELECT transaction_id FROM ddb_account_transaction_locks WHERE table_id = ?1 AND write_lock = 1 LIMIT 1",
+                vec![SqlValue::Text(table.id.clone())],
+            ))?,
+            QuerySource::Partition => {
+                let (predicate, parameters) =
+                    range_predicate(&partition_key, &bounds, &cursor, input.forward);
+                context.sql(&statement(
+                    &format!("SELECT transaction_id FROM ddb_partition_transaction_locks {predicate} AND write_lock = 1 LIMIT 1"),
+                    parameters,
+                ))?
+            }
+        };
+    if let Some(conflict) = crate::participant::read_conflict(context, &locks[0])? {
+        return Ok(Json(PartitionQueryOutcome::Conflict(conflict)));
+    }
+    loop {
+        let (mut predicate, mut parameters) =
+            range_predicate(&partition_key, &bounds, &cursor, input.forward);
+        let storage = match source {
+            QuerySource::Account => {
+                predicate.push_str(" AND table_id = ?");
+                parameters.push(SqlValue::Text(table.id.clone()));
+                "ddb_items"
+            }
+            QuerySource::Partition => "ddb_partition_items",
+        };
+        let mut sql = format!("SELECT item_key, sort_key FROM {storage} {predicate}");
+        let order = if input.forward { "ASC" } else { "DESC" };
+        sql.push_str(&format!(
+            " ORDER BY sort_key {order}, item_key {order} LIMIT 64"
+        ));
+        let rows = context.sql(&statement(&sql, parameters))?;
+        let page = &rows[0].rows;
+        if page.is_empty() {
+            break;
+        }
+        for row in page {
+            let [SqlValue::Blob(key), SqlValue::Blob(sort)] = row.as_slice() else {
+                return Err(Error::Command("invalid partition query row"));
+            };
+            let stored = match source {
+                QuerySource::Account => crate::item_storage::StoredValue::Account {
+                    table_id: &table.id,
+                    key,
+                },
+                QuerySource::Partition => crate::item_storage::StoredValue::Partition(key),
+            };
+            let item = stored
+                .read(|batch| context.sql(batch))?
+                .ok_or(Error::Command("query key has no item"))?;
+            if matches_item(&input, &item)? {
+                if items.len() >= limit {
+                    return Ok(Json(PartitionQueryOutcome::Page {
+                        items,
+                        last_evaluated_key: last_returned,
+                    }));
+                }
+                let encoded_bytes = serde_json::to_vec(&item)?.len().max(item_size_bytes(&item));
+                let next_bytes = bytes.saturating_add(encoded_bytes).saturating_add(128);
+                if !items.is_empty() && next_bytes > 900_000 {
+                    return Ok(Json(PartitionQueryOutcome::Page {
+                        items,
+                        last_evaluated_key: last_returned,
+                    }));
+                }
+                bytes = next_bytes;
+                last_returned = Some(extract_key(&item, &table.key_schema));
+                items.push(item);
+            }
+            cursor = Some((sort.clone(), key.clone()));
+        }
+        if page.len() < 64 {
+            break;
+        }
+    }
+    Ok(Json(PartitionQueryOutcome::Page {
+        items,
+        last_evaluated_key: None,
+    }))
 }
 
 fn range_predicate(

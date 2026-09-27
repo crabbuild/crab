@@ -148,11 +148,10 @@ impl TableEngine for CellStorage {
                 || input.vector_indexes.as_ref().is_some_and(|v| !v.is_empty())
                 || input.stream_specification.is_some()
                 || input.sse_specification.is_some()
-                || input.table_class.is_some()
                 || input.on_demand_throughput.is_some()
             {
                 return Err(unsupported(
-                    "vector indexes, non-ALL local index projections, streams, SSE, class, or on-demand ceilings",
+                    "vector indexes, non-ALL local index projections, streams, SSE, or on-demand ceilings",
                 ));
             }
             if self.initial_partitions.is_none()
@@ -168,6 +167,7 @@ impl TableEngine for CellStorage {
             let target = target(&account_id)?;
             let name = input.table_name.clone();
             let spec = TableSpec {
+                table_class: table_class(input.table_class.as_deref())?.unwrap_or_default(),
                 placement: self.initial_partitions.as_ref().map_or(
                     TablePlacement::Account,
                     |provisioner| TablePlacement::Routed {
@@ -196,7 +196,7 @@ impl TableEngine for CellStorage {
                 .await
             {
                 Ok(committed) => match committed.output.0 {
-                    CreateTableOutcome::Created(record) => record,
+                    CreateTableOutcome::Created(record) => *record,
                     _ => {
                         return Err(StorageError::Internal(
                             "unexpected successful create result".into(),
@@ -279,7 +279,7 @@ impl TableEngine for CellStorage {
                 .await
             {
                 Ok(committed) => match committed.output.0 {
-                    DeleteTableOutcome::Deleted(record) => record,
+                    DeleteTableOutcome::Deleted(record) => *record,
                     _ => {
                         return Err(StorageError::Internal(
                             "unexpected successful delete result".into(),
@@ -390,24 +390,24 @@ impl TableEngine for CellStorage {
                 .is_some_and(|v| !v.is_empty())
                 || input.attribute_definitions.is_some()
                 || input.stream_specification.is_some()
-                || input.table_class.is_some()
                 || input.on_demand_throughput.is_some()
                 || input
                     .vector_index_updates
                     .as_ref()
                     .is_some_and(|v| !v.is_empty())
             {
-                return Err(unsupported(
-                    "index, stream, class, or on-demand ceiling updates",
-                ));
+                return Err(unsupported("index, stream, or on-demand ceiling updates"));
             }
             let target = target(&account_id)?;
             let name = input.table_name.clone();
             let update = TableUpdate {
                 table_name: input.table_name,
-                billing_mode: input.billing_mode,
-                provisioned_throughput: input.provisioned_throughput,
-                deletion_protection_enabled: input.deletion_protection_enabled,
+                settings: crate::TableSettings {
+                    table_class: table_class(input.table_class.as_deref())?,
+                    billing_mode: input.billing_mode,
+                    provisioned_throughput: input.provisioned_throughput,
+                    deletion_protection_enabled: input.deletion_protection_enabled,
+                },
             };
             let record = match self
                 .client
@@ -415,7 +415,7 @@ impl TableEngine for CellStorage {
                 .await
             {
                 Ok(committed) => match committed.output.0 {
-                    UpdateTableOutcome::Updated(record) => record,
+                    UpdateTableOutcome::Updated(record) => *record,
                     _ => {
                         return Err(StorageError::Internal(
                             "unexpected successful update result".into(),
@@ -432,6 +432,11 @@ impl TableEngine for CellStorage {
                     UpdateTableOutcome::InvalidUpdate => {
                         return Err(StorageError::Validation(
                             "invalid table billing update".into(),
+                        ));
+                    }
+                    UpdateTableOutcome::TableClassLimitExceeded => {
+                        return Err(StorageError::LimitExceeded(
+                            "at most two table class changes are allowed in thirty days".into(),
                         ));
                     }
                     _ => {
@@ -688,6 +693,10 @@ fn description(
             ..ProvisionedThroughputDescription::default()
         },
         billing_mode_summary,
+        table_class_summary: Some(serde_json::json!({
+            "TableClass": record.table_class,
+            "LastUpdateDateTime": record.table_class_updates_ms.last().copied().unwrap_or(record.created_at_ms) as f64 / 1_000.0,
+        })),
         deletion_protection_enabled: record.deletion_protection_enabled,
         ..TableDescription::default()
     }
@@ -695,6 +704,17 @@ fn description(
 
 fn target(account_id: &str) -> Result<CellTarget, StorageError> {
     account_target(account_id).map_err(|error| StorageError::Validation(error.to_string()))
+}
+
+fn table_class(value: Option<&str>) -> Result<Option<crate::TableClass>, StorageError> {
+    value
+        .map(crate::TableClass::try_from)
+        .transpose()
+        .map_err(|_| {
+            StorageError::Validation(
+                "TableClass must be STANDARD or STANDARD_INFREQUENT_ACCESS".into(),
+            )
+        })
 }
 
 fn target_from_table_id(table_id: &str) -> Result<CellTarget, StorageError> {

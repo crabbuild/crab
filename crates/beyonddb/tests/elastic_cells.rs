@@ -43,6 +43,7 @@ mod elastic_cells {
     mod directory_tree;
     mod global_index_splits;
     mod global_indexes;
+    mod index_backfill;
     mod local_indexes;
     mod node_sessions;
     mod public_transactions;
@@ -599,6 +600,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
             &account,
             identity(77),
             Json(TableSpec {
+                table_class: Default::default(),
                 placement: beyonddb::TablePlacement::Routed {
                     initial_partitions: 64,
                 },
@@ -625,7 +627,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
         .output
         .0
     {
-        CreateTableOutcome::Created(table) => table,
+        CreateTableOutcome::Created(table) => *table,
         other => panic!("unexpected table creation: {other:?}"),
     };
     // Install a native metadata fixture across the 64-entry page boundary;
@@ -912,6 +914,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
                 &account,
                 identity(200 + index),
                 Json(TableSpec {
+                    table_class: Default::default(),
                     placement: beyonddb::TablePlacement::Account,
                     local_secondary_indexes: Vec::new(),
                     global_secondary_indexes: Vec::new(),
@@ -956,6 +959,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
             &account,
             identity(79),
             Json(TableSpec {
+                table_class: Default::default(),
                 placement: beyonddb::TablePlacement::Routed {
                     initial_partitions: 256,
                 },
@@ -976,7 +980,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
         .output
         .0
     {
-        CreateTableOutcome::Created(table) => table,
+        CreateTableOutcome::Created(table) => *table,
         other => panic!("unexpected table creation: {other:?}"),
     };
     let width = u128::MAX / 1_024;
@@ -2685,6 +2689,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             &account,
             identity(13),
             Json(TableSpec {
+                table_class: Default::default(),
                 placement: beyonddb::TablePlacement::Routed {
                     initial_partitions: 2,
                 },
@@ -2711,7 +2716,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .output
         .0
     {
-        CreateTableOutcome::Created(table) => table,
+        CreateTableOutcome::Created(table) => *table,
         other => panic!("unexpected create outcome: {other:?}"),
     };
     let split = [0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];

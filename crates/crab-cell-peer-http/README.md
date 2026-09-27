@@ -21,6 +21,7 @@ and product authorization before dispatching through `PeerDispatcher`.
 
 BeyondDB composes this transport and its pinned-mTLS implementation for account,
 credential, data, and coordinator Cells. Its incoming receiver reports a
-one-second retry delay when peer admission is occupied. `crab-http-server`
+one-second retry delay when request-memory admission is exhausted; codec work
+waits within the request deadline using the runtime's bounded CPU queue. `crab-http-server`
 retains its repository-scoped transport, owner-description hints, and telemetry;
 those product routing semantics are not enabled by this transport.

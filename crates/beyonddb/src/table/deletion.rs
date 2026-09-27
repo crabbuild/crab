@@ -62,7 +62,7 @@ impl Query for ReadTableLifecycle {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DeleteTableOutcome {
     TransactionConflict,
-    Deleted(TableRecord),
+    Deleted(Box<TableRecord>),
     TableNotFound,
     DeletionProtected,
 }
@@ -113,7 +113,7 @@ impl Command for DeleteTable {
         }
         cleanup(context, &table.id)?;
         Ok(CommandResult::Success(Json(DeleteTableOutcome::Deleted(
-            table,
+            Box::new(table),
         ))))
     }
 }

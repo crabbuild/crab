@@ -203,12 +203,35 @@ async fn cleanup_restart(delete_first: bool) {
             .await,
         Err(InvocationError::Rejected(_))
     ));
+    // A later shard forces recovery to release this settled coordinator in the
+    // four-slot fixture, regardless of the public read's random routing key.
+    let later_key = (0_u32..100_000)
+        .map(u32::to_be_bytes)
+        .find(|key| coordinator_target(ACCOUNT, key).unwrap().partition() > coordinator.partition())
+        .unwrap();
+    provisioner
+        .admit_coordinator(ACCOUNT, &later_key)
+        .await
+        .unwrap();
     // Record a settled root before acknowledgement: the later cleanup intent
     // must invalidate that checkpoint and become visible to startup recovery.
     provisioner
         .recover_registered_coordinators(ACCOUNT, &client, &storage, &nodes)
         .await
         .unwrap();
+    let released = CellAuthority::new(layout.clone())
+        .load(coordinator.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        released.value().state,
+        crab_cell_runtime::control::ControlState::Idle
+    );
+    assert!(released.value().owner.is_none());
+    // local_runtime never restores Idle roots; raw commands must arrange
+    // ownership, just as the serving resolver does before dispatch.
+    provisioner.admit_coordinator(ACCOUNT, &id).await.unwrap();
     client
         .command::<BeginReadResultRelease>(&coordinator, mutation(), Json(read.clone()))
         .await

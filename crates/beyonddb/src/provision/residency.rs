@@ -65,32 +65,7 @@ impl CellInitialPartitionProvisioner {
             })
             .map(|target| (target.cell_id(), target))
             .collect();
-        if targets.is_empty() {
-            return Ok(());
-        }
-        // A completed command invalidates idle inventory until the runtime's
-        // background inspection finishes. Bound that wait before reporting full
-        // residency; release still rechecks generation and settled work.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let mut candidates = loop {
-            let stats = self.runtime.stats();
-            if stats.active_cells() < stats.active_cell_capacity() {
-                return Ok(());
-            }
-            let candidates: Vec<_> = self
-                .runtime
-                .idle_transfer_candidates()
-                .await
-                .map_err(provision_error)?
-                .into_iter()
-                .filter(|(cell, _, _, _)| targets.contains_key(cell))
-                .collect();
-            if !candidates.is_empty() || tokio::time::Instant::now() >= deadline {
-                break candidates;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        };
-        candidates.sort_by_key(|(_, _, last_used, _)| *last_used);
+        let candidates = self.settled_admission_candidates(&targets).await?;
         let client = CellClient::local_runtime(
             self.application.registry(),
             self.runtime.clone(),
@@ -98,7 +73,7 @@ impl CellInitialPartitionProvisioner {
         );
         let mut candidate = None;
         let mut directory = None;
-        for (cell, generation, _, _) in candidates {
+        for (cell, generation) in candidates {
             let Some(range) = targets.get(&cell) else {
                 continue;
             };
@@ -144,6 +119,42 @@ impl CellInitialPartitionProvisioner {
             self.release_capacity(cell, generation).await?;
         }
         Ok(())
+    }
+
+    pub(super) async fn settled_admission_candidates(
+        &self,
+        targets: &HashMap<CellId, CellTarget>,
+    ) -> Result<Vec<(CellId, u64)>, StorageError> {
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        // A completed command invalidates idle inventory until the runtime's
+        // background inspection finishes. Bound that wait before reporting full
+        // residency; release still rechecks generation and settled work.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut candidates = loop {
+            let stats = self.runtime.stats();
+            if stats.active_cells() < stats.active_cell_capacity() {
+                return Ok(Vec::new());
+            }
+            let candidates: Vec<_> = self
+                .runtime
+                .idle_transfer_candidates()
+                .await
+                .map_err(provision_error)?
+                .into_iter()
+                .filter(|(cell, _, _, _)| targets.contains_key(cell))
+                .collect();
+            if !candidates.is_empty() || tokio::time::Instant::now() >= deadline {
+                break candidates;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        candidates.sort_by_key(|(_, _, last_used, _)| *last_used);
+        Ok(candidates
+            .into_iter()
+            .map(|(cell, generation, _, _)| (cell, generation))
+            .collect())
     }
 
     pub(crate) async fn reclaim_placement_capacity(

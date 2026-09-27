@@ -58,12 +58,12 @@ pub(crate) fn enqueue(
     source_epoch: u64,
     old: Option<Item>,
     new: Option<Item>,
-) -> Result<()> {
+) -> Result<Option<[u8; 32]>> {
     if table.global_secondary_indexes.iter().all(|index| {
         old.as_ref().and_then(|item| index.project(table, item))
             == new.as_ref().and_then(|item| index.project(table, item))
     }) {
-        return Ok(());
+        return Ok(None);
     }
     let mut hash = blake3::Hasher::new();
     hash.update(b"beyonddb.index-change.v1\0");
@@ -91,7 +91,8 @@ pub(crate) fn enqueue(
             old,
             new,
         },
-    )
+    )?;
+    Ok(Some(id))
 }
 
 pub(crate) fn old_bytes(table: &TableRecord, old: Option<&Item>) -> Result<u64> {

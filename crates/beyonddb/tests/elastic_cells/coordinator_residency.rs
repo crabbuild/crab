@@ -146,6 +146,7 @@ async fn coordinator_history_outgrows_residency_and_released_read_recovers() {
             &account,
             identity(245),
             Json(TableSpec {
+                table_class: Default::default(),
                 placement: beyonddb::TablePlacement::Account,
                 local_secondary_indexes: Vec::new(),
                 global_secondary_indexes: Vec::new(),

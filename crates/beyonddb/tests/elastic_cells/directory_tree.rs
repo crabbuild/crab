@@ -642,7 +642,7 @@ fn change(source: &beyonddb::RoutePagePartition, id: u128) -> DirectoryChange {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn terminal_directories_release_residency_without_losing_retirement_fences() {
+async fn retired_directories_make_room_for_new_data_without_losing_fences() {
     let application = Arc::new(
         Beyonddb::compile(BuildDescriptor {
             source_revision: "directory-residency".into(),
@@ -691,14 +691,33 @@ async fn terminal_directories_release_residency_without_losing_retirement_fences
         directories.push((spec, target));
     }
     assert_eq!(host.runtime().stats().active_cells(), 16);
+    let table_id = &directories[0].0.table_id;
+    let data = data_target(ACCOUNT, table_id, &[0; 16]).unwrap();
+    CellCatalog::new(layout.clone(), data.tenant())
+        .provision(
+            CatalogEntry::new(
+                &data,
+                CatalogRole::Sql,
+                application.registry().module_code("beyonddb-data").unwrap(),
+                1,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
     let authority = CellAuthority::new(layout);
-    assert!(provisioner.admit_account(ACCOUNT).await.is_err());
+    assert!(matches!(
+        provisioner
+            .admit_existing_partition(ACCOUNT, table_id, &[0; 16])
+            .await,
+        Err(StorageError::LimitExceeded(_))
+    ));
     assert!(
-        authority.load(account.cell_id()).await.unwrap().is_none(),
+        authority.load(data.cell_id()).await.unwrap().is_none(),
         "capacity rejection must precede a new ownership claim"
     );
-    // Keep one live node at the same capacity boundary. Only an irreversible
-    // terminal fence, never ordinary inactivity, authorizes reclamation.
+    // Metadata recovery can release live directory residency. Fresh data growth
+    // must wait for a terminal directory, preserving the live directory below.
     for (spec, target) in &directories[1..] {
         client
             .command::<beyonddb::RetireDirectory>(target, mutation(), Json(spec.clone()))
@@ -724,7 +743,10 @@ async fn terminal_directories_release_residency_without_losing_retirement_fences
     })
     .await
     .unwrap();
-    provisioner.admit_account(ACCOUNT).await.unwrap();
+    provisioner
+        .admit_existing_partition(ACCOUNT, table_id, &[0; 16])
+        .await
+        .unwrap();
     let mut released = Vec::new();
     for (spec, target) in &directories {
         if authority

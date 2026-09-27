@@ -117,6 +117,7 @@ async fn capacity_case(
                 &account,
                 mutation(),
                 Json(TableSpec {
+                    table_class: Default::default(),
                     placement: if name == "CapacityData" {
                         beyonddb::TablePlacement::Routed {
                             initial_partitions: 1,

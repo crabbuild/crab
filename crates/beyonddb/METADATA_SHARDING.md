@@ -737,4 +737,92 @@ full Linux qualification remains required.
 
 The same CI run also exposed coordinator-history admission exhaustion, an old
 directory test's refusal expectation, and a generation-four deletion timeout.
-Those failures remain open and are not attributed to this split-publication fix.
+They are not attributed to the split-publication fix. The coordinator/directory
+follow-up below addresses the first two; the deletion timeout remains unproven.
+
+### Coordinator inventory and fresh range admission
+
+The coordinator-history failure reproduced locally in 3.93 s. A diagnostic run
+failed in 0.23 s with an empty idle-candidate snapshot despite two tracked
+coordinators. Coordinator reclamation had bypassed the inventory-settlement wait
+used for data owners. Both paths now share that bounded wait and least-recently
+used ordering. Coordinator selection intersects the recovery registry with actual
+resident targets, so historical registry entries do not cause pointless waits.
+Pending transaction checks and exact released-root verification still gate
+coordinator retirement; an admitted target is never its own release candidate.
+
+The unchanged twelve-shard/three-slot history scenario now passes (20.35 s),
+including concurrent token replay and abandoned-read recovery. All three native
+coordinator-residency tests pass together (20.90 s), including fresh data growth
+and movement backpressure. The checkpoint/restart/later-BEGIN test passes (0.87 s).
+
+The directory-retirement fixture now exercises fresh data admission, which must
+refuse a full pool of live directories before publishing an ownership claim.
+After retirement it reclaims exactly one retired directory, preserves the live
+directory, restores the retired root and verifies its stale-install fence
+(0.61 s). Its former account-admission refusal contradicted the live-directory
+recovery policy; metadata recovery remains covered by signed SDK residency tests.
+
+### Request recovery after range-owner expiry
+
+Ordinary routing previously restored Idle owners but delegated Serving owners
+to peer transport even after their lease expired. Transaction recovery restores
+its recorded participants; index projection skips tables without indexes. Neither
+guarantees recovery of a plain table's directory before its next SDK read.
+
+A focused signed GetItem regression moves the directory and data owner to a peer,
+verifies both are Serving there, stops the peer and waits for lease expiry. It
+failed with HTTP 503 in 15.28 s without SDK retries. Request admission now checks
+expired Serving/Recovering owners for cataloged data, index and directory targets
+with published roots. It selects capacity through existing placement and uses
+the existing authenticated range admission and runtime fenced takeover path.
+Live remote owners stay in place; account and credential takeover remains owned
+by configured recovery. No accepted application command is replayed.
+
+The runtime contract remains `claim_expired_for_takeover` plus `takeover_restored`:
+fence the exact expired session, require published recovery coverage for active
+logs, reserve activation capacity, and compare-and-swap Cell authority before
+restoring the verified root. Missing/invalid membership and competing authority
+still fail closed. Receiver application invocation has no provisioner and cannot
+acquire ownership.
+
+The first fixed regression passes (16.29 s). With an additional live-lease
+refusal check, it passes in 15.45 s: an unreachable live peer retains both owners,
+then the same signed read succeeds after expiry. Two owner-race tests (0.96 s), four
+recovery tests (4.38 s), and five reclamation tests (4.71 s) also pass. This does
+not establish the full restart scenario: its latest run failed earlier, before
+node loss, on `BeginCrossCellTransaction` with peer HTTP admission exhaustion
+(134.80 s). A separate diagnostic run hit the same exhaustion during route
+inspection (202.44 s). The codec follow-up below addresses this admission
+failure; full Linux qualification remains pending.
+
+### Peer codec contention
+
+A focused signed peer read reproduced admission exhaustion in 2.34 s. Holding
+the only codec slot for two seconds exhausted the transport's two attempts,
+despite most of the request deadline remaining. Both rejections occurred during
+decode; retained memory was about 65 KiB out of 16 MiB, with no SQL job active.
+
+The receiver now waits fairly for decode and signature-verification capacity,
+matching the repository HTTP receiver's runtime reservation policy. Before
+decoding, the wait is bounded by the protocol's 60-second maximum. The decoded
+request deadline is measured from arrival, checked before enrollment, and reused
+for verification, dispatch and encoding. CPU reservations still drop before I/O;
+waiting requests retain separately bounded memory. Exhausted request memory
+still returns 503 with Retry-After before dispatch. Post-dispatch errors retain
+unknown-outcome handling and never become safe-to-retry capacity errors.
+
+Three focused codec tests pass together (4.42 s): a signed read waits through
+contention, catalog I/O releases CPU capacity, and both codec queueing and slow
+enrollment honor the original deadline without reaching Cell catalog resolution.
+The full fixture now exhausts request memory for its existing retry/deadline
+assertions; it no longer treats a momentarily occupied codec slot as full memory.
+
+Final focused codec verification passes (3 tests, 4.49 s). The full signed
+two-owner SDK scenario now passes (243.92 s), including six deletion/recreation
+generations, changed-endpoint restart, transaction token replay, abandoned work
+recovery, final serving-owner failover and index recovery. It uses real signed
+HTTP/mTLS with in-memory object storage, not a process-loss or fleet-scale test.
+Strict all-target Clippy (49.31 s), standalone server build (64 s), formatting
+and diff checks pass. The earlier Linux deletion timeout and full native/peer/
+process qualification still require CI on this revision.

@@ -379,9 +379,6 @@ impl DataEngine for CellStorage {
                 } else {
                     self.routed_owner(&key_info, &partition_key).await?
                 };
-                if owner.is_none() && index_name.is_none() {
-                    return Err(unsupported("sort-key Query on an account-local table"));
-                }
                 let epoch = owner.as_ref().map_or(0, |(_, epoch)| *epoch);
                 let limit = limit
                     .map(|value| {
@@ -418,12 +415,21 @@ impl DataEngine for CellStorage {
                     }
                 } else {
                     let account = target(&key_info.account_id)?;
-                    self.query_resolving::<crate::secondary_index::QueryAccountIndex>(
-                        &account,
-                        &key_info.account_id,
-                        input,
-                    )
-                    .await?
+                    if input.0.index_name.is_some() {
+                        self.query_resolving::<crate::secondary_index::QueryAccountIndex>(
+                            &account,
+                            &key_info.account_id,
+                            input,
+                        )
+                        .await?
+                    } else {
+                        self.query_resolving::<crate::QueryAccountItems>(
+                            &account,
+                            &key_info.account_id,
+                            input,
+                        )
+                        .await?
+                    }
                 };
                 return match output.output.0 {
                     PartitionQueryOutcome::Page {

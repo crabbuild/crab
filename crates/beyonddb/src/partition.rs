@@ -1,11 +1,13 @@
 //! Independently owned item range in one SQL Cell.
 
+mod indexes;
 pub(crate) mod key;
 pub(crate) mod query;
 mod scan;
 mod transaction;
 mod ttl;
 
+pub use indexes::*;
 pub use key::data_key_hash;
 pub use query::*;
 pub use scan::*;
@@ -50,7 +52,7 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     effect_targets: &[],
     dead_letter: None,
 }];
-static COMMANDS: [OperationDescriptor; 16] = [
+static COMMANDS: [OperationDescriptor; 19] = [
     operation(1),
     operation(2),
     operation(3),
@@ -70,8 +72,11 @@ static COMMANDS: [OperationDescriptor; 16] = [
         ..crate::participant::phase_operation(15)
     },
     crate::participant::phase_operation(16),
+    operation(17),
+    operation(18),
+    operation(19),
 ];
-static QUERIES: [OperationDescriptor; 13] = [
+static QUERIES: [OperationDescriptor; 14] = [
     operation(1),
     operation(2),
     operation(3),
@@ -85,6 +90,7 @@ static QUERIES: [OperationDescriptor; 13] = [
     crate::participant::phase_operation(12),
     crate::global_index::outbox::chunk_operation(13),
     operation(14),
+    operation(15),
 ];
 
 const fn operation(id: u32) -> OperationDescriptor {
@@ -120,6 +126,7 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
                 source.update(include_bytes!("partition/transaction.rs"));
                 source.update(include_bytes!("partition/transaction/participant.rs"));
                 source.update(include_bytes!("partition/ttl.rs"));
+                source.update(include_bytes!("partition/indexes.rs"));
                 source.update(include_bytes!("items.rs"));
                 source.update(include_bytes!("item_storage.rs"));
                 source.update(include_bytes!("participant.rs"));
@@ -148,6 +155,10 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
     }
 
     fn register(self, registry: &mut RegistryBuilder) -> Result<()> {
+        registry.bind_command::<ConfigurePartitionIndexes>()?;
+        registry.bind_command::<BackfillPartitionIndex>()?;
+        registry.bind_command::<InheritPartitionIndexes>()?;
+        registry.bind_query::<ReadPartitionIndexes>()?;
         registry.bind_command::<InstallPartition>()?;
         registry.bind_command::<PartitionPut>()?;
         registry.bind_command::<PartitionDelete>()?;
@@ -679,7 +690,11 @@ impl Command for ImportPartitionItem {
                 PartitionImportOutcome::NotImporting,
             )));
         };
-        if !valid_item(&input.item, &spec.table) {
+        // A stored row can predate an online GSI, or outlive a deleted one.
+        // Split copies preserve base/LSI validity; inherited policy governs new writes.
+        let mut base = spec.table.clone();
+        base.global_secondary_indexes.clear();
+        if !valid_item(&input.item, &base) {
             return Ok(CommandResult::Rejected(Json(
                 PartitionImportOutcome::InvalidItem,
             )));
@@ -912,11 +927,7 @@ impl Command for PartitionPut {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        let rows = context.sql(&statement(
-            "SELECT spec FROM ddb_partition WHERE singleton = 1",
-            vec![],
-        ))?;
-        let Some(spec) = decode_spec(&rows[0])? else {
+        let Some(spec) = indexes::command_spec(context)? else {
             return Ok(CommandResult::Rejected(Json(
                 PartitionPutOutcome::NotInstalled,
             )));
@@ -1033,11 +1044,7 @@ impl Command for PartitionDelete {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        let rows = context.sql(&statement(
-            "SELECT spec FROM ddb_partition WHERE singleton = 1",
-            vec![],
-        ))?;
-        let Some(spec) = decode_spec(&rows[0])? else {
+        let Some(spec) = indexes::command_spec(context)? else {
             return Ok(CommandResult::Rejected(Json(
                 PartitionDeleteOutcome::NotInstalled,
             )));
@@ -1176,11 +1183,7 @@ impl Command for PartitionUpdate {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        let rows = context.sql(&statement(
-            "SELECT spec FROM ddb_partition WHERE singleton = 1",
-            vec![],
-        ))?;
-        let Some(spec) = decode_spec(&rows[0])? else {
+        let Some(spec) = indexes::command_spec(context)? else {
             return Ok(CommandResult::Rejected(Json(
                 PartitionUpdateOutcome::NotInstalled,
             )));

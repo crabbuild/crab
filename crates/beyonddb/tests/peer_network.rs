@@ -5,6 +5,7 @@ include!("support/routes.rs");
 mod support;
 
 mod peer_network {
+    pub(super) mod account_query;
     pub(super) mod capacity;
     pub(super) mod concurrency;
     pub(super) mod global_indexes;
@@ -349,6 +350,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
                 expires_at_ms: issued_at_ms + 60_000,
             },
             Json(TableSpec {
+                table_class: Default::default(),
                 placement: beyonddb::TablePlacement::Routed {
                     initial_partitions: 1,
                 },
@@ -424,6 +426,49 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         )
         .await
         .unwrap();
+    remote_account
+        .command::<CreateTable>(
+            &account,
+            crab_cell_runtime::MutationIdentity {
+                request_id: crab_cell_runtime::identity::RequestId::from_bytes([109; 16]),
+                issued_at_ms: now_ms(),
+                expires_at_ms: now_ms() + 60_000,
+            },
+            Json(TableSpec {
+                table_class: Default::default(),
+                placement: beyonddb::TablePlacement::Account,
+                local_secondary_indexes: Vec::new(),
+                global_secondary_indexes: Vec::new(),
+                table_name: "AccountOrdered".into(),
+                key_schema: vec![
+                    KeySchemaElement {
+                        attribute_name: "pk".into(),
+                        key_type: KeyType::Hash,
+                    },
+                    KeySchemaElement {
+                        attribute_name: "sk".into(),
+                        key_type: KeyType::Range,
+                    },
+                ],
+                attribute_definitions: vec![
+                    AttributeDefinition {
+                        attribute_name: "pk".into(),
+                        attribute_type: ScalarAttributeType::S,
+                    },
+                    AttributeDefinition {
+                        attribute_name: "sk".into(),
+                        attribute_type: ScalarAttributeType::N,
+                    },
+                ],
+                billing_mode: BillingMode::PayPerRequest,
+                provisioned_throughput: None,
+                deletion_protection_enabled: false,
+                initial_tags: Vec::new(),
+                resource_arn: None,
+            }),
+        )
+        .await
+        .unwrap();
     let wrong_principal = CellClient::runtime_with_peer(
         application.registry(),
         remote.runtime(),
@@ -481,7 +526,11 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     .unwrap();
     let remote_credentials =
         CellCredentialStore::new(client.clone(), layout.clone(), ENCRYPTION_KEY);
-    let peer_job = owner.runtime().try_reserve_worker_job().unwrap().unwrap();
+    let runtime = owner.runtime();
+    let stats = runtime.stats();
+    let peer_bytes = runtime
+        .try_reserve_node_bytes(stats.retained_capacity_bytes() - stats.retained_bytes())
+        .unwrap();
     let round_trip = PeerHttpRoundTrip::new(
         Arc::new(BeyonddbPeerScope),
         CellAuthority::new(layout.clone()),
@@ -489,8 +538,8 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         Arc::new(client_tls.client_identity()),
         remote_session,
     );
-    // Admission precedes envelope parsing, so a held slot cannot dispatch
-    // even this invalid input. A retry delay must not extend the deadline.
+    // Memory admission precedes codec queuing and parsing, so exhausted memory
+    // cannot dispatch even invalid input. Retry delay must respect the deadline.
     assert!(matches!(
         round_trip.send(account.clone(), vec![0], 500).await,
         Err(crab_cell_runtime::Error::Deadline)
@@ -506,19 +555,17 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     ));
     let lookup = remote_credentials.lookup_credential(ACCESS_KEY);
     tokio::pin!(lookup);
-    // A real peer admission slot is busy. The lookup must pace its retry,
-    // keeping authentication pending until capacity becomes available.
+    // Memory bounds waiting requests. Authentication must pace its retry until
+    // capacity becomes available; codec contention instead uses a fair queue.
     tokio::select! {
         result = &mut lookup => panic!("credential lookup completed during peer overload: {}", result.is_ok()),
         () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
     }
-    drop(peer_job);
+    drop(peer_bytes);
     assert_eq!(lookup.await.unwrap().unwrap().account_id, "123456789012");
-    let authorization = CellAuthorizationStore::new(CellClient::local_runtime(
-        application.registry(),
-        owner.runtime(),
-        layout.clone(),
-    ));
+    // Admission pressure can move the account away from this host. IAM writes
+    // must use the same owner resolver as the public request path.
+    let authorization = CellAuthorizationStore::new(client.clone());
     authorization
         .put_user_policy(
             "123456789012",
@@ -532,6 +579,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
                     "Resource": [
                         "arn:aws:dynamodb:us-east-1:123456789012:table/NetworkData",
                         "arn:aws:dynamodb:us-east-1:123456789012:table/RemoteTable",
+                        "arn:aws:dynamodb:us-east-1:123456789012:table/AccountOrdered",
                         "arn:aws:dynamodb:us-east-1:123456789012:table/ServingIndexFailover",
                         "arn:aws:dynamodb:us-east-1:123456789012:table/ServingIndexFailover/index/ByBucket",
                         "arn:aws:dynamodb:us-east-1:123456789012:table/RecreatedTable"
@@ -573,6 +621,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .load()
         .await;
     let sdk = aws_sdk_dynamodb::Client::new(&sdk_config);
+    peer_network::account_query::write_and_assert(&sdk).await;
     sdk.create_table()
         .table_name("NetworkData")
         .key_schema(
@@ -802,7 +851,9 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .output
         .0
         .unwrap();
-    let route = crate::single_leaf_route(&client, &account, &table.id.clone())
+    // Startup inspection precedes the replacement listener. Resolve its local
+    // account directly while retaining peer routing for independently owned leaves.
+    let route = crate::single_leaf_route(&replacement_client, &account, &table.id.clone())
         .await
         .unwrap();
     for partition in &route.partitions {
@@ -913,6 +964,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .load()
         .await;
     let replacement_sdk = aws_sdk_dynamodb::Client::new(&replacement_sdk_config);
+    peer_network::account_query::assert_restored(&replacement_sdk).await;
     peer_network::concurrency::assert_counter(&replacement_sdk).await;
     peer_network::capacity::assert_restored_retry(&replacement_sdk).await;
     // The restored account's registry leads a new frontend to the existing

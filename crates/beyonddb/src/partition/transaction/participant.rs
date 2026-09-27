@@ -4,7 +4,7 @@ use crab_cell_runtime::registry::{Command, CommandContext, CommandResult, Query,
 use serde::{Deserialize, Serialize};
 
 use super::super::{
-    AccessState, DATA_MODULE, Error, Json, Result, SqlValue, command_access, decode_spec, statement,
+    AccessState, DATA_MODULE, Error, Json, Result, SqlValue, command_access, statement,
 };
 use super::{StagedImage, apply_staged, stage_operations};
 use crate::participant::StagedEffect;
@@ -61,11 +61,7 @@ impl Command for PreparePartitionTransaction {
         )? {
             return Ok(prepare_rejected(outcome));
         }
-        let rows = context.sql(&statement(
-            "SELECT spec FROM ddb_partition WHERE singleton = 1",
-            vec![],
-        ))?;
-        let Some(spec) = decode_spec(&rows[0])? else {
+        let Some(spec) = super::super::indexes::command_spec(context)? else {
             return Ok(prepare_rejected(PrepareTransactionOutcome::NotInstalled));
         };
         if spec.table.id != input.table_id || spec.epoch != input.epoch {
@@ -173,11 +169,7 @@ impl Command for ResolvePartitionTransaction {
         crate::participant::resolve(context, input.clone(), |context, staged| {
             if let Some(bytes) = staged {
                 let prepared: PreparedPartition = serde_json::from_slice(bytes)?;
-                let rows = context.sql(&statement(
-                    "SELECT spec FROM ddb_partition WHERE singleton = 1",
-                    vec![],
-                ))?;
-                let Some(spec) = decode_spec(&rows[0])? else {
+                let Some(spec) = super::super::indexes::command_spec(context)? else {
                     return Err(Error::Command("prepared partition is missing"));
                 };
                 if prepared.table_id != spec.table.id || prepared.epoch != spec.epoch {

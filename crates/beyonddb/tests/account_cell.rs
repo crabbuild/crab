@@ -4,9 +4,10 @@ use beyonddb::{
     AdvanceTtlSchedule, AdvanceTtlScheduleInput, AdvanceTtlSweep, AdvanceTtlSweepInput, Beyonddb,
     CellInitialPartitionProvisioner, CellStorage, CreateTable, CreateTableOutcome, DeleteItem,
     DeleteItemInput, DescribeTable, GetItem, GetItemInput, GetItemOutcome, ItemMutationOutcome,
-    Json, ListTables, ListTablesInput, ListTablesOutcome, PutItem, PutItemInput, ReadTtlSchedule,
-    ReadTtlSweep, TableSpec, TransactWrite, TransactWriteInput, TransactionOperation,
-    TransactionOutcome, UpdateTtl, UpdateTtlInput, account_target, initialize_account,
+    Json, ListTables, ListTablesInput, ListTablesOutcome, PartitionQueryInput,
+    PartitionQueryOutcome, PutItem, PutItemInput, QueryAccountItems, ReadTtlSchedule, ReadTtlSweep,
+    TableSpec, TransactWrite, TransactWriteInput, TransactionOperation, TransactionOutcome,
+    UpdateTtl, UpdateTtlInput, account_target, initialize_account,
 };
 use crab_cell_app::CellApplication;
 use crab_cell_host::CellNodeBuilder;
@@ -137,6 +138,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .application_handle::<Beyonddb>(cell_client, target.tenant(), target.application())
         .unwrap();
     let schema = TableSpec {
+        table_class: Default::default(),
         placement: beyonddb::TablePlacement::Account,
         local_secondary_indexes: Vec::new(),
         global_secondary_indexes: Vec::new(),
@@ -878,6 +880,123 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         storage.transact_get_items(&reads).await.unwrap(),
         large_items
     );
+    let ordered_table = storage
+        .create_table(
+            "123456789012",
+            CreateTableInput {
+                table_name: "Ordered".into(),
+                key_schema: vec![
+                    KeySchemaElement {
+                        attribute_name: "pk".into(),
+                        key_type: KeyType::Hash,
+                    },
+                    KeySchemaElement {
+                        attribute_name: "sk".into(),
+                        key_type: KeyType::Range,
+                    },
+                ],
+                attribute_definitions: vec![
+                    AttributeDefinition {
+                        attribute_name: "pk".into(),
+                        attribute_type: ScalarAttributeType::S,
+                    },
+                    AttributeDefinition {
+                        attribute_name: "sk".into(),
+                        attribute_type: ScalarAttributeType::N,
+                    },
+                ],
+                billing_mode: Some(BillingMode::PayPerRequest),
+                ..CreateTableInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    let ordered = storage
+        .table_key_info("123456789012", "Ordered")
+        .await
+        .unwrap();
+    for value in ["10", "-2", "2"] {
+        storage
+            .put_item(
+                &ordered,
+                Item::from([
+                    ("pk".into(), AttributeValue::S("same".into())),
+                    ("sk".into(), AttributeValue::N(value.into())),
+                ]),
+                false,
+                None,
+                &ExpressionMaps::default(),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    let ordered_condition = KeyCondition {
+        pk_path: vec![PathElement::Attribute("pk".into())],
+        pk_value: Expr::Placeholder("pk".into()),
+        extra_pk_conditions: Vec::new(),
+        sk_condition: None,
+        extra_sk_conditions: Vec::new(),
+    };
+    let ordered_maps = ExpressionMaps::new(
+        HashMap::new(),
+        HashMap::from([("pk".into(), AttributeValue::S("same".into()))]),
+    );
+    let (first, cursor) = storage
+        .query(
+            &ordered,
+            &ordered_condition,
+            &ordered_maps,
+            true,
+            Some(2),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        first.iter().map(|item| &item["sk"]).collect::<Vec<_>>(),
+        vec![
+            &AttributeValue::N("-2".into()),
+            &AttributeValue::N("2".into())
+        ]
+    );
+    let (last, end) = storage
+        .query(
+            &ordered,
+            &ordered_condition,
+            &ordered_maps,
+            true,
+            Some(2),
+            cursor.as_ref(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (last[0]["sk"].clone(), end),
+        (AttributeValue::N("10".into()), None)
+    );
+    let (reverse, _) = storage
+        .query(
+            &ordered,
+            &ordered_condition,
+            &ordered_maps,
+            false,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reverse.iter().map(|item| &item["sk"]).collect::<Vec<_>>(),
+        vec![
+            &AttributeValue::N("10".into()),
+            &AttributeValue::N("2".into()),
+            &AttributeValue::N("-2".into())
+        ]
+    );
     handle.drain().await.unwrap();
     host.shutdown().await.unwrap();
 
@@ -986,5 +1105,38 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .await
         .unwrap();
     assert_eq!(absent_table.output.0, None);
+    let restored_order = restored_client
+        .query::<QueryAccountItems>(
+            &target,
+            None,
+            Json(PartitionQueryInput {
+                table_id: ordered_table.table_id,
+                epoch: 0,
+                index_name: None,
+                partition_key: Item::from([("pk".into(), AttributeValue::S("same".into()))]),
+                sort: None,
+                extra_range_equals: Vec::new(),
+                forward: true,
+                limit: 10,
+                exclusive_start_key: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let PartitionQueryOutcome::Page {
+        items,
+        last_evaluated_key: None,
+    } = restored_order.output.0
+    else {
+        panic!("restored account query must return a complete page");
+    };
+    assert_eq!(
+        items.iter().map(|item| &item["sk"]).collect::<Vec<_>>(),
+        vec![
+            &AttributeValue::N("-2".into()),
+            &AttributeValue::N("2".into()),
+            &AttributeValue::N("10".into())
+        ]
+    );
     restored_host.shutdown().await.unwrap();
 }

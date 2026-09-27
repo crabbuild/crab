@@ -156,9 +156,12 @@ Cell recovered; configured admission and request routing share root restoration.
 This requires the account to be configured on the replacement and enough local
 capacity for its recovered ranges. While serving, it also discovers expired
 coordinator owners through configured accounts and restores their original
-participants. Data-only-node discovery and general fleet placement still need
-a recovery scheduler.
-Unattended takeover, distributed recovery scheduling, fleet qualification,
+participants. Requests also select capacity and recover expired data, index and
+directory owners from their published roots, without waiting for transaction or
+index maintenance to discover them. Unreachable owners with live leases remain
+fenced against takeover. Background recovery of unaccessed data-only nodes still
+needs a recovery scheduler.
+Distributed recovery scheduling, fleet qualification,
 management APIs, and the remaining DynamoDB operations are still required
 before this is a complete service. A public node with no locally owned account
 or credential Cells can forward signed requests to live owners through mTLS.
@@ -471,6 +474,16 @@ operations remain unsupported.
 
 ## API coverage boundary
 
+CreateTable and UpdateTable persist `STANDARD` or
+`STANDARD_INFREQUENT_ACCESS` as table-wide metadata; DescribeTable returns
+`TableClassSummary`. The default is `STANDARD`. The account command enforces
+[two class changes per trailing 30 days](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/WorkingWithTables.tableclasses.html)
+across owner restoration and rejects an invalid class without changing other
+settings. Both classes use BeyondDB's existing Cell storage and capacity
+mechanics; AWS pricing is not implemented. Signed SDK coverage includes a base
+split and account restoration. The new record fields alter unreleased serialized
+state; upgrading older roots remains unqualified.
+
 BeyondDB is not a complete DynamoDB replacement. In addition to the index,
 Streams, backup/PITR, IAM, and scale gaps described here, the pinned ExtendDB
 engine does not dispatch PartiQL or Global Tables operations. Its import/export
@@ -525,15 +538,17 @@ update expressions execute inside the Cell transaction. Base-table Scan uses
 bounded pages with stable continuation keys. Parallel Scan assigns contiguous
 hash intervals to segments and skips data Cell ranges outside each interval;
 cells crossing an interval boundary still scan and filter their items. Query
-supports hash-only tables
-and sort-key tables once their initial data route is published.
+supports hash-only and sort-key tables on both account-local and routed storage.
+Account-local sort-key Query uses a composite ordered key index and bounded
+pages; its transaction-intent fence conservatively covers the account table.
+The signed two-owner SDK test writes numeric sort keys, pages in both directions,
+and repeats the query after account-owner restoration.
 Low-level account and partition commands support local atomic transactions.
 The public adapter routes all transactional writes through the coordinator,
 including account participants before route activation. All transactional reads
 use durable shared locks and captured participant images, retrieved individually
 to avoid an aggregate Cell response limit. Same-Cell reads now pay the same
-coordinator protocol cost. Account-local
-base-table sort-key Query, online global-index changes, non-ALL local index projections,
+coordinator protocol cost. Online global-index changes, non-ALL local index projections,
 and streamed writes remain unsupported. Local secondary indexes with ALL
 projection support account/routed Query and Scan, strong reads, numeric sort
 ordering with base-sort tie-breakers, and base-plus-index continuation keys.
@@ -548,6 +563,18 @@ asynchronous maintenance, and ALL/KEYS_ONLY/INCLUDE projected Query and Scan.
 See [global-index implementation and limits](GLOBAL_INDEXES.md) for journal
 replay, transaction boundaries, restart evidence, and unfinished index splitting
 and collection.
+
+Data Cells also provide an internal foundation for online index backfill:
+revisioned write policies, bounded durable scan cursors, a historical-journal
+delivery barrier, and inheritance of unfinished work through splits. Policy
+changes wait for prepared transactions to resolve, preserving their capacity
+reservations. Native Cell tests cover restart, invalid historical keys, delivery
+tracking, and split inheritance. Account lifecycle orchestration and SDK
+`UpdateTable` create/delete remain unimplemented; these commands do not make
+online index changes a supported API. The foundation and account-local ordered
+query index extend unreleased initial SQL schemas; upgrading roots written by
+earlier binaries is unqualified.
+
 `tests/account_cell.rs` exercises them through a real
 `CellNodeBuilder` and in-memory object store, including request replay,
 receipt-based reads, conditional writes, update expressions, scan pagination, rollback of a
