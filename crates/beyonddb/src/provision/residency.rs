@@ -26,7 +26,8 @@ use crate::{
 
 impl CellInitialPartitionProvisioner {
     // Admission is held. Metadata and existing published owners must remain
-    // reachable when durable Cells outnumber resident slots. New range creation
+    // reachable when durable Cells outnumber resident slots. A first coordinator
+    // also needs room to record decisions for existing data. New range creation
     // still requires free capacity so placement can choose another node.
     pub(super) async fn release_recoverable_for_admission(
         &self,
@@ -36,6 +37,7 @@ impl CellInitialPartitionProvisioner {
             crate::NAMESPACE,
             crate::credentials::NAMESPACE,
             crate::directory::NAMESPACE,
+            crate::transaction_coordinator::NAMESPACE,
         ]
         .contains(&target.namespace())
             && CellAuthority::new(self.layout.clone())

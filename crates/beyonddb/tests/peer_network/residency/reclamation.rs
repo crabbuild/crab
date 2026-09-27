@@ -279,6 +279,64 @@ async fn sdk_split_sources_release_capacity_and_retain_recoverable_roots() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_cross_cell_transaction_at_capacity_survives_coordinator_restoration() {
+    use aws_sdk_dynamodb::types::{TransactWriteItem, Update};
+
+    let fixture = Fixture::with_capacity(2, 5).await;
+    let sdk = super::provisioning::sdk_without_retries(&fixture);
+    assert_eq!(fixture.node.runtime().stats().active_cells(), 5);
+    let token = "full-residency-first-transaction";
+    let operations = fixture
+        .data
+        .iter()
+        .map(|(_, item)| {
+            TransactWriteItem::builder()
+                .update(
+                    Update::builder()
+                        .table_name("Residency")
+                        .key("id", item["id"].clone())
+                        .update_expression("ADD #count :one")
+                        .expression_attribute_names("#count", "count")
+                        .expression_attribute_values(":one", AwsAttributeValue::N("1".into()))
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+        })
+        .collect();
+    let request = sdk
+        .transact_write_items()
+        .client_request_token(token)
+        .set_transact_items(Some(operations));
+    // No coordinator has been admitted yet. Existing data owners must yield
+    // residency so the transaction can publish its decision at the same limit.
+    request.clone().send().await.unwrap();
+    fixture
+        .provisioner
+        .admit_coordinator(ACCOUNT, token.as_bytes())
+        .await
+        .unwrap()
+        .drain()
+        .await
+        .unwrap();
+    request.send().await.unwrap();
+    for (_, item) in &fixture.data {
+        let result = sdk
+            .get_item()
+            .table_name("Residency")
+            .key("id", item["id"].clone())
+            .consistent_read(true)
+            .send()
+            .await
+            .unwrap();
+        let mut expected = item.clone();
+        expected.insert("count".into(), AwsAttributeValue::N("1".into()));
+        assert_eq!(result.item, Some(expected));
+    }
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sdk_reads_restore_data_and_live_directory_with_one_available_slot() {
     let fixture = Fixture::with_capacity(1, 4).await;
     let account = account_target(ACCOUNT).unwrap();

@@ -431,7 +431,8 @@ overlay, missing hint, or changed root takes the ordinary recovery path. Cell ad
 coordinators at the active-Cell limit; idle shards restore before token lookup.
 When published owners outnumber resident slots, restoration can release one
 settled base or GSI owner and later restore its exact durable root. Metadata
-admission has the same allowance. New data owners still require free capacity;
+admission, including a transaction's first coordinator, has the same allowance.
+New data owners still require free capacity;
 placement can choose another node instead of evicting live ranges to bootstrap.
 Recovery reactivates released coordinators; startup resolves shards one at a
 time. A participant admission failure no longer prevents a published decision

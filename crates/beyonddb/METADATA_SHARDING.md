@@ -570,3 +570,25 @@ Numeric Query/Scan and owner restoration pass (3.86 s).
 CI now runs the entire native capability suite alongside signed peer SDK and
 server-process suites, serially and with `--no-fail-fast`. Native fixture
 migration affects more paths than the previous filtered CI checks covered.
+
+### First transaction admission at full residency
+
+Coordinator admission now shares metadata's allowance to release a settled
+base, GSI or directory owner. Previously, a first coordinator without a
+published root was classified as new range growth and refused when every slot
+was occupied. The signed SDK regression reproduced `LimitExceededException`
+with account, credential, directory and two data owners filling five slots.
+
+`first_cross_cell_transaction_at_capacity_survives_coordinator_restoration`
+now commits increments across the two data Cells, drains the coordinator,
+replays the same client token through owner restoration, and verifies each
+increment was applied once. SDK retries are disabled. All five reclamation
+scenarios pass together (4.69 s). The fixture uses in-memory object storage;
+it establishes owner restoration, not process-loss or fleet-scale durability.
+
+The shared admission gate and runtime `release_idle_cell` still require the
+exact residency generation, settled-work preflight and authoritative release.
+New base/GSI owners retain capacity refusal and peer placement; this change
+does not alter transaction decisions, coordinator registration or wire formats.
+The native capacity-sweep regression still refuses new split children with
+`LimitExceeded` while preserving readiness and the unfinished split (0.56 s).
