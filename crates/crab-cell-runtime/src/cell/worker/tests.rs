@@ -672,6 +672,7 @@ async fn cancelled_hydration_releases_fetch_bytes_without_installing_pages() {
 async fn expired_worker_deadline_preserves_sparse_cell_for_retry() {
     let fixture = sparse_activation(7, Store::new(Arc::new(InMemory::new())), 64 * 1024).await;
     let pool = SqlWorkerPool::new(1, 1).unwrap();
+    pool.configure_retained_capacity(1 << 20).unwrap();
     pool.activate_restored(
         fixture.cell,
         RestoredDatabase::Paged(Box::new(fixture.database)),
