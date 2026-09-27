@@ -22,18 +22,16 @@ Peer requests reserve memory while awaiting storage or Cell dispatch. CPU slots
 cover envelope decoding, signature verification and reply encoding; asynchronous
 work does not retain a codec slot. The signed request deadline bounds enrollment,
 dispatch and reply encoding.
-Serving nodes publish a 15-second lease and renew every three seconds. Graceful
-shutdown drains the runtime and joins heartbeat maintenance before withdrawing
-the boot-session advertisement. After an unclean exit, owner replacement waits
-for authoritative expiry; storage stalls that exhaust the lease still fence serving. See [measured lease qualification](SCALING.md#large-transaction-transfer-qualification).
-
-Graceful shutdown keeps renewal running through Cell drain, then fences local
-admission and conditionally retires the boot session before returning success.
-A replacement may reuse the physical node ID immediately after that retirement.
-An unknown heartbeat CAS is reconciled only within the same signed boot identity;
-unsealed logs and recovery claims still reject retirement. Cleanup exceeding
-one lease lifetime returns an error, so provider outage cannot masquerade as a
-successful graceful stop.
+Serving nodes publish a 15-second lease and renew every three seconds.
+`shutdown_serving_node` drains the runtime and joins heartbeat maintenance before
+conditionally retiring the boot-session advertisement. A replacement can reuse
+the physical node ID immediately after successful retirement. If a canceled
+heartbeat commits after the final load, retirement reconciles only a newer
+advertisement from the same signed boot identity. Unsealed logs and recovery
+claims still reject withdrawal. Retirement reads and writes share one lease
+lifetime as their deadline; errors retain scratch state and failed drain never
+starts retirement. Unclean exit still requires authoritative expiry before
+takeover. See [measured lease qualification](SCALING.md#graceful-session-retirement-and-immediate-restart).
 
 Each renewal measures RAM and scratch-filesystem availability on a blocking
 worker, caps them by runtime reservations, and signs Cell/job counts and backlog

@@ -2329,55 +2329,42 @@ existing codec/enrollment tests pass (4.52s). These diagnostics are intended to
 make the next CI recurrence actionable; passing repeats do not close the failure.
 ### Graceful session retirement and immediate restart
 
-The process gate on main `311105eb864` later failed after an orderly restart:
-table recreation encountered `multiple live sessions advertise one node`.
-`PublishedNodeLease::run` stopped heartbeats without withdrawing the old
-advertisement. The replacement's fresh session overlapped its predecessor's
-remaining lease. A focused public-directory regression reproduced the same
-error in 0.01 seconds, without a provider delay or unfinished runtime drain.
+The original PR479 reproduced immediate physical-node reuse failure against
+main `311105eb864` and qualified a heartbeat-owned retirement implementation.
+Its native tests and GA RustFS process/peer runs (211.84s and 256.76s) remain
+historical evidence for that source, not proof of the current integration.
 
-After runtime drain, cancellation now fences the local guard and waits for
-authoritative session retirement. `NodeDirectory::withdraw_after_drain` reuses
-the existing exact withdrawal CAS and reconciles only a newer observation of
-the same signed boot identity. This handles renewal committed before its
-response was lost or canceled. It cannot withdraw another identity, erase an
-unsealed log, override a recovery claim, or revive a retired session. The exact
-`withdraw` API retains its previous stale-observation rejection contract.
+Current main `de215cd0c49` independently fixes the ordinary restart path through
+`shutdown_serving_node`: runtime drain must succeed before the product retires
+its session. PR479 now preserves that boundary. Lease maintenance still stops
+on cancellation without withdrawing; failed drain cannot remove the session.
+The duplicate heartbeat-owned retirement and its redundant restart test were
+removed during integration.
 
-One lease lifetime bounds retirement I/O. Cancellation still fences a stalled
-renewal promptly, but successful shutdown now requires the tombstone. A stalled
-withdrawal returns `Deadline`; the former test expecting cancellation to leave
-a usable guard is replaced by fencing and retirement assertions. This changes
-shutdown's success contract, not lease length or owner takeover timing.
+The remaining gap is a canceled heartbeat CAS that commits after shutdown's
+final load. `NodeDirectory::withdraw_after_drain` uses the existing exact
+withdrawal CAS, then reconciles only a newer generation of the same signed boot
+identity. Canonical decoding verifies the signature. A late refresh cannot
+replace the tombstone; an unsealed log, recovery claim, or changed identity
+cannot be withdrawn through this path. The exact `withdraw` API keeps its
+stale-observation rejection contract.
 
-The HTTP server sibling already withdraws after runtime drain and awaits each
-heartbeat response before processing shutdown. Its path is unchanged. BeyondDB
-cancels pending renewal I/O, which requires the explicit reconciliation boundary.
-The node host's existing lease-maintenance phase owns the ordering; no second
-lifecycle or authority is introduced. The added production surface is 46 net
-lines, primarily the shared directory reconciliation contract.
+`shutdown_serving_node` bounds the post-drain load and withdrawal together by
+one existing node lease lifetime. A provider stall returns `Deadline`, so the
+binary retains scratch state instead of reporting a clean stop. No new
+configuration, storage shape, lease duration, or takeover timing is introduced.
+The HTTP server sibling awaits each heartbeat response before processing its
+shutdown token and keeps its existing exact-withdrawal path.
 
-The process fixture and its CI workflow now use the existing pinned RustFS
-1.0 GA Docker image instead of a native 1.0.0-rc.1 binary. Successful fixtures
-remove their private object-store container and volume; failures retain a
-stopped container for replay. This exercises the production S3 adapter and the
-actual signed SDK/server process path. It does not turn a local process test
-into multi-host or sustained-capacity qualification.
+The public shutdown regressions cover immediate physical-node reuse, failed
+drain preserving the advertisement, a heartbeat committing between the final
+GET and conditional withdrawal, and bounded failure on either a retirement GET
+or PUT stall. The directory tests additionally preserve foreign-identity,
+recovery-claim, log-sealing and exact-withdrawal guards.
 
-The immediate-restart regression passes after the fix. Twelve directory-session
-tests and four node-log tests pass, preserving exact withdrawal, claim fencing,
-and log sealing. Five selected lease/residency tests pass, including an
-eight-second successful refresh and a sixty-second stalled PUT whose shutdown
-returns a bounded failure. The full signed SDK process scenario passes on the
-GA container in 211.84 seconds, including hard restart at a changed peer address,
-graceful restart, and table recreation. Strict runtime/BeyondDB all-target
-Clippy, layout, policy-entry, documentation, YAML parsing, and diff checks pass.
-
-The peer fixture now separates simulated process loss from graceful shutdown:
-crash drops renewal without writing a tombstone, preserving expiry-based
-takeover. Its signed SDK peer recovery scenario passes in 256.76 seconds,
-including changed peer addresses, abandoned transaction recovery, and restored
-index reads. The host lease-maintenance ordering regression also passes.
-Current-main architecture checks independently fail on the catalog-head marker and the
-BeyondDB dev-dependency inventory; this change does not edit either inventory
-or weaken the checks. Linux CI and the remaining fleet gates are still open.
+The process fixture and CI use the existing digest-pinned RustFS 1.0 GA Docker
+image instead of a native RC binary. Successful fixtures remove their private
+container and volume; failed fixtures retain a stopped container for replay.
+The peer fixture separates simulated process loss from graceful shutdown:
+crash drops renewal without writing a tombstone, retaining expiry-based
+recovery. Linux CI and fleet-scale qualification remain separate gates.
