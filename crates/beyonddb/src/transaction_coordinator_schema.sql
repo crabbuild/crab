@@ -23,7 +23,8 @@ CREATE TABLE ddb_coordinator_participants (
     position INTEGER NOT NULL,
     cell_id BLOB NOT NULL,
     target BLOB NOT NULL,
-    operation_chunks INTEGER NOT NULL,
+    operation_chunks INTEGER CHECK (operation_chunks > 0),
+    retain_operations INTEGER NOT NULL CHECK (retain_operations IN (0, 1)),
     prepared_sequence INTEGER,
     resolved_sequence INTEGER,
     PRIMARY KEY (transaction_id, position)

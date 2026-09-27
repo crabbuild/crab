@@ -313,6 +313,28 @@ impl Command for RecordParticipantResolution {
                 SqlValue::Integer(i64::from(input.position)),
             ],
         ))?;
+        // Terminal write replay needs the digest, target and receipts, but no
+        // operation images. Committed reads still need their position mapping;
+        // aborted reads never return images. Keep the decision payload at -1.
+        context.sql(&statement(
+            "DELETE FROM ddb_transaction_payloads WHERE transaction_id = ?1 AND position = ?2 \
+             AND EXISTS (SELECT 1 FROM ddb_coordinator_participants \
+             WHERE transaction_id = ?1 AND position = ?2 AND (retain_operations = 0 OR ?3 = 2))",
+            vec![
+                SqlValue::Blob(input.transaction_id.to_vec()),
+                SqlValue::Integer(i64::from(input.position)),
+                SqlValue::Integer(state),
+            ],
+        ))?;
+        context.sql(&statement(
+            "UPDATE ddb_coordinator_participants SET operation_chunks = NULL \
+             WHERE transaction_id = ?1 AND position = ?2 AND (retain_operations = 0 OR ?3 = 2)",
+            vec![
+                SqlValue::Blob(input.transaction_id.to_vec()),
+                SqlValue::Integer(i64::from(input.position)),
+                SqlValue::Integer(state),
+            ],
+        ))?;
         // ExtendDB rolls back token claims on canceled writes. Release the slot
         // only after every abort resolution, so retries cannot race old intents.
         context.sql(&statement(
@@ -433,7 +455,10 @@ impl WireValue for CoordinatorParticipantChunk {
     }
 }
 
-/// Read one immutable participant payload chunk for recovery.
+/// Read one participant payload chunk while its operations remain retained.
+///
+/// Returns none after resolution compacts its operation images. A driver
+/// that observed BEGIN earlier must re-read and finish the durable decision.
 pub struct ReadCoordinatorParticipant;
 
 impl Query for ReadCoordinatorParticipant {
@@ -463,8 +488,15 @@ impl Query for ReadCoordinatorParticipant {
         let Some(row) = rows[0].rows.first() else {
             return Ok(None);
         };
-        let [SqlValue::Blob(target), SqlValue::Integer(chunks)] = row.as_slice() else {
+        let [SqlValue::Blob(target), chunks] = row.as_slice() else {
             return Err(Error::Command("invalid coordinator payload"));
+        };
+        let SqlValue::Integer(chunks) = chunks else {
+            return if *chunks == SqlValue::Null {
+                Ok(None)
+            } else {
+                Err(Error::Command("invalid coordinator payload length"))
+            };
         };
         let chunks = u32::try_from(*chunks)
             .map_err(|_| Error::Command("invalid participant chunk count"))?;

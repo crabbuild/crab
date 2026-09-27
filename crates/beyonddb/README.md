@@ -355,6 +355,12 @@ only after participant resolution. A proven capacity refusal during participant
 upload or prepare proposes ABORT and returns ordered `ThrottlingError` reasons
 only after cleanup. This includes direct SQLite FULL errors with verified rollback;
 unknown outcomes remain retryable and a competing COMMIT wins.
+Recording a terminal participant resolution releases its coordinator operation
+images for writes and aborted reads. Durable decisions, request digests, targets,
+receipts and replay markers remain. Committed read operations stay available for
+response assembly. A driver whose chunk fetch races compaction re-reads and
+finishes the durable decision. This reduces retained write payloads; decision,
+tombstone, read-image and object-store history collection remain unfinished.
 Coordinator token lookup preserves original
 participants across route changes and starts the ten-minute replay window only
 after all participants resolve. The old account claims and Cell-local token

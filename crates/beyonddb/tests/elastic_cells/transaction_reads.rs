@@ -207,6 +207,34 @@ pub(super) async fn assert_shared_snapshots(
         .finish_decided_cross_cell_transaction(account_id, &[243; 16], [243; 16])
         .await
         .unwrap();
+    // Both participant types retain committed response mappings, while aborted
+    // readers release their coordinator operations after resolution.
+    for (byte, coordinator) in [(242, &committed), (243, &aborted)] {
+        for (position, (_, participant)) in participants.iter().enumerate() {
+            let payload = client
+                .query::<ReadCoordinatorParticipant>(
+                    coordinator,
+                    None,
+                    Json(ReadCoordinatorParticipantInput {
+                        account_id: account_id.clone(),
+                        transaction_id: [byte; 16],
+                        routing_key: vec![byte; 16],
+                        position: u8::try_from(position).unwrap(),
+                        chunk: 0,
+                    }),
+                )
+                .await
+                .unwrap()
+                .output;
+            let operations = payload.map(|chunk| {
+                serde_json::from_slice::<Vec<IndexedTransactionOperation>>(&chunk.payload).unwrap()
+            });
+            assert_eq!(
+                operations,
+                (byte == 242).then(|| participant.operations.clone())
+            );
+        }
+    }
     let mut changed = key.clone();
     changed.insert("newer".into(), AttributeValue::Bool(true));
     for info in infos {

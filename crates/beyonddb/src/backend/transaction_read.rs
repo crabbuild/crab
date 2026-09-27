@@ -60,7 +60,12 @@ impl CellStorage {
                 position,
                 chunk: 0,
             };
-            let participant = self.coordinator_participant(&coordinator, input).await?;
+            let participant = self
+                .coordinator_participant(&coordinator, input)
+                .await?
+                .ok_or_else(|| {
+                    StorageError::Internal("committed read operations are missing".into())
+                })?;
             let target = match &participant.target {
                 CoordinatorParticipantTarget::Account => account_target(account_id),
                 CoordinatorParticipantTarget::Data {

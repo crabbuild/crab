@@ -206,3 +206,90 @@ async fn sdk_range_usage_survives_mutation_replay_split_and_owner_restore() {
     );
     fixture.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_compacted_write_replays_after_owner_restore_without_reapplying_images() {
+    use aws_sdk_dynamodb::types::{Get, TransactGetItem};
+    let fixture = Fixture::new().await;
+    let sdk = aws_sdk_dynamodb::Client::from_conf(
+        fixture
+            .sdk
+            .config()
+            .to_builder()
+            .retry_config(aws_sdk_dynamodb::config::retry::RetryConfig::disabled())
+            .build(),
+    );
+    let writes = fixture
+        .data
+        .iter()
+        .map(|(_, original)| {
+            let mut item = original.clone();
+            item.insert("value".into(), AwsAttributeValue::S("transaction".into()));
+            TransactWriteItem::builder()
+                .put(
+                    Put::builder()
+                        .table_name("Residency")
+                        .set_item(Some(item))
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+        })
+        .collect::<Vec<_>>();
+    let request = sdk
+        .transact_write_items()
+        .client_request_token("compacted-write")
+        .set_transact_items(Some(writes));
+    request.clone().send().await.unwrap();
+    sdk.update_item()
+        .table_name("Residency")
+        .key("id", fixture.data[0].1["id"].clone())
+        .update_expression("SET #v = :v")
+        .expression_attribute_names("#v", "value")
+        .expression_attribute_values(":v", AwsAttributeValue::S("later-write".into()))
+        .send()
+        .await
+        .unwrap();
+    fixture
+        .provisioner
+        .admit_coordinator(ACCOUNT, b"compacted-write")
+        .await
+        .unwrap()
+        .drain()
+        .await
+        .unwrap();
+    for (handle, _) in &fixture.data {
+        handle.drain().await.unwrap();
+    }
+    // Restored token/decision records must return the original success without
+    // overwriting the later mutation, even though operation images are gone.
+    request.send().await.unwrap();
+    let reads = fixture
+        .data
+        .iter()
+        .map(|(_, item)| {
+            TransactGetItem::builder()
+                .get(
+                    Get::builder()
+                        .table_name("Residency")
+                        .key("id", item["id"].clone())
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+        })
+        .collect();
+    let result = sdk
+        .transact_get_items()
+        .set_transact_items(Some(reads))
+        .send()
+        .await
+        .unwrap();
+    let values = result
+        .responses()
+        .iter()
+        .map(|result| result.item().unwrap()["value"].as_s().unwrap().as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(values, ["later-write", "transaction"]);
+    fixture.shutdown().await;
+}

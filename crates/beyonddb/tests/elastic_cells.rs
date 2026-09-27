@@ -5023,13 +5023,9 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         )
         .await
         .unwrap();
-    let restored_participant = restored_participant.output.unwrap();
-    assert_eq!(restored_participant.target, participants[0].target);
-    assert_eq!(
-        serde_json::from_slice::<Vec<IndexedTransactionOperation>>(&restored_participant.payload)
-            .unwrap(),
-        participants[0].operations
-    );
+    // Terminal write payloads are compacted, while the durable decision and
+    // participant tombstones above still fence replay after owner restart.
+    assert!(restored_participant.output.is_none());
     let recovered_intent = restored_client
         .query::<ReadPartitionTransaction>(
             restored_child_target,

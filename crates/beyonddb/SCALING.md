@@ -1838,3 +1838,13 @@ smoke test now polls the executable's sampled totals after signed writes; its
 execution remains a CI gate. Production code grows to implement Cell accounting,
 generation-checked publication and one shared bounded sweep for the worker and
 explicit refresh. It adds no public configuration or dependency changes.
+
+### Coordinator write-image retention
+
+Participant resolution now compacts its coordinator write-operation chunks in
+the same durable command as its receipt. Committed read mappings and all decision,
+token and participant replay protection remain. Drivers tolerate compaction
+between chunk reads by finishing from the durable decision. See the
+[protocol evidence and race tests](CROSS_CELL_TRANSACTIONS.md#terminal-operation-compaction).
+This reduces retained logical write bytes; bounded total history and physical
+object-store reclamation still need the full retirement protocol.

@@ -291,7 +291,7 @@ Participant durable record:
 | --- | --- |
 | Transaction ID, coordinator target, request digest, route epoch | Match a prepare to its immutable decision authority. |
 | Locked table ID, canonical item keys, and lock mode | Shared reads exclude writes; exclusive writes exclude other transactions. |
-| Proposed write images or captured read images and local positions | Prepare evaluates conditions against one serialized local state; apply needs no expression re-evaluation. The coordinator retains the original operations and request indexes. |
+| Proposed write images or captured read images and local positions | Prepare evaluates conditions against one serialized local state; apply needs no expression re-evaluation. The coordinator retains operations during prepare and committed-read response assembly; write operation images are compacted at participant resolution. |
 | `PREPARED`, `COMMITTED`, or `ABORTED` and coordinator identity | Make resolution idempotent across retries and owner recovery. The trusted driver reads the decision; participants do not store or independently verify a decision certificate. An `ABORTED` tombstone also fences a delayed prepare. |
 
 Account locks have primary key `(table_id, item_key, transaction_id)`; data
@@ -326,8 +326,10 @@ described below. Locks, chunk counts, and phase payload rows commit or roll back
 together. Participant resolution reads its chunks into memory, deletes the
 staged rows to reclaim their pages, applies images, releases locks, and sets
 its terminal marker inside one command. A failed apply rolls back the deletion
-as well as any partial image writes. Coordinator history remains retained as before;
-SQL chunking does not implement history collection or add decision phases.
+as well as any partial image writes. Decisions and participant replay markers
+remain retained. [Terminal operation compaction](#terminal-operation-compaction)
+now releases coordinator write images at resolution; full history retirement
+still needs a protocol that prevents late messages from recreating intents.
 
 Large individual items also need bounded SQL, even below DynamoDB's item limit:
 JSON escapes can make their encoded images exceed 1 MiB. The shared
@@ -2227,3 +2229,80 @@ hard restart, and client-token replay. This supplies the durable client-to-serve
 proof for the initial GSI path; online index lifecycle, automatic GSI splitting,
 retention, full DynamoDB compatibility, and 10,000-Cell/multi-TB qualification
 remain open.
+
+## Terminal operation compaction
+
+Inspected main (`311105eb864`) and the previous branch head retained every
+coordinator operation chunk after all resolutions. Replaying a completed write
+uses the request fingerprint/digest and durable decision; terminal recovery uses
+the participant target and receipt. Neither path needs the original write images.
+Those payloads could therefore consume the coordinator's finite database budget
+in proportion to all historical write bytes.
+
+`RecordParticipantResolution` now deletes that participant's nonnegative payload
+position and sets its chunk count to NULL in the same Cell command that records
+the resolved receipt. BEGIN and unresolved participants retain their payloads.
+The NULL is an explicit absence of operation images; the participant identity,
+prepare/resolution receipts and decision stay durable. The abort-decision payload
+uses position -1 and remains available for cancellation reasons and old images.
+Repeated resolution returns the existing receipt outcome without another apply.
+
+BEGIN records whether each participant contains a Read operation. Committed
+reads retain their operation-to-result mapping for `transaction_read.rs` to
+assemble immutable saved images, including duplicate read positions. Aborted
+reads can release operations because they never return a committed response.
+The account and data participant markers remain unchanged, so a delayed prepare
+still returns Committed/Aborted and cannot reacquire locks after compaction.
+
+A driver can read BEGIN and the first operation chunk just before another driver
+finishes. `ReadCoordinatorParticipant` returns None after compaction, including
+for a later chunk of an already-started fetch. The adapter discards the partial
+image, reads the authoritative decision and finishes remaining resolutions.
+A missing payload does not itself imply COMMIT or ABORT. Transactional-read
+response assembly continues to require its retained operations.
+
+| Evidence boundary | Source / qualification |
+| --- | --- |
+| Entry and ownership | `backend/transaction.rs` drives BEGIN; `backend/recovery.rs::finish_participant` records resolution only after the participant's durable outcome. |
+| Durable mutation | `transaction_coordinator/phase.rs::RecordParticipantResolution` compacts the payload and records progress under the runtime command savepoint. The runtime publishes or rolls back those changes together. |
+| Chunk consumer | `backend/transaction_transport.rs::coordinator_participant` discards partial bytes when compaction wins; the driver finishes from the coordinator decision. |
+| Sibling consumer | `backend/transaction_read.rs` still reads retained operation mappings. BEGIN derives retention from the actual operation variants; callers do not choose it. Shared-snapshot tests verify committed mappings remain and aborted mappings disappear for both account and data participants. |
+| Replay protection | `participant.rs::prepared` checks terminal records before stage/lock creation; coordinator BEGIN compares the retained request digest/fingerprint. No terminal marker or token lifetime is removed. |
+| Direct proof | The transaction-driver fixture checks zero retained write-operation rows and preserved participant metadata for COMMIT, ABORT, condition/route/capacity failures, concurrent drivers and lost replies. Fresh late prepares must return the original terminal participant state. |
+| Chunk race | A valid escaped item spans multiple chunks. The test transport delivers one chunk, runs a competing driver to completion, then delivers the next read. Both drivers return COMMIT and the published item matches the full original request. |
+| Signed SDK | Two-key TransactWriteItems commits, a later UpdateItem changes one value, then coordinator and data owners drain. Replaying the old token after restoration preserves the later value; TransactGetItems returns both expected values through restored owners. |
+| Owner replacement | The restored range fixture requires compacted operation absence and retains its existing decision, participant, pending-work and data assertions. |
+
+This changes the unreleased coordinator schema and requires reprovisioning
+existing development roots. No dependency pin or lockfile changes are involved.
+Deleting the logical payload frees SQLite pages for reuse; it does not promise
+immediate object-store byte reclamation. Full decision/tombstone/read-image
+retirement, coordinator expansion, retention under backup/split references, and
+10,000-Cell/multi-TB soak qualification remain open.
+
+
+### Compaction qualification
+
+The focused driver regression passes (6.79 s), including the second-chunk race,
+physical payload absence and fresh delayed prepares. Mixed account/data
+participants and shared-reader COMMIT/ABORT checks pass (24.57 s). The signed SDK
+replay after coordinator/data owner restoration passes (1.33 s). Token retention
+passes (0.54 s), both interrupted-upload cases pass (2.51 s), and all four
+reservation/full-database cases pass (55.93 s).
+
+The large data-range owner-restart fixture passes (3.51 s) with
+`RUST_MIN_STACK=16777216`. Its default local test-thread stack overflows on both
+this change and unchanged head `37ad11cf66d`; the baseline was run with these
+changes stashed. No assertion or test timeout was relaxed. This is a local debug
+test-harness limitation, not evidence of a production stack failure or a fleet
+qualification.
+
+The production change adds 48 net lines for retention selection, atomic payload
+removal and the chunk-race/read-response handling. Resolution is the appropriate
+ownership boundary: participant outcomes are durable before images disappear,
+and no background collector or second transaction state machine is introduced.
+
+Strict all-target Clippy and the standalone server build pass. Formatting,
+diff, Cell/LTX layout and policy entry-point checks pass. The SDK/process CI
+workflow will qualify the pushed head; these local checks do not replace that
+gate or the full API and fleet qualification.

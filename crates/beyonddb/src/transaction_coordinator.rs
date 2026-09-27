@@ -345,6 +345,10 @@ impl Command for BeginCrossCellTransaction {
                 cell_id,
                 serde_json::to_vec(&participant.target)?,
                 serde_json::to_vec(&participant.operations)?,
+                participant
+                    .operations
+                    .iter()
+                    .any(|operation| matches!(operation.operation, TransactionOperation::Read(_))),
             ));
         }
         if indexes.is_empty()
@@ -388,7 +392,7 @@ impl Command for BeginCrossCellTransaction {
                 SqlValue::Integer(context.now_ms()),
             ],
         ))?;
-        for (position, cell_id, target, operations) in participants_rows {
+        for (position, cell_id, target, operations, retain_operations) in participants_rows {
             let position = i64::try_from(position)
                 .map_err(|_| Error::Command("participant index overflow"))?;
             let chunks = crate::transaction_payload::write(
@@ -399,13 +403,14 @@ impl Command for BeginCrossCellTransaction {
             )?;
             context.sql(&statement(
                 "INSERT INTO ddb_coordinator_participants \
-                 (transaction_id, position, cell_id, target, operation_chunks) VALUES (?1, ?2, ?3, ?4, ?5)",
+                 (transaction_id, position, cell_id, target, operation_chunks, retain_operations) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 vec![
                     SqlValue::Blob(input.transaction_id.to_vec()),
                     SqlValue::Integer(position),
                     SqlValue::Blob(cell_id.to_vec()),
                     SqlValue::Blob(target),
                     SqlValue::Integer(chunks),
+                    SqlValue::Integer(i64::from(retain_operations)),
                 ],
             ))?;
         }
