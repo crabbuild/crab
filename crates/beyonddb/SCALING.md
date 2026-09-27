@@ -2006,3 +2006,53 @@ uses GitHub's [documented concurrency behavior](https://docs.github.com/en/actio
 without changing assertions, deadlines or the SDK/process workload. A result for
 an older commit does not qualify a newer one; the latest head still needs its
 own completed run.
+
+## Bounded generation-scoped table deletion
+
+`DeleteTable` now accepts the immutable generation selected by the backend and
+records a durable deletion marker before cleanup. DescribeTable reports DELETING
+while that marker exists. The physical catalog entry reserves the name until
+cleanup finishes; normal account reads, writes and new prepares use the live
+catalog view. Prepared account transactions prevent the marker from being
+created, so a durable COMMIT can still apply its original table image.
+
+Each command removes at most 64 directly selected metadata rows, then removes
+the catalog and marker once every child collection is empty. Child rows precede
+parents, preventing foreign-key cascades from hiding an unbounded collection.
+Item/LSI counters remain until item deletion triggers have finished. The GSI
+base-table index keeps generation selection from scanning every index directory.
+This bounds selected row work; it does not qualify total WAL bytes, storage
+latency or fleet throughput. Immutable data/index histories are not garbage
+collected by this change.
+
+The account capacity worker discovers DELETING through the same catalog listing
+used for creation recovery and advances one cleanup batch per visit. Remaining
+rows are durable progress, so no process-local cursor is needed. Delayed cleanup
+uses the original table ID; a delayed initial delete also carries that ID and
+cannot remove a replacement with the same name. Base/GSI publication, split
+admission/publication, TTL selection and statistics publication reject the fenced
+generation. Existing participant addresses and transaction replay history remain
+available to resolve earlier decisions.
+
+| Evidence boundary | Source and proof |
+| --- | --- |
+| Public entry and owner | ExtendDB `TableEngine` reaches `backend.rs`, then `table/deletion.rs` commands in the account Cell. |
+| Previous behavior | Main and pre-change HEAD synchronously remove the catalog and all account rows; the new SDK recovery test failed at post-delete DescribeTable with ResourceNotFound. |
+| Dependency contract | Pinned ExtendDB SQLite deletion supports immediate removal or a DELETING lifecycle and returns a DELETING description. BeyondDB uses its existing description/error types; no dependency or lockfile change. |
+| Sibling fences | Shared table helpers, base/GSI routing, split publication, account transaction resolution, LSI reads, TTL and sampled statistics consult the live view. Physical catalog reads remain only for uniqueness, lifecycle and listing. |
+| Recovery regression | Signed SDK writes populate an account-local table; deletion rejects new mutations and reserves the name, survives account-owner drain, finishes through the production worker, and permits safe recreation. Old-generation cleanup and delete cannot affect the replacement. |
+| Transaction gate | `mixed_participants_preserve_locks_and_finish_after_owner_restart` passed after the input contract change; prepared account locks still refuse deletion. |
+
+This is a prerequisite for metadata extraction, not sharded metadata. The account
+catalog, directories and cleanup writer still share one Cell. Distributed cleanup
+completion, metadata-tree recovery and 10,000-Cell/multi-TB proof remain required.
+The unreleased account schema and internal DeleteTable input changed; development
+stores must be reprovisioned for this application release.
+
+Focused verification: the SDK deletion/recreation case with 160 base items and
+160 LSI entries passed in 8.97s; mixed account/data prepared transactions and
+owner restart passed in 34.69s. Both base-capacity recovery cases passed. The GSI
+capacity case returned one HTTP 503 during Scan when run with the base cases;
+an unchanged isolated rerun passed in 15.79s. That intermittent failure is not
+resolved by this deletion change. Large routed/GSI deletion and process-level
+recovery still require their broader qualification gates.

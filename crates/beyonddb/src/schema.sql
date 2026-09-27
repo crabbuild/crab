@@ -4,6 +4,14 @@ CREATE TABLE ddb_tables (
     record BLOB NOT NULL
 );
 
+CREATE TABLE ddb_table_deletions (
+    table_id TEXT PRIMARY KEY REFERENCES ddb_tables(table_id) ON DELETE CASCADE
+);
+CREATE VIEW ddb_live_tables AS
+    SELECT t.* FROM ddb_tables t WHERE NOT EXISTS (
+        SELECT 1 FROM ddb_table_deletions d WHERE d.table_id = t.table_id
+    );
+
 CREATE TABLE ddb_items (
     table_id TEXT NOT NULL REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
     item_key BLOB NOT NULL,
@@ -95,6 +103,7 @@ CREATE TABLE ddb_global_index_routes (
     base_table_id TEXT NOT NULL REFERENCES ddb_tables(table_id) ON DELETE CASCADE,
     route_epoch TEXT NOT NULL
 );
+CREATE INDEX ddb_global_index_routes_base ON ddb_global_index_routes (base_table_id);
 
 CREATE TABLE ddb_global_index_partitions (
     table_id TEXT NOT NULL REFERENCES ddb_global_index_routes(table_id) ON DELETE CASCADE,

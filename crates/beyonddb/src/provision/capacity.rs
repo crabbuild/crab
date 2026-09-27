@@ -23,7 +23,7 @@ use crate::{
 };
 
 impl CellInitialPartitionProvisioner {
-    /// Resume one creating table or inspect one base/index range; return whether a split completed.
+    /// Advance one table lifecycle or inspect one base/index range; return whether a split completed.
     ///
     /// `None` starts a new pass. Once a range is selected, the cursor advances
     /// even if its split fails; its durable plan remains for the next pass.
@@ -69,19 +69,32 @@ impl CellInitialPartitionProvisioner {
             };
             (name, None, None)
         };
-        let Some(table) = client
-            .query::<DescribeTable>(&account, None, Json(name.clone()))
+        let lifecycle = client
+            .query::<crate::ReadTableLifecycle>(&account, None, Json(name.clone()))
             .await
             .map_err(cell_error)?
             .output
-            .0
-        else {
-            *cursor = Some(CapacityCursor {
-                table_name: name,
-                after_lower: None,
-                index: None,
-            });
-            return Ok(false);
+            .0;
+        let table = match lifecycle {
+            crate::TableLifecycle::Live(table) => table,
+            lifecycle => {
+                *cursor = Some(CapacityCursor {
+                    table_name: name,
+                    after_lower: None,
+                    index: None,
+                });
+                if let crate::TableLifecycle::Deleting(table) = lifecycle {
+                    client
+                        .command::<crate::ContinueTableDeletion>(
+                            &account,
+                            mutation_identity()?,
+                            Json(table.id),
+                        )
+                        .await
+                        .map_err(cell_error)?;
+                }
+                return Ok(false);
+            }
         };
         let index_record = match index {
             Some(position) => match table.global_secondary_indexes.get(position) {

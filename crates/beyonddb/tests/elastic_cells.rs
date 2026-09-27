@@ -5224,7 +5224,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             restored_child_target,
             identity(64),
             Json(PartitionImportInput {
-                table_id: table.id,
+                table_id: table.id.clone(),
                 epoch: 3,
                 item: first_item,
             }),
@@ -5237,7 +5237,14 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     ));
     assert!(matches!(
         restored_client
-            .command::<DeleteTable>(&account, identity(67), Json(table.table_name.clone()))
+            .command::<DeleteTable>(
+                &account,
+                identity(67),
+                Json(beyonddb::TableGeneration {
+                    table_name: table.table_name.clone(),
+                    table_id: table.id.clone()
+                })
+            )
             .await
             .unwrap()
             .output

@@ -199,7 +199,11 @@ impl TableEngine for CellStorage {
                         if self.initial_partitions.is_none() {
                             return Err(StorageError::TableAlreadyExists(name));
                         }
-                        let existing = self.record(&account_id, &name).await?;
+                        let crate::TableLifecycle::Live(existing) =
+                            self.lifecycle(&account_id, &name).await?
+                        else {
+                            return Err(StorageError::TableAlreadyExists(name));
+                        };
                         if existing.placement == TablePlacement::Account
                             || !submitted.matches_record(&existing)
                             || self.route_active_for(&account_id, &existing.id).await?
@@ -246,11 +250,23 @@ impl TableEngine for CellStorage {
         Box::pin(async move {
             let target = target(&account_id)?;
             let name = input.table_name;
-            let previous = self.record(&account_id, &name).await?;
+            let previous = match self.lifecycle(&account_id, &name).await? {
+                crate::TableLifecycle::Live(record) | crate::TableLifecycle::Deleting(record) => {
+                    record
+                }
+                crate::TableLifecycle::Missing => return Err(StorageError::TableNotFound(name)),
+            };
             let statistics = self.statistics(&account_id, &previous.id).await?;
             let record = match self
                 .client
-                .command::<DeleteTable>(&target, mutation_identity()?, Json(name.clone()))
+                .command::<DeleteTable>(
+                    &target,
+                    mutation_identity()?,
+                    Json(crate::TableGeneration {
+                        table_name: name.clone(),
+                        table_id: previous.id.clone(),
+                    }),
+                )
                 .await
             {
                 Ok(committed) => match committed.output.0 {
@@ -299,13 +315,21 @@ impl TableEngine for CellStorage {
     ) -> BoxedFuture<'_, Result<TableDescription, StorageError>> {
         let account_id = account_id.to_owned();
         Box::pin(async move {
-            let record = self.record(&account_id, &input.table_name).await?;
-            let status = if matches!(record.placement, TablePlacement::Routed { .. })
-                && !self.route_active_for(&account_id, &record.id).await?
-            {
-                TableStatus::Creating
-            } else {
-                TableStatus::Active
+            let (record, status) = match self.lifecycle(&account_id, &input.table_name).await? {
+                crate::TableLifecycle::Missing => {
+                    return Err(StorageError::TableNotFound(input.table_name));
+                }
+                crate::TableLifecycle::Deleting(record) => (record, TableStatus::Deleting),
+                crate::TableLifecycle::Live(record) => {
+                    let status = if matches!(record.placement, TablePlacement::Routed { .. })
+                        && !self.route_active_for(&account_id, &record.id).await?
+                    {
+                        TableStatus::Creating
+                    } else {
+                        TableStatus::Active
+                    };
+                    (record, status)
+                }
             };
             self.table_description(record, &account_id, status).await
         })
@@ -543,6 +567,21 @@ impl CellStorage {
                 Err(StorageError::Transient("table route changed; retry".into()))
             }
         }
+    }
+
+    async fn lifecycle(
+        &self,
+        account_id: &str,
+        name: &str,
+    ) -> Result<crate::TableLifecycle, StorageError> {
+        let account = target(account_id)?;
+        Ok(self
+            .client
+            .query::<crate::ReadTableLifecycle>(&account, None, Json(name.into()))
+            .await
+            .map_err(cell_error)?
+            .output
+            .0)
     }
 
     async fn record(&self, account_id: &str, name: &str) -> Result<TableRecord, StorageError> {

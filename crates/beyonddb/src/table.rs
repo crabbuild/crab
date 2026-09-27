@@ -1,3 +1,10 @@
+mod deletion;
+
+pub use deletion::{
+    ContinueTableDeletion, DeleteTable, DeleteTableOutcome, ReadTableLifecycle, TableGeneration,
+    TableLifecycle,
+};
+
 use super::*;
 use extenddb_core::types::{LsiInput, Tag};
 
@@ -191,95 +198,6 @@ impl Command for CreateTable {
     }
 }
 
-/// Result of removing a table and all its items.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum DeleteTableOutcome {
-    /// Prepared account transactions still reference this table.
-    TransactionConflict,
-    /// The removed table's last description.
-    Deleted(TableRecord),
-    /// No table has this name.
-    TableNotFound,
-    /// The table's deletion protection is enabled.
-    DeletionProtected,
-}
-
-/// Remove a table and all its items in one durable command.
-pub struct DeleteTable;
-
-impl Command for DeleteTable {
-    const MODULE: &'static str = MODULE;
-    const ID: u32 = 7;
-    const CODEC_VERSION: u32 = 1;
-    type Input = Json<String>;
-    type Output = Json<DeleteTableOutcome>;
-
-    fn execute(
-        context: &mut CommandContext<'_, '_>,
-        Json(name): Self::Input,
-    ) -> Result<CommandResult<Self::Output>> {
-        let Some(table) = command_table(context, &name)? else {
-            return Ok(CommandResult::Rejected(Json(
-                DeleteTableOutcome::TableNotFound,
-            )));
-        };
-        if table.deletion_protection_enabled {
-            return Ok(CommandResult::Rejected(Json(
-                DeleteTableOutcome::DeletionProtected,
-            )));
-        }
-        // Deletion must not discard the table required to apply a durable COMMIT.
-        if crate::items::transaction::table_locked(context, &table.id)? {
-            return Ok(CommandResult::Rejected(Json(
-                DeleteTableOutcome::TransactionConflict,
-            )));
-        }
-        context.sql(&SqlBatch {
-            statements: vec![
-                SqlStatement {
-                    sql: "DELETE FROM ddb_route_partitions WHERE table_id = ?1".into(),
-                    parameters: vec![SqlValue::Text(table.id.clone())],
-                },
-                SqlStatement {
-                    sql: "DELETE FROM ddb_split_plans WHERE table_id = ?1".into(),
-                    parameters: vec![SqlValue::Text(table.id.clone())],
-                },
-                SqlStatement {
-                    sql: "DELETE FROM ddb_routes WHERE table_id = ?1".into(),
-                    parameters: vec![SqlValue::Text(table.id.clone())],
-                },
-                SqlStatement {
-                    sql: "DELETE FROM ddb_local_index_items WHERE table_id = ?1".into(),
-                    parameters: vec![SqlValue::Text(table.id.clone())],
-                },
-                SqlStatement {
-                    sql: "DELETE FROM ddb_items WHERE table_id = ?1".into(),
-                    parameters: vec![SqlValue::Text(table.id.clone())],
-                },
-                SqlStatement {
-                    sql: "DELETE FROM ddb_local_index_statistics WHERE table_id = ?1".into(),
-                    parameters: vec![SqlValue::Text(table.id.clone())],
-                },
-                SqlStatement {
-                    sql: "DELETE FROM ddb_table_tags WHERE table_id = ?1".into(),
-                    parameters: vec![SqlValue::Text(table.id.clone())],
-                },
-                SqlStatement {
-                    sql: "DELETE FROM ddb_table_ttl WHERE table_id = ?1".into(),
-                    parameters: vec![SqlValue::Text(table.id.clone())],
-                },
-                SqlStatement {
-                    sql: "DELETE FROM ddb_tables WHERE table_id = ?1".into(),
-                    parameters: vec![SqlValue::Text(table.id.clone())],
-                },
-            ],
-        })?;
-        Ok(CommandResult::Success(Json(DeleteTableOutcome::Deleted(
-            table,
-        ))))
-    }
-}
-
 /// Supported table settings changed atomically in the account Cell.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TableUpdate {
@@ -320,10 +238,18 @@ impl Command for UpdateTable {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        let Some(mut table) = command_table(context, &input.table_name)? else {
-            return Ok(CommandResult::Rejected(Json(
-                UpdateTableOutcome::TableNotFound,
-            )));
+        let mut table = match deletion::command_lifecycle(context, &input.table_name)? {
+            TableLifecycle::Live(table) => table,
+            TableLifecycle::Deleting(_) => {
+                return Ok(CommandResult::Rejected(Json(
+                    UpdateTableOutcome::TableNotActive,
+                )));
+            }
+            TableLifecycle::Missing => {
+                return Ok(CommandResult::Rejected(Json(
+                    UpdateTableOutcome::TableNotFound,
+                )));
+            }
         };
         // Initial owners persist this record verbatim. Keep it immutable until
         // route publication so a retry cannot conflict with installed owners.
@@ -418,7 +344,7 @@ impl Query for DescribeTableById {
     fn execute(context: &mut QueryContext<'_>, Json(id): Self::Input) -> Result<Self::Output> {
         Ok(Json(decode_table(
             &context.sql(&statement(
-                "SELECT record FROM ddb_tables WHERE table_id = ?1",
+                "SELECT record FROM ddb_live_tables WHERE table_id = ?1",
                 vec![SqlValue::Text(id)],
             ))?[0],
         )?))
@@ -499,7 +425,7 @@ pub(super) fn command_table(
 ) -> Result<Option<TableRecord>> {
     decode_table(
         &context.sql(&statement(
-            "SELECT record FROM ddb_tables WHERE table_name = ?1",
+            "SELECT record FROM ddb_live_tables WHERE table_name = ?1",
             vec![SqlValue::Text(name.to_owned())],
         ))?[0],
     )
@@ -508,7 +434,7 @@ pub(super) fn command_table(
 pub(super) fn query_table(context: &QueryContext<'_>, name: &str) -> Result<Option<TableRecord>> {
     decode_table(
         &context.sql(&statement(
-            "SELECT record FROM ddb_tables WHERE table_name = ?1",
+            "SELECT record FROM ddb_live_tables WHERE table_name = ?1",
             vec![SqlValue::Text(name.to_owned())],
         ))?[0],
     )
@@ -521,7 +447,7 @@ pub(super) fn command_unrouted_table(
     // Route publication transfers item authority; account writes must fail closed.
     decode_table(
         &context.sql(&statement(
-            "SELECT t.record FROM ddb_tables t LEFT JOIN ddb_routes r ON t.table_id = r.table_id \
+            "SELECT t.record FROM ddb_live_tables t LEFT JOIN ddb_routes r ON t.table_id = r.table_id \
              WHERE t.table_name = ?1 AND r.table_id IS NULL",
             vec![SqlValue::Text(name.to_owned())],
         ))?[0],
@@ -535,7 +461,7 @@ pub(super) fn query_unrouted_table(
     // The account item image is no longer authoritative after activation.
     decode_table(
         &context.sql(&statement(
-            "SELECT t.record FROM ddb_tables t LEFT JOIN ddb_routes r ON t.table_id = r.table_id \
+            "SELECT t.record FROM ddb_live_tables t LEFT JOIN ddb_routes r ON t.table_id = r.table_id \
              WHERE t.table_name = ?1 AND r.table_id IS NULL",
             vec![SqlValue::Text(name.to_owned())],
         ))?[0],

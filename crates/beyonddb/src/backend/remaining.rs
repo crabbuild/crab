@@ -869,8 +869,8 @@ impl WorkerStore for CellStorage {
     fn process_control_plane_transitions(
         &self,
     ) -> BoxedFuture<'_, Result<Vec<(String, &'static str)>, StorageError>> {
-        // Account-scoped capacity workers discover incomplete creation. This
-        // global hook has no account inventory; deletion remains one Cell command.
+        // Account-scoped capacity workers resume creation and bounded deletion.
+        // This global hook has no account inventory to discover that work.
         Box::pin(async { Ok(Vec::new()) })
     }
 }

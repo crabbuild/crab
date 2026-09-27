@@ -142,7 +142,7 @@ impl Command for ActivateTableRoute {
         Json(route): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
         let table_rows = context.sql(&statement(
-            "SELECT record FROM ddb_tables WHERE table_id = ?1",
+            "SELECT record FROM ddb_live_tables WHERE table_id = ?1",
             vec![SqlValue::Text(route.table_id.clone())],
         ))?;
         let Some(table) = decode_table(&table_rows[0])? else {
@@ -239,7 +239,7 @@ fn load_route(
     sql: impl Fn(&SqlBatch) -> Result<Vec<SqlResultSet>>,
 ) -> Result<Option<TableRoute>> {
     let route_rows = sql(&statement(
-        "SELECT route_epoch, route_table FROM ddb_routes WHERE table_id = ?1",
+        "SELECT route_epoch, route_table FROM ddb_routes WHERE table_id = ?1 AND EXISTS (SELECT 1 FROM ddb_live_tables WHERE table_id = ?1)",
         vec![SqlValue::Text(table_id.to_owned())],
     ))?;
     let route_rows = &route_rows[0];
@@ -357,7 +357,7 @@ impl Query for ReadPartitionRoute {
             "SELECT p.partition_id, p.epoch FROM ddb_routes r \
              LEFT JOIN ddb_route_partitions p ON p.table_id = r.table_id \
              AND p.lower_bound <= ?2 AND ?2 < p.upper_bound \
-             WHERE r.table_id = ?1 ORDER BY p.lower_bound DESC LIMIT 2",
+             WHERE r.table_id = ?1 AND EXISTS (SELECT 1 FROM ddb_live_tables WHERE table_id = ?1) ORDER BY p.lower_bound DESC LIMIT 2",
             vec![
                 SqlValue::Text(input.table_id),
                 SqlValue::Blob(input.hash.to_vec()),
@@ -456,8 +456,13 @@ pub(crate) fn read_route_page(
     if input.start_hash.is_some() && input.after_lower.is_some() {
         return Err(crate::Error::Command("invalid route page cursor"));
     }
+    let generation = if routes_table == "ddb_routes" {
+        "table_id"
+    } else {
+        "base_table_id"
+    };
     let epoch_rows = context.sql(&statement(
-        &format!("SELECT route_epoch FROM {routes_table} WHERE table_id = ?1"),
+        &format!("SELECT r.route_epoch FROM {routes_table} r JOIN ddb_live_tables t ON t.table_id = r.{generation} WHERE r.table_id = ?1"),
         vec![SqlValue::Text(input.table_id.clone())],
     ))?;
     let Some(row) = epoch_rows[0].rows.first() else {

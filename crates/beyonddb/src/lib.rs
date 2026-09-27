@@ -113,7 +113,7 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 28] = [
+static COMMANDS: [OperationDescriptor; 29] = [
     operation(1),
     operation(2),
     operation(3),
@@ -146,8 +146,9 @@ static COMMANDS: [OperationDescriptor; 28] = [
     operation(29),
     operation(30),
     operation(31),
+    operation(32),
 ];
-static QUERIES: [OperationDescriptor; 31] = [
+static QUERIES: [OperationDescriptor; 32] = [
     operation(4),
     operation(7),
     operation(8),
@@ -179,6 +180,7 @@ static QUERIES: [OperationDescriptor; 31] = [
     operation(35),
     operation(36),
     operation(37),
+    operation(38),
 ];
 
 /// Statically linked account application.
@@ -292,6 +294,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
                 source.update(include_bytes!("lib.rs"));
                 source.update(include_bytes!("statistics.rs"));
                 source.update(include_bytes!("table.rs"));
+                source.update(include_bytes!("table/deletion.rs"));
                 source.update(include_bytes!("global_index.rs"));
                 source.update(include_bytes!("global_index/outbox.rs"));
                 source.update(include_bytes!("global_index/routing.rs"));
@@ -347,6 +350,8 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<PrepareAccountTransaction>()?;
         registry.bind_command::<ResolveAccountTransaction>()?;
         registry.bind_command::<DeleteTable>()?;
+        registry.bind_command::<ContinueTableDeletion>()?;
+        registry.bind_query::<ReadTableLifecycle>()?;
         registry.bind_command::<UpdateTable>()?;
         registry.bind_command::<UpdateItem>()?;
         registry.bind_command::<ActivateTableRoute>()?;

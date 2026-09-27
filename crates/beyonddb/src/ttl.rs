@@ -129,7 +129,7 @@ impl Query for ListTtlTables {
     fn execute(context: &mut QueryContext<'_>, Json(after): Self::Input) -> Result<Self::Output> {
         let rows = context.sql(&statement(
             "SELECT t.table_name, ttl.attribute_name FROM ddb_table_ttl ttl \
-             JOIN ddb_tables t ON t.table_id = ttl.table_id \
+             JOIN ddb_live_tables t ON t.table_id = ttl.table_id \
              WHERE (?1 IS NULL OR t.table_name > ?1) ORDER BY t.table_name LIMIT 101",
             vec![after.map_or(SqlValue::Null, SqlValue::Text)],
         ))?;
@@ -193,7 +193,7 @@ fn sweep_state(
 
 fn sweep_sql() -> &'static str {
     "SELECT ttl.table_id, ttl.attribute_name, ttl.sweep_after FROM ddb_table_ttl ttl \
-     JOIN ddb_tables t ON t.table_id = ttl.table_id WHERE t.table_name = ?1"
+     JOIN ddb_live_tables t ON t.table_id = ttl.table_id WHERE t.table_name = ?1"
 }
 
 /// Read one table's durable TTL sweep position.

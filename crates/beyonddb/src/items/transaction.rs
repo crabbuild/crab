@@ -145,7 +145,7 @@ fn apply(context: &mut CommandContext<'_, '_>, staged: Vec<StagedImage>) -> Resu
         }
         let table = crate::table::decode_table(
             &context.sql(&statement(
-                "SELECT record FROM ddb_tables WHERE table_id = ?1",
+                "SELECT record FROM ddb_live_tables WHERE table_id = ?1",
                 vec![SqlValue::Text(image.table_id.clone())],
             ))?[0],
         )?

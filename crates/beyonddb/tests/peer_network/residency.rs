@@ -1,4 +1,5 @@
 mod creation;
+mod deletion;
 mod index_splits;
 mod placement;
 mod provisioning;

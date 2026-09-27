@@ -15,7 +15,7 @@ has already been sharded or that 10,000 active Cells have been qualified.
 | Scan/maintenance pages | `ReadRoutePage`, `ReadGlobalIndexRoutePage`; routed Scan, TTL, projection, capacity, statistics and recovery | Ordered coverage, bounded pages and explicit detection of conflicting directory changes; no full-directory read on the request path. |
 | Base split | `routing/split_state.rs`, `split.rs`, `provision/capacity.rs` | Source/child reservations and route replacement currently share one account commit. Keep the intent until both children open. Unrelated splits may publish independently. |
 | GSI split | `global_index/split_routing.rs`, `global_index/transfer.rs`, `provision/global_indexes.rs` | Transfer versions and tombstones as well as items; retain unfinished source/child reservations through opening. |
-| Delete | `table.rs::DeleteTable`, `schema.sql` foreign keys | Deleting a table currently removes its catalog, routes, plans, tags, TTL state and statistics in one Cell command. Prepared account transactions prevent deletion. |
+| Delete | `table/deletion.rs`, account lifecycle marker and cleanup worker | Fence the exact generation before bounded metadata cleanup. Prepared account transactions prevent deletion; name reuse waits for catalog removal. |
 | Statistics | `statistics.rs::PublishStatistics`, `backend/statistics.rs` | The current final publication checks every sampled base/GSI directory epoch in the same account commit, preventing a split from double-counting source and children. |
 | Residency/recovery | `provision.rs`, `provision/residency.rs`, `provision/transactions.rs` | Metadata absence is authoritative only at the current owner and for the exact generation. Original transaction participants remain recoverable after directory changes. |
 
@@ -60,13 +60,17 @@ changes. UpdateTable rejects a routed generation until base-route publication
 inside the account command, keeping the installed specification immutable during
 creation. Metadata extraction must retain that atomic lifecycle guard.
 
-Deletion needs an explicit generation-scoped lifecycle transition before its
-metadata can live on separate owners. Mark the generation deleting, fence new
-route/index publications and transaction admission for that generation, and
-perform bounded cleanup with durable progress. A table name can be reused only
-at the lifecycle boundary that guarantees old work cannot mutate the replacement.
-Readers and maintenance workers must distinguish a deleting generation from an
-unavailable metadata owner. No missing-owner response may authorize data removal.
+Deletion now records a generation-scoped marker in the account Cell before
+bounded cleanup. Live-table lookups fence new account writes/prepares, route and
+index publication, split admission/publication and statistics publication. The
+capacity worker discovers deleting generations and resumes cleanup after owner
+restore. Name reuse waits for catalog removal; delayed delete/cleanup commands
+carry the original generation. See [deletion proof](SCALING.md#bounded-generation-scoped-table-deletion).
+
+Metadata extraction must preserve these lifecycle semantics across independent
+owners, including explicit completion acknowledgements before name reuse. The
+current cleanup is account-local and does not implement that distributed protocol.
+An unavailable metadata owner must never be treated as deletion evidence.
 
 Directory split and data split are distinct operations. A metadata leaf cannot
 move an unfinished data-split reservation without transferring its recovery

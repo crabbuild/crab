@@ -32,7 +32,7 @@ impl Command for ActivateGlobalIndexRoute {
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
         let rows = context.sql(&statement(
-            "SELECT record FROM ddb_tables WHERE table_id = ?1",
+            "SELECT record FROM ddb_live_tables WHERE table_id = ?1",
             vec![SqlValue::Text(input.table.id.clone())],
         ))?;
         let Some(table) = decode_table(&rows[0])? else {

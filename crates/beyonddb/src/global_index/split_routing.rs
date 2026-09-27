@@ -95,7 +95,7 @@ fn route_state(
     sql: impl Fn(&SqlBatch) -> Result<Vec<SqlResultSet>>,
 ) -> Result<(SplitRouteState, Option<u64>)> {
     let rows = sql(&statement(
-        "SELECT r.route_epoch, t.record FROM ddb_global_index_routes r JOIN ddb_tables t ON t.table_id = r.base_table_id WHERE r.table_id = ?1",
+        "SELECT r.route_epoch, t.record FROM ddb_global_index_routes r JOIN ddb_live_tables t ON t.table_id = r.base_table_id WHERE r.table_id = ?1",
         vec![SqlValue::Text(plan.source.index.id.clone())],
     ))?;
     let Some(row) = rows[0].rows.first() else {

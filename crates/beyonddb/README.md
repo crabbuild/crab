@@ -161,7 +161,11 @@ account-owner restoration without a client retry. One creation attempt can insta
 all remaining initial ranges; this is not a one-Cell-per-tick operation. The global
 table-transition hook has no account inventory and remains a no-op.
 Table resource tags now have Cell-backed CreateTable, TagResource, UntagResource,
-and ListTagsOfResource paths; DeleteTable removes their rows. The RustFS
+and ListTagsOfResource paths; DeleteTable fences the generation and removes their
+rows in bounded cleanup batches. Large deletions remain DELETING until the
+account capacity worker finishes; progress survives account-owner replacement.
+The name remains reserved until catalog cleanup completes. This does not reclaim
+the retired data/index Cells' object-store history. The RustFS
 process test verifies these requests through the AWS SDK across a server
 restart and verifies that a recreated table starts without the old tags.
 TransactWriteItems accepts Put, Delete, Update, and ConditionCheck across

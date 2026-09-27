@@ -203,7 +203,7 @@ impl Command for BeginSplit {
     ) -> Result<CommandResult<Self::Output>> {
         let table_id = &plan.source.table.id;
         let table_rows = context.sql(&statement(
-            "SELECT record FROM ddb_tables WHERE table_id = ?1",
+            "SELECT record FROM ddb_live_tables WHERE table_id = ?1",
             vec![SqlValue::Text(table_id.clone())],
         ))?;
         let Some(table) = decode_table(&table_rows[0])? else {
@@ -292,7 +292,7 @@ impl Command for CommitSplit {
     ) -> Result<CommandResult<Self::Output>> {
         let table_id = &plan.source.table.id;
         let table_rows = context.sql(&statement(
-            "SELECT record FROM ddb_tables WHERE table_id = ?1",
+            "SELECT record FROM ddb_live_tables WHERE table_id = ?1",
             vec![SqlValue::Text(table_id.clone())],
         ))?;
         if decode_table(&table_rows[0])?.is_none() {
