@@ -481,7 +481,11 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     .unwrap();
     let remote_credentials =
         CellCredentialStore::new(client.clone(), layout.clone(), ENCRYPTION_KEY);
-    let peer_job = owner.runtime().try_reserve_worker_job().unwrap().unwrap();
+    let runtime = owner.runtime();
+    let stats = runtime.stats();
+    let peer_bytes = runtime
+        .try_reserve_node_bytes(stats.retained_capacity_bytes() - stats.retained_bytes())
+        .unwrap();
     let round_trip = PeerHttpRoundTrip::new(
         Arc::new(BeyonddbPeerScope),
         CellAuthority::new(layout.clone()),
@@ -489,8 +493,8 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         Arc::new(client_tls.client_identity()),
         remote_session,
     );
-    // Admission precedes envelope parsing, so a held slot cannot dispatch
-    // even this invalid input. A retry delay must not extend the deadline.
+    // Memory admission precedes codec queuing and parsing, so exhausted memory
+    // cannot dispatch even invalid input. Retry delay must respect the deadline.
     assert!(matches!(
         round_trip.send(account.clone(), vec![0], 500).await,
         Err(crab_cell_runtime::Error::Deadline)
@@ -506,13 +510,13 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     ));
     let lookup = remote_credentials.lookup_credential(ACCESS_KEY);
     tokio::pin!(lookup);
-    // A real peer admission slot is busy. The lookup must pace its retry,
-    // keeping authentication pending until capacity becomes available.
+    // Memory bounds waiting requests. Authentication must pace its retry until
+    // capacity becomes available; codec contention instead uses a fair queue.
     tokio::select! {
         result = &mut lookup => panic!("credential lookup completed during peer overload: {}", result.is_ok()),
         () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
     }
-    drop(peer_job);
+    drop(peer_bytes);
     assert_eq!(lookup.await.unwrap().unwrap().account_id, "123456789012");
     let authorization = CellAuthorizationStore::new(CellClient::local_runtime(
         application.registry(),

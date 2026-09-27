@@ -793,4 +793,36 @@ recovery tests (4.38 s), and five reclamation tests (4.71 s) also pass. This doe
 not establish the full restart scenario: its latest run failed earlier, before
 node loss, on `BeginCrossCellTransaction` with peer HTTP admission exhaustion
 (134.80 s). A separate diagnostic run hit the same exhaustion during route
-inspection (202.44 s). Those codec-admission failures remain open.
+inspection (202.44 s). The codec follow-up below addresses this admission
+failure; full Linux qualification remains pending.
+
+### Peer codec contention
+
+A focused signed peer read reproduced admission exhaustion in 2.34 s. Holding
+the only codec slot for two seconds exhausted the transport's two attempts,
+despite most of the request deadline remaining. Both rejections occurred during
+decode; retained memory was about 65 KiB out of 16 MiB, with no SQL job active.
+
+The receiver now waits fairly for decode and signature-verification capacity,
+matching the repository HTTP receiver's runtime reservation policy. Before
+decoding, the wait is bounded by the protocol's 60-second maximum. The decoded
+request deadline is measured from arrival, checked before enrollment, and reused
+for verification, dispatch and encoding. CPU reservations still drop before I/O;
+waiting requests retain separately bounded memory. Exhausted request memory
+still returns 503 with Retry-After before dispatch. Post-dispatch errors retain
+unknown-outcome handling and never become safe-to-retry capacity errors.
+
+Three focused codec tests pass together (4.42 s): a signed read waits through
+contention, catalog I/O releases CPU capacity, and both codec queueing and slow
+enrollment honor the original deadline without reaching Cell catalog resolution.
+The full fixture now exhausts request memory for its existing retry/deadline
+assertions; it no longer treats a momentarily occupied codec slot as full memory.
+
+Final focused codec verification passes (3 tests, 4.49 s). The full signed
+two-owner SDK scenario now passes (243.92 s), including six deletion/recreation
+generations, changed-endpoint restart, transaction token replay, abandoned work
+recovery, final serving-owner failover and index recovery. It uses real signed
+HTTP/mTLS with in-memory object storage, not a process-loss or fleet-scale test.
+Strict all-target Clippy (49.31 s), standalone server build (64 s), formatting
+and diff checks pass. The earlier Linux deletion timeout and full native/peer/
+process qualification still require CI on this revision.

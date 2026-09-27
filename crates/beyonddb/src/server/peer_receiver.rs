@@ -361,11 +361,19 @@ async fn forward(
         .runtime
         .try_reserve_node_bytes(body.len() * 3 + 64 * 1024)
     else {
-        return busy(&receiver, "request_memory");
+        return busy(&receiver);
     };
     let decoded = {
-        let Some(_reservation) = receiver.runtime.try_reserve_worker_job().ok().flatten() else {
-            return busy(&receiver, "decode");
+        // The envelope is not decoded yet. Bound this fair queue by the peer
+        // protocol's maximum lifetime, then charge it to the decoded deadline.
+        let _reservation = match receiver
+            .runtime
+            .reserve_worker_job(started + Duration::from_secs(60))
+            .await
+        {
+            Ok(reservation) => reservation,
+            Err(Error::Deadline) => return error(StatusCode::GATEWAY_TIMEOUT),
+            Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
         };
         match crab_cell_runtime::peer::UnverifiedPeerRequest::decode(&body) {
             Ok(request) => request,
@@ -373,6 +381,9 @@ async fn forward(
         }
     };
     let deadline = started + Duration::from_millis(u64::from(decoded.remaining_ms()));
+    if Instant::now() >= deadline {
+        return error(StatusCode::GATEWAY_TIMEOUT);
+    }
     let now_ms = match unix_time_ms() {
         Ok(now_ms) => now_ms,
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
@@ -391,8 +402,10 @@ async fn forward(
         Err(_) => return error(StatusCode::GATEWAY_TIMEOUT),
     };
     let request = {
-        let Some(_reservation) = receiver.runtime.try_reserve_worker_job().ok().flatten() else {
-            return busy(&receiver, "verify");
+        let _reservation = match receiver.runtime.reserve_worker_job(deadline).await {
+            Ok(reservation) => reservation,
+            Err(Error::Deadline) => return error(StatusCode::GATEWAY_TIMEOUT),
+            Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
         };
         // Enrollment I/O consumes the signed request lifetime too.
         let now_ms = match unix_time_ms() {
@@ -451,13 +464,12 @@ fn error(status: StatusCode) -> Response {
     (status, [(header::CACHE_CONTROL, "no-store")]).into_response()
 }
 
-fn busy(receiver: &Receiver, phase: &'static str) -> Response {
+fn busy(receiver: &Receiver) -> Response {
     tracing::debug!(
-        phase,
         resources = ?receiver.runtime.stats(),
-        "peer request admission deferred"
+        "peer request memory exhausted"
     );
-    // No dispatch has occurred; the sender may retry after codec capacity frees.
+    // No dispatch has occurred; the sender may retry after request memory frees.
     (
         StatusCode::SERVICE_UNAVAILABLE,
         [

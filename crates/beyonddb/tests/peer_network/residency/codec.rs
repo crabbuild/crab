@@ -39,6 +39,33 @@ fn peer(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_read_waits_for_codec_capacity_within_its_deadline() {
+    let fixture = Fixture::new().await;
+    let remote = Remote::new(&fixture).await;
+    let (transport, signer, principal) = peer(&fixture, &remote);
+    let client = CellClient::peer(fixture.application.registry(), signer, principal, transport);
+    let runtime = fixture.node.runtime();
+    let held = runtime.try_reserve_worker_job().unwrap().unwrap();
+    let request = tokio::spawn(async move {
+        client
+            .query::<DescribeTable>(
+                &account_target("123456789012").unwrap(),
+                None,
+                Json("Residency".into()),
+            )
+            .await
+    });
+    // Occupy only codec capacity for longer than the transport's single paced
+    // retry, while leaving most of the signed request budget available.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    drop(held);
+    let result = request.await.unwrap();
+    remote.shutdown().await;
+    fixture.shutdown().await;
+    assert!(result.unwrap().output.0.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn peer_catalog_io_leaves_cpu_capacity_for_unrelated_work() {
     let slow = Arc::new(ThrottledStore::new(
         InMemory::new(),
@@ -89,57 +116,90 @@ async fn peer_catalog_io_leaves_cpu_capacity_for_unrelated_work() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn peer_enrollment_io_obeys_signed_request_deadline() {
-    let slow = Arc::new(ThrottledStore::new(
-        InMemory::new(),
-        ThrottleConfig::default(),
-    ));
-    let fixture = Fixture::with_store(2, slow.clone()).await;
-    let remote = Remote::new(&fixture).await;
-    let (transport, signer, principal) = peer(&fixture, &remote);
-    let account = account_target("123456789012").unwrap();
-    let destination = fixture
-        .directory
-        .load(fixture.session, now_ms())
-        .await
-        .unwrap()
-        .unwrap()
-        .advertisement()
-        .clone();
-    let now = now_ms();
-    let request = signer
-        .sign(
-            principal,
-            now,
-            now + 60_000,
-            100,
-            PeerOperation::Read(wire::ReadRequest {
-                target: Some(wire::Target {
-                    tenant_id: account.tenant().as_bytes().to_vec(),
-                    application_id: account.application().as_bytes().to_vec(),
-                    namespace_id: account.namespace().as_bytes().to_vec(),
-                    partition: account.partition().to_vec(),
+async fn peer_pre_dispatch_waits_obey_signed_request_deadline() {
+    for codec in [false, true] {
+        let slow = Arc::new(ThrottledStore::new(
+            InMemory::new(),
+            ThrottleConfig::default(),
+        ));
+        let counted = Arc::new(CountingObjectStore::new(slow.clone()));
+        let fixture = Fixture::with_store(2, counted.clone()).await;
+        let remote = Remote::new(&fixture).await;
+        let (transport, signer, principal) = peer(&fixture, &remote);
+        let account = account_target("123456789012").unwrap();
+        let destination = fixture
+            .directory
+            .load(fixture.session, now_ms())
+            .await
+            .unwrap()
+            .unwrap()
+            .advertisement()
+            .clone();
+        let now = now_ms();
+        let request = signer
+            .sign(
+                principal,
+                now,
+                now + 60_000,
+                100,
+                PeerOperation::Read(wire::ReadRequest {
+                    target: Some(wire::Target {
+                        tenant_id: account.tenant().as_bytes().to_vec(),
+                        application_id: account.application().as_bytes().to_vec(),
+                        namespace_id: account.namespace().as_bytes().to_vec(),
+                        partition: account.partition().to_vec(),
+                    }),
+                    timeout_ms: 100,
+                    minimum: None,
+                    expected: None,
+                    operation: Some(wire::read_request::Operation::Describe(true)),
                 }),
-                timeout_ms: 100,
-                minimum: None,
-                expected: None,
-                operation: Some(wire::read_request::Operation::Describe(true)),
-            }),
-        )
-        .unwrap();
-    slow.config_mut(|config| config.wait_get_per_call = Duration::from_secs(5));
-    // The sender allows five seconds. Only the receiver's signed deadline can
-    // end this stalled enrollment within the shorter observation window.
-    let result = tokio::time::timeout(
-        Duration::from_secs(2),
-        transport.send_to_node(account, destination, request, 5_000),
-    )
-    .await;
-    slow.config_mut(|config| config.wait_get_per_call = Duration::ZERO);
-    remote.shutdown().await;
-    fixture.shutdown().await;
-    assert!(matches!(
-        result.expect("receiver ignored its signed deadline"),
-        Err(crab_cell_runtime::Error::PeerTransportUnknown { .. })
-    ));
+            )
+            .unwrap();
+        let catalog = fixture
+            .layout
+            .catalog_head_path(account.tenant().as_bytes(), account.cell_id().as_bytes()[0])
+            .to_string();
+        counted.reset();
+        let held = if codec {
+            Some(
+                fixture
+                    .node
+                    .runtime()
+                    .try_reserve_worker_job()
+                    .unwrap()
+                    .unwrap(),
+            )
+        } else {
+            slow.config_mut(|config| config.wait_get_per_call = Duration::from_secs(5));
+            None
+        };
+        // Queueing and enrollment consume the original 100-ms request budget.
+        // Releasing codec capacity afterward must not restart it or reach dispatch.
+        let ((), result) = tokio::join!(
+            async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                drop(held);
+            },
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                transport.send_to_node(account, destination, request, 5_000),
+            ),
+        );
+        let dispatched = counted
+            .requests()
+            .iter()
+            .any(|request| request.location == catalog);
+        slow.config_mut(|config| config.wait_get_per_call = Duration::ZERO);
+        remote.shutdown().await;
+        fixture.shutdown().await;
+        assert!(matches!(
+            result.expect("receiver ignored its signed deadline"),
+            Err(crab_cell_runtime::Error::PeerTransportUnknown { .. })
+        ));
+        assert!(
+            !dispatched,
+            "expired request reached Cell catalog resolution"
+        );
+    }
 }
