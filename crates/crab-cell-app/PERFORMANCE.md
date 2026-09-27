@@ -34,6 +34,39 @@ traffic pauses for code publication and recovery. This gate does not establish
 rolling-container availability, sustained throughput, or a migration latency
 bound. Independent-process scale and fault qualification remain separate.
 
+### Local GA RustFS receipt, 2026-09-27
+
+Source `ea51218b45c7401fac600f2e35aaa75aff30dc35` passed with the digest-pinned
+Rust 1.97 and RustFS 1.0.0 images in `qualification/compose.yaml`. A fresh Linux
+release build took 3m43s. The binary SHA-256 was
+`0dfdedef7b47a28833ba608915149e3f2f7f915b7a1a8227efaf58ef0130fd52`.
+Colima supplied four CPUs and 8,307,101,696 bytes of VM memory; each of the
+three node containers and both successive driver containers enforced one CPU,
+1,073,741,824 bytes of memory and no swap. RustFS shared that VM.
+
+The ordinary three-node smoke passed in 14.93s: 180 complete primitive actions,
+one duplicate generated command, twelve replica reads split six per reader,
+automatic recruitment/refresh and target-zero eviction. Balancer ingress was
+524/524/524; every node performed local and forwarded work. The separately
+invoked rollout gate passed in 0.48s with four visible application receipts,
+two exact duplicate replays and fresh-host recovery. This short smoke is not
+an offered-rate capacity or availability result.
+
+All three node processes withdrew their sessions. Nodes, drivers and bucket
+initialization exited zero; RustFS was stopped after evidence capture. Kernel
+counters recorded no OOM or CPU throttling. Node memory peaks were
+12,853,248–29,618,176 bytes; rollout driver peak was 27,291,648 bytes. Raw logs,
+kernel samples, image/container inspections and source/binary identities are
+retained under `additive-rollout-ea51218-20260927/evidence` in the external
+qualification state directory. Evidence SHA-256 values:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `driver.log` | `23bb78bfed1311c8af57e9775af6e743e0f0d35f990058b8c064d5cb2bfd17de` |
+| `rollout.log` | `ac481febb24d076295fed3c8582ed35ec917a3de3475ac210ef07481cba5a2b0` |
+| `containers.json` | `ed656bffd21f614cc83ffe14f56f3b4b6941a09791eab99c9968beb6d4d1d4ef` |
+| `verification.json` | `9ad897b570edca4ea05e3a2573431cd94ee3c8a0af46e35f91f1687ab47eac7c` |
+
 ## Generated client action and recovery slices
 
 The ignored `reference_public_host_action_performance` test runs the generated
