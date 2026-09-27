@@ -63,9 +63,10 @@ async fn capacity_sweep_survives_admission_backpressure() {
         .await
         .unwrap();
     // The account and source occupy both slots: splitting cannot admit a child.
+    let mut cursor = None;
     assert!(matches!(
         provisioner
-            .reconcile_account_capacity(ACCOUNT, client.clone(), 1, None)
+            .reconcile_account_capacity(ACCOUNT, client.clone(), 1, &mut cursor)
             .await,
         Err(StorageError::Transient(_))
     ));

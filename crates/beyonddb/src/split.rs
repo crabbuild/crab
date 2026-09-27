@@ -87,11 +87,25 @@ impl CellSplitController {
                 return Err(split_state("child install did not commit"));
             }
         }
-        let sealed = self
+        let sealed = match self
             .client
             .command::<SealPartition>(&source_target, mutation_identity()?, Json(seal.clone()))
             .await
-            .map_err(cell_error)?;
+        {
+            Ok(result) => result,
+            // Prepared intents and projection journals must settle before copying.
+            // They defer this source without terminating the serving capacity task.
+            Err(InvocationError::Rejected(result))
+                if matches!(
+                    result.output.0,
+                    SealPartitionOutcome::InFlightTransaction
+                        | SealPartitionOutcome::PendingIndexChanges
+                ) =>
+            {
+                return Err(split_state("split source has unresolved work"));
+            }
+            Err(error) => return Err(cell_error(error)),
+        };
         if sealed.output.0 != SealPartitionOutcome::Sealed {
             return Err(split_state("source seal did not commit"));
         }

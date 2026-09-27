@@ -1648,39 +1648,39 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         replay_after_split,
         Err(StorageError::IdempotentReplay)
     ));
+    let mut capacity_cursor = None;
     let first_range = provisioner
-        .reconcile_account_capacity("123456789012", capacity_client.clone(), u64::MAX, None)
+        .reconcile_account_capacity(
+            "123456789012",
+            capacity_client.clone(),
+            u64::MAX,
+            &mut capacity_cursor,
+        )
         .await
         .unwrap();
-    assert!(first_range.split.is_none());
-    assert_eq!(
-        first_range.cursor.as_ref().unwrap().after_lower,
-        Some([0; 16])
-    );
+    assert!(first_range.is_none());
+    assert_eq!(capacity_cursor.as_ref().unwrap().after_lower, Some([0; 16]));
     let second_range = provisioner
         .reconcile_account_capacity(
             "123456789012",
             capacity_client.clone(),
             u64::MAX,
-            first_range.cursor.as_ref(),
+            &mut capacity_cursor,
         )
         .await
         .unwrap();
-    assert!(second_range.split.is_none());
-    assert_eq!(second_range.cursor.as_ref().unwrap().after_lower, None);
-    assert!(
-        provisioner
-            .reconcile_account_capacity(
-                "123456789012",
-                capacity_client.clone(),
-                u64::MAX,
-                second_range.cursor.as_ref(),
-            )
-            .await
-            .unwrap()
-            .cursor
-            .is_none()
-    );
+    assert!(second_range.is_none());
+    assert_eq!(capacity_cursor.as_ref().unwrap().after_lower, None);
+    provisioner
+        .reconcile_account_capacity(
+            "123456789012",
+            capacity_client.clone(),
+            u64::MAX,
+            &mut capacity_cursor,
+        )
+        .await
+        .unwrap();
+    assert!(capacity_cursor.is_none());
     assert_eq!(
         account_client
             .query::<ReadTableRoute>(&account, None, Json(created.table_id.clone()))
@@ -2004,28 +2004,28 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         .output
         .0
         .unwrap();
-    let new_table_sweep = provisioner
-        .reconcile_account_capacity("123456789012", capacity_client.clone(), u64::MAX, None)
-        .await
-        .unwrap();
-    assert_eq!(
-        new_table_sweep.cursor.as_ref().unwrap().table_name,
-        "NewTable"
-    );
-    let numbers_sweep = provisioner
+    let mut capacity_cursor = None;
+    provisioner
         .reconcile_account_capacity(
             "123456789012",
             capacity_client.clone(),
             u64::MAX,
-            new_table_sweep.cursor.as_ref(),
+            &mut capacity_cursor,
         )
         .await
         .unwrap();
-    assert_eq!(numbers_sweep.cursor.as_ref().unwrap().table_name, "Numbers");
-    assert_eq!(
-        numbers_sweep.cursor.as_ref().unwrap().after_lower,
-        Some([0; 16])
-    );
+    assert_eq!(capacity_cursor.as_ref().unwrap().table_name, "NewTable");
+    provisioner
+        .reconcile_account_capacity(
+            "123456789012",
+            capacity_client.clone(),
+            u64::MAX,
+            &mut capacity_cursor,
+        )
+        .await
+        .unwrap();
+    assert_eq!(capacity_cursor.as_ref().unwrap().table_name, "Numbers");
+    assert_eq!(capacity_cursor.as_ref().unwrap().after_lower, Some([0; 16]));
     let new_target = data_target(
         "123456789012",
         &new_table_id,

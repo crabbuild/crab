@@ -43,15 +43,6 @@ pub struct CapacityCursor {
     pub after_lower: Option<[u8; 16]>,
 }
 
-/// Bounded progress from one account capacity sweep.
-#[derive(Clone, Debug, PartialEq)]
-pub struct CapacitySweep {
-    /// Resume at this position on the next sweep, or restart at the beginning.
-    pub cursor: Option<CapacityCursor>,
-    /// Source and children of one completed split, if any.
-    pub split: Option<SplitPlan>,
-}
-
 /// Admits initial data Cells per table on a leased or private Cell runtime.
 pub struct CellInitialPartitionProvisioner {
     runtime: CellRuntime,

@@ -11,9 +11,7 @@ use extenddb_storage::{BoxedFuture, error::StorageError};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    CapacityCursor, CapacitySweep, CellInitialPartitionProvisioner, provision_error, split_plan,
-};
+use super::{CapacityCursor, CellInitialPartitionProvisioner, provision_error, split_plan};
 use crate::backend::{cell_error, mutation_identity};
 use crate::split::split_contract;
 use crate::{
@@ -27,16 +25,16 @@ use crate::{
 impl CellInitialPartitionProvisioner {
     /// Inspect one table range or resume one pending split.
     ///
-    /// Pass the returned cursor back into the next call; `None` starts a new pass.
-    /// The client must reach the account and data owners, restoring idle Cells.
-    /// All inspection reads use current owners.
+    /// `None` starts a new pass. Once a range is selected, the cursor advances
+    /// even if its split fails; its durable plan remains for the next pass.
+    /// Discovery failures preserve the cursor. Reads use current owners.
     pub async fn reconcile_account_capacity(
         &self,
         account_id: &str,
         client: CellClient,
         max_database_bytes: u64,
-        cursor: Option<&CapacityCursor>,
-    ) -> Result<CapacitySweep, StorageError> {
+        cursor: &mut Option<CapacityCursor>,
+    ) -> Result<Option<SplitPlan>, StorageError> {
         if max_database_bytes == 0 {
             return Err(StorageError::Validation(
                 "database byte split threshold must be positive".into(),
@@ -44,7 +42,7 @@ impl CellInitialPartitionProvisioner {
         }
         let account = account_target(account_id).map_err(provision_error)?;
         let client = client.with_read_policy(ReadPolicy::CurrentOwner);
-        let (name, after_lower) = if let Some(cursor) = cursor
+        let (name, after_lower) = if let Some(cursor) = cursor.as_ref()
             && cursor.after_lower.is_some()
         {
             (cursor.table_name.clone(), cursor.after_lower)
@@ -55,7 +53,7 @@ impl CellInitialPartitionProvisioner {
                     None,
                     Json(ListTablesInput {
                         limit: 1,
-                        exclusive_start: cursor.map(|cursor| cursor.table_name.clone()),
+                        exclusive_start: cursor.as_ref().map(|cursor| cursor.table_name.clone()),
                     }),
                 )
                 .await
@@ -66,10 +64,8 @@ impl CellInitialPartitionProvisioner {
                 return Err(StorageError::Internal("invalid capacity table page".into()));
             };
             let Some(name) = page.names.into_iter().next() else {
-                return Ok(CapacitySweep {
-                    cursor: None,
-                    split: None,
-                });
+                *cursor = None;
+                return Ok(None);
             };
             (name, None)
         };
@@ -80,13 +76,11 @@ impl CellInitialPartitionProvisioner {
             .output
             .0
         else {
-            return Ok(CapacitySweep {
-                cursor: Some(CapacityCursor {
-                    table_name: name,
-                    after_lower: None,
-                }),
-                split: None,
+            *cursor = Some(CapacityCursor {
+                table_name: name,
+                after_lower: None,
             });
+            return Ok(None);
         };
         let page = client
             .query::<ReadRoutePage>(
@@ -110,13 +104,11 @@ impl CellInitialPartitionProvisioner {
                 ..
             } => (partitions, has_more),
             RoutePageOutcome::Unrouted => {
-                return Ok(CapacitySweep {
-                    cursor: Some(CapacityCursor {
-                        table_name: name,
-                        after_lower: None,
-                    }),
-                    split: None,
+                *cursor = Some(CapacityCursor {
+                    table_name: name,
+                    after_lower: None,
                 });
+                return Ok(None);
             }
             RoutePageOutcome::Changed => {
                 return Err(StorageError::Transient(
@@ -124,57 +116,29 @@ impl CellInitialPartitionProvisioner {
                 ));
             }
         };
-        let pending = client
-            .query::<ReadSplitPlan>(&account, None, Json(table.id.clone()))
-            .await
-            .map_err(cell_error)?
-            .output
-            .0;
         let partition = partitions.first();
-        if partition.is_none() && pending.is_none() {
-            return Ok(CapacitySweep {
-                cursor: Some(CapacityCursor {
-                    table_name: name,
-                    after_lower: None,
-                }),
-                split: None,
-            });
-        }
-        let split = if let Some(plan) = pending {
-            Some(
-                self.split_partition(
-                    account_id,
-                    client.clone(),
-                    &table.id,
-                    plan.source.partition_id,
-                )
-                .await?,
-            )
-        } else {
-            let Some(partition) = partition else {
-                return Err(StorageError::Internal("capacity range disappeared".into()));
-            };
-            self.split_if_over_database_bytes(
-                account_id,
-                client.clone(),
-                &table.id,
-                partition.partition_id,
-                max_database_bytes,
-            )
-            .await?
-        };
-        let next_after_lower = if partitions.len() > 1 || has_more {
+        let after_lower = if partitions.len() > 1 || has_more {
             partition.map(|partition| partition.lower)
         } else {
             None
         };
-        Ok(CapacitySweep {
-            cursor: Some(CapacityCursor {
-                table_name: name,
-                after_lower: next_after_lower,
-            }),
-            split,
-        })
+        // Keep retry state in the durable source plan, not the scan position.
+        // Otherwise a transaction or unavailable owner starves unrelated ranges.
+        *cursor = Some(CapacityCursor {
+            table_name: name,
+            after_lower,
+        });
+        let Some(partition) = partition else {
+            return Ok(None);
+        };
+        self.split_if_over_database_bytes(
+            account_id,
+            client,
+            &table.id,
+            partition.partition_id,
+            max_database_bytes,
+        )
+        .await
     }
 
     /// Repeat bounded account sweeps until cancellation or an actionable error.
@@ -204,14 +168,13 @@ impl CellInitialPartitionProvisioner {
                     account_id,
                     client.clone(),
                     max_database_bytes,
-                    cursor.as_ref(),
+                    &mut cursor,
                 )
                 .await;
             match result {
-                Ok(result) => cursor = result.cursor,
-                // Admission and movement share bounded runtime budgets with
-                // foreground traffic. Keep the cursor and durable split plan
-                // for the next tick; temporary pressure must not kill serving.
+                Ok(_) => {}
+                // A selected range has already advanced the cursor. Its durable
+                // plan survives pressure while later ranges continue serving.
                 Err(StorageError::Transient(error)) => {
                     tracing::warn!(account_id, %error, "capacity sweep deferred");
                 }

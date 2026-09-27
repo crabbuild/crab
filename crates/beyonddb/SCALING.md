@@ -1386,7 +1386,8 @@ Pending data splits are keyed by `(table_id, source_partition_id)`. Each source
 has one immutable pending plan; unrelated sources can copy and publish
 concurrently. `ReadSourceSplitPlan` is the point lookup used by explicit split,
 threshold, and replay paths. `ReadSplitPlan` returns only the first pending
-source in ID order for bounded table/account recovery sweeps.
+source in ID order for explicit table recovery. Account sweeps visit published
+ranges in lower-bound order and use the source lookup.
 
 Publication compares the exact source and child identities, bounds, table
 snapshot, and partition epochs in the command's SQL transaction. A newer
@@ -1413,8 +1414,8 @@ one. Existing per-source prepare locks, export/import fingerprints, and opening
 after publication remain unchanged.
 
 Account metadata still uses one writer and a 512-MiB Cell budget.
-Table recovery still chooses one pending plan per sweep; fair
-distributed scheduling and recursively sharded directories remain required.
+Each account sweep attempts one range, advancing past transient failures.
+Distributed scheduling and recursively sharded directories remain required.
 The split-plan schema is unreleased and changed in place; development roots
 must be reprovisioned. There is no legacy schema reader or upgrade claim.
 
@@ -1434,3 +1435,43 @@ Strict all-target BeyondDB Clippy passes in 28.60s; the standalone server builds
 in 51.83s. Format, Cell/LTX layout, policy entry points, and diff checks pass.
 The prior build directory lost compiler files during verification; a fresh
 checkout-specific target directory completed the clean build and tests.
+
+
+## Capacity progress around unresolved source work
+
+The account capacity sweep visits each published range in lower-bound order.
+Its caller retains a mutable cursor that advances after range selection,
+including when that range's inspection or split returns a transient error.
+Metadata discovery failures retain the prior cursor. At the end of a table the
+sweep proceeds to the next table, then starts another account pass. A pending
+split's source remains published until atomic cutover, so its durable plan is
+rediscovered on the next pass without a separate first-pending-plan priority.
+
+`SealPartition` still refuses prepared transaction locks and pending GSI
+projection journals. The split controller now maps those two typed rejections
+to transient deferral. Invalid contracts and unexpected results retain their
+existing error handling. Expected source work must neither stop the supervised
+serving task nor prevent another range's independent split from progressing.
+
+`reconcile_account_capacity` now takes `&mut Option<CapacityCursor>` and returns
+only the optional completed split. The redundant `CapacitySweep` result type
+was removed; all workspace callers use the canonical cursor ownership. These
+APIs are unreleased. The explicit one-shot table reconciliation method retains
+its first-pending-plan behavior and reports a blocked attempt to its caller.
+
+The signed SDK regression first timed out with both plans pending: a prepared
+read intent on the first source stopped the capacity task. With only cursor
+changes it still failed, exposing the fatal classification of the seal refusal.
+After both fixes, the other range publishes while the original intent remains
+Prepared and its source plan remains durable. Explicitly resolving that intent
+allows a later pass to finish its split. SDK reads with retries disabled return
+both original items, and node readiness remains healthy throughout.
+
+Verification: eight signed SDK residency cases pass in 66.71s; numeric
+Query/Scan, supervised splitting, and SDK restart coverage pass in 14.21s;
+admission-backpressure recovery passes in 0.48s; data-range transaction/split
+restart coverage passes in 3.01s. Strict all-target BeyondDB Clippy passes in
+9.55s and the standalone server builds in 24.36s. This refactor removes 32 net
+production Rust lines. It adds no storage, wire, dependency, or configuration
+change. Distributed controller ownership, metadata sharding, and fleet-scale
+throughput qualification remain open.
