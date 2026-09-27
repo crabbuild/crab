@@ -2314,3 +2314,12 @@ process cases passing (273.86s). Peer tests finished 25 passed and one failed:
 `Capacity("peer HTTP admission")` when reading the sealed source at line 417.
 This differs from the earlier post-drain Scan 503. The admission failure remains
 open; the run does not qualify a green peer suite or the newer rebalancing head.
+
+The unchanged GSI scenario passed 11 subsequent local runs, so no local
+reproduction or causal fix is established. Peer admission now records its
+rejection stage (`request_memory`, `decode`, or `verify`) and the runtime's
+resource counters at DEBUG level. The residency fixture retains that target's
+DEBUG events alongside other server warnings. It logs neither request bodies
+nor credentials, and changes no admission, deadline or retry behavior. The two
+existing codec/enrollment tests pass (4.52s). These diagnostics are intended to
+make the next CI recurrence actionable; passing repeats do not close the failure.

@@ -318,11 +318,11 @@ async fn forward(
         .runtime
         .try_reserve_node_bytes(body.len() * 3 + 64 * 1024)
     else {
-        return busy();
+        return busy(&receiver, "request_memory");
     };
     let decoded = {
         let Some(_reservation) = receiver.runtime.try_reserve_worker_job().ok().flatten() else {
-            return busy();
+            return busy(&receiver, "decode");
         };
         match crab_cell_runtime::peer::UnverifiedPeerRequest::decode(&body) {
             Ok(request) => request,
@@ -349,7 +349,7 @@ async fn forward(
     };
     let request = {
         let Some(_reservation) = receiver.runtime.try_reserve_worker_job().ok().flatten() else {
-            return busy();
+            return busy(&receiver, "verify");
         };
         // Enrollment I/O consumes the signed request lifetime too.
         let now_ms = match unix_time_ms() {
@@ -408,7 +408,12 @@ fn error(status: StatusCode) -> Response {
     (status, [(header::CACHE_CONTROL, "no-store")]).into_response()
 }
 
-fn busy() -> Response {
+fn busy(receiver: &Receiver, phase: &'static str) -> Response {
+    tracing::debug!(
+        phase,
+        resources = ?receiver.runtime.stats(),
+        "peer request admission deferred"
+    );
     // No dispatch has occurred; the sender may retry after codec capacity frees.
     (
         StatusCode::SERVICE_UNAVAILABLE,

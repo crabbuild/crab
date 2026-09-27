@@ -15,6 +15,7 @@ mod usage;
 use crate::*;
 use crab_cell_runtime::cell::actor::CellHandle;
 use extenddb_core::types::{AttributeValue, Item};
+use tracing_subscriber::prelude::*;
 
 type SdkItem = HashMap<String, AwsAttributeValue>;
 
@@ -48,10 +49,16 @@ impl Fixture {
     async fn with_store(partitions: u16, store: Arc<dyn object_store::ObjectStore>) -> Self {
         // SDK errors deliberately hide storage details. Retain server warnings
         // in the test output so CI failures identify the underlying boundary.
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .with_test_writer()
+        let diagnostics = tracing_subscriber::filter::Targets::new()
+            .with_default(tracing::Level::WARN)
+            .with_target("beyonddb::server::peer_receiver", tracing::Level::DEBUG);
+        let _ = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_test_writer()
+                    .with_filter(diagnostics),
+            )
             .try_init();
         let files = tempfile::tempdir().unwrap();
         let (certificate, key, remote_certificate, remote_key, ca) = tls_files(files.path());
