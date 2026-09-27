@@ -39,18 +39,6 @@ pub(super) fn exact_effect_id(identity: &wire::EffectIdentity) -> Result<[u8; 32
     Ok(effect_id)
 }
 
-pub(super) fn next_sequence(transaction: &crab_ltx::rusqlite::Transaction<'_>) -> Result<u64> {
-    let sequence = transaction.query_row(
-        "SELECT commit_sequence + 1 FROM sys_meta WHERE singleton = 1",
-        [],
-        |row| row.get::<_, i64>(0),
-    )?;
-    u64::try_from(sequence)
-        .ok()
-        .filter(|sequence| *sequence != 0)
-        .ok_or(Error::Command("invalid next Cell sequence"))
-}
-
 pub(super) fn mutation_identity(
     identity: &wire::MutationIdentity,
     expected_incarnation: IncarnationId,

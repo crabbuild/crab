@@ -8,7 +8,8 @@ use crate::cell::executor::{MutationIdentity, Resolution, StoredOutcome};
 use crate::client::{CellDescription, CellReadReplica, Receipt};
 use crate::client::{
     CellTransport, EncodedCommand, EncodedObservation, EncodedQuery, EncodedResolve,
-    LocalCellTransport, encoded_command_operation_digest, local_description, receipt,
+    LocalCellTransport, encoded_command_operation_digest, local_description, next_metadata,
+    receipt,
 };
 use crate::fleet::telemetry::{
     CellTelemetryHandle, PrimitiveOperationKind, PrimitiveOperationOutcome,
@@ -573,8 +574,9 @@ impl PeerDispatcher {
                 encoded_request.len(),
                 descriptor.output_limit as usize,
                 move |transaction| {
+                    let (sequence, logical_time_ms) = next_metadata(transaction, now_ms)?;
                     let started = Instant::now();
-                    let result = registry.execute_command(
+                    let result = registry.execute_command_with_issue_time(
                         transaction,
                         CommandInvocation {
                             module,
@@ -582,10 +584,11 @@ impl PeerDispatcher {
                             codec_version,
                             schema,
                             target: target.clone(),
-                            sequence: next_sequence(transaction)?,
-                            now_ms,
+                            sequence,
+                            now_ms: logical_time_ms,
                             input: &input,
                         },
+                        now_ms,
                     );
                     telemetry.primitive_operation(
                         module,
