@@ -90,7 +90,7 @@ async fn local_indexes_follow_mutations_transactions_and_splits() {
         )
         .unwrap(),
     );
-    let account_handle = provisioner.admit_account(account_id).await.unwrap();
+    provisioner.admit_account(account_id).await.unwrap();
     let client = CellClient::local_runtime(registry, host.runtime(), layout);
     let storage = CellStorage::new(client.clone(), "us-east-1")
         .with_transaction_coordinators(provisioner.clone());
@@ -260,7 +260,7 @@ async fn local_indexes_follow_mutations_transactions_and_splits() {
     provisioner
         .split_partition(
             account_id,
-            account_handle,
+            client.clone(),
             &infos[1].table_id,
             route.partitions[0].partition_id,
         )

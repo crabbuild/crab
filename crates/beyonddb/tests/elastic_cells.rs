@@ -1266,6 +1266,8 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
     let account_handle = Box::pin(provisioner.admit_account("123456789012"))
         .await
         .unwrap();
+    let capacity_client =
+        CellClient::local_runtime(registry.clone(), host.runtime(), layout.clone());
     let creator = CellStorage::new(
         CellClient::local(Arc::clone(&registry), account_handle.clone()),
         "us-east-1",
@@ -1548,7 +1550,7 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         provisioner
             .reconcile_table_capacity(
                 "123456789012",
-                account_handle.clone(),
+                capacity_client.clone(),
                 &created.table_id,
                 usage_before_split.database_bytes,
             )
@@ -1607,7 +1609,7 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         .install_account_capacity_loop(
             &tasks,
             "123456789012".into(),
-            account_handle.clone(),
+            capacity_client.clone(),
             split_threshold,
             Duration::from_secs(5),
         )
@@ -1647,7 +1649,7 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         Err(StorageError::IdempotentReplay)
     ));
     let first_range = provisioner
-        .reconcile_account_capacity("123456789012", account_handle.clone(), u64::MAX, None)
+        .reconcile_account_capacity("123456789012", capacity_client.clone(), u64::MAX, None)
         .await
         .unwrap();
     assert!(first_range.split.is_none());
@@ -1658,7 +1660,7 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
     let second_range = provisioner
         .reconcile_account_capacity(
             "123456789012",
-            account_handle.clone(),
+            capacity_client.clone(),
             u64::MAX,
             first_range.cursor.as_ref(),
         )
@@ -1670,7 +1672,7 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         provisioner
             .reconcile_account_capacity(
                 "123456789012",
-                account_handle.clone(),
+                capacity_client.clone(),
                 u64::MAX,
                 second_range.cursor.as_ref(),
             )
@@ -1691,7 +1693,7 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
     let completed = provisioner
         .split_if_over_database_bytes(
             "123456789012",
-            account_handle.clone(),
+            capacity_client.clone(),
             &created.table_id,
             route.partitions[0].partition_id,
             1,
@@ -1718,7 +1720,7 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
     let split = provisioner
         .split_partition(
             "123456789012",
-            account_handle.clone(),
+            capacity_client.clone(),
             &created.table_id,
             owner.partition_id,
         )
@@ -2003,7 +2005,7 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         .0
         .unwrap();
     let new_table_sweep = provisioner
-        .reconcile_account_capacity("123456789012", account_handle.clone(), u64::MAX, None)
+        .reconcile_account_capacity("123456789012", capacity_client.clone(), u64::MAX, None)
         .await
         .unwrap();
     assert_eq!(
@@ -2013,7 +2015,7 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
     let numbers_sweep = provisioner
         .reconcile_account_capacity(
             "123456789012",
-            account_handle.clone(),
+            capacity_client.clone(),
             u64::MAX,
             new_table_sweep.cursor.as_ref(),
         )
@@ -4349,7 +4351,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     )
     .unwrap();
     split_provisioner
-        .resume_split("123456789012", account_handle.clone(), &plan)
+        .resume_split("123456789012", controller_client.clone(), &plan)
         .await
         .unwrap();
     CellSplitController::new(controller_client.clone())

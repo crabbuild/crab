@@ -1280,3 +1280,37 @@ existing local restoration and released-participant transaction regressions.
 Strict all-target BeyondDB Clippy passes in 32.54 seconds; format, layout,
 policy-entry, and diff checks pass. These are local macOS results; current-head
 Linux qualification remains pending. No fleet-scale throughput is claimed.
+
+
+### Splitting ranges after remote placement
+
+Capacity sweeps previously called local admission for every source and every
+split child. An SDK regression with a remotely placed range reproduced
+`Cell has another owner or is still activating` before the fix. The source had
+a live valid owner; retrying local admission could not make progress.
+
+The capacity controller now accepts the same routed `CellClient` as the serving
+request path. Inspection, source export, completed-plan lookup, and split replay
+reach current owners; a published child is never locally reacquired merely to
+resume a split. Only missing child roots use local bootstrap. The serving
+binary passes its peer client into the supervised sweep. The implementation is
+collected in `src/provision/capacity.rs`, replacing the local-handle composition
+inside `provision.rs`. Metadata route CAS, sealed-source fingerprints, and
+participant transaction barriers remain in their existing Cell commands.
+
+This fixes automatic data-range growth after cold placement. Initial child
+placement, proactive ownership movement, GSI splitting, and distributed capacity
+controller ownership remain unfinished.
+
+The pre-fix remote-source regression fails in 1.95 seconds. After routing the
+controller, the expanded SDK scenario passes in 16.11 seconds; the final version
+starts the supervised loop and passes in 15.69 seconds with SDK retries disabled.
+It verifies that the source stays remotely owned, moves an opened child remotely,
+replays the completed plan without acquiring either remote owner, and reads both
+transaction-updated items after owner removal. Local backpressure, numeric
+Query/automatic split, and LSI mutation/transaction/split checks pass in 0.43,
+2.90, and 1.09 seconds respectively. Strict all-target Clippy passes in 2 minutes
+37 seconds. Format, layout, policy-entry, and diff checks pass. These timings
+are functional evidence, not fleet performance qualification.
+The standalone server build also passes (5 minutes 8 seconds); a live compiler
+sample observed a directory read on the external build volume.

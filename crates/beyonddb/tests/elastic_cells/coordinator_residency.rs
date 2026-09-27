@@ -48,7 +48,7 @@ async fn capacity_sweep_survives_admission_backpressure() {
     let account = provisioner.admit_account(ACCOUNT).await.unwrap();
     let client = CellClient::local_runtime(application.registry(), host.runtime(), layout);
     let storage =
-        CellStorage::new(client, "us-east-1").with_initial_partitions(provisioner.clone());
+        CellStorage::new(client.clone(), "us-east-1").with_initial_partitions(provisioner.clone());
     let table = storage
         .create_table(
             ACCOUNT,
@@ -65,7 +65,7 @@ async fn capacity_sweep_survives_admission_backpressure() {
     // The account and source occupy both slots: splitting cannot admit a child.
     assert!(matches!(
         provisioner
-            .reconcile_account_capacity(ACCOUNT, account.clone(), 1, None)
+            .reconcile_account_capacity(ACCOUNT, client.clone(), 1, None)
             .await,
         Err(StorageError::Transient(_))
     ));
@@ -73,7 +73,7 @@ async fn capacity_sweep_survives_admission_backpressure() {
         .install_account_capacity_loop(
             &tasks,
             ACCOUNT.into(),
-            account.clone(),
+            client.clone(),
             1,
             Duration::from_millis(20),
         )

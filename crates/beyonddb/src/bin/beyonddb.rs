@@ -389,7 +389,7 @@ async fn serve_ready(
             provisioner.install_account_capacity_loop(
                 &tasks,
                 account_id.clone(),
-                account,
+                client.clone(),
                 config.split_threshold_bytes,
                 Duration::from_secs(3),
             )?;

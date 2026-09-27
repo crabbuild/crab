@@ -363,6 +363,196 @@ async fn sdk_cold_placement_activates_remote_and_resumes_its_claim() {
         .send()
         .await
         .unwrap();
+    let account = account_target("123456789012").unwrap();
+    let table = fixture
+        .client
+        .query::<DescribeTable>(&account, None, Json("Residency".into()))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    let before = fixture
+        .client
+        .query::<ReadTableRoute>(&account, None, Json(table.id.clone()))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    fixture
+        .provisioner
+        .install_account_capacity_loop(
+            &fixture.tasks,
+            "123456789012".into(),
+            fixture.client.clone(),
+            1,
+            std::time::Duration::from_secs(3_600),
+        )
+        .unwrap();
+    // The supervised loop's first tick must split the remotely owned range.
+    // Wait for publication and both child opens before moving one child again.
+    let split = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            assert!(
+                fixture.node.is_ready(),
+                "remote capacity work stopped serving"
+            );
+            let route = fixture
+                .client
+                .query::<ReadTableRoute>(&account, None, Json(table.id.clone()))
+                .await
+                .unwrap()
+                .output
+                .0
+                .unwrap();
+            if route.epoch == before.epoch + 1 {
+                let split = fixture
+                    .provisioner
+                    .split_if_over_database_bytes(
+                        "123456789012",
+                        fixture.client.clone(),
+                        &table.id,
+                        before.partitions[0].partition_id,
+                        1,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let mut opened = true;
+                for child in &split.children {
+                    let target =
+                        beyonddb::data_target("123456789012", &child.table.id, &child.partition_id)
+                            .unwrap();
+                    let status = fixture
+                        .client
+                        .query::<beyonddb::ReadPartitionState>(&target, None, Json(()))
+                        .await
+                        .unwrap()
+                        .output
+                        .0
+                        .unwrap();
+                    opened &= matches!(status.state, beyonddb::PartitionState::Opened { .. });
+                }
+                if opened {
+                    break split;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        authority
+            .load(
+                beyonddb::data_target(
+                    "123456789012",
+                    &split.source.table.id,
+                    &split.source.partition_id
+                )
+                .unwrap()
+                .cell_id()
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .owner
+            .as_ref()
+            .unwrap()
+            .session,
+        session
+    );
+    let key = Item::from([(
+        "id".into(),
+        AttributeValue::S(fixture.data[0].1["id"].as_s().unwrap().clone()),
+    )]);
+    let hash =
+        beyonddb::data_key_hash(&split.source.table.id, &key, &split.source.table.key_schema)
+            .unwrap();
+    let child = split
+        .children
+        .iter()
+        .find(|child| {
+            child.lower.is_none_or(|lower| hash >= lower)
+                && child.upper.is_none_or(|upper| hash < upper)
+        })
+        .unwrap();
+    fixture
+        .provisioner
+        .admit_existing_partition("123456789012", &child.table.id, &child.partition_id)
+        .await
+        .unwrap()
+        .drain()
+        .await
+        .unwrap();
+    let child_target =
+        beyonddb::data_target("123456789012", &child.table.id, &child.partition_id).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let selected = fixture
+                .directory
+                .choose_advertised_placement(
+                    &PlacementPlanner::default(),
+                    child_target.cell_id(),
+                    now_ms(),
+                    4,
+                )
+                .await
+                .unwrap();
+            if selected.is_some_and(|selected| selected.session == session) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let read = sdk
+        .get_item()
+        .table_name("Residency")
+        .key("id", fixture.data[0].1["id"].clone())
+        .consistent_read(true)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        read.item.unwrap()["value"],
+        AwsAttributeValue::S("remote transaction".into())
+    );
+    // A completed plan can be replayed after a child moves. The source and
+    // child remain on their authoritative remote owner throughout the replay.
+    fixture
+        .provisioner
+        .resume_split("123456789012", fixture.client.clone(), &split)
+        .await
+        .unwrap();
+    assert_eq!(
+        authority
+            .load(child_target.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .owner
+            .as_ref()
+            .unwrap()
+            .session,
+        session
+    );
+    let completed = fixture
+        .provisioner
+        .split_if_over_database_bytes(
+            "123456789012",
+            fixture.client.clone(),
+            &split.source.table.id,
+            split.source.partition_id,
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(completed, Some(split));
     remote.shutdown().await.unwrap();
     server.abort();
     let _ = server.await;

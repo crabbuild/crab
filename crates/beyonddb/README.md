@@ -175,7 +175,9 @@ provisioner installs 1–256 initial data Cells per table during CreateTable and
 resumes after an interrupted setup. The initial count must stay fixed across
 retries. A host-backed controller can resume a recorded split. A cancellable
 account capacity loop can trigger a split, and the serving binary starts that
-loop for locally owned accounts. There is no merge controller or complete
+loop for locally owned accounts. Inspection and split replay use the routed
+client, so published sources and children can stay on remote owners. New split
+children are still bootstrapped locally. There is no merge controller or complete
 `StorageEngine`/`CatalogStore` behavior, or account-management service yet.
 `build_http_state` now assembles ExtendDB's signed request path from a ready,
 leased Cell node. ExtendDB requires a `CatalogStore` even for DynamoDB request

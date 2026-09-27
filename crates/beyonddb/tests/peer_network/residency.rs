@@ -9,6 +9,7 @@ type SdkItem = HashMap<String, AwsAttributeValue>;
 struct Fixture {
     _files: tempfile::TempDir,
     node: CellNode,
+    tasks: Arc<CellNodeTaskGroup>,
     application: Arc<crab_cell_app::CompiledApplication>,
     provisioner: Arc<CellInitialPartitionProvisioner>,
     layout: CellStorageLayout,
@@ -17,6 +18,7 @@ struct Fixture {
     remote_tls: LoadedPeerTls,
     endpoint: String,
     sdk: aws_sdk_dynamodb::Client,
+    client: CellClient,
     data: Vec<(CellHandle, SdkItem)>,
     public_server: tokio::task::JoinHandle<()>,
     peer_server: tokio::task::JoinHandle<()>,
@@ -52,7 +54,7 @@ impl Fixture {
         );
         let session = SessionId::from_bytes([93; 16]);
         let lease = CancellationToken::new();
-        let (node, _tasks) = start_node(
+        let (node, tasks) = start_node(
             Arc::clone(&application),
             directory.clone(),
             session,
@@ -192,7 +194,7 @@ impl Fixture {
             .await
             .unwrap();
         let app = node
-            .application_handle::<Beyonddb>(client, account.tenant(), account.application())
+            .application_handle::<Beyonddb>(client.clone(), account.tenant(), account.application())
             .unwrap();
         let table = app
             .query::<DescribeTable>(&account, None, Json("Residency".into()))
@@ -240,6 +242,7 @@ impl Fixture {
         Self {
             _files: files,
             node,
+            tasks,
             application,
             provisioner,
             layout,
@@ -248,6 +251,7 @@ impl Fixture {
             remote_tls,
             endpoint,
             sdk,
+            client,
             data,
             public_server,
             peer_server,
