@@ -118,9 +118,9 @@ Fresh, unfiltered fetches of exact visible ref targets use the visibility
 proof's complete per-ref closure directly. Each monotonic ref update retains a
 bounded transition from recent prior tips to the current tip, so an unfiltered
 incremental fetch can select the proven `want - have` closure without walking
-the complete object graph. A rewrite, deletion, missing transition, shallow or
-depth request, filter, or want that is not an exact ref target uses the bounded
-traversal planner. Pack generation reads up to the operation's default
+the complete object graph. A rewrite or deletion without an exact transition,
+shallow or depth request, filter, or want that is not an exact ref target uses
+the bounded traversal planner. Pack generation reads up to the operation's default
 10,000-object bound as one locator batch so adjacent pack ranges can be
 coalesced; fetched-byte and inflated-byte budgets remain the memory and I/O
 bounds. Locator batches spanning at least one exact-read wave and at least half
@@ -128,6 +128,14 @@ of the pinned pack inventory use one ordered SlateDB scan, clipped to the
 requested SHA-1 range. The scan abandons itself and returns to exact reads if
 stale rows would make it examine more than twice the requested object count,
 so sparse and stale-heavy repositories remain bounded.
+
+For a layered capsule's ordinary unfiltered fetch, the same authenticated
+transition chain can end negotiation as soon as it covers every visible want
+from client haves. The helper sends `ready` with the pack, but no individual
+ACK for a historical have that may no longer be visible. Hidden, unknown,
+ambiguous, or incomplete chains do not grant early completion; shallow,
+filtered, and tag-expanded requests retain their existing complete-admission
+path. The response still requires full pack planning and budget checks.
 
 For fresh `blob:none` and `object:type` requests, the catalog visibility
 bitmap is consumed as ordinals. Crab reads the additive ordinal metadata

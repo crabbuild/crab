@@ -19,7 +19,7 @@ use crab_read::upload_pack_wire::{
 use crab_read::{
     FetchAdmissionPolicy, UPLOAD_PACK_MAX_DURATION, UploadPackFilter, UploadPackRequest,
     plan_upload_pack_catalog, plan_upload_pack_tip_bound_with_transitions,
-    upload_pack_repository_options,
+    tip_bound_transitions_cover_wants, upload_pack_repository_options,
 };
 use crab_remote_git::{
     Error as RemoteGitError, GitCatalogVisibilityIndex, RemoteGitRepository, RemoteGitRuntime,
@@ -882,9 +882,26 @@ where
                     let common_haves =
                         common_haves(repository, proof, &fetch, &visible_ref_names, cancellation)
                             .await?;
-                    if common_haves.is_empty() {
+                    let transition_ready = match proof {
+                        UploadPackVisibilityProof::TipBound { transitions } => {
+                            tip_bound_transitions_cover_wants(
+                                &repository.refs().entries,
+                                &visible_ref_names,
+                                transitions,
+                                &fetch.wants,
+                                &negotiated_haves,
+                            )
+                        }
+                        _ => false,
+                    };
+                    if common_haves.is_empty() && !transition_ready {
                         write_acknowledgments(writer, cancellation).await?;
                     } else {
+                        if transition_ready {
+                            // Reuse the proven cut point without ACKing historical haves
+                            // as currently visible. The response still admits its full plan.
+                            fetch.haves.clone_from(&negotiated_haves);
+                        }
                         write_fetch_response(
                             writer,
                             repository,
@@ -1640,8 +1657,8 @@ async fn common_haves(
             )
             .await
         }
-        // Haves are admitted only when the shared tip-bound traversal reaches
-        // them as commits. Do not ACK arbitrary client claims up front.
+        // Individual ACKs require current visibility. Authenticated transition
+        // coverage may finish negotiation with ready instead, without any ACK.
         UploadPackVisibilityProof::TipBound { .. } => Ok(Vec::new()),
     }
 }
@@ -2514,6 +2531,8 @@ fn protocol(message: impl Into<String>) -> CrabError {
 
 #[cfg(test)]
 mod tests {
+    mod capsule_negotiation;
+
     use super::*;
     use std::io::Cursor;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};

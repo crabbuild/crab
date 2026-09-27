@@ -3028,6 +3028,11 @@ resolves selected objects and delta bases through the merged locator. Verified
 complete, disjoint members may be structurally concatenated with one response
 header/checksum and preserved in-member delta distances; otherwise selected
 entries form one valid self-contained or negotiated thin response pack.
+For an ordinary unfiltered fetch of exact visible tips, an authenticated
+transition chain to a client have can end wire negotiation immediately with
+`ready`. A historical have need not still be visible, so the server sends no
+individual ACK for it. The complete authorized, byte-bounded response plan
+still runs before pack output; absent or ambiguous chains keep negotiating.
 
 For an exact, fully authorized clone, a one-layer pack set may stream that
 layer directly. A multi-layer pack set uses one of two non-authoritative
@@ -3506,6 +3511,15 @@ cannot satisfy the request target by rereading a stable GiB-scale source. This
 is a release target, not a correctness shortcut: a workload that requires more
 verified ranges reports them honestly and fails the performance gate rather
 than transferring unauthorized or unbounded unrelated data.
+
+The September 27 pre-repack Kubernetes diagnostic reduced Git negotiation from
+17 rounds to one and fetch latency from 10.656 to 4.460 seconds, while origin
+requests remained 80. Seventy-two of those requests read 24 distinct capsule
+objects. Reducing the three ranges per capsule to one cannot meet the ten-read
+target; publication or independently scheduled physical maintenance must bound
+the number of new physical sources before the fetch, without adding a
+whole-repository rewrite or blocking ordinary pushes. This remains an open
+design/performance gate, not an implemented guarantee.
 
 Request count alone is insufficient. The fetch gate also measures source bytes,
 local bytes written, number of input sources, response-pack generation CPU,

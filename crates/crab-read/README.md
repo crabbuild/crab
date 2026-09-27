@@ -236,6 +236,12 @@ reader cannot resolve external index objects. Ordinary Git readers do not load
 the record. Fetch transition hints accept the same authenticated cross-ref
 closure reuse as visibility application when creating a new branch; existing
 refs still require an exact expected-old match.
+For ordinary tip-bound Git negotiation, an exact chain from every advertised
+want to a client have is a sufficient cut point. This proof does not establish
+that a historical have remains visible, so the wire owner may send `ready`
+without ACKing it. The ordinary authorization, object budget, and complete
+pack plan still run before any pack bytes are sent. Unknown, ambiguous, or
+incomplete chains continue negotiation.
 Publication must recheck capsule activity against a freshly loaded root;
 `RemoteGitRepository::is_current` checks the v1 manifest and is not a v2
 freshness check.

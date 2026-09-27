@@ -639,17 +639,7 @@ pub async fn plan_upload_pack_tip_bound_with_transitions(
             "tip-bound upload-pack planning requires an ordinary unfiltered fetch".to_owned(),
         ));
     }
-    let visible = visible_ref_names
-        .iter()
-        .filter_map(|name| {
-            repository
-                .refs()
-                .entries
-                .iter()
-                .find(|reference| reference.name == *name)
-                .map(|reference| (name.clone(), reference.target))
-        })
-        .collect::<HashMap<_, _>>();
+    let visible = tip_bound_visible_refs(&repository.refs().entries, visible_ref_names);
     if visible.is_empty() || request.wants.is_empty() {
         return Err(ReadError::UnauthorizedObject);
     }
@@ -664,6 +654,60 @@ pub async fn plan_upload_pack_tip_bound_with_transitions(
         cancellation,
     )
     .await
+}
+
+/// Return whether authenticated transitions cover every advertised want from client haves.
+///
+/// This is a negotiation cut-point hint for ordinary, non-shallow fetches, not
+/// proof that historical haves remain visible. Callers must still authorize and
+/// budget the complete pack plan before sending a response.
+#[must_use]
+pub fn tip_bound_transitions_cover_wants(
+    references: &[RepositoryRef],
+    visible_ref_names: &[String],
+    transitions: &CapsuleTipBoundTransitions,
+    wants: &[ObjectId],
+    haves: &[ObjectId],
+) -> bool {
+    if wants.is_empty() || haves.is_empty() {
+        return false;
+    }
+    let visible = tip_bound_visible_refs(references, visible_ref_names);
+    let Some(selected) = selected_tip_bound_refs(&visible, wants) else {
+        return false;
+    };
+    selected.iter().zip(wants).all(|(name, want)| {
+        transitions
+            .get(*name)
+            .and_then(|history| transition_path_for_haves(history, *want, haves))
+            .is_some()
+    })
+}
+
+fn tip_bound_visible_refs(
+    references: &[RepositoryRef],
+    visible_ref_names: &[String],
+) -> HashMap<String, ObjectId> {
+    references
+        .iter()
+        .filter(|reference| visible_ref_names.contains(&reference.name))
+        .map(|reference| (reference.name.clone(), reference.target))
+        .collect()
+}
+
+fn selected_tip_bound_refs<'a>(
+    visible: &'a HashMap<String, ObjectId>,
+    wants: &[ObjectId],
+) -> Option<Vec<&'a str>> {
+    wants
+        .iter()
+        .map(|want| {
+            visible
+                .iter()
+                .filter_map(|(name, target)| (target == want).then_some(name.as_str()))
+                .min()
+        })
+        .collect()
 }
 
 async fn plan_upload_pack_inner(
@@ -760,15 +804,7 @@ fn plan_from_tip_bound_transitions(
         );
         return Ok(None);
     }
-    let selected_refs = request
-        .wants
-        .iter()
-        .map(|want| {
-            visible
-                .iter()
-                .find_map(|(name, target)| (target == want).then_some(name))
-        })
-        .collect::<Option<Vec<_>>>();
+    let selected_refs = selected_tip_bound_refs(visible, &request.wants);
     let Some(selected_refs) = selected_refs else {
         tracing::debug!(
             wants = request.wants.len(),
@@ -843,63 +879,63 @@ fn transition_delta_for_haves(
     target: ObjectId,
     haves: &[ObjectId],
 ) -> Option<(ObjectId, Vec<ObjectId>)> {
-    for have in haves {
-        if *have == target {
-            return Some((*have, Vec::new()));
+    let (have, path) = transition_path_for_haves(transitions, target, haves)?;
+    // Fold the exact sequence into final-minus-initial state. A
+    // remove-first event was already present in the client's old tip;
+    // an add-first event contributes only when it remains at the target.
+    let mut events = HashMap::<ObjectId, (Option<bool>, bool)>::new();
+    for transition in path.iter().rev() {
+        for oid in &transition.added {
+            let event = events.entry(*oid).or_insert((None, false));
+            if event.0.is_none() {
+                event.0 = Some(true);
+            }
+            event.1 = true;
         }
-        let mut current = target;
-        let mut path = Vec::new();
-        let mut visited = HashSet::new();
-        loop {
-            if current == *have {
-                break;
+        for oid in &transition.removed {
+            let event = events.entry(*oid).or_insert((None, false));
+            if event.0.is_none() {
+                event.0 = Some(false);
             }
-            if !visited.insert(current) {
-                break;
-            }
-            let candidates = transitions
-                .iter()
-                .filter(|transition| transition.new_oid == current && transition.old_oid.is_some())
-                .collect::<Vec<_>>();
-            if candidates.len() != 1 {
-                break;
-            }
-            let transition = candidates[0];
-            path.push(transition);
-            current = transition.old_oid?;
+            event.1 = false;
         }
-        if current != *have {
-            continue;
-        }
-
-        // Fold the exact sequence into final-minus-initial state. A
-        // remove-first event was already present in the client's old tip;
-        // an add-first event contributes only when it remains at the target.
-        let mut events = HashMap::<ObjectId, (Option<bool>, bool)>::new();
-        for transition in path.iter().rev() {
-            for oid in &transition.added {
-                let event = events.entry(*oid).or_insert((None, false));
-                if event.0.is_none() {
-                    event.0 = Some(true);
-                }
-                event.1 = true;
-            }
-            for oid in &transition.removed {
-                let event = events.entry(*oid).or_insert((None, false));
-                if event.0.is_none() {
-                    event.0 = Some(false);
-                }
-                event.1 = false;
-            }
-        }
-        let mut delta = events
-            .into_iter()
-            .filter_map(|(oid, (first, present))| (first == Some(true) && present).then_some(oid))
-            .collect::<Vec<_>>();
-        delta.sort_unstable();
-        return Some((*have, delta));
     }
-    None
+    let mut delta = events
+        .into_iter()
+        .filter_map(|(oid, (first, present))| (first == Some(true) && present).then_some(oid))
+        .collect::<Vec<_>>();
+    delta.sort_unstable();
+    Some((have, delta))
+}
+
+fn transition_path_for_haves<'a>(
+    transitions: &'a [CapsuleVisibilityTransition],
+    target: ObjectId,
+    haves: &[ObjectId],
+) -> Option<(ObjectId, Vec<&'a CapsuleVisibilityTransition>)> {
+    let haves = haves.iter().copied().collect::<HashSet<_>>();
+    let mut current = target;
+    let mut path = Vec::new();
+    let mut visited = HashSet::new();
+    // Walk once to the closest proven client base. Rewalking the chain for
+    // each unrecognized have amplifies every unsuccessful negotiation round.
+    loop {
+        if haves.contains(&current) {
+            return Some((current, path));
+        }
+        if !visited.insert(current) {
+            return None;
+        }
+        let mut candidates = transitions
+            .iter()
+            .filter(|transition| transition.new_oid == current && transition.old_oid.is_some());
+        let transition = candidates.next()?;
+        if candidates.next().is_some() {
+            return None;
+        }
+        path.push(transition);
+        current = transition.old_oid?;
+    }
 }
 
 async fn plan_with_operation(
@@ -2790,6 +2826,108 @@ mod tests {
         assert_eq!(have, oid('1'));
         assert_eq!(delta, [oid('2'), oid('4'), oid('5')]);
         assert!(transition_delta_for_haves(&transitions, oid('4'), &[oid('9')]).is_none());
+    }
+
+    #[test]
+    fn tip_bound_ready_requires_a_visible_complete_chain_for_every_want() {
+        let references = references();
+        let transitions = BTreeMap::from([
+            (
+                "refs/heads/main".to_owned(),
+                vec![CapsuleVisibilityTransition {
+                    old_oid: Some(oid('3')),
+                    new_oid: oid('1'),
+                    added: vec![oid('1')],
+                    removed: Vec::new(),
+                }],
+            ),
+            (
+                "refs/heads/secret".to_owned(),
+                vec![CapsuleVisibilityTransition {
+                    old_oid: Some(oid('4')),
+                    new_oid: oid('2'),
+                    added: vec![oid('2')],
+                    removed: Vec::new(),
+                }],
+            ),
+        ]);
+        let main = vec!["refs/heads/main".to_owned()];
+        let both = vec!["refs/heads/main".to_owned(), "refs/heads/secret".to_owned()];
+        for (visible, wants, haves, expected) in [
+            (&main, vec![oid('1')], vec![oid('3')], true),
+            (&main, vec![oid('1')], vec![oid('9')], false),
+            (&main, vec![oid('2')], vec![oid('4')], false),
+            (&both, vec![oid('1'), oid('2')], vec![oid('3')], false),
+            (
+                &both,
+                vec![oid('1'), oid('2')],
+                vec![oid('3'), oid('4')],
+                true,
+            ),
+        ] {
+            assert_eq!(
+                tip_bound_transitions_cover_wants(
+                    &references,
+                    visible,
+                    &transitions,
+                    &wants,
+                    &haves,
+                ),
+                expected,
+                "visible={visible:?}, wants={wants:?}, haves={haves:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tip_bound_ready_rejects_ambiguous_and_broken_history() {
+        let references = references();
+        let visible = vec!["refs/heads/main".to_owned()];
+        for chain in [
+            vec![(oid('3'), oid('1')), (oid('4'), oid('1'))],
+            vec![(oid('3'), oid('2'))],
+            vec![(oid('2'), oid('1')), (oid('1'), oid('2'))],
+        ] {
+            let history = chain
+                .into_iter()
+                .map(|(old_oid, new_oid)| CapsuleVisibilityTransition {
+                    old_oid: Some(old_oid),
+                    new_oid,
+                    added: vec![new_oid],
+                    removed: Vec::new(),
+                })
+                .collect();
+            let transitions = BTreeMap::from([("refs/heads/main".to_owned(), history)]);
+            assert!(!tip_bound_transitions_cover_wants(
+                &references,
+                &visible,
+                &transitions,
+                &[oid('1')],
+                &[oid('3')],
+            ));
+        }
+    }
+
+    #[test]
+    fn transition_delta_uses_the_nearest_proven_have() {
+        let transitions = vec![
+            CapsuleVisibilityTransition {
+                old_oid: Some(oid('1')),
+                new_oid: oid('2'),
+                added: vec![oid('2'), oid('3')],
+                removed: Vec::new(),
+            },
+            CapsuleVisibilityTransition {
+                old_oid: Some(oid('2')),
+                new_oid: oid('4'),
+                added: vec![oid('4'), oid('5')],
+                removed: vec![oid('3')],
+            },
+        ];
+        assert_eq!(
+            transition_delta_for_haves(&transitions, oid('4'), &[oid('1'), oid('2')]),
+            Some((oid('2'), vec![oid('4'), oid('5')]))
+        );
     }
 
     #[test]

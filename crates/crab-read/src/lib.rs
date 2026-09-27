@@ -39,5 +39,6 @@ pub use upload_pack::{
     PackPlan, UPLOAD_PACK_MAX_DURATION, UploadPackFilter, UploadPackFilterError,
     UploadPackObjectType, UploadPackRequest, combine_upload_pack_filters, parse_upload_pack_filter,
     plan_upload_pack, plan_upload_pack_catalog, plan_upload_pack_tip_bound,
-    plan_upload_pack_tip_bound_with_transitions, upload_pack_repository_options,
+    plan_upload_pack_tip_bound_with_transitions, tip_bound_transitions_cover_wants,
+    upload_pack_repository_options,
 };

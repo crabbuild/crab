@@ -374,6 +374,73 @@ one catalog range during fetch 4,000; the fetch subsequently completed. These
 attempts remain in the totals. They are an additional transport-quality caveat,
 not silently discarded samples or evidence of eight corrupt objects.
 
+## September 27 frozen 500-commit fetch-phase diagnostic
+
+The `k8s-fetch-phases-500-20260927-r1` run used the retained GitHub Kubernetes
+source, a fresh RustFS 1.0.0 GA bucket, unchanged r4 CLI binary and the new
+phase-instrumented harness. It completed a seed push/checkpoint/clone, 500
+individual pushes, incremental fetch **before** repack, independent final
+clones, strict full native Git and Crab fsck, exact tips, and 32 sampled blob
+comparisons per clone. The frozen binary's SHA-256 was
+`d2e0357e196c64e9050cdc54b0854d35d35e321f7780a0bf953dbba6a100cfb3`;
+the report SHA-256 is
+`3a98d344e4c06eaf490aef5454d4d0015d790e52d0bb343fcd59f4133a977136`.
+
+| Operation | Wall time | Origin requests | Result |
+|---|---:|---:|---|
+| Seed push | 385.872 s | 9 | passed |
+| 500 incremental pushes, mean | 308.15 ms | 7.012 | passed |
+| 500-commit fetch | 10.656 s | 80 | correct, performance gates failed |
+| Interval repack | 15.572 s | recorded separately | passed |
+| Final cold / warm clone | 58.519 / 41.141 s | recorded separately | integrity passed |
+
+The fetch transferred 75,443,078 response bytes, preserved the existing seed
+pack, installed one new pack, and reached the exact expected tip. Its Git
+Trace2 children took 10.014 s in the helper, 2.101 s in `index-pack`, and
+0.423 s in connectivity; these phases overlap and must not be summed. Crab
+recorded 17 negotiation rounds and 140,196 haves, while visibility planning
+took 2 ms and pack generation 656 ms for 19,265 copied, zero materialized
+entries. The tip-bound wire path returned no common haves until `done`, giving
+a specific latency hypothesis to test with an authenticated early cut point.
+The 80 origin requests are an independent source-fan-out failure. This smaller
+diagnostic is not a replacement for a final-candidate 5,000-commit replay or
+proof that either fetch gate has been fixed. The host was shared; unrelated
+builds ran, but no task-owned build overlapped this frozen diagnostic.
+
+## September 27 authenticated early-cut-point diagnostic
+
+`k8s-fetch-phases-500-ready-20260927-r2` replayed the same 500 Kubernetes
+commits against a separate prefix on RustFS 1.0.0 GA using the new r5 CLI
+(SHA-256 `c0a36f2f86a3dd2ec62fb696ad738b1dcb8ad5ca6dcefa897c70afb18fa1e117`).
+Its report SHA-256 is
+`26821039320f5959c9e7f98ad53de0cd14e796cdb502fe38628ab957613b3afa`.
+The harness again fetched **before** interval repack, kept the existing local
+pack, installed one new pack, and recorded no native Git repack during fetch.
+
+| Operation | Wall time | Origin requests | Result |
+|---|---:|---:|---|
+| Seed push | 247.431 s | 9 | passed |
+| 500 incremental pushes, mean / p95 | 268.39 / 571 ms | 7.012 mean | passed |
+| 500-commit fetch | 4.460 s | 80 | correct; latency passed, request gate failed |
+| Interval repack | 11.984 s | 63 | passed |
+| Final cold / warm clone | 33.346 / 38.585 s | 14 each | integrity passed |
+
+The fetch used one negotiation round and 16 haves instead of the frozen run's
+17 rounds and 140,196 haves. It selected the same 19,265 Git objects; the
+helper ran for 3.879 s, `index-pack` for 2.476 s, and connectivity for
+0.501 s (overlapping phases). It transferred 75,446,697 response bytes. The
+80 requests were 75 v2 GETs, two v2 list GETs, two read-admission PUTs, and
+one replica-discovery GET. The 75 v2 GETs included 72 ranges across 24 distinct
+capsules. Early negotiation therefore addresses latency, not physical-source
+fan-out; even one GET per capsule would exceed the ten-request fetch gate.
+
+Both final clones reached the exact source tip, passed strict full native Git
+fsck, and matched all 32 sampled Git blobs. Seed and final remote Crab fsck
+passed. The harness exited nonzero **only** because the unchanged fetch-request
+gate failed at 80 > 10. A single 500-commit interval is diagnostic evidence,
+not a final-candidate 5,000-push replay, full Xet proof, matched v1 comparison,
+or a release qualification.
+
 ## Correctness and open gates
 
 Completed: seed and all 5,000 pushes; ten exact-tip/connectivity fetches before
