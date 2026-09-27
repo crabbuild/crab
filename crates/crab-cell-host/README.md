@@ -27,17 +27,27 @@ reservations are separate from measured RSS and the container memory ceiling.
 Call `CellNode::install_read_replicas` during startup after installing the task
 group. It retains the shared `ReadReplicaManager`, supervises refresh and
 placement eviction, and cancels activation before closing views during drain.
-Pass the returned manager to the peer dispatcher as its replica resolver.
+Pass the returned manager to the peer dispatcher as its replica resolver and
+replica control implementation.
 The operator supplies the application storage layout, signed directory,
 private local root, and LTX limits. An authenticated owner hint calls
 `activate`; it must still pass current owner and reader-selection checks.
 Queries never activate or refresh a missing reader.
 
 The supervisor refreshes admitted views from published roots and removes views
-that are no longer selected. It does not discover new Cells or recruit spare
-nodes. The product's owner reconciler remains responsible for activation hints;
-HTTP authentication, administrative policy, and repository scope stay in the
-server. The issue service and independent reference hosts use this same manager.
+that are no longer selected. Call `CellNode::install_read_replica_recruitment`
+with the application identity and an activation-authorized `ReplicaPeerClient`
+to recruit readers automatically for locally owned Cells. Recruitment scans
+all compiled namespace roles, advances its cursor before I/O, and bounds each
+pass to 64 Cells, 16 concurrent hints per Cell, and 30 seconds. The five-second
+poll interval is not a freshness or replacement SLO. Expired readers are
+replaced through signed live membership and the same receiver admission path.
+
+The task group owns recruitment alongside refresh; cancellation interrupts
+provider and peer waits before drain. Explicit operator hints can use the
+returned recruiter's `reconcile` method. HTTP authentication, administrative
+policy, and repository scope stay in the server. The issue service and
+independent reference hosts use these same implementations.
 
 ## Module map
 
@@ -46,6 +56,7 @@ server. The issue service and independent reference hosts use this same manager.
 | `builder` | `CellNodeBuilder` validation and required-owner wiring |
 | `node` | `CellNode`, its task group, lifecycle, qualification, and scale down |
 | `read_replicas` | Selected immutable views, refresh, eviction, and terminal close |
+| `read_replicas/recruitment` | Scoped owner recruitment, bounded fanout, and replacement |
 | `durability` | Node-log durability supervision and rotation |
 | `facility` | Facility registration and drained owners |
 | `status` | `NodeState` and `NodeStatus` reporting |

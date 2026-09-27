@@ -1,4 +1,5 @@
 use super::*;
+use crab_cell_runtime::read_policy::ReadPolicyStore;
 use crab_cell_runtime::{
     Digest, SessionId,
     cell::worker::SqlWorkerPool,
@@ -13,6 +14,7 @@ use std::{future::Future, pin::Pin, sync::Mutex as StdMutex};
 
 #[derive(Default)]
 struct ActivationProbe {
+    wrong_incarnation: std::sync::atomic::AtomicBool,
     stalled: StdMutex<HashSet<SessionId>>,
     received: StdMutex<Vec<(crab_cell_runtime::CellId, SessionId)>>,
 }
@@ -34,7 +36,7 @@ impl PeerRoundTrip for ActivationProbe {
         request: Vec<u8>,
         _: u32,
     ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>> {
-        let now = crate::cells::unix_now_ms().unwrap();
+        let now = crate::cells::unix_now_ms().unwrap() + 1;
         assert!(
             node.expires_at_ms() > now,
             "activation used expired discovery"
@@ -51,6 +53,11 @@ impl PeerRoundTrip for ActivationProbe {
             .lock()
             .unwrap()
             .push((target.cell_id(), node.session()));
+        let incarnation = if self.wrong_incarnation.load(Ordering::Relaxed) {
+            99
+        } else {
+            9
+        };
         Box::pin(async move {
             if stalled {
                 return std::future::pending().await;
@@ -59,7 +66,7 @@ impl PeerRoundTrip for ActivationProbe {
                 outcome: Some(peer_wire::peer_reply::Outcome::Read(peer_wire::ReadReply {
                     receipt: Some(peer_wire::Receipt {
                         cell_id: target.cell_id().as_bytes().to_vec(),
-                        incarnation: vec![9; 16],
+                        incarnation: vec![incarnation; 16],
                         commit_sequence: 1,
                     }),
                     result: Some(peer_wire::read_reply::Result::ReplicaReady(true)),
@@ -71,6 +78,7 @@ impl PeerRoundTrip for ActivationProbe {
 
 struct Fixture {
     router: RepositoryCellRouter,
+    recruiter: crab_cell_host::read_replicas::ReadReplicaRecruiter,
     probe: Arc<ActivationProbe>,
     targets: Vec<CellTarget>,
     _directory: tempfile::TempDir,
@@ -128,6 +136,17 @@ impl Fixture {
             directory.path().to_path_buf(),
         )
         .unwrap();
+        let readers = crab_cell_host::read_replicas::ReadReplicaManager::new(
+            router.runtime.clone(),
+            Arc::clone(&registry),
+            layout.clone(),
+            router.peer.directory.clone(),
+            session,
+            directory.path().join("readers"),
+            repository_replica_limits(),
+        );
+        let router = router.with_read_replicas(Some(readers));
+        let recruiter = router.read_recruiter().unwrap();
         let mut targets = Vec::new();
         for cell in 1..=cells {
             let target = router
@@ -172,6 +191,7 @@ impl Fixture {
         targets.sort_by_key(|target| *target.cell_id().as_bytes());
         let fixture = Self {
             router,
+            recruiter,
             probe,
             targets,
             _directory: directory,
@@ -229,7 +249,7 @@ async fn malformed_cell_policy_does_not_starve_other_cells() {
         .put(&path, bytes::Bytes::from_static(b"broken").into())
         .await
         .unwrap();
-    let result = fixture.router.reconcile_readers_once(&mut 0).await;
+    let result = fixture.recruiter.reconcile_active().await;
     let received = fixture.probe.received.lock().unwrap().clone();
     fixture.router.runtime.shutdown().await.unwrap();
     assert!(
@@ -278,10 +298,28 @@ async fn activation_reloads_advertisement_after_discovery() {
     let fixture = Fixture::new(1).await;
     let now = crate::cells::unix_now_ms().unwrap();
     let stale = fixture.advertisement(2, now - 20_000);
+    let target = &fixture.targets[0];
+    let control = fixture
+        .router
+        .authority
+        .load(target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
     fixture
         .router
-        .peer
-        .activate_read_replica(fixture.targets[0].clone(), stale)
+        .read_replica_peer()
+        .activate(
+            target,
+            &fixture.router.peer.directory,
+            stale,
+            CellDescription {
+                cell: target.cell_id(),
+                incarnation: control.value().incarnation,
+                code: control.value().code,
+                schema: control.value().schema,
+            },
+        )
         .await
         .unwrap();
     fixture.router.runtime.shutdown().await.unwrap();
@@ -294,21 +332,44 @@ async fn interrupted_batch_resumes_at_the_next_cell() {
         SessionId::from_bytes([2; 16]),
         SessionId::from_bytes([3; 16]),
     ]);
-    let mut cursor = 0;
     let interrupted = tokio::time::timeout(
         Duration::from_millis(200),
-        fixture.router.reconcile_readers_once(&mut cursor),
+        fixture.recruiter.reconcile_active(),
     )
     .await;
     assert!(interrupted.is_err());
     fixture.probe.stalled.lock().unwrap().clear();
     fixture.probe.received.lock().unwrap().clear();
-    fixture
-        .router
-        .reconcile_readers_once(&mut cursor)
-        .await
-        .unwrap();
+    fixture.recruiter.reconcile_active().await.unwrap();
     let first = fixture.probe.received.lock().unwrap()[0].0;
     fixture.router.runtime.shutdown().await.unwrap();
     assert_eq!(first, fixture.targets[1].cell_id());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn activation_rejects_a_receipt_from_another_cell_lifetime() {
+    let fixture = Fixture::new(1).await;
+    fixture
+        .probe
+        .wrong_incarnation
+        .store(true, Ordering::Relaxed);
+    let target = &fixture.targets[0];
+    let (expected, selected) = fixture
+        .router
+        .replica_routing
+        .selected(target)
+        .await
+        .unwrap();
+    let result = fixture
+        .router
+        .read_replica_peer()
+        .activate(
+            target,
+            &fixture.router.peer.directory,
+            selected[0].clone(),
+            expected,
+        )
+        .await;
+    fixture.router.runtime.shutdown().await.unwrap();
+    assert!(matches!(result, Err(crab_cell_runtime::Error::Peer(_))));
 }

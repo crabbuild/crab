@@ -9,11 +9,16 @@ use std::{
 
 use crab_cell_runtime::identity::CellId;
 use crab_cell_runtime::peer::{
-    MAX_PEER_REQUEST_BYTES, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerReplicaResolver,
-    PeerRoundTrip, PeerVerifier, VerifiedPeerRequest, wire,
+    MAX_PEER_REQUEST_BYTES, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerRoundTrip,
+    PeerVerifier, UnverifiedPeerRequest, VerifiedPeerRequest, wire,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+
+type Readers = (
+    Arc<crab_cell_host::read_replicas::ReadReplicaManager>,
+    NodeDirectory,
+);
 
 struct FleetResolver(Arc<HashMap<CellId, CellHandle>>);
 
@@ -38,7 +43,16 @@ impl PeerAuthorizer for FleetAuthorizer {
     fn authorize(&self, request: &VerifiedPeerRequest) -> Result<()> {
         let action = match request.operation_tag() {
             10 | 12 => "cell.write",
-            11 => "cell.read",
+            11 => match request.operation() {
+                Some(wire::peer_request::Operation::Read(read)) => match read.operation {
+                    Some(wire::read_request::Operation::ReplicaActivate(_)) => {
+                        "cell.replica.activate"
+                    }
+                    Some(wire::read_request::Operation::ReplicaStatus(_)) => "cell.replica.status",
+                    _ => "cell.read",
+                },
+                _ => return Err(Error::PeerAuthorization("unsupported read operation")),
+            },
             13 | 14 => "reference.cron.deliver",
             _ => return Err(Error::PeerAuthorization("unsupported fleet operation")),
         };
@@ -218,19 +232,35 @@ pub(super) async fn start_peer_server(
     registry: &Arc<Registry>,
     verifier: Arc<PeerVerifier>,
     handles: Vec<CellHandle>,
-    replicas: Option<Arc<dyn PeerReplicaResolver>>,
+    replicas: Option<Readers>,
 ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
-    let dispatcher = dispatcher(registry, handles, replicas);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = serve_listener(listener, verifier, dispatcher, None);
+    let server = start_bound_peer_server(listener, registry, verifier, handles, replicas);
     (address, server)
+}
+
+pub(super) fn start_bound_peer_server(
+    listener: TcpListener,
+    registry: &Arc<Registry>,
+    verifier: Arc<PeerVerifier>,
+    handles: Vec<CellHandle>,
+    replicas: Option<Readers>,
+) -> tokio::task::JoinHandle<()> {
+    let directory = replicas.as_ref().map(|(_, directory)| directory.clone());
+    serve_listener(
+        listener,
+        verifier,
+        dispatcher(registry, handles, replicas),
+        None,
+        directory,
+    )
 }
 
 fn dispatcher(
     registry: &Arc<Registry>,
     handles: Vec<CellHandle>,
-    replicas: Option<Arc<dyn PeerReplicaResolver>>,
+    replicas: Option<Readers>,
 ) -> Arc<PeerDispatcher> {
     let dispatcher = PeerDispatcher::new(
         Arc::clone(registry),
@@ -243,7 +273,9 @@ fn dispatcher(
         Arc::new(FleetAuthorizer),
     );
     Arc::new(match replicas {
-        Some(replicas) => dispatcher.with_replica_resolver(replicas),
+        Some((replicas, _)) => dispatcher
+            .with_replica_resolver(replicas.clone())
+            .with_replica_control(replicas),
         None => dispatcher,
     })
 }
@@ -261,8 +293,9 @@ pub(super) fn start_gateway_peer_server(
     handles: Vec<CellHandle>,
     owners: HashMap<CellId, SocketAddr>,
     stats: Arc<GatewayStats>,
-    replicas: Option<Arc<dyn PeerReplicaResolver>>,
+    replicas: Option<Readers>,
 ) -> tokio::task::JoinHandle<()> {
+    let directory = replicas.as_ref().map(|(_, directory)| directory.clone());
     let gateway = Arc::new(Gateway {
         local: handles.iter().map(CellHandle::cell_id).collect(),
         owners,
@@ -273,6 +306,7 @@ pub(super) fn start_gateway_peer_server(
         verifier,
         dispatcher(registry, handles, replicas),
         Some(gateway),
+        directory,
     )
 }
 
@@ -281,14 +315,16 @@ fn serve_listener(
     verifier: Arc<PeerVerifier>,
     dispatcher: Arc<PeerDispatcher>,
     gateway: Option<Arc<Gateway>>,
+    directory: Option<NodeDirectory>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Ok((socket, _)) = listener.accept().await {
             let verifier = Arc::clone(&verifier);
             let dispatcher = Arc::clone(&dispatcher);
             let gateway = gateway.clone();
+            let directory = directory.clone();
             tokio::spawn(async move {
-                let _ = serve_peer(socket, verifier, dispatcher, gateway).await;
+                let _ = serve_peer(socket, verifier, dispatcher, gateway, directory).await;
             });
         }
     })
@@ -299,6 +335,7 @@ async fn serve_peer(
     verifier: Arc<PeerVerifier>,
     dispatcher: Arc<PeerDispatcher>,
     gateway: Option<Arc<Gateway>>,
+    directory: Option<NodeDirectory>,
 ) -> Result<()> {
     let started = Instant::now();
     let mut length = [0; 4];
@@ -310,9 +347,27 @@ async fn serve_peer(
     let mut request = vec![0; length];
     socket.read_exact(&mut request).await.map_err(peer_io)?;
     let now = now_ms();
-    let verified = verifier.verify(&request, now)?;
+    let decoded = UnverifiedPeerRequest::decode(&request)?;
+    let verified = if let Some(directory) = directory
+        .filter(|_| decoded.session() != crab_cell_runtime::SessionId::from_bytes([77; 16]))
+    {
+        let enrolled = tokio::time::timeout(
+            Duration::from_millis(u64::from(decoded.remaining_ms())),
+            directory.load(decoded.session(), now),
+        )
+        .await
+        .map_err(|_| Error::Deadline)??
+        .ok_or(Error::Fenced)?;
+        let node = enrolled.advertisement();
+        PeerVerifier::new(node.session(), node.release(), node.verifying_key()?)
+            .verify_decoded(decoded, now_ms())?
+    } else {
+        verifier.verify_decoded(decoded, now)?
+    };
     let replica = matches!(verified.operation(), Some(wire::peer_request::Operation::Read(read))
-        if matches!(read.operation, Some(wire::read_request::Operation::ReplicaQuery(_))));
+        if matches!(read.operation, Some(wire::read_request::Operation::ReplicaQuery(_)
+            | wire::read_request::Operation::ReplicaActivate(_)
+            | wire::read_request::Operation::ReplicaStatus(_))));
     let reply = match gateway {
         // A selected secondary must execute its snapshot locally. Forwarding
         // an explicit replica query would hide missing reader admission.

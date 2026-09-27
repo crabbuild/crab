@@ -104,6 +104,8 @@ fn required_cell_components(mode: CellDurabilityMode) -> Vec<&'static str> {
     ];
     if mode == CellDurabilityMode::Fleet {
         components.push(NODE_DURABILITY_PROVIDER_COMPONENT);
+    } else {
+        components.extend(["read-replicas", "read-replica-recruitment"]);
     }
     components
 }
@@ -1240,6 +1242,12 @@ pub async fn serve(config: Config) -> Result<()> {
     )?
     .with_recovery_artifacts(Arc::clone(&recovery_artifacts))
     .with_read_replicas(read_replicas.clone());
+    if read_replicas.is_some() {
+        cell_node.install_read_replica_recruitment(
+            startup.identity,
+            repository_cells.read_replica_peer(),
+        )?;
+    }
     let cell_scheduler = crate::cells::RepositoryCellScheduler::new(
         startup.identity,
         startup.layout,
@@ -1459,15 +1467,6 @@ pub async fn serve(config: Config) -> Result<()> {
     cell_tasks.spawn(release_watch)?;
     let scheduler_cancellation = cancellation.clone();
     cell_tasks.spawn(async move { cell_scheduler.run(scheduler_cancellation).await })?;
-    if read_replicas.is_some() {
-        let owner_reconciler = repository_cells.clone();
-        let reader_cancellation = cancellation.clone();
-        cell_tasks.spawn(async move {
-            owner_reconciler
-                .run_read_replica_reconciliation(reader_cancellation)
-                .await
-        })?;
-    }
     let rebalance_cancellation = cancellation.clone();
     cell_tasks
         .spawn(async move { repository_cells.run_rebalance(rebalance_cancellation).await })?;

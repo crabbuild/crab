@@ -170,6 +170,41 @@ impl CellNode {
         Ok(manager)
     }
 
+    /// Supervises owner-side reader recruitment after installing read replicas.
+    ///
+    /// The product supplies application scope and an activation-authorized peer
+    /// client. The host retains the cursor and cancels recruitment before drain.
+    pub fn install_read_replica_recruitment(
+        &self,
+        identity: crab_cell_runtime::cell::application::ApplicationIdentity,
+        peer: crab_cell_runtime::peer::ReplicaPeerClient,
+    ) -> crab_cell_runtime::Result<crate::read_replicas::ReadReplicaRecruiter> {
+        const COMPONENT: &str = "read-replica-recruitment";
+        let readers = self
+            .owned_component::<crate::read_replicas::ReadReplicaManager>("read-replicas")
+            .ok_or(Error::Control(
+                "read recruitment requires installed read replicas",
+            ))?;
+        let tasks = self
+            .task_group
+            .lock()
+            .map_err(|_| Error::Control("CellNode task group lock poisoned"))?
+            .clone()
+            .ok_or(Error::Control(
+                "read recruitment requires installed task group",
+            ))?;
+        let recruiter =
+            crate::read_replicas::ReadReplicaRecruiter::new((*readers).clone(), identity, peer)?;
+        self.install_owned_component(COMPONENT, Arc::new(recruiter.clone()))?;
+        let supervised = recruiter.clone();
+        let cancellation = tasks.cancellation_token();
+        if let Err(error) = tasks.spawn(async move { supervised.run(cancellation).await }) {
+            self.remove_facility(COMPONENT)?;
+            return Err(error);
+        }
+        Ok(recruiter)
+    }
+
     pub(super) fn remove_facility(&self, name: &'static str) -> crab_cell_runtime::Result<()> {
         let mut facilities = self
             .facilities

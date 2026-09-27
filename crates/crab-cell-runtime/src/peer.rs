@@ -11,7 +11,9 @@ mod protobuf;
 mod transport;
 mod validation;
 
-pub use dispatch::{PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerReplicaResolver};
+pub use dispatch::{
+    PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerReplicaControl, PeerReplicaResolver,
+};
 pub(crate) use transport::PeerClientTransport;
 pub use transport::PeerRoundTrip;
 pub use transport::{EffectPeerClient, MigrationPeerClient, ReplicaPeerClient};

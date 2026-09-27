@@ -38,7 +38,6 @@ use crab_cell_runtime::peer::{
 };
 use crab_cell_runtime::primitives::maintenance::PersistedWorkInventory;
 use crab_cell_runtime::primitives::workflow::MAX_ACTIVITY_PAYLOAD_BYTES;
-use crab_cell_runtime::read_policy::ReadPolicyStore;
 use crab_cell_runtime::recovery::release::{ReleaseState, ReleaseStore};
 use crab_cell_runtime::registry::Query;
 use crab_cell_runtime::registry::Registry;
@@ -1208,55 +1207,6 @@ impl RepositoryCellRouter {
 }
 
 impl RepositoryCellPeer {
-    async fn activate_read_replica(
-        &self,
-        target: CellTarget,
-        node: crab_cell_runtime::node::NodeAdvertisement,
-    ) -> crate::Result<()> {
-        // A bounded fanout can queue longer than the discovery lease. Reload
-        // the exact session before dispatch; another boot cannot inherit it.
-        let observed = self
-            .directory
-            .load(node.session(), super::unix_now_ms()?)
-            .await?
-            .ok_or(crab_cell_runtime::Error::CellNotActive)?;
-        let node = observed.advertisement().clone();
-        let now_ms = super::unix_now_ms()?;
-        let principal = PeerPrincipal {
-            issuer: format!(
-                "crab-runtime:{}",
-                encode_hex(self.directory.fleet().as_bytes())
-            ),
-            subject: encode_hex(self.owner.session.as_bytes()),
-            actions: vec!["cell.replica.activate".to_owned()],
-        };
-        let request = self.signer.sign(
-            principal,
-            now_ms,
-            now_ms.saturating_add(60_000),
-            30_000,
-            PeerOperation::Read(peer_wire::ReadRequest {
-                target: Some(peer_target(&target)),
-                timeout_ms: 30_000,
-                minimum: None,
-                expected: None,
-                operation: Some(peer_wire::read_request::Operation::ReplicaActivate(true)),
-            }),
-        )?;
-        let reply = self
-            .round_trip
-            .send_to_node(target.clone(), node, request, 30_000)
-            .await?;
-        let reply = crab_cell_runtime::peer::decode_peer_reply(&reply)?;
-        match reply.outcome {
-            Some(peer_wire::peer_reply::Outcome::Read(peer_wire::ReadReply {
-                receipt: Some(receipt),
-                result: Some(peer_wire::read_reply::Result::ReplicaReady(true)),
-            })) if receipt.cell_id == target.cell_id().as_bytes() => Ok(()),
-            _ => Err(crab_cell_runtime::Error::Peer("read replica did not become ready").into()),
-        }
-    }
-
     pub(crate) fn new(
         owner_hints: crate::peer::PeerOwnerHints,
         directory: NodeDirectory,
