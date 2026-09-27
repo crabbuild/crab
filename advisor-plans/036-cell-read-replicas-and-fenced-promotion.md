@@ -325,6 +325,10 @@ application-host recruitment/replacement remains separate work. Shutdown
 cancels provider waits before joining the activation lane, and a retained
 manager cannot reopen after drain. A stalled-store regression covers this
 ordering. Product authentication and owner-side recruitment stay in the server.
+The [three-container GA RustFS receipt](../crates/crab-cell-app/performance/2026-09-27-host-readers-compose.md)
+binds these automatic lifecycle checks to source and binary hashes, one CPU /
+1 GiB / zero swap per node, and successful renewed-session withdrawal. It does
+not qualify performance improvement or a supported capacity.
 
 The ignored `rustfs_replica_reads_exact_root_and_policy_cas` test also passed
 against a local RustFS bucket with an isolated prefix. It exercised real S3

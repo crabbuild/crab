@@ -207,6 +207,9 @@ records the owner action path. The
 [generated replica-read follow-up](performance/2026-09-27-replica-compose.md)
 records two non-owner readers, stale/minimum-receipt checks, controlled refresh,
 source and binary identity, and container resource evidence on GA RustFS.
+The [host-owned reader run](performance/2026-09-27-host-readers-compose.md)
+then proves automatic refresh, target-zero eviction, and terminal drain through
+the manager shared with the product server.
 
 This is an application integration smoke with six closed-loop lanes and seven
 Cells assigned 3/2/2. Ingress counts are even; owner load follows the action
