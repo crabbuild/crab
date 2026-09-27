@@ -1426,8 +1426,11 @@ in the automatic index growth section. Per-source prepare locks and
 export/import fingerprints retain their existing guards.
 
 Account metadata still uses one writer and a 512-MiB Cell budget.
-Each account sweep attempts one range, advancing past transient failures.
-Distributed scheduling and recursively sharded directories remain required.
+Each account sweep selects one existing range or one incomplete table, advancing
+past transient failures. A creation attempt can install all remaining initial
+ranges. Distributed scheduling and recursively sharded directories remain
+required; [the metadata ownership design](METADATA_SHARDING.md) records the atomic
+boundaries and integration gates for that work.
 The split-plan schema is unreleased and changed in place; development roots
 must be reprovisioned. There is no legacy schema reader or upgrade claim.
 
@@ -1905,3 +1908,47 @@ GSI split/tombstone restoration also passes (11.63 s). Strict all-target
 Clippy, the standalone server build, formatting, diff, Cell/LTX layout and
 policy entry-point checks pass. Full SDK/process qualification remains a CI
 gate for the pushed head.
+
+
+## Resume incomplete table creation
+
+A failed CreateTable request can leave a durable catalog generation and published
+GSI directories without a base route. Previously the account capacity sweep
+skipped that generation; only a matching client retry could finish it. The sweep
+now invokes the same initial-route completion function as the request path,
+preserves published GSI directories and publishes the base route after its
+owners are installed. It advances the table cursor before trying recovery, so
+capacity pressure on one creation does not starve other tables.
+
+Deletion or a competing creator can supersede a discovered generation. If
+completion fails, the worker rereads the catalog and base publication before
+propagating the error. An absent/replaced record or completed base publication
+ends that attempt safely. Errors for an unchanged, incomplete generation still
+propagate through the existing retry/error policy.
+
+| Evidence | Boundary |
+| --- | --- |
+| Entry and owner | `backend.rs::create_table` and `provision/capacity.rs::reconcile_account_capacity` call `backend/table_creation.rs::publish_initial_routes`. The account owns the catalog and initial directory publication. |
+| Callees | `provision.rs::InitialPartitionProvisioner` installs deterministic base/GSI ranges through existing placement and admission; account `ActivateTableRoute` requires index publication before base publication. |
+| Siblings | Active base/GSI split sweeps keep their cursor and reservation handling. Account-local storage still bypasses routed provisioning; the global transition hook has no account inventory. |
+| Runtime contract | `CellClient::with_local_resolver` resolves before invocation; typed account commands reject stale generations. Durable Cell roots survive owner drain and are restored by the existing resolver. |
+| ExtendDB contract | Pinned `crates/engine/src/create_table.rs` delegates to `TableEngine::create_table`; readiness and cache invalidation follow a successful response. Worker completion uses the durable stored generation and does not replay the HTTP request. |
+| Baseline | Main and pre-change HEAD skip unrouted tables. The signed SDK recovery test failed its 15-second ACTIVE wait before this change. Removing error revalidation makes the concurrent-deletion test fail with `TableNotFound`. |
+| Regression | `tests/peer_network/residency/creation.rs` fills the node, fails creation after GSI publication, deletes a filler table, drains the account owner and lets the production worker finish without a CreateTable retry. Generation and GSI routes are preserved; writes, owner-restored reads and GSI Scan succeed. A second test deletes during base installation, then recreates and writes the name. |
+
+One worker selection repairs one table, potentially installing all remaining
+initial base/GSI ranges. Work is not bounded to one Cell per tick. Initial
+partition-count policy still must remain stable while creation is incomplete;
+its durable representation belongs to the metadata lifecycle work described in
+[METADATA_SHARDING.md](METADATA_SHARDING.md). Administrative updates between
+partial installation attempts also require a stable creation specification;
+this change does not qualify that case. Metadata sharding and 10,000-Cell/multi-TB
+qualification remain open. No dependency, configuration or schema change is
+required for this recovery path.
+
+Local proof: both new signed SDK cases pass (3.80 s); remote base/GSI placement
+and unpublished-owner recovery pass (22.00 s); three capacity/split regressions
+pass (9.53 s). Strict all-target Clippy passes (10.11 s), as do formatting,
+diff, Cell/LTX layout and policy checks. The standalone server builds (17.55 s).
+Full SDK/process proof remains the CI gate. Production growth is 100 net lines: one shared completion path, published
+route checks, and worker revalidation replace the request-only path.

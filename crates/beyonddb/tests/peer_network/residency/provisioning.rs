@@ -91,7 +91,7 @@ impl Remote {
     }
 }
 
-fn sdk_without_retries(fixture: &Fixture) -> aws_sdk_dynamodb::Client {
+pub(super) fn sdk_without_retries(fixture: &Fixture) -> aws_sdk_dynamodb::Client {
     aws_sdk_dynamodb::Client::from_conf(
         fixture
             .sdk
@@ -432,7 +432,7 @@ async fn wait_for_expiry(fixture: &Fixture, session: SessionId) {
     .unwrap();
 }
 
-fn create(
+pub(super) fn create(
     sdk: &aws_sdk_dynamodb::Client,
     name: &str,
     index: bool,
@@ -486,7 +486,7 @@ fn create(
     request
 }
 
-async fn table_id(fixture: &Fixture, name: &str) -> String {
+pub(super) async fn table_id(fixture: &Fixture, name: &str) -> String {
     fixture
         .client
         .query::<DescribeTable>(

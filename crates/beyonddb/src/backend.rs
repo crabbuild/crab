@@ -6,6 +6,7 @@ mod global_index;
 mod recovery;
 mod remaining;
 mod statistics;
+pub(crate) mod table_creation;
 mod transaction;
 mod transaction_read;
 mod transaction_transport;
@@ -29,11 +30,10 @@ use extenddb_storage::error::StorageError;
 use extenddb_storage::{BoxedFuture, TableEngine};
 
 use super::{
-    APPLICATION, ActivateTableRoute, ActivateTableRouteOutcome, CreateTable, CreateTableOutcome,
-    DeleteTable, DeleteTableOutcome, DescribeTable, DescribeTableById, Json, ListTables,
-    ListTablesInput, ListTablesOutcome, NAMESPACE, PartitionSpec, ReadRoutePage, RoutePageInput,
-    RoutePageOutcome, TableRecord, TableRoute, TableSpec, TableUpdate, UpdateTable,
-    UpdateTableOutcome, account_target,
+    APPLICATION, CreateTable, CreateTableOutcome, DeleteTable, DeleteTableOutcome, DescribeTable,
+    DescribeTableById, Json, ListTables, ListTablesInput, ListTablesOutcome, NAMESPACE,
+    PartitionSpec, ReadRoutePage, RoutePageInput, RoutePageOutcome, TableRecord, TableSpec,
+    TableUpdate, UpdateTable, UpdateTableOutcome, account_target,
 };
 
 /// Installs an initial table's data Cells before its route becomes visible.
@@ -210,78 +210,13 @@ impl TableEngine for CellStorage {
                 Err(error) => return Err(cell_error(error)),
             };
             if let Some(provisioner) = &self.initial_partitions {
-                for index in &record.global_secondary_indexes {
-                    let partitions = provisioner
-                        .provision_global_index(&self.client, &account_id, &record, index)
-                        .await?
-                        .into_iter()
-                        .map(|range| crate::RoutePagePartition {
-                            partition_id: range.partition_id,
-                            lower: range.lower.unwrap_or([0; 16]),
-                            upper: range.upper,
-                            epoch: range.epoch,
-                        })
-                        .collect();
-                    self.client
-                        .command::<crate::ActivateGlobalIndexRoute>(
-                            &target,
-                            mutation_identity()?,
-                            Json(crate::GlobalIndexRoute {
-                                table: record.clone(),
-                                index: index.clone(),
-                                partitions,
-                            }),
-                        )
-                        .await
-                        .map_err(cell_error)?;
-                }
-                let partitions = provisioner
-                    .provision(&self.client, &account_id, &record)
-                    .await?;
-                let route = TableRoute {
-                    table_id: record.id.clone(),
-                    epoch: 1,
-                    partitions,
-                };
-                match self
-                    .client
-                    .command::<ActivateTableRoute>(&target, mutation_identity()?, Json(route))
-                    .await
-                {
-                    Ok(committed) if committed.output.0 == ActivateTableRouteOutcome::Activated => {
-                    }
-                    Ok(_) => {
-                        return Err(StorageError::Internal(
-                            "unexpected successful route activation".into(),
-                        ));
-                    }
-                    Err(InvocationError::Rejected(committed)) => {
-                        return Err(match committed.output.0 {
-                            ActivateTableRouteOutcome::TableNotFound => {
-                                StorageError::TableNotFound(record.table_name.clone())
-                            }
-                            ActivateTableRouteOutcome::AlreadyActive => StorageError::Transient(
-                                "table route changed during creation".into(),
-                            ),
-                            ActivateTableRouteOutcome::TransactionConflict => {
-                                StorageError::Transient("table has prepared transactions".into())
-                            }
-                            ActivateTableRouteOutcome::IndexesNotReady => {
-                                StorageError::Transient("global index routes are not ready".into())
-                            }
-                            ActivateTableRouteOutcome::TableNotEmpty => {
-                                StorageError::TableNotActive(record.table_name.clone())
-                            }
-                            ActivateTableRouteOutcome::InvalidRoute => StorageError::Internal(
-                                "provisioner returned an invalid table route".into(),
-                            ),
-                            ActivateTableRouteOutcome::Activated => StorageError::Internal(
-                                "unexpected rejected route activation".into(),
-                            ),
-                        });
-                    }
-                    Err(error) => return Err(cell_error(error)),
-                }
+                table_creation::publish_initial_routes(
+                    provisioner.as_ref(),
+                    &self.client,
+                    &account_id,
+                    &record,
+                )
+                .await?;
             }
             Ok(description(
                 record,

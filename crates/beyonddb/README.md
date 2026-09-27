@@ -154,7 +154,13 @@ data Cell index.
 TTL candidate selection skips shared and exclusive transaction locks. If a
 prepare races selection, the conditional delete defers that item while the
 sweep continues; later passes revisit it after transaction resolution.
-The synchronous table-transition worker is also implemented. Table resource tags now have Cell-backed CreateTable, TagResource, UntagResource,
+The account capacity worker resumes incomplete table creation from its durable
+catalog row, preserving any published GSI directories before publishing the base
+route. It uses the same provisioning path as CreateTable and can continue after
+account-owner restoration without a client retry. One creation attempt can install
+all remaining initial ranges; this is not a one-Cell-per-tick operation. The global
+table-transition hook has no account inventory and remains a no-op.
+Table resource tags now have Cell-backed CreateTable, TagResource, UntagResource,
 and ListTagsOfResource paths; DeleteTable removes their rows. The RustFS
 process test verifies these requests through the AWS SDK across a server
 restart and verifies that a recreated table starts without the old tags.

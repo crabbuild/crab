@@ -23,7 +23,7 @@ use crate::{
 };
 
 impl CellInitialPartitionProvisioner {
-    /// Inspect one base/index range or resume its pending split; return whether a split completed.
+    /// Resume one creating table or inspect one base/index range; return whether a split completed.
     ///
     /// `None` starts a new pass. Once a range is selected, the cursor advances
     /// even if its split fails; its durable plan remains for the next pass.
@@ -121,13 +121,50 @@ impl CellInitialPartitionProvisioner {
             } => (partitions, has_more),
             RoutePageOutcome::Unrouted if index.is_some() => (Vec::new(), false),
             RoutePageOutcome::Unrouted => {
-                // Do not resize indexes while CreateTable is still publishing
-                // its initial base route and may retry index installation.
+                // A request may exit after committing the catalog or index routes.
+                // Advance before repair so an unavailable table cannot starve peers;
+                // the catalog row remains discoverable until base publication.
                 *cursor = Some(CapacityCursor {
                     table_name: name,
                     after_lower: None,
                     index: None,
                 });
+                if let Err(error) = crate::backend::table_creation::publish_initial_routes(
+                    self, &client, account_id, &table,
+                )
+                .await
+                {
+                    // Deletion, metadata updates or a competing creator can
+                    // supersede this attempt. Confirm current state before a
+                    // stale rejection can terminate the serving worker.
+                    let current = client
+                        .query::<DescribeTable>(&account, None, Json(table.table_name.clone()))
+                        .await
+                        .map_err(cell_error)?
+                        .output
+                        .0;
+                    if current.as_ref() != Some(&table) {
+                        return Ok(false);
+                    }
+                    let route = client
+                        .query::<ReadRoutePage>(
+                            &account,
+                            None,
+                            Json(RoutePageInput {
+                                table_id: table.id,
+                                start_hash: None,
+                                after_lower: None,
+                                expected_epoch: None,
+                            }),
+                        )
+                        .await
+                        .map_err(cell_error)?
+                        .output
+                        .0;
+                    if !matches!(route, RoutePageOutcome::Page { .. }) {
+                        return Err(error);
+                    }
+                }
                 return Ok(false);
             }
             RoutePageOutcome::Changed => {

@@ -869,7 +869,8 @@ impl WorkerStore for CellStorage {
     fn process_control_plane_transitions(
         &self,
     ) -> BoxedFuture<'_, Result<Vec<(String, &'static str)>, StorageError>> {
-        // Table creation and deletion reach their durable end state in one Cell command.
+        // Account-scoped capacity workers discover incomplete creation. This
+        // global hook has no account inventory; deletion remains one Cell command.
         Box::pin(async { Ok(Vec::new()) })
     }
 }
