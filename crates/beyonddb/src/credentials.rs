@@ -120,6 +120,10 @@ pub(crate) struct CredentialRecord {
     access_key_id: String,
     account_id: String,
     principal_name: String,
+    session_name: Option<String>,
+    is_session: bool,
+    encrypted_session_token: Option<Vec<u8>>,
+    expires_at: Option<time::OffsetDateTime>,
     is_active: bool,
     encrypted_secret: Vec<u8>,
 }
@@ -279,36 +283,40 @@ impl CellCredentialStore {
         let secret_key = Zeroizing::new(std::mem::take(&mut credential.secret_key));
         crate::account_target(&credential.account_id)
             .map_err(|error| StorageError::Validation(error.to_string()))?;
-        if credential.is_session
-            || credential.session_name.is_some()
+        if credential.is_session {
+            if credential.session_name.as_deref().is_none_or(str::is_empty)
+                || credential
+                    .session_token
+                    .as_deref()
+                    .is_none_or(str::is_empty)
+                || credential.expires_at.is_none()
+            {
+                return Err(StorageError::Validation(
+                    "incomplete session credential".into(),
+                ));
+            }
+        } else if credential.session_name.is_some()
             || credential.session_token.is_some()
             || credential.expires_at.is_some()
         {
-            return Err(StorageError::Unsupported(
-                "temporary session credentials".into(),
-            ));
+            return Err(StorageError::Validation("unexpected session fields".into()));
         }
         let target = credential_target(access_key_id)
             .map_err(|error| StorageError::Validation(error.to_string()))?;
-        let mut nonce = [0_u8; 12];
-        getrandom::fill(&mut nonce).map_err(|error| StorageError::Internal(error.to_string()))?;
-        let cipher = Aes256Gcm::new_from_slice(&*self.encryption_key)
-            .map_err(|_| StorageError::Internal("invalid credential encryption key".into()))?;
-        let encrypted = cipher
-            .encrypt(
-                Nonce::from_slice(&nonce),
-                Payload {
-                    msg: secret_key.as_bytes(),
-                    aad: access_key_id.as_bytes(),
-                },
-            )
-            .map_err(|_| StorageError::Internal("credential encryption failed".into()))?;
-        let mut encrypted_secret = nonce.to_vec();
-        encrypted_secret.extend_from_slice(&encrypted);
+        let encrypted_secret = self.encrypt(access_key_id.as_bytes(), secret_key.as_bytes())?;
+        let encrypted_session_token = credential
+            .session_token
+            .as_deref()
+            .map(|token| self.encrypt(&token_aad(access_key_id), token.as_bytes()))
+            .transpose()?;
         let record = CredentialRecord {
             access_key_id: access_key_id.into(),
             account_id: credential.account_id.clone(),
             principal_name: credential.principal_name.clone(),
+            session_name: credential.session_name.clone(),
+            is_session: credential.is_session,
+            encrypted_session_token,
+            expires_at: credential.expires_at,
             is_active: credential.is_active,
             encrypted_secret,
         };
@@ -334,6 +342,25 @@ impl CellCredentialStore {
             },
             Err(error) => Err(cell_error(error)),
         }
+    }
+
+    fn encrypt(&self, aad: &[u8], plaintext: &[u8]) -> std::result::Result<Vec<u8>, StorageError> {
+        let mut nonce = [0_u8; 12];
+        getrandom::fill(&mut nonce).map_err(|error| StorageError::Internal(error.to_string()))?;
+        let cipher = Aes256Gcm::new_from_slice(&*self.encryption_key)
+            .map_err(|_| StorageError::Internal("invalid credential encryption key".into()))?;
+        let encrypted = cipher
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
+            .map_err(|_| StorageError::Internal("credential encryption failed".into()))?;
+        let mut output = nonce.to_vec();
+        output.extend_from_slice(&encrypted);
+        Ok(output)
     }
 
     /// Disable an existing access key durably; repeat calls are idempotent.
@@ -382,8 +409,52 @@ impl CellCredentialStore {
         &self,
         record: CredentialRecord,
     ) -> std::result::Result<StoredCredential, DynamoDbError> {
-        let (nonce, encrypted) = record
-            .encrypted_secret
+        if record.is_session {
+            if record.session_name.as_deref().is_none_or(str::is_empty)
+                || record.encrypted_session_token.is_none()
+                || record.expires_at.is_none()
+            {
+                return Err(internal_error());
+            }
+        } else if record.session_name.is_some()
+            || record.encrypted_session_token.is_some()
+            || record.expires_at.is_some()
+        {
+            return Err(internal_error());
+        }
+        if record
+            .expires_at
+            .is_some_and(|expiry| expiry <= time::OffsetDateTime::now_utc())
+        {
+            return Err(DynamoDbError::ExpiredTokenException(
+                "The security token included in the request is expired".into(),
+            ));
+        }
+        let secret_key =
+            self.decrypt_field(record.access_key_id.as_bytes(), &record.encrypted_secret)?;
+        let session_token = record
+            .encrypted_session_token
+            .as_deref()
+            .map(|token| self.decrypt_field(&token_aad(&record.access_key_id), token))
+            .transpose()?;
+        Ok(StoredCredential {
+            secret_key,
+            account_id: record.account_id,
+            principal_name: record.principal_name,
+            session_name: record.session_name,
+            is_session: record.is_session,
+            session_token,
+            is_active: record.is_active,
+            expires_at: record.expires_at,
+        })
+    }
+
+    fn decrypt_field(
+        &self,
+        aad: &[u8],
+        ciphertext: &[u8],
+    ) -> std::result::Result<String, DynamoDbError> {
+        let (nonce, encrypted) = ciphertext
             .split_first_chunk::<12>()
             .ok_or_else(internal_error)?;
         let cipher =
@@ -393,22 +464,18 @@ impl CellCredentialStore {
                 Nonce::from_slice(nonce),
                 Payload {
                     msg: encrypted,
-                    aad: record.access_key_id.as_bytes(),
+                    aad,
                 },
             )
             .map_err(|_| internal_error())?;
-        let secret_key = String::from_utf8(plaintext).map_err(|_| internal_error())?;
-        Ok(StoredCredential {
-            secret_key,
-            account_id: record.account_id,
-            principal_name: record.principal_name,
-            session_name: None,
-            is_session: false,
-            session_token: None,
-            is_active: record.is_active,
-            expires_at: None,
-        })
+        String::from_utf8(plaintext).map_err(|_| internal_error())
     }
+}
+
+fn token_aad(access_key_id: &str) -> Vec<u8> {
+    let mut aad = b"beyonddb.session-token.v1\0".to_vec();
+    aad.extend_from_slice(access_key_id.as_bytes());
+    aad
 }
 
 #[async_trait::async_trait]

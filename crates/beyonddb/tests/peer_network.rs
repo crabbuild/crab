@@ -24,6 +24,7 @@ use std::{
 };
 
 use aws_credential_types::Credentials;
+use aws_sdk_dynamodb::error::ProvideErrorMetadata;
 use aws_sdk_dynamodb::types::AttributeValue as AwsAttributeValue;
 use beyonddb::{
     ActivateTableRoute, Beyonddb, BeyonddbPeerScope, BeyonddbPeers, CellAuthorizationStore,
@@ -54,6 +55,27 @@ use tokio_util::sync::CancellationToken;
 
 fn run(command: &mut Command) {
     assert!(command.output().unwrap().status.success());
+}
+
+async fn sdk_with_session(
+    endpoint: &str,
+    access_key: &str,
+    secret: &str,
+    token: &str,
+) -> aws_sdk_dynamodb::Client {
+    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_config::Region::new("us-east-1"))
+        .credentials_provider(Credentials::new(
+            access_key,
+            secret,
+            Some(token.to_owned()),
+            None,
+            "beyonddb-session-test",
+        ))
+        .endpoint_url(endpoint)
+        .load()
+        .await;
+    aws_sdk_dynamodb::Client::new(&config)
 }
 
 fn tls_files(
@@ -209,8 +231,27 @@ async fn start_node(
     (node, tasks)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
+#[test]
+fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
+    // This recovery scenario retains several SDK and Cell futures at once.
+    // Give both the test and Tokio workers enough stack for nested polls.
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(16 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(run_signed_sdk_network_recovery());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn run_signed_sdk_network_recovery() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
         .with_ansi(false)
@@ -502,6 +543,10 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     );
     const ACCESS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
     const SECRET_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    const SESSION_KEY: &str = "ASIAIOSFODNN7EXAMPLE";
+    const SESSION_SECRET: &str = "session-secret-for-network-test";
+    const SESSION_TOKEN: &str = "session-token-for-network-test";
+    const EXPIRED_KEY: &str = "ASIAIOSFODNN7EXPIRED";
     const ENCRYPTION_KEY: [u8; 32] = [38; 32];
     let credential = provisioner.admit_credential(ACCESS_KEY).await.unwrap();
     CellCredentialStore::new(
@@ -617,7 +662,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
             None,
             "beyonddb-network-test",
         ))
-        .endpoint_url(public_endpoint)
+        .endpoint_url(public_endpoint.clone())
         .load()
         .await;
     let sdk = aws_sdk_dynamodb::Client::new(&sdk_config);
@@ -660,6 +705,116 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .await
         .unwrap();
     assert_eq!(read.item(), Some(&item));
+    // Keep the session exercise off this large recovery test's worker stack.
+    Box::pin(async {
+        let session_cell = provisioner.admit_credential(SESSION_KEY).await.unwrap();
+        CellCredentialStore::new(
+            CellClient::local(application.registry(), session_cell),
+            layout.clone(),
+            ENCRYPTION_KEY,
+        )
+        .put_credential(
+            SESSION_KEY,
+            StoredCredential {
+                secret_key: SESSION_SECRET.into(),
+                account_id: "123456789012".into(),
+                principal_name: "network-reader".into(),
+                session_name: Some("network-session".into()),
+                is_session: true,
+                session_token: Some(SESSION_TOKEN.into()),
+                is_active: true,
+                expires_at: Some(time::OffsetDateTime::now_utc() + time::Duration::hours(1)),
+            },
+        )
+        .await
+        .unwrap();
+        let session_sdk =
+            sdk_with_session(&public_endpoint, SESSION_KEY, SESSION_SECRET, SESSION_TOKEN).await;
+        let denied = session_sdk
+            .get_item()
+            .table_name("NetworkData")
+            .key("id", AwsAttributeValue::S("remote".into()))
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            denied.as_service_error().unwrap().code(),
+            Some("AccessDeniedException")
+        );
+        authorization
+            .put_role_policy(
+                "123456789012",
+                "network-reader",
+                "read-network-data",
+                &serde_json::json!({
+                    "Version": "2012-10-17",
+                    "Statement": [{
+                        "Effect": "Allow",
+                        "Action": "dynamodb:GetItem",
+                        "Resource": "arn:aws:dynamodb:us-east-1:123456789012:table/NetworkData"
+                    }]
+                })
+                .to_string(),
+            )
+            .await
+            .unwrap();
+        let session_read = session_sdk
+            .get_item()
+            .table_name("NetworkData")
+            .key("id", AwsAttributeValue::S("remote".into()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(session_read.item(), Some(&item));
+        let wrong_token_sdk =
+            sdk_with_session(&public_endpoint, SESSION_KEY, SESSION_SECRET, "wrong-token").await;
+        let wrong_token = wrong_token_sdk
+            .get_item()
+            .table_name("NetworkData")
+            .key("id", AwsAttributeValue::S("remote".into()))
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            wrong_token.as_service_error().unwrap().code(),
+            Some("UnrecognizedClientException")
+        );
+        let expired_cell = provisioner.admit_credential(EXPIRED_KEY).await.unwrap();
+        CellCredentialStore::new(
+            CellClient::local(application.registry(), expired_cell),
+            layout.clone(),
+            ENCRYPTION_KEY,
+        )
+        .put_credential(
+            EXPIRED_KEY,
+            StoredCredential {
+                secret_key: SESSION_SECRET.into(),
+                account_id: "123456789012".into(),
+                principal_name: "network-reader".into(),
+                session_name: Some("expired-session".into()),
+                is_session: true,
+                session_token: Some(SESSION_TOKEN.into()),
+                is_active: true,
+                expires_at: Some(time::OffsetDateTime::now_utc() - time::Duration::seconds(1)),
+            },
+        )
+        .await
+        .unwrap();
+        let expired_sdk =
+            sdk_with_session(&public_endpoint, EXPIRED_KEY, SESSION_SECRET, SESSION_TOKEN).await;
+        let expired = expired_sdk
+            .get_item()
+            .table_name("NetworkData")
+            .key("id", AwsAttributeValue::S("remote".into()))
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            expired.as_service_error().unwrap().code(),
+            Some("ExpiredTokenException")
+        );
+    })
+    .await;
     peer_network::concurrency::increment_without_client_retries(&sdk).await;
     // This fixture explicitly places new ranges on the API host. Its retained
     // controller must share that provisioner, while reaching account metadata
@@ -873,6 +1028,10 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .takeover_expired_credential(ACCESS_KEY, &peer_directory)
         .await
         .unwrap();
+    replacement_provisioner
+        .takeover_expired_credential(SESSION_KEY, &peer_directory)
+        .await
+        .unwrap();
     let (replacement_shutdown, replacement_cancel) = tokio::sync::oneshot::channel();
     let replacement_router = replacement_peers.router(replacement_provisioner.clone());
     let replacement_server = tokio::spawn(async move {
@@ -960,10 +1119,28 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
             None,
             "beyonddb-replacement-test",
         ))
-        .endpoint_url(replacement_public_endpoint)
+        .endpoint_url(replacement_public_endpoint.clone())
         .load()
         .await;
     let replacement_sdk = aws_sdk_dynamodb::Client::new(&replacement_sdk_config);
+    Box::pin(async {
+        let replacement_session_sdk = sdk_with_session(
+            &replacement_public_endpoint,
+            SESSION_KEY,
+            SESSION_SECRET,
+            SESSION_TOKEN,
+        )
+        .await;
+        let restored_session_read = replacement_session_sdk
+            .get_item()
+            .table_name("NetworkData")
+            .key("id", AwsAttributeValue::S("remote".into()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(restored_session_read.item(), Some(&item));
+    })
+    .await;
     peer_network::account_query::assert_restored(&replacement_sdk).await;
     peer_network::concurrency::assert_counter(&replacement_sdk).await;
     peer_network::capacity::assert_restored_retry(&replacement_sdk).await;
@@ -1139,7 +1316,11 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     replacement_shutdown.send(()).unwrap();
     replacement_server.await.unwrap().unwrap();
     replacement_public_server.abort();
-    owner.shutdown().await.unwrap();
+    // Recovered Cells can leave their expired original owner fenced on drain.
+    assert!(matches!(
+        owner.shutdown().await,
+        Ok(()) | Err(crab_cell_runtime::Error::Fenced)
+    ));
     // Recovery may have transferred all shards before drain; any remaining
     // authority still naming this expired session must reject release.
     assert!(matches!(
