@@ -24,12 +24,28 @@ snapshots. The reference Compose host reserves 32 MiB for native admission
 and 64 MiB for retained cuts within its 1 GiB container limit. Admission
 reservations are separate from measured RSS and the container memory ceiling.
 
+Call `CellNode::install_read_replicas` during startup after installing the task
+group. It retains the shared `ReadReplicaManager`, supervises refresh and
+placement eviction, and cancels activation before closing views during drain.
+Pass the returned manager to the peer dispatcher as its replica resolver.
+The operator supplies the application storage layout, signed directory,
+private local root, and LTX limits. An authenticated owner hint calls
+`activate`; it must still pass current owner and reader-selection checks.
+Queries never activate or refresh a missing reader.
+
+The supervisor refreshes admitted views from published roots and removes views
+that are no longer selected. It does not discover new Cells or recruit spare
+nodes. The product's owner reconciler remains responsible for activation hints;
+HTTP authentication, administrative policy, and repository scope stay in the
+server. The issue service and independent reference hosts use this same manager.
+
 ## Module map
 
 | Module | Responsibility |
 | --- | --- |
 | `builder` | `CellNodeBuilder` validation and required-owner wiring |
 | `node` | `CellNode`, its task group, lifecycle, qualification, and scale down |
+| `read_replicas` | Selected immutable views, refresh, eviction, and terminal close |
 | `durability` | Node-log durability supervision and rotation |
 | `facility` | Facility registration and drained owners |
 | `status` | `NodeState` and `NodeStatus` reporting |

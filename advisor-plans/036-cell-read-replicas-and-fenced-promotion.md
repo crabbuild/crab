@@ -316,6 +316,16 @@ records the 7/6 successful reader split and cgroup evidence. Protected capacity
 and fault gates remain open. See the reference application's `PERFORMANCE.md`
 commands.
 
+The admitted-view manager now belongs to `crab-cell-host`; the issue service
+and reference processes use the same implementation. `CellNode` owns its
+refresh task and drain callback. The reference proof now observes automatic
+root refresh and eviction after target zero, with six generated queries served
+by each reader. Admission still begins with an explicit owner hint; general
+application-host recruitment/replacement remains separate work. Shutdown
+cancels provider waits before joining the activation lane, and a retained
+manager cannot reopen after drain. A stalled-store regression covers this
+ordering. Product authentication and owner-side recruitment stay in the server.
+
 The ignored `rustfs_replica_reads_exact_root_and_policy_cas` test also passed
 against a local RustFS bucket with an isolated prefix. It exercised real S3
 root reads, atomic snapshot refresh, fencing after release, and a policy

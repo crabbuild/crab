@@ -106,17 +106,23 @@ repeating a committed mutation preserves its receipt and creates one visible
 effect. Every primitive lane checks its visible result.
 
 After the measured action lanes, the generated-client proof admits two SQL
-snapshot readers on the other node processes. It verifies unavailable readers
-do not fall back to the owner, reads report the older snapshot after a new
-owner mutation, and a minimum receipt rejects that older position. A controlled
-refresh then exposes the exact newer receipt and one effect after duplicate
-command delivery. Successful direct peer replies are counted by selected
-physical node; both readers must serve queries and the writer must serve none
-of these replica queries. Each receiver dispatches the explicit query against
-its local admitted snapshot, including when that receiver is also a gateway.
-These steps are outside the action timer and do not establish replica
-throughput. Refresh is driven by test markers; automatic reader reconciliation
-and replacement remain separate product qualification.
+snapshot readers on the other node processes through the host-owned
+`ReadReplicaManager`. It verifies missing readers do not fall back to the owner,
+then issues a new owner mutation twice. The supervisor must discover its exact
+newer receipt without a refresh hint; both readers return one additional effect.
+Changing the desired-reader policy to zero must evict both views automatically.
+Each node proves its retained manager rejects activation and resolution after
+host shutdown. Initial admission is triggered by fixture markers; recruitment
+after node loss remains separate product qualification.
+
+Successful direct peer replies are counted by selected physical node: six
+per reader, zero on the writer. Each receiver executes the explicit query
+against its local admitted snapshot, including gateway receivers. The fixture
+observes each reader's receipt before testing the new position, so background
+refresh timing cannot make a stale-position assertion flaky. Deterministic
+stale/minimum-receipt checks remain in the runtime suite and the earlier
+source-bound Compose report. These steps are outside the action timer and do
+not establish replica throughput.
 
 Provide an isolated bucket, a prefix, and explicit credentials:
 

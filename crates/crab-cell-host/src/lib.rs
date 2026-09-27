@@ -43,6 +43,7 @@ mod builder;
 mod durability;
 mod facility;
 mod node;
+pub mod read_replicas;
 mod status;
 mod tasks;
 

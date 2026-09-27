@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use crab_cell_runtime::peer::{PeerSigner, PeerVerifier};
+use crab_cell_runtime::peer::{PeerReplicaResolver, PeerSigner, PeerVerifier};
 use tokio::net::TcpListener;
 
 const ROLE_ENV: &str = "CRAB_CELL_PERF_PROCESS_NODE";
@@ -51,18 +51,17 @@ async fn fleet_process_role() {
     // this process/container and cannot be used by another owner.
     let directory = tempfile::TempDir::new().unwrap();
     let started = std::time::Instant::now();
-    let (host, durability) =
-        super::process_node::start(node, Arc::clone(&application), &layout).await;
+    let (host, durability, readers) =
+        super::process_node::start(node, Arc::clone(&application), &layout, directory.path()).await;
     let runtime = host.runtime();
-    let reader = Arc::new(super::process_replica::Reader::new(
-        CellTarget::new(
-            tenant,
-            application_id,
-            SQL_NAMESPACE,
-            &partition_for_shard(0),
-        )
-        .unwrap(),
-    ));
+    let reader = Arc::new(readers);
+    let read_target = CellTarget::new(
+        tenant,
+        application_id,
+        SQL_NAMESPACE,
+        &partition_for_shard(0),
+    )
+    .unwrap();
     let mut handles = Vec::new();
     for (index, (namespace, role, module, incarnation, schema)) in
         perf_cells().into_iter().enumerate()
@@ -146,33 +145,49 @@ async fn fleet_process_role() {
         server
     };
     let stop = Path::new(&sync).join("stop");
-    let mut refresh = 0;
+    let activate = Path::new(&sync).join("readers.activate");
+    let activated = Path::new(&sync).join(format!("node-{node}-readers.ready"));
+    let evict = Path::new(&sync).join("readers.evicted");
+    let evicted = Path::new(&sync).join(format!("node-{node}-readers.evicted"));
+    let minimum = Path::new(&sync).join("readers.minimum");
+    let refreshed = Path::new(&sync).join(format!("node-{node}-readers.refreshed"));
     while !stop.exists() {
-        if Path::new(&sync)
-            .join(format!("readers-{refresh}.refresh"))
-            .exists()
-        {
+        if activate.exists() && !activated.exists() {
             if node != 0 {
+                assert!(matches!(
+                    reader
+                        .activate(read_target.clone(), node_session(node))
+                        .await,
+                    Err(Error::Fenced)
+                ));
                 reader
-                    .refresh(
-                        &runtime,
-                        &registry,
-                        &layout,
-                        &directory.path().join(format!("reader-{refresh}.sqlite")),
-                    )
-                    .await;
+                    .activate(read_target.clone(), node_session(0))
+                    .await
+                    .unwrap();
             }
-            std::fs::write(
-                Path::new(&sync).join(format!("node-{node}-readers-{refresh}.ready")),
-                [],
+            std::fs::write(&activated, []).unwrap();
+        }
+        if node != 0 && minimum.exists() && !refreshed.exists() {
+            let sequence: u64 = std::fs::read_to_string(&minimum).unwrap().parse().unwrap();
+            let (receipt, ready) = reader.status(read_target.clone()).await.unwrap();
+            if ready && receipt.commit_sequence >= sequence {
+                // This only observes the supervisor; no refresh hint is sent.
+                std::fs::write(&refreshed, []).unwrap();
+            }
+        }
+        if evict.exists()
+            && !evicted.exists()
+            && matches!(
+                reader.resolve(read_target.clone()).await,
+                Err(Error::ReplicaUnavailable)
             )
-            .unwrap();
-            refresh += 1;
+        {
+            // Observe the host supervisor's eviction; the fixture does not remove the view.
+            std::fs::write(&evicted, []).unwrap();
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     server.abort();
-    reader.close();
     println!(
         "PERF node_{node}: active_cells={} retained_bytes={} local_disk_reserved_bytes={}",
         host.stats().active_cells(),
@@ -180,6 +195,15 @@ async fn fleet_process_role() {
         host.stats().local_disk_reserved_bytes()
     );
     host.shutdown().await.unwrap();
+    assert!(matches!(
+        reader.activate(read_target.clone(), node_session(0)).await,
+        Err(Error::RuntimeClosed)
+    ));
+    assert!(matches!(
+        reader.resolve(read_target).await,
+        Err(Error::RuntimeClosed)
+    ));
+    println!("PERF node_{node}_reader_drained: activation_closed=1 resolver_closed=1");
     let mut waits = durability.object_waits();
     assert!(
         !waits.is_empty(),

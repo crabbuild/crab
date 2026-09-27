@@ -1197,16 +1197,16 @@ pub async fn serve(config: Config) -> Result<()> {
         local_disk.clone(),
     )?);
     let release_store = Arc::new(ReleaseStore::new(startup.layout.clone(), startup.identity)?);
-    let read_replicas = (config.cells.durability == CellDurabilityMode::Object).then(|| {
-        crate::cells::ReadReplicaManager::new(
-            cell_runtime.clone(),
-            Arc::clone(&registry),
+    let read_replicas = if config.cells.durability == CellDurabilityMode::Object {
+        Some(cell_node.install_read_replicas(
             startup.layout.clone(),
             directory.clone(),
-            session,
             session_dir.join("read-replicas"),
-        )
-    });
+            crate::cells::repository_replica_limits(),
+        )?)
+    } else {
+        None
+    };
     let peer_receiver = crate::peer::PeerReceiver::new(
         node,
         session,
@@ -1252,7 +1252,6 @@ pub async fn serve(config: Config) -> Result<()> {
     .with_node(node)
     .with_node_recovery_disk(local_disk.clone())
     .with_metrics(metrics.clone());
-    let readers_for_drain = read_replicas.clone();
     cell_node.install_facilities([
         CellNodeFacility::owned(
             CELL_COMPONENT_REPOSITORY_ROUTER,
@@ -1262,15 +1261,7 @@ pub async fn serve(config: Config) -> Result<()> {
         CellNodeFacility::owned(
             CELL_COMPONENT_PEER_RECEIVER,
             Arc::new(peer_receiver.clone()),
-            move || {
-                let readers = readers_for_drain.clone();
-                async move {
-                    if let Some(readers) = readers {
-                        readers.shutdown().await;
-                    }
-                    Ok(())
-                }
-            },
+            || async { Ok(()) },
         )?,
         CellNodeFacility::owned(
             CELL_COMPONENT_NODE_LOG_TRANSPORT,
@@ -1480,10 +1471,6 @@ pub async fn serve(config: Config) -> Result<()> {
     let rebalance_cancellation = cancellation.clone();
     cell_tasks
         .spawn(async move { repository_cells.run_rebalance(rebalance_cancellation).await })?;
-    if let Some(read_replicas) = read_replicas {
-        let refresh_cancellation = cancellation.clone();
-        cell_tasks.spawn(async move { read_replicas.run(refresh_cancellation).await })?;
-    }
     cell_node.start()?;
     server.node_healthy.store(true, Ordering::Release);
     let app = router(Arc::clone(&server));

@@ -3,92 +3,17 @@
 use super::performance_fixture::{PerfFixture, identity, node_session, now_ms, rustfs_store};
 use super::process_node;
 use crate::*;
-use crab_cell_runtime::client::{CellReadReplica, ReadPolicy, ReplicaReadRouter};
+use crab_cell_runtime::client::{ReadPolicy, ReplicaReadRouter};
 use crab_cell_runtime::peer::{
-    PeerPrincipal, PeerReplicaResolver, PeerRoundTrip, PeerSigner, ReplicaPeerClient,
-    decode_peer_reply, wire,
+    PeerPrincipal, PeerRoundTrip, PeerSigner, ReplicaPeerClient, decode_peer_reply, wire,
 };
 use crab_cell_runtime::read_policy::ReadPolicyStore;
 use std::{
     net::SocketAddr,
     path::Path,
-    sync::{
-        RwLock,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
 };
-
-pub(super) struct Reader {
-    target: CellTarget,
-    view: RwLock<Option<CellReadReplica>>,
-}
-
-impl Reader {
-    pub(super) fn new(target: CellTarget) -> Self {
-        Self {
-            target,
-            view: RwLock::new(None),
-        }
-    }
-
-    pub(super) async fn refresh(
-        &self,
-        runtime: &CellRuntime,
-        registry: &Arc<Registry>,
-        layout: &CellStorageLayout,
-        destination: &Path,
-    ) {
-        let current = self.view.read().unwrap().clone();
-        if let Some(view) = current {
-            view.refresh(destination).await.unwrap();
-            return;
-        }
-        let authority = CellAuthority::new(layout.clone());
-        let control = authority
-            .load(self.target.cell_id())
-            .await
-            .unwrap()
-            .unwrap();
-        let replica = CellReplica::new(
-            layout.clone(),
-            *self.target.cell_id().as_bytes(),
-            *control.value().incarnation.as_bytes(),
-            Limits::default(),
-        )
-        .unwrap();
-        let view = CellReadReplica::open(
-            runtime.clone(),
-            Arc::clone(registry),
-            authority,
-            process_node::directory(layout, registry),
-            replica,
-            self.target.clone(),
-            destination,
-        )
-        .await
-        .unwrap();
-        *self.view.write().unwrap() = Some(view);
-    }
-
-    pub(super) fn close(&self) {
-        if let Some(view) = self.view.write().unwrap().take() {
-            view.close();
-        }
-    }
-}
-
-impl PeerReplicaResolver for Reader {
-    fn resolve(
-        &self,
-        target: CellTarget,
-    ) -> Pin<Box<dyn Future<Output = Result<CellReadReplica>> + Send + 'static>> {
-        // Snapshot installation is controlled by the node loop, so a lagging
-        // read cannot silently refresh itself or activate the writable owner.
-        let reader = self.view.read().unwrap().clone();
-        let matches = target == self.target;
-        Box::pin(async move { reader.filter(|_| matches).ok_or(Error::ReplicaUnavailable) })
-    }
-}
 
 struct ReaderTransport {
     nodes: [SocketAddr; 3],
@@ -131,11 +56,11 @@ impl PeerRoundTrip for ReaderTransport {
     }
 }
 
-async fn refresh(sync: &Path, round: usize) {
-    std::fs::write(sync.join(format!("readers-{round}.refresh")), []).unwrap();
+async fn activate(sync: &Path) {
+    std::fs::write(sync.join("readers.activate"), []).unwrap();
     for node in 0..3 {
         super::process_performance::wait_for_marker(
-            &sync.join(format!("node-{node}-readers-{round}.ready")),
+            &sync.join(format!("node-{node}-readers.ready")),
         )
         .await;
     }
@@ -203,7 +128,7 @@ pub(super) async fn verify(fixture: &PerfFixture, sync: &Path, root: &str, nodes
         order.receipt_count(None, ()).await,
         Err(InvocationError::NotStarted(Error::ReplicaUnavailable))
     ));
-    refresh(sync, 0).await;
+    activate(sync).await;
     let before = order.receipt_count(None, ()).await.unwrap();
     for _ in 0..5 {
         assert_eq!(
@@ -223,13 +148,22 @@ pub(super) async fn verify(fixture: &PerfFixture, sync: &Path, root: &str, nodes
     let duplicate = order.receive_cron(identity, input).await.unwrap();
     assert_eq!(duplicate.receipt, committed.receipt);
     assert!(committed.receipt.commit_sequence > before.receipt.commit_sequence);
-    assert_eq!(order.receipt_count(None, ()).await.unwrap(), before);
-    assert!(
-        matches!(order.receipt_count(Some(committed.receipt), ()).await,
-        Err(InvocationError::NotStarted(Error::ReplicaBehind { observed_sequence, minimum_sequence }))
-            if observed_sequence == before.receipt.commit_sequence && minimum_sequence == committed.receipt.commit_sequence)
-    );
-    refresh(sync, 1).await;
+    // Host-owned reconciliation must discover the new root without a refresh hint.
+    std::fs::write(
+        sync.join("readers.minimum"),
+        committed.receipt.commit_sequence.to_string(),
+    )
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        for node in 1..3 {
+            super::process_performance::wait_for_marker(
+                &sync.join(format!("node-{node}-readers.refreshed")),
+            )
+            .await;
+        }
+    })
+    .await
+    .expect("automatic reader refresh timed out");
     for _ in 0..6 {
         let observed = order
             .receipt_count(Some(committed.receipt), ())
@@ -238,13 +172,27 @@ pub(super) async fn verify(fixture: &PerfFixture, sync: &Path, root: &str, nodes
         assert_eq!(observed.output, before.output + 1);
         assert_eq!(observed.receipt, committed.receipt);
     }
+    let policy = ReadPolicyStore::new(layout);
+    let current = policy.load(target.cell_id()).await.unwrap().unwrap();
+    policy.update(&current, 0).await.unwrap();
+    std::fs::write(sync.join("readers.evicted"), []).unwrap();
+    for node in 0..3 {
+        super::process_performance::wait_for_marker(
+            &sync.join(format!("node-{node}-readers.evicted")),
+        )
+        .await;
+    }
+    assert!(matches!(
+        order.receipt_count(None, ()).await,
+        Err(InvocationError::NotStarted(Error::ReplicaUnavailable))
+    ));
     let counts = successes
         .each_ref()
         .map(|count| count.load(Ordering::Relaxed));
     assert_eq!(counts[0], 0);
-    assert_eq!(counts[1] + counts[2], 13);
+    assert_eq!(counts[1] + counts[2], 12);
     assert!(counts[1].abs_diff(counts[2]) <= 1);
     println!(
-        "PERF generated_replica_reads: successful_by_node={counts:?} unavailable_before_open=1 behind_rejected=1 refresh_rounds=2 duplicate_effects=0"
+        "PERF generated_replica_reads: successful_by_node={counts:?} unavailable_before_open=1 automatic_refresh=2 evicted_readers=2 duplicate_effects=0"
     );
 }

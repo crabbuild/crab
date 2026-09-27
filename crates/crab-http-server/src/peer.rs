@@ -103,7 +103,7 @@ pub(crate) struct PeerReceiver {
     releases: Arc<ReleaseStore>,
     resolver: LocalCellResolver,
     round_trip: Arc<dyn PeerRoundTrip>,
-    read_replicas: Option<crate::cells::ReadReplicaManager>,
+    read_replicas: Option<crab_cell_host::read_replicas::ReadReplicaManager>,
 }
 
 impl PeerReceiver {
@@ -115,7 +115,7 @@ impl PeerReceiver {
         releases: Arc<ReleaseStore>,
         resolver: LocalCellResolver,
         round_trip: Arc<dyn PeerRoundTrip>,
-        read_replicas: Option<crate::cells::ReadReplicaManager>,
+        read_replicas: Option<crab_cell_host::read_replicas::ReadReplicaManager>,
     ) -> Self {
         Self {
             node,
@@ -129,7 +129,9 @@ impl PeerReceiver {
         }
     }
 
-    pub(crate) fn read_replicas(&self) -> Option<crate::cells::ReadReplicaManager> {
+    pub(crate) fn read_replicas(
+        &self,
+    ) -> Option<crab_cell_host::read_replicas::ReadReplicaManager> {
         self.read_replicas.clone()
     }
 }
