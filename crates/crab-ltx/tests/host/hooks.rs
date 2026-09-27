@@ -60,6 +60,34 @@ impl Executor for DelayedExecutor {
     }
 }
 
+struct Pause {
+    operation: &'static str,
+    entered: tokio::sync::Notify,
+    released: Mutex<bool>,
+    wake: std::sync::Condvar,
+}
+
+impl Pause {
+    fn wait(&self, operation: &str) {
+        if self.operation == operation {
+            let mut released = self.released.lock().unwrap();
+            self.entered.notify_one();
+            while !*released {
+                released = self.wake.wait(released).unwrap();
+            }
+        }
+    }
+}
+
+struct Release(Arc<Pause>);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        *self.0.released.lock().unwrap() = true;
+        self.0.wake.notify_all();
+    }
+}
+
 #[derive(Clone, Default)]
 struct Faults {
     failure: Arc<Mutex<Option<&'static str>>>,
@@ -67,6 +95,9 @@ struct Faults {
     calls: Arc<Mutex<BTreeSet<&'static str>>>,
     largest_read: Arc<AtomicUsize>,
     read_calls: Arc<AtomicUsize>,
+    checksum_reads: Arc<AtomicUsize>,
+    checksum_read_bytes: Arc<AtomicUsize>,
+    largest_checksum_read: Arc<AtomicUsize>,
     largest_write: Arc<AtomicUsize>,
     write_calls: Arc<AtomicUsize>,
     file_syncs: Arc<AtomicUsize>,
@@ -74,6 +105,8 @@ struct Faults {
     track_all: Arc<AtomicBool>,
     #[cfg(feature = "replica")]
     create_pause: Arc<OnceLock<Arc<InstallPause>>>,
+    forbidden_thread: Arc<Mutex<Option<std::thread::ThreadId>>>,
+    pause: Arc<Mutex<Option<Arc<Pause>>>>,
 }
 
 #[cfg(feature = "replica")]
@@ -107,6 +140,13 @@ impl Faults {
 
     fn check(&self, operation: &'static str) -> io::Result<()> {
         self.calls.lock().unwrap().insert(operation);
+        if *self.forbidden_thread.lock().unwrap() == Some(std::thread::current().id()) {
+            return Err(io::Error::other("filesystem work on async thread"));
+        }
+        let pause = self.pause.lock().unwrap().clone();
+        if let Some(pause) = pause {
+            pause.wait(operation);
+        }
         if *self.failure.lock().unwrap() == Some(operation) {
             return Err(io::Error::new(io::ErrorKind::StorageFull, operation));
         }
@@ -123,6 +163,7 @@ struct File {
     inner: Box<dyn FileIo>,
     faults: Faults,
     track: bool,
+    checksum: bool,
 }
 
 impl FileIo for File {
@@ -153,6 +194,15 @@ impl FileIo for File {
         self.inner.write_all_at(offset, bytes)
     }
     fn read_exact_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        if self.checksum {
+            self.faults.checksum_reads.fetch_add(1, Ordering::Relaxed);
+            self.faults
+                .checksum_read_bytes
+                .fetch_add(len, Ordering::Relaxed);
+            self.faults
+                .largest_checksum_read
+                .fetch_max(len, Ordering::Relaxed);
+        }
         if self.track {
             self.faults.largest_read.fetch_max(len, Ordering::Relaxed);
             self.faults.read_calls.fetch_add(1, Ordering::Relaxed);
@@ -189,6 +239,7 @@ impl FileSystem for Faults {
         Ok(Box::new(File {
             inner: DirectFileSystem.open(path)?,
             faults: self.clone(),
+            checksum: path.to_string_lossy().ends_with(".crab-ltx-checksums"),
             track: self.track_all.load(Ordering::Relaxed)
                 || path.to_string_lossy().contains(".ltx"),
         }))
@@ -198,6 +249,7 @@ impl FileSystem for Faults {
         Ok(Box::new(File {
             inner: DirectFileSystem.open_rw(path)?,
             faults: self.clone(),
+            checksum: path.to_string_lossy().ends_with(".crab-ltx-checksums"),
             track: self.track_all.load(Ordering::Relaxed)
                 || path.to_string_lossy().contains(".ltx"),
         }))
@@ -213,6 +265,7 @@ impl FileSystem for Faults {
         Ok(Box::new(File {
             inner,
             faults: self.clone(),
+            checksum: path.to_string_lossy().ends_with(".crab-ltx-checksums"),
             track: self.track_all.load(Ordering::Relaxed)
                 || path.to_string_lossy().contains(".ltx"),
         }))
@@ -244,7 +297,9 @@ impl FileSystem for Faults {
 fn fixture() -> (tempfile::TempDir, Arc<Faults>, Host, Db) {
     let directory = tempfile::TempDir::new().unwrap();
     let faults = Arc::new(Faults::default());
-    let host = Host::default().with_filesystem(faults.clone());
+    let host = Host::default()
+        .with_filesystem(faults.clone())
+        .with_local_disk_budget(crab_ltx::DiskBudget::new(1 << 30));
     let mut writer = Db::open_with_host(
         &directory.path().join("source.sqlite"),
         Limits::default(),
@@ -265,6 +320,8 @@ fn injected<T>(result: crab_ltx::Result<T>) {
     );
 }
 
+#[cfg(feature = "replica")]
+mod activation;
 mod capture;
 mod compaction;
 mod injection;

@@ -133,11 +133,9 @@ impl QualificationRunSummary {
 
     /// Returns receipt-compatible bounded metrics from this run.
     pub fn metrics(&self) -> Result<Vec<QualificationMetric>> {
-        let duration_secs = self
-            .elapsed
-            .as_secs()
-            .saturating_add(u64::from(self.elapsed.subsec_nanos() != 0))
-            .max(1);
+        // Verification recomputes these metrics from serialized milliseconds.
+        // Rounding nanoseconds independently rejects runs just past a whole second.
+        let duration_secs = self.elapsed_ms().saturating_add(999) / 1_000;
         let throughput = self.operations / duration_secs;
         Ok(vec![
             QualificationMetric::new("cells".into(), self.cells, "cells".into())?,
@@ -203,7 +201,7 @@ impl QualificationRunSummary {
             seed: self.seed,
             cells: self.cells,
             operations: self.operations,
-            elapsed_ms: self.elapsed.as_millis().max(1).min(u128::from(u64::MAX)) as u64,
+            elapsed_ms: self.elapsed_ms(),
             primitive_counts: self.primitive_counts.clone(),
             case_coverage: self.case_coverage.clone(),
             outcome_digest: *qualification_run_outcome_digest(
@@ -214,6 +212,10 @@ impl QualificationRunSummary {
             .as_bytes(),
             metrics,
         })
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.elapsed.as_millis().max(1).min(u128::from(u64::MAX)) as u64
     }
 }
 

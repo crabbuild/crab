@@ -184,14 +184,16 @@ Fault profiles additionally require a named injected fault, a non-`none` fault
 schedule digest, and a monotonic ownership transition; a signed no-op receipt
 cannot stand in for Kubernetes fault evidence.
 
+The inventory check below uses an in-memory store. The following source-loss,
+retention, and public-host checks use the configured RustFS endpoint. Confirm
+each selected command reports a nonzero passed-test count; Cargo accepts an
+exact filter that matches no tests. The architecture workflow enforces this
+check for every invocation in its RustFS recovery step.
+
 ```bash
-AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
-AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
-CRAB_LTX_TEST_BUCKET="$BUCKET" \
-CRAB_LTX_TEST_ENDPOINT="$ENDPOINT" \
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
   cargo test -p crab-ltx --features replica --test cell --locked \
-  cell::roots::exact_root_inventory_verifies_every_remote_dependency -- --exact
+  cell::roots::lifecycle::exact_root_inventory_verifies_every_remote_dependency -- --exact
 
 AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
 AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
@@ -200,7 +202,7 @@ CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
 CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
   cargo test -p crab-cell-runtime --test runtime \
-  runtime::lifecycle::rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
+  runtime::lifecycle::ownership::recovery::rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
   --locked -- --ignored --exact
 
 AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
@@ -210,7 +212,7 @@ CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
 CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX-mixed" \
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
   cargo test -p crab-cell-runtime --test runtime \
-  runtime::lifecycle::rustfs_mixed_primitive_inventory_churn_preserves_exact_roots \
+  runtime::lifecycle::idle::churn::rustfs_mixed_primitive_inventory_churn_preserves_exact_roots \
   --locked -- --ignored --exact
 
 AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
@@ -220,7 +222,7 @@ CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
 CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX-retention" \
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-rustfs \
   cargo test -p crab-cell-runtime --lib \
-  retention::tests::rustfs_maintenance_collection_preserves_live_and_pinned_graphs \
+  recovery::retention::tests::rustfs_maintenance_collection_preserves_live_and_pinned_graphs \
   --locked -- --ignored --exact
 
 AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
@@ -260,7 +262,7 @@ normal runtime test binary. It never starts I/O or Tokio work:
 ```bash
 CRAB_COORDINATION_SEED=41 CRAB_COORDINATION_STEPS=256 \
   CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-main \
-  cargo test -p crab-cell-runtime coordination_sim::replay_requested_seed_from_environment \
+  cargo test -p crab-cell-runtime --lib coordination::sim::replay_requested_seed_from_environment \
   --locked -- --exact --nocapture
 ```
 
@@ -340,19 +342,19 @@ prefix, observe identical summaries, inspect unowned `Idle` authority, and use
 a separate process configured only for the destination prefix to verify the
 complete graph with the pinned release.
 
-The ignored qualification tests require one fresh bucket and a unique Cell prefix:
+The RustFS qualification tests require one fresh bucket and a unique Cell prefix.
+The first command is the in-memory inventory check. Each command must report
+at least one passed test:
 
 ```bash
-CRAB_LTX_TEST_BUCKET="$BUCKET" \
-CRAB_LTX_TEST_ENDPOINT="$ENDPOINT" \
 cargo test -p crab-ltx --features replica --test cell \
-  exact_root_inventory_verifies_every_remote_dependency -- --exact
+  cell::roots::lifecycle::exact_root_inventory_verifies_every_remote_dependency -- --exact
 
 CRAB_CELL_TEST_BUCKET="$BUCKET" \
 CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
 CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
 cargo test -p crab-cell-runtime --test runtime \
-  runtime::lifecycle::rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
+  runtime::lifecycle::ownership::recovery::rustfs_source_loss_takeover_restores_exact_root_and_continues_publication \
   -- --ignored --exact
 
 CRAB_CELL_TEST_BUCKET="$BUCKET" \
@@ -366,7 +368,7 @@ CRAB_CELL_TEST_BUCKET="$BUCKET" \
 CRAB_CELL_TEST_ENDPOINT="$ENDPOINT" \
 CRAB_CELL_TEST_PREFIX="$UNIQUE_PREFIX" \
 cargo test -p crab-cell-runtime --lib \
-  retention::tests::rustfs_maintenance_collection_preserves_live_and_pinned_graphs \
+  recovery::retention::tests::rustfs_maintenance_collection_preserves_live_and_pinned_graphs \
   -- --ignored --exact
 
 CRAB_HTTP_CELL_TEST_BUCKET="$BUCKET" \

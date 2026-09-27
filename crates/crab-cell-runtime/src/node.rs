@@ -52,7 +52,7 @@ pub use advertisement::{
     VersionedNodeAdvertisement,
 };
 pub use capacity::{NodeCapacity, NodeFailureDomain, NodePlacementCapacity};
-pub use directory::NodeDirectory;
+pub use directory::{EnrolledPeerVerifier, NodeDirectory};
 mod advertisement;
 mod capacity;
 mod directory;

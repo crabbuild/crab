@@ -4,6 +4,17 @@ use std::{sync::Arc, time::Duration};
 use crate::fleet::pressure::PressureState;
 use crate::node::log::DurabilitySource;
 
+/// Evidence used for one returned durable command or effect outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandResponseSource {
+    /// An already durable outcome was replayed without another commit.
+    Recorded,
+    /// Follower durability proved the new commit.
+    Fleet,
+    /// Object publication proved the new commit.
+    Object,
+}
+
 /// Outcome of an actor-owned resident route lookup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResidentRouteOutcome {
@@ -111,6 +122,19 @@ pub trait CellTelemetry: Send + Sync {
     /// Records one completed fleet or object durability proof.
     fn durability_proof(&self, _source: DurabilitySource, _waited: Duration) {}
 
+    /// Records one durable command or effect outcome sent to its runtime caller.
+    ///
+    /// Elapsed time starts at admitted enqueue; confirmation is the final SQL
+    /// worker wait after proof, or zero for a recorded result. Transport, queries,
+    /// migrations, failed results, and abandoned receivers are excluded.
+    fn command_response(
+        &self,
+        _source: CommandResponseSource,
+        _elapsed: Duration,
+        _confirmation: Duration,
+    ) {
+    }
+
     /// Records how one commit's node-log submission resolved.
     fn durability_submission(&self, _outcome: DurabilitySubmissionOutcome) {}
 
@@ -197,6 +221,17 @@ impl CellTelemetryHandle {
     pub(crate) fn durability_proof(&self, source: DurabilitySource, waited: Duration) {
         if let Some(telemetry) = self.inner.get() {
             telemetry.durability_proof(source, waited);
+        }
+    }
+
+    pub(crate) fn command_response(
+        &self,
+        source: CommandResponseSource,
+        elapsed: Duration,
+        confirmation: Duration,
+    ) {
+        if let Some(telemetry) = self.inner.get() {
+            telemetry.command_response(source, elapsed, confirmation);
         }
     }
 
@@ -312,6 +347,19 @@ impl crab_ltx::LtxTelemetry for CellTelemetryHandle {
     }
 
     fn capture(&self, timing: &crab_ltx::CaptureTiming, succeeded: bool) {
+        tracing::debug!(
+            target: "crab_cell_runtime::action",
+            event = "cell_capture_completed",
+            capture_ns = timing.total_nanos,
+            encode_ns = timing.encode_nanos,
+            write_ns = timing.local_write_nanos,
+            fsync_ns = timing.fsync_nanos,
+            parent_sync_ns = timing.parent_sync_nanos,
+            checkpoint_ns = timing.checkpoint_nanos,
+            wal_read_bytes = timing.wal_read_bytes,
+            ltx_bytes = timing.ltx_bytes,
+            succeeded,
+        );
         self.ltx_capture(timing, succeeded);
     }
 }

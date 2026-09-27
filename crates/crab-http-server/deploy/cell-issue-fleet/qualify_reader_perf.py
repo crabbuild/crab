@@ -7,7 +7,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from qualify import command, compose, issue_path, node_url, request_json
+from qualify import command, compose, initial_issue, issue_matches, issue_path, node_url, request_json
 from qualify_read_replicas import cost_delta, cost_snapshot, node_inventory, prove_authority_outage, prove_readers, set_reader_target
 from qualify_reader_load import measure, resources
 from render import CONFIG, node_name
@@ -51,9 +51,9 @@ def main():
     # Clean drain preserves the fixture; only node 5 can claim its first read.
     compose(path, ("five",), "stop", "gateway", *nodes)
     compose(path, ("five",), "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300", "node-05", "gateway")
-    expected = {"title": "Cell issue on node 1", "body": previous["acknowledged_body"]}
+    expected = {**initial_issue(1), "body": previous["acknowledged_body"]}
     current = request_json("GET", node_url(5, args.node_port_base) + issue_path(1) + "/1")
-    if any(current.get(key) != value for key, value in expected.items()):
+    if not issue_matches(current, expected):
         raise RuntimeError("fixture lost its acknowledged value")
     compose(path, ("five",), "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300",
             "gateway", *nodes)
@@ -63,7 +63,7 @@ def main():
             raise RuntimeError("running container differs from the selected image")
     set_reader_target(args.node_port_base, 1, 4)
     current = request_json("GET", node_url(1, args.node_port_base) + issue_path(1) + "/1")
-    if any(current.get(key) != value for key, value in expected.items()):
+    if not issue_matches(current, expected):
         raise RuntimeError("fixture lost its acknowledged value")
     report = {"runtime_source": source, "image": image, "project": config["name"],
               "runner_source": command("git", "rev-parse", "HEAD"),
@@ -118,7 +118,7 @@ def main():
     if report["similar_performance"]:
         report["authority_outage"] = prove_authority_outage(path, ("five",), args.node_port_base, 5)
         current = request_json("GET", node_url(1, args.node_port_base) + issue_path(1) + "/1?read=replica")
-        if any(current.get(key) != value for key, value in expected.items()):
+        if not issue_matches(current, expected):
             raise RuntimeError("authority recovery changed the acknowledged value")
     report["finished_at"] = datetime.now(timezone.utc).isoformat()
     args.report.write_text(json.dumps(report, indent=2) + "\n")

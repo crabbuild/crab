@@ -154,15 +154,20 @@ jobs:
           grep -F 'name: http-server-candidate-' "$workflow"
           grep -F 'github.run_id' "$workflow"
           grep -F 'github.run_attempt' "$workflow"
-          grep -F 'gh run download "$CANDIDATE_RUN_ID"' "$workflow"
           grep -F '.event == "push"' "$workflow"
-          grep -F '.headSha == $source' "$workflow"
-          grep -F '.databaseId == $run' "$workflow"
-          grep -F 'test "$(cat "$candidate_dir/source-revision")" = "$SOURCE_SHA"' "$workflow"
-          grep -F '"$image_ref" != "$expected_ref"' "$workflow"
-          grep -F 'Candidate tag moved from $IMAGE_DIGEST to $actual.' "$workflow"
-          grep -F '"$GITHUB_SHA" != "$source_sha"' "$workflow"
-          grep -F '"$GITHUB_REF" != "refs/tags/$tag"' "$workflow"
+          # Compare literal source fragments without evaluating their variables.
+          while IFS= read -r fragment; do
+            grep -F -- "$fragment" "$workflow"
+          done <<'SOURCE_FRAGMENTS'
+          gh run download "$CANDIDATE_RUN_ID"
+          .headSha == $source
+          .databaseId == $run
+          test "$(cat "$candidate_dir/source-revision")" = "$SOURCE_SHA"
+          "$image_ref" != "$expected_ref"
+          Candidate tag moved from $IMAGE_DIGEST to $actual.
+          "$GITHUB_SHA" != "$source_sha"
+          "$GITHUB_REF" != "refs/tags/$tag"
+          SOURCE_FRAGMENTS
           grep -A2 '^  image:' "$workflow" | grep -F "if: github.event_name == 'workflow_dispatch'"
           test "$(grep -cF '          TAG: ' "$workflow")" -eq 3
           grep -F 'inputs.tag || github.ref_name' "$workflow"

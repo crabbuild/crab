@@ -107,6 +107,7 @@ impl Fixture {
             Arc::clone(&registry),
             runtime,
             RepositoryCellPeer::new(
+                crate::peer::PeerOwnerHints::default(),
                 NodeDirectory::new(
                     layout.clone(),
                     Digest::from_bytes([4; 32]),

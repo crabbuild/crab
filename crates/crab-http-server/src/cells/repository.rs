@@ -147,6 +147,7 @@ pub(crate) struct CreateLabelInput {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CreateLabelOutcome {
+    Archived,
     Created(LabelRecord),
     RequestConflict,
     NameConflict,
@@ -165,6 +166,7 @@ pub(crate) struct UpdateLabelInput {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum UpdateLabelOutcome {
+    Archived,
     Updated(LabelRecord),
     NotFound,
     NameConflict,
@@ -179,6 +181,7 @@ pub(crate) struct DeleteLabelInput {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DeleteLabelOutcome {
+    Archived,
     Deleted,
     NotFound,
     Conflict,
@@ -194,6 +197,7 @@ pub(crate) struct CreateIssueInput {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CreateIssueOutcome {
+    Archived,
     Created(Box<IssueRecord>),
     RequestConflict,
 }
@@ -233,6 +237,7 @@ pub(crate) struct CommentRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CreateCommentOutcome {
+    Archived,
     Created(CommentRecord),
     IssueNotFound,
     RequestConflict,
@@ -259,6 +264,7 @@ pub(crate) struct UpdateIssueInput {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum UpdateIssueOutcome {
+    Archived,
     Updated(Box<IssueRecord>),
     NotFound,
     Forbidden,
@@ -278,6 +284,7 @@ pub(crate) struct UpdateCommentInput {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum UpdateCommentOutcome {
+    Archived,
     Updated(CommentRecord),
     NotFound,
     Forbidden,
@@ -340,6 +347,9 @@ impl Command for CreateIssue {
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
     ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(CommandResult::Rejected(CreateIssueOutcome::Archived));
+        }
         validate_author(&input.author)?;
         validate_title(&input.title)?;
         validate_body(&input.body, false)?;
@@ -433,6 +443,9 @@ impl Command for CreateComment {
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
     ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(CommandResult::Rejected(CreateCommentOutcome::Archived));
+        }
         validate_number(input.issue)?;
         validate_author(&input.author)?;
         validate_body(&input.body, true)?;

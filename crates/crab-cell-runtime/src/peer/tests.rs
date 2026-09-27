@@ -87,6 +87,12 @@ fn target() -> wire::Target {
 
 fn mutation() -> wire::MutationRequest {
     wire::MutationRequest {
+        expected: Some(wire::CellDescription {
+            cell_id: vec![9; 32],
+            incarnation: vec![8; 16],
+            code: vec![10; 32],
+            schema: 1,
+        }),
         target: Some(target()),
         identity: Some(wire::MutationIdentity {
             request_id: vec![7; 16],
@@ -103,6 +109,40 @@ fn mutation() -> wire::MutationRequest {
             },
         )),
     }
+}
+
+#[test]
+fn expected_contract_is_required_and_covered_by_the_signature() {
+    let signer = signer();
+    let sign = |request| {
+        signer.sign(
+            principal(),
+            NOW_MS,
+            NOW_MS + 60_000,
+            30_000,
+            PeerOperation::Mutate(request),
+        )
+    };
+    let mut missing = mutation();
+    missing.expected = None;
+    assert!(sign(missing).is_err());
+
+    let encoded = sign(mutation()).unwrap();
+    let mut decoded = wire::PeerRequest::decode(encoded.as_slice()).unwrap();
+    assert!(
+        verifier(&signer)
+            .verify(&decoded.encode_to_vec(), NOW_MS)
+            .is_ok()
+    );
+    let Some(wire::peer_request::Operation::Mutate(request)) = &mut decoded.operation else {
+        panic!("expected a mutation");
+    };
+    request.expected.as_mut().unwrap().schema += 1;
+    assert!(
+        verifier(&signer)
+            .verify(&decoded.encode_to_vec(), NOW_MS)
+            .is_err()
+    );
 }
 
 fn effect_identity() -> wire::EffectIdentity {
@@ -173,7 +213,7 @@ fn signed_request_verifies_and_forward_preserves_payload() {
         )
         .unwrap();
     assert_eq!(
-        claimed_peer_session(&encoded).unwrap(),
+        UnverifiedPeerRequest::decode(&encoded).unwrap().session(),
         SessionId::from_bytes([1; 16])
     );
     let verifier = verifier(&signer);
@@ -350,6 +390,12 @@ fn reordered_protobuf_payload_retains_exact_signature_binding() {
         None => unreachable!(),
     };
     encode_bytes_field(&mut payload, 10, &command).unwrap();
+    encode_bytes_field(
+        &mut payload,
+        4,
+        &mutation.expected.as_ref().unwrap().encode_to_vec(),
+    )
+    .unwrap();
     encode_bytes_field(
         &mut payload,
         2,

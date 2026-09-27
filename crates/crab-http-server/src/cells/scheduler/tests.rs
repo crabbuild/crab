@@ -868,6 +868,7 @@ async fn scan_executes_registered_workflow_activity_without_blocking_the_scanner
         registry.clone(),
         runtime.clone(),
         super::super::RepositoryCellPeer::new(
+            crate::peer::PeerOwnerHints::default(),
             node_directory.clone(),
             Arc::new(PeerSigner::new(session, registry.release_digest(), key)),
             Arc::new(UnavailablePeer),
@@ -1041,6 +1042,7 @@ async fn scan_cursor_advances_when_the_cycle_budget_is_exhausted() {
         Arc::clone(&registry),
         runtime.clone(),
         super::super::RepositoryCellPeer::new(
+            crate::peer::PeerOwnerHints::default(),
             node_directory.clone(),
             Arc::new(PeerSigner::new(session, registry.release_digest(), key)),
             Arc::new(UnavailablePeer),
@@ -1254,6 +1256,7 @@ async fn failed_remote_schedule_keeps_durable_due_state_for_the_next_cycle() {
         Arc::clone(&registry),
         local_runtime.clone(),
         super::super::RepositoryCellPeer::new(
+            crate::peer::PeerOwnerHints::default(),
             node_directory.clone(),
             Arc::new(PeerSigner::new(
                 local_session,
@@ -1411,6 +1414,7 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
         Arc::clone(&registry),
         runtime.clone(),
         super::super::RepositoryCellPeer::new(
+            crate::peer::PeerOwnerHints::default(),
             node_directory.clone(),
             Arc::new(PeerSigner::new(session, registry.release_digest(), key)),
             Arc::new(UnavailablePeer),
@@ -1561,6 +1565,7 @@ async fn due_scheduler_fixture(
         Arc::clone(&registry),
         runtime.clone(),
         super::super::RepositoryCellPeer::new(
+            crate::peer::PeerOwnerHints::default(),
             node_directory.clone(),
             Arc::new(PeerSigner::new(session, registry.release_digest(), key)),
             Arc::new(UnavailablePeer),
@@ -1694,6 +1699,20 @@ async fn hinted_tick_spends_a_bounded_metadata_budget() {
 #[tokio::test(flavor = "multi_thread")]
 async fn foreground_cycle_ticks_hints_without_the_backstop() {
     let mut fixture = due_scheduler_fixture(121, 1, false).await;
+    let node =
+        crab_cell_runtime::identity::NodeId::from_bytes(*fixture.scheduler.session.as_bytes());
+    let followers = crab_cell_runtime::FollowerStore::open(
+        fixture._directory.path().join("followers"),
+        super::super::repository_replica_limits(),
+        crab_ltx::DiskBudget::new(1 << 30),
+    )
+    .unwrap();
+    fixture.scheduler = fixture
+        .scheduler
+        .with_node_recovery(Arc::new(
+            crab_cell_runtime::node::log_transport::LocalFollowerTransport::new(node, followers),
+        ))
+        .with_node(node);
     let target = fixture.targets[0].clone();
     let now_ms = super::super::unix_now_ms().unwrap();
     crab_cell_runtime::cell::due::publish(
@@ -2039,6 +2058,7 @@ async fn activating_release_migrates_idle_cell_before_ready_gate() {
         Arc::clone(&registry),
         runtime.clone(),
         super::super::RepositoryCellPeer::new(
+            crate::peer::PeerOwnerHints::default(),
             node_directory.clone(),
             Arc::new(PeerSigner::new(session, registry.release_digest(), key)),
             Arc::new(UnavailablePeer),

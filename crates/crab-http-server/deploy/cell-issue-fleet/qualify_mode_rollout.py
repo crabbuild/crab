@@ -2,17 +2,18 @@
 """Qualify a drained three-node fleet-to-object rollout against local RustFS."""
 
 import argparse
-import hashlib
 import json
-import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from qualify import command, compose, issue_path, node_url, prove_node, request_json, run_stage
+from qualify import (
+    build_image, command, compose, initial_issue, issue_matches, issue_path,
+    node_url, pin_image, prove_node, request_json, run_stage,
+)
 from qualify_read_replicas import prove_readers, set_reader_target
-from render import CONFIG, ROOT, node_name, render
+from render import CONFIG, ROOT, node_config, node_name, render
 
 
 def metrics(path: Path, index: int) -> str:
@@ -34,7 +35,7 @@ def verify_values(port: int, bodies: dict[int, set[str]]) -> None:
     for index in range(1, 4):
         issue = request_json("GET", node_url(1, port) + issue_path(index) + "/1")
         labels = request_json("GET", node_url(1, port) + f"/api/repos/demo/work-{index:02d}/labels")
-        if issue["title"] != f"Cell issue on node {index}" or labels["items"][0]["name"] != "distributed":
+        if not issue_matches(issue, initial_issue(index)) or labels["items"][0]["name"] != "distributed":
             raise RuntimeError("rollout changed an acknowledged issue or label")
         comments = request_json("GET", node_url(1, port) + issue_path(index) + "/1/comments?limit=50")
         if not bodies[index].issubset({item["body"] for item in comments["items"]}):
@@ -95,6 +96,7 @@ def main() -> None:
     parser.add_argument("--project", required=True)
     parser.add_argument("--gateway-port", type=int, default=18080)
     parser.add_argument("--node-port-base", type=int, default=18100)
+    parser.add_argument("--rustfs-port", type=int, default=19010)
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--runtime-source", help="source commit of the existing image when skipping its build")
     parser.add_argument("--exercise-drain-faults", action="store_true")
@@ -106,18 +108,23 @@ def main() -> None:
     label = f"label=com.docker.compose.project={args.project}"
     if any(command("docker", kind, "ls", "-q", "--filter", label) for kind in ("volume", "network")) or command("docker", "ps", "-aq", "--filter", label):
         raise RuntimeError(f"Compose project {args.project} already has resources")
-    path = render(args.state, args.project, args.gateway_port, args.node_port_base)
+    path = render(args.state, args.project, args.gateway_port, args.node_port_base, args.rustfs_port)
     compose(path, (), "config", "--quiet")
+    source = command("git", "-C", str(ROOT), "rev-parse", "HEAD")
     if not args.skip_build:
-        subprocess.run(["docker", "compose", "--file", str(path), "build", "release-init"], check=True)
+        build_image(args.project, source)
+    runtime_source = source
+    if args.skip_build:
+        runtime_source = command("git", "-C", str(ROOT), "rev-parse", args.runtime_source + "^{commit}")
+    image = pin_image(path, runtime_source)
     report = {
-        "runtime_source": args.runtime_source or command("git", "-C", str(ROOT), "rev-parse", "HEAD"),
-        "source_commit": command("git", "-C", str(ROOT), "rev-parse", "HEAD"),
-        "source_diff_sha256": hashlib.sha256(command("git", "-C", str(ROOT), "diff", "--binary", "HEAD").encode()).hexdigest(),
-        "image": command("docker", "image", "inspect", "--format", "{{.Id}}", f"{args.project}:local"),
+        "runtime_source": runtime_source,
+        "source_commit": source,
+        **image,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "profile": "local-rustfs-fleet-to-object",
-        "initial_stage": run_stage(path, (), 0, 3, args.gateway_port, args.node_port_base),
+        "initial_stage": run_stage(path, (), 0, 3, args.gateway_port, args.node_port_base,
+                                   {index: initial_issue(index) for index in range(1, 4)}),
     }
     nodes = [node_name(index) for index in range(1, 4)]
     acknowledged = {index: set() for index in range(1, 4)}
@@ -179,7 +186,10 @@ def main() -> None:
     report["drain"] = drain_fleet(path, nodes)
     (path.parent / "mode-rollout-report.json").write_text(json.dumps(report, indent=2) + "\n")
     require_drained(report["drain"])
-    path = render(args.state, args.project, args.gateway_port, args.node_port_base, True)
+    # Preserve the pinned image, release identity and provider port across the
+    # transition; re-rendering Compose would restore the mutable build tag.
+    for index in range(1, 21):
+        (path.parent / "config" / f"{node_name(index)}.toml").write_text(node_config(index, object_durability=True))
     compose(path, (), "up", "--detach", "--no-build", "--wait", "--wait-timeout", "300")
     verify_values(args.node_port_base, acknowledged)
     object_body = "acknowledged after the object-proof rollout"

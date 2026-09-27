@@ -462,6 +462,23 @@ async fn exercise_replica_read(fixture: &Fixture) {
             .output,
         0
     );
+    // Peer fencing is encoded as unavailable and decoded as CellNotActive.
+    // A mismatched incarnation must be rejected before executing the query.
+    assert!(matches!(
+        peer_client
+            .query::<ReadCounter>(
+                &fixture.target,
+                reader_node.clone(),
+                CellDescription {
+                    incarnation: IncarnationId::from_bytes([99; 16]),
+                    ..expected
+                },
+                None,
+                0,
+            )
+            .await,
+        Err(crab_cell_runtime::Error::CellNotActive)
+    ));
     directory
         .create(reader_node.clone(), now_ms())
         .await
@@ -606,20 +623,24 @@ async fn exercise_replica_read(fixture: &Fixture) {
         .await
         .unwrap();
     let refreshed = reader.clone();
-    assert_eq!(
-        refreshed
-            .refresh(&refreshed_path)
-            .await
-            .unwrap()
-            .commit_sequence,
-        committed.commit_sequence()
-    );
-    assert!(reader_path.exists());
+    let refresh = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        refreshed.refresh(&refreshed_path),
+    )
+    .await;
+    let old_view_retained = reader_path.exists();
     let during_refresh = reader_runtime.stats();
+    // Release the SQL callback before asserting progress, so an admission
+    // regression fails instead of leaving the test's blocking task parked.
     tokio::task::spawn_blocking(|| query_barriers().1.wait())
         .await
         .unwrap();
     let old = pending.await.unwrap().unwrap();
+    assert_eq!(
+        refresh.unwrap().unwrap().commit_sequence,
+        committed.commit_sequence()
+    );
+    assert!(old_view_retained);
     assert_eq!(during_refresh.worker_jobs(), 1);
     assert_eq!(reader_runtime.stats().worker_jobs(), 0);
     assert_eq!(during_refresh.file_descriptors(), 8);

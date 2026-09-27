@@ -546,6 +546,61 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
     let collaboration =
         serde_json::from_slice::<Value>(&collaboration.bytes().await.unwrap()).unwrap();
     assert_eq!(collaboration["error"]["code"], "repository_archived");
+    for (method, path, body) in [
+        (
+            reqwest::Method::POST,
+            "issues",
+            json!({"request_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","title":"Blocked issue","body":""}),
+        ),
+        (
+            reqwest::Method::PATCH,
+            "issues/1",
+            json!({"version":1,"title":"Blocked edit"}),
+        ),
+        (
+            reqwest::Method::POST,
+            "issues/1/comments",
+            json!({"request_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","body":"Blocked comment"}),
+        ),
+        (
+            reqwest::Method::PATCH,
+            "issues/1/comments/1",
+            json!({"version":1,"body":"Blocked edit"}),
+        ),
+        (
+            reqwest::Method::POST,
+            "labels",
+            json!({"request_id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","name":"Blocked","color":"123456","description":null}),
+        ),
+        (
+            reqwest::Method::PATCH,
+            "labels/1",
+            json!({"version":1,"name":"Blocked","color":"123456","description":null}),
+        ),
+        (reqwest::Method::DELETE, "labels/1", json!({"version":1})),
+    ] {
+        let response = h
+            .http
+            .request(
+                method,
+                format!("{}/api/repos/team/private/{path}", h.origin),
+            )
+            .header(header::COOKIE, &alice)
+            .header(header::ORIGIN, &h.origin)
+            .header("x-csrf-token", csrf)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body: Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(
+            (status, body["error"]["code"].as_str()),
+            (StatusCode::FORBIDDEN, Some("repository_archived")),
+            "{path}: {body}",
+        );
+    }
     let rejected = crate::server::receive_tests::git(
         source.path(),
         &["push", git_url.as_str(), "HEAD:feature/archive"],

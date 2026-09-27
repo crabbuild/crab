@@ -29,9 +29,19 @@ impl CaptureEngine {
         }
         let hdr = hdr.clone();
         info.offset = hdr.wal_offset + hdr.wal_size;
-        info.salt1 = hdr.wal_salt1;
-        info.salt2 = hdr.wal_salt2;
         info.prev_commit = hdr.commit;
+        let Some((prior_salt1, prior_salt2)) = hdr.wal_salts else {
+            // An exact inherited root has no local WAL boundary yet. Capture
+            // creates/observes the first WAL under the session's read lock;
+            // its complete committed prefix continues the verified checksums.
+            let wal = self.wal_header_bytes()?;
+            info.salt1 = be_u32(&wal[16..]);
+            info.salt2 = be_u32(&wal[20..]);
+            info.snapshotting = false;
+            return Ok(info);
+        };
+        info.salt1 = prior_salt1;
+        info.salt2 = prior_salt2;
 
         // If the LTX WAL offset exceeds the real WAL size, the WAL was truncated.
         let wal_size = self.wal_file_size()?;
@@ -57,7 +67,7 @@ impl CaptureEngine {
         let wal_hdr = self.wal_header_bytes()?;
         let salt1 = be_u32(&wal_hdr[16..]);
         let salt2 = be_u32(&wal_hdr[20..]);
-        let salt_match = salt1 == hdr.wal_salt1 && salt2 == hdr.wal_salt2;
+        let salt_match = salt1 == prior_salt1 && salt2 == prior_salt2;
 
         // Edge case: LTX represents the start of the WAL (WALOffset=32, WALSize=0).
         // Handle this before computing prev_wal_offset to avoid underflow
@@ -99,7 +109,7 @@ impl CaptureEngine {
             info.salt2 = salt2;
 
             let detected =
-                self.detect_full_checkpoint(&[(salt1, salt2), (hdr.wal_salt1, hdr.wal_salt2)])?;
+                self.detect_full_checkpoint(&[(salt1, salt2), (prior_salt1, prior_salt2)])?;
             if detected {
             } else {
                 info.snapshotting = false;
@@ -125,8 +135,7 @@ impl CaptureEngine {
         let fsalt1 = be_u32(&frame[8..]);
         let fsalt2 = be_u32(&frame[12..]);
         let data = &frame[WAL_FRAME_HEADER_SIZE..];
-        Ok(fsalt1 == hdr.wal_salt1
-            && fsalt2 == hdr.wal_salt2
+        Ok(Some((fsalt1, fsalt2)) == hdr.wal_salts
             && pgno == hdr.final_pgno
             && data == hdr.final_page.as_slice())
     }

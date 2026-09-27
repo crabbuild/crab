@@ -1470,6 +1470,7 @@ pub(crate) async fn enter_maintenance(
         Arc::clone(&registry),
         runtime.clone(),
         RepositoryCellPeer::new(
+            crate::peer::PeerOwnerHints::default(),
             directory.clone(),
             Arc::new(PeerSigner::new(
                 session,
@@ -2172,6 +2173,7 @@ mod tests {
     use crab_cell_runtime::cell::executor::MutationIdentity;
     use crab_cell_runtime::cell::worker::SqlWorkerPool;
     use crab_cell_runtime::client::{CellClient, InvocationError};
+    use crab_cell_runtime::codec::{BoundedEncoder, WireValue};
     use crab_cell_runtime::control::Owner;
     use crab_cell_runtime::control::authority::CellAuthority;
     use crab_cell_runtime::identity::IncarnationId;
@@ -2201,20 +2203,21 @@ mod tests {
         CreateLabelInput, CreateLabelOutcome, CreatePull, CreatePullInput, CreatePullOutcome,
         CreatePullReviewReply, CreatePullReviewReplyInput, CreatePullReviewReplyOutcome,
         CreatePullReviewThread, CreatePullReviewThreadInput, CreatePullReviewThreadOutcome,
-        CreateRelease, CreateReleaseInput, CreateReleaseOutcome, GetBranchProtections, GetCheckRun,
-        GetCheckUpdateSubmission, GetComment, GetIssue, GetPull, GetPullReviewReply,
-        GetPullReviewThread, GetRelease, GetRepositoryLifecycle, IssuePage, LabelCatalog,
-        ListComments, ListCommentsInput, ListCommitStatuses, ListIssues, ListIssuesInput,
-        ListLabels, ListPullReviewReplies, ListPullReviewThreads, MergeMethod, PullMerge,
-        PullMergeTransition, PullReviewReplyKey, PullReviewReplyListInput, PullReviewReplyPage,
-        PullReviewThreadKey, PullReviewThreadListInput, PullReviewThreadSide, PullState,
-        ReplaceBranchProtections, ReplaceBranchProtectionsInput, ReplaceBranchProtectionsOutcome,
-        ReplaceRepositoryLifecycle, ReplaceRepositoryLifecycleInput,
-        ReplaceRepositoryLifecycleOutcome, RepositoryAuthor, RepositoryLifecycleRecord,
-        ReservePullMerge, ReservePullMergeInput, ReservePullMergeOutcome, TransitionPullMerge,
-        TransitionPullMergeInput, TransitionPullMergeOutcome, UpdateCheckRun, UpdateCheckRunInput,
-        UpdateCheckRunOutcome, UpdateComment, UpdateCommentInput, UpdateCommentOutcome,
-        UpdateIssue, UpdateIssueInput, UpdateIssueOutcome, UpdatePullReviewReply,
+        CreateRelease, CreateReleaseInput, CreateReleaseOutcome, DeleteLabel, DeleteLabelInput,
+        GetBranchProtections, GetCheckRun, GetCheckUpdateSubmission, GetComment, GetIssue, GetPull,
+        GetPullReviewReply, GetPullReviewThread, GetRelease, GetRepositoryLifecycle, IssuePage,
+        LabelCatalog, ListComments, ListCommentsInput, ListCommitStatuses, ListIssues,
+        ListIssuesInput, ListLabels, ListPullReviewReplies, ListPullReviewThreads, MergeMethod,
+        PullMerge, PullMergeTransition, PullReviewReplyKey, PullReviewReplyListInput,
+        PullReviewReplyPage, PullReviewThreadKey, PullReviewThreadListInput, PullReviewThreadSide,
+        PullState, ReplaceBranchProtections, ReplaceBranchProtectionsInput,
+        ReplaceBranchProtectionsOutcome, ReplaceRepositoryLifecycle,
+        ReplaceRepositoryLifecycleInput, ReplaceRepositoryLifecycleOutcome, RepositoryAuthor,
+        RepositoryLifecycleRecord, ReservePullMerge, ReservePullMergeInput,
+        ReservePullMergeOutcome, TransitionPullMerge, TransitionPullMergeInput,
+        TransitionPullMergeOutcome, UpdateCheckRun, UpdateCheckRunInput, UpdateCheckRunOutcome,
+        UpdateComment, UpdateCommentInput, UpdateCommentOutcome, UpdateIssue, UpdateIssueInput,
+        UpdateIssueOutcome, UpdateLabel, UpdateLabelInput, UpdatePullReviewReply,
         UpdatePullReviewReplyInput, UpdatePullReviewReplyOutcome, UpdatePullReviewThread,
         UpdatePullReviewThreadInput, UpdatePullReviewThreadOutcome,
     };
@@ -2819,6 +2822,7 @@ mod tests {
             Arc::clone(&registry),
             runtime.clone(),
             RepositoryCellPeer::new(
+                crate::peer::PeerOwnerHints::default(),
                 directory.clone(),
                 Arc::new(PeerSigner::new(
                     session,
@@ -2999,6 +3003,7 @@ mod tests {
             Arc::clone(&registry),
             runtime.clone(),
             RepositoryCellPeer::new(
+                crate::peer::PeerOwnerHints::default(),
                 directory.clone(),
                 Arc::new(PeerSigner::new(
                     session,
@@ -3771,6 +3776,7 @@ mod tests {
             layout.clone(),
             ApplicationIdentity::new(tenant, application),
             first_runtime.clone(),
+            first_runtime.telemetry_handle(),
         );
         let peer_handle = peer_resolver.resolve(target.clone()).await.unwrap();
         assert_eq!(peer_handle.cell_id(), first_handle.cell_id());
@@ -4237,6 +4243,115 @@ mod tests {
             ReplaceRepositoryLifecycleOutcome::Updated(lifecycle.clone())
         );
 
+        let archived_issue_identity = mutation(200);
+        let archived_issue_input = CreateIssueInput {
+            submission_id: [200; 16],
+            author: status_input.author.clone(),
+            title: "Attempt while archived".into(),
+            body: "Must not create a row until a new mutation after unarchive".into(),
+        };
+        let archived_issue = archive_rejection(
+            first_client
+                .command::<CreateIssue>(
+                    &target,
+                    archived_issue_identity,
+                    archived_issue_input.clone(),
+                )
+                .await,
+        );
+        archive_rejection(
+            first_client
+                .command::<CreateComment>(
+                    &target,
+                    mutation(201),
+                    CreateCommentInput {
+                        submission_id: [201; 16],
+                        issue: issue_record.number,
+                        author: status_input.author.clone(),
+                        body: "Must not create an archived comment".into(),
+                    },
+                )
+                .await,
+        );
+        archive_rejection(
+            first_client
+                .command::<UpdateIssue>(
+                    &target,
+                    mutation(202),
+                    UpdateIssueInput {
+                        number: updated_issue_record.number,
+                        actor: status_input.author.clone(),
+                        can_manage_metadata: true,
+                        version: updated_issue_record.version,
+                        title: Some("Must not change an archived issue".into()),
+                        body: None,
+                        state: None,
+                        label_ids: None,
+                        assignee_subjects: None,
+                    },
+                )
+                .await,
+        );
+        archive_rejection(
+            first_client
+                .command::<UpdateComment>(
+                    &target,
+                    mutation(203),
+                    UpdateCommentInput {
+                        key: CommentKey {
+                            issue: updated_comment_record.issue,
+                            number: updated_comment_record.number,
+                        },
+                        actor: status_input.author.clone(),
+                        version: updated_comment_record.version,
+                        body: "Must not change an archived comment".into(),
+                    },
+                )
+                .await,
+        );
+        archive_rejection(
+            first_client
+                .command::<CreateLabel>(
+                    &target,
+                    mutation(204),
+                    CreateLabelInput {
+                        submission_id: [204; 16],
+                        author: status_input.author.clone(),
+                        name: "archived".into(),
+                        color: "123456".into(),
+                        description: None,
+                    },
+                )
+                .await,
+        );
+        archive_rejection(
+            first_client
+                .command::<UpdateLabel>(
+                    &target,
+                    mutation(205),
+                    UpdateLabelInput {
+                        number: first_label_record.number,
+                        version: first_label_record.version,
+                        name: "Must not rename an archived label".into(),
+                        color: first_label_record.color.clone(),
+                        description: None,
+                    },
+                )
+                .await,
+        );
+        archive_rejection(
+            first_client
+                .command::<DeleteLabel>(
+                    &target,
+                    mutation(206),
+                    DeleteLabelInput {
+                        number: second_label_record.number,
+                        version: second_label_record.version,
+                    },
+                )
+                .await,
+        );
+
         let pull = first_client
             .command::<CreatePull>(
                 &target,
@@ -4681,6 +4796,34 @@ mod tests {
             .unwrap();
         let second_client = CellClient::local(registry, second_handle.clone());
         assert_eq!(
+            archive_rejection(
+                second_client
+                    .command::<CreateIssue>(
+                        &target,
+                        archived_issue_identity,
+                        archived_issue_input.clone(),
+                    )
+                    .await,
+            ),
+            archived_issue,
+        );
+        assert_eq!(
+            second_client
+                .command::<CreateIssue>(
+                    &target,
+                    issue_identity,
+                    CreateIssueInput {
+                        submission_id: [1; 16],
+                        author: issue_record.author.clone(),
+                        title: "Durable issue".into(),
+                        body: "published through LTX".into(),
+                    },
+                )
+                .await
+                .unwrap(),
+            issue,
+        );
+        assert_eq!(
             second_client
                 .query::<GetIssue>(&target, Some(comment.receipt), issue_record.number)
                 .await
@@ -4885,8 +5028,55 @@ mod tests {
                 next: None,
             }
         );
+        second_client
+            .command::<ReplaceRepositoryLifecycle>(
+                &target,
+                mutation(207),
+                ReplaceRepositoryLifecycleInput {
+                    expected_version: lifecycle.version,
+                    archived: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            archive_rejection(
+                second_client
+                    .command::<CreateIssue>(
+                        &target,
+                        archived_issue_identity,
+                        archived_issue_input.clone(),
+                    )
+                    .await,
+            ),
+            archived_issue,
+        );
+        let created_after_unarchive = second_client
+            .command::<CreateIssue>(&target, mutation(208), archived_issue_input.clone())
+            .await
+            .unwrap();
+        let CreateIssueOutcome::Created(created_after_unarchive) = created_after_unarchive.output
+        else {
+            panic!("new mutation remained blocked after unarchive");
+        };
+        assert_eq!(
+            (created_after_unarchive.number, created_after_unarchive.body),
+            (2, archived_issue_input.body),
+        );
         second_handle.drain().await.unwrap();
         second_runtime.shutdown().await.unwrap();
+    }
+
+    fn archive_rejection<T: WireValue>(
+        result: std::result::Result<crab_cell_runtime::client::Committed<T>, InvocationError<T>>,
+    ) -> crab_cell_runtime::client::Committed<T> {
+        let Err(InvocationError::Rejected(rejected)) = result else {
+            panic!("archived repository accepted a fresh mutation");
+        };
+        let mut encoder = BoundedEncoder::new(1).unwrap();
+        rejected.output.encode(&mut encoder).unwrap();
+        assert_eq!(encoder.finish(), [0]);
+        *rejected
     }
     fn mutation(byte: u8) -> MutationIdentity {
         let now_ms = i64::try_from(

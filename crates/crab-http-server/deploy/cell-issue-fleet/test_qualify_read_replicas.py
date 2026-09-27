@@ -1,8 +1,18 @@
-"""Reject incomplete or reset telemetry instead of reporting fabricated costs."""
+"""Verify replica fixture identity, image provenance, and measured costs."""
 
+import io
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from qualify_read_replicas import COST_METRICS, cost_delta, parse_cost_metrics
+import qualify
+import qualify_mode_rollout
+import qualify_read_replicas
+from qualify import initial_issue
+from qualify_mode_rollout import verify_values
+from qualify_read_replicas import COST_METRICS, cost_delta, parse_cost_metrics, replica_issue
 
 
 def counters(control=0):
@@ -43,6 +53,99 @@ class CostEvidenceTests(unittest.TestCase):
         for after in [{}, snapshot(0), missing_series]:
             with self.subTest(after=after), self.assertRaises(RuntimeError):
                 cost_delta(snapshot(1), after)
+
+
+class FixtureReadbackTests(unittest.TestCase):
+    def test_readers_and_rollout_reject_wrong_source_before_starting_nodes(self):
+        source = "a" * 40
+        wrong_image = {"Id": "sha256:" + "1" * 64, "Os": "linux", "Architecture": "arm64",
+                       "Config": {"Labels": {"org.opencontainers.image.revision": "b" * 40}}}
+        for module in (qualify_read_replicas, qualify_mode_rollout):
+            with self.subTest(module=module.__name__), tempfile.TemporaryDirectory() as state:
+                args = [module.__name__, "--state", state, "--project", "crab-cell-issue-reader-test", "--skip-build"]
+                args.extend(["--runtime-source", source])
+                with patch("sys.argv", args), \
+                        patch.object(module, "command", side_effect=lambda *args:
+                                     source if "rev-parse" in args else ""), \
+                        patch.object(module, "compose", return_value=""), \
+                        patch.object(qualify, "command", return_value=json.dumps([wrong_image])), \
+                        patch.object(module, "run_stage") as start:
+                    with self.assertRaisesRegex(RuntimeError, "source revision"):
+                        module.main()
+                    start.assert_not_called()
+                self.assertFalse((Path(state) / "read-replica-report.json").exists())
+
+    def test_rollout_preserves_the_pinned_deployment_when_changing_durability(self):
+        class ObjectRestart(Exception):
+            pass
+
+        source = "a" * 40
+        image = {"Id": "sha256:" + "1" * 64, "Os": "linux", "Architecture": "arm64",
+                 "Config": {"Labels": {"org.opencontainers.image.revision": source}}}
+        with tempfile.TemporaryDirectory() as state:
+            path = Path(state) / "compose.yaml"
+            before = []
+
+            def drain(_path, nodes):
+                before.append(path.read_bytes())
+                return {node: {"Running": False, "ExitCode": 0, "OOMKilled": False}
+                        for node in nodes}
+
+            def compose(_path, _profiles, *args):
+                if args[0] == "up":
+                    raise ObjectRestart()
+                if args[0] == "exec":
+                    return json.dumps({"advertisement": {"log": {"active": True}}})
+                return ""
+
+            args = ["qualify_mode_rollout", "--state", state, "--project", "crab-cell-issue-rollout-test",
+                    "--skip-build", "--runtime-source", source, "--rustfs-port", "42010"]
+            with patch("sys.argv", args), \
+                    patch.object(qualify_mode_rollout, "command", side_effect=lambda *args:
+                                 source if "rev-parse" in args else ""), \
+                    patch.object(qualify, "command", return_value=json.dumps([image])), \
+                    patch.object(qualify_mode_rollout, "compose", side_effect=compose), \
+                    patch.object(qualify_mode_rollout, "run_stage", return_value={}), \
+                    patch.object(qualify_mode_rollout, "prove_node", return_value=("session", {}, "container")), \
+                    patch.object(qualify_mode_rollout, "request_json", side_effect=lambda _m, _u, body: body), \
+                    patch.object(qualify_mode_rollout, "metrics", return_value='crab_cell_durability_proofs_total{source="fleet"} 1'), \
+                    patch.object(qualify_mode_rollout, "drain_fleet", side_effect=drain):
+                with self.assertRaises(ObjectRestart):
+                    qualify_mode_rollout.main()
+            self.assertEqual(path.read_bytes(), before[0])
+            self.assertEqual(json.loads(before[0])["services"]["rustfs"]["ports"], ["127.0.0.1:42010:9000"])
+            configs = list((Path(state) / "config").glob("*.toml"))
+            self.assertEqual(len(configs), 20)
+            self.assertTrue(all('durability = "object"' in file.read_text() for file in configs))
+
+    def test_reader_accepts_the_current_fixture_after_body_refresh(self):
+        response = io.BytesIO(json.dumps({**initial_issue(1), "body": "acknowledged update"}).encode())
+        response.headers = {"x-crab-cell-reader": "a" * 32,
+                            "x-crab-cell-incarnation": "b" * 32, "x-crab-cell-sequence": "7"}
+        with response, patch("urllib.request.urlopen", return_value=response):
+            self.assertEqual(replica_issue("http://fixture/issue", 1), ("a" * 32, 7, "b" * 32))
+
+    def test_rollout_checks_the_complete_initial_issue(self):
+        for corruption in (None, "title", "body", "number"):
+            with self.subTest(corruption=corruption):
+                def request(_method, url):
+                    index = int(url.split("work-")[1][:2])
+                    if url.endswith("/labels"):
+                        return {"items": [{"name": "distributed"}]}
+                    if "/comments?" in url:
+                        return {"items": [{"body": "acknowledged comment"}]}
+                    issue = initial_issue(index)
+                    if corruption:
+                        issue[corruption] = "wrong"
+                    return issue
+
+                with patch("qualify_mode_rollout.request_json", side_effect=request):
+                    comments = {index: {"acknowledged comment"} for index in range(1, 4)}
+                    if corruption:
+                        with self.assertRaisesRegex(RuntimeError, "acknowledged issue"):
+                            verify_values(18100, comments)
+                    else:
+                        verify_values(18100, comments)
 
 
 if __name__ == "__main__":

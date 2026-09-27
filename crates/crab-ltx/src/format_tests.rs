@@ -7,6 +7,10 @@ use crate::{
 };
 use std::path::PathBuf;
 
+pub(crate) fn decode_file(bytes: &[u8]) -> crate::Result<ltx::DecodedFile> {
+    ltx::inspect_reader(std::io::Cursor::new(bytes)).map(|(file, _, _)| file)
+}
+
 /// Page body the external vectors were generated with.
 ///
 /// `tests/vectors/generate` writes the same pattern, so a change to one side
@@ -147,6 +151,7 @@ fn external_snapshots_decode_restore_and_match_our_writer() {
         assert_eq!((summary.min_txid, summary.max_txid), (1, 1), "{name}");
         assert_eq!(summary.pages, *commit, "{name}");
         assert_eq!(summary.size_bytes, bytes.len() as u64, "{name}");
+        assert_eq!(summary.blake3, *blake3::hash(&bytes).as_bytes(), "{name}");
 
         // The upstream file restores the exact image the pages encode.
         let temp = tempfile::TempDir::new().unwrap();
@@ -332,7 +337,35 @@ fn valid_outer_checksums_do_not_hide_bad_page_order_or_index() {
         let sum = pages.iter().fold(CHECKSUM_FLAG, |sum, (pgno, data)| {
             CHECKSUM_FLAG | (sum ^ page_sum(*pgno, data))
         });
-        assert!(ltx::decode_file(&fixture(&pages, commit, sum, bias, false)).is_err());
+        assert!(decode_file(&fixture(&pages, commit, sum, bias, false)).is_err());
+    }
+}
+
+#[test]
+fn footer_checks_the_original_varint_encoding_and_exact_length() {
+    let data = vec![8; 512];
+    let mut bytes = fixture(&[(1, data.clone())], 1, page_sum(1, &data), 0, false);
+    let sentinel = bytes.len() - 25;
+    assert_eq!(bytes[sentinel], 0);
+    // Nonminimal varints are accepted by the existing format. Both their
+    // encoded length and their original bytes contribute to footer validation.
+    bytes.splice(sentinel..=sentinel, [0x80, 0]);
+    let size_offset = bytes.len() - 24;
+    let old_size = u64::from_be_bytes(bytes[size_offset..size_offset + 8].try_into().unwrap());
+    for correct_size in [true, false] {
+        let size = old_size + u64::from(correct_size);
+        bytes[size_offset..size_offset + 8].copy_from_slice(&size.to_be_bytes());
+        let mut hashed = bytes[..110].to_vec();
+        hashed.extend_from_slice(&data);
+        hashed.extend_from_slice(&bytes[625..bytes.len() - 8]);
+        let len = bytes.len();
+        bytes[len - 8..].copy_from_slice(&(CHECKSUM_FLAG | crc(&hashed)).to_be_bytes());
+        let decoded = decode_file(&bytes);
+        if correct_size {
+            decoded.unwrap();
+        } else {
+            assert!(matches!(decoded, Err(CrabError::LTXCorrupted)));
+        }
     }
 }
 
@@ -341,7 +374,7 @@ fn every_truncated_prefix_is_rejected_without_panicking() {
     let data = vec![8; 512];
     let bytes = fixture(&[(1, data.clone())], 1, page_sum(1, &data), 0, false);
     for end in 0..bytes.len() {
-        assert!(ltx::decode_file(&bytes[..end]).is_err());
+        assert!(decode_file(&bytes[..end]).is_err());
     }
 }
 
@@ -357,7 +390,7 @@ fn exact_restore_rejects_checksum_disabled_file() {
     hashed.extend_from_slice(&bytes[625..bytes.len() - 8]);
     let len = bytes.len();
     bytes[len - 8..].copy_from_slice(&(CHECKSUM_FLAG | crc(&hashed)).to_be_bytes());
-    let file = ltx::decode_file(&bytes).unwrap();
+    let file = decode_file(&bytes).unwrap();
     let info = SegmentInfo::from_decoded(&bytes, &file);
     let path = temp.path().join("unchecked.ltx");
     std::fs::write(&path, bytes).unwrap();
@@ -413,7 +446,7 @@ fn altered_delta_predecessor_or_post_state_is_rejected_with_valid_file_crc() {
     let after = vec![2; 512];
     let first = fixture(&[(1, before.clone())], 1, page_sum(1, &before), 0, false);
     let select = |name: &str, bytes: Vec<u8>| {
-        let decoded = ltx::decode_file(&bytes).unwrap();
+        let decoded = decode_file(&bytes).unwrap();
         let info = SegmentInfo::from_decoded(&bytes, &decoded);
         let path = temp.path().join(name);
         std::fs::write(&path, bytes).unwrap();

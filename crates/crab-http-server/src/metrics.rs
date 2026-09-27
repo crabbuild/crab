@@ -15,7 +15,7 @@ use axum::{
 use bytes::Bytes;
 use http_body::{Body as _, Frame, SizeHint};
 use metrics::{Counter, Gauge, Histogram, Key, KeyName, Label, Level, Metadata, Recorder, Unit};
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 
 const METHOD_COUNT: usize = 6;
 const OUTCOME_COUNT: usize = 7;
@@ -42,6 +42,10 @@ const DURATION_BUCKETS_SECONDS: [f64; 16] = [
     0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
     600.0,
 ];
+const COMMAND_BUCKETS_SECONDS: [f64; 20] = [
+    0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0,
+    2.5, 5.0, 10.0, 30.0, 60.0, 120.0,
+];
 const METHOD_LABELS: [&str; METHOD_COUNT] = ["get", "head", "put", "post", "delete", "other"];
 const OUTCOME_LABELS: [&str; OUTCOME_COUNT] =
     ["1xx", "2xx", "3xx", "4xx", "5xx", "other", "cancelled"];
@@ -49,10 +53,20 @@ pub(crate) const ADMISSION_LABELS: [&str; ADMISSION_COUNT] =
     ["read", "git_transfer", "application", "maintenance"];
 const TRANSFER_REJECTION_LABELS: [&str; TRANSFER_REJECTION_COUNT] = ["capacity", "coordination"];
 const DURABILITY_SOURCE_LABELS: [&str; DURABILITY_SOURCE_COUNT] = ["fleet", "object"];
+const COMMAND_RESPONSE_LABELS: [&str; 3] = ["recorded", "fleet", "object"];
 const APPEND_RESULT_LABELS: [&str; APPEND_RESULT_COUNT] = ["acked", "nacked"];
 const DURABILITY_SUBMISSION_LABELS: [&str; DURABILITY_SUBMISSION_COUNT] =
     ["fleet", "unsupported", "unavailable", "rejected"];
 const RESIDENT_ROUTE_LABELS: [&str; 3] = ["hit", "miss", "refused"];
+const OWNER_HINT_LABELS: [&str; 4] = ["hit", "miss", "stale", "refused"];
+
+#[derive(Clone, Copy)]
+pub(crate) enum OwnerHintOutcome {
+    Hit,
+    Miss,
+    Stale,
+    Refused,
+}
 const CATALOG_READ_LABELS: [&str; 2] = ["head", "page"];
 const CATALOG_READ_RESULT_LABELS: [&str; 2] = ["ok", "failed"];
 const CONTROL_READ_RESULT_LABELS: [&str; 2] = ["ok", "failed"];
@@ -179,9 +193,13 @@ struct MetricsInner {
     cell_follower_retained_bytes: Gauge,
     durability_proofs: [Counter; DURABILITY_SOURCE_COUNT],
     durability_wait: [Histogram; DURABILITY_SOURCE_COUNT],
+    command_responses: [Counter; 3],
+    command_response_duration: [Histogram; 3],
+    command_confirmation_duration: [Histogram; 3],
     node_log_append_bytes: [Counter; APPEND_RESULT_COUNT],
     durability_submissions: [Counter; DURABILITY_SUBMISSION_COUNT],
     resident_routes: [Counter; 3],
+    owner_hints: [Counter; 4],
     catalog_reads: [[Counter; 2]; 2],
     catalog_read_duration: [Histogram; 2],
     control_reads: [Counter; 2],
@@ -381,6 +399,10 @@ impl Metrics {
     ) -> Result<Self, metrics_exporter_prometheus::BuildError> {
         let recorder = PrometheusBuilder::new()
             .set_buckets(&DURATION_BUCKETS_SECONDS)?
+            .set_buckets_for_metric(
+                Matcher::Prefix("crab_cell_command_".to_owned()),
+                &COMMAND_BUCKETS_SECONDS,
+            )?
             .build_recorder();
         describe_metrics(&recorder);
         let methods = METHOD_LABELS.map(|method| MethodMetrics::new(&recorder, method));
@@ -563,6 +585,27 @@ impl Metrics {
                         &METADATA,
                     )
                 }),
+                command_responses: COMMAND_RESPONSE_LABELS.map(|source| {
+                    recorder.register_counter(
+                        &key("crab_cell_command_responses_total", &[("source", source)]),
+                        &METADATA,
+                    )
+                }),
+                command_response_duration: COMMAND_RESPONSE_LABELS.map(|source| {
+                    recorder.register_histogram(
+                        &key("crab_cell_command_response_seconds", &[("source", source)]),
+                        &METADATA,
+                    )
+                }),
+                command_confirmation_duration: COMMAND_RESPONSE_LABELS.map(|source| {
+                    recorder.register_histogram(
+                        &key(
+                            "crab_cell_command_confirmation_seconds",
+                            &[("source", source)],
+                        ),
+                        &METADATA,
+                    )
+                }),
                 node_log_append_bytes: APPEND_RESULT_LABELS.map(|result| {
                     recorder.register_counter(
                         &key(
@@ -584,6 +627,12 @@ impl Metrics {
                 resident_routes: RESIDENT_ROUTE_LABELS.map(|outcome| {
                     recorder.register_counter(
                         &key("crab_cell_resident_route_total", &[("outcome", outcome)]),
+                        &METADATA,
+                    )
+                }),
+                owner_hints: OWNER_HINT_LABELS.map(|outcome| {
+                    recorder.register_counter(
+                        &key("crab_cell_owner_hint_total", &[("outcome", outcome)]),
                         &METADATA,
                     )
                 }),
@@ -1052,6 +1101,10 @@ impl Metrics {
         self.inner.methods[method].requests[outcome].increment(1);
     }
 
+    pub(crate) fn record_owner_hint(&self, outcome: OwnerHintOutcome) {
+        self.inner.owner_hints[outcome as usize].increment(1);
+    }
+
     fn record_duration(&self, method: usize, started: Instant) {
         self.inner.methods[method]
             .duration
@@ -1105,6 +1158,24 @@ impl crab_cell_runtime::fleet::telemetry::CellTelemetry for Metrics {
         };
         self.inner.durability_proofs[index].increment(1);
         self.inner.durability_wait[index].record(waited.as_secs_f64());
+    }
+
+    fn command_response(
+        &self,
+        source: crab_cell_runtime::fleet::telemetry::CommandResponseSource,
+        elapsed: Duration,
+        confirmation: Duration,
+    ) {
+        use crab_cell_runtime::fleet::telemetry::CommandResponseSource;
+
+        let index = match source {
+            CommandResponseSource::Recorded => 0,
+            CommandResponseSource::Fleet => 1,
+            CommandResponseSource::Object => 2,
+        };
+        self.inner.command_responses[index].increment(1);
+        self.inner.command_response_duration[index].record(elapsed.as_secs_f64());
+        self.inner.command_confirmation_duration[index].record(confirmation.as_secs_f64());
     }
 
     fn durability_submission(
@@ -1971,6 +2042,21 @@ fn describe_metrics(recorder: &impl Recorder) {
     );
     describe_counter(
         recorder,
+        "crab_cell_command_responses_total",
+        "Successful command and effect responses by the evidence that released the response.",
+    );
+    recorder.describe_histogram(
+        KeyName::from_const_str("crab_cell_command_response_seconds"),
+        Some(Unit::Seconds),
+        "Time from admitted command enqueue to successful runtime response.".into(),
+    );
+    recorder.describe_histogram(
+        KeyName::from_const_str("crab_cell_command_confirmation_seconds"),
+        Some(Unit::Seconds),
+        "Final SQL worker confirmation after durability proof; zero for recorded responses.".into(),
+    );
+    describe_counter(
+        recorder,
         "crab_cell_node_log_append_bytes_total",
         "Bytes attempted across bounded follower append lanes by result.",
     );
@@ -1983,6 +2069,11 @@ fn describe_metrics(recorder: &impl Recorder) {
         recorder,
         "crab_cell_resident_route_total",
         "Actor-owned resident route lookups by bounded outcome.",
+    );
+    describe_counter(
+        recorder,
+        "crab_cell_owner_hint_total",
+        "Peer sender owner-hint lookups and invalidations by bounded outcome.",
     );
     describe_counter(
         recorder,
@@ -2332,6 +2423,8 @@ mod tests {
     #[tokio::test]
     async fn completed_request_exports_bounded_full_body_metrics() {
         let metrics = Metrics::new(&[]).unwrap();
+        metrics.record_owner_hint(OwnerHintOutcome::Hit);
+        metrics.record_owner_hint(OwnerHintOutcome::Stale);
         metrics.record_transfer_admission_rejection(false);
         metrics.record_transfer_admission_rejection(true);
         <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::durability_proof(
@@ -2344,6 +2437,18 @@ mod tests {
             crab_cell_runtime::node::log::DurabilitySource::Object,
             Duration::from_millis(50),
         );
+        for source in [
+            crab_cell_runtime::fleet::telemetry::CommandResponseSource::Recorded,
+            crab_cell_runtime::fleet::telemetry::CommandResponseSource::Fleet,
+            crab_cell_runtime::fleet::telemetry::CommandResponseSource::Object,
+        ] {
+            <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::command_response(
+                &metrics,
+                source,
+                Duration::from_millis(40),
+                Duration::from_millis(2),
+            );
+        }
         <Metrics as crab_cell_runtime::fleet::telemetry::CellTelemetry>::durability_submission(
             &metrics,
             crab_cell_runtime::fleet::telemetry::DurabilitySubmissionOutcome::Fleet,
@@ -2529,6 +2634,19 @@ mod tests {
             rendered.contains("crab_cell_node_log_recovery_work_total{kind=\"object_writes\"} 10")
         );
         assert!(rendered.contains("crab_cell_durability_proofs_total{source=\"fleet\"} 1"));
+        for source in COMMAND_RESPONSE_LABELS {
+            assert!(rendered.contains(&format!(
+                "crab_cell_command_confirmation_seconds_bucket{{source=\"{source}\",le=\"0.001\"}} 0"
+            )));
+            for (name, expected) in [
+                ("crab_cell_command_responses_total", "1"),
+                ("crab_cell_command_response_seconds_count", "1"),
+                ("crab_cell_command_response_seconds_sum", "0.04"),
+                ("crab_cell_command_confirmation_seconds_sum", "0.002"),
+            ] {
+                assert!(rendered.contains(&format!("{name}{{source=\"{source}\"}} {expected}")));
+            }
+        }
         assert!(rendered.contains("crab_cell_durability_proofs_total{source=\"object\"} 1"));
         assert!(
             rendered.contains("crab_cell_ltx_phase_seconds_count{phase=\"root_preparation\"} 1")
@@ -2550,6 +2668,8 @@ mod tests {
         assert!(rendered.contains("crab_cell_node_log_append_bytes_total{result=\"nacked\"} 128"));
         assert!(rendered.contains("crab_cell_resident_route_total{outcome=\"hit\"} 1"));
         assert!(rendered.contains("crab_cell_resident_route_total{outcome=\"miss\"} 1"));
+        assert!(rendered.contains("crab_cell_owner_hint_total{outcome=\"hit\"} 1"));
+        assert!(rendered.contains("crab_cell_owner_hint_total{outcome=\"stale\"} 1"));
         // The metadata plane has its own counter: a page read that failed must
         // be visible even though no LTX phase ran for it.
         assert!(rendered.contains("crab_cell_catalog_reads_total{kind=\"head\",result=\"ok\"} 1"));

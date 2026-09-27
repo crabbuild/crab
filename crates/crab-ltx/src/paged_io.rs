@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-type Pages = Vec<(u32, Vec<u8>)>;
+pub(crate) type Pages = Vec<(u32, Vec<u8>)>;
 pub(crate) type DriverSlot = Arc<Mutex<Weak<Driver>>>;
 const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
 
@@ -145,6 +145,18 @@ struct Cache {
 }
 
 impl Cache {
+    fn missing_prefix(&self, view: u64, first: u32, count: u32) -> u32 {
+        // The first page is missing. A later page may already be prefetched;
+        // stop before it so demand reads and hydration do not fetch it twice.
+        (1..count)
+            .find(|offset| {
+                first
+                    .checked_add(*offset)
+                    .is_some_and(|page| self.pages.contains_key(&(view, page)))
+            })
+            .unwrap_or(count)
+    }
+
     fn insert(&mut self, view: u64, pages: Pages) {
         for (page, bytes) in pages {
             let key = (view, page);
@@ -230,9 +242,15 @@ impl Driver {
 
 async fn fetch(request: &Request, cache: &Mutex<Cache>) -> Result<Vec<u8>> {
     let deadline = tokio::time::Instant::from_std(request.deadline);
+    let count = cache
+        .lock()
+        .map_err(|_| CrabError::InvalidState("paged cache poisoned"))?
+        .missing_prefix(request.view, request.page, 64);
     let pages = tokio::time::timeout_at(
         deadline,
-        request.database.read_run(request.page, 64, request.origin),
+        request
+            .database
+            .read_run(request.page, count, request.origin),
     )
     .await
     .map_err(|_| CrabError::Deadline)??;
@@ -264,6 +282,34 @@ pub(crate) struct Io {
 }
 
 impl Io {
+    pub(crate) async fn hydration_pages(&self, first: u32, count: u32) -> Result<Pages> {
+        self.database
+            .host()
+            .observe_ltx_logical_read(crate::LtxReadOrigin::Hydrating);
+        let missing = {
+            let cache = self
+                .driver
+                .cache
+                .lock()
+                .map_err(|_| CrabError::InvalidState("paged cache poisoned"))?;
+            let mut cached = Vec::new();
+            for offset in 0..count {
+                let page = first.checked_add(offset).ok_or(CrabError::LTXCorrupted)?;
+                let Some(bytes) = cache.pages.get(&(self.view, page)) else {
+                    break;
+                };
+                cached.push((page, bytes.clone()));
+            }
+            if !cached.is_empty() {
+                return Ok(cached);
+            }
+            cache.missing_prefix(self.view, first, count)
+        };
+        self.database
+            .read_run(first, missing, crate::LtxReadOrigin::Hydrating)
+            .await
+    }
+
     pub(crate) fn new(database: Database) -> Result<Self> {
         let host = database.host();
         let mut slot = host

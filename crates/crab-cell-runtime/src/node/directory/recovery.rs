@@ -7,6 +7,28 @@
 use super::*;
 
 impl NodeDirectory {
+    /// Reads live scheduler membership and primes the advisory recovery scan.
+    ///
+    /// Each call reads fresh signed records. Recovery claims still reload their
+    /// claimant and failed session before the fencing CAS.
+    /// Invalid bounds, incompatible records and storage failures return errors.
+    pub async fn live_for_recovery(
+        &self,
+        now_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<NodeAdvertisement>> {
+        if now_ms < 0 || !(1..=MAX_LIVE_NODE_RECORDS).contains(&limit) {
+            return Err(Error::Node("node recovery membership bound is invalid"));
+        }
+        let mut cached = self.recovery_scan.write().await;
+        // A scheduler cycle needs a fresh view. Clear the old observation so
+        // cancellation or failure cannot leave it serving recovery discovery.
+        cached.take();
+        let (snapshot, live) = self.scan_recovery_records(now_ms, true, limit).await?;
+        *cached = Some(Arc::new(snapshot));
+        Ok(live)
+    }
+
     /// Fences one expired boot session with an ETag CAS before any Cell takeover.
     ///
     /// Missing, live, malformed, or foreign records fail closed. The tombstone
@@ -40,18 +62,29 @@ impl NodeDirectory {
             .await
     }
 
-    /// Claims an expired session for request-path takeover only when its node
-    /// log is already inactive. An active log returns `PendingPublication`
-    /// without writing a claim so the follower recovery scheduler can proceed.
+    /// Fences an expired session or reuses its completed takeover authority.
+    ///
+    /// An unsealed active log returns `PendingPublication` without writing a
+    /// claim so the follower recovery scheduler can proceed.
     pub async fn claim_expired_for_takeover(
         &self,
         session: SessionId,
         claimant: SessionId,
         now_ms: i64,
     ) -> Result<NodeTakeoverProof> {
-        self.claim_expired_inner(session, claimant, now_ms, true, false)
-            .await?
-            .direct_takeover()
+        match self
+            .claim_expired_inner(session, claimant, now_ms, true, false)
+            .await
+        {
+            Ok(fenced) => fenced.direct_takeover(),
+            // Another request may have fenced the same dead session after our
+            // routing observation. Re-read durable proof before reporting its
+            // claim conflict; Cell ownership still requires a separate CAS.
+            Err(error) => self
+                .takeover_proof(session, claimant, now_ms)
+                .await?
+                .ok_or(error),
+        }
     }
 
     pub(super) async fn claim_expired_inner(
@@ -144,7 +177,7 @@ impl NodeDirectory {
         }
     }
 
-    /// Loads takeover authority already persisted by a completed node recovery.
+    /// Loads takeover authority from a permanent fence with no unrecovered active log.
     pub async fn takeover_proof(
         &self,
         session: SessionId,
@@ -167,16 +200,15 @@ impl NodeDirectory {
         if tombstone.session != session {
             return Err(Error::Node("node tombstone session differs"));
         }
-        let claimed_by_caller = tombstone.claimant == Some(claimant)
-            && tombstone
-                .claim_expires_at_ms
-                .is_some_and(|expires_at_ms| expires_at_ms > now_ms);
+        // The claim serializes active follower-tail recovery, not all Cells
+        // from one failed node. Absent/inactive logs cannot add acknowledged
+        // state after fencing, so each live successor can acquire its own Cell.
         let ready = match tombstone.log.as_ref() {
             Some(log) if matches!(log.phase(), NodeLogPhase::Sealed | NodeLogPhase::Retired) => {
                 true
             }
-            Some(log) => !log.active() && claimed_by_caller,
-            None => claimed_by_caller,
+            Some(log) => !log.active(),
+            None => true,
         };
         Ok(ready.then_some(NodeTakeoverProof { session, claimant }))
     }
@@ -338,11 +370,25 @@ impl NodeDirectory {
             return Ok(Arc::clone(snapshot));
         }
 
+        let (snapshot, _) = self
+            .scan_recovery_records(now_ms, include_live_nodes, MAX_LIVE_NODE_RECORDS)
+            .await?;
+        let snapshot = Arc::new(snapshot);
+        *cached = Some(Arc::clone(&snapshot));
+        Ok(snapshot)
+    }
+
+    async fn scan_recovery_records(
+        &self,
+        now_ms: i64,
+        include_live_nodes: bool,
+        live_node_limit: usize,
+    ) -> Result<(RecoveryScanSnapshot, Vec<NodeAdvertisement>)> {
         let prefix = self.layout.node_directory_path();
         let stream = self.layout.store().inner().list(Some(&prefix));
         let mut live_nodes = HashSet::new();
         let mut live_sessions = HashSet::new();
-        let mut live_count = 0_usize;
+        let mut live = Vec::new();
         let mut records = stream
             .map(|item| {
                 let prefix = prefix.clone();
@@ -363,16 +409,6 @@ impl NodeDirectory {
                             {
                                 return Err(Error::Node("advertised node issue time differs"));
                             }
-                            let live = if include_live_nodes && advertisement.expires_at_ms > now_ms
-                            {
-                                self.validate(&advertisement, now_ms)?;
-                                Some((
-                                    advertisement.node(),
-                                    recovery_executor_eligible(&advertisement),
-                                ))
-                            } else {
-                                None
-                            };
                             let candidate =
                                 advertisement
                                     .log
@@ -386,6 +422,13 @@ impl NodeDirectory {
                                         phase: log.phase(),
                                         members: log.members().to_vec(),
                                     });
+                            let live = if include_live_nodes && advertisement.expires_at_ms > now_ms
+                            {
+                                self.validate(&advertisement, now_ms)?;
+                                Some(advertisement)
+                            } else {
+                                None
+                            };
                             Ok(Some((candidate, live)))
                         }
                         NodeRecord::Tombstone(tombstone) => {
@@ -407,18 +450,19 @@ impl NodeDirectory {
             .buffer_unordered(NODE_DIRECTORY_READ_CONCURRENCY);
         let mut candidates = Vec::new();
         while let Some(record) = records.next().await {
-            if let Some((record, live)) = record? {
-                if let Some((node, eligible)) = live {
-                    live_count = live_count.saturating_add(1);
-                    if live_count > MAX_LIVE_NODE_RECORDS {
+            if let Some((record, advertisement)) = record? {
+                if let Some(advertisement) = advertisement {
+                    if live.len() == live_node_limit {
                         return Err(Error::Node("live node directory exceeds its limit"));
                     }
+                    let node = advertisement.node();
                     if !live_sessions.insert(node) {
                         return Err(Error::Node("multiple live sessions advertise one node"));
                     }
-                    if eligible {
+                    if recovery_executor_eligible(&advertisement) {
                         live_nodes.insert(node);
                     }
+                    live.push(*advertisement);
                 }
                 let Some(record) = record else {
                     continue;
@@ -429,14 +473,14 @@ impl NodeDirectory {
                 candidates.push(record);
             }
         }
-        let snapshot = Arc::new(RecoveryScanSnapshot {
+        live.sort_unstable_by(|left, right| left.session.as_bytes().cmp(right.session.as_bytes()));
+        let snapshot = RecoveryScanSnapshot {
             observed_at_ms: now_ms,
             includes_live_nodes: include_live_nodes,
             live_nodes,
             records: candidates,
-        });
-        *cached = Some(Arc::clone(&snapshot));
-        Ok(snapshot)
+        };
+        Ok((snapshot, live))
     }
 
     /// Extends an exact recovery claim while its claimant remains live.

@@ -514,9 +514,13 @@ impl CellReplica {
             .await?
         } else {
             let entries = directory::initial_entries(directory_inputs)?;
-            let directory =
-                directory::build_initial_and_upload(entries, page_size, database_pages, self)
-                    .await?;
+            let directory = directory::build_initial_and_upload(
+                stream::iter(entries),
+                page_size,
+                database_pages,
+                self,
+            )
+            .await?;
             if directory.checksum() != target.checksum {
                 return Err(CrabError::ChecksumMismatch);
             }

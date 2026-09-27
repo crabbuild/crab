@@ -206,6 +206,12 @@ the same catalog UUID. Adopt validates an existing layout and manifest, records
 `empty_cell_pending`, publishes a new empty application Cell and never converts
 arbitrary object prefixes. Old collaboration application data is not imported.
 
+The initializer prepares its local directory, checks resource admission, and
+builds its private maintenance host before publishing Cell ownership. After a
+local setup failure, correct the directory or available resources and retry
+the same create/adopt command. This does not authorize taking over an existing
+unpublished owner after a crash or a storage failure during initialization.
+
 ```sh
 SERVER="$HOME/Workspace/crabbuild-target/crab-http-server-dev/release/crab-http-server"
 "$SERVER" --config /secure/server.toml repository create \
@@ -426,6 +432,24 @@ The two probe routes answer different operator questions:
 
 Only the management listener serves probes. Every public request retains strict
 canonical `Host` validation.
+`crab_cell_owner_hint_total{outcome="hit|miss|stale|refused"}` counts the peer
+sender's bounded owner observations. A hit saves that sender's control and
+node-directory reads. The public entry router shares that observation to avoid
+catalog/control reads for a warm remote target. Only a serving, published Cell
+can supply the cached description; the receiving node still verifies target,
+control, authorization, and actor admission. Observations expire within five
+seconds and before the signed node lease, with at most 4,096 entries. Refusals
+and ambiguous results clear the observed session; only the existing retryable
+cases take one authoritative retry. A sender lookup removes an expired entry
+before refresh, including when authoritative lookup fails or is canceled.
+
+Forwarded requests reserve retained bytes while waiting. Codec admission uses
+one absolute received transport deadline, and releases its job slot during
+enrollment storage I/O. Structural decoding runs once; signature verification
+rechecks the enrollment lifetime after the wait. Resolution, activation,
+dispatch waiting, and reply encoding share the received deadline. A timed-out
+HTTP wait returns 504; an already accepted mutation can still finish and must
+be resolved by its stable request identity.
 
 Before starting either listener, the process also claims and releases one of
 16 dedicated startup-probe slots in the shared transfer-admission namespace.
@@ -433,7 +457,129 @@ Invalid conditional-write permissions therefore fail startup instead of
 leaving a read-ready server that rejects its first transfer. Probe slots are
 separate from the four live-transfer slots.
 
-Every public response includes a server-generated `x-request-id`. The completion log records the same identifier with the method, path, status, and elapsed milliseconds. Set the standard `RUST_LOG` environment variable to adjust tracing filters; the default level is `info`.
+Every public response includes a server-generated `x-request-id`. The
+`http_response_ready` log records the same identifier with the method, path,
+status, and elapsed microseconds. This event marks handler completion; body
+delivery may finish later. Set the standard `RUST_LOG` environment variable to
+adjust tracing filters; the default level is `info`.
+
+### Attribute acknowledged Cell writes
+
+The Compose fleet renderer enables
+`RUST_LOG=info,crab_cell_runtime::action=debug,crab_http_server::action=debug`
+on Cell nodes. The existing filter controls this diagnostic overhead; include
+it in comparisons and measure with and without tracing before setting limits.
+The load report records each node's configured filter.
+
+Scheduled `load.py` reports use schema 5. Raw samples retain each HTTP attempt,
+its status, server request ID and latency, including retries. Successful write
+samples are joined to the stable submission, runtime attempt, Cell/incarnation,
+owner/session, commit sequence and winning `object`, `fleet` or `recorded`
+response source. A `<report>.traces/` directory retains per-node logs and
+`actions.jsonl` before the owner-loss test. Missing or ambiguous attribution
+fails qualification. This includes duplicate owner responses for the same
+runtime attempt: the collector refuses to guess which response arrived.
+
+Recovery and old-owner restart have separate outcomes. `owner_loss` retains
+takeover and acknowledgement checks completed before cleanup;
+`owner_loss.restart` records whether restarting the killed node succeeded.
+When both recovery and restart fail, the original recovery error remains
+alongside the restart error. Either failure fails qualification. The parent
+`report.json` also retains a failed load stage's artifact path. These receipts
+do not qualify faults during an unpublished follower tail: the current
+scheduled fault still waits for publication to drain before killing its owner.
+
+| Timing | Measurement boundary |
+| --- | --- |
+| Client HTTP latency | Retry-inclusive request through decoded response body; individual attempts retained separately |
+| HTTP response readiness | Entry handler lifetime, excluding later body delivery |
+| Authentication | HTTP principal resolution, including session/token storage when used |
+| Archive check | Pre-handler lifecycle policy, including any nested route and query. When `command_checks_archive=true`, this interval records only dispatch; the command checks lifecycle during worker execution. A client-error response can trigger a later policy query outside this interval. |
+| Command route | Issue-create route resolution and activation before client preparation |
+| Client preparation | Description, contract/input validation, wire encoding and request digest before invocation |
+| Typed invocation | Transport invocation and result decoding after request validation |
+| Response enrichment | Issue-create label/assignee enrichment and response-value construction after the command; excludes later JSON encoding/body delivery |
+| Actor queue | Admitted command construction until its execution task starts |
+| Worker queue / execution | Worker admission and queue wait / synchronous command and capture |
+| Capture | LTX total and encode, write, sync, checkpoint observations within worker execution |
+| Proof wait | Proof task lifetime until a winning object/follower proof; excludes earlier node-log submission |
+| Confirmation | Durable-sequence confirmation on the SQL worker after proof |
+| Runtime response | Admitted command construction until a successful reply is released |
+
+These intervals overlap. Do not sum them or subtract percentiles from separate
+histograms; durations use each process's monotonic clock. A `recorded` response
+has no new proof/capture requirement. The client sample supplies acknowledgement;
+an owner reply or handler-ready log alone does not prove receipt by the client.
+Reads retain HTTP samples but do not yet have joined query phases. The report's
+execution-owner and forwarded-write counts come from acknowledged writes only.
+`repository_routes` retains every entry-node route with its static application
+action and outcome. The archive-check and enrichment intervals may contain
+their own routes; only `repository.issue.create` supplies `command_route_us`.
+Preparation must match the exact acknowledged Cell, incarnation, mutation
+request, module and stable operation ID. Missing preparation or boundary events
+fail the current join.
+
+Issue, comment and label mutations read archive state inside the same SQLite
+transaction as their writes. Successful requests therefore avoid a separate
+`GetRepositoryLifecycle` invocation. Fresh mutations after archive return a
+durable rejection; an exact runtime request replay returns its recorded outcome
+before running the handler, including after recovery or unarchive. A new request
+after unarchive can proceed. Existing outcome tags retain their bytes; these
+seven commands use tag zero for `Archived`. Their source digest changes, so
+this is a new release descriptor, not proof of mixed-version rollout.
+
+For these routes, HTTP client-error responses still consult lifecycle policy
+to preserve the archive error's precedence over invalid input shipped in
+v1.2.4. Server errors, including unknown mutation outcomes, retain their original
+status. Other mutation families retain their pre-handler checks; Git and other
+external storage effects require separate ordering proof. Removing one routed
+query is verified by the public HTTP/mTLS fixture, but does not establish an
+improved throughput or latency limit.
+
+The fixture also races duplicate typed label commands against archive across
+four rounds, checks each decision against archive's durable commit sequence,
+then replays all 24 outcomes after owner loss. Exact receipts, accepted rows,
+absent rejected rows and the recovered authority root are checked with both
+memory storage and RustFS 1.0 GA. This bounded concurrency proof is separate
+from sustained load qualification on the Compose fleet.
+
+`action_traces.latency` summarizes each observed phase separately for `all`,
+`local`, `forwarded`, `fleet`, `object` and `recorded` writes. Fault reports add
+the same summaries within each before/during/after population. Every distribution
+retains its sample count; absent proof or capture observations are not zero-time
+measurements. `http_outside_invocation` subtracts the nested typed invocation
+from HTTP response-readiness time for each matched action on the entry node,
+then computes percentiles. This interval includes request-path work and is not
+a network-only estimate. The other phase distributions still overlap.
+
+Replay retained evidence from the repository root, with one `--node-log` for
+every participating node and a new output path. Use the collector revision
+that produced the evidence: older server logs lack the new boundary events
+and cannot qualify their timings with the current collector.
+
+```sh
+python3 -B crates/crab-http-server/deploy/cell-issue-fleet/action_traces.py \
+  --samples /path/to/load.samples.jsonl \
+  --node-log node-01=/path/to/load.traces/node-01.log \
+  --node-log node-02=/path/to/load.traces/node-02.log \
+  --node-log node-03=/path/to/load.traces/node-03.log \
+  --output /path/to/replayed-actions.jsonl
+python3 -B -W error::ResourceWarning -m unittest discover \
+  -s crates/crab-http-server/deploy/cell-issue-fleet -p 'test_*.py' -v
+```
+
+The replay command also writes `replayed-actions.summary.json` beside its
+joined JSONL. Both paths must be new. Retain the raw joined actions alongside
+the summary so phase populations and proof selection remain inspectable.
+
+This qualifier consumes the server's default text formatter. Keep logs intact;
+rotation, filtering, malformed fields or formatter changes must cause a failed
+join instead of a partial success. Logs and joined events are collected in the
+external load process and currently buffered in memory; the arrival ceiling
+bounds sample count, not total log bytes. Very long runs need a bounded streaming
+collector before its memory use can be considered qualified.
+
+### Keep metric cardinality bounded
 
 Metrics use bounded `method`, `outcome`, and `class` labels. They never include
 repository names, paths, principals, request IDs, or storage keys. Request
@@ -1340,6 +1486,13 @@ Identity uses the exact OIDC issuer and subject. Display names do not establish 
 
 Lists accept `state=open|closed|all`, a case-insensitive `q`, `limit`, and exclusive numeric `before`. They return newest items first.
 
+Issue responses load the label catalog only when returned issues have selected
+labels or an edit needs to validate nonempty label input. Repository archive
+checks and label permissions still apply, including when clearing labels.
+A retried creation returns the existing issue with its current labels.
+Response enrichment may fail after a mutation commits; retry creations with
+the original submission ID, or reload an edited issue and reconcile its version.
+
 ### Work with pull requests and reviews
 
 Pull creation records exact base and head branch names plus their opening commit OIDs. Detail reads refresh both live tips without rewriting the immutable opening evidence.
@@ -1613,6 +1766,14 @@ availability without letting a permanently unready pod block a node drain.
 
 ### Keep qualification evidence honest
 
+The local [reader and rollout runners](deploy/cell-issue-fleet/README.md)
+accept `--rustfs-port` alongside `--gateway-port` and `--node-port-base` to
+isolate simultaneous Compose projects. Both require
+`--skip-build --runtime-source <commit>` for an existing image; the report
+records the image source separately from the committed runner source.
+The drained fleet-to-object transition updates node configuration while
+preserving the Compose image digest, release identity and provider endpoint.
+
 Use the following interpretation:
 
 | Evidence | What it proves | What it does not prove |
@@ -1622,6 +1783,35 @@ Use the following interpretation:
 | RustFS integration | Real object-store persistence and independent-client result | Production load, region failure, or Internet latency |
 | Browser regression | Rendered behavior and automated accessibility rules | Storage durability or manual assistive technology |
 | Container CI | Reproducible image/runtime metadata, one in-flight `SIGKILL` outcome, and one isolated complete-root cold restore | Cloud orchestration, version-selected provider recovery, every crash phase, or upgrade safety |
+
+The Compose cluster qualifier requires Bash, Docker Compose, curl, jq, and
+Python 3. Its recovery-work counters describe the surviving processes during
+each fault interval. The recovery claimant can differ from the Cell's elected
+successor: sealing a failed node log authorizes subsequent ownership election.
+The first owner-loss interval therefore samples every running survivor; the
+replacement-follower and fallback intervals each leave one eligible process.
+Each process is compared with its own pre-fault snapshot before deltas are
+summed. Missing metrics, counter resets, or a changed container boot fail the
+gate. Raw snapshots remain in `metrics.recovery` in the receipt. Aggregate work
+can include concurrent recovery attempts; exact recovered data and serving
+ownership are proved separately by the existing control and HTTP assertions.
+
+For the first fault, follower selection uses the active log sampled after the
+follower-only write. A fully covered startup log can be replaced before that
+write, so its membership is diagnostic evidence only. The collector requires
+the Cell owner and epoch to remain unchanged across the write, then checks the
+acknowledging log's epoch and membership again immediately before the kill.
+The receipt validator requires that active log and binds the successor and
+selection evidence to its members. The second fault already checks its sole
+replacement member after the write; the object-covered fallback separately
+requires a successor outside the failed log's members.
+
+The deterministic evidence tests run without Docker:
+
+```sh
+python3 -B -m unittest discover \
+  -s crates/crab-http-server/tests -p test_recovery_work.py -v
+```
 
 ## Completion requirements
 

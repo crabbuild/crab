@@ -557,7 +557,9 @@ impl CoordinationState {
                 } else if !queue_empty || !publication_idle || self.residency != Residency::Sparse {
                     CoordinationDecision::Ignored
                 } else {
-                    self.busy = true;
+                    // Fetch owns an effect, not the foreground slot. The worker
+                    // serializes installation with SQL; the effect keeps drain
+                    // and transfer from releasing the activation during fetch.
                     self.residency = Residency::Hydrating;
                     CoordinationDecision::Started
                 }
@@ -689,7 +691,8 @@ impl CoordinationState {
                 }
             }
             CoordinationInput::FinishHydration { complete, stale } => {
-                self.busy = false;
+                // A command may have started while this fetch was in flight.
+                // Hydration completion must not release its exclusive slot.
                 if !stale {
                     self.residency = if complete {
                         Residency::Resident

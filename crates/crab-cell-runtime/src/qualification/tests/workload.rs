@@ -83,6 +83,37 @@ async fn workload_iterator_and_executor_are_streaming_and_reproducible() {
 }
 
 #[tokio::test]
+async fn measured_artifact_verifies_across_fractional_second_boundaries() {
+    let profile = QualificationProfile::pr_contract();
+    let workload = QualificationWorkload::generate_with_size(&profile, 41, 1, 64, 1).unwrap();
+    let mut executor = ContractExecutor {
+        calls: 0,
+        case_coverage: false,
+    };
+    let mut summary = workload.run(&mut executor).await.unwrap();
+    for nanos in [
+        999_999_999,
+        1_000_000_000,
+        1_000_000_001,
+        1_000_999_999,
+        1_001_000_000,
+        7_000_000_000,
+        7_000_000_001,
+        7_000_999_999,
+        7_001_000_000,
+    ] {
+        summary.elapsed = std::time::Duration::from_nanos(nanos);
+        let artifact = summary.artifact(&workload).unwrap();
+        let decoded = QualificationRunArtifact::decode(&artifact.encode().unwrap()).unwrap();
+        assert_eq!(
+            decoded.verify_for_profile(&profile).is_ok(),
+            nanos >= 1_000_000_000,
+            "elapsed {nanos} ns must preserve the profile's minimum duration"
+        );
+    }
+}
+
+#[tokio::test]
 async fn case_coverage_runner_rejects_unverified_lifecycle_hints() {
     let profile = QualificationProfile::pr_contract();
     let workload = QualificationWorkload::generate(&profile, 41).unwrap();

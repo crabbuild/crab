@@ -72,7 +72,7 @@ def main() -> None:
             raise RuntimeError("stop this fixture's application nodes before retention qualification")
     image = command("docker", "image", "inspect", "--format", "{{.Id}}", args.image)
     for service in config["services"].values():
-        if service.get("image") == original["project"] + ":local":
+        if service.get("image") == original["image"]:
             service["image"] = image
     maintenance = dict(config["services"]["node-01"])
     maintenance.pop("network_mode")

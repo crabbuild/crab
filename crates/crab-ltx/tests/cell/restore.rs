@@ -24,11 +24,15 @@ use object_store::{
     path::Path,
 };
 
+mod read_ahead;
+mod upload;
+
 const NO_FAULT: u8 = 0;
 const SHORT_RANGE: u8 = 1;
 const CORRUPT_RANGE: u8 = 2;
 const TIMEOUT_RANGE: u8 = 3;
 const PUT_FAILURE: u8 = 4;
+const PUT_RESPONSE_LOST: u8 = 5;
 
 #[derive(Default)]
 struct RecordingTelemetry {
@@ -52,6 +56,7 @@ impl LtxTelemetry for RecordingTelemetry {
 }
 
 struct ReadStats {
+    ranges: Mutex<Vec<(Path, std::ops::Range<u64>)>>,
     active: AtomicUsize,
     peak: AtomicUsize,
     active_ranges: AtomicUsize,
@@ -65,6 +70,7 @@ struct ReadStats {
 impl ReadStats {
     fn new() -> Self {
         Self {
+            ranges: Mutex::new(Vec::new()),
             active: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
             active_ranges: AtomicUsize::new(0),
@@ -94,6 +100,7 @@ impl ReadStats {
     }
 
     fn reset(&self) {
+        self.ranges.lock().unwrap().clear();
         assert_eq!(self.active.load(Ordering::SeqCst), 0);
         assert_eq!(self.active_ranges.load(Ordering::SeqCst), 0);
         assert_eq!(self.active_range_bytes.load(Ordering::SeqCst), 0);
@@ -127,6 +134,8 @@ struct InstrumentedStore {
     delay: Duration,
     fault: AtomicU8,
     stats: Arc<ReadStats>,
+    puts: AtomicUsize,
+    multipart: AtomicUsize,
 }
 
 impl InstrumentedStore {
@@ -136,6 +145,8 @@ impl InstrumentedStore {
             delay,
             fault: AtomicU8::new(NO_FAULT),
             stats: Arc::new(ReadStats::new()),
+            puts: AtomicUsize::new(0),
+            multipart: AtomicUsize::new(0),
         })
     }
 
@@ -182,8 +193,29 @@ impl ObjectStore for InstrumentedStore {
         payload: PutPayload,
         options: PutOptions,
     ) -> object_store::Result<PutResult> {
+        self.puts.fetch_add(1, Ordering::SeqCst);
         self.check_upload_fault()?;
-        self.inner.put_opts(location, payload, options).await
+        let result = self.inner.put_opts(location, payload, options).await?;
+        if location.extension() == Some("ltx")
+            && self
+                .fault
+                .compare_exchange(
+                    PUT_RESPONSE_LOST,
+                    NO_FAULT,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
+        {
+            return Err(object_store::Error::Generic {
+                store: "InstrumentedStore",
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "injected response loss after commit",
+                )),
+            });
+        }
+        Ok(result)
     }
 
     async fn put_multipart_opts(
@@ -191,6 +223,7 @@ impl ObjectStore for InstrumentedStore {
         location: &Path,
         options: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.multipart.fetch_add(1, Ordering::SeqCst);
         self.check_upload_fault()?;
         self.inner.put_multipart_opts(location, options).await
     }
@@ -202,6 +235,11 @@ impl ObjectStore for InstrumentedStore {
     ) -> object_store::Result<GetResult> {
         let is_range = options.range.is_some();
         let range_bytes = if let Some(GetRange::Bounded(range)) = &options.range {
+            self.stats
+                .ranges
+                .lock()
+                .unwrap()
+                .push((location.clone(), range.clone()));
             let bytes = usize::try_from(range.end - range.start).unwrap_or(usize::MAX);
             self.stats
                 .maximum_range_bytes

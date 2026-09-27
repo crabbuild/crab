@@ -228,7 +228,11 @@ same object-store and authority model before they can be compared fairly.
 the Cell object store when it publishes an immutable root. Each measured command
 commits one SQLite transaction, captures one LTX cut, and prepares one successor
 root through `CellReplica` over an in-memory `object_store`, which reports the
-objects and bytes a provider would receive.
+objects and bytes a provider would receive. Supply `--endpoint` and the bucket
+arguments below to measure real RustFS requests. All activation modes
+use the same measured host, deferred capture and exact-cut pruning. The runner
+restores the final root from the provider into a fresh destination and verifies
+every committed payload byte before emitting a report.
 
 ```bash
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-ltx-replica-cost" \
@@ -237,25 +241,306 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-ltx-replica-cost" \
   --payload-bytes 4096 --commands 32 --warmup 4
 ```
 
+### Activation histories and the first mutation
+
+`--activation fresh|sparse|hydrated|resumed` selects one writer history. All
+histories start with the same bootstrap SQL, root, deferred capture policy and
+mutation sequence. `--churn-rows` fixes the initial working set. Churn now
+starts at the last row and walks backward; this keeps the first update outside
+the header read-ahead window for sufficiently large databases. Historical
+churn reports walked forward from row one. The old
+`--sparse` switch is removed; unsupported options fail before creating data.
+
+| Mode | Setup before the first measured mutation |
+| --- | --- |
+| `fresh` (default) | Continue the writer that produced the bootstrap root |
+| `sparse` | Close that writer and open a fresh writable VFS from the exact root |
+| `hydrated` | Open the sparse VFS, then fetch and install all inherited pages in batches of at most 64 |
+| `resumed` | Hydrate, persist the drained continuation, close, and reopen on a fresh path with local checksum verification |
+
+Every mode must retain the bootstrap TXID/checksum before it can run a command.
+`activation` records the selected mode, initial database page count/size,
+elapsed setup time and storage observations. Resumed setup includes hydration,
+continuation persistence and reopen; it is not isolated reopen latency.
+`activation.first_command` always retains command zero, even when `--warmup`
+excludes it from the existing steady-state `samples` and percentile summaries.
+Use `--warmup 0` to include every command in those summaries too.
+
+Each command separates `commit_io`, `capture_io`, `preparation_io` and
+`prune_io`; activation and final restore are outside these phase counters.
+These are observed storage operations, outcomes and bytes, not a count of
+provider-internal retry attempts. The timing field `elapsed_us` still measures
+root preparation only. Add commit, capture, preparation and prune durations
+for their measured total; it excludes fixture bookkeeping and is not public
+response latency. Resident mutations can have zero commit/capture origin reads
+while root preparation still reads and writes the provider.
+
+Run each mode in a separate process against a private RustFS bucket, alternating
+mode order between repeats. This example seeds about 32 MiB of payload, then
+updates, deletes and reinserts one 4-KiB row per command:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
+TMPDIR="$HOME/Workspace/crabbuild-target/crab-8bc8/tmp" RUSTC_WRAPPER= \
+  cargo run --release --locked \
+  --manifest-path crates/crab-ltx/perf/replica-cost/Cargo.toml -- \
+  --activation resumed --churn-rows 8192 --random-payload \
+  --payload-bytes 4096 --commands 30 --warmup 3 \
+  --endpoint http://127.0.0.1:44010 --bucket crab-cell-issue-fleet \
+  --access-key crab --secret-key crab
+```
+
+Hold initial page count, payload, command sequence and changed pages constant
+before comparing histories. Check each report's exact provider restore and
+`restored_rows`. This library fixture does not measure actor queues, ownership
+CAS, eviction policy, multi-Cell interference, power-loss durability, or a
+one-vCPU/one-GiB node's capacity.
+
+#### RustFS GA verification (2026-09-27)
+
+Twelve release processes passed: three per history, using the command above
+with alternating mode order. Every initial database had 9,222 pages of 4 KiB,
+every first mutation updated row 8,192, and every final provider restore
+verified all 8,192 expected rows byte for byte. Each run retained 27 commands
+after three warmup commands, plus the first command separately.
+
+| History | First commit ms, min–max | First capture ms, min–max | First commit/capture origin bytes, each run | Later update commit median ms, min–max across runs |
+| --- | ---: | ---: | ---: | ---: |
+| Fresh | 0.457–18.668 | 0.307–2.002 | 0 | 0.526–9.893 |
+| Sparse | 9.009–26.437 | 0.507–0.935 | 507,531 | 1.570–6.754 |
+| Hydrated | 28.691–99.794 | 0.557–0.579 | 0 | 0.824–30.463 |
+| Resumed | 1.260–59.712 | 0.529–0.660 | 0 | 0.614–7.006 |
+
+The deterministic result is that only sparse first mutations fetched inherited
+pages from the provider. Hydrated and resumed writers still incurred local
+SQLite work, and every history still performed provider work to prepare roots.
+These noisy timing ranges do not establish a latency ranking or a performance
+improvement. The benchmark exposed a clean-resume checksum mismatch: opening
+a restored database wrote a synthetic sequence frame that SQLite checkpointed
+on close. The capture-boundary fix and repeated no-write resume regression
+are included with this runner.
+
+The native macOS ARM64 process used Rust 1.98.0 and SQLite 3.49.1. RustFS ran
+in a private 4-vCPU/8-GiB Colima VM, pinned to
+`ghcr.io/rustfs/rustfs:1.0.0-glibc@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858`.
+Provider connections/caches persisted between processes, each process used a
+fresh object prefix, and other host builds could compete for resources. There
+was no separate provider CPU/memory cap. This is library correctness and I/O
+attribution evidence; public-action and independent-host limits remain open.
+
+Retained evidence directory: `activation-histories-ga-20260927` under the
+checkout's external Cargo target. It contains all twelve JSON reports and a
+manifest with source hashes, report hashes, order and timing. Parent revision:
+`58f370537887932dee3ada482b9077cdaccc4c9b`, plus this clean-resume and runner
+change. All recorded source hashes matched the tested files at closeout.
+Binary SHA-256: `e967ff4a8dd9c07597618f8d638bcbb9277b9c77ea2bce28d160ae18599485db`.
+Manifest SHA-256: `536563484e6bf0e366958f4a38ae573623689139c3a83ded4694dd996ab55f23`.
+
 ### Sparse activation baseline (2026-09-25)
 
-Pass `--sparse` to bootstrap a root, close the source writer, and activate a
+Pass `--activation sparse` to bootstrap a root, close the source writer, and activate a
 real sparse writer through `open_root().paged().prepare_writable()` and
 `open_writable()`. This mode uses deferred capture, prepares an immutable
 successor, and prunes its local cut after preparation. It reports SQLite commit,
 capture, checksum-sidecar sync count/time, root preparation, WAL bytes read, and
 peak WAL-image allocation separately. The sidecar sync measurement wraps only
-the local `FileSystem`; it does not include SQLite VFS syncs. The fresh mode
-retains its original immediate-capture workload. Neither mode measures runtime
+the local `FileSystem`; it does not include SQLite VFS syncs. In the original
+baseline, fresh mode used immediate capture and retained cuts. That historical
+comparison also changed the barrier and cleanup workload; the matched runner
+described below removes those differences. Neither mode measures runtime
 response proof latency or grants authority merely by preparing a root.
 
 The runner also emits per-command `capture_*_us` fields for all phases in
 `CaptureTiming`. They distinguish WAL transfer, page collection, cut encoding,
 checkpoint maintenance, and LTX reinspection during batch collection.
+`prune_us` measures cleanup after root preparation in both modes; historical
+fresh reports have null because they retained cuts. `captured_bytes` is the total LTX length in that
+command's batch, including any checkpoint cut. Preparation timing excludes
+cleanup, and neither timing includes the runtime authority CAS.
+
+### Matched capture and provider restore (2026-09-26)
+
+The follow-up to `3ced0777a6f` opens fresh databases through `CellReplica` so
+both histories share the instrumented host. Both capture deferred cuts and
+prune after preparing each successor, including the bootstrap. Final restore
+and payload verification run outside the timed phases; `restored_rows` must
+equal the configured command count.
+
+Three release processes per history used local RustFS, 32 transactions, four
+warmups, and 4 KiB command-seeded random payloads. Run order alternated between
+fresh and sparse. Every process restored all 32 rows byte-for-byte and prepared
+five immutable objects per measured command.
+
+| Repeat | Fresh capture p50 / p95, µs | Sparse capture p50 / p95, µs | Fresh prepare p50 / p95, µs | Sparse prepare p50 / p95, µs |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 342 / 463 | 723 / 1,812 | 3,648 / 4,666 | 4,377 / 6,391 |
+| 2 | 322 / 426 | 616 / 803 | 3,761 / 6,009 | 3,603 / 4,815 |
+| 3 | 336 / 471 | 618 / 911 | 3,774 / 5,392 | 3,597 / 5,210 |
+
+These small-database, shared-host diagnostics do not isolate checksum
+representation from all sparse VFS work, measure activation latency, or
+establish service capacity. No before/after performance gain is inferred.
+Deferred rename time remains in `capture_parent_sync_us`; that field is a
+phase duration, not proof that a directory sync occurred. SQLite's own syncs
+are separate from the deferred LTX barrier.
+
+Retained evidence is under the external per-checkout target's
+`matched-capture-20260926/`: six JSON reports, stderr, source diff, and source
+and binary SHA-256 values. Reproduce each history with a fresh process; add
+`--activation sparse` for the restored history:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
+TMPDIR="$HOME/Workspace/crabbuild-target/crab-8bc8/tmp" \
+  cargo run --release --locked \
+  --manifest-path crates/crab-ltx/perf/replica-cost/Cargo.toml -- \
+  --random-payload --payload-bytes 4096 --commands 32 --warmup 4 \
+  --endpoint http://127.0.0.1:19010 --bucket crab-cell-issue-fleet \
+  --access-key crab --secret-key crab
+```
+
+### Fixed-working-set update/delete churn (2026-09-26)
+
+`replica-cost --churn-rows N` seeds N rows, then updates, deletes and reinserts
+one row in three separate transactions before moving to the next row. The
+working set cycles while command-seeded payloads change. Omitting the option
+retains append-only inserts. Each `samples` entry includes `mutation`, `row`,
+`live_rows` and checkpoint run/busy/frame/backfill counts, alongside the existing
+capture, preparation and cleanup phases. Compare the mutation classes separately.
+`object_prefix` identifies the retained immutable graph; `churn_rows` identifies
+the initial working set. It does not cap runtime command-history retention.
+
+Every transaction must change exactly one row. After closing the writer and
+pruning its captured cuts, the runner restores the selected root from the
+provider into a fresh destination. An independent key-to-payload-seed model
+rejects lost rows, stale payloads and resurrected deleted keys. A run ending
+immediately after deletion must also restore that absence. These checks run
+outside measured phases. In append mode, `restored_rows` still equals commands;
+in churn mode, it equals the surviving working set.
+
+Reproduce on an existing isolated RustFS bucket; use `--activation sparse` for the restored
+writer history and a target directory belonging to this checkout:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
+TMPDIR="$HOME/Workspace/crabbuild-target/crab-8bc8/tmp" RUSTC_WRAPPER= \
+  cargo run --release --locked \
+  --manifest-path crates/crab-ltx/perf/replica-cost/Cargo.toml -- \
+  --churn-rows 32 --random-payload --payload-bytes 32768 \
+  --commands 300 --warmup 12 \
+  --endpoint http://127.0.0.1:19010 --bucket crab-cell-issue-fleet \
+  --access-key crab --secret-key crab
+```
+
+Six alternating release processes against local RustFS
+`1.0.0-beta.8-glibc` ran this workload. Each restored all 32 surviving rows,
+with 96 measured updates, 96 deletes and 96 reinserts after warmup. Two
+checkpoints per run backfilled their reported frames with no busy result.
+
+| Repeat | Fresh capture p50 / p95, µs | Sparse capture p50 / p95, µs | Fresh prepare p50 / p95, µs | Sparse prepare p50 / p95, µs |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 468 / 974 | 565 / 947 | 13,669 / 19,304 | 13,820 / 20,893 |
+| 2 | 465 / 566 | 550 / 690 | 13,591 / 19,600 | 13,338 / 19,071 |
+| 3 | 473 / 619 | 546 / 682 | 13,590 / 20,934 | 12,825 / 19,385 |
+
+These are unconstrained macOS processes with Docker-hosted RustFS, one writer
+and roughly 1 MiB of live payload. They do not measure public application
+responses, scheduled compaction, pinned readers, concurrent recovery or the
+one-vCPU/one-GiB node profile. Preparation excludes authority CAS. The fixture
+runs for seconds, so crossing two checkpoints does not establish sustained
+service capacity or a tail-latency SLO. The different payload size, initial
+database and root-chain length prevent a causal comparison with the append
+measurements above.
+
+Evidence is under the checkout's external target in `churn-20260926/`:
+source patch, parent `6169c9c0270`, binary SHA256, six reports and their hashes,
+and stderr. The separate `*-tail-*`, `*-append` and `*-full-image-delete`
+reports exercise final update/delete/reinsert states, the original append
+workload, and cuts exceeding an 8 KiB incremental bound in both histories.
+
+### Streaming published-cut cleanup (2026-09-26)
+
+Three release processes per workload and implementation used local RustFS,
+command-seeded random payloads, sparse deferred capture, six commands, and one
+warmup. The large workload used 4 MiB inserts and a 1 MiB incremental-capture
+limit, exercising full-image cuts and checkpoint batches. Both versions used
+the same macOS/APFS host and RustFS instance. Baseline production source was
+`0c898097e95`; the candidate replaces cleanup's full-file buffer with a 64 KiB
+buffered reader and verifies its digest during decoding.
+
+| Captured bytes in batch | Before cleanup, median ms | Streaming cleanup, median ms |
+| ---: | ---: | ---: |
+| 16,941,374 | 63.204 | 52.233 |
+| 25,412,106 | 94.847 | 88.384 |
+| 33,882,834 | 128.005 | 127.587 |
+| 42,353,558 | 160.156 | 143.721 |
+| 50,824,284 | 194.740 | 153.671 |
+
+Each row is the median of three matching command positions, not a tail
+percentile. The small 4 KiB payload workload produced 5,162–7,155-byte batches;
+its pooled cleanup median was 161 microseconds for both implementations over
+15 measured commands each. Variation is visible in the raw samples. These
+measurements suggest a large-cut benefit but do not establish an application
+latency improvement, a 1 GiB RSS bound, or sustained throughput.
+
+Raw reports, binary SHA-256 values, host metadata, and the candidate source diff
+are retained under
+`$HOME/Workspace/crabbuild-target/crab-8bc8/prune-streaming-20260926/`.
+`summary.json` retains every per-command comparison. Reproduce the large run
+against an existing local RustFS bucket:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
+TMPDIR="$HOME/Workspace/crabbuild-target/crab-8bc8/tmp" \
+  cargo run --release --locked \
+  --manifest-path crates/crab-ltx/perf/replica-cost/Cargo.toml -- \
+  --activation sparse --random-payload --payload-bytes 4194304 \
+  --max-capture-bytes 1048576 --commands 6 --warmup 1 \
+  --endpoint http://127.0.0.1:19010 --bucket crab-cell-issue-fleet \
+  --access-key crab --secret-key crab
+```
+
+Cleanup still decodes every page and retains decoder indexes on the SQL worker.
+The transfer-bound regression rejects a whole-file read for a large random cut;
+the failure cases retain accounting and allow retry after repair. Decoder index
+memory and same-worker response interference remain separate audit gates.
+
+### Streaming footer and optional replica index (2026-09-26)
+
+The next decoder change removes unused replica entries from ordinary
+verification, compares footer entries as a stream, and moves requested replica
+indexes to their caller instead of cloning them. Three release processes per
+implementation repeated the preceding RustFS workload. Baseline LTX behavior
+matches `5c2abfd915e` (unchanged by `a16c8efcc2b`); candidate production changes
+are retained as a source diff beside the reports.
+
+| Captured bytes in batch | Previous decoder cleanup, median ms | Changed decoder cleanup, median ms |
+| ---: | ---: | ---: |
+| 16,941,374 | 46.035 | 25.091 |
+| 25,412,106 | 70.635 | 37.511 |
+| 33,882,834 | 92.304 | 50.118 |
+| 42,353,558 | 131.654 | 63.285 |
+| 50,824,284 | 140.464 | 101.878 |
+
+Rows compare three samples at the same command position. Small-cut pooled
+medians were 202 and 139 microseconds across 15 commands per implementation.
+These are exploratory observations: the shared developer host had unrelated
+compiler/VM activity, and baseline samples overlapped focused compilation.
+The runs were sequential, not randomized or isolated, so the differences
+cannot establish a causal gain or public-action percentiles.
+
+Whole-process maximum RSS for the large workload ranged from 86.5–92.9 MB
+before and 83.6–91.7 MB after; those ranges do not establish a memory reduction.
+They include SQLite, capture, publication, and cleanup, not decoder allocations
+alone. Concurrent verification under the 1 GiB node profile remains unmeasured.
+Raw JSON, `/usr/bin/time -l` output, binary digests, source provenance/diff, and
+per-command comparison are retained under
+`$HOME/Workspace/crabbuild-target/crab-8bc8/decoder-streaming-20260926/`.
+Use the preceding command to reproduce the workload.
 
 ### Large sparse checkpoint capture (2026-09-25)
 
-With `--sparse --payload-bytes 4194304 --max-capture-bytes 1048576
+With `--activation sparse --payload-bytes 4194304 --max-capture-bytes 1048576
 --commands 3 --warmup 1`, seven independent release processes measured two
 commands each. Each row below is the p50 / nearest-rank p95 of the seven
 per-process medians, in microseconds. The before and after binaries ran on the
@@ -317,12 +602,12 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-<checkout>" \
   cargo build --release --locked \
   --manifest-path crates/crab-ltx/perf/replica-cost/Cargo.toml
 /usr/bin/time -l "$HOME/Workspace/crabbuild-target/crab-<checkout>/release/crab-ltx-replica-cost" \
-  --sparse --payload-bytes 4096 --commands 12 --warmup 5
+  --activation sparse --payload-bytes 4096 --commands 12 --warmup 5
 ```
 
 Replace the payload with `16384` for the middle row. For 4 MiB, use
 `--payload-bytes 4194304 --max-capture-bytes 1048576 --commands 3 --warmup 1`.
-Omit `--sparse` for fresh rows. The published RustFS loopback measurements
+Use `--activation fresh` (the default) for fresh rows. The published RustFS loopback measurements
 below are provider preparation cost; runtime fleet or exact-root response
 latency needs a separate qualification receipt.
 
@@ -377,17 +662,230 @@ number of directory leaves a payload touches: 5 objects for a small write up to
 is dominated by the rewritten leaves and root document, and the payload's
 compressibility matters more than its size.
 
-A hot Cell at 100 commands per second would issue roughly 500-1,300 immutable
-PUTs per second, which is why the runtime admits against one pending-publication
-byte high-water mark per Cell plus the 32-segment compaction debt that folds the
+A hot Cell offering 100 commands per second would demand roughly 500-1,300
+logical immutable-object uploads per second at these measured costs. These
+are not HTTP request counts: at that revision native LTX bodies used multipart even when small,
+and retries, metadata reads, and authority CAS add requests. The runtime admits
+against one pending-publication byte high-water mark per Cell plus the
+32-segment compaction debt that folds the
 root graph. Publication stays one serialized root per command because the object
 path is the long-term durability authority and the node-log fleet proof releases
 the command earlier; on this loopback RustFS path one command costs roughly
 0.09-0.15 seconds of provider work, so a Cell without a fleet proof is
 provider-latency bound, not CPU bound. Coalescing several commands into one root
-would save metadata objects, not bodies, and the fleet-proof race already
-absorbs most of that latency for enrolled nodes. Multi-Cell concurrency,
+could save metadata objects while retaining each command's captured bodies.
+Fleet proof can release a response before object publication; the response
+winner and sustained publication drain rate still need measurement. Multi-Cell concurrency,
 cloud-bucket p99, and retention cost remain unmeasured.
+
+Audit qualification limits: `replica-cost` generates a periodic payload that
+repeats every 251 bytes; it does not represent incompressible data. Its direct
+`CellReplica::prepare` loop excludes runtime authority CAS, the follower race,
+and scheduled compaction. With 28 measured commands, nearest-rank p99 is the
+maximum sample. Retain these rows as a reproducible historical workload;
+qualify entropy, sustained publication debt, and application latency separately.
+The [LTX performance audit](../../crab-cell-runtime/docs/ltx-performance-audit.md)
+records source-backed optimization candidates and their acceptance gates.
+
+### Small-body transfer experiment
+
+On 2026-09-25, seven independent release processes before (`a7091fd7138`)
+and after (`85a3bf684d3`) the bounded single-PUT change used the same loopback
+RustFS container. Each process ran `--activation sparse --payload-bytes 4096 --commands 32
+--warmup 4`: 28 measured preparations of the historical periodic payload.
+Values below are the median of the seven per-run statistics, in microseconds:
+
+| Measurement | Before | After |
+| --- | ---: | ---: |
+| Root preparation p50 | 6,642 | 6,163 |
+| Root preparation p95 | 10,951 | 12,142 |
+| SQLite commit p50 | 463 | 550 |
+| Capture p50 | 542 | 653 |
+| Logical objects / command | 5 | 5 |
+| Mean bytes / command | 13,046 | 13,046 |
+
+Raw samples and source/binary SHA-256 metadata are retained outside the
+checkout under `$HOME/.codex/cell-vfs-ltx-scale/ltx-upload-a7091fd/`, with
+`before-0.json` through `before-6.json` and matching `after-*` files.
+The store image is the pinned RustFS `1.0.0-beta.8-glibc` from the Compose
+example; the harness uses `object_store` 0.14.2 and bundled SQLite 3.49.1.
+
+This is an inconclusive latency comparison: phases ran sequentially on one
+shared host, p95 worsened, and the unchanged commit/capture paths also slowed.
+The baseline itself differs substantially from the earlier RustFS table.
+Do not attribute that historical difference to this patch or claim a p99,
+fleet throughput, or latency SLO. This harness does not install the persistent
+directory cache, so it cannot measure removal of cache-index writes.
+
+Focused transport tests prove the narrower change: native, compacted, and
+bundled bodies up to 256 KiB use single PUT; larger bodies keep multipart;
+lost responses reconcile; conflicting bytes are refused; restored databases
+are identical. A real RustFS public HTTP/peer test also passed mutations and
+restoration after takeover. Public-action p95/p99 and sustained publication
+drain remain the performance acceptance gates.
+
+### Backend calls and payload entropy
+
+The runner now uses the existing `Store::with_storage_observer` boundary.
+Each sample's `preparation_io` records backend operation/outcome, calls,
+accumulated duration, bytes read, and bytes written for root preparation.
+Bootstrap, activation, and commit/capture reads are excluded. Calls retried
+by `Store` appear separately; retries inside the provider client do not.
+These are logical backend calls, not a wire-level HTTP request counter.
+Concurrent call durations overlap and must not be added to infer wall time.
+
+The default report labels its historical data `periodic-251`.
+`--random-payload` selects deterministic command-seeded xorshift64 bytes and
+labels them `xorshift64-command-seeded`. Generation is outside the timed SQL
+transaction. This is workload data, not a cryptographic random generator.
+
+```sh
+TMPDIR="$HOME/Workspace/crabbuild-target/crab-8bc8/tmp" \
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
+  cargo run --release --locked --manifest-path \
+  crates/crab-ltx/perf/replica-cost/Cargo.toml -- \
+  --activation sparse --random-payload --payload-bytes 300000 --commands 12 --warmup 4 \
+  --endpoint http://127.0.0.1:19010 --bucket crab-cell-issue-fleet \
+  --access-key crab --secret-key crab
+```
+
+Three real RustFS smoke runs at `6226f0445c1`, each with eight measured
+preparations after four warmups, produced these aggregate counts:
+
+| Payload | HEAD | PUT | Multipart start / part / complete | Mean logical bytes / root |
+| --- | ---: | ---: | ---: | ---: |
+| 4 KiB periodic | 16 | 40 | 0 / 0 / 0 | 7,468 |
+| 4 KiB random | 16 | 40 | 0 / 0 / 0 | 13,627 |
+| 300,000 bytes random | 16 | 51 | 8 / 8 / 8 | 356,575 |
+
+All calls completed successfully. The small-root path still performs two
+metadata presence checks and five immutable PUTs per measured command. The
+larger body crosses the bounded single-PUT threshold. Raw `io-committed-*.json`
+samples and source/binary metadata are retained beside the comparison above.
+These short runs verify observation wiring and expose payload sensitivity;
+they do not establish tail latency, runtime CAS cost, compaction cost, or
+sustainable throughput. Keep the missing-root-metadata refusal invariant when
+evaluating those two HEADs.
+
+### Sparse activation over real RustFS
+
+The scale example at `42b7eb8e0c9` measures cold and reused metadata at one,
+four, and eight shared I/O slots. The library includes bounded leaf overlap
+from `b2c3b51bede`. See the [runnable example](../examples/README.md#rustfs-scale-workload)
+for setup, JSON fields, and cache semantics. This experiment compares admission
+settings on the same implementation; it is not a previous-revision comparison.
+
+Two release processes on 2026-09-25 (local time) used SQLite `randomblob`
+payloads of 32 MiB and 256 MiB. Each process produced three samples per
+slot/cache pair, reversing slot order in the middle round. The table gives
+median checksum-preparation milliseconds; calls/bytes were identical in all
+three cold samples for each size and slot count.
+
+| Payload | Metadata cache | 1 slot | 4 slots | 8 slots | Origin calls / bytes |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 32 MiB | Cold | 100.464 | 74.721 | 73.979 | 33 / 723,272 |
+| 32 MiB | Reused | 52.158 | 78.214 | 83.789 | 0 / 0 |
+| 256 MiB | Cold | 1,057.293 | 419.734 | 295.320 | 259 / 5,797,768 |
+| 256 MiB | Reused | 119.020 | 57.479 | 71.758 | 0 / 0 |
+
+The databases contained 8,207 and 65,626 pages of 4 KiB. Every activation
+queried its restored row successfully and materialized four pages. Both
+processes deleted the source and passed byte-identical full restore and
+compaction restore. Cold checksum preparation benefits from overlap in these
+samples; the zero-origin phase still has substantial and variable local work.
+Wider concurrency does not improve every phase: cold writable-open medians at
+256 MiB were 107, 82, and 126 ms for one, four, and eight slots. Three samples
+per setting do not establish tails or a universally optimal concurrency.
+
+The first query made two range calls totaling 524,994 bytes at 32 MiB and
+265,332 bytes at 256 MiB. The current VFS requests up to 64 contiguous
+same-object pages per miss. This exposes a demand-read versus read-ahead
+tradeoff to qualify with scans and hydration before changing policy.
+
+Environment: native ARM64 release binary on macOS 26.5.2, external APFS volume,
+Rust 1.97.0, SQLite 3.49.1, workspace `object_store` 0.14.1. RustFS ran in the
+existing Colima ARM64 VM (8 CPUs, approximately 16 GiB), using
+`1.0.0-beta.8-glibc` at digest
+`sha256:040304b66e029a5cde4bed140b41513e925909839a9b912a40a98340610d1f66`.
+Provider connections and provider-side caches were reused. This is a local
+library probe without per-node cgroup limits, runtime ownership/CAS, followers,
+concurrent application traffic, or a persistent directory cache.
+
+Raw JSON lines and phase summaries: `32mib.log` and `256mib.log` under
+`$HOME/Workspace/crabbuild-target/crab-8bc8/activation-probe/`. Binary SHA-256:
+`0be9ec6e3015dff76aea2a7c769c87a0087335d265cd86a32a66cd638954ac47`.
+The same directory retains source/environment metadata and stderr. Keep this
+microbenchmark separate from public-action and fleet qualification.
+
+### Concurrent GA activation under one vCPU (2026-09-27)
+
+The scale example's [activation burst](../examples/README.md#concurrent-activation-and-first-write-recovery)
+was run with four distinct Cells at 32 MiB and 256 MiB per Cell. Both release
+processes used the same Linux ARM64 binary, pinned RustFS 1.0 GA and kernel
+limits of one vCPU, 1 GiB memory and no swap. Within each process all four
+rounds reopened the same four authenticated roots with fresh metadata
+identities and local files. Serial/burst order was `1, 4, 4, 1`.
+
+The measured interval ends when every Cell has read its first 1 MiB payload,
+committed a local replacement, captured it and prepared its next immutable root.
+Full verification starts after that interval. Times below are whole-round
+observations, not percentiles:
+
+| Payload per Cell | Serial, round 0 | Four concurrent, round 1 | Four concurrent, round 2 | Serial, round 3 |
+| --- | ---: | ---: | ---: | ---: |
+| 32 MiB | 139.252 ms | 81.941 ms | 107.235 ms | 136.621 ms |
+| 256 MiB | 243.549 ms | 393.284 ms | 542.418 ms | 290.040 ms |
+
+At 256 MiB, per-Cell checksum-phase medians were 28.770 / 167.682 /
+355.429 / 31.504 ms in round order. That phase includes shared dirty-admission
+waiting and local checksum-file work as well as object reads; it is not a
+provider-only timer. It performed 259–260 observed reads and returned
+5,797,768–5,797,912 bytes per Cell. At 32 MiB, it performed 33 reads and
+returned 723,272 bytes. The larger case therefore exposes eager metadata cost
+and interference that the smaller case does not qualify away.
+
+Both sizes passed all sixteen first-write recovery checks: after removing the
+local database and captured cut, a fresh object-root restore matched every
+payload against the independent source-plus-replacement model. Across both
+processes this checks 4,608 payloads of 1 MiB each. All sixteen mutations per
+process have distinct IDs and prepared roots. The 256 MiB case also exercises
+eight successive bootstrap capture batches for each independent Cell graph.
+The original full-source and compacted-root byte comparisons also passed.
+
+The replacement is a compressible 1 MiB value with a unique mutation ID; the
+source payloads use SQLite `randomblob`. The measured write follows a complete
+read of that row, so it does not measure a write-first cold fault. Prepared
+object totals were 8 / 102,814 bytes at 32 MiB and 9 / 121,989 bytes at 256 MiB.
+These are immutable proposals; the probe performs no authority CAS or public
+application acknowledgement.
+
+Peak charged cgroup memory was 205.9 MiB at 32 MiB and 940.1 MiB at 256 MiB.
+The latter process recorded 68 throttled CPU periods and 591,933 microseconds
+of throttled time; the smaller process recorded none. Neither had OOM events.
+These process-wide counters include bootstrap, the preceding eighteen single
+activations, verification and final compaction. They cannot attribute the
+burst slowdown to CPU throttling or estimate four resident Cells' RSS.
+Default LTX Host admission had 32 I/O slots, one blocking slot, one dirty slot
+and two recovery slots. SQLite operations used Tokio blocking dispatch; this
+does not reproduce the runtime's fixed SQL-worker assignment or node ledger.
+
+Source: `411ab72b291` plus the opt-in activation-burst example patch, excluding
+the separately staged app-to-host relocation. Rust 1.97.1 and SQLite 3.49.1;
+RustFS image
+`ghcr.io/rustfs/rustfs:1.0.0-glibc@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858`.
+Four-CPU/eight-GiB Colima VM; scratch used a Docker local volume. Raw logs,
+source patch/hashes, binary hash, container inspections, cgroup counters and
+independently checked JSON summaries are retained under
+`worker-profile-20260927/activation-burst/evidence/` in the checkout's external
+target; the `256/` child holds the larger run. The example defaults remain
+unchanged when `--activation-cells` is omitted.
+
+Do not raise production recovery concurrency from the 32 MiB result. First
+measure the same mixed recovery/application workload through `CellNode` and
+its admission ledger, including write-first faults, larger or fragmented
+roots, unaffected resident Cells and phase-specific resource counters. These
+two processes do not establish sustained capacity, service tails or independent
+failure-domain recovery.
 
 The runners also use the implementations' pinned bundled SQLite versions:
 Crab currently links SQLite 3.49.1 while the pinned Celld revision links SQLite

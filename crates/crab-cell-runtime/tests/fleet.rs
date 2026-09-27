@@ -7,4 +7,5 @@ mod fleet {
     pub mod pressure_properties;
     pub mod read_placement;
     pub mod read_policy;
+    pub mod takeover;
 }

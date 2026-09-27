@@ -2,7 +2,6 @@
 """Qualify S3-rooted issue read replicas through 3, 5, 10, and 20 local nodes."""
 
 import argparse
-import hashlib
 import json
 import math
 import re
@@ -16,14 +15,20 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from qualify import command, compose, issue_path, node_url, prove_node, request_json, run_stage
+from qualify import (
+    build_image, command, compose, initial_issue, issue_matches, issue_path,
+    node_url, pin_image, prove_node, request_json, run_stage,
+)
 from render import CONFIG, MEMORY_LIMIT, ROOT, RUSTFS_NOFILE_LIMIT, node_name, render
 
 
 def replica_issue(url: str, index: int) -> tuple[str, int, str]:
     with urllib.request.urlopen(url, timeout=10) as response:
         body = json.load(response)
-        if body.get("title") != f"Cell issue on node {index}":
+        # Body refresh is measured separately; reader discovery must still bind
+        # the receipt to this fixture's issue, rather than any successful query.
+        if (type(body.get("number")) is not int or body["number"] != 1
+                or body.get("title") != initial_issue(index)["title"]):
             raise RuntimeError(f"replica returned the wrong issue: {body}")
         reader = response.headers.get("x-crab-cell-reader")
         incarnation = response.headers.get("x-crab-cell-incarnation")
@@ -180,7 +185,7 @@ def measure_refresh(path: Path, profiles: tuple[str, ...], port: int, size: int,
             "timing_scope": "poll-observed upper bounds after acknowledgement, including root inspection"}
 
 
-def measure_reads(path: Path, profiles: tuple[str, ...], port: int, size: int) -> dict:
+def measure_reads(path: Path, profiles: tuple[str, ...], port: int, size: int, expected: dict) -> dict:
     result = {}
     for mode in ("owner", "replica"):
         url = node_url(1, port) + issue_path(1) + "/1" + ("?read=replica" if mode == "replica" else "")
@@ -188,7 +193,7 @@ def measure_reads(path: Path, profiles: tuple[str, ...], port: int, size: int) -
             start = time.monotonic()
             with urllib.request.urlopen(url, timeout=15) as response:
                 body = json.load(response)
-                if body.get("title") != "Cell issue on node 1":
+                if not issue_matches(body, expected):
                     raise RuntimeError("measured read returned the wrong value")
                 reader = response.headers.get("x-crab-cell-reader", "owner")
             return time.monotonic() - start, reader
@@ -326,7 +331,7 @@ def prove_warm_promotion(path: Path, profiles: tuple[str, ...], port: int) -> di
         issue = request_json("GET", node_url(observer, port) + issue_path(19) + "/1")
         after = json.loads(compose(path, profiles, "exec", "-T", node_name(observer), *args))
         successor = sessions[after["owner"]["session"]][1]
-        if successor not in warm["reader_counts"] or issue["title"] != "Cell issue on node 19":
+        if successor not in warm["reader_counts"] or not issue_matches(issue, initial_issue(19)):
             raise RuntimeError("failed owner was not replaced by a verified warm reader")
         if after["root"]["commit_sequence"] < before["root"]["commit_sequence"]:
             raise RuntimeError("warm promotion regressed the acknowledged root")
@@ -380,8 +385,7 @@ def prove_all_reader_loss(path: Path, profiles: tuple[str, ...], stage: dict, po
             labels = request_json("GET", node_url(survivor_index, port) + "/api/repos/demo/work-20/labels")
             observed = json.loads(compose(path, profiles, *status_args))
             if (
-                issue["title"] == "Cell issue on node 20"
-                and issue["body"] == "Durable issue created through a constrained Cell node"
+                issue_matches(issue, initial_issue(20))
                 and len(labels.get("items", [])) == 1
                 and labels["items"][0]["name"] == "distributed"
                 and observed["state"] == "serving"
@@ -465,23 +469,34 @@ def main() -> None:
     parser.add_argument("--project", required=True)
     parser.add_argument("--gateway-port", type=int, default=18080)
     parser.add_argument("--node-port-base", type=int, default=18100)
+    parser.add_argument("--rustfs-port", type=int, default=19010)
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--runtime-source", help="source commit of the existing image when skipping its build")
     args = parser.parse_args()
+    if args.skip_build and not args.runtime_source:
+        parser.error("--skip-build requires --runtime-source")
 
+    source = command("git", "-C", str(ROOT), "rev-parse", "HEAD")
+    if command("git", "-C", str(ROOT), "status", "--porcelain"):
+        raise RuntimeError("qualification requires committed source")
     command("docker", "info", "--format", "{{.ServerVersion}}")
     label = f"label=com.docker.compose.project={args.project}"
     if any(command("docker", kind, "ls", "-q", "--filter", label) for kind in ("volume", "network")) or command("docker", "ps", "-aq", "--filter", label):
         raise RuntimeError(f"Compose project {args.project} already has resources")
-    path = render(args.state, args.project, args.gateway_port, args.node_port_base, True)
+    path = render(args.state, args.project, args.gateway_port, args.node_port_base,
+                  args.rustfs_port, object_durability=True)
     compose(path, (), "config", "--quiet")
     if not args.skip_build:
-        subprocess.run(["docker", "compose", "--file", str(path), "build", "release-init"], check=True)
-    source_diff = command("git", "-C", str(ROOT), "diff", "--binary", "HEAD")
+        build_image(args.project, source)
+    runtime_source = source
+    if args.skip_build:
+        runtime_source = command("git", "-C", str(ROOT), "rev-parse", args.runtime_source + "^{commit}")
+    image = pin_image(path, runtime_source)
     report = {
         "project": args.project,
-        "source_commit": command("git", "-C", str(ROOT), "rev-parse", "HEAD"),
-        "source_diff_sha256": hashlib.sha256(source_diff.encode()).hexdigest(),
-        "image": command("docker", "image", "inspect", "--format", "{{.Id}}", f"{args.project}:local"),
+        "runtime_source": runtime_source,
+        "source_commit": source,
+        **image,
         "started_at": datetime.now(timezone.utc).isoformat(),
         "profile": "local-rustfs-object-read-replicas",
         "node_cpu_limit": 1,
@@ -491,8 +506,9 @@ def main() -> None:
     phases = [(3, ()), (5, ("five",)), (10, ("five", "ten")), (20, ("five", "ten", "twenty"))]
     previous = 0
     revision = 0
+    expected_issues = {index: initial_issue(index) for index in range(1, 21)}
     for size, profiles in phases:
-        stage = run_stage(path, profiles, previous, size, args.gateway_port, args.node_port_base)
+        stage = run_stage(path, profiles, previous, size, args.gateway_port, args.node_port_base, expected_issues)
         target = size - 1
         policy = request_json(
             "PUT",
@@ -503,11 +519,13 @@ def main() -> None:
         if policy["desired_readers"] != target:
             raise RuntimeError(f"{size} nodes: target update was not applied")
         stage["replicas"] = prove_readers(args.node_port_base, size, target)
-        stage["read_measurement"] = measure_reads(path, profiles, args.node_port_base, size)
+        stage["read_measurement"] = measure_reads(path, profiles, args.node_port_base, size, expected_issues[1])
         stage["refresh_measurement"] = measure_refresh(
             path, profiles, args.node_port_base, size,
             set(stage["replicas"]["reader_counts"]), stage["owners"]["work-01"],
         )
+        # Scale-out must preserve the acknowledged update from this stage.
+        expected_issues[1] = {**expected_issues[1], "body": stage["refresh_measurement"]["body"]}
         stage["readiness"] = request_json("GET", node_url(1, args.node_port_base) + "/api/repos/demo/work-01/settings/read-replicas")
         stage["reader_resources"] = {}
         for index in range(1, size + 1):

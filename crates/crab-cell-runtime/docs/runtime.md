@@ -54,6 +54,12 @@ The node bounds:
 - Per-Cell request and byte admission
 - Node-wide memory, disk, and activity admission
 
+Worker-job admission uses one slot per SQL worker. A job waiting for a busy
+worker holds neither another worker's slot nor a node worker-job reservation.
+Once dispatched, the job owns its slot and reservation until execution ends,
+including when its caller is canceled. Lifecycle and publication-confirmation
+messages retain their bounded worker queue and do not need a job permit.
+
 Cancellation of a caller doesn't cancel accepted work. The actor still records and publishes the result, so a retry can resolve it.
 
 ## Execute commands in six phases
@@ -191,6 +197,21 @@ Arbitrary Rust cannot be preempted safely. When a callback exceeds the deadline,
 
 After exit, recovery closes the SQLite handle and reloads control. It releases only authority that still names the same Cell, incarnation, code, schema, owner, and epoch.
 
+HTTP peer codecs use a separate primitive-job budget. Immediate and queued
+admission share that budget; queued admission checks one absolute deadline
+before waiting and after waking. Canceling a waiter reserves nothing, and
+runtime shutdown wakes queued callers with `RuntimeClosed`. Callers must
+reserve retained request bytes before waiting. Enrollment storage I/O releases
+the codec slot; decoded requests remain untrusted until signature verification
+rechecks the signed enrollment's lifetime.
+
+The HTTP receiver applies its received transport budget to enrollment,
+resolution, activation, dispatch waiting, and reply encoding. That budget
+starts after the request body arrives and remains distinct from the native
+work deadline above. Canceling the HTTP wait does not cancel an accepted
+mutation's durable completion; the caller resolves an ambiguous result using
+the same stable request identity.
+
 ## Recover from panic without losing the worker
 
 The worker catches native callback panic at its fixed thread boundary. SQLite unwinds the transaction, the affected Cell becomes fenced, and the worker continues serving other Cells.
@@ -290,6 +311,14 @@ parse is deleted, so a foreign object under the prefix cannot be re-listed
 forever.
 
 A Tick advances at most 128 ledger, expiry, lease, timer, or retention items. Protected shares prevent one maintenance class from starving another, and a Tick that reserves a share for a class it does not run fails instead of silently shrinking its usable work.
+
+When node-log recovery is configured, each scheduler cycle uses
+`NodeDirectory::live_for_recovery` to read live membership and expired-log
+candidates in one fresh directory scan. Candidate selection reuses that bounded
+observation for its existing one-second lifetime; claimant admission and the
+fencing CAS still reload authoritative records. Failed or cancelled fresh scans
+discard the previous observation. Peer authentication, release activation and
+ordinary `live` calls retain their direct reads.
 
 ## Shed under node pressure
 

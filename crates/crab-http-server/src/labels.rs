@@ -208,6 +208,7 @@ async fn create(
             .await,
     )?;
     let label = match output {
+        CreateLabelOutcome::Archived => return Err(Error::Archived),
         CreateLabelOutcome::Created(label) => label,
         CreateLabelOutcome::RequestConflict => return Err(Error::RequestConflict),
         CreateLabelOutcome::NameConflict => return Err(Error::LabelConflict),
@@ -251,6 +252,7 @@ async fn edit(
             .await,
     )?;
     let label = match output {
+        UpdateLabelOutcome::Archived => return Err(Error::Archived),
         UpdateLabelOutcome::Updated(label) => label,
         UpdateLabelOutcome::NotFound => return Err(Error::LabelNotFound),
         UpdateLabelOutcome::NameConflict => return Err(Error::LabelConflict),
@@ -285,6 +287,7 @@ async fn remove(
             )
             .await,
     )? {
+        DeleteLabelOutcome::Archived => Err(Error::Archived),
         DeleteLabelOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
         DeleteLabelOutcome::NotFound => Err(Error::LabelNotFound),
         DeleteLabelOutcome::Conflict => Err(Error::Conflict),

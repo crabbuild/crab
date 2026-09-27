@@ -302,6 +302,25 @@ sequenceDiagram
 
 The protocol permits at most two forwarding hops. Mutation retries happen only when transport proves the first attempt did not start. Ambiguous attempts use `Resolve`.
 
+Commands, queries, and mutation resolution carry a signed expected Cell ID,
+incarnation, code digest, and schema. The receiver compares all four with its
+resolved owner handle before execution or ledger lookup; actor admission still
+fences ownership changes after resolution. A stale observation returns a
+not-started refusal. It cannot authorize a different Cell or schema.
+
+A host that already read this description from Cell authority can bind one
+routed request with `CellClient::with_observed_description`. This avoids the
+extra peer `Describe` round trip. The binding is specific to that Cell and
+does not refresh itself: after refusal, resolve a fresh route and retain any
+pending mutation's original identity and digest. Other clients obtain the
+description through their transport. Effect delivery retains its destination
+incarnation and durable inbox contract; migration already carries both source
+and successor code/schema.
+
+These required fields revise the unshipped private wire contract. Compatible
+application rollout tests use nodes implementing the same peer contract;
+older private binaries that omit or reject these fields cannot participate.
+
 Native SQL, KV, Blob, Queue, Cron, Workflow, Activity, and Effect operations
 cross this private boundary as registered `CellCommand`/`CellQuery` codecs.
 The wire contract deliberately has no primitive-specific peer operation path;

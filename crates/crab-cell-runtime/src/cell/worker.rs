@@ -69,6 +69,12 @@ pub(crate) enum WorkerState {
     Fenced,
 }
 
+#[derive(Debug)]
+pub(crate) enum HydrationStep {
+    Progress(Option<crab_ltx::Hydration>),
+    Deferred(Duration),
+}
+
 /// Result returned by one SQL worker without releasing pending command output.
 #[derive(Clone)]
 pub enum WorkerExecution {
@@ -135,7 +141,9 @@ impl SqlWorkerPool {
                 resources,
                 max_active_cells,
                 worker_count,
-                worker_permits: Arc::new(Semaphore::new(worker_count)),
+                worker_permits: (0..worker_count)
+                    .map(|_| Arc::new(Semaphore::new(1)))
+                    .collect(),
             }),
         })
     }
@@ -285,6 +293,8 @@ impl SqlWorkerPool {
         self.send_worker_job(
             cell,
             WorkerCommand::Execute {
+                trace: tracing::Span::current(),
+                queued_at: Instant::now(),
                 cell,
                 identity,
                 operation_digest,
@@ -336,6 +346,8 @@ impl SqlWorkerPool {
         self.send_worker_job(
             cell,
             WorkerCommand::DeliverEffect {
+                trace: tracing::Span::current(),
+                queued_at: Instant::now(),
                 cell,
                 delivery,
                 now_ms,
@@ -372,25 +384,81 @@ impl SqlWorkerPool {
         receive(response).await
     }
 
-    /// Resolves a bounded sparse-page batch on the Cell's assigned worker.
+    /// Fetches a bounded sparse batch asynchronously, then installs it on its worker.
     pub(crate) async fn hydrate(
         &self,
         cell: CellId,
         pages: u32,
         deadline: Instant,
-    ) -> Result<Option<crab_ltx::Hydration>> {
+    ) -> Result<HydrationStep> {
         let (reply, response) = oneshot::channel();
-        self.send_worker_job(
-            cell,
-            WorkerCommand::Hydrate {
+        let preparation = async {
+            self.send_worker_job(
                 cell,
-                pages,
-                deadline,
-                reply,
+                WorkerCommand::PrepareHydration {
+                    cell,
+                    pages,
+                    deadline,
+                    reply,
+                },
+            )
+            .await?;
+            receive(response).await
+        };
+        // Preparation only selects pages. Abandoning its waiter cannot install
+        // bytes or release foreground ownership, even if it was dispatched.
+        let read = match tokio::time::timeout_at(deadline.into(), preparation).await {
+            Ok(result) => result?,
+            Err(_) => return Ok(HydrationStep::Deferred(Duration::ZERO)),
+        };
+        let Some(read) = read else {
+            return Ok(HydrationStep::Progress(None));
+        };
+        let retained = match self
+            .inner
+            .resources
+            .try_reserve(ResourceCost::zero().with_retained_bytes(read.retained_bytes()))
+        {
+            Ok(retained) => retained,
+            // Background work yields to retained foreground bytes. No page was
+            // fetched or installed, so retry later without fencing the owner.
+            Err(Error::Capacity(_)) => return Ok(HydrationStep::Deferred(Duration::ZERO)),
+            Err(error) => return Err(error),
+        };
+        let batch = match tokio::time::timeout_at(deadline.into(), read.fetch()).await {
+            Ok(Ok(batch)) => batch,
+            Ok(Err(error)) => match error.classify() {
+                crab_ltx::FailureClass::Retryable { after } => {
+                    return Ok(HydrationStep::Deferred(after.unwrap_or_default()));
+                }
+                crab_ltx::FailureClass::Capacity => {
+                    return Ok(HydrationStep::Deferred(Duration::ZERO));
+                }
+                _ => return Err(error.into()),
             },
-        )
-        .await?;
-        receive(response).await
+            Err(_) => return Ok(HydrationStep::Deferred(Duration::ZERO)),
+        };
+        let (reply, response) = oneshot::channel();
+        // Move the payload's reservation into the dispatched install: dropping
+        // its waiter cannot release bytes still owned by the worker queue.
+        let installation = async {
+            self.send_worker_job(
+                cell,
+                WorkerCommand::InstallHydration {
+                    cell,
+                    batch,
+                    retained,
+                    deadline,
+                    reply,
+                },
+            )
+            .await?;
+            receive(response).await
+        };
+        let progress = tokio::time::timeout_at(deadline.into(), installation)
+            .await
+            .map_err(|_| Error::Deadline)??;
+        Ok(HydrationStep::Progress(Some(progress)))
     }
 
     pub(crate) async fn hydration(&self, cell: CellId) -> Result<Option<crab_ltx::Hydration>> {
@@ -657,7 +725,9 @@ impl SqlWorkerPool {
                 ));
             }
             lifecycle.closing = true;
-            self.inner.worker_permits.close();
+            for permits in &self.inner.worker_permits {
+                permits.close();
+            }
             lifecycle.workers.clear();
             std::mem::take(&mut lifecycle.threads)
         };
@@ -703,7 +773,7 @@ impl SqlWorkerPool {
     }
 
     async fn send_worker_job(&self, cell: CellId, command: WorkerCommand) -> Result<()> {
-        let reservation = self.reserve_job().await?;
+        let reservation = self.reserve_job(cell).await?;
         self.send(
             cell,
             WorkerCommand::Reserved {
@@ -714,7 +784,19 @@ impl SqlWorkerPool {
         .await
     }
 
-    pub(crate) async fn reserve_job(&self) -> Result<WorkerJobReservation> {
+    pub(crate) async fn reserve_snapshot_job(&self) -> Result<WorkerJobReservation> {
+        // Immutable connections have no writer-thread affinity. Borrow any SQL
+        // slot so refresh can progress beside an old view, within the node cap.
+        let permits = self
+            .inner
+            .worker_permits
+            .iter()
+            .map(|permit| Box::pin(Arc::clone(permit).acquire_owned()));
+        let (permit, _, _) = futures_util::future::select_all(permits).await;
+        self.job_reservation(permit.map_err(|_| Error::RuntimeClosed)?)
+    }
+
+    async fn reserve_job(&self, cell: CellId) -> Result<WorkerJobReservation> {
         let worker_permits = {
             let lifecycle = self
                 .inner
@@ -724,12 +806,18 @@ impl SqlWorkerPool {
             if lifecycle.closing {
                 return Err(Error::RuntimeClosed);
             }
-            Arc::clone(&self.inner.worker_permits)
+            // A queued job must wait for its own shard, without consuming
+            // the admission capacity an idle worker needs to make progress.
+            Arc::clone(&self.inner.worker_permits[worker_index(cell, self.inner.worker_count)])
         };
         let permit = worker_permits
             .acquire_owned()
             .await
             .map_err(|_| Error::RuntimeClosed)?;
+        self.job_reservation(permit)
+    }
+
+    fn job_reservation(&self, permit: OwnedSemaphorePermit) -> Result<WorkerJobReservation> {
         let lifecycle = self
             .inner
             .lifecycle
@@ -798,7 +886,7 @@ struct PoolInner {
     resources: ResourceLedger,
     max_active_cells: usize,
     worker_count: usize,
-    worker_permits: Arc<Semaphore>,
+    worker_permits: Vec<Arc<Semaphore>>,
 }
 
 struct WorkerLifecycle {
@@ -809,7 +897,9 @@ struct WorkerLifecycle {
 
 impl Drop for PoolInner {
     fn drop(&mut self) {
-        self.worker_permits.close();
+        for permits in &self.worker_permits {
+            permits.close();
+        }
         let lifecycle = match self.lifecycle.get_mut() {
             Ok(lifecycle) => lifecycle,
             Err(poisoned) => poisoned.into_inner(),
@@ -853,6 +943,8 @@ enum WorkerCommand {
     },
     Bootstrap(Box<WorkerBootstrap>),
     Execute {
+        trace: tracing::Span,
+        queued_at: Instant,
         cell: CellId,
         identity: MutationIdentity,
         operation_digest: Digest,
@@ -870,6 +962,8 @@ enum WorkerCommand {
         reply: oneshot::Sender<Result<PendingMigration>>,
     },
     DeliverEffect {
+        trace: tracing::Span,
+        queued_at: Instant,
         cell: CellId,
         delivery: InboxDelivery,
         now_ms: i64,
@@ -885,11 +979,18 @@ enum WorkerCommand {
         handler: QueryHandler,
         reply: oneshot::Sender<Result<Vec<u8>>>,
     },
-    Hydrate {
+    PrepareHydration {
         cell: CellId,
         pages: u32,
         deadline: Instant,
-        reply: oneshot::Sender<Result<Option<crab_ltx::Hydration>>>,
+        reply: oneshot::Sender<Result<Option<crab_ltx::db::HydrationRead>>>,
+    },
+    InstallHydration {
+        cell: CellId,
+        batch: crab_ltx::db::HydrationBatch,
+        retained: ResourceReservation,
+        deadline: Instant,
+        reply: oneshot::Sender<Result<crab_ltx::Hydration>>,
     },
     Hydration {
         cell: CellId,

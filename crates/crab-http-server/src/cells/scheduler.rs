@@ -323,7 +323,15 @@ impl RepositoryCellScheduler {
         // Due work this node already owns is answered from memory: a resident
         // Cell must not wait for the fleet scan to reach its catalog shard.
         remaining -= self.tick_resident_due(now_ms, remaining).await?;
-        let advertisements = self.directory.live(now_ms, MAX_LIVE_NODES).await?;
+        // Recovery-enabled schedulers discover live capacity and expired logs
+        // in one fresh pass; recovery claims still reload their authority.
+        let advertisements = if self.node_log_transport.is_some() {
+            self.directory
+                .live_for_recovery(now_ms, MAX_LIVE_NODES)
+                .await?
+        } else {
+            self.directory.live(now_ms, MAX_LIVE_NODES).await?
+        };
         let nodes =
             self.fleet
                 .eligible_sessions(&advertisements, now_ms, SCHEDULER_STALE_AFTER_MS)?;

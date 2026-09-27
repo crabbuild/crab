@@ -9,6 +9,7 @@ use super::admission::{
     send_resolve_reply,
 };
 use super::*;
+use tracing::Instrument as _;
 
 pub(super) async fn execute_migration(
     pool: SqlWorkerPool,
@@ -136,6 +137,13 @@ pub(super) async fn execute_command(
     generation: u64,
     effect_id: u64,
 ) -> TaskResult {
+    let execution_started = std::time::Instant::now();
+    tracing::debug!(
+        target: "crab_cell_runtime::action",
+        parent: &command.trace,
+        event = "cell_execution_started",
+        actor_queue_us = command.queued_at.elapsed().as_micros(),
+    );
     let deadline = std::time::Instant::now() + SQL_WALL_DEADLINE;
     let execution = match command.handler.take() {
         Some(handler) => {
@@ -176,6 +184,7 @@ pub(super) async fn execute_command(
                     }
                 }
             };
+            let operation = operation.instrument(command.trace.clone());
             tokio::pin!(operation);
             match tokio::time::timeout_at(deadline.into(), &mut operation).await {
                 Ok(result) => result,
@@ -199,6 +208,13 @@ pub(super) async fn execute_command(
         }
         None => Err(Error::Fenced),
     };
+    tracing::debug!(
+        target: "crab_cell_runtime::action",
+        parent: &command.trace,
+        event = "cell_execution_completed",
+        worker_round_trip_us = execution_started.elapsed().as_micros(),
+        succeeded = execution.is_ok(),
+    );
     let (result, must_fence) = match execution {
         Ok(WorkerExecution::Recorded(outcome)) => (Ok(CommandTaskResult::Recorded(outcome)), false),
         Ok(WorkerExecution::Pending(pending)) => {
@@ -251,7 +267,7 @@ pub(super) async fn execute_command(
 
 pub(super) async fn prove_command(
     pool: SqlWorkerPool,
-    command: Box<QueuedCommand>,
+    mut command: Box<QueuedCommand>,
     outcome: StoredOutcome,
     commit_sequence: u64,
     durability: Option<PendingDurability>,
@@ -259,32 +275,48 @@ pub(super) async fn prove_command(
     generation: u64,
     effect_id: u64,
 ) -> TaskResult {
+    use crate::node::log::DurabilitySource;
+
+    let proof_started = std::time::Instant::now();
     let proof = match durability {
         Some(durability) => {
             let fleet_or_object = durability.prove();
             tokio::pin!(fleet_or_object);
             tokio::select! {
                 object = &mut object => match receive_publication_proof(object) {
-                    Ok(()) => Ok(()),
+                    Ok(()) => Ok(DurabilitySource::Object),
                     // Object publication failure does not invalidate an
                     // independently fsynced follower proof for this cut.
-                    Err(_) => fleet_or_object.await.map(|_| ()),
+                    Err(_) => fleet_or_object.await,
                 },
                 result = &mut fleet_or_object => match result {
-                    Ok(()) => Ok(()),
+                    Ok(source) => Ok(source),
                     // Losing the follower path does not invalidate the same
                     // cut's object publication, which remains the fallback.
-                    Err(_) => receive_publication_proof(object.await),
+                    Err(_) => receive_publication_proof(object.await).map(|()| DurabilitySource::Object),
                 }
             }
         }
-        None => receive_publication_proof(object.await),
+        None => receive_publication_proof(object.await).map(|()| DurabilitySource::Object),
     };
+    tracing::debug!(
+        target: "crab_cell_runtime::action",
+        parent: &command.trace,
+        event = "cell_proof_completed",
+        proof_wait_us = proof_started.elapsed().as_micros(),
+        commit_sequence,
+        succeeded = proof.is_ok(),
+    );
     let result = match proof {
-        Ok(()) => pool
-            .confirm_durable(command.cell, commit_sequence)
-            .await
-            .map(|()| outcome),
+        Ok(source) => {
+            let confirmation = std::time::Instant::now();
+            pool.confirm_durable(command.cell, commit_sequence)
+                .await
+                .map(|()| {
+                    command.response_proof = Some((source, confirmation.elapsed()));
+                    outcome
+                })
+        }
         Err(error) => Err(error),
     };
     let fenced = result.is_err();
@@ -328,7 +360,14 @@ pub(super) fn start_publication(
     let node_logged = publication.durability.is_some();
     let root_sequence_lag = i128::from(publication.pending.outcome().commit_sequence())
         - i128::from(active.published_sequence);
+    let incarnation = active.incarnation;
+    let commit_sequence = publication.pending.outcome().commit_sequence();
     tracing::debug!(
+        target: "crab_cell_runtime::action",
+        event = "cell_publication_started",
+        cell = ?cell,
+        incarnation = ?incarnation,
+        commit_sequence,
         queue_wait_ms = publication.submitted_at.elapsed().as_millis(),
         pending_publications = active.coordination.publication_count(),
         publication_bytes = active.publication_bytes,
@@ -412,6 +451,11 @@ pub(super) fn start_publication(
         }
         .await;
         tracing::debug!(
+            target: "crab_cell_runtime::action",
+            event = "cell_publication_completed",
+            cell = ?cell,
+            incarnation = ?incarnation,
+            commit_sequence,
             publication_lag_ms = publication.submitted_at.elapsed().as_millis(),
             succeeded = result.is_ok(),
             "Cell LTX publication completed"

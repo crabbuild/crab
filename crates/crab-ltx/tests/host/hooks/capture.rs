@@ -168,6 +168,69 @@ fn capture_partial_write_sync_and_rename_failures_fence_the_session() {
 }
 #[cfg(feature = "replica")]
 #[test]
+fn published_cut_pruning_bounds_each_filesystem_transfer() {
+    let (_directory, faults, host, mut writer) = fixture();
+    writer
+        .transaction(|tx| tx.execute("INSERT INTO t VALUES(randomblob(2000000))", []))
+        .unwrap();
+    let batch = writer.capture_deferred().unwrap();
+    assert!(batch.segments[0].info().size_bytes > 1_000_000);
+    let retained = host.local_disk_used();
+    faults.largest_read.store(0, Ordering::Relaxed);
+
+    assert_eq!(writer.prune_captured(&batch).unwrap(), batch.segments.len());
+
+    assert!(faults.largest_read.load(Ordering::Relaxed) < 128 * 1024);
+    assert!(host.local_disk_used() < retained);
+    assert!(
+        batch
+            .segments
+            .iter()
+            .all(|segment| !segment.path().exists())
+    );
+    writer.close().unwrap();
+}
+
+#[cfg(feature = "replica")]
+#[test]
+fn published_cut_pruning_rejects_changed_bytes_without_releasing_accounting() {
+    for damage in ["truncated", "extended", "corrupted", "replaced"] {
+        let (_directory, _faults, host, mut writer) = fixture();
+        let batch = writer.capture_deferred().unwrap();
+        let path = batch.segments[0].path();
+        let original = std::fs::read(path).unwrap();
+        let retained = host.local_disk_used();
+        let mut changed = original.clone();
+        match damage {
+            "truncated" => changed.truncate(changed.len() - 1),
+            "extended" => changed.push(0),
+            "corrupted" => {
+                let middle = changed.len() / 2;
+                changed[middle] ^= 1;
+            }
+            "replaced" => {
+                // A separately valid cut must not satisfy this batch's identity.
+                let (_other_directory, _faults, _host, mut other) = fixture();
+                let other_batch = other.capture().unwrap();
+                changed = std::fs::read(other_batch.segments[0].path()).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        std::fs::write(path, &changed).unwrap();
+
+        assert!(writer.prune_captured(&batch).is_err(), "{damage}");
+        assert!(path.exists(), "{damage}");
+        assert_eq!(host.local_disk_used(), retained, "{damage}");
+
+        std::fs::write(path, &original).unwrap();
+        assert_eq!(writer.prune_captured(&batch).unwrap(), batch.segments.len());
+        assert_eq!(writer.prune_captured(&batch).unwrap(), 0);
+        writer.close().unwrap();
+    }
+}
+
+#[cfg(feature = "replica")]
+#[test]
 fn captured_pruning_retains_accounting_after_io_failure() {
     for operation in ["read_exact_at", "remove_file"] {
         let (_directory, faults, _host, mut writer) = fixture();
@@ -197,4 +260,137 @@ fn published_deferred_capture_is_pruned_without_a_local_durability_barrier() {
     writer.close().unwrap();
     assert_eq!(faults.file_syncs.load(Ordering::Relaxed), 0);
     assert_eq!(faults.parent_syncs.load(Ordering::Relaxed), 0);
+}
+
+fn resumed_checksum_fixture() -> (tempfile::TempDir, Arc<Faults>, Db) {
+    let (directory, faults, host, mut source) = fixture();
+    source
+        .transaction(|tx| tx.execute("INSERT INTO t VALUES(zeroblob(33554432))", []))
+        .unwrap();
+    source.capture().unwrap();
+    source.persist_continuation().unwrap();
+    source.close().unwrap();
+    faults.track_all.store(true, Ordering::Relaxed);
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("checksum-handoff"),
+            [4; 16],
+        ),
+        [5; 32],
+        [6; 16],
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(host);
+    let resumed = replica
+        .open_resumed(
+            &directory.path().join("source.sqlite"),
+            &directory.path().join("resumed.sqlite"),
+        )
+        .unwrap();
+    (directory, faults, resumed)
+}
+
+#[test]
+fn checksum_handoff_batches_reads_and_preserves_the_dense_sidecar() {
+    let (directory, faults, resumed) = resumed_checksum_fixture();
+    let sidecar = directory.path().join("resumed.sqlite.crab-ltx-checksums");
+    let before = std::fs::read(&sidecar).unwrap();
+    faults.read_calls.store(0, Ordering::Relaxed);
+    faults.largest_read.store(0, Ordering::Relaxed);
+
+    resumed.persist_continuation().unwrap();
+
+    assert!(
+        faults.read_calls.load(Ordering::Relaxed) <= before.len().div_ceil(64 * 1024),
+        "checksum handoff made {} reads for {} bytes",
+        faults.read_calls.load(Ordering::Relaxed),
+        before.len()
+    );
+    assert!(faults.largest_read.load(Ordering::Relaxed) <= 64 * 1024);
+    assert_eq!(std::fs::read(sidecar).unwrap(), before);
+    resumed.close().unwrap();
+}
+
+#[test]
+fn checksum_capture_batches_adjacent_updates() {
+    let (_directory, faults, mut resumed) = resumed_checksum_fixture();
+    resumed
+        .transaction(|tx| tx.execute("UPDATE t SET v=randomblob(length(v))", []))
+        .unwrap();
+    faults.write_calls.store(0, Ordering::Relaxed);
+    faults.largest_write.store(0, Ordering::Relaxed);
+    faults.checksum_reads.store(0, Ordering::Relaxed);
+    faults.checksum_read_bytes.store(0, Ordering::Relaxed);
+    faults.largest_checksum_read.store(0, Ordering::Relaxed);
+
+    let captured = resumed.capture_deferred().unwrap();
+
+    // Checkpoint maintenance can seal another cut. Each cut must read the
+    // preceding cut's merged sidecar through a fresh bounded window.
+    let checksum_bytes = captured
+        .segments
+        .iter()
+        .map(|cut| cut.info().database_pages as usize * 8)
+        .sum::<usize>();
+    let checksum_blocks = captured
+        .segments
+        .iter()
+        .map(|cut| (cut.info().database_pages as usize * 8).div_ceil(4096))
+        .sum::<usize>();
+    assert!(
+        faults.checksum_reads.load(Ordering::Relaxed) <= checksum_blocks,
+        "capture made {} checksum reads for {checksum_bytes} sidecar bytes",
+        faults.checksum_reads.load(Ordering::Relaxed),
+    );
+    assert!(faults.checksum_read_bytes.load(Ordering::Relaxed) <= checksum_bytes);
+    assert!(faults.largest_checksum_read.load(Ordering::Relaxed) <= 4096);
+    eprintln!(
+        "checksum capture: {} reads, {} bytes, {} maximum transfer, {} cuts",
+        faults.checksum_reads.load(Ordering::Relaxed),
+        faults.checksum_read_bytes.load(Ordering::Relaxed),
+        faults.largest_checksum_read.load(Ordering::Relaxed),
+        captured.segments.len(),
+    );
+
+    assert!(
+        faults.write_calls.load(Ordering::Relaxed) < 1024,
+        "capture made {} writes for {} cut bytes",
+        faults.write_calls.load(Ordering::Relaxed),
+        captured
+            .segments
+            .iter()
+            .map(|cut| cut.info().size_bytes)
+            .sum::<u64>()
+    );
+    assert!(faults.largest_write.load(Ordering::Relaxed) <= 64 * 1024);
+    // Updating the same small row in successive cuts must reread its block;
+    // retaining a window across the sidecar merge would use stale checksums.
+    for value in [17, 23] {
+        resumed
+            .transaction(|tx| tx.execute("UPDATE t SET v=? WHERE rowid=1", [value]))
+            .unwrap();
+        faults.checksum_reads.store(0, Ordering::Relaxed);
+        faults.checksum_read_bytes.store(0, Ordering::Relaxed);
+        let small = resumed.capture_deferred().unwrap();
+        let changed = small
+            .segments
+            .iter()
+            .map(|cut| {
+                crab_ltx::internal::inspect_ltx(&std::fs::read(cut.path()).unwrap())
+                    .unwrap()
+                    .pages as usize
+            })
+            .sum::<usize>();
+        assert!(
+            changed < 8,
+            "a point edit unexpectedly captured {changed} pages"
+        );
+        assert!(faults.checksum_reads.load(Ordering::Relaxed) <= changed);
+        assert!(faults.checksum_read_bytes.load(Ordering::Relaxed) <= changed * 4096);
+    }
+    // Re-read and fold the persisted blocks before allowing a clean handoff.
+    resumed.persist_continuation().unwrap();
+    resumed.close().unwrap();
 }

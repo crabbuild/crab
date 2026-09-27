@@ -13,7 +13,7 @@ const MIN_TRANSFER_GAIN: u128 = 50_000;
 const MIN_RESIDENCE_MS: i64 = 60_000;
 const MAX_TRANSFERS_PER_TICK: usize = 2;
 const MAX_TRANSFER_BYTES_PER_TICK: u64 = 8 * 1024 * 1024 * 1024;
-/// A receiver fills to this fraction below its weighted ownership target, while
+/// A receiver reserves this whole-Cell fraction of its weighted target, while
 /// the donor drains to its target exactly. The receiver's margin absorbs the
 /// sample lag between a batch and its publication: a stale count can overshoot
 /// by one batch, and the fleet cannot end up short by one deadband per donor.
@@ -361,7 +361,7 @@ impl PlacementPlanner {
             .iter()
             .filter(|observation| {
                 observation.session != donor.session
-                    && u128::from(observation.active_cells) < target(observation)
+                    && room(observation, target(observation)) > 0
                     && observation.pressure < PlacementPressure::Shedding
                     && self.eligibility(now_ms, **observation) == PlacementEligibility::Eligible
             })
@@ -425,6 +425,22 @@ impl PlacementPlanner {
         }
         let accepting =
             balance.map(|balance| balance.receivers.iter().copied().collect::<HashSet<_>>());
+        let owned = observations
+            .iter()
+            .map(|node| u128::from(node.active_cells))
+            .sum::<u128>();
+        let weight = observations
+            .iter()
+            .map(|node| u128::from(node.max_active_cells))
+            .sum::<u128>();
+        let receiver_room = |node: &PlacementObservation| {
+            let target = if weight == 0 {
+                0
+            } else {
+                (owned * u128::from(node.max_active_cells)).div_ceil(weight)
+            };
+            room(node, target)
+        };
         let mut candidates = demands.to_vec();
         candidates.sort_by(|left, right| {
             let priority = |demand: &CellTransferDemand| {
@@ -505,32 +521,34 @@ impl PlacementPlanner {
                                     && node.max_active_cells.saturating_sub(node.active_cells) >= 1
                                     && node.job_capacity.saturating_sub(node.running_jobs)
                                         >= demand.job_credits
+                                    && (urgent
+                                        || (donates
+                                            && accepting.as_ref().is_some_and(|accepting| {
+                                                accepting.contains(&score.session)
+                                            })
+                                            && receiver_room(node) > 0)
+                                        || score.score
+                                            >= source_score.saturating_add(MIN_TRANSFER_GAIN))
                             })
-                        && (urgent
-                            || (donates
-                                && accepting
-                                    .as_ref()
-                                    .is_some_and(|accepting| accepting.contains(&score.session)))
-                            || score.score >= source_score.saturating_add(MIN_TRANSFER_GAIN))
                 });
             let Some(destination) = destination else {
                 continue;
             };
-            // The find above tests the donation rule before the gain gate, so
-            // a receiver-bound intent that the gain gate would also admit is
-            // charged to the donation batch. Charging it is the conservative
-            // direction: it can only shrink this snapshot's donation budget.
-            let donation = !urgent
-                && donates
-                && accepting
-                    .as_ref()
-                    .is_some_and(|accepting| accepting.contains(&destination.session));
             let Some(receiver) = projected
                 .iter_mut()
                 .find(|node| node.session == destination.session)
             else {
                 continue;
             };
+            // Charge a donation only while its projected receiver has room.
+            // Fleet-wide room alone lets a preferred receiver take the whole
+            // batch and overshoot its share, despite other empty receivers.
+            let donation = !urgent
+                && donates
+                && accepting
+                    .as_ref()
+                    .is_some_and(|accepting| accepting.contains(&destination.session))
+                && receiver_room(receiver) > 0;
             receiver.free_memory_bytes -= demand.memory_bytes;
             receiver.free_disk_bytes -= demand.disk_bytes;
             receiver.active_cells += 1;
@@ -680,7 +698,9 @@ fn denser(left: &PlacementObservation, right: &PlacementObservation) -> Ordering
 /// weighted target. A validated snapshot keeps every member at or below its
 /// declared Cell capacity, so the target itself already bounds the slots.
 fn room(observation: &PlacementObservation, target: u128) -> u128 {
-    let deadband = (target * BALANCE_DEADBAND_PERCENT).div_ceil(100);
+    // A fractional Cell cannot be withheld: rounding up makes a target of
+    // one unreachable and strands concentrated ownership after scale-out.
+    let deadband = target * BALANCE_DEADBAND_PERCENT / 100;
     target
         .saturating_sub(deadband)
         .saturating_sub(u128::from(observation.active_cells))

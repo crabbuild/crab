@@ -2,6 +2,82 @@
 
 use super::*;
 
+#[tokio::test(flavor = "multi_thread")]
+async fn compaction_reservation_covers_all_coexisting_scratch_files() {
+    for page_size in [512, 65_536] {
+        let source = tempfile::TempDir::new().unwrap();
+        let path = source.path().join("source.sqlite");
+        let initial = crab_ltx::rusqlite::Connection::open(&path).unwrap();
+        initial
+            .execute_batch(&format!("PRAGMA page_size={page_size}; CREATE TABLE t(v)"))
+            .unwrap();
+        drop(initial);
+        let mut writer = Db::open(&path, Limits::default()).unwrap();
+        writer
+            .transaction(|tx| tx.execute_batch("INSERT INTO t VALUES(randomblob(1048576))"))
+            .unwrap();
+        let replica = CellReplica::new(
+            CellStorageLayout::new(
+                Store::new(Arc::new(InMemory::new())),
+                ObjectPath::from("scratch-bound"),
+                [111; 16],
+            ),
+            [112; 32],
+            [113; 16],
+            Limits::default(),
+        )
+        .unwrap();
+        let prepared = replica
+            .prepare(None, &writer.capture().unwrap(), 1, 1)
+            .await
+            .unwrap();
+        let root = prepared.root();
+        let count = prepared.verified().segment_count();
+        writer.close().unwrap();
+        let scratch = tempfile::TempDir::new().unwrap();
+        let faults = Arc::new(Faults::default());
+        let slots = Arc::new(tokio::sync::Semaphore::new(8));
+        let replica = replica.with_host(
+            Host::default()
+                .with_filesystem(faults.clone())
+                .with_scratch_slots(slots.clone()),
+        );
+        let pause = Arc::new(Pause {
+            operation: "remove_file",
+            entered: tokio::sync::Notify::new(),
+            released: Mutex::new(false),
+            wake: std::sync::Condvar::new(),
+        });
+        let release = Release(pause.clone());
+        *faults.pause.lock().unwrap() = Some(pause.clone());
+        let destination = scratch.path().to_owned();
+        let mut task = tokio::spawn(async move {
+            replica
+                .prepare_compaction(&root, 0..count, 9, &destination)
+                .await
+        });
+        tokio::select! {
+            result = &mut task => panic!("compaction finished before cleanup: {:?}", result.unwrap().map(|prepared| prepared.root())),
+            result = tokio::time::timeout(Duration::from_secs(10), pause.entered.notified()) => result.unwrap(),
+        }
+        // Every spool/output grows monotonically and cleanup has not started:
+        // these five final file lengths are the operation's peak logical bytes.
+        let sizes = std::fs::read_dir(scratch.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().metadata().unwrap().len())
+            .collect::<Vec<_>>();
+        assert_eq!(sizes.len(), 5);
+        assert!(
+            sizes.iter().sum::<u64>() <= ((8 - slots.available_permits()) << 20) as u64,
+            "{page_size}-byte pages exceed reserved scratch"
+        );
+        drop(release);
+        assert_eq!(task.await.unwrap().unwrap().root().position, root.position);
+        assert_eq!(slots.available_permits(), 8);
+        assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+    }
+}
+
 #[cfg(feature = "replica")]
 #[tokio::test(start_paused = true)]
 async fn compaction_overlaps_independent_remote_transfers() {
@@ -85,6 +161,7 @@ async fn cell_compaction_coalesces_local_output_writes() {
     .with_host(host);
     let root = replica.prepare(None, &captured, 1, 1).await.unwrap().root();
     faults.track_all.store(true, Ordering::Relaxed);
+    faults.read_calls.store(0, Ordering::Relaxed);
     faults.write_calls.store(0, Ordering::Relaxed);
     let scratch = tempfile::TempDir::new().unwrap();
 
@@ -99,7 +176,55 @@ async fn cell_compaction_coalesces_local_output_writes() {
         "compaction used {} local writes",
         faults.write_calls.load(Ordering::Relaxed)
     );
+    assert!(
+        faults.read_calls.load(Ordering::Relaxed) < 128,
+        "compaction used {} local reads",
+        faults.read_calls.load(Ordering::Relaxed)
+    );
     writer.close().unwrap();
+}
+
+#[tokio::test]
+async fn cell_compaction_dispatches_local_io_with_one_job_slot() {
+    let (directory, faults, host, mut writer) = fixture();
+    let jobs = Arc::new(tokio::sync::Semaphore::new(1));
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("compaction-job-admission"),
+            [91; 16],
+        ),
+        [92; 32],
+        [93; 16],
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(host.with_job_slots(jobs.clone()));
+    let root = replica
+        .prepare(None, &writer.capture().unwrap(), 1, 1)
+        .await
+        .unwrap()
+        .root();
+    writer.close().unwrap();
+    *faults.forbidden_thread.lock().unwrap() = Some(std::thread::current().id());
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        replica.prepare_compaction(&root, 0..1, 9, directory.path()),
+    )
+    .await;
+
+    *faults.forbidden_thread.lock().unwrap() = None;
+    let compacted = result.unwrap().unwrap();
+    assert_eq!(compacted.root().position, root.position);
+    assert_eq!(jobs.available_permits(), 1);
+    assert!(!std::fs::read_dir(directory.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".crab-compaction-")
+    }));
 }
 #[cfg(feature = "replica")]
 #[tokio::test(flavor = "multi_thread")]
@@ -124,7 +249,14 @@ async fn cell_compaction_uses_injected_filesystem_and_cleans_failed_scratch() {
         .root();
     writer.close().unwrap();
 
-    for operation in ["write_all_at", "write_all"] {
+    for operation in [
+        "create",
+        "open_rw",
+        "read_exact_at",
+        "write_all_at",
+        "write_all",
+        "sync_all",
+    ] {
         faults.arm(Some(operation));
         injected(
             replica
@@ -147,4 +279,116 @@ async fn cell_compaction_uses_injected_filesystem_and_cleans_failed_scratch() {
         .unwrap();
     assert_eq!(compacted.root().position, root.position);
     assert!(faults.calls.lock().unwrap().contains("open_rw"));
+}
+
+#[tokio::test]
+async fn canceled_compaction_retains_files_and_admission_through_cleanup() {
+    for operation in [
+        "create",
+        "open_rw",
+        "read_exact_at",
+        "write_all_at",
+        "write_all",
+        "sync_all",
+    ] {
+        let (directory, faults, host, mut writer) = fixture();
+        let jobs = Arc::new(tokio::sync::Semaphore::new(1));
+        let dirty = Arc::new(tokio::sync::Semaphore::new(1));
+        let recovery = Arc::new(tokio::sync::Semaphore::new(1));
+        let scratch = Arc::new(tokio::sync::Semaphore::new(128));
+        let replica = CellReplica::new(
+            CellStorageLayout::new(
+                Store::new(Arc::new(InMemory::new())),
+                ObjectPath::from("canceled-compaction"),
+                [94; 16],
+            ),
+            [95; 32],
+            [96; 16],
+            Limits::default(),
+        )
+        .unwrap()
+        .with_host(
+            host.with_job_slots(jobs.clone())
+                .with_dirty_slots(dirty.clone())
+                .with_recovery_slots(recovery.clone())
+                .with_scratch_slots(scratch.clone()),
+        );
+        let root = replica
+            .prepare(None, &writer.capture().unwrap(), 1, 1)
+            .await
+            .unwrap()
+            .root();
+        writer.close().unwrap();
+        let pause = Arc::new(Pause {
+            operation,
+            entered: tokio::sync::Notify::new(),
+            released: Mutex::new(false),
+            wake: std::sync::Condvar::new(),
+        });
+        let release = Release(pause.clone());
+        *faults.pause.lock().unwrap() = Some(pause.clone());
+        *faults.forbidden_thread.lock().unwrap() = Some(std::thread::current().id());
+        let task_replica = replica.clone();
+        let destination = directory.path().to_owned();
+        let task = tokio::spawn(async move {
+            task_replica
+                .prepare_compaction(&root, 0..1, 9, &destination)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), pause.entered.notified())
+            .await
+            .unwrap();
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        assert_eq!(jobs.available_permits(), 0, "{operation}");
+        assert_eq!(dirty.available_permits(), 0, "{operation}");
+        assert_eq!(recovery.available_permits(), 0, "{operation}");
+        assert!(scratch.available_permits() < 128, "{operation}");
+
+        let cleanup_pause = Arc::new(Pause {
+            operation: "remove_file",
+            entered: tokio::sync::Notify::new(),
+            released: Mutex::new(false),
+            wake: std::sync::Condvar::new(),
+        });
+        let cleanup_release = Release(cleanup_pause.clone());
+        *faults.pause.lock().unwrap() = Some(cleanup_pause.clone());
+        drop(release);
+        tokio::time::timeout(Duration::from_secs(2), cleanup_pause.entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(jobs.available_permits(), 0, "cleanup after {operation}");
+        assert_eq!(dirty.available_permits(), 0, "cleanup after {operation}");
+        assert_eq!(recovery.available_permits(), 0, "cleanup after {operation}");
+        assert!(
+            scratch.available_permits() < 128,
+            "cleanup after {operation}"
+        );
+        *faults.pause.lock().unwrap() = None;
+        drop(cleanup_release);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let _job = jobs.acquire().await.unwrap();
+            let _dirty = dirty.acquire().await.unwrap();
+            let _recovery = recovery.acquire().await.unwrap();
+            let _scratch = scratch.acquire_many(128).await.unwrap();
+        })
+        .await
+        .unwrap();
+        *faults.forbidden_thread.lock().unwrap() = None;
+        assert!(
+            !std::fs::read_dir(directory.path()).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".crab-compaction-")
+            }),
+            "{operation}"
+        );
+        let compacted = replica
+            .prepare_compaction(&root, 0..1, 9, directory.path())
+            .await
+            .unwrap();
+        assert_eq!(compacted.root().position, root.position);
+    }
 }

@@ -201,6 +201,7 @@ impl WireValue for CreateLabelInput {
 impl WireValue for CreateLabelOutcome {
     fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
         match self {
+            Self::Archived => encoder.write_u8(0),
             Self::Created(label) => {
                 encoder.write_u8(1)?;
                 label.encode(encoder)
@@ -214,6 +215,7 @@ impl WireValue for CreateLabelOutcome {
 
     fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
         match decoder.read_u8()? {
+            0 => Ok(Self::Archived),
             1 => Ok(Self::Created(LabelRecord::decode(decoder)?)),
             2 => Ok(Self::RequestConflict),
             3 => Ok(Self::NameConflict),
@@ -247,6 +249,7 @@ impl WireValue for UpdateLabelInput {
 impl WireValue for UpdateLabelOutcome {
     fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
         match self {
+            Self::Archived => encoder.write_u8(0),
             Self::Updated(label) => {
                 encoder.write_u8(1)?;
                 label.encode(encoder)
@@ -259,6 +262,7 @@ impl WireValue for UpdateLabelOutcome {
 
     fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
         match decoder.read_u8()? {
+            0 => Ok(Self::Archived),
             1 => Ok(Self::Updated(LabelRecord::decode(decoder)?)),
             2 => Ok(Self::NotFound),
             3 => Ok(Self::NameConflict),
@@ -285,6 +289,7 @@ impl WireValue for DeleteLabelInput {
 impl WireValue for DeleteLabelOutcome {
     fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
         encoder.write_u8(match self {
+            Self::Archived => 0,
             Self::Deleted => 1,
             Self::NotFound => 2,
             Self::Conflict => 3,
@@ -293,6 +298,7 @@ impl WireValue for DeleteLabelOutcome {
 
     fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
         match decoder.read_u8()? {
+            0 => Ok(Self::Archived),
             1 => Ok(Self::Deleted),
             2 => Ok(Self::NotFound),
             3 => Ok(Self::Conflict),
@@ -338,6 +344,7 @@ impl WireValue for CreateIssueInput {
 impl WireValue for CreateIssueOutcome {
     fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
         match self {
+            Self::Archived => encoder.write_u8(0),
             Self::Created(record) => {
                 encoder.write_u8(1)?;
                 record.encode(encoder)
@@ -348,6 +355,7 @@ impl WireValue for CreateIssueOutcome {
 
     fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
         match decoder.read_u8()? {
+            0 => Ok(Self::Archived),
             1 => Ok(Self::Created(Box::new(IssueRecord::decode(decoder)?))),
             2 => Ok(Self::RequestConflict),
             _ => Err(CodecError::Invalid("invalid create-issue outcome")),
@@ -430,6 +438,7 @@ impl WireValue for CommentRecord {
 impl WireValue for CreateCommentOutcome {
     fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
         match self {
+            Self::Archived => encoder.write_u8(0),
             Self::Created(record) => {
                 encoder.write_u8(1)?;
                 record.encode(encoder)
@@ -441,6 +450,7 @@ impl WireValue for CreateCommentOutcome {
 
     fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
         match decoder.read_u8()? {
+            0 => Ok(Self::Archived),
             1 => Ok(Self::Created(CommentRecord::decode(decoder)?)),
             2 => Ok(Self::IssueNotFound),
             3 => Ok(Self::RequestConflict),
@@ -504,6 +514,7 @@ impl WireValue for UpdateIssueInput {
 impl WireValue for UpdateIssueOutcome {
     fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
         match self {
+            Self::Archived => encoder.write_u8(0),
             Self::Updated(issue) => {
                 encoder.write_u8(1)?;
                 issue.encode(encoder)
@@ -519,6 +530,7 @@ impl WireValue for UpdateIssueOutcome {
 
     fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
         match decoder.read_u8()? {
+            0 => Ok(Self::Archived),
             1 => Ok(Self::Updated(Box::new(IssueRecord::decode(decoder)?))),
             2 => Ok(Self::NotFound),
             3 => Ok(Self::Forbidden),
@@ -552,6 +564,7 @@ impl WireValue for UpdateCommentInput {
 impl WireValue for UpdateCommentOutcome {
     fn encode(&self, encoder: &mut BoundedEncoder) -> Result<(), CodecError> {
         match self {
+            Self::Archived => encoder.write_u8(0),
             Self::Updated(comment) => {
                 encoder.write_u8(1)?;
                 comment.encode(encoder)
@@ -564,6 +577,7 @@ impl WireValue for UpdateCommentOutcome {
 
     fn decode(decoder: &mut BoundedDecoder<'_>) -> Result<Self, CodecError> {
         match decoder.read_u8()? {
+            0 => Ok(Self::Archived),
             1 => Ok(Self::Updated(CommentRecord::decode(decoder)?)),
             2 => Ok(Self::NotFound),
             3 => Ok(Self::Forbidden),
