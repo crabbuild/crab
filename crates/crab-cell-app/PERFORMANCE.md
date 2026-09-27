@@ -396,6 +396,12 @@ The [2026-09-27 run](performance/2026-09-27-reader-scaling.md) records all four
 sizes, 990 measured generated reads, a 34.830-second reader replacement sample,
 roughly five-second refresh observations, and successful drain of all twenty
 survivors. Query latency and freshness are reported separately.
+The [reader-loss-under-load run](performance/2026-09-27-reader-loss-during-load.md)
+records two reproduced availability failures, their shared routing and host
+recruitment fixes, and a passing raw-data progress check on GA RustFS. All eight
+lanes made successful queries during replacement. Its missed writes and host
+contention preclude a supported throughput claim.
+
 The [mixed-read/write run](performance/2026-09-27-mixed-readers.md) records
 691,427 correct replica reads across four sixty-second windows, with explicit
 behind responses and 144 missed scheduled writes. It establishes concurrent
