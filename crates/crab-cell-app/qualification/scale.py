@@ -16,7 +16,7 @@ import subprocess
 import time
 
 
-def verify_mixed_load(control: Path, nodes: int) -> dict:
+def verify_mixed_load(control: Path, nodes: int, label: str = "mixed") -> dict:
     def rows(name):
         path = control / name
         with path.open(newline="") as source:
@@ -25,7 +25,7 @@ def verify_mixed_load(control: Path, nodes: int) -> dict:
         return result
 
     hashes = {}
-    writes = rows(f"mixed-{nodes}-writes.tsv")
+    writes = rows(f"{label}-{nodes}-writes.tsv")
     baseline, *arrivals = writes
     assert baseline["outcome"] == baseline["arrival"] == "baseline"
     assert [int(row["arrival"]) for row in arrivals] == list(range(300))
@@ -49,7 +49,7 @@ def verify_mixed_load(control: Path, nodes: int) -> dict:
     reads, behind, lag = 0, 0, 0
     lanes = []
     for lane in range(8):
-        samples = rows(f"mixed-{nodes}-reader-{lane}.tsv")
+        samples = rows(f"{label}-{nodes}-reader-{lane}.tsv")
         assert samples and max(int(row["started_us"]) + int(row["elapsed_us"]) for row in samples) >= 59_000_000
         successes = 0
         for row in samples:
@@ -78,6 +78,48 @@ def verify_mixed_load(control: Path, nodes: int) -> dict:
                 fully_served_writes=missed == 0, successful_reads=reads,
                 behind_responses=behind, max_acknowledged_count_lag=lag,
                 successful_reads_by_lane=lanes, raw_sha256=hashes)
+
+
+def verify_reader_loss(control: Path, killed_node: int) -> dict:
+    result = verify_mixed_load(control, 5, "reader_loss")
+    fault_path = control / "reader-loss.tsv"
+    with fault_path.open(newline="") as source:
+        events = list(csv.DictReader(source, delimiter="\t"))
+    assert len(events) == 1
+    event = {key: int(value) for key, value in events[0].items()}
+    assert event["killed_node"] == killed_node
+    requested, killed, ready, served = [event[key] for key in
+                                        ("requested_us", "killed_us", "ready_us", "served_us")]
+    assert 10_000_000 <= requested <= killed <= ready <= served < 50_000_000
+    result["raw_sha256"][fault_path.name] = hashlib.sha256(fault_path.read_bytes()).hexdigest()
+    result["fault"] = event
+    result["phases"] = {}
+    # Count calls wholly inside a phase. A pre-fault request completed after
+    # recovery must not masquerade as service while the reader was unavailable.
+    for phase, low, high in [("before", 0, requested), ("replacement", killed, served),
+                             ("after", served, 60_000_000)]:
+        timings = {"writes": [], "reads": []}
+        lanes = []
+        for suffix in ["writes", *[f"reader-{lane}" for lane in range(8)]]:
+            kind = "writes" if suffix == "writes" else "reads"
+            with (control / f"reader_loss-5-{suffix}.tsv").open(newline="") as source:
+                samples = list(csv.DictReader(source, delimiter="\t"))
+            elapsed = [int(row["elapsed_us"]) for row in samples
+                       if row["outcome"] in ("committed", "ok")
+                       and low <= int(row["started_us"])
+                       and int(row["started_us"]) + int(row["elapsed_us"]) <= high]
+            assert elapsed, f"{suffix} made no progress {phase} reader replacement"
+            timings[kind].extend(elapsed)
+            if kind == "reads":
+                lanes.append(len(elapsed))
+        summary = {"read_successes_by_lane": lanes}
+        for kind, elapsed in timings.items():
+            ordered = sorted(elapsed)
+            summary[kind] = dict(successes=len(elapsed),
+                                 p99_ms=ordered[(len(ordered) * 99 + 99) // 100 - 1] / 1000,
+                                 max_ms=ordered[-1] / 1000)
+        result["phases"][phase] = summary
+    return result
 
 
 class Fleet:
@@ -258,7 +300,8 @@ class Fleet:
         assert f"killed_node={killed} ready_readers=3 exact_queries=12 " in driver_log
         source = (self.state / "evidence/source-revision.txt").read_text().strip()
         result = dict(verified=True, source=source, binary_sha256=binaries.pop(),
-                      roles=reports, killed_node=killed, events=self.events, mixed_load=mixed)
+                      roles=reports, killed_node=killed, events=self.events, mixed_load=mixed,
+                      reader_loss_load=verify_reader_loss(self.control, killed))
         (self.evidence / "verification.json").write_text(json.dumps(result, indent=2) + "\n")
         print(f"Verified 3/5/10/20 nodes and reader replacement; evidence: {self.evidence}", flush=True)
 

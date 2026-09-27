@@ -399,3 +399,211 @@ async fn drain_query(
         "node drain returned while replica SQL was running"
     );
 }
+
+struct StalledRead(Arc<AtomicUsize>);
+
+impl Drop for StalledRead {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl PeerReplicaResolver for StalledRead {
+    fn resolve(
+        &self,
+        _: CellTarget,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = crab_cell_runtime::Result<CellReadReplica>>
+                + Send
+                + 'static,
+        >,
+    > {
+        let guard = Self(self.0.clone());
+        Box::pin(async move {
+            let _guard = guard;
+            std::future::pending().await
+        })
+    }
+}
+
+struct StalledPeer {
+    session: Option<SessionId>,
+    dropped: Arc<AtomicUsize>,
+    healthy: LoopbackReplica,
+}
+
+impl PeerRoundTrip for StalledPeer {
+    fn send(
+        &self,
+        target: CellTarget,
+        request: Vec<u8>,
+        remaining_ms: u32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>,
+    > {
+        self.healthy.send(target, request, remaining_ms)
+    }
+
+    fn send_to_node(
+        &self,
+        target: CellTarget,
+        node: NodeAdvertisement,
+        request: Vec<u8>,
+        remaining_ms: u32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>,
+    > {
+        if Some(node.session()) != self.session {
+            return self
+                .healthy
+                .send_to_node(target, node, request, remaining_ms);
+        }
+        let guard = StalledRead(self.dropped.clone());
+        Box::pin(async move {
+            let _guard = guard;
+            std::future::pending().await
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stalled_remote_reader_leaves_time_for_a_healthy_replica() {
+    stalled_reader_is_skipped(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stalled_local_resolver_leaves_time_for_a_healthy_replica() {
+    stalled_reader_is_skipped(true).await;
+}
+
+async fn stalled_reader_is_skipped(local: bool) {
+    let fixture = fixture();
+    let owner = SessionId::from_bytes([44; 16]);
+    let runtime = CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 << 20, owner).unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, owner).await;
+    let registry = compiled_reader_registry();
+    let directory = owner_directory(&fixture, owner, &registry).await;
+    for node in [14, 15] {
+        let now = now_ms();
+        directory
+            .create(
+                NodeAdvertisement::sign(
+                    NodeId::from_bytes([node; 16]),
+                    SessionId::from_bytes([node; 16]),
+                    format!("https://reader-{node}.internal:8081"),
+                    directory.fleet(),
+                    Digest::from_bytes([12; 32]),
+                    Digest::from_bytes([10; 32]),
+                    registry.release_digest(),
+                    &ed25519_dalek::SigningKey::from_bytes(&[node; 32]),
+                    1,
+                    now,
+                    now + 15_000,
+                    vec![CODE],
+                    vec![1],
+                    NodeFailureDomain::default(),
+                    NodeCapacity {
+                        free_memory_bytes: 32 << 20,
+                        free_disk_bytes: 1 << 20,
+                        job_credits: 1,
+                        ..NodeCapacity::default()
+                    },
+                )
+                .unwrap(),
+                now,
+            )
+            .await
+            .unwrap();
+    }
+    let reader_runtime = CellRuntime::new(
+        SqlWorkerPool::new(2, 2)
+            .unwrap()
+            .with_native_memory_limit(32 << 20)
+            .unwrap(),
+        8 << 20,
+        SessionId::from_bytes([14; 16]),
+    )
+    .unwrap();
+    let reader = CellReadReplica::open(
+        reader_runtime.clone(),
+        registry.clone(),
+        CellAuthority::new(fixture.layout.clone()),
+        directory.clone(),
+        fixture.replica.clone(),
+        fixture.target.clone(),
+        &fixture._directory.path().join("routing-reader.sqlite"),
+    )
+    .await
+    .unwrap();
+    let receipt = reader.receipt().await;
+    crab_cell_runtime::read_policy::ReadPolicyStore::new(fixture.layout.clone())
+        .create(fixture.target.cell_id(), receipt.incarnation, 2)
+        .await
+        .unwrap();
+    let router = ReplicaReadRouter::new(CellAuthority::new(fixture.layout.clone()), directory);
+    let (_, selected) = router.selected(&fixture.target).await.unwrap();
+    assert_eq!(selected.len(), 2);
+    let blocked = selected[0].session();
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let local_resolver = StalledRead(dropped.clone());
+    let peer_session = SessionId::from_bytes([21; 16]);
+    let key = ed25519_dalek::SigningKey::from_bytes(&[22; 32]);
+    let dispatcher = PeerDispatcher::new(
+        registry.clone(),
+        Arc::new(NoOwner),
+        Arc::new(ReadAuthorizer),
+    )
+    .with_replica_resolver(Arc::new(ReplicaResolver(reader.clone())));
+    let transport = StalledPeer {
+        session: (!local).then_some(blocked),
+        dropped: dropped.clone(),
+        healthy: LoopbackReplica {
+            verifier: Arc::new(PeerVerifier::new(
+                peer_session,
+                registry.release_digest(),
+                key.verifying_key(),
+            )),
+            dispatcher: Arc::new(dispatcher),
+        },
+    };
+    let peer = ReplicaPeerClient::new(
+        registry.clone(),
+        Arc::new(PeerSigner::new(
+            peer_session,
+            registry.release_digest(),
+            key,
+        )),
+        PeerPrincipal {
+            issuer: "test".into(),
+            subject: "reader".into(),
+            actions: vec!["repository.read".into()],
+        },
+        Arc::new(transport),
+    );
+    let queried = router
+        .query::<ReadCounter>(
+            &peer,
+            local.then_some((blocked, &local_resolver as &dyn PeerReplicaResolver)),
+            &fixture.target,
+            Some(receipt),
+            0,
+        )
+        .await;
+    // Drain even on the red run, so a failed routing assertion cannot strand SQL workers.
+    drop(peer);
+    drop(reader);
+    reader_runtime.shutdown().await.unwrap();
+    handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+    let (observed, served_by) = queried.unwrap();
+    assert_eq!(
+        (observed.output, observed.receipt, served_by),
+        (0, receipt, selected[1].node())
+    );
+    assert_eq!(
+        dropped.load(Ordering::Relaxed),
+        1,
+        "stalled attempt was not cancelled"
+    );
+}

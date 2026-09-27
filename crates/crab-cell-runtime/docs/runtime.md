@@ -279,6 +279,15 @@ codecs use the node primitive-job ledger with deadline-bounded waiting; S3
 session enrollment runs outside the CPU reservation so provider latency does
 not reject otherwise idle concurrent reads.
 
+Explicit replica routing also has one five-second deadline covering discovery
+and every selected-reader attempt. Each attempt receives an equal share of the
+remaining time divided by the remaining candidates, so a blackholed connection
+or stalled local resolver leaves time to try a healthy reader. Local and remote
+attempts share this rule; the remote request carries the reduced time budget.
+Receipt, authority, and authorization checks still apply, and replica routing
+never falls back to the owner. A cancelled SQL waiter retains its snapshot and
+admission until the running SQL job exits.
+
 ## Apply one absolute operation deadline
 
 Native commands and queries receive a five-second wall deadline. The same deadline covers:
