@@ -649,6 +649,7 @@ async fn unpublished(
             &account_target("123456789012").unwrap(),
             mutation(),
             Json(TableSpec {
+                table_class: Default::default(),
                 placement: beyonddb::TablePlacement::Routed {
                     initial_partitions: 2,
                 },

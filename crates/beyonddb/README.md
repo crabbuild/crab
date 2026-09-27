@@ -474,6 +474,16 @@ operations remain unsupported.
 
 ## API coverage boundary
 
+CreateTable and UpdateTable persist `STANDARD` or
+`STANDARD_INFREQUENT_ACCESS` as table-wide metadata; DescribeTable returns
+`TableClassSummary`. The default is `STANDARD`. The account command enforces
+[two class changes per trailing 30 days](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/WorkingWithTables.tableclasses.html)
+across owner restoration and rejects an invalid class without changing other
+settings. Both classes use BeyondDB's existing Cell storage and capacity
+mechanics; AWS pricing is not implemented. Signed SDK coverage includes a base
+split and account restoration. The new record fields alter unreleased serialized
+state; upgrading older roots remains unqualified.
+
 BeyondDB is not a complete DynamoDB replacement. In addition to the index,
 Streams, backup/PITR, IAM, and scale gaps described here, the pinned ExtendDB
 engine does not dispatch PartiQL or Global Tables operations. Its import/export

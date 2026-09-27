@@ -349,6 +349,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
                 expires_at_ms: issued_at_ms + 60_000,
             },
             Json(TableSpec {
+                table_class: Default::default(),
                 placement: beyonddb::TablePlacement::Routed {
                     initial_partitions: 1,
                 },

@@ -137,6 +137,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .application_handle::<Beyonddb>(cell_client, target.tenant(), target.application())
         .unwrap();
     let schema = TableSpec {
+        table_class: Default::default(),
         placement: beyonddb::TablePlacement::Account,
         local_secondary_indexes: Vec::new(),
         global_secondary_indexes: Vec::new(),

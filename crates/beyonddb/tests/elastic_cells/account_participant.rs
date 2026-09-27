@@ -85,6 +85,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
                 &account,
                 mutation(),
                 Json(TableSpec {
+                    table_class: Default::default(),
                     placement: if name == "DataItems" {
                         beyonddb::TablePlacement::Routed {
                             initial_partitions: 1,
@@ -115,7 +116,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
         let CreateTableOutcome::Created(table) = result.output.0 else {
             panic!("create table")
         };
-        tables.push(table);
+        tables.push(*table);
     }
     let table = &tables[0];
     let data_table = &tables[1];

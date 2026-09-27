@@ -12,6 +12,7 @@ mod reclamation;
 mod recovery;
 mod splits;
 mod statistics;
+mod table_class;
 mod usage;
 
 use crate::*;

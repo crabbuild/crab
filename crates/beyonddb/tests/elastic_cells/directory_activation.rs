@@ -26,6 +26,7 @@ async fn activation_replay_compares_large_base_and_index_directories() {
     );
     let account_handle = provisioner.admit_account(ACCOUNT).await.unwrap();
     let spec = TableSpec {
+        table_class: Default::default(),
         placement: beyonddb::TablePlacement::Routed {
             initial_partitions: 256,
         },
@@ -63,7 +64,7 @@ async fn activation_replay_compares_large_base_and_index_directories() {
         .output
         .0
     {
-        CreateTableOutcome::Created(table) => table,
+        CreateTableOutcome::Created(table) => *table,
         other => panic!("unexpected creation: {other:?}"),
     };
     let width = u128::MAX / 1_024;
