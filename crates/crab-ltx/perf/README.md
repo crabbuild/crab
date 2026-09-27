@@ -887,6 +887,57 @@ roots, unaffected resident Cells and phase-specific resource counters. These
 two processes do not establish sustained capacity, service tails or independent
 failure-domain recovery.
 
+### Write-first GA activation under one vCPU (2026-09-27)
+
+The burst probe now makes the update its first application SQL, omitting the
+payload query that warmed the earlier measurement. Each JSON sample marks
+`access_order: "write_first"`. The separate eighteen single-Cell activation
+samples still exercise first reads. Both 32 MiB and 256 MiB cases used four
+distinct authenticated graphs, fresh local files and metadata identities,
+shared default Host admission, and verified one-vCPU/one-GiB/no-swap limits.
+
+Whole-round time until all four successor roots were prepared:
+
+| Payload per Cell | Serial, round 0 | Four concurrent, round 1 | Four concurrent, round 2 | Serial, round 3 |
+| --- | ---: | ---: | ---: | ---: |
+| 32 MiB | 186.978 ms | 108.865 ms | 696.506 ms | 216.590 ms |
+| 256 MiB | 262.668 ms | 252.677 ms | 255.855 ms | 368.397 ms |
+
+Every first update fetched origin data: six reads and 1,580,738 bytes in the
+32 MiB case; six to ten reads and 1,321,076–1,380,708 bytes in the larger case.
+These counters include Store GET/range/HEAD operations, excluding provider
+retries. Writable-open and checksum preparation have separate counters. The
+larger checksum phase still reads about 5.8 MB per Cell before the mutation.
+
+The 696.506 ms round is retained. Its per-Cell checksum, writable-open and
+mutation medians were 210.337, 77.084 and 229.205 ms. No CPU throttling was
+recorded in that process; these overlapping durations do not establish the
+cause of the delay. Two serial and two concurrent rounds cannot establish
+percentiles or a concurrency default. The new processes create different random
+source payloads from the preceding read-before-write runs, so those records
+are not a controlled before/after latency comparison.
+
+All 32 first-write outcomes survived deletion of local database/capture state;
+4,608 full 1 MiB payload digests matched the independent source-plus-mutation
+model. Both whole-source and compacted-root byte comparisons passed. Replacements
+remain compressible and have distinct mutation IDs and prepared roots. Peak
+charged cgroup memory was 205.5 MiB and 932.5 MiB, with no OOM events. The larger
+process recorded 69 throttled periods and 640,927 microseconds of throttled
+time. Resource counters include setup, verification and compaction.
+
+Source: `bf672cf1c64` plus the write-first example change, with the staged
+app-to-host relocation excluded. All other tracked build inputs matched that
+commit. Native Linux ARM64 release build, Rust 1.97.1, the same pinned RustFS
+1.0 GA image and four-CPU/eight-GiB Colima VM described above. Raw samples,
+source and executable hashes, Docker inspection and kernel counters are retained
+under `worker-profile-20260927/write-first/evidence/` in the external target.
+An initial evidence-mount failure ran no workload; its log is also retained.
+
+This closes the probe's read-before-write measurement gap. The roots remain
+immutable proposals without authority CAS or application acknowledgements.
+Public `CellNode` actions, fixed-worker interference, fragmented roots,
+sustained arrivals and failure-domain recovery remain separate qualification.
+
 The runners also use the implementations' pinned bundled SQLite versions:
 Crab currently links SQLite 3.49.1 while the pinned Celld revision links SQLite
 3.45.0. `workload_write_us` and therefore `total_us` include that difference;

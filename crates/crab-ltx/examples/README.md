@@ -88,16 +88,19 @@ After the original eighteen activation samples, four rounds run with concurrent
 activation limits `1, 4, 4, 1`. Every round uses the same four authenticated
 roots and fresh sparse files. New per-Cell Store identities discard prior
 metadata caches; the provider connection pool, provider caches and default
-Host admission remain shared. Each Cell reads and hashes the first 1 MiB
-payload, replaces it with a known compressible Cell-specific value, captures the update
+Host admission remain shared. Each Cell's first application SQL replaces the
+first 1 MiB payload with a known compressible Cell-specific value, captures the update
 through `capture_deferred`, and prepares the next immutable root. A distinct
 mutation ID in each replacement prevents later rounds from measuring a repeated
-immutable upload. The first write follows the payload read, which has already
-materialized that row; this is not a write-first cold-page experiment.
+immutable upload. No payload query or hydration precedes the write; its timer
+includes any demand page faults. SQLite's own writable-open reads are recorded
+separately. The original eighteen activation samples still measure first reads.
 
-`activation_burst` records each Cell/root identity, dispatch delay, time to
-first payload read and prepared root, plus separate root-open, checksum,
-writable-open, query, mutation, capture and root-prepare read counters/timers.
+`activation_burst` marks `access_order: "write_first"` and records each
+Cell/root identity, dispatch delay, time to the first completed transaction and
+prepared root, plus separate root-open, checksum, writable-open, mutation,
+capture and root-prepare read counters/timers. Older reports without
+`access_order` measured a payload read before the mutation; keep them separate.
 These read counters observe Store GET/range/HEAD calls and bytes; they exclude
 provider-internal retries. `prepared_objects` and `prepared_bytes` report the
 replica publication ledger separately. The mutation timer is a
