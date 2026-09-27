@@ -23,7 +23,7 @@ use crate::{
     DescribeTableById, GlobalIndexPartitionInput, GlobalIndexState, Json, PartitionState,
     PublishedPartitionInput, PublishedPartitionOutcome, ReadGlobalIndexPartition,
     ReadGlobalIndexSplitPlan, ReadGlobalIndexState, ReadPartitionSplitPlan, ReadPartitionState,
-    ReadPublishedGlobalIndexPartition, ReadPublishedPartition, account_target,
+    ReadPublishedGlobalIndexPartition, ReadPublishedPartition,
 };
 
 impl CellInitialPartitionProvisioner {
@@ -120,17 +120,16 @@ impl CellInitialPartitionProvisioner {
         Ok(handle)
     }
 
-    pub(super) async fn reclaim_retired_ranges(
+    pub(crate) async fn reclaim_retired_ranges(
         &self,
         client: &CellClient,
-        account_id: &str,
+        account: &CellTarget,
         retained_source: Option<CellId>,
     ) -> Result<(), StorageError> {
         let stats = self.runtime.stats();
         if stats.active_cells() < stats.active_cell_capacity() {
             return Ok(());
         }
-        let account = account_target(account_id).map_err(provision_error)?;
         let mut retired = HashSet::new();
         let mut tables = HashMap::new();
         let local = CellClient::local_runtime(
@@ -210,7 +209,7 @@ impl CellInitialPartitionProvisioner {
                 Some(present) => *present,
                 None => {
                     let present = client
-                        .query::<DescribeTableById>(&account, None, Json(table_id.clone()))
+                        .query::<DescribeTableById>(account, None, Json(table_id.clone()))
                         .await
                         .map_err(cell_error)?
                         .output
@@ -232,14 +231,14 @@ impl CellInitialPartitionProvisioner {
                     // Keep the sealed source resident while copying/opening is
                     // pending. Completion removes its durable participant reservation.
                     client
-                        .query::<ReadGlobalIndexSplitPlan>(&account, None, Json(input.clone()))
+                        .query::<ReadGlobalIndexSplitPlan>(account, None, Json(input.clone()))
                         .await
                         .map_err(cell_error)?
                         .output
                         .0
                         .is_none()
                         && client
-                            .query::<ReadPublishedGlobalIndexPartition>(&account, None, Json(input))
+                            .query::<ReadPublishedGlobalIndexPartition>(account, None, Json(input))
                             .await
                             .map_err(cell_error)?
                             .output
@@ -251,7 +250,7 @@ impl CellInitialPartitionProvisioner {
                         partition_id,
                     };
                     client
-                        .query::<ReadPartitionSplitPlan>(&account, None, Json(input.clone()))
+                        .query::<ReadPartitionSplitPlan>(account, None, Json(input.clone()))
                         .await
                         .map_err(cell_error)?
                         .output
@@ -259,7 +258,7 @@ impl CellInitialPartitionProvisioner {
                         .is_none()
                         && matches!(
                             client
-                                .query::<ReadPublishedPartition>(&account, None, Json(input))
+                                .query::<ReadPublishedPartition>(account, None, Json(input))
                                 .await
                                 .map_err(cell_error)?
                                 .output

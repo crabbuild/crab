@@ -684,8 +684,7 @@ impl crate::CoordinatorProvisioner for CellInitialPartitionProvisioner {
                     self.track_coordinator(&target)?;
                 }
             } else {
-                self.reclaim_retired_ranges(client, account_id, None)
-                    .await?;
+                self.reclaim_retired_ranges(client, &account, None).await?;
                 self.admit_module(
                     &target,
                     crate::transaction_coordinator::MODULE,

@@ -215,14 +215,8 @@ async fn sdk_split_sources_release_capacity_and_retain_recoverable_roots() {
     assert_eq!(state, GlobalIndexState::Sealed(split.clone()));
     // Restore the serving ranges too, proving SDK data remains readable from
     // durable children after both historical and current owners have closed.
-    for target in [&source, &index_source].into_iter().chain(
-        split
-            .children
-            .iter()
-            .map(|child| global_index_target(ACCOUNT, &index.id, &child.partition_id).unwrap())
-            .collect::<Vec<_>>()
-            .iter(),
-    ) {
+    for child in &split.children {
+        let target = global_index_target(ACCOUNT, &index.id, &child.partition_id).unwrap();
         let observed = authority.load(target.cell_id()).await.unwrap().unwrap();
         let proof = crab_cell_runtime::cell::catalog::CellCatalog::new(
             fixture.layout.clone(),
@@ -253,6 +247,24 @@ async fn sdk_split_sources_release_capacity_and_retain_recoverable_roots() {
             .items,
         Some(vec![indexed_item])
     );
+    // Every slot is occupied again, including both retired sources. Ordinary
+    // reads must reclaim those slots before placement can restore live children.
+    assert_eq!(fixture.node.runtime().stats().active_cells(), 8);
+    assert_eq!(
+        sdk.scan()
+            .table_name("Residency")
+            .consistent_read(true)
+            .send()
+            .await
+            .unwrap()
+            .items,
+        Some(fixture.data.iter().map(|(_, item)| item.clone()).collect())
+    );
+    for target in [&source, &index_source] {
+        let control = authority.load(target.cell_id()).await.unwrap().unwrap();
+        assert!(control.value().owner.is_none());
+        assert!(control.value().root.is_some());
+    }
     for (_, item) in &fixture.data {
         assert_eq!(
             sdk.get_item()

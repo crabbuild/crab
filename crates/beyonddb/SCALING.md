@@ -1698,9 +1698,10 @@ No coordinator decision, split state, account schema, or dependency changes.
 
 This increment closes an interrupted-activation recovery gap. It does not prove
 fleet recovery throughput, rebalancing, a larger metadata budget, hot-key
-partitioning, or the 10,000-active-Cell/multi-TB target. Ordinary restoration under
-a full local pool still depends on coordinator reclamation or spare capacity;
-retired-range reclamation remains on explicit provisioning/splitting paths.
+partitioning, or the 10,000-active-Cell/multi-TB target. At this stage, ordinary restoration under a full local pool still depended on
+coordinator reclamation or spare capacity. The later
+[request admission change](#retired-range-reclamation-before-request-placement)
+extends retired-range reclamation beyond explicit provisioning/splitting.
 
 Focused verification for this increment: 13 peer-network residency cases passed
 in 23.20 seconds, including signed SDK reads, cross-Cell transactional writes
@@ -1848,3 +1849,59 @@ between chunk reads by finishing from the durable decision. See the
 [protocol evidence and race tests](CROSS_CELL_TRANSACTIONS.md#terminal-operation-compaction).
 This reduces retained logical write bytes; bounded total history and physical
 object-store reclamation still need the full retirement protocol.
+
+
+### Retired-range reclamation before request placement
+
+The signed SDK regression on `47921e03923` returned ServiceUnavailable when a
+Scan needed to restore published children while all eight fixture slots were
+occupied, including two retired sources (51.55 s). Main `311105eb864` also sends
+ordinary restoration to placement without checking retired ranges. Explicit
+provisioning on the branch already performs that check.
+
+`server/peer_receiver.rs::LocalResolver` now checks for a current local actor
+first. A missing data/GSI owner invokes the existing retirement check before
+fresh placement or authenticated bootstrap/activation. The requested source is
+excluded from reclamation, so reading a historical root cannot evict that same
+root while trying to restore it. The planner observes the updated local Cell
+count; destination admission and authority CAS still decide whether activation
+is possible.
+
+Retirement receives the account Cell target derived from the request's tenant.
+`account_target` and request admission share the same private target constructor;
+account IDs are not reverse-decoded from hashes. Its dedicated metadata client
+uses `CellClient::runtime_with_peer`, whose runtime contract reaches current local
+or authenticated remote owners without acquiring an idle Cell. Queries force
+CurrentOwner policy. Missing metadata authority is an error, never evidence of
+deletion. Metadata queries precede the admission mutex, preventing recursive
+restoration and admission waits. Current local actors and ordinary forwarded
+invocations do not run reclamation.
+
+| Evidence boundary | Source / behavior |
+| --- | --- |
+| Entry | Signed SDK Scan/Get reach `BeyonddbPeers::client` and `LocalResolver`; authenticated activate/provision dispatchers use the same resolver. |
+| Owner | `provision/residency.rs::reclaim_retired_ranges` remains the sole retirement policy. It verifies table generation, seals, published routes and unfinished split plans. |
+| Runtime dependency | `client.rs::runtime_with_peer` and `client/runtime.rs::RuntimeLocalResolver` never activate metadata. `cell/actor/runtime.rs::release_idle_cell` and `cell/actor/task.rs` recheck the exact generation, lease and settled-work gates before closing and publishing release. |
+| Caller siblings | Initial base/GSI provisioning, base/GSI split children and coordinator admission now pass their existing account target to the same retirement function. Their policy is unchanged. |
+| Security sibling | Ordinary peer invocation has no provisioner or metadata client. Activate/provision authorization still requires the scoped capability and a data/index description. |
+| Regression | `tests/peer_network/residency/reclamation.rs` restores both historical seals, fills the pool, then uses signed SDK Scan to restore serving children without manually draining the historical sources. Both released roots remain present and SDK items match. |
+| Adjacent proof | Remote activation and capability rejection, base/GSI initial placement, unpublished-owner recovery and interrupted base split publication keep their existing assertions. |
+
+The new full-pool regression passes (3.54 s), remote cold placement passes
+(22.79 s), both remote provisioning/recovery cases pass (39.00 s), and interrupted
+split publication recovery passes (3.12 s). No test assertion or timeout was
+relaxed. The retirement check grows production code by 29 net lines, mostly the
+non-activating metadata client and shared admission sequencing; it adds no
+configuration, dependency, serialized format or storage-schema change.
+
+This is local same-account residency reclamation, not distributed rebalancing or
+object-store garbage collection. A full remote node can remain excluded by its
+signed capacity advertisement before activation is attempted. Account metadata
+must already have an available owner; background recovery, coordinator/credential
+admission and cross-account capacity selection retain their separate policies.
+10,000-active-Cell/multi-TB throughput and failure qualification remain open.
+
+GSI split/tombstone restoration also passes (11.63 s). Strict all-target
+Clippy, the standalone server build, formatting, diff, Cell/LTX layout and
+policy entry-point checks pass. Full SDK/process qualification remains a CI
+gate for the pushed head.

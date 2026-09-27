@@ -259,12 +259,11 @@ pub fn account_target(account_id: &str) -> Result<CellTarget> {
     let hash = hasher.finalize();
     let mut tenant = [0_u8; 16];
     tenant.copy_from_slice(&hash.as_bytes()[..16]);
-    CellTarget::new(
-        TenantId::from_bytes(tenant),
-        APPLICATION,
-        NAMESPACE,
-        &partition_for_shard(0),
-    )
+    account_for_tenant(TenantId::from_bytes(tenant))
+}
+
+fn account_for_tenant(tenant: TenantId) -> Result<CellTarget> {
+    CellTarget::new(tenant, APPLICATION, NAMESPACE, &partition_for_shard(0))
 }
 
 /// Installs the initial account schema during Cell bootstrap.

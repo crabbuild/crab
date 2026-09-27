@@ -38,6 +38,11 @@ existing policies. Initial data, GSI, and split-child provisioning use the same
 signed placement measurements with a separate authenticated provisioning
 capability. Automatic rebalancing remains unfinished; adding a node does not
 move already serving Cells.
+When the local Cell pool is full, request restoration and authenticated range
+admission can release retired base/GSI sources before placement. Current-owner
+account metadata must prove the table generation is deleted, or that the sealed
+source is absent from both routes and unfinished split plans. The durable root
+remains recoverable; active ranges and pending exports are retained.
 
 `cargo run -p beyonddb --bin beyonddb -- config.json --bootstrap` starts one
 leased Cell node, a private mTLS peer listener, and ExtendDB's public DynamoDB

@@ -651,7 +651,7 @@ impl CellInitialPartitionProvisioner {
             ));
         }
         for spec in children {
-            self.reclaim_retired_ranges(&client, account_id, Some(source_target.cell_id()))
+            self.reclaim_retired_ranges(&client, &account, Some(source_target.cell_id()))
                 .await?;
             let target = data_target(account_id, &spec.table.id, &spec.partition_id)
                 .map_err(provision_error)?;
