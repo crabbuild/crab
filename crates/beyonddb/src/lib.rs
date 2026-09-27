@@ -112,7 +112,7 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 26] = [
+static COMMANDS: [OperationDescriptor; 27] = [
     operation(1),
     operation(2),
     operation(3),
@@ -143,6 +143,7 @@ static COMMANDS: [OperationDescriptor; 26] = [
     operation(27),
     operation(28),
     operation(29),
+    operation(30),
 ];
 static QUERIES: [OperationDescriptor; 29] = [
     operation(4),
@@ -344,6 +345,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<ActivateTableRoute>()?;
         registry.bind_command::<BeginSplit>()?;
         registry.bind_command::<CommitSplit>()?;
+        registry.bind_command::<FinishSplit>()?;
         registry.bind_command::<authorization::PutUserPolicy>()?;
         registry.bind_command::<authorization::DeleteUserPolicy>()?;
         registry.bind_command::<tags::UpdateTags>()?;
@@ -367,7 +369,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<secondary_index::QueryAccountIndex>()?;
         registry.bind_query::<ReadTableRoute>()?;
         registry.bind_query::<ReadSplitPlan>()?;
-        registry.bind_query::<ReadSourceSplitPlan>()?;
+        registry.bind_query::<ReadPartitionSplitPlan>()?;
         registry.bind_query::<ReadPartitionRoute>()?;
         registry.bind_query::<ReadRoutePage>()?;
         registry.bind_query::<ReadPublishedPartition>()?;

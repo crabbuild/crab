@@ -137,6 +137,29 @@ async fn sdk_split_sources_release_capacity_and_retain_recoverable_roots() {
     let released = authority.load(source.cell_id()).await.unwrap().unwrap();
     assert!(released.value().owner.is_none());
     assert!(released.value().root.is_some());
+    assert_eq!(fixture.node.runtime().stats().active_cells(), 8);
+    // Finished-plan replay must not reacquire historical sources when every
+    // slot belongs to a live range. Only unfinished transfers need their exports.
+    fixture
+        .provisioner
+        .resume_split(ACCOUNT, fixture.client.clone(), &base)
+        .await
+        .unwrap();
+    fixture
+        .provisioner
+        .resume_global_index_split(ACCOUNT, fixture.client.clone(), &split)
+        .await
+        .unwrap();
+    assert!(
+        authority
+            .load(source.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .owner
+            .is_none()
+    );
     // Reuse the completed index source's slot through an ordinary SDK action.
     create(&sdk, "ResidencyAfterSplit", false).await;
     let released = authority

@@ -22,7 +22,7 @@ use crate::backend::cell_error;
 use crate::{
     DescribeTableById, GlobalIndexPartitionInput, GlobalIndexState, Json, PartitionState,
     PublishedPartitionInput, PublishedPartitionOutcome, ReadGlobalIndexPartition,
-    ReadGlobalIndexSplitPlan, ReadGlobalIndexState, ReadPartitionState,
+    ReadGlobalIndexSplitPlan, ReadGlobalIndexState, ReadPartitionSplitPlan, ReadPartitionState,
     ReadPublishedGlobalIndexPartition, ReadPublishedPartition, account_target,
 };
 
@@ -144,8 +144,8 @@ impl CellInitialPartitionProvisioner {
                 entry.partition(),
             )
             .map_err(provision_error)?;
-            // A completed split can be replayed. Its caller still needs the
-            // sealed source, even after publication makes it otherwise eligible.
+            // An unfinished controller may resume after publication. Keep its
+            // sealed export source resident throughout copy/open recovery.
             if target.cell_id() != entry.cell() || retained_source == Some(entry.cell()) {
                 continue;
             }
@@ -232,22 +232,26 @@ impl CellInitialPartitionProvisioner {
                             .0
                             .is_none()
                 } else {
-                    matches!(
-                        client
-                            .query::<ReadPublishedPartition>(
-                                &account,
-                                None,
-                                Json(PublishedPartitionInput {
-                                    table_id,
-                                    partition_id
-                                }),
-                            )
-                            .await
-                            .map_err(cell_error)?
-                            .output
-                            .0,
-                        PublishedPartitionOutcome::Missing
-                    )
+                    let input = PublishedPartitionInput {
+                        table_id,
+                        partition_id,
+                    };
+                    client
+                        .query::<ReadPartitionSplitPlan>(&account, None, Json(input.clone()))
+                        .await
+                        .map_err(cell_error)?
+                        .output
+                        .0
+                        .is_none()
+                        && matches!(
+                            client
+                                .query::<ReadPublishedPartition>(&account, None, Json(input))
+                                .await
+                                .map_err(cell_error)?
+                                .output
+                                .0,
+                            PublishedPartitionOutcome::Missing
+                        )
                 };
                 if !unpublished {
                     continue;

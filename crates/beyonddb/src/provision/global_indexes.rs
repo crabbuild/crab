@@ -211,9 +211,13 @@ impl CellInitialPartitionProvisioner {
                 .map_err(cell_error)?
                 .output
                 .0;
-            if !((pending.as_ref() == Some(plan)
-                && matches!(state, SplitRouteState::Before | SplitRouteState::After))
-                || (pending.is_none() && state == SplitRouteState::After))
+            // Finish is durable proof that the exact replacement ranges opened.
+            // Completed replay needs no historical source or admission capacity.
+            if pending.is_none() && state == SplitRouteState::After {
+                return Ok(());
+            }
+            if pending.as_ref() != Some(plan)
+                || !matches!(state, SplitRouteState::Before | SplitRouteState::After)
             {
                 return Err(changed());
             }

@@ -1,17 +1,18 @@
 //! Recoverable host orchestration of one planned data-range split.
 
-use crab_cell_runtime::client::{CellClient, InvocationError};
+use crab_cell_runtime::client::{CellClient, InvocationError, ReadPolicy};
 use extenddb_storage::error::StorageError;
 
 use crate::backend::{cell_error, mutation_identity};
 use crate::{
     ActivateImportedPartition, ActivateImportedPartitionInput, ActivateImportedPartitionOutcome,
-    CommitSplit, CommitSplitOutcome, ImportPartitionItem, ImportSummary, InstallPartition,
-    InstallPartitionOutcome, Json, OpenPartition, OpenPartitionOutcome, PartitionExport,
-    PartitionImportInput, PartitionImportOutcome, PartitionInstall, PartitionScanInput,
-    PartitionScanOutcome, PartitionSeal, PartitionSpec, PartitionState, PublishedPartitionInput,
-    ReadPartitionState, ReadSourceSplitPlan, ReadSplitRoute, SealPartition, SealPartitionOutcome,
-    SplitPlan, SplitRouteState, account_target, data_key_hash, data_target,
+    CommitSplit, CommitSplitOutcome, FinishSplit, ImportPartitionItem, ImportSummary,
+    InstallPartition, InstallPartitionOutcome, Json, OpenPartition, OpenPartitionOutcome,
+    PartitionExport, PartitionImportInput, PartitionImportOutcome, PartitionInstall,
+    PartitionScanInput, PartitionScanOutcome, PartitionSeal, PartitionSpec, PartitionState,
+    PublishedPartitionInput, ReadPartitionSplitPlan, ReadPartitionState, ReadSplitRoute,
+    SealPartition, SealPartitionOutcome, SplitPlan, SplitRouteState, account_target, data_key_hash,
+    data_target,
 };
 
 /// Runs a durable split using already admitted account and data Cells.
@@ -26,7 +27,9 @@ pub struct CellSplitController {
 impl CellSplitController {
     /// Bind the routed Cell client used for all split participants.
     pub fn new(client: CellClient) -> Self {
-        Self { client }
+        Self {
+            client: client.with_read_policy(ReadPolicy::CurrentOwner),
+        }
     }
 
     /// Finish a previously planned split and open its replacement ranges.
@@ -43,7 +46,7 @@ impl CellSplitController {
         ];
         let current_plan = self
             .client
-            .query::<ReadSourceSplitPlan>(
+            .query::<ReadPartitionSplitPlan>(
                 &account,
                 None,
                 Json(PublishedPartitionInput {
@@ -62,13 +65,19 @@ impl CellSplitController {
             .map_err(cell_error)?
             .output
             .0;
-        let published_before = current_plan.is_none() && route_state == SplitRouteState::After;
-        if !((current_plan.as_ref() == Some(plan) && route_state == SplitRouteState::Before)
-            || published_before)
+        let published_before = route_state == SplitRouteState::After;
+        // Finish removes intent only after both durable opens. A completed
+        // replay must not reacquire a historical source or consume a slot.
+        if current_plan.is_none() && published_before {
+            return Ok(());
+        }
+        if current_plan.as_ref() != Some(plan)
+            || !matches!(
+                route_state,
+                SplitRouteState::Before | SplitRouteState::After
+            )
         {
-            return Err(StorageError::Transient(
-                "split plan or published route changed".into(),
-            ));
+            return Err(split_state("split plan or published route changed"));
         }
         for (spec, target) in children.iter().zip(&child_targets) {
             let installed = self
@@ -250,8 +259,37 @@ impl CellSplitController {
             if opened.output.0 != OpenPartitionOutcome::Opened {
                 return Err(split_state("child open did not commit"));
             }
+            let state = self
+                .client
+                .query::<ReadPartitionState>(target, Some(opened.receipt), Json(()))
+                .await
+                .map_err(cell_error)?
+                .output
+                .0;
+            if !state.is_some_and(|status| {
+                status.spec == children[index]
+                    && status.state
+                        == PartitionState::Opened {
+                            source: seal.clone(),
+                            summary: expected[index].clone(),
+                        }
+            }) {
+                return Err(split_state("child open differs from source export"));
+            }
         }
-        Ok(())
+        // The published children retain discovery until both are durably open.
+        // Removing the plan earlier strands them after controller loss.
+        match self
+            .client
+            .command::<FinishSplit>(&account, mutation_identity()?, Json(plan.clone()))
+            .await
+        {
+            Ok(result) if result.output.0 => Ok(()),
+            Ok(_) | Err(InvocationError::Rejected(_)) => {
+                Err(split_state("split completion state changed"))
+            }
+            Err(error) => Err(cell_error(error)),
+        }
     }
 }
 

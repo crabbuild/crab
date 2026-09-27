@@ -1626,6 +1626,19 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
                 .0
                 && route.epoch == 2
             {
+                // Publication precedes child opening. The capacity task's
+                // terminal boundary is the durable Finish, not the new epoch.
+                if account_client
+                    .query::<ReadSplitPlan>(&account, None, Json(created.table_id.clone()))
+                    .await
+                    .unwrap()
+                    .output
+                    .0
+                    .is_some()
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    continue;
+                }
                 break route;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

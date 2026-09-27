@@ -377,8 +377,9 @@ children accept idempotent imports while hidden from normal reads and writes;
 they activate only when the imported count and digest match the sealed export.
 Activated children remain hidden until route publication and a durable open
 command. Late imports are rejected after activation, including after owner restart.
-The account directory can consume the exact durable plan and switch the route
-with a predecessor compare-and-swap; owner restart retains the published route.
+The account directory switches the route with a predecessor compare-and-swap
+and retains the exact durable plan until both children open; owner restart
+retains both the route and unfinished plan.
 The host-backed controller verifies the sealed source and both children before
 publication and resumes idempotently after interruption. A host test runs the
 account capacity loop to trigger a split, performs a second split, sends a
@@ -1393,17 +1394,19 @@ No wire shape, storage schema, dependency, or configuration setting changed.
 
 Pending data splits are keyed by `(table_id, source_partition_id)`. Each source
 has one immutable pending plan; unrelated sources can copy and publish
-concurrently. `ReadSourceSplitPlan` is the point lookup used by explicit split,
+concurrently. `ReadPartitionSplitPlan` is the point lookup used by explicit split,
 threshold, and replay paths. `ReadSplitPlan` returns only the first pending
 source in ID order for explicit table recovery. Account sweeps visit published
-ranges in lower-bound order and use the source lookup.
+ranges in lower-bound order and use the participant lookup, which also finds
+an unfinished plan through either published child.
 
 Publication compares the exact source and child identities, bounds, table
 snapshot, and partition epochs in the command's SQL transaction. A newer
 directory epoch from an unrelated split no longer invalidates that comparison.
 Each successful publication increments the current directory epoch, preserving
-Scan page invalidation, while planned child epochs remain immutable. It removes
-only that source's plan. Completed replay validates the exact children even
+Scan page invalidation, while planned child epochs remain immutable. Publication
+retains the source plan and all three reservations until verified child opening;
+`FinishSplit` then removes only that plan and its members. Completed replay validates the exact children even
 when subsequent unrelated publications have advanced the directory epoch.
 
 The regression initially rejected the second disjoint source's plan. The signed
@@ -1417,10 +1420,10 @@ and child owners. SDK retries are disabled for those recovered reads.
 Ownership remains in `routing.rs` and `routing/split_state.rs`; callers are
 `provision/capacity.rs` and `split.rs`. The runtime's existing application SQL
 transaction/savepoint commits or rolls back the route rows, epoch, and plan
-together. `DeleteTable` continues deleting all plans for the table. GSI routing
-shares page validation but has no split planner yet; this change does not add
-one. Existing per-source prepare locks, export/import fingerprints, and opening
-after publication remain unchanged.
+together. `DeleteTable` continues deleting all plans for the table and cascades
+participant reservations. GSI routing has an equivalent lifecycle, described
+in the automatic index growth section. Per-source prepare locks and
+export/import fingerprints retain their existing guards.
 
 Account metadata still uses one writer and a 512-MiB Cell budget.
 Each account sweep attempts one range, advancing past transient failures.
@@ -1532,18 +1535,19 @@ through the existing runtime release path.
 A candidate must have a durable `Sealed` state and a successful current-account
 lookup showing its exact partition ID absent from the published directory.
 For base ranges, `Unrouted` is insufficient: the directory must exist and report
-`Missing`. For indexes, the pending participant reservation must also be absent;
-it remains present until both children open. Table deletion still supplies its
+`Missing`. For both base and index sources, the pending participant reservation must also
+be absent; it remains present until both children open. Table deletion still supplies its
 independent immutable-generation proof. Serving and importing Cells are never
 eligible solely because their route row is absent.
 
 Initial table/index creation, transaction coordinator admission, and both split
-controllers share this pressure path. Each split excludes its own source from
-reclamation, including completed-plan replays. The runtime rechecks the selected
+controllers share this pressure path. Each unfinished split excludes its own source from reclamation.
+Completed-plan replays perform no admission. The runtime rechecks the selected
 local generation and settled work before publishing Idle. Object-store roots,
 seals, tombstones, and transaction history remain recoverable. This does not
-collect storage, proactively rebalance remote nodes, or guarantee admission
-against stale fleet advertisements. Recovery of historical sources still needs
+collect storage, proactively rebalance remote nodes, or guarantee admission against stale remote fleet advertisements. The local
+Cell count now comes directly from the runtime admission ledger; other resource
+observations retain their signed-advertisement gates. Recovery of historical sources still needs
 available runtime capacity.
 
 The signed SDK regression `sdk_split_sources_release_capacity_and_retain_recoverable_roots`
@@ -1573,3 +1577,94 @@ Verification on 2026-09-27:
 
 These scoped results do not resolve the previously recorded intermittent
 idle-owner test or establish fleet-scale qualification.
+
+
+## Base split recovery through child opening
+
+The base split previously deleted its intent at route publication. A crash before
+`OpenPartition` left published children in `Activated`, while automatic sweeps
+could see neither the old source nor its plan. The signed SDK fault regression
+reproduced this: after all participant/account owners were released and restored,
+four capacity steps left the published child unreadable.
+
+`ddb_split_members` now reserves the source and both child IDs in the same
+account command as the plan. `ReadPartitionSplitPlan` replaces the unreleased
+source-only query and performs an indexed member lookup. Publication retains the
+plan; repeated publication returns the same success without advancing the epoch
+again. The controller accepts a matching pending plan on either side of cutover,
+uses current-owner reads, verifies each durable open state, and calls
+`FinishSplit` only afterward. Completion atomically deletes the plan and cascades
+its memberships. A published child remains reserved against a nested split
+until its parent finishes. Deleted tables cascade all unfinished memberships.
+
+Account capacity sweeps therefore rediscover unfinished base work through a
+published child even when its occupied pages are below the split threshold.
+Source residency reclamation also requires absence of the pending reservation,
+matching index behavior. Prepared transactions and undelivered index journals
+still block source sealing; the source root and immutable import fingerprints
+remain the recovery authority. A newer write to an already-open child is not
+replaced when the controller replays the original sealed source.
+
+Evidence map:
+
+| Boundary | Proof |
+| --- | --- |
+| Caller | Account capacity sweep → partition lookup → host provisioner → `CellSplitController`. |
+| Metadata owner | `routing/split_state.rs`: Begin/Commit/Finish and indexed participant reads; route/schema types remain in `routing.rs`. |
+| Atomic callee | Runtime application savepoint commits plan/member/route mutations with the command result; rejected commands roll back. |
+| Data owner | Install/import/activate/open keep exact source seals and frozen import summaries; ordinary writes stay fenced until opening. |
+| Sibling paths | GSI already retains its plan through both opens; initial routes, source transaction guards, table deletion, and residency continue through their canonical paths. |
+| Baseline | Main and the previous PR head consume base intent at CommitSplit and cannot rediscover a published unopened child. |
+| SDK regression | Inject loss before the first or second child opens, release all participants/account, resume from a fresh sweep, preserve an intervening write, reject a nested plan until completion, then delete a table with a later pending plan. |
+
+**Is this the best fix?** Retain discoverable intent through the last required
+cross-Cell side effect. This follows the existing GSI protocol and avoids
+heuristic scans of historical sources or opening children without verifying
+imports. Split metadata handlers now live beside their state queries, bringing
+both routing modules below 700 lines. The new table and query name are unreleased;
+development roots require reprovisioning. No dependency, configuration, or
+released-data compatibility path is added.
+
+
+A completed replay now returns after matching the exact child directory and
+observing that Finish removed the intent. This applies to both base and GSI
+controllers: it does not reacquire historical sources, mutate children, or
+consume another active slot. The eight-slot SDK regression checks that completed
+base/index replays leave a released source idle before creating another table.
+Unfinished plans still require their sealed exports and verified fingerprints.
+
+The same capacity regression also exposed a stale local placement count: after
+release published Idle, the last heartbeat could still advertise eight occupied
+slots. Local placement now uses `CellRuntimeStats::placement_active_cells()` for
+its own authenticated session. Signed lease identity and all other resource
+eligibility gates remain mandatory; remote observations stay signed snapshots.
+Runtime admission and owner CAS still authorize actual acquisition. This is a
+local count refresh, not proactive fleet rebalancing.
+
+The existing numeric Query/Scan regression now waits for Finish before checking
+that a below-threshold child performs no split work. Its original assertions and
+timeout remain; a published epoch alone no longer implies completed opening.
+Net production growth for this increment is about 130 lines, including SQL and
+local placement wiring; moving existing handlers adds no second code path.
+
+
+Verification on 2026-09-27:
+
+- Before intent retention: the injected publication/open crash stranded an
+  `Activated` child after owner restoration and four capacity steps (2.54s).
+- Final 11 SDK residency cases: PASS, 23.20s, including both interruption points,
+  pending-member lookup, nested-split exclusion, table deletion, preserved newer
+  writes, completed replay at full capacity, GSI tombstones, and remote recovery.
+- Data/transaction/split owner recovery: PASS, 3.17s.
+- Numeric Query/Scan and successive capacity splits: PASS, 3.10s.
+- 1,025-range directory publication: PASS, 7.42s.
+- LSI mutations/transactions/splits: PASS, 1.32s.
+- Strict all-target Clippy: PASS, 9.38s; server build: PASS, 12.79s.
+- Format, diff, Cell/LTX layout, and policy entry-point checks: PASS.
+
+Earlier concurrent selections reported a five-second blocked-source timeout,
+placement denials, a remote-placement assertion, and a transient GSI read. The
+blocked-source case passed alone in 2.19s. The final selection above ran after
+completed-replay and fresh local-count fixes; no test timeout or assertion was
+relaxed. CI and fleet-scale qualification remain required. The older recorded
+idle-owner regression was not included in this selection and remains unresolved.

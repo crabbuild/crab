@@ -282,7 +282,11 @@ keeping ordinary requests fenced. The host-backed split controller admits
 children, seals the source, copies bounded export pages, checks both child
 fingerprints against the sealed source, and atomically publishes the exact
 durable plan against its exact predecessor source range. It then opens the
-children for ordinary requests. The host provisioner can choose a range
+children for ordinary requests, verifies their durable open states, then
+finishes the plan. Source and child reservations remain discoverable through
+publication, so a restarted capacity sweep can resume from either published
+child. An opened child cannot start a new split until its parent plan finishes.
+The host provisioner can choose a range
 midpoint, record the plan, and repeat the split on an already opened child. Repeated calls
 resume this sequence after interruption.
 The account command itself cannot inspect other Cells; serving code must use

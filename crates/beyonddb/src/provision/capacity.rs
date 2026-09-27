@@ -17,8 +17,8 @@ use crate::split::split_contract;
 use crate::{
     BeginSplit, BeginSplitOutcome, CellSplitController, DescribeTable, Json, ListTables,
     ListTablesInput, ListTablesOutcome, PartitionState, PartitionUsage, PublishedPartitionInput,
-    PublishedPartitionOutcome, ReadGlobalIndexRoutePage, ReadPartitionState,
-    ReadPublishedPartition, ReadRoutePage, ReadSourceSplitPlan, ReadSplitPlan, ReadSplitRoute,
+    PublishedPartitionOutcome, ReadGlobalIndexRoutePage, ReadPartitionSplitPlan,
+    ReadPartitionState, ReadPublishedPartition, ReadRoutePage, ReadSplitPlan, ReadSplitRoute,
     RoutePageInput, RoutePageOutcome, SplitPlan, SplitRouteState, account_target, data_target,
 };
 
@@ -368,7 +368,7 @@ impl CellInitialPartitionProvisioner {
         let account = account_target(account_id).map_err(provision_error)?;
         let client = client.with_read_policy(ReadPolicy::CurrentOwner);
         if client
-            .query::<ReadSourceSplitPlan>(
+            .query::<ReadPartitionSplitPlan>(
                 &account,
                 None,
                 Json(PublishedPartitionInput {
@@ -439,7 +439,7 @@ impl CellInitialPartitionProvisioner {
             let account = account_target(account_id).map_err(provision_error)?;
             let client = client.with_read_policy(ReadPolicy::CurrentOwner);
             if let Some(plan) = client
-                .query::<ReadSourceSplitPlan>(
+                .query::<ReadPartitionSplitPlan>(
                     &account,
                     None,
                     Json(PublishedPartitionInput {
@@ -604,7 +604,7 @@ impl CellInitialPartitionProvisioner {
         let account = account_target(account_id).map_err(provision_error)?;
         let client = client.with_read_policy(ReadPolicy::CurrentOwner);
         let pending = client
-            .query::<ReadSourceSplitPlan>(
+            .query::<ReadPartitionSplitPlan>(
                 &account,
                 None,
                 Json(PublishedPartitionInput {
@@ -622,8 +622,16 @@ impl CellInitialPartitionProvisioner {
             .map_err(cell_error)?
             .output
             .0;
-        if !((pending.as_ref() == Some(plan) && route_state == SplitRouteState::Before)
-            || (pending.is_none() && route_state == SplitRouteState::After))
+        // A missing intent plus the exact replacement route proves Finish.
+        // Replaying completed work must not admit any historical participants.
+        if pending.is_none() && route_state == SplitRouteState::After {
+            return Ok(());
+        }
+        if pending.as_ref() != Some(plan)
+            || !matches!(
+                route_state,
+                SplitRouteState::Before | SplitRouteState::After
+            )
         {
             return Err(StorageError::Transient(
                 "split plan or published route changed".into(),

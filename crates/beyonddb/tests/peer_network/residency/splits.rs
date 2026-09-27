@@ -1,6 +1,6 @@
 use super::*;
 use beyonddb::{
-    BeginSplit, BeginSplitOutcome, PublishedPartitionInput, ReadRoutePage, ReadSourceSplitPlan,
+    BeginSplit, BeginSplitOutcome, PublishedPartitionInput, ReadPartitionSplitPlan, ReadRoutePage,
     ReadSplitPlan, RoutePageInput, RoutePageOutcome, SplitPlan,
 };
 use crab_cell_runtime::client::InvocationError;
@@ -40,7 +40,7 @@ async fn sdk_independent_range_splits_preserve_progress_and_replay() {
     for plan in &plans {
         let recovered = fixture
             .client
-            .query::<ReadSourceSplitPlan>(
+            .query::<ReadPartitionSplitPlan>(
                 &account,
                 None,
                 Json(PublishedPartitionInput {
@@ -302,7 +302,7 @@ async fn sdk_capacity_sweep_advances_past_a_transaction_blocked_split() {
     assert_eq!(
         fixture
             .client
-            .query::<ReadSourceSplitPlan>(
+            .query::<ReadPartitionSplitPlan>(
                 &account,
                 None,
                 Json(PublishedPartitionInput {
@@ -393,4 +393,297 @@ async fn wait_for_ranges(fixture: &Fixture, table_id: &str, count: usize) -> Tab
     })
     .await
     .expect("capacity sweep did not progress past the blocked source")
+}
+
+struct FailPublishedChild {
+    client: CellClient,
+    account: crab_cell_runtime::identity::CellTarget,
+    plan: SplitPlan,
+    child: crab_cell_runtime::identity::CellId,
+}
+
+impl crab_cell_runtime::client::LocalCellResolver for FailPublishedChild {
+    fn resolve(
+        &self,
+        target: crab_cell_runtime::identity::CellTarget,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = crab_cell_runtime::Result<Option<CellHandle>>>
+                + Send
+                + 'static,
+        >,
+    > {
+        let client = self.client.clone();
+        let account = self.account.clone();
+        let plan = self.plan.clone();
+        let child = self.child;
+        Box::pin(async move {
+            if target.cell_id() == child
+                && client
+                    .query::<beyonddb::ReadSplitRoute>(&account, None, Json(plan))
+                    .await
+                    .unwrap()
+                    .output
+                    .0
+                    == beyonddb::SplitRouteState::After
+            {
+                return Err(crab_cell_runtime::Error::CellNotActive);
+            }
+            Ok(None)
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_capacity_recovers_publication_before_children_open() {
+    use beyonddb::{PartitionState, ReadPartitionState, data_target};
+    for failed_child in 0..2 {
+        let fixture = Fixture::with_partition_count(1).await;
+        let (_, plans) = pending_splits(&fixture).await;
+        let plan = &plans[0];
+        let table = &plan.source.table;
+        let account = account_target("123456789012").unwrap();
+        let sdk = aws_sdk_dynamodb::Client::from_conf(
+            fixture
+                .sdk
+                .config()
+                .to_builder()
+                .retry_config(aws_sdk_dynamodb::config::retry::RetryConfig::disabled())
+                .build(),
+        );
+        let mut items = Vec::new();
+        let mut targets = Vec::new();
+        for (i, child) in plan.children.iter().enumerate() {
+            let id = (0..1000)
+                .map(|n| format!("cutover-{i}-{n}"))
+                .find(|id| {
+                    let key = Item::from([("id".into(), AttributeValue::S(id.clone()))]);
+                    let hash = beyonddb::data_key_hash(&table.id, &key, &table.key_schema).unwrap();
+                    child.lower.is_none_or(|lower| hash >= lower)
+                        && child.upper.is_none_or(|upper| hash < upper)
+                })
+                .unwrap();
+            let item = SdkItem::from([
+                ("id".into(), AwsAttributeValue::S(id)),
+                ("value".into(), AwsAttributeValue::S("before".into())),
+            ]);
+            sdk.put_item()
+                .table_name("Residency")
+                .set_item(Some(item.clone()))
+                .send()
+                .await
+                .unwrap();
+            items.push(item);
+            targets.push(data_target("123456789012", &table.id, &child.partition_id).unwrap());
+        }
+        let interrupted =
+            fixture
+                .client
+                .clone()
+                .with_local_resolver(Arc::new(FailPublishedChild {
+                    client: fixture.client.clone(),
+                    account: account.clone(),
+                    plan: plan.clone(),
+                    child: targets[failed_child].cell_id(),
+                }));
+        assert!(
+            fixture
+                .provisioner
+                .resume_split("123456789012", interrupted, plan)
+                .await
+                .is_err()
+        );
+        for spec in [&plan.source, &plan.children[0], &plan.children[1]] {
+            assert_eq!(
+                fixture
+                    .client
+                    .query::<ReadPartitionSplitPlan>(
+                        &account,
+                        None,
+                        Json(PublishedPartitionInput {
+                            table_id: table.id.clone(),
+                            partition_id: spec.partition_id
+                        })
+                    )
+                    .await
+                    .unwrap()
+                    .output
+                    .0
+                    .as_ref(),
+                Some(plan)
+            );
+        }
+        let child_source = plan.children[0].clone();
+        let middle = (u128::from_be_bytes(child_source.upper.unwrap()) / 2).to_be_bytes();
+        let mut grandchildren = [child_source.clone(), child_source.clone()];
+        grandchildren[0].partition_id = [121; 16];
+        grandchildren[0].upper = Some(middle);
+        grandchildren[1].partition_id = [122; 16];
+        grandchildren[1].lower = Some(middle);
+        for child in &mut grandchildren {
+            child.epoch += 1;
+        }
+        let nested = SplitPlan {
+            source: child_source,
+            children: grandchildren,
+            expected_epoch: plan.expected_epoch + 1,
+        };
+        let mutation = || MutationIdentity {
+            request_id: RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes()),
+            issued_at_ms: now_ms(),
+            expires_at_ms: now_ms() + 60_000,
+        };
+        // A published child remains reserved until its parent's second open.
+        assert!(
+            matches!(fixture.client.command::<BeginSplit>(&account, mutation(), Json(nested.clone())).await,
+            Err(InvocationError::Rejected(result)) if result.output.0 == BeginSplitOutcome::Conflict)
+        );
+        for (i, target) in targets.iter().enumerate() {
+            let state = fixture
+                .client
+                .query::<ReadPartitionState>(target, None, Json(()))
+                .await
+                .unwrap()
+                .output
+                .0
+                .unwrap()
+                .state;
+            assert!(match state {
+                PartitionState::Opened { .. } => i < failed_child,
+                PartitionState::Activated { .. } => i >= failed_child,
+                _ => false,
+            });
+        }
+        if failed_child == 1 {
+            items[0].insert("value".into(), AwsAttributeValue::S("after".into()));
+            sdk.put_item()
+                .table_name("Residency")
+                .set_item(Some(items[0].clone()))
+                .send()
+                .await
+                .unwrap();
+        }
+        // Lose all participant and account actors. A fresh sweep has only the
+        // published child directory, not the original controller's in-memory plan.
+        for spec in [&plan.source, &plan.children[0], &plan.children[1]] {
+            fixture
+                .provisioner
+                .admit_existing_partition("123456789012", &table.id, &spec.partition_id)
+                .await
+                .unwrap()
+                .drain()
+                .await
+                .unwrap();
+        }
+        fixture
+            .provisioner
+            .admit_account("123456789012")
+            .await
+            .unwrap()
+            .drain()
+            .await
+            .unwrap();
+        let mut cursor = None;
+        for _ in 0..4 {
+            fixture
+                .provisioner
+                .reconcile_account_capacity(
+                    "123456789012",
+                    fixture.client.clone(),
+                    u64::MAX,
+                    &mut cursor,
+                )
+                .await
+                .unwrap();
+        }
+        for target in &targets {
+            let state = fixture
+                .client
+                .query::<ReadPartitionState>(target, None, Json(()))
+                .await
+                .unwrap()
+                .output
+                .0
+                .unwrap()
+                .state;
+            assert!(
+                matches!(state, PartitionState::Opened { .. }),
+                "published child stranded: {state:?}"
+            );
+        }
+        for item in items {
+            assert_eq!(
+                sdk.get_item()
+                    .table_name("Residency")
+                    .key("id", item["id"].clone())
+                    .consistent_read(true)
+                    .send()
+                    .await
+                    .unwrap()
+                    .item,
+                Some(item)
+            );
+        }
+        assert!(
+            fixture
+                .client
+                .query::<ReadSplitPlan>(&account, None, Json(table.id.clone()))
+                .await
+                .unwrap()
+                .output
+                .0
+                .is_none()
+        );
+        for spec in [&plan.source, &plan.children[0], &plan.children[1]] {
+            assert!(
+                fixture
+                    .client
+                    .query::<ReadPartitionSplitPlan>(
+                        &account,
+                        None,
+                        Json(PublishedPartitionInput {
+                            table_id: table.id.clone(),
+                            partition_id: spec.partition_id
+                        })
+                    )
+                    .await
+                    .unwrap()
+                    .output
+                    .0
+                    .is_none()
+            );
+        }
+        // Completion releases the reservation, and table deletion cascades a
+        // later unfinished plan together with all of its participant lookups.
+        fixture
+            .client
+            .command::<BeginSplit>(&account, mutation(), Json(nested.clone()))
+            .await
+            .unwrap();
+        sdk.delete_table()
+            .table_name("Residency")
+            .send()
+            .await
+            .unwrap();
+        for spec in [&nested.source, &nested.children[0], &nested.children[1]] {
+            assert!(
+                fixture
+                    .client
+                    .query::<ReadPartitionSplitPlan>(
+                        &account,
+                        None,
+                        Json(PublishedPartitionInput {
+                            table_id: table.id.clone(),
+                            partition_id: spec.partition_id
+                        })
+                    )
+                    .await
+                    .unwrap()
+                    .output
+                    .0
+                    .is_none()
+            );
+        }
+        fixture.shutdown().await;
+    }
 }

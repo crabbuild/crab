@@ -36,6 +36,16 @@ CREATE TABLE ddb_split_plans (
     PRIMARY KEY (table_id, source_partition_id)
 );
 
+CREATE TABLE ddb_split_members (
+    table_id TEXT NOT NULL,
+    partition_id BLOB NOT NULL,
+    source_partition_id BLOB NOT NULL,
+    PRIMARY KEY (table_id, partition_id),
+    FOREIGN KEY (table_id, source_partition_id)
+        REFERENCES ddb_split_plans(table_id, source_partition_id) ON DELETE CASCADE
+);
+CREATE INDEX ddb_split_source ON ddb_split_members (table_id, source_partition_id);
+
 CREATE TABLE ddb_iam_user_policies (
     user_name TEXT NOT NULL,
     policy_name TEXT NOT NULL,

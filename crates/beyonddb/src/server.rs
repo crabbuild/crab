@@ -97,6 +97,7 @@ impl BeyonddbPeers {
             layout,
             registry: node.application().registry(),
             placement: Arc::new(placement::RangePlacement {
+                runtime: node.runtime(),
                 directory,
                 session,
                 signer,

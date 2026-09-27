@@ -18,6 +18,7 @@ pub(super) fn is_data_target(target: &CellTarget) -> bool {
 }
 
 pub(super) struct RangePlacement {
+    pub runtime: crab_cell_runtime::cell::actor::CellRuntime,
     pub directory: NodeDirectory,
     pub session: SessionId,
     pub signer: Arc<PeerSigner>,
@@ -51,7 +52,16 @@ impl RangePlacement {
             let observations = nodes
                 .iter()
                 .filter_map(|node| {
-                    PlacementObservation::from_signed_advertisement(node, observed_at, false).ok()
+                    let mut observation =
+                        PlacementObservation::from_signed_advertisement(node, observed_at, false)
+                            .ok()?;
+                    if observation.session == self.session {
+                        // The local pool is authoritative after admission/release.
+                        // Waiting for its next heartbeat would reject a slot just
+                        // reclaimed here; other signed resource gates still apply.
+                        observation.active_cells = self.runtime.stats().placement_active_cells();
+                    }
+                    Some(observation)
                 })
                 .collect::<Vec<_>>();
             let selected = PlacementPlanner::default()
