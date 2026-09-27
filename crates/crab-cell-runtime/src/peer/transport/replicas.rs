@@ -82,6 +82,8 @@ impl ReplicaPeerClient {
     ///
     /// The caller supplies an activation-authorized principal. Discovery is
     /// revalidated just before dispatch so queued hints cannot target a later boot.
+    /// A pending hint rechecks the session at its observed expiry and ends if
+    /// it is no longer live. Renewals retain the original request and budget.
     pub async fn activate(
         &self,
         target: &CellTarget,
@@ -97,15 +99,32 @@ impl ReplicaPeerClient {
             .await?
             .ok_or(Error::CellNotActive)?;
         let node = observed.advertisement().clone();
-        let (receipt, ready) = self
-            .readiness(
+        let session = node.session();
+        let mut expires_at_ms = node.expires_at_ms();
+        let expired = async {
+            loop {
+                let remaining_ms = expires_at_ms.saturating_sub(unix_time_ms()?).max(0) as u64;
+                tokio::time::sleep(std::time::Duration::from_millis(remaining_ms)).await;
+                let current = directory
+                    .load(session, unix_time_ms()?)
+                    .await?
+                    .ok_or(Error::CellNotActive)?;
+                expires_at_ms = current.advertisement().expires_at_ms();
+            }
+        };
+        // Recheck a pending peer at lease expiry so a dead connection does not
+        // hold recruitment until the transport deadline. Renewals retain slow
+        // valid opens; a ready reply can interrupt a stalled directory read.
+        let (receipt, ready) = tokio::select! {
+            result = self.readiness(
                 target,
                 node,
                 expected,
                 wire::read_request::Operation::ReplicaActivate(true),
                 DEFAULT_TIMEOUT_MS,
-            )
-            .await?;
+            ) => result?,
+            result = expired => return result,
+        };
         if !ready {
             return Err(Error::ReplicaUnavailable);
         }
