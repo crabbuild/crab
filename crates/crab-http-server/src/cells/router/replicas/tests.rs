@@ -17,6 +17,7 @@ struct ActivationProbe {
     wrong_incarnation: std::sync::atomic::AtomicBool,
     stalled: StdMutex<HashSet<SessionId>>,
     received: StdMutex<Vec<(crab_cell_runtime::CellId, SessionId)>>,
+    release: Arc<tokio::sync::Notify>,
 }
 
 impl PeerRoundTrip for ActivationProbe {
@@ -49,6 +50,7 @@ impl PeerRoundTrip for ActivationProbe {
         .verify(&request, now)
         .unwrap();
         let stalled = self.stalled.lock().unwrap().contains(&node.session());
+        let release = Arc::clone(&self.release);
         self.received
             .lock()
             .unwrap()
@@ -60,7 +62,7 @@ impl PeerRoundTrip for ActivationProbe {
         };
         Box::pin(async move {
             if stalled {
-                return std::future::pending().await;
+                release.notified().await;
             }
             crab_cell_runtime::peer::encode_peer_reply(&peer_wire::PeerReply {
                 outcome: Some(peer_wire::peer_reply::Outcome::Read(peer_wire::ReadReply {
@@ -372,4 +374,89 @@ async fn activation_rejects_a_receipt_from_another_cell_lifetime() {
         .await;
     fixture.router.runtime.shutdown().await.unwrap();
     assert!(matches!(result, Err(crab_cell_runtime::Error::Peer(_))));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_activation_releases_an_expired_peer_without_waiting_for_transport() {
+    let fixture = Fixture::new(1).await;
+    let now = crate::cells::unix_now_ms().unwrap();
+    // Discovery can legitimately observe a live boot near its lease expiry.
+    let node = fixture.advertisement(4, now - 9_500);
+    fixture
+        .router
+        .peer
+        .directory
+        .create(node.clone(), now)
+        .await
+        .unwrap();
+    fixture.probe.stalled.lock().unwrap().insert(node.session());
+    let target = &fixture.targets[0];
+    let (expected, _) = fixture
+        .router
+        .replica_routing
+        .selected(target)
+        .await
+        .unwrap();
+    let peer = fixture.router.read_replica_peer();
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        peer.activate(target, &fixture.router.peer.directory, node, expected),
+    )
+    .await;
+    fixture.router.runtime.shutdown().await.unwrap();
+    assert!(
+        matches!(result, Ok(Err(crab_cell_runtime::Error::Node(_)))),
+        "expired peer stranded activation until the transport deadline: {result:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_activation_survives_a_fresh_renewal_without_resending() {
+    let fixture = Fixture::new(1).await;
+    let now = crate::cells::unix_now_ms().unwrap();
+    let node = fixture.advertisement(4, now - 9_500);
+    let observed = fixture
+        .router
+        .peer
+        .directory
+        .create(node.clone(), now)
+        .await
+        .unwrap();
+    fixture.probe.stalled.lock().unwrap().insert(node.session());
+    let target = &fixture.targets[0];
+    let (expected, _) = fixture
+        .router
+        .replica_routing
+        .selected(target)
+        .await
+        .unwrap();
+    let peer = fixture.router.read_replica_peer();
+    let mut activation =
+        Box::pin(peer.activate(target, &fixture.router.peer.directory, node, expected));
+    assert!(futures_util::poll!(&mut activation).is_pending());
+    assert_eq!(fixture.probe.received.lock().unwrap().len(), 1);
+    let renewed_at = crate::cells::unix_now_ms().unwrap();
+    fixture
+        .router
+        .peer
+        .directory
+        .refresh(&observed, fixture.advertisement(4, renewed_at), renewed_at)
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(700), &mut activation)
+            .await
+            .is_err(),
+        "the original advertisement expiry canceled a renewed boot"
+    );
+    fixture.probe.release.notify_one();
+    let result = tokio::time::timeout(Duration::from_secs(2), activation)
+        .await
+        .unwrap();
+    let received = fixture.probe.received.lock().unwrap().len();
+    fixture.router.runtime.shutdown().await.unwrap();
+    assert!(
+        result.is_ok() && received == 1,
+        "renewal restarted or failed the request: {result:?}, sends={received}"
+    );
 }

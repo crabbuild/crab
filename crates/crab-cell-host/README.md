@@ -42,6 +42,9 @@ all compiled namespace roles, advances its cursor before I/O, and bounds each
 pass to 64 Cells, 16 concurrent hints per Cell, and 30 seconds. The five-second
 poll interval is not a freshness or replacement SLO. Expired readers are
 replaced through signed live membership and the same receiver admission path.
+Pending activation hints recheck the selected boot at its observed lease
+expiry. A renewal preserves the in-flight request; an expired or withdrawn
+session releases the wait so a later pass can recruit its replacement.
 
 The task group owns recruitment alongside refresh; cancellation interrupts
 provider and peer waits before drain. Explicit operator hints can use the
