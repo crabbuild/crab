@@ -21,7 +21,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      CRAB_REFERENCE_STATE: ${{ runner.temp }}/cell-reference
       CRAB_REFERENCE_PROJECT: cell-reference
       CRAB_CELL_PERF_ITERATIONS: "30"
     steps:
@@ -31,6 +30,8 @@ jobs:
       - name: Pin qualification source and host profile
         run: |
           set -euo pipefail
+          CRAB_REFERENCE_STATE="$RUNNER_TEMP/cell-reference"
+          printf 'CRAB_REFERENCE_STATE=%s\n' "$CRAB_REFERENCE_STATE" >> "$GITHUB_ENV"
           mkdir -p "$CRAB_REFERENCE_STATE/source" "$CRAB_REFERENCE_STATE/target-linux" "$CRAB_REFERENCE_STATE/evidence"
           git archive HEAD | tar -x -C "$CRAB_REFERENCE_STATE/source"
           git rev-parse HEAD > "$CRAB_REFERENCE_STATE/evidence/source-revision.txt"
