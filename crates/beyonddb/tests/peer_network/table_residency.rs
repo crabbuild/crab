@@ -38,7 +38,7 @@ pub(crate) async fn recreate_with_remote_account(sdk: &Client) {
             .global_secondary_indexes(index.clone())
             .send()
             .await
-            .unwrap();
+            .unwrap_or_else(|error| panic!("generation {generation} create failed: {error:?}"));
         let empty = sdk
             .scan()
             .table_name("RecreatedTable")
@@ -57,7 +57,35 @@ pub(crate) async fn recreate_with_remote_account(sdk: &Client) {
             .table_name("RecreatedTable")
             .send()
             .await
-            .unwrap();
+            .unwrap_or_else(|error| panic!("generation {generation} delete failed: {error:?}"));
+        // DeleteTable returns DELETING until directory retirement completes.
+        // Require public absence before reusing the name for a new generation.
+        tokio::time::timeout(std::time::Duration::from_secs(45), async {
+            loop {
+                match sdk
+                    .describe_table()
+                    .table_name("RecreatedTable")
+                    .send()
+                    .await
+                {
+                    Ok(table) => assert_eq!(
+                        table.table.unwrap().table_status(),
+                        Some(&aws_sdk_dynamodb::types::TableStatus::Deleting)
+                    ),
+                    Err(error)
+                        if error
+                            .as_service_error()
+                            .is_some_and(|error| error.is_resource_not_found_exception()) =>
+                    {
+                        break;
+                    }
+                    Err(error) => panic!("generation {generation} deletion failed: {error:?}"),
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|error| panic!("generation {generation} deletion stalled: {error:?}"));
     }
     let live = sdk
         .get_item()

@@ -694,7 +694,8 @@ The new regression counts entry into a PUT before a throttled store stalls it,
 then cancels renewal or fences the guard. Before the fix, cancellation failed
 its one-second completion bound (test failed in 4.03 seconds). An outer select
 now covers the whole renewal loop, including storage and retry waits.
-Cancellation retains the current deadline; fencing remains terminal. Dropping
+That revision retained the current deadline on cancellation; the retirement
+follow-up below supersedes this cancellation behavior. Fencing remains terminal. Dropping
 the request cannot establish whether its remote CAS committed and never grants
 a new local lease.
 
@@ -2326,3 +2327,101 @@ DEBUG events alongside other server warnings. It logs neither request bodies
 nor credentials, and changes no admission, deadline or retry behavior. The two
 existing codec/enrollment tests pass (4.52s). These diagnostics are intended to
 make the next CI recurrence actionable; passing repeats do not close the failure.
+### Graceful session retirement and immediate restart
+
+The original PR479 reproduced immediate physical-node reuse failure against
+main `311105eb864` and qualified a heartbeat-owned retirement implementation.
+Its native tests and GA RustFS process/peer runs (211.84s and 256.76s) remain
+historical evidence for that source, not proof of the current integration.
+
+Main `de215cd0c49` independently fixed the ordinary restart path through
+`shutdown_serving_node`: runtime drain must succeed before the product retires
+its session. PR479 now preserves that boundary. Lease maintenance still stops
+on cancellation without withdrawing; failed drain cannot remove the session.
+The duplicate heartbeat-owned retirement and its redundant restart test were
+removed during integration.
+
+The remaining gap is a canceled heartbeat CAS that commits after shutdown's
+final load. `NodeDirectory::withdraw_after_drain` uses the existing exact
+withdrawal CAS, then reconciles only a newer generation of the same signed boot
+identity. Canonical decoding verifies the signature. A late refresh cannot
+replace the tombstone; an unsealed log, recovery claim, or changed identity
+cannot be withdrawn through this path. The exact `withdraw` API keeps its
+stale-observation rejection contract.
+
+`shutdown_serving_node` bounds the post-drain load and withdrawal together by
+one existing node lease lifetime. A provider stall returns `Deadline`, so the
+binary retains scratch state instead of reporting a clean stop. No new
+configuration, storage shape, lease duration, or takeover timing is introduced.
+The HTTP server sibling awaits each heartbeat response before processing its
+shutdown token and keeps its existing exact-withdrawal path.
+
+The public shutdown regressions cover immediate physical-node reuse, failed
+drain preserving the advertisement, a heartbeat committing between the final
+GET and conditional withdrawal, and bounded failure on either a retirement GET
+or PUT stall. The directory tests additionally preserve foreign-identity,
+recovery-claim, log-sealing and exact-withdrawal guards.
+
+The process fixture and CI use the existing digest-pinned RustFS 1.0 GA Docker
+image instead of a native RC binary. Successful fixtures remove their private
+container and volume; failed fixtures retain a stopped container for replay.
+The peer fixture separates simulated process loss from graceful shutdown:
+crash drops renewal without writing a tombstone, retaining expiry-based
+recovery. Linux CI and fleet-scale qualification remain separate gates.
+
+Current integration evidence uses base `a362f3b17f5` and source
+`1cf2db64ad7e7fa7fc1e63628e8e0f1983109f91`. The full signed SDK process
+scenario passed against digest-pinned RustFS GA in Colima in **321.67s**:
+large escaped/binary transactions, coordinator churn, hard restart at a new
+peer address, exact replay, index recovery, graceful restart and table
+recreation. This run builds and executes the real server binary; the server
+processes themselves run on the macOS host.
+
+Preserve the preceding failure as separate evidence: source `49906251a6f`
+on base `de215cd0c49` failed in 187.36s at `escaped-transfer-put`, before any
+restart or shutdown. The log reports mailbox-byte refusals and a started SQL
+command exceeding its wall deadline, followed by fenced-executor errors.
+The failed RustFS container was stopped and retained. The later passing run
+uses a newer integrated base and does not establish a causal fix for that
+failure. The shared macOS host also had other workloads and swap in use;
+this does not prove that contention caused the failure. Sustained-load and
+Linux process qualification remain required.
+
+The four public shutdown cases also pass on this integrated source (30.04s),
+and strict all-target BeyondDB/runtime Clippy with runtime test-support passes
+(1m36s). The earlier-base shared node suite passed 36 cases in 0.50s and the
+host drain-ordering regression in 0.01s. The controlled current-main function
+substitution reproduced the late-heartbeat failure; the corrected function
+passed in 2.04s. Format, layout, policy-entry, documentation and workflow
+syntax checks pass.
+
+
+The integrated signed peer SDK scenario also passed in **283.06s** after
+correcting its deletion lifecycle wiring. The test uses an in-memory provider
+with real signed SDK, HTTP/mTLS and public hosts; it is not RustFS evidence.
+DeleteTable returns DELETING until the account maintenance controller retires
+independent index directories. The old fixture reused the name immediately,
+failed at generation 1, and stalled when a completion waiter was added without
+maintenance. The retained maintenance task now uses the API host's provisioner
+and peer-aware client, preserving this fixture's explicit owner placement.
+DescribeTable must report ResourceNotFound before each of six recreations.
+Empty scans, writes, live-table preservation, transaction capacity cancellation,
+large transactions, owner expiry, changed-address recovery and replay retain
+their original assertions. The autonomous creation-recovery fixtures separately
+exercise production placement; installing a competing local-only provisioner
+into this explicit-placement scenario is not equivalent wiring.
+
+
+The sibling unleased residency test exposed the same stale fixture assumptions:
+it failed in 0.47s before recreation because its five slots predated independent
+GSI directory owners. Its exact full-pool accounting is now seven Cells: one
+account and two indexed tables with data, index and directory owners each.
+It drives the bounded deletion controller until the generation is absent,
+then checks that both historical range roots remain durable and the live table
+remains readable. The corrected case passes in **5.80s**, retaining all four
+recreations and historical-root restoration. No runtime capacity or admission
+policy was changed.
+
+Final BeyondDB/runtime all-target Clippy with runtime test-support passes in
+6.42s after these fixture changes. Format, layout, policy-entry and documentation
+checks also pass; production Rust remains the same bounded retirement change.

@@ -145,7 +145,7 @@ async fn start_node(
     endpoint: String,
     tls: &LoadedPeerTls,
     node_byte: u8,
-    node_shutdown: CancellationToken,
+    crash: CancellationToken,
 ) -> (CellNode, Arc<CellNodeTaskGroup>) {
     let node = CellNodeBuilder::new(Arc::clone(&application))
         .with_runtime(
@@ -156,10 +156,11 @@ async fn start_node(
         .with_session(session)
         .build()
         .unwrap();
-    // The caller simulates process loss by canceling both phases. Ordinary
-    // host drain cancels only the child until runtime publication finishes.
+    // Process loss drops renewal without retiring the boot session. Ordinary
+    // host shutdown uses its separate token only after runtime drain finishes.
+    let node_shutdown = CancellationToken::new();
     let tasks = node
-        .install_task_group(node_shutdown.child_token(), node_shutdown.clone())
+        .install_task_group(crash.child_token(), node_shutdown.clone())
         .unwrap();
     let certificate = tls.certificate();
     let signing_key = tls.signing_key().clone();
@@ -194,7 +195,12 @@ async fn start_node(
     node.install_node_lease_for_startup(published.guard())
         .unwrap();
     tasks
-        .spawn_lease_maintenance(async move { published.run(&node_shutdown).await })
+        .spawn_lease_maintenance(async move {
+            tokio::select! {
+                () = crash.cancelled() => Ok(()),
+                result = published.run(&node_shutdown) => result,
+            }
+        })
         .unwrap();
     node.start().unwrap();
     (node, tasks)
@@ -202,6 +208,11 @@ async fn start_node(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .with_test_writer()
+        .try_init();
     let files = tempfile::tempdir().unwrap();
     let (owner_certificate, owner_key, remote_certificate, remote_key, ca) =
         tls_files(files.path());
@@ -278,7 +289,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     let remote_endpoint = format!("https://{}", remote_listener.local_addr().unwrap());
     let remote_session = SessionId::from_bytes([96; 16]);
     let remote_lease = CancellationToken::new();
-    let (remote, _remote_tasks) = start_node(
+    let (remote, remote_tasks) = start_node(
         Arc::clone(&application),
         8,
         peer_directory.clone(),
@@ -579,6 +590,18 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .unwrap();
     assert_eq!(read.item(), Some(&item));
     peer_network::concurrency::increment_without_client_retries(&sdk).await;
+    // This fixture explicitly places new ranges on the API host. Its retained
+    // controller must share that provisioner, while reaching account metadata
+    // through the peer client, to preserve the same admission policy.
+    remote_provisioner
+        .install_account_capacity_loop(
+            &remote_tasks,
+            "123456789012".into(),
+            client.clone(),
+            u64::MAX,
+            std::time::Duration::from_millis(100),
+        )
+        .unwrap();
     peer_network::table_residency::recreate_with_remote_account(&sdk).await;
     peer_network::capacity::assert_capacity_abort(&remote_provisioner, &client, &sdk).await;
     recovery::assert_read_triggered_commit(&remote_provisioner, &client, &sdk).await;

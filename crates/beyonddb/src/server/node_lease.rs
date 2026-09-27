@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 // Use the runtime's maximum advertisement lifetime for storage refresh headroom.
 // Takeover still requires expiry, and a refresh cannot revive a fenced guard.
-const LEASE_MS: i64 = 15_000;
+pub(super) const LEASE_MS: i64 = 15_000;
 const HEARTBEAT: Duration = Duration::from_secs(3);
 const RETRY: Duration = Duration::from_millis(500);
 const FENCE_MARGIN: Duration = Duration::from_secs(1);

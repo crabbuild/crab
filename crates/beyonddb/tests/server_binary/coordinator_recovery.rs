@@ -1,7 +1,7 @@
 use crate::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires local rustfs and aws CLI"]
+#[ignore = "requires Docker, aws CLI, and the pinned RustFS GA image"]
 async fn settled_history_beyond_residency_survives_process_loss() {
     let started = Instant::now();
     let mut fixture = process_fixture(2).await;

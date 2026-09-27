@@ -500,6 +500,45 @@ impl NodeDirectory {
         result
     }
 
+    /// Withdraws a drained boot session, reconciling an unobserved heartbeat CAS.
+    ///
+    /// The caller must fence local admission, finish runtime/log drain, and stop
+    /// issuing refreshes first. Only successors of the same signed boot identity
+    /// may be reconciled; an unsealed log or recovery claim still rejects cleanup.
+    pub async fn withdraw_after_drain(
+        &self,
+        observed: &VersionedNodeAdvertisement,
+        now_ms: i64,
+    ) -> Result<()> {
+        let mut current = observed.clone();
+        for _ in 0..4 {
+            let error = match self.withdraw(&current, now_ms).await {
+                Ok(()) => return Ok(()),
+                Err(error) => error,
+            };
+            let Some((next, token)) = self.load_canonical(observed.advertisement.session).await?
+            else {
+                return Err(error);
+            };
+            // Canceling renewal cannot cancel a CAS already at the provider.
+            // Rebase only on a newer heartbeat from this drained boot; the
+            // exact withdrawal CAS prevents any later renewal from reviving it.
+            if !same_boot_identity(&observed.advertisement, &next)
+                || next.generation <= current.advertisement.generation
+                || next.issued_at_ms < current.advertisement.issued_at_ms
+            {
+                return Err(error);
+            }
+            current = VersionedNodeAdvertisement {
+                advertisement: next,
+                token,
+            };
+        }
+        Err(Error::Node(
+            "node session changed during drained withdrawal",
+        ))
+    }
+
     /// Authenticates one request against its live advertisement and mTLS leaf digest.
     pub async fn verify_peer_request(
         &self,
