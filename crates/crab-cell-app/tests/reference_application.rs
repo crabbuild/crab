@@ -77,6 +77,7 @@ mod reference_application {
     pub mod process_performance;
     pub mod process_recruitment;
     pub mod process_replica;
+    pub mod process_scaling;
     pub mod public_host;
 }
 

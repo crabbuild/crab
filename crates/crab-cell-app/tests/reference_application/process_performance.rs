@@ -32,11 +32,12 @@ impl Drop for ChildGuard {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "child role for manual three-process performance run"]
+#[ignore = "independent node role for native and Compose qualification"]
 async fn fleet_process_role() {
     let node = env::var(ROLE_ENV).unwrap();
     let node: usize = node.parse().unwrap();
-    assert!(node < 5);
+    // Twenty live nodes plus one killed boot; replacement never reuses a session.
+    assert!(node <= 20);
     let root = env::var(ROOT_ENV).unwrap();
     let sync = env::var(SYNC_ENV).unwrap();
     let store = rustfs_store();

@@ -1,9 +1,10 @@
 #!/bin/sh
 set -eu
 case "${1:-}" in
-  node) role="node-${CRAB_CELL_PERF_PROCESS_NODE:?}"; selected=fleet_process_role ;;
-  driver) role=driver; selected=reference_compose_fleet_end_to_end_performance ;;
-  *) printf 'usage: run.sh node|driver\n' >&2; exit 2 ;;
+  node) role="node-${CRAB_CELL_PERF_PROCESS_NODE:?}"; selected=process_performance::fleet_process_role ;;
+  driver) role=driver; selected=process_performance::reference_compose_fleet_end_to_end_performance ;;
+  scale) role=driver; selected=process_scaling::reference_compose_reader_scaling ;;
+  *) printf 'usage: run.sh node|driver|scale\n' >&2; exit 2 ;;
 esac
 binary=
 for candidate in /target/release/deps/reference_application-*; do
@@ -28,7 +29,7 @@ test "$quota" -eq "$period"
 test "$(cat /sys/fs/cgroup/memory.max)" -eq 1073741824
 test "$(cat /sys/fs/cgroup/memory.swap.max)" -eq 0
 set +e
-"$binary" --ignored --exact "reference_application::process_performance::$selected" --nocapture \
+"$binary" --ignored --exact "reference_application::$selected" --nocapture \
   > "/evidence/$role.log" 2>&1
 result=$?
 set -e

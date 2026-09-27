@@ -60,6 +60,11 @@ jobs:
             test -n "$container"
             test "$(docker wait "$container")" = 0
           done
+          compose stop
+      - name: Scale readers across 3, 5, 10 and 20 constrained nodes
+        run: |
+          python3 "$CRAB_REFERENCE_STATE/source/crates/crab-cell-app/qualification/scale.py" \
+            --state "$CRAB_REFERENCE_STATE" --project "$CRAB_REFERENCE_PROJECT-scale"
       - name: Retain reports and container resource proof
         if: always()
         run: |

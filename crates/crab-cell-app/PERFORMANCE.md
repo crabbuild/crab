@@ -244,6 +244,54 @@ capacity, mTLS, failure-domain isolation, replica-query throughput, or recovery
 during arrivals. The issue-service fleet qualification
 covers its separate product ingress and scaling paths.
 
+### Constrained reader scaling and loss
+
+After building the archived source with the procedure above, run the controller
+from that same archive with a fresh Compose project:
+
+```bash
+python3 "$CRAB_REFERENCE_STATE/source/crates/crab-cell-app/qualification/scale.py" \
+  --state "$CRAB_REFERENCE_STATE" --project "$CRAB_REFERENCE_PROJECT-scale"
+```
+
+The controller writes a resolved Compose configuration into
+`evidence/scaling/`, starts the driver, and follows its bounded scale/fault
+requests. Every node and the driver inherit the one CPU / 1 GiB / zero-swap
+profile. The driver grows one fleet through 3, 5, 10 and 20 live nodes. The
+seven writer Cells remain on the original three owners; new nodes participate
+as gateways and admitted readers for the reference SQL Cell.
+
+At each size, generated commands publish two new receipts with duplicate
+delivery checks. Both initial recruitment and a later refresh must become
+ready automatically. The driver verifies 30 exact queries per selected reader,
+records serial read latency, and separately sends owner reads through a TCP
+balancer whose entry counts must differ by at most one. Replica requests go
+directly to the selected readers through the signed peer transport; this
+profile does not place a second balancer in that path.
+
+At five nodes, three readers and one spare are eligible. The controller kills
+one selected reader-only container, proves exit 137 without an OOM event, and
+the driver requires a newly selected reader plus twelve exact query results.
+The fleet temporarily has four survivors before growing to ten. The killed
+boot is never restarted with the fixture's deterministic identity: growth
+creates a new node/session, yielding twenty live nodes out of twenty-one
+created containers. Writer ownership must remain unchanged. Target zero then
+evicts every view, and all surviving hosts must withdraw and drain.
+
+The controller requires successful exact tests, distinct scratch volumes,
+matching binary hashes, actual Docker/cgroup limits and no OOM events. It
+retains logs, fault events, resource counters and `verification.json`, then
+stops only its project. Failed runs retain their containers and evidence.
+An optional repeated `--compose-file` supplies explicit image/cache overrides
+to the same source configuration; the resolved result is retained.
+
+This is a scaling and failure smoke. Serial reads, two writes per stage and
+one killed reader do not establish sustained capacity, concurrent-write
+freshness, continuous fault availability or an owner-loss SLO. A one-CPU cap
+does not reserve a physical core; record Docker VM resources and contention
+before comparing latency across sizes. The Compose CI runs this profile after
+the three-node lifecycle smoke using the same compiled binary.
+
 ## Native RustFS sanity check
 
 On 2026-09-22, the ignored typed primitive smoke was also run against a fresh
