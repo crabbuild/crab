@@ -592,3 +592,22 @@ New base/GSI owners retain capacity refusal and peer placement; this change
 does not alter transaction decisions, coordinator registration or wire formats.
 The native capacity-sweep regression still refuses new split children with
 `LimitExceeded` while preserving readiness and the unfinished split (0.56 s).
+
+### Abandoned transactions under residency pressure
+
+`abandoned_begin_finishes_with_one_participant_residency_slot` publishes BEGIN
+for two data participants, prepares one without recording its receipt, then
+drains the participant and coordinator owners. Account and three credential
+owners occupy four of six slots. The background recovery worker must restore
+the coordinator and alternate the two participants through the final slot.
+Local handle observations cannot restore the coordinator or drive the decision;
+the worker reaches COMMIT with both resolutions, then signed SDK strong reads
+verify both images. Transient capacity deferrals are observed before completion.
+All four recovery scenarios pass together (6.49 s).
+
+The claimed-owner recovery fixture now budgets nine resident slots: account,
+credential, three directory owners and the four data/index/coordinator owners
+it explicitly interrupts. Its old eight-slot budget let coordinator admission
+release a data owner before the interruption, leaving only three observed targets.
+The expected four-owner coverage is retained. These are local owner-restoration
+tests with in-memory object storage, not process-loss or fleet qualification.
