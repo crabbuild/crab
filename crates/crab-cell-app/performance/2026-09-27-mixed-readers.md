@@ -195,3 +195,47 @@ format, layout and workflow parsing passed. Manual cases stayed ignored in
 native suites; the separate container run above supplies the real-store proof.
 Existing BeyondDB dependency-inventory and frozen product-descriptor baseline
 failures remain unchanged from current main. Their baselines were not edited.
+
+
+## Linux CI integration evidence
+
+[Compose run 36333012095](https://github.com/crabbuild/crab/actions/runs/36333012095)
+passed on Ubuntu 24.04.5, x86_64, one shared 4-CPU / 16,766,414,848-byte host.
+The tested PR merge commit was `d8ceaf89632f7cc1a38294606585633bb620a8b7`;
+its tree equals PR490 head `05ed72527cbb7a331f1ccc149de7c5593205fd4f`.
+Release binary SHA-256 was
+`ba51f66c24400e30d136bab37a1cf7fb756fd172ea2e7d21dc5e5651a6b2713d`.
+The workload and pinned RustFS GA image were unchanged.
+
+| Nodes | Exact reads | Writes / offered | Read p99 ms | Write p99 ms | Behind responses |
+| --- | --- | --- | --- | --- | --- |
+| 3 | 86,364 | 300 / 300 | 12.005 | 269.974 | 4,341 |
+| 5 | 86,753 | 300 / 300 | 12.758 | 249.793 | 3,118 |
+| 10 | 66,199 | 300 / 300 | 32.195 | 210.780 | 1,513 |
+| 20 | 35,344 | 286 / 300 | 94.594 | 578.271 | 726 |
+
+Independent replay of all raw TSVs confirmed 274,660 exact reads, 1,186
+acknowledged writes, 14 missed arrivals and 9,698 typed behind responses.
+The twenty-node window did not fully serve the offered writes. Reader
+replacement between windows took 14.869s including the 0.408s fault command;
+twelve exact queries followed. All twenty surviving nodes and the driver
+exited zero with verified one-CPU / 1-GiB / zero-swap limits. Their memory
+peaks ranged from 23,945,216 to 48,209,920 bytes; one throttled CPU period
+and no OOM events were recorded. These are shared-host observations, not
+supported distributed capacity or availability under continuous faults.
+
+The same job passed the three-node application smoke (180 actions, ingress
+524/524/524, twelve generated replica reads) in 13.30s and the additive code
+rollout in 0.28s (four exact receipts, two duplicate replays, fresh-host
+recovery). The rollout still uses three public hosts inside one driver
+container and pauses at cutover; it does not prove continuous rolling updates.
+
+Artifact `cell-reference-compose-36333012095-1` retains raw samples, logs,
+source identity and kernel/container evidence. Rechecked SHA-256 values:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `scaling/verification.json` | `069df70b59831bd987700234d5d03b1b09a06f0794c6e12b25d1235915c0c41f` |
+| `scaling/driver.log` | `51e6ad6f5ccffab2b629fb386443d7330172dc04e959eba034d15679ee38f688` |
+| `scaling/containers.json` | `306293e54ceb39c95b2602f76846047e641e5387d7e947447dea7fdcc5f72361` |
+| `rollout.log` | `f7ad473004479c7b0727758d2097a781801060ee1919459bf6f35191841cf5bd` |
