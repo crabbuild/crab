@@ -10,8 +10,8 @@ use crate::{
     InstallPartition, InstallPartitionOutcome, Json, OpenPartition, OpenPartitionOutcome,
     PartitionExport, PartitionImportInput, PartitionImportOutcome, PartitionInstall,
     PartitionScanInput, PartitionScanOutcome, PartitionSeal, PartitionSpec, PartitionState,
-    PublishDirectoryTransfer, ReadDirectoryTransfer, ReadPartitionState, SealPartition,
-    SealPartitionOutcome, SplitPlan, SplitRouteState, account_target, data_key_hash, data_target,
+    ReadDirectoryTransfer, ReadPartitionState, SealPartition, SealPartitionOutcome, SplitPlan,
+    SplitRouteState, account_target, data_key_hash, data_target,
 };
 
 /// Runs a durable split using already admitted account and data Cells.
@@ -231,23 +231,13 @@ impl CellSplitController {
                 return Err(split_state("child activation differs from source export"));
             }
         }
-        let published = self
-            .client
-            .command::<PublishDirectoryTransfer>(
-                &directory,
-                mutation_identity()?,
-                Json(plan.clone().into()),
-            )
-            .await
-            .map_err(cell_error)?;
-        if !published.output.0 {
-            return Err(split_state("route switch did not commit"));
-        }
-        if crate::split_route_state(&self.client, account_id, &plan.clone().into()).await?
-            != SplitRouteState::After
-        {
-            return Err(split_state("published route differs from split plan"));
-        }
+        crate::publish_directory_transfer(
+            &self.client,
+            account_id,
+            &directory,
+            &plan.clone().into(),
+        )
+        .await?;
         for (index, target) in child_targets.iter().enumerate() {
             let opened = self
                 .client

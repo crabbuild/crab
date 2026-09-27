@@ -704,3 +704,37 @@ recovery tests pass in 8.03 s, five reclamation tests in 7.84 s and the native
 deletion/recreation test in 11.14 s. Strict all-target Clippy and the standalone
 server build pass. The rebase retains main's supervised lifecycle worker and
 RustFS GA container; native coverage includes its node-session tests.
+
+### Concurrent split completion
+
+Linux qualification `36341489813` on `89d9c2b0299` passed 42/44 native tests,
+41/44 peer SDK tests and all three server-process tests. Two peer failures
+reproduced locally: cold-placement split recovery rejected a late publication,
+and unpublished-root recovery expected an owner that capacity admission had
+already released.
+
+The split trace identified `PublishDirectoryTransfer`: a competing controller
+had finished and removed the reservation. The directory correctly rejects
+publication without that full plan. Base and GSI controllers now share a
+publication boundary that accepts this completed state only when no transfer
+remains and both exact replacement ranges are published. A remaining plan,
+changed route or unavailable owner still prevents success. Durable command
+semantics, child fingerprint verification and the finish ordering are unchanged.
+
+The unpublished-root fixture now budgets eleven resident Cells: account,
+credential, and three tables with two data ranges and one directory each. It
+retains its takeover-owner, incarnation and SDK data assertions; bounded-slot
+recovery is exercised by separate fixtures. This corrects the fixture's ownership
+budget after the directory cutover, not a production capacity limit.
+
+Cold-placement SDK recovery passes five consecutive repeats (15.39–18.46 s);
+five base-split SDK scenarios pass (2.62 s), GSI split/restoration passes
+(6.19 s), and unpublished-root SDK recovery passes (15.73 s). The native
+directory-transfer rejection contract passes (0.25 s), as do three native GSI
+projection/transfer/restart checks (9.83 s). Strict all-target Clippy and the
+standalone server build pass. These are focused results on the follow-up tree;
+full Linux qualification remains required.
+
+The same CI run also exposed coordinator-history admission exhaustion, an old
+directory test's refusal expectation, and a generation-four deletion timeout.
+Those failures remain open and are not attributed to this split-publication fix.

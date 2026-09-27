@@ -262,7 +262,10 @@ async fn sdk_initial_base_and_index_ranges_use_remote_owners() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sdk_initial_claim_recovery_preserves_unrouted_roots() {
-    let fixture = Fixture::new().await;
+    // Keep three two-range tables, their directories, account and credential
+    // resident while asserting takeover ownership. Slot recycling is covered
+    // separately; it may legitimately release a recovered owner here.
+    let fixture = Fixture::with_capacity(2, 11).await;
     let sdk = sdk_without_retries(&fixture);
     let remote = Remote::new(&fixture).await;
     let account = account_target("123456789012").unwrap();

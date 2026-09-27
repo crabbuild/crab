@@ -13,8 +13,8 @@ use crate::{
     ExportGlobalIndexEntries, FinishDirectoryTransfer, GlobalIndexApplyOutcome, GlobalIndexExport,
     GlobalIndexFingerprint, GlobalIndexImport, GlobalIndexImportComplete, GlobalIndexSplitPlan,
     GlobalIndexState, ImportGlobalIndexEntry, Json, OpenGlobalIndexImport, PrepareGlobalIndexSplit,
-    PublishDirectoryTransfer, ReadDirectoryRange, ReadDirectoryTransfer, ReadGlobalIndexPartition,
-    ReadGlobalIndexState, SplitRouteState, account_target, data_key_hash, global_index_target,
+    ReadDirectoryRange, ReadDirectoryTransfer, ReadGlobalIndexPartition, ReadGlobalIndexState,
+    SplitRouteState, account_target, data_key_hash, global_index_target,
 };
 
 fn changed() -> StorageError {
@@ -337,20 +337,13 @@ impl CellInitialPartitionProvisioner {
                         .await,
                 )?;
             }
-            committed(
-                client
-                    .command::<PublishDirectoryTransfer>(
-                        &directory,
-                        mutation_identity()?,
-                        Json(plan.clone().into()),
-                    )
-                    .await,
-            )?;
-            if crate::split_route_state(&client, account_id, &plan.clone().into()).await?
-                != SplitRouteState::After
-            {
-                return Err(changed());
-            }
+            crate::publish_directory_transfer(
+                &client,
+                account_id,
+                &directory,
+                &plan.clone().into(),
+            )
+            .await?;
             for (i, target) in children.iter().enumerate() {
                 committed(
                     client
