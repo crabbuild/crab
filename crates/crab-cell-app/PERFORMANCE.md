@@ -95,51 +95,98 @@ dynamic placement, mTLS, or provider network latency. The measured topology,
 workload, and two runs are in
 [`performance/2026-09-21-three-node-local.md`](performance/2026-09-21-three-node-local.md).
 
-## Three-process fleet workload
+## Three-process RustFS workload
 
-The process benchmark runs the same six concurrent lanes through three
-separate owner processes and a parent load generator. Owners share the
-test-only filesystem CAS store and receive signed Cell peer requests over
-loopback TCP. Each process has its own node session, SQLite workers, and local
-database directory:
+The process benchmark runs the six concurrent action lanes through three
+public `CellNode` hosts. Each process owns its SQLite workers, WAL/cache
+files, signed renewable node session, and ordered shutdown. RustFS stores
+Cell authority, LTX objects, and session records. The parent binds public
+application handles; generated stable-ID commands additionally prove that
+repeating a committed mutation preserves its receipt and creates one visible
+effect. Every primitive lane checks its visible result.
 
-```bash
-CRAB_CELL_PERF_ITERATIONS=100 \
-CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-my-worktree \
-  cargo test -p crab-cell-app --test reference_application \
-  process_performance::reference_three_process_fleet_end_to_end_performance \
-  --release --locked -- --ignored --nocapture
-```
-
-The test prints action-level and combined fleet latency and throughput. It
-starts and stops the three owner processes outside the timed workload. The
-topology and two measured runs are recorded in
-[`performance/2026-09-21-three-process-local.md`](performance/2026-09-21-three-process-local.md).
-
-## Balanced three-process fleet workload
-
-The balanced variant sends every request through a loopback TCP listener that
-selects one of the three owner processes in round-robin order. Any process can
-receive a request. It verifies the peer signature, serves a locally owned Cell,
-or forwards the unchanged signed operation to the owning process using the
-protocol's one allowed forwarding hop. The test asserts that every process
-served local requests and forwarded remote requests. It also reports how many
-requests the balancer sent to each entry process.
+Provide an isolated bucket, a prefix, and explicit credentials:
 
 ```bash
-CRAB_CELL_PERF_ITERATIONS=100 \
+AWS_ACCESS_KEY_ID=crab AWS_SECRET_ACCESS_KEY=crab \
+CRAB_CELL_TEST_ENDPOINT=http://127.0.0.1:9000 \
+CRAB_CELL_TEST_BUCKET=crab-reference-app \
+CRAB_CELL_TEST_PREFIX=reference-performance \
+CRAB_CELL_PERF_ITERATIONS=30 \
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/crab-my-worktree \
   cargo test -p crab-cell-app --test reference_application \
   process_performance::reference_balanced_three_process_fleet_end_to_end_performance \
   --release --locked -- --ignored --nocapture
 ```
 
-The timer includes the balancer TCP hop and any entry-to-owner forwarding. The
-balancer runs as a task in the load-generator process, while three owners run
-as separate OS processes. Cell placement is a static seven-Cell test map; this
-does not qualify a distributed ownership directory, dynamic placement, or a
-million-Cell fleet. Results are recorded in
-[`performance/2026-09-21-balanced-three-process-local.md`](performance/2026-09-21-balanced-three-process-local.md).
+Each invocation adds a unique object prefix. The balanced variant sends every
+request to a round-robin TCP gateway. Each receiving node verifies the peer
+signature, dispatches locally or forwards once to the owner. The test requires
+local and forwarded results on every node. The direct variant,
+`reference_three_process_fleet_end_to_end_performance`, omits the gateway.
+Both measure complete actions; setup and shutdown remain outside the action
+timer. Node object-proof wait samples include the whole process lifetime.
+
+The historical September 21 filesystem measurements remain in
+[`performance/2026-09-21-three-process-local.md`](performance/2026-09-21-three-process-local.md)
+and [`performance/2026-09-21-balanced-three-process-local.md`](performance/2026-09-21-balanced-three-process-local.md).
+They do not describe the current RustFS path.
+
+### Three constrained Compose nodes
+
+[`qualification/compose.yaml`](qualification/compose.yaml) pins GA RustFS 1.0.0
+and the build image by digest. It runs three independent nodes plus a driver
+containing the TCP balancer. Each node is limited to one CPU, 1 GiB memory,
+zero swap, and 256 processes. Each has a private disk-backed Docker volume for
+SQLite/WAL/cache; the shared evidence directory holds control markers and
+reports. The `crab`/`crab` credentials are local fixture credentials. No service
+publishes a host port.
+The disposable evidence directory is shared and writable by the host and all
+fixture containers; its sticky bit protects entries owned by another UID.
+This also permits capability-free container root to create logs on a Linux
+runner-owned bind mount. Source and binary mounts remain read-only.
+
+Use a fresh Compose project and state directory per run. The source archive
+must contain the committed change being measured. The selected Docker/Colima
+VM must mount the external state directory and have space for the build:
+
+```bash
+export CRAB_REFERENCE_STATE="$HOME/Workspace/crabbuild-target/crab-my-worktree/reference-$(git rev-parse --short HEAD)-$(date +%s)"
+export CRAB_REFERENCE_PROJECT="crab-reference-$(date +%s)"
+mkdir -p "$CRAB_REFERENCE_STATE/source" "$CRAB_REFERENCE_STATE/target-linux" "$CRAB_REFERENCE_STATE/evidence"
+chmod 1777 "$CRAB_REFERENCE_STATE/evidence"
+git archive HEAD | tar -x -C "$CRAB_REFERENCE_STATE/source"
+git rev-parse HEAD > "$CRAB_REFERENCE_STATE/evidence/source-revision.txt"
+compose() {
+  docker compose -p "$CRAB_REFERENCE_PROJECT" \
+    -f "$CRAB_REFERENCE_STATE/source/crates/crab-cell-app/qualification/compose.yaml" "$@"
+}
+compose run --rm build
+compose up -d node-0 node-1 node-2
+compose run --name "$CRAB_REFERENCE_PROJECT-driver" driver
+compose ps -a
+compose logs --no-color > "$CRAB_REFERENCE_STATE/evidence/compose.log"
+docker inspect $(compose ps -aq) > "$CRAB_REFERENCE_STATE/evidence/containers.json"
+```
+
+The wrapper verifies the actual cgroup CPU/memory/swap limits and exactly one
+executed test. It retains the binary hash, per-node kernel CPU and peak-memory
+counters, active Cell and retained-byte observations, object-proof wait
+samples, action timings, duplicate-delivery proof, and gateway counts. Require
+all three nodes and the driver to exit zero. A driver failure leaves nodes
+available for diagnosis; use `compose stop` after collecting evidence. Remove
+only this project's containers/volumes with `compose down -v` when their
+artifacts are no longer needed.
+
+The [2026-09-27 run](performance/2026-09-27-three-node-compose.md) records source,
+images, resource evidence, and observed timings.
+
+This is an application integration smoke with six closed-loop lanes and seven
+Cells assigned 3/2/2. Ingress counts are even; owner load follows the action
+mix. It does not establish a supported throughput, 5/10/20-node application
+capacity, automatic placement, mTLS, failure-domain isolation, follower SQL
+reads, or recovery during arrivals. The issue-service fleet qualification
+covers its separate product ingress and scaling paths.
 
 ## Native RustFS sanity check
 

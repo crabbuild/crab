@@ -73,6 +73,7 @@ mod reference_application {
     pub mod performance;
     pub mod performance_fixture;
     pub mod primitives;
+    pub mod process_node;
     pub mod process_performance;
     pub mod public_host;
 }

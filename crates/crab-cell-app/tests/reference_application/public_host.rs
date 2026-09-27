@@ -12,7 +12,6 @@ use crab_cell_runtime::cell::catalog::CellCatalog;
 use crab_cell_runtime::cell::executor::Resolution;
 use crab_cell_runtime::peer::{PeerPrincipal, PeerRoundTrip, PeerSigner, PeerVerifier};
 use crab_cell_runtime::recovery::manifest::RecoveryManifestStore;
-use crab_storage::{ObjectStoreCredentials, build_explicit_store};
 use object_store::path::Path;
 use tokio::net::TcpListener;
 
@@ -293,18 +292,7 @@ async fn reference_public_host_action_performance() {
 #[ignore = "manual RustFS action-level latency and recovery qualification"]
 async fn reference_public_host_rustfs_action_performance() {
     let required = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
-    let store = build_explicit_store(
-        &required("CRAB_CELL_TEST_BUCKET"),
-        ObjectStoreCredentials::Aws {
-            access_key_id: required("AWS_ACCESS_KEY_ID"),
-            secret_access_key: required("AWS_SECRET_ACCESS_KEY"),
-            session_token: None,
-            region: "us-east-1".into(),
-        },
-        Some(&required("CRAB_CELL_TEST_ENDPOINT")),
-        true,
-    )
-    .unwrap();
+    let store = super::performance_fixture::rustfs_store();
     let run_id = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
