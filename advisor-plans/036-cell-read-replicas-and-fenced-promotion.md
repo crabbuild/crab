@@ -320,15 +320,29 @@ The admitted-view manager now belongs to `crab-cell-host`; the issue service
 and reference processes use the same implementation. `CellNode` owns its
 refresh task and drain callback. The reference proof now observes automatic
 root refresh and eviction after target zero, with six generated queries served
-by each reader. Admission still begins with an explicit owner hint; general
-application-host recruitment/replacement remains separate work. Shutdown
-cancels provider waits before joining the activation lane, and a retained
-manager cannot reopen after drain. A stalled-store regression covers this
-ordering. Product authentication and owner-side recruitment stay in the server.
+by each reader. In that measured revision, admission began with an explicit
+fixture owner hint; general application-host recruitment was separate work.
+Shutdown cancels provider waits before joining the activation lane, and a
+retained manager cannot reopen after drain. A stalled-store regression covers
+this ordering. Product authentication stays in the server.
 The [three-container GA RustFS receipt](../crates/crab-cell-app/performance/2026-09-27-host-readers-compose.md)
 binds these automatic lifecycle checks to source and binary hashes, one CPU /
 1 GiB / zero swap per node, and successful renewed-session withdrawal. It does
 not qualify performance improvement or a supported capacity.
+
+Owner recruitment now also belongs to the public host. The issue service and
+reference hosts install one bounded, cancellable loop across their compiled
+application namespaces. Activation and status share the signed runtime peer
+client/dispatcher; receiver admission still checks current owner, policy,
+membership and resources. The
+[recruitment receipt](../crates/crab-cell-app/performance/2026-09-27-reader-recruitment.md)
+proves automatic placement, refresh, eviction and drain on three constrained
+Compose nodes. A separate native three-to-five-process run killed a selected
+reader, automatically replaced it, and verified twelve generated reads at the
+acknowledged receipt without changing writer ownership. Its observed 14.777 s
+replacement time is one sample. Native processes had no individual CPU/memory
+limits; constrained application capacity at 5/10/20 nodes, sustained freshness
+and throughput, owner loss during arrivals, and protected gates remain open.
 
 The ignored `rustfs_replica_reads_exact_root_and_policy_cas` test also passed
 against a local RustFS bucket with an isolated prefix. It exercised real S3
