@@ -628,6 +628,27 @@ does not alter transaction decisions, coordinator registration or wire formats.
 The native capacity-sweep regression still refuses new split children with
 `LimitExceeded` while preserving readiness and the unfinished split (0.56 s).
 
+The earlier Linux CI run `36338473488` subsequently exposed a timing gap in
+first-coordinator admission. The same SDK transaction failed locally with
+`LimitExceededException` in 0.28 s, with client retries disabled. Runtime commands
+invalidate idle inventory; its background inspection can finish after the next
+admission request. A diagnostic snapshot contained no eligible data/directory
+owners, while those same owners became eligible after 150 ms.
+
+Recovery admission now waits up to five seconds for an eligible resident
+data/GSI/directory owner, checking every 50 ms and stopping if capacity becomes
+available. This uses the existing retired-range settlement budget. Empty pools
+return immediately; fresh data/GSI creation retains its capacity refusal. The
+admission lock excludes competing local reclamation, and runtime release still
+rechecks the residency generation, settled work and authority. No command retry,
+dependency change or runtime contract change is introduced.
+
+The unchanged first-transaction/restoration/replay SDK regression passes ten
+consecutive runs (1.58–2.90 s). Five reclamation tests pass (4.59 s), four recovery
+tests pass (4.18 s), both owner-race tests pass (0.82 s), and the GSI
+split/tombstone/restoration test passes (8.05 s). Native new-range capacity refusal
+still passes (0.60 s). Full Linux qualification remains a CI requirement.
+
 ### Abandoned transactions under residency pressure
 
 `abandoned_begin_finishes_with_one_participant_residency_slot` publishes BEGIN
