@@ -154,32 +154,38 @@ impl LocalCellResolver for LocalResolver {
                         .map(Some);
                 }
                 let control = control.ok_or(Error::CellNotActive)?;
-                if needs_placement
-                    && super::placement::is_placeable_target(&target)
-                    && let Some(placement) = &resolver.placement
-                {
-                    match placement
-                        .select_local(&target, owner, ACTIVATE_ACTION)
-                        .await
+                let resolved = async {
+                    if needs_placement
+                        && super::placement::is_placeable_target(&target)
+                        && let Some(placement) = &resolver.placement
+                        && !placement
+                            .select_local(&target, owner, ACTIVATE_ACTION)
+                            .await?
                     {
-                        Ok(false) => return Ok(None),
-                        Ok(true) => {}
-                        Err(Error::CellNotActive) if attempt == 0 => {
-                            // Another admission can win while a selected peer is restoring.
-                            // Refresh only on a changed ownership epoch, before dispatch;
-                            // a stable refusal or uncertain activation still propagates.
-                            let current = authority.load(target.cell_id()).await?;
-                            if current.is_some_and(|current| {
-                                current.value().epoch != control.value().epoch
-                            }) {
-                                continue;
-                            }
-                            return Err(Error::CellNotActive);
-                        }
-                        Err(error) => return Err(error),
+                        return Ok(None);
+                    }
+                    provisioner
+                        .restore_idle(&target, proof.clone(), control.clone())
+                        .await
+                }
+                .await;
+                if attempt == 0
+                    && matches!(
+                        &resolved,
+                        Err(Error::CellNotActive
+                            | Error::Storage(crab_storage::StorageError::StateConflict { .. }))
+                    )
+                {
+                    // Placement or local restoration can lose the ownership CAS.
+                    // Refresh only a proven new epoch, before dispatch; stable
+                    // refusals and failures with an uncertain outcome propagate.
+                    let current = authority.load(target.cell_id()).await?;
+                    if current.is_some_and(|current| current.value().epoch != control.value().epoch)
+                    {
+                        continue;
                     }
                 }
-                return provisioner.restore_idle(&target, proof, control).await;
+                return resolved;
             }
             Err(Error::CellNotActive)
         })

@@ -465,6 +465,38 @@ The original index split/tombstone/owner-restore scenario then passed five times
 all three focused scenarios (1.20 s). These checks establish this admission race's
 behavior, not arbitrary churn tolerance or fleet-scale qualification.
 
+### Ownership changes during lookup and claim
+
+Repeated SDK GSI qualification reproduced a 503 after owner drain (the ninth
+unmodified run failed). Instrumented repetition also captured an idle-root CAS
+loss: a remote activation read Idle, another node claimed the Cell, and the
+losing storage conflict became a generic peer rejection.
+
+Placement and published-root restoration now share one bounded admission
+re-resolution. A CellNotActive or typed storage StateConflict triggers one
+fresh attempt only when authority proves a different ownership epoch. This
+runs before application dispatch and does not replay accepted item mutations.
+Stable refusals, unrelated storage errors and ambiguous transport errors still
+propagate. The runtime's CAS, exact-root checks and rollback remain unchanged.
+
+A separate stale observation can name a local Serving owner that has drained
+before local handle lookup. Published-root restoration now reloads that local
+observation under the admission lock; an Idle successor is restored normally.
+Foreign Serving owners still route remotely without taking the local admission
+lock. Base, GSI, directory, credential and coordinator requests use this shared
+resolver; ordinary peer invocation still cannot acquire ownership.
+
+Deterministic signed SDK tests pause the selected remote activation both before
+admission and inside its conditional claim, then install a competing winner.
+A second test pauses an authority response, drains its local owner, and resumes
+the stale read. Both new interleavings returned SDK 503 before the fix, with
+client retries disabled. After the fix, both tests passed (6.47 s), the original
+GSI workload passed ten consecutive runs (9.23–18.15 s), and all five reclamation
+and four recovery siblings passed (9.77 s and 7.67 s). Strict all-target Clippy
+and the standalone server build passed. Full peer/process qualification remains
+a separate CI gate; these tests do not establish arbitrary churn or fleet-scale
+readiness.
+
 ## Base serving cutover
 
 Base creation installs a bounded directory root and publishes its durable copy
@@ -596,6 +628,27 @@ does not alter transaction decisions, coordinator registration or wire formats.
 The native capacity-sweep regression still refuses new split children with
 `LimitExceeded` while preserving readiness and the unfinished split (0.56 s).
 
+The earlier Linux CI run `36338473488` subsequently exposed a timing gap in
+first-coordinator admission. The same SDK transaction failed locally with
+`LimitExceededException` in 0.28 s, with client retries disabled. Runtime commands
+invalidate idle inventory; its background inspection can finish after the next
+admission request. A diagnostic snapshot contained no eligible data/directory
+owners, while those same owners became eligible after 150 ms.
+
+Recovery admission now waits up to five seconds for an eligible resident
+data/GSI/directory owner, checking every 50 ms and stopping if capacity becomes
+available. This uses the existing retired-range settlement budget. Empty pools
+return immediately; fresh data/GSI creation retains its capacity refusal. The
+admission lock excludes competing local reclamation, and runtime release still
+rechecks the residency generation, settled work and authority. No command retry,
+dependency change or runtime contract change is introduced.
+
+The unchanged first-transaction/restoration/replay SDK regression passes ten
+consecutive runs (1.58–2.90 s). Five reclamation tests pass (4.59 s), four recovery
+tests pass (4.18 s), both owner-race tests pass (0.82 s), and the GSI
+split/tombstone/restoration test passes (8.05 s). Native new-range capacity refusal
+still passes (0.60 s). Full Linux qualification remains a CI requirement.
+
 ### Abandoned transactions under residency pressure
 
 `abandoned_begin_finishes_with_one_participant_residency_slot` publishes BEGIN
@@ -651,3 +704,37 @@ recovery tests pass in 8.03 s, five reclamation tests in 7.84 s and the native
 deletion/recreation test in 11.14 s. Strict all-target Clippy and the standalone
 server build pass. The rebase retains main's supervised lifecycle worker and
 RustFS GA container; native coverage includes its node-session tests.
+
+### Concurrent split completion
+
+Linux qualification `36341489813` on `89d9c2b0299` passed 42/44 native tests,
+41/44 peer SDK tests and all three server-process tests. Two peer failures
+reproduced locally: cold-placement split recovery rejected a late publication,
+and unpublished-root recovery expected an owner that capacity admission had
+already released.
+
+The split trace identified `PublishDirectoryTransfer`: a competing controller
+had finished and removed the reservation. The directory correctly rejects
+publication without that full plan. Base and GSI controllers now share a
+publication boundary that accepts this completed state only when no transfer
+remains and both exact replacement ranges are published. A remaining plan,
+changed route or unavailable owner still prevents success. Durable command
+semantics, child fingerprint verification and the finish ordering are unchanged.
+
+The unpublished-root fixture now budgets eleven resident Cells: account,
+credential, and three tables with two data ranges and one directory each. It
+retains its takeover-owner, incarnation and SDK data assertions; bounded-slot
+recovery is exercised by separate fixtures. This corrects the fixture's ownership
+budget after the directory cutover, not a production capacity limit.
+
+Cold-placement SDK recovery passes five consecutive repeats (15.39–18.46 s);
+five base-split SDK scenarios pass (2.62 s), GSI split/restoration passes
+(6.19 s), and unpublished-root SDK recovery passes (15.73 s). The native
+directory-transfer rejection contract passes (0.25 s), as do three native GSI
+projection/transfer/restart checks (9.83 s). Strict all-target Clippy and the
+standalone server build pass. These are focused results on the follow-up tree;
+full Linux qualification remains required.
+
+The same CI run also exposed coordinator-history admission exhaustion, an old
+directory test's refusal expectation, and a generation-four deletion timeout.
+Those failures remain open and are not attributed to this split-publication fix.

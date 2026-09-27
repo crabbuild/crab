@@ -1,7 +1,7 @@
 //! Bounded traversal from a generation root to its current metadata leaf.
 
 use super::*;
-use crab_cell_runtime::client::{CellClient, ReadPolicy};
+use crab_cell_runtime::client::{CellClient, InvocationError, ReadPolicy};
 use extenddb_storage::error::StorageError;
 
 /// One current leaf page and the immutable interval whose membership it samples.
@@ -109,4 +109,47 @@ pub async fn read_directory_leaf(
     Err(StorageError::Internal(
         "directory traversal exceeded depth bound".into(),
     ))
+}
+
+// Both controllers validate the retained full plan and child fingerprints before
+// publication. A competing controller can finish and remove that plan meanwhile;
+// accept its result only when no transfer remains and both exact children route.
+pub(crate) async fn publish_directory_transfer(
+    client: &CellClient,
+    account_id: &str,
+    directory: &CellTarget,
+    plan: &DirectoryTransfer,
+) -> std::result::Result<(), StorageError> {
+    let changed = || StorageError::Transient("split publication state changed".into());
+    match client
+        .command::<PublishDirectoryTransfer>(
+            directory,
+            crate::backend::mutation_identity()?,
+            Json(plan.clone()),
+        )
+        .await
+    {
+        Ok(result) if result.output.0 => {}
+        Ok(_) | Err(InvocationError::Rejected(_)) => {
+            let pending = client
+                .query::<ReadDirectoryTransfer>(
+                    directory,
+                    None,
+                    Json(DirectoryPartitionInput {
+                        table_id: plan.table_id().into(),
+                        partition_id: plan.directory_change().source.partition_id,
+                    }),
+                )
+                .await
+                .map_err(crate::backend::cell_error)?;
+            if pending.output.0.is_some() {
+                return Err(changed());
+            }
+        }
+        Err(error) => return Err(crate::backend::cell_error(error)),
+    }
+    if crate::split_route_state(client, account_id, plan).await? != crate::SplitRouteState::After {
+        return Err(changed());
+    }
+    Ok(())
 }

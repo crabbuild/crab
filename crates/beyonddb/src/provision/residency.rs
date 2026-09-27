@@ -54,21 +54,42 @@ impl CellInitialPartitionProvisioner {
             .await
             .map_err(provision_error)?
             .into_iter()
-            .filter(|target| {
-                [
-                    crate::DATA_NAMESPACE,
-                    crate::global_index::NAMESPACE,
-                    crate::directory::NAMESPACE,
-                ]
-                .contains(&target.namespace())
+            .filter(|resident| {
+                resident.cell_id() != target.cell_id()
+                    && [
+                        crate::DATA_NAMESPACE,
+                        crate::global_index::NAMESPACE,
+                        crate::directory::NAMESPACE,
+                    ]
+                    .contains(&resident.namespace())
             })
             .map(|target| (target.cell_id(), target))
             .collect();
-        let mut candidates = self
-            .runtime
-            .idle_transfer_candidates()
-            .await
-            .map_err(provision_error)?;
+        if targets.is_empty() {
+            return Ok(());
+        }
+        // A completed command invalidates idle inventory until the runtime's
+        // background inspection finishes. Bound that wait before reporting full
+        // residency; release still rechecks generation and settled work.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut candidates = loop {
+            let stats = self.runtime.stats();
+            if stats.active_cells() < stats.active_cell_capacity() {
+                return Ok(());
+            }
+            let candidates: Vec<_> = self
+                .runtime
+                .idle_transfer_candidates()
+                .await
+                .map_err(provision_error)?
+                .into_iter()
+                .filter(|(cell, _, _, _)| targets.contains_key(cell))
+                .collect();
+            if !candidates.is_empty() || tokio::time::Instant::now() >= deadline {
+                break candidates;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
         candidates.sort_by_key(|(_, _, last_used, _)| *last_used);
         let client = CellClient::local_runtime(
             self.application.registry(),
@@ -78,9 +99,6 @@ impl CellInitialPartitionProvisioner {
         let mut candidate = None;
         let mut directory = None;
         for (cell, generation, _, _) in candidates {
-            if cell == target.cell_id() {
-                continue;
-            }
             let Some(range) = targets.get(&cell) else {
                 continue;
             };
@@ -207,7 +225,15 @@ impl CellInitialPartitionProvisioner {
                     _ => false,
                 }
         };
-        if !restorable(observed.value()) {
+        // A local owner can drain after the caller's authority read. Recheck
+        // under admission before delegating; the remote path cannot route Idle.
+        if !restorable(observed.value())
+            && observed
+                .value()
+                .owner
+                .as_ref()
+                .is_none_or(|owner| owner.session != self.session)
+        {
             return Ok(None);
         }
         let _admission = self.admission.lock().await;
