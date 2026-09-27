@@ -48,7 +48,7 @@ pub use routing::ReplicaReadRouter;
 pub use local::command_operation_digest;
 pub(crate) use local::{
     LocalCellTransport, decode_pending, encoded_command_operation_digest, local_description,
-    receipt, validate_description,
+    next_metadata, receipt, validate_description,
 };
 use local::{decode_output, unix_time_ms, validate_minimum};
 pub use runtime::LocalCellResolver;

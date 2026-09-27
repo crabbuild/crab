@@ -62,6 +62,80 @@ fn invocation(occurrence: u64) -> CronInvocation {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn due_workflow_activity_survives_a_clock_rollback() {
+    use crab_cell_runtime::codec::{BoundedEncoder, WireValue};
+    use crab_cell_runtime::primitives::workflow::WorkflowStart;
+    use crab_cell_runtime::registry::CommandInvocation;
+
+    for nodes in [1, 3] {
+        let fixture = PerfFixture::start(nodes).await;
+        let handle = fixture
+            .owned_handles
+            .iter()
+            .flatten()
+            .find(|handle| handle.catalog().entry().namespace() == WORKFLOW_NAMESPACE)
+            .unwrap();
+        let target = CellTarget::new(
+            fixture.sql_target.tenant(),
+            fixture.sql_target.application(),
+            WORKFLOW_NAMESPACE,
+            &partition_for_shard(0),
+        )
+        .unwrap();
+        let identity = identity(8, 0, 0);
+        let mut encoder = BoundedEncoder::new(1024).unwrap();
+        WorkflowStart {
+            workflow_id: b"clock-rollback".to_vec(),
+            request_id: identity.request_id,
+            event: b"activity".to_vec(),
+        }
+        .encode(&mut encoder)
+        .unwrap();
+        let input = encoder.finish();
+        let registry = Arc::clone(&fixture.registry);
+        // Publish at a later clock sample, then let the ordinary application
+        // supervisor use the earlier wall clock without changing global time.
+        let future = now_ms() + 10_000;
+        handle
+            .execute(
+                identity,
+                Digest::from_bytes([89; 32]),
+                future,
+                input.len(),
+                1024,
+                move |tx| {
+                    registry.execute_command(
+                        tx,
+                        CommandInvocation {
+                            module: WORKFLOW_MODULE,
+                            operation_id: ReferenceWorkflow::START_COMMAND_ID,
+                            codec_version: 1,
+                            schema: 1,
+                            target,
+                            sequence: 1,
+                            now_ms: future,
+                            input: &input,
+                        },
+                    )
+                },
+            )
+            .await
+            .unwrap();
+        let supervisor = crab_cell_runtime::primitives::workflow::ActivitySupervisor::new(
+            fixture.typed.activities::<ReferenceWorkflow>().unwrap(),
+            5_000,
+        )
+        .unwrap();
+        let outcome = supervisor.run_once(0, None).await.unwrap();
+        assert!(
+            matches!(outcome, ActivityRunOutcome::Completed { .. }),
+            "{nodes} nodes: {outcome:?}"
+        );
+        fixture.shutdown().await;
+    }
+}
+
 fn signed_client(
     fixture: &PerfFixture,
     round_trip: Arc<dyn PeerRoundTrip>,
