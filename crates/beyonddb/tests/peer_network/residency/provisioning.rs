@@ -20,6 +20,13 @@ pub(super) struct Remote {
 
 impl Remote {
     pub(super) async fn new(fixture: &Fixture) -> Self {
+        Self::with_router(fixture, std::convert::identity).await
+    }
+
+    pub(super) async fn with_router(
+        fixture: &Fixture,
+        wrap: impl FnOnce(axum::Router) -> axum::Router,
+    ) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("https://{}", listener.local_addr().unwrap());
         let session = SessionId::from_bytes([96; 16]);
@@ -59,7 +66,7 @@ impl Remote {
             .unwrap()
             .with_peers(peers.clone()),
         );
-        let router = peers.router(provisioner.clone());
+        let router = wrap(peers.router(provisioner.clone()));
         let tls = LoadedPeerTls::load(
             &fixture._files.path().join("remote.crt"),
             &fixture._files.path().join("remote.key"),

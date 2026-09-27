@@ -4,11 +4,9 @@ pub(crate) mod outbox;
 pub use outbox::*;
 mod read;
 mod routing;
-mod split_routing;
 mod transfer;
 pub use read::*;
 pub use routing::*;
-pub use split_routing::*;
 pub use transfer::*;
 
 use std::sync::OnceLock;

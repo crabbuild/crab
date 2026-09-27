@@ -4,10 +4,11 @@ use aws_sdk_dynamodb::types::{
     ProjectionType, ScalarAttributeType,
 };
 use beyonddb::{
-    ApplyGlobalIndexMutation, BeginGlobalIndexSplit, GlobalIndexApplyOutcome, GlobalIndexMutation,
-    GlobalIndexPartitionInput, GlobalIndexSplitPlan, GlobalIndexState, GlobalIndexUsage,
-    PartitionUsage, ProjectionVersion, ReadGlobalIndexPartition, ReadGlobalIndexSplitPlan,
-    ReadGlobalIndexState, RoutePageInput, RoutePageOutcome, data_target, global_index_target,
+    ApplyGlobalIndexMutation, BeginDirectoryTransfer, DirectoryPartitionInput,
+    GlobalIndexApplyOutcome, GlobalIndexMutation, GlobalIndexSplitPlan, GlobalIndexState,
+    GlobalIndexUsage, PartitionUsage, ProjectionVersion, ReadDirectoryTransfer,
+    ReadGlobalIndexPartition, ReadGlobalIndexState, RoutePageInput, RoutePageOutcome, data_target,
+    global_index_target,
 };
 use crab_cell_runtime::{MutationIdentity, cell::catalog::CellCatalog, identity::RequestId};
 
@@ -246,7 +247,11 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
     assert!(
         fixture
             .client
-            .command::<BeginGlobalIndexSplit>(&index_directory, mutation(), Json(pending.clone()))
+            .command::<BeginDirectoryTransfer>(
+                &index_directory,
+                mutation(),
+                Json(pending.clone().into())
+            )
             .await
             .unwrap()
             .output
@@ -275,7 +280,7 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
     assert!(matches!(
         fixture
             .client
-            .command::<BeginGlobalIndexSplit>(&index_directory, mutation(), Json(collision))
+            .command::<BeginDirectoryTransfer>(&index_directory, mutation(), Json(collision.into()))
             .await,
         Err(crab_cell_runtime::client::InvocationError::Rejected(_))
     ));
@@ -348,11 +353,11 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
     assert!(deferred);
     let plan = fixture
         .client
-        .query::<ReadGlobalIndexSplitPlan>(
+        .query::<ReadDirectoryTransfer>(
             &index_directory,
             None,
-            Json(GlobalIndexPartitionInput {
-                index_id: index.id.clone(),
+            Json(DirectoryPartitionInput {
+                table_id: index.id.clone(),
                 partition_id: partitions[0].partition_id,
             }),
         )
@@ -361,6 +366,7 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
         .output
         .0
         .expect("capacity refusal must retain the plan");
+    let plan = GlobalIndexSplitPlan::try_from(plan).unwrap();
     fixture
         .provisioner
         .install_account_capacity_loop(
@@ -386,11 +392,11 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
             for plan in [&plan, &pending] {
                 done &= fixture
                     .client
-                    .query::<ReadGlobalIndexSplitPlan>(
+                    .query::<ReadDirectoryTransfer>(
                         &index_directory,
                         None,
-                        Json(GlobalIndexPartitionInput {
-                            index_id: index.id.clone(),
+                        Json(DirectoryPartitionInput {
+                            table_id: index.id.clone(),
                             partition_id: plan.source.partition_id,
                         }),
                     )
@@ -581,7 +587,11 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
     assert!(
         fixture
             .client
-            .command::<BeginGlobalIndexSplit>(&index_directory, mutation(), Json(retiring.clone()))
+            .command::<BeginDirectoryTransfer>(
+                &index_directory,
+                mutation(),
+                Json(retiring.clone().into())
+            )
             .await
             .unwrap()
             .output
@@ -616,11 +626,11 @@ async fn sdk_capacity_splits_indexes_and_preserves_tombstones_after_owner_restor
         assert!(
             fixture
                 .client
-                .query::<ReadGlobalIndexSplitPlan>(
+                .query::<ReadDirectoryTransfer>(
                     &index_directory,
                     None,
-                    Json(GlobalIndexPartitionInput {
-                        index_id: index.id.clone(),
+                    Json(DirectoryPartitionInput {
+                        table_id: index.id.clone(),
                         partition_id: spec.partition_id
                     })
                 )

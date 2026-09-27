@@ -4,6 +4,7 @@ mod deletion;
 mod directories;
 mod discovery;
 mod index_splits;
+mod ownership_race;
 mod placement;
 mod provisioning;
 mod rebalance;

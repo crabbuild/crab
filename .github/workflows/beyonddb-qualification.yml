@@ -78,6 +78,8 @@ jobs:
             -- --nocapture 2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/directory-tree.log"
           cargo test -p beyonddb --locked --test elastic_cells node_sessions \
             -- --nocapture 2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/node-sessions.log"
+          cargo test -p beyonddb --locked --test elastic_cells directory_transfers \
+            -- --nocapture 2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/directory-transfers.log"
           cargo test -p beyonddb --locked --test elastic_cells data_ranges_use_independent_cells \
             -- --nocapture 2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/participant-recovery.log"
           # Keep the two process workloads serial so their storage load does not

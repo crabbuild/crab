@@ -332,7 +332,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
                 source.update(include_bytes!("global_index.rs"));
                 source.update(include_bytes!("global_index/outbox.rs"));
                 source.update(include_bytes!("global_index/routing.rs"));
-                source.update(include_bytes!("global_index/split_routing.rs"));
+                source.update(include_bytes!("directory/transfer.rs"));
                 source.update(include_bytes!("global_index/transfer.rs"));
                 source.update(include_bytes!("items.rs"));
                 source.update(include_bytes!("secondary_index.rs"));

@@ -19,10 +19,10 @@ use extenddb_storage::error::StorageError;
 use super::{CellInitialPartitionProvisioner, provision_error};
 use crate::backend::cell_error;
 use crate::{
-    DescribeTableById, GlobalIndexPartitionInput, GlobalIndexState, Json, PartitionState,
-    PublishedPartitionInput, PublishedPartitionOutcome, ReadGlobalIndexPartition,
-    ReadGlobalIndexSplitPlan, ReadGlobalIndexState, ReadPartitionSplitPlan, ReadPartitionState,
-    ReadPublishedGlobalIndexPartition, ReadPublishedPartition,
+    DescribeTableById, DirectoryPartitionInput, GlobalIndexState, Json, PartitionState,
+    PublishedPartitionInput, PublishedPartitionOutcome, ReadDirectoryRange, ReadDirectoryTransfer,
+    ReadGlobalIndexPartition, ReadGlobalIndexState, ReadPartitionSplitPlan, ReadPartitionState,
+    ReadPublishedPartition,
 };
 
 impl CellInitialPartitionProvisioner {
@@ -345,25 +345,21 @@ impl CellInitialPartitionProvisioner {
                     let directory =
                         crate::global_index_directory_target(&client, account, &index_id, lower)
                             .await?;
-                    let input = GlobalIndexPartitionInput {
-                        index_id,
+                    let input = DirectoryPartitionInput {
+                        table_id: index_id,
                         partition_id,
                     };
                     // Keep the sealed source resident while copying/opening is
                     // pending. Completion removes its durable participant reservation.
                     client
-                        .query::<ReadGlobalIndexSplitPlan>(&directory, None, Json(input.clone()))
+                        .query::<ReadDirectoryTransfer>(&directory, None, Json(input.clone()))
                         .await
                         .map_err(cell_error)?
                         .output
                         .0
                         .is_none()
                         && client
-                            .query::<ReadPublishedGlobalIndexPartition>(
-                                &directory,
-                                None,
-                                Json(input),
-                            )
+                            .query::<ReadDirectoryRange>(&directory, None, Json(input))
                             .await
                             .map_err(cell_error)?
                             .output

@@ -16,7 +16,7 @@ or qualify 10,000 active Cells; catalog and base-directory extraction remain ope
 | Point routing | `backend/data/routed.rs::routed_partition`, `backend/admission.rs` | A full primary-key lookup resolves one current owner. An existing transaction token resolves its original coordinator and participants before reading current routes. |
 | Scan/maintenance pages | `ReadRoutePage`, `read_global_index_route_page`; routed Scan, TTL, projection, capacity, statistics and recovery | Ordered coverage, bounded pages and explicit detection of conflicting directory changes; no full-directory read on the request path. |
 | Base split | `routing/split_state.rs`, `split.rs`, `provision/capacity.rs` | Source/child reservations and route replacement currently share one account commit. Keep the intent until both children open. Unrelated splits may publish independently. |
-| GSI split | `global_index/split_routing.rs`, `global_index/transfer.rs`, `provision/global_indexes.rs` | Transfer versions and tombstones as well as items; retain unfinished source/child reservations through opening. |
+| GSI split | `directory/transfer.rs`, `global_index/transfer.rs`, `provision/global_indexes.rs` | Transfer versions and tombstones as well as items; retain unfinished source/child reservations through opening. |
 | Delete | `table/deletion.rs`, account lifecycle marker and cleanup worker | Fence the exact generation before bounded metadata cleanup. Prepared account transactions prevent deletion; name reuse waits for catalog removal. |
 | Statistics | `statistics.rs::PublishStatistics`, `backend/statistics.rs` | Base sampling retains its account epoch guard. GSI sampling validates each leaf before leaving its immutable interval; final publication checks the live index generation set. |
 | Residency/recovery | `provision.rs`, `provision/residency.rs`, `provision/transactions.rs` | Metadata absence is authoritative only at the current owner and for the exact generation. Original transaction participants remain recoverable after directory changes. |
@@ -159,6 +159,16 @@ only that leaf's version. Reservations remain through child opening. A metadata
 split cannot freeze a leaf with an unfinished range plan, so migration cannot
 lose that plan's recovery owner. Independent leaves can publish independently;
 there is no ancestor write for a descendant's data-range change.
+
+`directory/transfer.rs` retains a typed base or GSI split plan beside the compact
+reservation in the same commit. Recovery through the source or either child
+returns the exact immutable table/index contract, including after membership
+publication removes the source. Publication compares that full plan; completion
+removes it with the participant reservations. The native base-transfer regression
+restarts the owner before and after publication, rejects a changed contract and
+wrong generation, and checks that metadata splitting remains fenced until finish.
+GSI controllers use this shared protocol. Base serving and controllers still use
+account-owned routes; the native base protocol is a prerequisite for that cutover.
 
 `directory/split.rs` freezes an exact leaf version and records deterministic child
 identities, bounds and copy fingerprints. Children install in a non-serving state.
@@ -414,3 +424,25 @@ passed in 4.14 s, and the bounded route-page case passed in 9.30 s. Strict
 all-target Clippy passed (11.76 s), and the server binary built (17.69 s).
 The remote-account recreation fixture and full peer/process suite still require
 CI on the follow-up head. Earlier process success does not qualify these changes.
+
+### Concurrent owner admission
+
+Signed GSI Scan after a drain exposed a placement race: the ingress selected a
+remote destination, then another admission claimed the same Cell locally before
+the remote activation arrived. The peer correctly refused that stale activation;
+the ingress previously propagated its refusal as an SDK 503.
+
+The serving resolver now reloads ownership once when an activation reports
+CellNotActive and authority proves a changed ownership epoch. It resumes the
+winning claim through the normal admission path before dispatching application
+work. Stable refusals and ambiguous transport outcomes still propagate. The
+peer receiver's prohibition against acquiring Cells during ordinary invocation
+is unchanged; explicit provisioning and rebalancing retain their existing policy.
+
+A deterministic signed SDK regression pauses the selected peer's activation,
+commits the competing local claim, then releases the peer request. It failed
+with 503 before the fix and passed with SDK retries disabled afterward (0.57 s).
+The original index split/tombstone/owner-restore scenario then passed five times
+(6.56–11.37 s). Claimed-owner recovery and full-pool metadata restoration passed
+all three focused scenarios (1.20 s). These checks establish this admission race's
+behavior, not arbitrary churn tolerance or fleet-scale qualification.

@@ -6,6 +6,7 @@ mod elastic_cells {
     mod coordinator_residency;
     mod coordinator_tokens;
     mod directory_activation;
+    mod directory_transfers;
     mod directory_tree;
     mod global_index_splits;
     mod global_indexes;
