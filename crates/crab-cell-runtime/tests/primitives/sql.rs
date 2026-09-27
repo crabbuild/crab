@@ -19,7 +19,8 @@ use crab_cell_runtime::primitives::sql::{
 };
 use crab_cell_runtime::primitives::sql::{SqlCell, SqlModule};
 use crab_cell_runtime::registry::{
-    BuildDescriptor, CellModule, ModuleDescriptor, NamespaceDescriptor, RegistryBuilder,
+    BuildDescriptor, CellModule, Command, CommandContext, CommandResult, ModuleDescriptor,
+    NamespaceDescriptor, RegistryBuilder,
 };
 use crab_cell_runtime::registry::{MigrationDescriptor, OperationDescriptor};
 use crab_ltx::CellStorageLayout;
@@ -58,14 +59,24 @@ impl CellModule for TestSql {
                 sql: SQL_MIGRATION,
                 digest: Digest::from_bytes(*blake3::hash(SQL_MIGRATION.as_bytes()).as_bytes()),
             }])),
-            commands: &[OperationDescriptor {
-                id: 1,
-                codec_version: 1,
-                schema_min: 1,
-                schema_max: 1,
-                input_limit: 1024 * 1024,
-                output_limit: 1024 * 1024,
-            }],
+            commands: &[
+                OperationDescriptor {
+                    id: 2,
+                    codec_version: 1,
+                    schema_min: 1,
+                    schema_max: 1,
+                    input_limit: 8,
+                    output_limit: 8,
+                },
+                OperationDescriptor {
+                    id: 1,
+                    codec_version: 1,
+                    schema_min: 1,
+                    schema_max: 1,
+                    input_limit: 1024 * 1024,
+                    output_limit: 1024 * 1024,
+                },
+            ],
             queries: &[OperationDescriptor {
                 id: 1,
                 codec_version: 1,
@@ -88,7 +99,118 @@ impl CellModule for TestSql {
     }
 
     fn register(self, registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
-        register_sql::<Self>(registry)
+        register_sql::<Self>(registry)?;
+        registry.bind_command::<WriteBlob>()
+    }
+}
+
+const BLOB_BYTES: usize = (1 << 20) + 17;
+const BLOB_CHUNK: usize = 256 * 1024;
+
+struct WriteBlob;
+
+impl Command for WriteBlob {
+    const MODULE: &'static str = SQL_MODULE;
+    const ID: u32 = 2;
+    const CODEC_VERSION: u32 = 1;
+    type Input = u8;
+    type Output = ();
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        mode: u8,
+    ) -> crab_cell_runtime::Result<CommandResult<()>> {
+        if mode == 0 {
+            context.sql(&SqlBatch { statements: vec![statement(
+                "INSERT INTO app_items(id, name, payload) VALUES (8, 'incremental', zeroblob(?1))",
+                vec![SqlValue::Integer(BLOB_BYTES as i64)],
+            )] })?;
+            for offset in (0..BLOB_BYTES).step_by(BLOB_CHUNK) {
+                let chunk = vec![(offset / BLOB_CHUNK) as u8; BLOB_CHUNK.min(BLOB_BYTES - offset)];
+                context.write_sql_blob("app_items", "payload", 8, offset, &chunk)?;
+            }
+        } else if mode <= 2 {
+            // A release of staged storage and partial BLOB application must
+            // both roll back on rejection or a handler error.
+            context.sql(&SqlBatch {
+                statements: vec![statement("DELETE FROM app_items WHERE id = 7", vec![])],
+            })?;
+            context.write_sql_blob("app_items", "payload", 8, 0, &[99; 32])?;
+            if mode == 1 {
+                return Ok(CommandResult::Rejected(()));
+            }
+            return Err(crab_cell_runtime::Error::Command(
+                "injected after incremental write",
+            ));
+        } else {
+            for table in [
+                "sys_meta",
+                "SyS_requests",
+                "kv_entries",
+                "queue_messages",
+                "workflow_runs",
+                "blob_objects",
+                "cron_schedules",
+                "CaPaCiTy_total",
+                "capacity_reservations",
+                "sqlite_schema",
+            ] {
+                assert!(
+                    matches!(
+                        context.write_sql_blob(table, "payload", 1, 0, &[1]),
+                        Err(crab_cell_runtime::Error::Command(
+                            "SQL blob targets a protected table"
+                        ))
+                    ),
+                    "{table}"
+                );
+            }
+            assert!(
+                context
+                    .write_sql_blob("app_items", "payload", 8, 0, &vec![1; 1 << 20])
+                    .is_err()
+            );
+            assert!(
+                context
+                    .write_sql_blob("app_items", "payload", 8, BLOB_BYTES, &[1])
+                    .is_err()
+            );
+            assert!(
+                context
+                    .write_sql_blob("app_items", "payload", 8, usize::MAX, &[1])
+                    .is_err()
+            );
+            assert!(
+                context
+                    .write_sql_blob("app_items", "payload", 999, 0, &[1])
+                    .is_err()
+            );
+            assert!(
+                context
+                    .write_sql_blob("app_items", "id", 8, 0, &[1])
+                    .is_err()
+            );
+        }
+        Ok(CommandResult::Success(()))
+    }
+}
+
+async fn assert_blob(sql: &SqlCell<TestSql>) {
+    for offset in (0..BLOB_BYTES).step_by(BLOB_CHUNK) {
+        let result = sql.query(None, SqlBatch { statements: vec![statement(
+            "SELECT length(payload), substr(payload, ?1, ?2) FROM app_items WHERE id = 8",
+            vec![SqlValue::Integer(offset as i64 + 1), SqlValue::Integer(BLOB_CHUNK as i64)],
+        )] }).await.unwrap();
+        assert_eq!(
+            result.output[0].rows,
+            vec![vec![
+                SqlValue::Integer(BLOB_BYTES as i64),
+                SqlValue::Blob(vec![
+                    (offset / BLOB_CHUNK) as u8;
+                    BLOB_CHUNK.min(BLOB_BYTES - offset)
+                ]),
+            ]]
+        );
     }
 }
 
@@ -199,12 +321,19 @@ fn authorizer_blocks_runtime_tables_and_indirect_trigger_or_view_access() {
     let transaction = connection.transaction().unwrap();
     install_blob_schema(&transaction).unwrap();
     install_cron_schema(&transaction).unwrap();
+    transaction
+        .execute_batch(crab_cell_runtime::primitives::capacity::SCHEMA)
+        .unwrap();
     for sql in [
         "SELECT commit_sequence FROM sys_meta",
         "SELECT object_key FROM blob_objects",
         "SELECT schedule_id FROM cron_schedules",
         "DELETE FROM blob_objects",
         "DELETE FROM cron_schedules",
+        "SELECT pages FROM capacity_total",
+        "SELECT pages FROM capacity_reservations",
+        "UPDATE capacity_total SET pages = 0",
+        "DELETE FROM capacity_reservations",
         "SELECT commit_sequence FROM app_runtime_metadata",
         "INSERT INTO app_items(id, name) VALUES (1, 'blocked by trigger')",
         "PRAGMA user_version",
@@ -427,6 +556,28 @@ async fn typed_sql_cell_publishes_enforces_read_only_queries_and_survives_restor
         mutation_query,
         Err(InvocationError::NotStarted(_))
     ));
+    let client = CellClient::local(registry.clone(), handle.clone());
+    client
+        .command::<WriteBlob>(&target, mutation_identity(8), 0)
+        .await
+        .unwrap();
+    assert!(matches!(
+        client
+            .command::<WriteBlob>(&target, mutation_identity(9), 1)
+            .await,
+        Err(InvocationError::Rejected(_))
+    ));
+    assert!(
+        client
+            .command::<WriteBlob>(&target, mutation_identity(10), 2)
+            .await
+            .is_err()
+    );
+    let latest = client
+        .command::<WriteBlob>(&target, mutation_identity(11), 3)
+        .await
+        .unwrap();
+    assert_blob(&sql).await;
     handle.drain().await.unwrap();
 
     let idle = authority.load(cell).await.unwrap().unwrap();
@@ -465,7 +616,7 @@ async fn typed_sql_cell_publishes_enforces_read_only_queries_and_survives_restor
         )
         .await
         .unwrap();
-    assert_eq!(observed.receipt, committed.receipt);
+    assert_eq!(observed.receipt, latest.receipt);
     assert_eq!(
         observed.output[0].rows,
         vec![vec![
@@ -474,5 +625,6 @@ async fn typed_sql_cell_publishes_enforces_read_only_queries_and_survives_restor
             SqlValue::Blob(vec![1, 2, 3]),
         ]]
     );
+    assert_blob(&restored_sql).await;
     restored.drain().await.unwrap();
 }

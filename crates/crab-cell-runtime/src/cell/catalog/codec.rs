@@ -13,6 +13,7 @@ pub(super) struct ObservedHead {
 /// The head carries these locators so a reader finds an entry with one page
 /// read. Without them a lookup must download every page in the shard, which
 /// makes cold routing cost grow with the Cell population.
+#[derive(Clone)]
 pub(super) struct CatalogPageRef {
     pub(super) digest: Digest,
     pub(super) first: CellId,

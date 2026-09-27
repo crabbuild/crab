@@ -2,6 +2,115 @@
 
 use super::*;
 
+async fn verified_fixture(
+    extra_bytes: i64,
+) -> (tempfile::TempDir, Arc<Faults>, crab_ltx::VerifiedRoot) {
+    let (directory, faults, host, mut source) = fixture();
+    source
+        .transaction(|tx| {
+            tx.execute("INSERT INTO t VALUES(zeroblob(?1))", [extra_bytes])?;
+            Ok(())
+        })
+        .unwrap();
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("async-checksums"),
+            [4; 16],
+        ),
+        [5; 32],
+        [6; 16],
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(host.with_job_slots(Arc::new(tokio::sync::Semaphore::new(1))));
+    let root = replica
+        .prepare(None, &source.capture().unwrap(), 1, 1)
+        .await
+        .unwrap()
+        .root();
+    source.close().unwrap();
+    let verified = replica.open_root(&root).await.unwrap();
+    (directory, faults, verified)
+}
+
+#[tokio::test]
+async fn writable_activation_avoids_syncing_derived_files() {
+    let (directory, faults, verified) = verified_fixture(0).await;
+    for barrier in ["sync_all", "sync_parent"] {
+        let destination = directory.path().join(format!("{barrier}.sqlite"));
+        faults.arm(Some(barrier));
+        let prepared = verified.paged().prepare_writable(&destination).await;
+        let opened = prepared.and_then(|prepared| prepared.open_writable(&destination));
+        faults.arm(None);
+        let mut writer = opened.unwrap();
+        let bytes: i64 = writer
+            .query_with(|db| db.query_row("SELECT sum(length(v)) FROM t", [], |row| row.get(0)))
+            .unwrap();
+        assert_eq!(bytes, 20_000);
+        writer.close().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn immutable_activation_avoids_syncing_derived_files() {
+    let (directory, faults, verified) = verified_fixture(0).await;
+    for barrier in ["sync_all", "sync_parent"] {
+        let destination = directory.path().join(format!("{barrier}.sqlite"));
+        faults.arm(Some(barrier));
+        let opened = verified.open_read_only(&destination);
+        faults.arm(None);
+        let view = opened.unwrap();
+        let bytes: i64 = view
+            .connection()
+            .unwrap()
+            .query_row("SELECT sum(length(v)) FROM t", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(bytes, 20_000);
+    }
+}
+
+#[tokio::test]
+async fn writable_preparation_dispatches_filesystem_work_off_the_async_thread() {
+    // More than 8,192 pages exercises streamed checksum writes as well as the
+    // final metadata check, with only one available host executor slot.
+    let (directory, faults, verified) = verified_fixture(35_000_000).await;
+    let destination = directory.path().join("active.sqlite");
+    *faults.forbidden_thread.lock().unwrap() = Some(std::thread::current().id());
+    let prepared = verified.paged().prepare_writable(&destination).await;
+    *faults.forbidden_thread.lock().unwrap() = None;
+    let mut writer = prepared.unwrap().open_writable(&destination).unwrap();
+    let size: i64 = writer
+        .transaction(|connection| {
+            connection.query_row("SELECT sum(length(v)) FROM t", [], |row| row.get(0))
+        })
+        .unwrap();
+    assert_eq!(size, 35_020_000);
+    writer.close().unwrap();
+}
+
+#[tokio::test]
+async fn failed_checksum_preparation_cleans_up_without_blocking_the_async_thread() {
+    let (directory, faults, verified) = verified_fixture(0).await;
+    for operation in ["write_all", "file_len"] {
+        let destination = directory.path().join(format!("{operation}.sqlite"));
+        faults.arm(Some(operation));
+        *faults.forbidden_thread.lock().unwrap() = Some(std::thread::current().id());
+        let result = verified.paged().prepare_writable(&destination).await;
+        *faults.forbidden_thread.lock().unwrap() = None;
+        faults.arm(None);
+        assert!(
+            matches!(result, Err(CrabError::Io(error)) if error.kind() == io::ErrorKind::StorageFull)
+        );
+        assert!(
+            !directory
+                .path()
+                .join(format!("{operation}.sqlite.crab-ltx-checksums"))
+                .exists()
+        );
+    }
+}
+
 #[cfg(feature = "replica")]
 #[tokio::test(flavor = "multi_thread")]
 async fn cell_prepare_bounds_source_transfers_without_local_writes() {

@@ -38,6 +38,52 @@ fn entry(target: &CellTarget, role: CatalogRole, byte: u8) -> CatalogEntry {
 }
 
 #[tokio::test]
+async fn catalogs_isolate_tenants_with_colliding_shards() {
+    let (layout, first_catalog, first) = fixture();
+    let tenant = TenantId::from_bytes([99; 16]);
+    let shard = first.cell_id().as_bytes()[0];
+    let second = (0_u32..10_000)
+        .map(|partition| {
+            CellTarget::new(
+                tenant,
+                first.application(),
+                first.namespace(),
+                &partition.to_be_bytes(),
+            )
+            .unwrap()
+        })
+        .find(|target| target.cell_id().as_bytes()[0] == shard)
+        .unwrap();
+    let second_catalog = CellCatalog::new(layout.clone(), tenant);
+    for (catalog, target) in [(&first_catalog, &first), (&second_catalog, &second)] {
+        catalog
+            .provision(entry(target, CatalogRole::Sql, 4))
+            .await
+            .unwrap();
+    }
+    // Reopen both catalogs: no process-local routing state may hide a mixed head.
+    for (target, other) in [(&first, &second), (&second, &first)] {
+        let catalog = CellCatalog::new(layout.clone(), target.tenant());
+        assert_eq!(
+            catalog
+                .lookup(target.cell_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .entry()
+                .cell(),
+            target.cell_id()
+        );
+        assert!(catalog.lookup(other.cell_id()).await.unwrap().is_none());
+        let mut scan = catalog.scan_shard(shard).await.unwrap();
+        let page = scan.next_page().await.unwrap().unwrap();
+        assert_eq!(page.entries().len(), 1);
+        assert_eq!(page.entries()[0].entry().cell(), target.cell_id());
+        assert!(scan.next_page().await.unwrap().is_none());
+    }
+}
+
+#[tokio::test]
 async fn catalog_provision_is_idempotent_and_precedes_control() {
     let (layout, catalog, target) = fixture();
     let expected = entry(&target, CatalogRole::Repository, 4);
@@ -154,7 +200,7 @@ async fn catalog_page_digest_is_checked_before_entry_use() {
     let (head, _) = layout
         .store()
         .get_with_etag_bounded(
-            &layout.catalog_head_path(target.cell_id().as_bytes()[0]),
+            &layout.catalog_head_path(target.tenant().as_bytes(), target.cell_id().as_bytes()[0]),
             32 * 1024,
         )
         .await
@@ -199,7 +245,7 @@ async fn catalog_lookup_reports_one_head_and_one_page_read() {
     .unwrap();
     let expected = entry(&target, CatalogRole::Repository, 12);
     catalog.provision(expected.clone()).await.unwrap();
-    // Provisioning republishes the page set, so the routing claim starts here.
+    // Provisioning reads catalog metadata, so the routing claim starts here.
     recorder.reads.lock().unwrap().clear();
     assert_eq!(
         catalog
@@ -265,9 +311,9 @@ async fn due_scan_reads_one_control_record_per_cell() {
 
 #[tokio::test]
 async fn catalog_lookup_reads_only_the_page_that_can_hold_the_entry() {
-    let (layout, _, catalog, entries) = provisioned_shard(257).await;
+    let (layout, tenant, catalog, entries) = provisioned_shard(257).await;
     let shard = entries[0].cell().as_bytes()[0];
-    let head = head_json(&layout, shard).await;
+    let head = head_json(&layout, tenant, shard).await;
     let first_page = decode_digest(head["pages"][0]["digest"].as_str().unwrap());
     let last = entries.last().unwrap();
     assert!(
@@ -296,15 +342,73 @@ async fn catalog_lookup_reads_only_the_page_that_can_hold_the_entry() {
 }
 
 #[tokio::test]
+async fn catalog_provision_replaces_only_the_affected_page() {
+    let (layout, tenant, _, entries) = provisioned_shard(257).await;
+    let shard = entries[0].cell().as_bytes()[0];
+    let before = head_json(&layout, tenant, shard).await;
+    let second_first = before["pages"][1]["first"].as_str().unwrap();
+    let second_digest = before["pages"][1]["digest"].clone();
+    let application = ApplicationId::from_bytes([21; 16]);
+    let namespace = NamespaceId::from_bytes([22; 16]);
+    let target = (0_u32..)
+        .map(|partition| {
+            CellTarget::new(tenant, application, namespace, &partition.to_be_bytes()).unwrap()
+        })
+        .find(|target| {
+            target.cell_id().as_bytes()[0] == shard
+                && hex(target.cell_id().as_bytes()).as_str() < second_first
+                && entries.iter().all(|entry| entry.cell() != target.cell_id())
+        })
+        .unwrap();
+    let recorder = Arc::new(CatalogReadRecorder::default());
+    let catalog = CellCatalog::with_telemetry(
+        layout.clone(),
+        tenant,
+        crab_cell_runtime::fleet::telemetry::CellTelemetryHandle::from_sink(recorder.clone()),
+    );
+    let expected = entry(&target, CatalogRole::Repository, 9);
+    catalog.provision(expected.clone()).await.unwrap();
+    assert_eq!(
+        recorder.reads.lock().unwrap().as_slice(),
+        [(CatalogReadKind::Head, true), (CatalogReadKind::Page, true)]
+    );
+    let after = head_json(&layout, tenant, shard).await;
+    assert_eq!(after["pages"][1]["digest"], second_digest);
+    assert_eq!(
+        catalog
+            .lookup(target.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .entry(),
+        &expected
+    );
+    let mut scan = catalog.scan_shard(shard).await.unwrap();
+    let mut cells = Vec::new();
+    while let Some(page) = scan.next_page().await.unwrap() {
+        cells.extend(page.entries().iter().map(|proof| proof.entry().cell()));
+    }
+    assert_eq!(cells.len(), 258);
+    assert!(
+        cells
+            .windows(2)
+            .all(|pair| pair[0].as_bytes() < pair[1].as_bytes())
+    );
+}
+
+#[tokio::test]
 async fn catalog_lookup_rejects_a_head_whose_locator_disagrees_with_its_page() {
-    let (layout, _, catalog, entries) = provisioned_shard(257).await;
+    let (layout, tenant, catalog, entries) = provisioned_shard(257).await;
     let shard = entries[0].cell().as_bytes()[0];
     // The head body is canonical JSON, so tamper inside the encoded document:
     // the first page now claims to open at the second entry, which the page
     // does not have. A lookup that lands there must fail closed.
     let (body, _) = layout
         .store()
-        .get_with_etag_bounded(&layout.catalog_head_path(shard), 64 * 1024)
+        .get_with_etag_bounded(
+            &layout.catalog_head_path(tenant.as_bytes(), shard),
+            64 * 1024,
+        )
         .await
         .unwrap();
     let body = String::from_utf8(body.to_vec()).unwrap();
@@ -315,7 +419,7 @@ async fn catalog_lookup_rejects_a_head_whose_locator_disagrees_with_its_page() {
     layout
         .store()
         .put_overwrite(
-            &layout.catalog_head_path(shard),
+            &layout.catalog_head_path(tenant.as_bytes(), shard),
             Bytes::from(body.into_bytes()),
         )
         .await
@@ -333,14 +437,14 @@ async fn catalog_lookup_rejects_a_head_whose_locator_disagrees_with_its_page() {
 
 #[tokio::test]
 async fn catalog_rejects_an_unordered_page_locator() {
-    let (layout, _, catalog, entries) = provisioned_shard(257).await;
+    let (layout, tenant, catalog, entries) = provisioned_shard(257).await;
     let shard = entries[0].cell().as_bytes()[0];
-    let mut head = head_json(&layout, shard).await;
+    let mut head = head_json(&layout, tenant, shard).await;
     head["pages"][1]["first"] = head["pages"][0]["first"].clone();
     layout
         .store()
         .put_overwrite(
-            &layout.catalog_head_path(shard),
+            &layout.catalog_head_path(tenant.as_bytes(), shard),
             Bytes::from(serde_json::to_vec(&head).unwrap()),
         )
         .await
@@ -353,10 +457,13 @@ async fn catalog_rejects_an_unordered_page_locator() {
     ));
 }
 
-async fn head_json(layout: &CellStorageLayout, shard: u8) -> serde_json::Value {
+async fn head_json(layout: &CellStorageLayout, tenant: TenantId, shard: u8) -> serde_json::Value {
     let (head, _) = layout
         .store()
-        .get_with_etag_bounded(&layout.catalog_head_path(shard), 64 * 1024)
+        .get_with_etag_bounded(
+            &layout.catalog_head_path(tenant.as_bytes(), shard),
+            64 * 1024,
+        )
         .await
         .unwrap();
     serde_json::from_slice(&head).unwrap()

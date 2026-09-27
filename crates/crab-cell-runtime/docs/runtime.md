@@ -62,6 +62,40 @@ messages retain their bounded worker queue and do not need a job permit.
 
 Cancellation of a caller doesn't cancel accepted work. The actor still records and publishes the result, so a retry can resolve it.
 
+`CellClient::with_local_resolver` binds product owner selection before the
+underlying transport. Its `LocalCellResolver` returns a local handle, `None` to
+delegate, or an error that stops dispatch. Describe, command, query, and mutation
+resolution share this path. Products may restore an idle cataloged Cell using
+runtime admission and authority CAS; the framework's default runtime resolver
+only looks up existing ownership. Apply admission backpressure after the local
+resolver so the same request budgets cover local and remote invocations.
+
+An embedding service can opt into `CellClient::with_admission_backpressure`
+when its request budget permits waiting for owner capacity. Client clones share
+finite call-count and encoded-input byte budgets; exhausting either still fails
+immediately. Mailbox operations acquire per-Cell FIFO semaphores using the
+runtime's request and byte limits.
+The byte charge is encoded input plus the operation's maximum result size, so
+routing and execution can overlap within the owner bounds. Weighted FIFO
+admission prevents small calls from starving older large waiters. Different
+Cells have independent gates, retained only by admitted calls. Known capacity
+refusals from other callers receive paced retries until the admission
+wait expires. Commands retain their request identity, digest, and expected
+incarnation, and revalidate expiry before each attempt. Fencing and ambiguous
+outcomes are returned unchanged, including ambiguity caused by capacity during
+publication. The wait limit never cancels an accepted attempt. Describe shares
+the client budgets and capacity retry, but skips the owner mailbox gate because
+metadata description does not enter that mailbox. Queries and resolution use
+the mailbox policy; replica queries retain their
+separate admission path. Unconfigured clients retain immediate refusal.
+Each transport stage has its own wait budget; an encompassing typed or HTTP
+operation can take longer. Command expiry is still rechecked before dispatch.
+
+The input budget charges the retained envelope, one attempted copy, and envelope
+overhead. Runtime result and mailbox reservations remain authoritative. This
+does not bound HTTP request bodies or caller-owned typed inputs; the embedding
+service must account for those separately.
+
 ## Execute commands in six phases
 
 The actor completes these phases in order:
@@ -93,9 +127,71 @@ The worker transaction applies this procedure:
 5. Execute the registered synchronous handler
 6. Store success or durable rejection in `sys_requests`
 7. Advance `sys_meta.sequence` and derive `next_due_ms`
-8. Commit SQLite and capture every unpublished cut
+8. Validate any durable database page reservations after all receipt and metadata writes
+9. Commit SQLite and capture every unpublished cut
 
 Handler errors roll back the application savepoint. Runtime ledger updates still commit when the error is a durable business rejection. Every registered call reports its owning module, kind, outcome, and duration to the installed `CellTelemetry` sink from the thread that executed the handler, so the server can chart one primitive module without knowing its operations.
+
+SQLite may automatically roll back the whole command on capacity or interruption
+errors. The managed LTX writer recognizes completed rollback using autocommit
+and its WAL commit observer, preserves the original error, and keeps the Cell
+servable. No request receipt or commit sequence advances for that failed
+command. An observed commit or failed rollback still requires fencing; an
+unreachable result must never be reported as a proven rollback.
+
+For typed commands, a direct SQLite `FULL` remains the original SQLite error
+locally and maps to `RESOURCE_EXHAUSTED` / `NOT_STARTED` over peers. Command
+execution wraps fenced commit/publication errors as unknown before this mapping;
+a nested `FULL` therefore cannot become a refusal. This mapping is specific to
+typed command execution. Migration and other peer operations retain their own
+outcome contracts.
+
+### Bounded application BLOB writes
+
+`CommandContext::write_sql_blob` fills an already allocated BLOB at a byte offset,
+with at most 1 MiB of operation data per call. An application can allocate an
+image with SQL `zeroblob` and fill it in bounded slices without repeatedly
+allocating replacement images. Allocation, writes, and application indexes stay
+inside the command savepoint and publish through the normal LTX boundary.
+Propagate write errors so partial images roll back.
+
+The method opens only the main database, rejects runtime/primitive and SQLite
+internal table names, and closes the handle before returning. SQLite incremental
+I/O does not invoke the SQL authorizer, triggers, or CHECK constraints; applications
+must maintain their invariants explicitly in the same command. It cannot grow
+the BLOB. SQLite rejects unsupported table types and writable indexed columns.
+The SQL capability integration fixture covers bounds, protected names, rollback
+on rejection/error, and byte-for-byte recovery after publication.
+
+### Durable database capacity for deferred work
+
+A Cell can install `primitives::capacity::SCHEMA` and use
+`CommandContext::reserve_database_capacity(key, bytes)` during prepare. The
+primitive rounds bytes up to pages and records a durable claim under a stable
+key. Repeating the key requires the same rounded count. The claim remains until
+an explicit release; timeouts never reclaim it. No padding BLOB is written.
+
+Before committing commands, effect deliveries, bootstrap, or migrations, the
+executor checks `page_count - freelist_count + reserved_pages <= max_page_count`.
+This check includes runtime receipts and metadata. Refusal rolls back all writes,
+leaves no receipt, and keeps a proven-rollback owner usable. A running total makes
+the check independent of the number of claims. Cells without the primitive have
+no reservation check beyond their existing SQLite capacity limit.
+
+A resolver releases its own claim before applying deferred work within the same
+command. Success publishes both together; rejection or failure restores the
+claim. The final check still protects other claims. SQL and incremental BLOB
+access cannot modify the protected `capacity_` tables. Trusted migrations must
+preserve both tables and their accounting; they are not an untrusted SQL API.
+
+This reserves SQLite page capacity only. Applications must bound their own
+future page demand, including index changes and runtime receipts. WAL, capture,
+local disk, and memory admission remain independent. `database_used_bytes`
+reports occupied pages and excludes reusable freelist pages.
+
+The runtime lifecycle capacity tests cover receipt and effect refusal, failed
+release, changed-session/address root restore, bootstrap, and migration. SQL
+capability tests cover direct access and incremental BLOB protection.
 
 ## Publish before replying
 
@@ -192,6 +288,16 @@ Native commands and queries receive a five-second wall deadline. The same deadli
 - SQLite progress interruption
 - Sparse page faults
 - Object-store range reads triggered by the sparse VFS
+
+Worker admission and the native queue share an atomic start/cancel boundary.
+If the deadline wins before execution starts, the worker skips the operation;
+commands and queries return a deadline error, and resolution returns Unknown.
+The untouched Cell remains usable. Cancellation of a caller's response future
+alone does not cancel an accepted mutation. Reservations stay held until the
+worker acknowledges deadline cancellation or the running callback exits.
+Background hydration likewise retries a queued expiry without fencing or marking
+hydration complete. Migration is different: it has already closed the old
+capability, so any failure still fences and recovers ownership.
 
 Arbitrary Rust cannot be preempted safely. When a callback exceeds the deadline, admission closes immediately, but the runtime retains worker and byte permits until the callback exits.
 

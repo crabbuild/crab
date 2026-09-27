@@ -295,3 +295,86 @@ fn cell_type_limits_and_partition_bounds_fail_closed() {
     assert!(cell_type.with_schema_range(0, 1).is_err());
     assert!(cell_type.with_schema_range(2, 1).is_err());
 }
+
+#[test]
+fn entity_partitions_are_stable_and_distinct_from_fixed_shards() {
+    let fixed = CellType::new(
+        "app-sql",
+        "orders",
+        NamespaceId::from_bytes([2; 16]),
+        CatalogRole::Sql,
+        1,
+    )
+    .unwrap();
+    assert!(fixed.entity_partition(b"order-1").is_err());
+    assert!(fixed.with_entity_partitions().is_ok());
+    assert!(
+        CellType::new(
+            "app-sql",
+            "orders",
+            NamespaceId::from_bytes([2; 16]),
+            CatalogRole::Sql,
+            2,
+        )
+        .unwrap()
+        .with_entity_partitions()
+        .is_err()
+    );
+
+    let entity = fixed.with_entity_partitions().unwrap();
+    let first = entity.entity_partition(b"order-1").unwrap();
+    assert_eq!(first, entity.entity_partition(b"order-1").unwrap());
+    assert_ne!(first, entity.entity_partition(b"order-2").unwrap());
+    assert!(entity.valid_partition(&first));
+    assert!(!fixed.valid_partition(&first));
+    assert!(!entity.valid_partition(&partition_for_shard(0)));
+    let mut invalid_prefix = first;
+    invalid_prefix[0] = 0;
+    assert!(!entity.valid_partition(&invalid_prefix));
+    assert!(!entity.valid_partition(&first[..32]));
+    assert!(entity.shard_for_scope(b"order-1").is_err());
+    assert!(entity.entity_partition(b"").is_err());
+    assert!(entity.entity_partition(&[0; 1_025]).is_err());
+}
+
+#[test]
+fn entity_topology_changes_application_descriptor() {
+    let fixed = build(false);
+    let mut builder = ApplicationBuilder::new(
+        "app",
+        BuildDescriptor {
+            source_revision: "source".into(),
+            cargo_lock_digest: Digest::from_bytes([9; 32]),
+        },
+    )
+    .unwrap();
+    builder.register(SqlModule).unwrap();
+    builder
+        .cell_type(
+            CellType::new(
+                "app-sql",
+                "orders",
+                NamespaceId::from_bytes([2; 16]),
+                CatalogRole::Sql,
+                1,
+            )
+            .unwrap()
+            .with_entity_partitions()
+            .unwrap(),
+        )
+        .unwrap();
+    builder
+        .cell_type(
+            CellType::new(
+                "app-sql",
+                "inventory",
+                NamespaceId::from_bytes([3; 16]),
+                CatalogRole::Sql,
+                1,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let entity = builder.finish().unwrap();
+    assert_ne!(fixed.descriptor_digest(), entity.descriptor_digest());
+}

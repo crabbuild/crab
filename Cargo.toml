@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/beyonddb",
     "crates/crab-auth",
     "crates/crab-auth-store",
     "crates/crab-auth-server",
@@ -10,6 +11,7 @@ members = [
     "crates/crab-cell-runtime",
     "crates/crab-cell-app",
     "crates/crab-cell-host",
+    "crates/crab-cell-peer-http",
     "crates/crab-coordination",
     "crates/crab-diff",
     "crates/crab-git",
@@ -38,6 +40,7 @@ repository = "https://github.com/crabbuild/crab"
 rust-version = "1.97"
 
 [workspace.dependencies]
+beyonddb = { version = "=0.1.0", path = "crates/beyonddb", default-features = false }
 crab-auth = { version = "=0.1.0", path = "crates/crab-auth", default-features = false }
 crab-auth-server = { version = "=1.2.4", path = "crates/crab-auth-server", default-features = false }
 crab-auth-store = { version = "=0.1.0", path = "crates/crab-auth-store", default-features = false }
@@ -47,6 +50,7 @@ crab-cache-store = { version = "=0.1.0", path = "crates/crab-cache-store", defau
 crab-cell-runtime = { version = "=0.1.0", path = "crates/crab-cell-runtime", default-features = false }
 crab-cell-app = { version = "=0.1.0", path = "crates/crab-cell-app", default-features = false }
 crab-cell-host = { version = "=0.1.0", path = "crates/crab-cell-host", default-features = false }
+crab-cell-peer-http = { version = "=0.1.0", path = "crates/crab-cell-peer-http", default-features = false }
 crab-coordination = { version = "=0.1.0", path = "crates/crab-coordination", default-features = false }
 crab-diff = { version = "=0.1.0", path = "crates/crab-diff", default-features = false }
 crab-git = { version = "=0.1.0", path = "crates/crab-git", default-features = false }

@@ -197,7 +197,13 @@ queries the recovered row.
 Use `transaction_with` when the callback can reject a mutation for an
 application reason. `TransactionError::Operation` means the callback failed and
 the SQLite transaction was rolled back; commit ambiguity or capture failures
-use different variants and may fence the session.
+use different variants and may fence the session. SQLite can automatically roll
+back the entire transaction on `SQLITE_FULL`, interruption, or a ROLLBACK
+constraint. The managed writer recognizes that state only when autocommit is
+restored and its WAL observer recorded no commit. It preserves the original
+operation error, prior committed capture boundary, and disk admission; a
+redundant ROLLBACK must not turn a capacity refusal into a fenced session.
+See SQLite's [automatic rollback contract](https://www.sqlite.org/c3ref/get_autocommit.html).
 
 ```rust,no_run
 use std::io;
@@ -507,7 +513,13 @@ async fn objects_to_pin(
 ## Activate sparse writable SQL
 
 A verified root can become writable without first downloading every page.
-`prepare_writable` fetches the authenticated checksum directory asynchronously;
+`prepare_writable` fetches the authenticated checksum directory asynchronously
+and dispatches local checksum creation, buffered writes, metadata checks, and
+failure cleanup through the bounded host executor. Dispatched jobs retain their
+admission until completion even if the caller cancels.
+Checksum bases and sparse/immutable placeholders are derived session files, so
+activation does not sync them or their names. SQLite retains its normal WAL
+durability policy; warm reuse separately writes and syncs a verified continuation.
 `open_writable` must then run on the Cell's dedicated SQLite worker. Page faults
 fetch and verify missing pages. Direct synchronous embedders can use
 `hydrate_step` on their database worker. The Cell runtime instead uses

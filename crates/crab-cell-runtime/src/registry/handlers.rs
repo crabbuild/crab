@@ -103,6 +103,49 @@ impl CommandContext<'_, '_> {
         sql_batch(self.transaction, batch)
     }
 
+    /// Reserves database bytes under a stable key for later commands in this Cell.
+    ///
+    /// Install the capacity primitive schema first. Reusing a key requires the
+    /// same rounded page count. Reservations persist until explicitly released;
+    /// every runtime commit protects them, including its own receipt writes.
+    pub fn reserve_database_capacity(&self, key: &[u8], bytes: u64) -> Result<()> {
+        crate::primitives::capacity::reserve(self.transaction, key, bytes)
+    }
+
+    /// Releases a reservation in this command, returning whether it existed.
+    ///
+    /// Release before applying deferred work. Failure of this command restores
+    /// the reservation with the rest of the transaction.
+    pub fn release_database_capacity(&self, key: &[u8]) -> Result<bool> {
+        crate::primitives::capacity::release(self.transaction, key)
+    }
+
+    /// Returns the SQLite page size for application allocation accounting.
+    pub fn database_page_size(&self) -> Result<u32> {
+        Ok(self
+            .transaction
+            .query_row("PRAGMA page_size", [], |row| row.get(0))?)
+    }
+
+    /// Writes a bounded slice into an existing application BLOB in this command.
+    ///
+    /// Allocate its fixed size with SQL `zeroblob` first. Only main-database
+    /// rowid tables and unindexed, non-key columns are supported. SQLite does
+    /// not run triggers or CHECK constraints for incremental writes: callers
+    /// must maintain application invariants in the same command. Protected
+    /// tables, writes beyond the BLOB, and operations over 1 MiB are rejected.
+    /// Propagate failures to roll back the command's application savepoint.
+    pub fn write_sql_blob(
+        &self,
+        table: &str,
+        column: &str,
+        row_id: i64,
+        offset: usize,
+        bytes: &[u8],
+    ) -> Result<()> {
+        crate::primitives::sql::write_blob(self.transaction, table, column, row_id, offset, bytes)
+    }
+
     pub(crate) const fn primitive_transaction(&self) -> &Transaction<'_> {
         self.transaction
     }
@@ -140,6 +183,29 @@ impl QueryContext<'_> {
     /// Executes bounded read-only application SQL under the runtime authorizer.
     pub fn sql(&self, batch: &SqlBatch) -> Result<Vec<SqlResultSet>> {
         sql_query_batch(self.connection, batch)
+    }
+
+    /// Returns occupied SQLite page bytes, including runtime and indexes but excluding the freelist.
+    pub fn database_used_bytes(&self) -> Result<u64> {
+        let pages: i64 = self
+            .connection
+            .query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let free_pages: i64 = self
+            .connection
+            .query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+        let page_size: i64 = self
+            .connection
+            .query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        let pages = pages
+            .checked_sub(free_pages)
+            .ok_or(Error::Command("invalid database freelist count"))?;
+        let pages =
+            u64::try_from(pages).map_err(|_| Error::Command("invalid database page count"))?;
+        let page_size =
+            u64::try_from(page_size).map_err(|_| Error::Command("invalid database page size"))?;
+        pages
+            .checked_mul(page_size)
+            .ok_or(Error::Command("database size overflow"))
     }
 
     pub(crate) const fn primitive_connection(&self) -> &Connection {

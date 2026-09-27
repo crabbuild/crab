@@ -485,6 +485,15 @@ async fn collection_preserves_live_and_pinned_graphs(store: Store, prefix: Path)
 
 #[tokio::test(flavor = "multi_thread")]
 async fn maintenance_collection_rejects_an_owned_current_cell_before_deleting() {
+    collection_rejects_unscanned_or_owned_cells(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn maintenance_collection_rejects_another_tenants_catalog_before_deleting() {
+    collection_rejects_unscanned_or_owned_cells(true).await;
+}
+
+async fn collection_rejects_unscanned_or_owned_cells(foreign_tenant: bool) {
     let identity = identity();
     let layout = CellStorageLayout::new(
         Store::new(Arc::new(InMemory::new())),
@@ -492,8 +501,13 @@ async fn maintenance_collection_rejects_an_owned_current_cell_before_deleting() 
         *identity.application().as_bytes(),
     );
     let code = Digest::from_bytes([12; 32]);
-    let target = target(identity, b"owned");
-    CellCatalog::new(layout.clone(), identity.tenant())
+    let cell_identity = if foreign_tenant {
+        ApplicationIdentity::new(TenantId::from_bytes([99; 16]), identity.application())
+    } else {
+        identity
+    };
+    let target = target(cell_identity, b"owned");
+    CellCatalog::new(layout.clone(), cell_identity.tenant())
         .provision(CatalogEntry::new(&target, CatalogRole::Repository, code, 1).unwrap())
         .await
         .unwrap();
@@ -566,10 +580,12 @@ async fn maintenance_collection_rejects_an_owned_current_cell_before_deleting() 
     .await
     .unwrap_err();
 
-    assert!(matches!(
-        error,
-        Error::Retention("a current Cell still has an owner during maintenance")
-    ));
+    let expected = if foreign_tenant {
+        "maintenance collection requires a single-tenant catalog"
+    } else {
+        "a current Cell still has an owner during maintenance"
+    };
+    assert!(matches!(error, Error::Retention(message) if message == expected));
     layout.store().head(&orphan).await.unwrap();
 }
 

@@ -1,0 +1,26 @@
+[package]
+name = "crab-cell-peer-http"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Authenticated HTTP transport and pinned mTLS for Crab Cell peers"
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+crab-cell-runtime.workspace = true
+ed25519-dalek = { workspace = true, features = ["pkcs8"] }
+futures-util.workspace = true
+http = "1"
+reqwest = { workspace = true, features = ["rustls-tls", "stream"] }
+rustls = "0.23"
+rustls-pemfile = "2"
+sha2 = "0.10"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "time"] }
+tokio-rustls = "0.26"
+tracing.workspace = true
+url = "2"
+x509-cert = "0.2.5"

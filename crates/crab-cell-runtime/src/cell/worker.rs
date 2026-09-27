@@ -3,7 +3,10 @@ use std::{
     collections::HashMap,
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU8, Ordering},
+    },
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -33,6 +36,57 @@ const MAX_WORKERS: usize = 16;
 const MAX_ACTIVE_CELLS: usize = 10_000;
 const WORKER_QUEUE: usize = 256;
 const DEFAULT_PAGE_IO_DEADLINE: Duration = Duration::from_secs(30);
+
+const SQL_QUEUED: u8 = 0;
+const SQL_STARTED: u8 = 1;
+const SQL_CANCELLED: u8 = 2;
+
+#[derive(Clone)]
+pub(crate) struct SqlDeadline {
+    at: Instant,
+    state: Arc<AtomicU8>,
+}
+
+impl SqlDeadline {
+    pub(crate) fn new(at: Instant) -> Self {
+        Self {
+            at,
+            state: Arc::new(AtomicU8::new(SQL_QUEUED)),
+        }
+    }
+
+    pub(crate) fn at(&self) -> Instant {
+        self.at
+    }
+
+    // Only the winner of queued -> started may touch SQLite. A timer can
+    // cancel queued work without fencing a Cell or permitting a late mutation.
+    pub(crate) fn cancel_queued(&self) -> bool {
+        self.state
+            .compare_exchange(
+                SQL_QUEUED,
+                SQL_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+            || self.cancelled()
+    }
+
+    pub(crate) fn cancelled(&self) -> bool {
+        self.state.load(Ordering::Acquire) == SQL_CANCELLED
+    }
+
+    fn start(&self) -> Result<()> {
+        if Instant::now() >= self.at {
+            self.cancel_queued();
+        }
+        self.state
+            .compare_exchange(SQL_QUEUED, SQL_STARTED, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| Error::Deadline)
+    }
+}
 
 /// Minimum SQLite page-cache reservation for one active Cell.
 pub const ACTIVE_CELL_PAGE_CACHE_BYTES: u64 =
@@ -273,7 +327,7 @@ impl SqlWorkerPool {
             operation_digest,
             now_ms,
             max_result_bytes,
-            Instant::now() + DEFAULT_PAGE_IO_DEADLINE,
+            SqlDeadline::new(Instant::now() + DEFAULT_PAGE_IO_DEADLINE),
             Box::new(handler),
         )
         .await
@@ -286,7 +340,7 @@ impl SqlWorkerPool {
         operation_digest: Digest,
         now_ms: i64,
         max_result_bytes: usize,
-        deadline: Instant,
+        deadline: SqlDeadline,
         handler: Handler,
     ) -> Result<WorkerExecution> {
         let (reply, response) = oneshot::channel();
@@ -315,7 +369,7 @@ impl SqlWorkerPool {
         cell: CellId,
         plan: MigrationPlan,
         now_ms: i64,
-        deadline: Instant,
+        deadline: SqlDeadline,
     ) -> Result<PendingMigration> {
         let (reply, response) = oneshot::channel();
         self.send_worker_job(
@@ -339,7 +393,7 @@ impl SqlWorkerPool {
         delivery: InboxDelivery,
         now_ms: i64,
         max_result_bytes: usize,
-        deadline: Instant,
+        deadline: SqlDeadline,
         handler: Handler,
     ) -> Result<WorkerExecution> {
         let (reply, response) = oneshot::channel();
@@ -366,7 +420,7 @@ impl SqlWorkerPool {
         &self,
         cell: CellId,
         max_result_bytes: usize,
-        deadline: Instant,
+        deadline: SqlDeadline,
         handler: QueryHandler,
     ) -> Result<Vec<u8>> {
         let (reply, response) = oneshot::channel();
@@ -398,7 +452,7 @@ impl SqlWorkerPool {
                 WorkerCommand::PrepareHydration {
                     cell,
                     pages,
-                    deadline,
+                    deadline: SqlDeadline::new(deadline),
                     reply,
                 },
             )
@@ -408,6 +462,7 @@ impl SqlWorkerPool {
         // Preparation only selects pages. Abandoning its waiter cannot install
         // bytes or release foreground ownership, even if it was dispatched.
         let read = match tokio::time::timeout_at(deadline.into(), preparation).await {
+            Ok(Err(Error::Deadline)) => return Ok(HydrationStep::Deferred(Duration::ZERO)),
             Ok(result) => result?,
             Err(_) => return Ok(HydrationStep::Deferred(Duration::ZERO)),
         };
@@ -441,6 +496,7 @@ impl SqlWorkerPool {
         let (reply, response) = oneshot::channel();
         // Move the payload's reservation into the dispatched install: dropping
         // its waiter cannot release bytes still owned by the worker queue.
+        let install_deadline = SqlDeadline::new(deadline);
         let installation = async {
             self.send_worker_job(
                 cell,
@@ -448,17 +504,30 @@ impl SqlWorkerPool {
                     cell,
                     batch,
                     retained,
-                    deadline,
+                    deadline: install_deadline.clone(),
                     reply,
                 },
             )
             .await?;
             receive(response).await
         };
-        let progress = tokio::time::timeout_at(deadline.into(), installation)
-            .await
-            .map_err(|_| Error::Deadline)??;
-        Ok(HydrationStep::Progress(Some(progress)))
+        tokio::pin!(installation);
+        let result = match tokio::time::timeout_at(deadline.into(), &mut installation).await {
+            Ok(result) => result,
+            Err(_) => {
+                // Queued installation cannot run after cancellation. Retain its
+                // admission until acknowledgement; started writes remain uncertain.
+                install_deadline.cancel_queued();
+                let _ = installation.await;
+                Err(Error::Deadline)
+            }
+        };
+        match result {
+            Err(Error::Deadline) if install_deadline.cancelled() => {
+                Ok(HydrationStep::Deferred(Duration::ZERO))
+            }
+            result => result.map(|progress| HydrationStep::Progress(Some(progress))),
+        }
     }
 
     pub(crate) async fn hydration(&self, cell: CellId) -> Result<Option<crab_ltx::Hydration>> {
@@ -507,7 +576,7 @@ impl SqlWorkerPool {
         operation_digest: Digest,
         now_ms: i64,
         max_result_bytes: usize,
-        deadline: Instant,
+        deadline: SqlDeadline,
     ) -> Result<Resolution> {
         let (reply, response) = oneshot::channel();
         self.send_worker_job(
@@ -533,7 +602,7 @@ impl SqlWorkerPool {
         delivery: InboxDelivery,
         now_ms: i64,
         max_result_bytes: usize,
-        deadline: Instant,
+        deadline: SqlDeadline,
     ) -> Result<Resolution> {
         let (reply, response) = oneshot::channel();
         self.send_worker_job(
@@ -950,7 +1019,7 @@ enum WorkerCommand {
         operation_digest: Digest,
         now_ms: i64,
         max_result_bytes: usize,
-        deadline: Instant,
+        deadline: SqlDeadline,
         handler: Handler,
         reply: oneshot::Sender<Result<WorkerExecution>>,
     },
@@ -958,7 +1027,7 @@ enum WorkerCommand {
         cell: CellId,
         plan: MigrationPlan,
         now_ms: i64,
-        deadline: Instant,
+        deadline: SqlDeadline,
         reply: oneshot::Sender<Result<PendingMigration>>,
     },
     DeliverEffect {
@@ -968,28 +1037,28 @@ enum WorkerCommand {
         delivery: InboxDelivery,
         now_ms: i64,
         max_result_bytes: usize,
-        deadline: Instant,
+        deadline: SqlDeadline,
         handler: Handler,
         reply: oneshot::Sender<Result<WorkerExecution>>,
     },
     Query {
         cell: CellId,
         max_result_bytes: usize,
-        deadline: Instant,
+        deadline: SqlDeadline,
         handler: QueryHandler,
         reply: oneshot::Sender<Result<Vec<u8>>>,
     },
     PrepareHydration {
         cell: CellId,
         pages: u32,
-        deadline: Instant,
+        deadline: SqlDeadline,
         reply: oneshot::Sender<Result<Option<crab_ltx::db::HydrationRead>>>,
     },
     InstallHydration {
         cell: CellId,
         batch: crab_ltx::db::HydrationBatch,
         retained: ResourceReservation,
-        deadline: Instant,
+        deadline: SqlDeadline,
         reply: oneshot::Sender<Result<crab_ltx::Hydration>>,
     },
     Hydration {
@@ -1013,7 +1082,7 @@ enum WorkerCommand {
         operation_digest: Digest,
         now_ms: i64,
         max_result_bytes: usize,
-        deadline: Instant,
+        deadline: SqlDeadline,
         reply: oneshot::Sender<Result<Resolution>>,
     },
     ResolveEffect {
@@ -1021,7 +1090,7 @@ enum WorkerCommand {
         delivery: InboxDelivery,
         now_ms: i64,
         max_result_bytes: usize,
-        deadline: Instant,
+        deadline: SqlDeadline,
         reply: oneshot::Sender<Result<Resolution>>,
     },
     BindPrepared {

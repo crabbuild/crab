@@ -1,0 +1,488 @@
+--- a/crates/storage/src/lib.rs
++++ b/crates/storage/src/lib.rs
+@@ -155,8 +155,17 @@
+ }
+ /// TTL table info: `(account_id, table_name, ttl_attribute)`.
+ pub type TtlTableInfo = (String, String, String);
+-/// Stream records result: records plus an optional next shard iterator.
+-pub type StreamRecordsResult = Result<(Vec<StreamRecord>, Option<String>), StorageError>;
++/// Whether a stream page can be followed by another read.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum StreamContinuation {
++    /// Keep polling; None preserves the caller's previous sequence position.
++    More(Option<String>),
++    /// The shard is closed and the page exhausts its remaining records.
++    End,
++}
++
++/// Stream records and explicit continuation, including closed-shard exhaustion.
++pub type StreamRecordsResult = Result<(Vec<StreamRecord>, StreamContinuation), StorageError>;
+ /// Stream list result: summaries plus an optional next exclusive start ARN.
+ pub type StreamListResult = Result<(Vec<StreamSummary>, Option<String>), StorageError>;
+
+@@ -563,6 +572,10 @@
+     ) -> BoxFuture<'_, Result<(), StorageError>>;
+
+     /// Read stream records from a shard starting after a sequence number.
++    ///
++    /// Return `End` only after observing a closed shard and exhausting its
++    /// records. An empty open shard returns `More(None)`. A final nonempty
++    /// page may return `End`; its records must still reach the caller.
+     ///
+     /// `account_id` is the authenticated caller's account. Implementations MUST
+     /// return records only for shards whose backing table belongs to that
+--- a/crates/storage-sqlite/src/stream.rs
++++ b/crates/storage-sqlite/src/stream.rs
+@@ -15,7 +15,7 @@
+ };
+ use extenddb_storage::error::StorageError;
+ use extenddb_storage::util::{parse_stream_arn, stream_arn};
+-use extenddb_storage::{StreamEngine, StreamListResult, StreamRecordsResult};
++use extenddb_storage::{StreamContinuation, StreamEngine, StreamListResult, StreamRecordsResult};
+ use futures::future::BoxFuture;
+
+ use crate::sqlite_util::format_timestamp;
+@@ -116,6 +116,12 @@
+         let shard_id = shard_id.to_owned();
+         let after = after_sequence.map(str::to_owned);
+         Box::pin(async move {
++            let limit = usize::try_from(limit)
++                .ok()
++                .filter(|limit| (1..=1000).contains(limit))
++                .ok_or_else(|| {
++                    StorageError::Validation("Limit must be between 1 and 1000".to_owned())
++                })?;
+             // Ownership guard: only return records if the shard's backing table
+             // belongs to the calling account. SQLite keeps shards and the table
+             // catalog in the same database, so ownership resolves in one join.
+@@ -125,8 +131,8 @@
+             // iterator it did not issue, and does NOT distinguish "exists but
+             // not yours" from "does not exist" — so neither do we (both
+             // collapse here). Verified against DynamoDB Streams (us-east-1).
+-            let owned: Option<(i32,)> = sqlx::query_as(
+-                "SELECT 1 FROM stream_shards s \
++            let owned: Option<(Option<String>,)> = sqlx::query_as(
++                "SELECT s.ending_sequence_number FROM stream_shards s \
+                  JOIN tables t ON t.table_id = s.table_id \
+                  WHERE s.shard_id = ? AND t.account_id = ?",
+             )
+@@ -135,9 +141,10 @@
+             .fetch_optional(&self.pool)
+             .await
+             .map_err(|e| StorageError::Internal(e.to_string()))?;
+-            if owned.is_none() {
++            let Some((ending_sequence,)) = owned else {
+                 return Err(StorageError::Validation("Invalid ShardIterator".to_owned()));
+-            }
++            };
++            let closed = ending_sequence.is_some();
+
+             let rows: Vec<(String,)> = if let Some(after) = after {
+                 sqlx::query_as(
+@@ -146,7 +153,7 @@
+                 )
+                 .bind(&shard_id)
+                 .bind(&after)
+-                .bind(limit)
++                .bind((limit + 1) as i64)
+                 .fetch_all(&self.pool)
+                 .await
+             } else {
+@@ -155,20 +162,27 @@
+                      WHERE shard_id = ? ORDER BY sequence_number LIMIT ?",
+                 )
+                 .bind(&shard_id)
+-                .bind(limit)
++                .bind((limit + 1) as i64)
+                 .fetch_all(&self.pool)
+                 .await
+             }
+             .map_err(|e| StorageError::Internal(e.to_string()))?;
+
++            let has_more = rows.len() > limit;
+             let records: Vec<StreamRecord> = rows
+                 .into_iter()
++                .take(limit)
+                 .map(|(d,)| {
+                     serde_json::from_str(&d).map_err(|e| StorageError::Internal(e.to_string()))
+                 })
+                 .collect::<Result<_, _>>()?;
+             let last = records.last().map(|r| r.dynamodb.sequence_number.clone());
+-            Ok((records, last))
++            let continuation = if closed && !has_more {
++                StreamContinuation::End
++            } else {
++                StreamContinuation::More(last)
++            };
++            Ok((records, continuation))
+         })
+     }
+
+@@ -496,3 +510,105 @@
+         })
+     }
+ }
++
++#[cfg(test)]
++mod continuation_tests {
++    use super::*;
++    use extenddb_storage::TableEngine;
++
++    async fn fixture() -> (SqliteEngine, String) {
++        let engine = SqliteEngine::new(":memory:", 1, "us-east-1", 400 * 1024)
++            .await
++            .unwrap();
++        engine
++            .create_table(
++                "123456789012",
++                serde_json::from_value(serde_json::json!({
++                    "TableName": "StreamPages",
++                    "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
++                    "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
++                    "BillingMode": "PAY_PER_REQUEST",
++                    "StreamSpecification": {"StreamEnabled": true, "StreamViewType": "KEYS_ONLY"}
++                }))
++                .unwrap(),
++            )
++            .await
++            .unwrap();
++        let shard: String =
++            sqlx::query_scalar("SELECT shard_id FROM stream_shards ORDER BY shard_id LIMIT 1")
++                .fetch_one(&engine.pool)
++                .await
++                .unwrap();
++        (engine, shard)
++    }
++
++    #[tokio::test]
++    async fn empty_open_shard_remains_pollable_and_closed_shard_ends() {
++        let (engine, shard) = fixture().await;
++        let (records, continuation) = engine
++            .get_stream_records("123456789012", &shard, None, 1)
++            .await
++            .unwrap();
++        assert!(records.is_empty());
++        assert_eq!(continuation, StreamContinuation::More(None));
++        sqlx::query("UPDATE stream_shards SET ending_sequence_number = ? WHERE shard_id = ?")
++            .bind(format!("{:021}", 0))
++            .bind(&shard)
++            .execute(&engine.pool)
++            .await
++            .unwrap();
++        let (records, continuation) = engine
++            .get_stream_records("123456789012", &shard, None, 1)
++            .await
++            .unwrap();
++        assert!(records.is_empty());
++        assert_eq!(continuation, StreamContinuation::End);
++        engine.pool.close().await;
++    }
++
++    #[tokio::test]
++    async fn closed_shard_returns_final_records_before_ending() {
++        let (engine, shard) = fixture().await;
++        for sequence in [1, 2] {
++            let record: StreamRecord = serde_json::from_value(serde_json::json!({
++                "eventID": format!("event-{sequence}"), "eventName": "INSERT",
++                "eventVersion": "1.1", "eventSource": "aws:dynamodb", "awsRegion": "us-east-1",
++                "dynamodb": { "ApproximateCreationDateTime": 0, "Keys": {"id": {"S": "key"}},
++                    "SequenceNumber": format!("{sequence:021}"), "SizeBytes": 5, "StreamViewType": "KEYS_ONLY" }
++            })).unwrap();
++            engine
++                .write_stream_record("123456789012", &record, &shard, "StreamPages")
++                .await
++                .unwrap();
++        }
++        sqlx::query("UPDATE stream_shards SET ending_sequence_number = ? WHERE shard_id = ?")
++            .bind(format!("{:021}", 2))
++            .bind(&shard)
++            .execute(&engine.pool)
++            .await
++            .unwrap();
++        let (first, continuation) = engine
++            .get_stream_records("123456789012", &shard, None, 1)
++            .await
++            .unwrap();
++        assert_eq!(first.len(), 1);
++        let StreamContinuation::More(Some(sequence)) = continuation else {
++            panic!("first page must continue")
++        };
++        assert_eq!(sequence, format!("{:021}", 1));
++        let (last, continuation) = engine
++            .get_stream_records("123456789012", &shard, Some(&sequence), 1)
++            .await
++            .unwrap();
++        assert_eq!(last.len(), 1);
++        assert_eq!(last[0].dynamodb.sequence_number, format!("{:021}", 2));
++        assert_eq!(continuation, StreamContinuation::End);
++        assert!(matches!(
++            engine
++                .get_stream_records("999999999999", &shard, None, 1)
++                .await,
++            Err(StorageError::Validation(_))
++        ));
++        engine.pool.close().await;
++    }
++}
+--- a/crates/storage-postgres/src/stream_engine.rs
++++ b/crates/storage-postgres/src/stream_engine.rs
+@@ -7,9 +7,9 @@
+     SequenceNumberRange, Shard, StreamDescription, StreamRecord, StreamStatus, StreamSummary,
+     StreamViewType,
+ };
+-use extenddb_storage::StreamEngine;
+ use extenddb_storage::error::StorageError;
+ use extenddb_storage::util::{parse_stream_arn, stream_arn};
++use extenddb_storage::{StreamContinuation, StreamEngine, StreamRecordsResult};
+ use futures::future::BoxFuture;
+ use sqlx::PgPool;
+
+@@ -128,11 +128,17 @@
+         shard_id: &str,
+         after_sequence: Option<&str>,
+         limit: i64,
+-    ) -> BoxFuture<'_, Result<(Vec<StreamRecord>, Option<String>), StorageError>> {
++    ) -> BoxFuture<'_, StreamRecordsResult> {
+         let account_id = account_id.to_string();
+         let shard_id = shard_id.to_string();
+         let after_sequence = after_sequence.map(std::string::ToString::to_string);
+         Box::pin(async move {
++            let limit = usize::try_from(limit)
++                .ok()
++                .filter(|limit| (1..=1000).contains(limit))
++                .ok_or_else(|| {
++                    StorageError::Validation("Limit must be between 1 and 1000".to_owned())
++                })?;
+             // Ownership guard: only return records if the shard's backing table
+             // belongs to the calling account. `stream_shards`/`stream_records`
+             // rows live in the data database while the `tables` catalog (which
+@@ -141,14 +147,18 @@
+             // (data pool), then table_id + account_id (catalog pool). A shard
+             // iterator for a table the caller does not own is rejected as an
+             // invalid shard iterator (below).
+-            let shard_table_id: Option<(String,)> =
+-                sqlx::query_as("SELECT table_id FROM stream_shards WHERE shard_id = $1")
+-                    .bind(&shard_id)
+-                    .fetch_optional(&self.data_pool)
+-                    .await
+-                    .map_err(|e| StorageError::Internal(e.to_string()))?;
++            let shard_table_id: Option<(String, Option<String>)> = sqlx::query_as(
++                "SELECT table_id, ending_sequence_number FROM stream_shards WHERE shard_id = $1",
++            )
++            .bind(&shard_id)
++            .fetch_optional(&self.data_pool)
++            .await
++            .map_err(|e| StorageError::Internal(e.to_string()))?;
++            let closed = shard_table_id
++                .as_ref()
++                .is_some_and(|(_, end)| end.is_some());
+             let owned = match &shard_table_id {
+-                Some((table_id,)) => sqlx::query_as::<_, (i32,)>(
++                Some((table_id, _)) => sqlx::query_as::<_, (i32,)>(
+                     "SELECT 1 FROM tables WHERE table_id = $1 AND account_id = $2",
+                 )
+                 .bind(table_id)
+@@ -178,7 +188,7 @@
+                 )
+                 .bind(&shard_id)
+                 .bind(&after)
+-                .bind(limit)
++                .bind((limit + 1) as i64)
+                 .fetch_all(&self.data_pool)
+                 .await
+                 .map_err(|e| StorageError::Internal(e.to_string()))?
+@@ -189,21 +199,28 @@
+                      ORDER BY sequence_number LIMIT $2",
+                 )
+                 .bind(&shard_id)
+-                .bind(limit)
++                .bind((limit + 1) as i64)
+                 .fetch_all(&self.data_pool)
+                 .await
+                 .map_err(|e| StorageError::Internal(e.to_string()))?
+             };
+
++            let has_more = rows.len() > limit;
+             let records: Vec<StreamRecord> = rows
+                 .into_iter()
++                .take(limit)
+                 .map(|(data,)| {
+                     serde_json::from_value(data).map_err(|e| StorageError::Internal(e.to_string()))
+                 })
+                 .collect::<Result<Vec<_>, _>>()?;
+
+             let last_seq = records.last().map(|r| r.dynamodb.sequence_number.clone());
+-            Ok((records, last_seq))
++            let continuation = if closed && !has_more {
++                StreamContinuation::End
++            } else {
++                StreamContinuation::More(last_seq)
++            };
++            Ok((records, continuation))
+         })
+     }
+
+--- a/crates/storage-mongodb/src/stream_engine.rs
++++ b/crates/storage-mongodb/src/stream_engine.rs
+@@ -23,7 +23,7 @@
+ use extenddb_storage::StreamEngine;
+ use extenddb_storage::error::StorageError;
+ use extenddb_storage::util::{parse_stream_arn, stream_arn};
+-use extenddb_storage::{StreamListResult, StreamRecordsResult};
++use extenddb_storage::{StreamContinuation, StreamListResult, StreamRecordsResult};
+
+ use crate::MongoEngine;
+
+@@ -293,6 +293,12 @@
+         let shard_id = shard_id.to_owned();
+         let after_sequence = after_sequence.map(std::borrow::ToOwned::to_owned);
+         Box::pin(async move {
++            let limit = usize::try_from(limit)
++                .ok()
++                .filter(|limit| (1..=1000).contains(limit))
++                .ok_or_else(|| {
++                    StorageError::Validation("Limit must be between 1 and 1000".to_owned())
++                })?;
+             // Ownership guard: only return records if the shard's backing table
+             // belongs to the calling account. `stream_shards`/`stream_records`
+             // live in the data database while the `tables` catalog (which
+@@ -305,6 +311,9 @@
+                 .find_one(doc! { "shard_id": &shard_id })
+                 .await
+                 .map_err(|e| StorageError::Internal(e.to_string()))?;
++            let closed = shard_doc
++                .as_ref()
++                .is_some_and(|shard| shard.get_str("ending_sequence_number").is_ok());
+             let owned = match shard_doc.as_ref().and_then(|d| d.get_str("table_id").ok()) {
+                 // Look the table up by its globally-unique `table_id` (a
+                 // top-level field), then compare the owning account_id read out
+@@ -348,7 +357,7 @@
+
+             let opts = FindOptions::builder()
+                 .sort(doc! { "sequence_number": 1 })
+-                .limit(limit)
++                .limit((limit + 1) as i64)
+                 .build();
+
+             let cursor = records_coll
+@@ -362,8 +371,10 @@
+                 .await
+                 .map_err(|e| StorageError::Internal(e.to_string()))?;
+
++            let has_more = docs.len() > limit;
+             let records: Vec<StreamRecord> = docs
+                 .into_iter()
++                .take(limit)
+                 .map(|d| {
+                     let record_bson = d
+                         .get("record_data")
+@@ -376,7 +387,12 @@
+                 .collect::<Result<Vec<_>, _>>()?;
+
+             let last_seq = records.last().map(|r| r.dynamodb.sequence_number.clone());
+-            Ok((records, last_seq))
++            let continuation = if closed && !has_more {
++                StreamContinuation::End
++            } else {
++                StreamContinuation::More(last_seq)
++            };
++            Ok((records, continuation))
+         })
+     }
+
+--- a/crates/engine/src/streams.rs
++++ b/crates/engine/src/streams.rs
+@@ -9,6 +9,7 @@
+     GetShardIteratorInput, GetShardIteratorOutput, ListStreamsInput, ListStreamsOutput,
+     ShardIteratorType,
+ };
++use extenddb_storage::StreamContinuation;
+ use extenddb_storage::error::StorageError;
+ use serde_json::Value;
+
+@@ -224,32 +225,40 @@
+         Some(seq.to_owned())
+     };
+
+-    let (records, last_seq) = ctx
++    let (records, continuation) = ctx
+         .storage
+         .get_stream_records(&ctx.account_id, shard_id, after_sequence.as_deref(), limit)
+         .await
+         .map_err(storage_to_dynamo)?;
+
+-    // Build next iterator — points to after the last record read.
+-    // Carries a fresh creation timestamp so the 15-minute window resets.
+-    let next_iterator = {
+-        let next_seq = last_seq.unwrap_or_else(|| seq.to_owned());
+-        let now = std::time::SystemTime::now()
+-            .duration_since(std::time::UNIX_EPOCH)
+-            .unwrap_or_default()
+-            .as_secs();
+-        let next_token = format!("{shard_id}|AFTER_SEQUENCE_NUMBER|{next_seq}|{now}");
+-        Some(base64::Engine::encode(
+-            &base64::engine::general_purpose::STANDARD,
+-            next_token,
+-        ))
+-    };
++    let now = std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .unwrap_or_default()
++        .as_secs();
++    let next_iterator = next_iterator(shard_id, seq, continuation, now);
+
+     let output = GetRecordsOutput {
+         records,
+         next_shard_iterator: next_iterator,
+     };
+     serialize_output(&output)
++}
++
++fn next_iterator(
++    shard_id: &str,
++    previous_sequence: &str,
++    continuation: StreamContinuation,
++    created_at: u64,
++) -> Option<String> {
++    let StreamContinuation::More(last_sequence) = continuation else {
++        return None;
++    };
++    let sequence = last_sequence.as_deref().unwrap_or(previous_sequence);
++    let token = format!("{shard_id}|AFTER_SEQUENCE_NUMBER|{sequence}|{created_at}");
++    Some(base64::Engine::encode(
++        &base64::engine::general_purpose::STANDARD,
++        token,
++    ))
+ }
+
+ fn storage_to_dynamo(e: StorageError) -> DynamoDbError {
+@@ -262,3 +271,29 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod continuation_tests {
++    use super::*;
++
++    #[test]
++    fn closed_shard_has_no_next_iterator() {
++        assert_eq!(
++            next_iterator("shard", "7", StreamContinuation::End, 123),
++            None
++        );
++    }
++
++    #[test]
++    fn open_page_preserves_or_advances_position_and_refreshes_expiry() {
++        for (last, expected) in [(None, "7"), (Some("8".to_owned()), "8")] {
++            let token = next_iterator("shard", "7", StreamContinuation::More(last), 123).unwrap();
++            let decoded =
++                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, token).unwrap();
++            assert_eq!(
++                String::from_utf8(decoded).unwrap(),
++                format!("shard|AFTER_SEQUENCE_NUMBER|{expected}|123")
++            );
++        }
++    }
++}

@@ -36,9 +36,11 @@ const MAX_STATE_STREAM_CHUNKS: usize = 1_024;
 #[cfg(test)]
 mod tests;
 
+mod backpressure;
 mod local;
 mod replica;
 mod routing;
+mod runtime;
 
 pub use replica::CellReadReplica;
 pub use routing::ReplicaReadRouter;
@@ -49,6 +51,8 @@ pub(crate) use local::{
     receipt, validate_description,
 };
 use local::{decode_output, unix_time_ms, validate_minimum};
+pub use runtime::LocalCellResolver;
+use runtime::{RuntimeCellTransport, RuntimeLocalResolver};
 
 /// Execution policy for typed queries on a client capability.
 ///
@@ -466,6 +470,7 @@ pub(super) struct EncodedCommand {
 }
 
 /// Owned encoded query accepted by a local or authenticated peer transport.
+#[derive(Clone)]
 pub(super) struct EncodedQuery {
     pub(super) target: CellTarget,
     pub(super) expected: CellDescription,
@@ -480,6 +485,7 @@ pub(super) struct EncodedQuery {
 }
 
 /// Owned request-ledger lookup accepted by a routed transport.
+#[derive(Clone)]
 pub(super) struct EncodedResolve {
     pub(super) target: CellTarget,
     pub(super) expected: CellDescription,
@@ -540,6 +546,30 @@ impl CellClient {
             read_policy: ReadPolicy::CurrentOwner,
             replicas: None,
         }
+    }
+
+    /// Returns a capability with bounded waiting for owner capacity refusals.
+    ///
+    /// Clones share request and retained-input limits. Full client admission
+    /// still fails immediately. Mailbox work queues in FIFO order per Cell;
+    /// Describe uses shared client bounds only. Cells remain independent.
+    /// Only capacity refusals are retried; ambiguous commands require resolution.
+    /// The wait bound never cancels an accepted attempt. Replica reads retain
+    /// separate admission.
+    pub fn with_admission_backpressure(
+        &self,
+        requests: usize,
+        bytes: usize,
+        max_wait: std::time::Duration,
+    ) -> Result<Self> {
+        let mut client = self.clone();
+        client.transport = Arc::new(backpressure::BackpressureTransport::new(
+            self.transport.clone(),
+            requests,
+            bytes,
+            max_wait,
+        )?);
+        Ok(client)
     }
 
     /// Wires replica placement and authenticated execution at the host boundary.
@@ -675,6 +705,54 @@ impl CellClient {
                 telemetry,
             }),
         ))
+    }
+
+    /// Routes to any Cell currently owned by this local runtime.
+    ///
+    /// The catalog and authority are checked for each invocation. This does
+    /// not acquire an idle Cell or forward to another node; callers must
+    /// arrange ownership before sending an operation.
+    #[must_use]
+    pub fn local_runtime(
+        registry: Arc<Registry>,
+        runtime: crate::cell::actor::CellRuntime,
+        layout: crate::ltx::CellStorageLayout,
+    ) -> Self {
+        let transport = Arc::new(RuntimeCellTransport::new(registry.clone(), runtime, layout));
+        Self::new(registry, transport)
+    }
+
+    /// Routes a target to its current local owner or an authenticated peer.
+    ///
+    /// Every invocation rechecks catalog and authority state. The peer round
+    /// trip must resolve the current remote owner and verify its enrollment;
+    /// this constructor does not acquire an idle Cell.
+    #[must_use]
+    pub fn runtime_with_peer(
+        registry: Arc<Registry>,
+        runtime: crate::cell::actor::CellRuntime,
+        layout: crate::ltx::CellStorageLayout,
+        signer: Arc<crate::peer::PeerSigner>,
+        principal: crate::peer::PeerPrincipal,
+        round_trip: Arc<dyn crate::peer::PeerRoundTrip>,
+    ) -> Self {
+        Self::peer(registry, signer, principal, round_trip)
+            .with_local_resolver(Arc::new(RuntimeLocalResolver { runtime, layout }))
+    }
+
+    /// Resolves a local owner before delegating to this client's transport.
+    ///
+    /// The resolver owns product placement and admission policy. It runs before
+    /// describe, command, query, and resolution; errors never dispatch remotely.
+    /// Configure admission backpressure afterward so it bounds both routes.
+    #[must_use]
+    pub fn with_local_resolver(mut self, resolver: Arc<dyn LocalCellResolver>) -> Self {
+        self.transport = Arc::new(RuntimeCellTransport::with_resolver(
+            self.registry.clone(),
+            resolver,
+            self.transport,
+        ));
+        self
     }
 
     /// Builds a typed capability over authenticated private peer routing.
@@ -876,12 +954,18 @@ impl CellClient {
                 .local
                 .as_ref()
                 .map(|(session, resolver)| (*session, resolver.as_ref()));
-            return replicas
-                .router
-                .query::<Q>(&replicas.peer, local, target, minimum, input)
-                .await
-                .map(|(observed, _)| observed)
-                .map_err(InvocationError::NotStarted);
+            // Placement and replica admission carry large I/O futures. Keep
+            // that optional state off every caller's owner-query stack frame.
+            return Box::pin(replicas.router.query::<Q>(
+                &replicas.peer,
+                local,
+                target,
+                minimum,
+                input,
+            ))
+            .await
+            .map(|(observed, _)| observed)
+            .map_err(InvocationError::NotStarted);
         }
         let description = self.describe::<Q::Output>(target).await?;
         self.query_with_description::<Q>(target, description, minimum, input)

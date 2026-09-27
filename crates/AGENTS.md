@@ -26,6 +26,7 @@ Scoped rules for `crates/`. Root `AGENTS.md` also applies.
 - `crab-lfs` — Git LFS object layout, storage access, and integrity checks; pointer parsing remains in `crab-git`.
 - `crab-ltx` — managed SQLite WAL capture, checksum-bearing LTX, exact recovery; optional `replica` adds crab-storage transport, epoch inheritance/head CAS, bundles, range compaction and immutable/writable sparse SQL with hydration. Provenance in `crab-ltx/UPSTREAM.md`; provider construction, leases and HTTP control policy remain outside.
 - `crab-cell-runtime` — embedded Rust Cell identities, control/CAS authority, SQLite runtime schema, actors, primitive mechanics and LTX publication. HTTP/auth/provider construction remain in the server composition boundary.
+- `crab-cell-peer-http` — shared owner-resolving HTTP peer round trip and pinned mTLS identity/listener. Product servers supply target scope, TLS files and name, and authenticated receivers.
 
 ### Read, Cache, and Virtual Filesystems
 

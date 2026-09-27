@@ -279,37 +279,15 @@ impl CellCatalog {
         let mut backoff = Backoff::default();
         loop {
             let observed = self.load_head(shard).await?;
-            let mut entries = match &observed {
-                Some(observed) => self.load_entries(shard, &observed.head).await?,
-                None => Vec::new(),
+            let Some(head) = self.insert_entry(shard, observed.as_ref(), &entry).await? else {
+                return Ok(CatalogProof {
+                    entry,
+                    revision: observed.as_ref().map_or(0, |head| head.head.revision),
+                });
             };
-            match entries.binary_search_by(|value| value.cell.as_bytes().cmp(entry.cell.as_bytes()))
-            {
-                Ok(index) if entries[index] == entry => {
-                    return Ok(CatalogProof {
-                        entry,
-                        revision: observed
-                            .as_ref()
-                            .map_or(0, |observed| observed.head.revision),
-                    });
-                }
-                Ok(_) => return Err(Error::CatalogCollision),
-                Err(index) => entries.insert(index, entry.clone()),
-            }
-            if entries.len() > MAX_ENTRIES {
-                return Err(Error::CatalogFull);
-            }
-            let revision = match &observed {
-                Some(observed) => observed
-                    .head
-                    .revision
-                    .checked_add(1)
-                    .ok_or(Error::Catalog("head revision overflow"))?,
-                None => 1,
-            };
-            let head = self.upload_pages(revision, &entries).await?;
+            let revision = head.revision;
             let encoded = head.encode()?;
-            let path = self.layout.catalog_head_path(shard);
+            let path = self.layout.catalog_head_path(self.tenant.as_bytes(), shard);
             let published = match observed {
                 Some(observed) => {
                     self.layout
@@ -421,7 +399,7 @@ impl CellCatalog {
             pages: page_refs,
         };
         let encoded = head.encode()?;
-        let path = self.layout.catalog_head_path(shard);
+        let path = self.layout.catalog_head_path(self.tenant.as_bytes(), shard);
         match self
             .layout
             .store()
@@ -461,7 +439,7 @@ impl CellCatalog {
     }
 
     async fn load_head(&self, shard: u8) -> Result<Option<ObservedHead>> {
-        let path = self.layout.catalog_head_path(shard);
+        let path = self.layout.catalog_head_path(self.tenant.as_bytes(), shard);
         let started = std::time::Instant::now();
         let observed = self
             .layout
@@ -509,6 +487,61 @@ impl CellCatalog {
             return Err(Error::Catalog("head exceeds entry limit"));
         }
         Ok(entries)
+    }
+
+    /// Replace only the page that can contain this Cell. The head CAS remains
+    /// the serialization point, so a losing writer retries against fresh pages.
+    async fn insert_entry(
+        &self,
+        shard: u8,
+        observed: Option<&ObservedHead>,
+        entry: &CatalogEntry,
+    ) -> Result<Option<CatalogHead>> {
+        let Some(observed) = observed else {
+            let reference = self.upload_page(std::slice::from_ref(entry)).await?;
+            return Ok(Some(CatalogHead {
+                revision: 1,
+                pages: vec![reference],
+            }));
+        };
+        let mut pages = observed.head.pages.clone();
+        let index = observed.head.page_index(entry.cell).unwrap_or(0);
+        let mut entries = self.load_located_page(shard, &pages, index).await?;
+        match entries.binary_search_by(|value| value.cell.as_bytes().cmp(entry.cell.as_bytes())) {
+            Ok(index) if entries[index] == *entry => return Ok(None),
+            Ok(_) => return Err(Error::CatalogCollision),
+            Err(index) => entries.insert(index, entry.clone()),
+        }
+        let revision = observed
+            .head
+            .revision
+            .checked_add(1)
+            .ok_or(Error::Catalog("head revision overflow"))?;
+        if entries.len() <= ENTRIES_PER_PAGE {
+            pages[index] = self.upload_page(&entries).await?;
+            return Ok(Some(CatalogHead { revision, pages }));
+        }
+        if pages.len() == MAX_PAGES {
+            // Full pages are not guaranteed after earlier splits. Repack once
+            // at the head limit before reporting that the shard is full.
+            let mut all = self.load_entries(shard, &observed.head).await?;
+            let position = match all
+                .binary_search_by(|value| value.cell.as_bytes().cmp(entry.cell.as_bytes()))
+            {
+                Ok(_) => return Err(Error::Catalog("catalog page insertion changed")),
+                Err(position) => position,
+            };
+            all.insert(position, entry.clone());
+            if all.len() > MAX_ENTRIES {
+                return Err(Error::CatalogFull);
+            }
+            return self.upload_pages(revision, &all).await.map(Some);
+        }
+        let right = entries.split_off(entries.len() / 2);
+        let left = self.upload_page(&entries).await?;
+        let right = self.upload_page(&right).await?;
+        pages.splice(index..=index, [left, right]);
+        Ok(Some(CatalogHead { revision, pages }))
     }
 
     /// Loads one immutable page and proves it belongs where the locator says.
@@ -639,31 +672,35 @@ impl CellCatalog {
     async fn upload_pages(&self, revision: u64, entries: &[CatalogEntry]) -> Result<CatalogHead> {
         let mut pages = Vec::new();
         for entries in entries.chunks(ENTRIES_PER_PAGE) {
-            let first = entries
-                .first()
-                .ok_or(Error::Catalog("empty catalog page"))?
-                .cell;
-            let encoded = CatalogPage {
-                entries: entries.to_vec(),
-            }
-            .encode()?;
-            if encoded.len() as u64 > MAX_PAGE_BYTES {
-                return Err(Error::Catalog("encoded page exceeds 1 MiB"));
-            }
-            let digest = Digest::from_bytes(*blake3::hash(&encoded).as_bytes());
-            self.layout
-                .store()
-                .put(
-                    &self.layout.catalog_object_path(digest.as_bytes()),
-                    Bytes::from(encoded),
-                )
-                .await?;
-            pages.push(CatalogPageRef { digest, first });
+            pages.push(self.upload_page(entries).await?);
         }
         if pages.is_empty() || pages.len() > MAX_PAGES {
             return Err(Error::Catalog("invalid head page count"));
         }
         Ok(CatalogHead { revision, pages })
+    }
+
+    async fn upload_page(&self, entries: &[CatalogEntry]) -> Result<CatalogPageRef> {
+        let first = entries
+            .first()
+            .ok_or(Error::Catalog("empty catalog page"))?
+            .cell;
+        let encoded = CatalogPage {
+            entries: entries.to_vec(),
+        }
+        .encode()?;
+        if encoded.len() as u64 > MAX_PAGE_BYTES {
+            return Err(Error::Catalog("encoded page exceeds 1 MiB"));
+        }
+        let digest = Digest::from_bytes(*blake3::hash(&encoded).as_bytes());
+        self.layout
+            .store()
+            .put(
+                &self.layout.catalog_object_path(digest.as_bytes()),
+                Bytes::from(encoded),
+            )
+            .await?;
+        Ok(CatalogPageRef { digest, first })
     }
 }
 

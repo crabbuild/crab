@@ -125,8 +125,8 @@ impl Registration {
         if !read_only {
             file.set_len(u64::from(count) * u64::from(page_size))?;
         }
-        file.sync_all()?;
-        host.filesystem.sync_parent(path)?;
+        // These pages are derived from the pinned root. Durable warm reuse
+        // has its own handoff; syncing this placeholder adds no command durability.
         drop(file);
         let app = Arc::new(App {
             io: Io::new(database)?,

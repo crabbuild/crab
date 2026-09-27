@@ -2,6 +2,7 @@
 
 pub mod activity_pool;
 pub mod blob;
+pub mod capacity;
 pub mod cron;
 pub mod effects;
 pub mod kv;
