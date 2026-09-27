@@ -465,6 +465,38 @@ The original index split/tombstone/owner-restore scenario then passed five times
 all three focused scenarios (1.20 s). These checks establish this admission race's
 behavior, not arbitrary churn tolerance or fleet-scale qualification.
 
+### Ownership changes during lookup and claim
+
+Repeated SDK GSI qualification reproduced a 503 after owner drain (the ninth
+unmodified run failed). Instrumented repetition also captured an idle-root CAS
+loss: a remote activation read Idle, another node claimed the Cell, and the
+losing storage conflict became a generic peer rejection.
+
+Placement and published-root restoration now share one bounded admission
+re-resolution. A CellNotActive or typed storage StateConflict triggers one
+fresh attempt only when authority proves a different ownership epoch. This
+runs before application dispatch and does not replay accepted item mutations.
+Stable refusals, unrelated storage errors and ambiguous transport errors still
+propagate. The runtime's CAS, exact-root checks and rollback remain unchanged.
+
+A separate stale observation can name a local Serving owner that has drained
+before local handle lookup. Published-root restoration now reloads that local
+observation under the admission lock; an Idle successor is restored normally.
+Foreign Serving owners still route remotely without taking the local admission
+lock. Base, GSI, directory, credential and coordinator requests use this shared
+resolver; ordinary peer invocation still cannot acquire ownership.
+
+Deterministic signed SDK tests pause the selected remote activation both before
+admission and inside its conditional claim, then install a competing winner.
+A second test pauses an authority response, drains its local owner, and resumes
+the stale read. Both new interleavings returned SDK 503 before the fix, with
+client retries disabled. After the fix, both tests passed (6.47 s), the original
+GSI workload passed ten consecutive runs (9.23–18.15 s), and all five reclamation
+and four recovery siblings passed (9.77 s and 7.67 s). Strict all-target Clippy
+and the standalone server build passed. Full peer/process qualification remains
+a separate CI gate; these tests do not establish arbitrary churn or fleet-scale
+readiness.
+
 ## Base serving cutover
 
 Base creation installs a bounded directory root and publishes its durable copy

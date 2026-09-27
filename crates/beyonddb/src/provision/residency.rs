@@ -207,7 +207,15 @@ impl CellInitialPartitionProvisioner {
                     _ => false,
                 }
         };
-        if !restorable(observed.value()) {
+        // A local owner can drain after the caller's authority read. Recheck
+        // under admission before delegating; the remote path cannot route Idle.
+        if !restorable(observed.value())
+            && observed
+                .value()
+                .owner
+                .as_ref()
+                .is_none_or(|owner| owner.session != self.session)
+        {
             return Ok(None);
         }
         let _admission = self.admission.lock().await;
