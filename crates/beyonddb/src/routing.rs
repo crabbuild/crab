@@ -157,7 +157,7 @@ impl Command for ActivateTableRoute {
         }
         for index in &table.global_secondary_indexes {
             if context.sql(&statement(
-                "SELECT 1 FROM ddb_global_index_routes WHERE table_id = ?1 AND base_table_id = ?2",
+                "SELECT 1 FROM ddb_global_index_routes WHERE table_id = ?1 AND base_table_id = ?2 AND initial_fingerprint IS NOT NULL",
                 vec![
                     SqlValue::Text(index.id.clone()),
                     SqlValue::Text(table.id.clone()),

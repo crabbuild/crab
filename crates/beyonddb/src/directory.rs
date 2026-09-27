@@ -15,9 +15,11 @@ use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
 mod changes;
+mod client;
 mod retirement;
 mod split;
 pub use changes::*;
+pub use client::*;
 pub use retirement::*;
 pub use split::*;
 
@@ -27,7 +29,7 @@ const SCHEMA: &str = include_str!("directory/schema.sql");
 const MAX_RANGES: usize = 1024;
 const PAGE_SIZE: usize = 64;
 
-static COMMANDS: [crab_cell_runtime::registry::OperationDescriptor; 9] = [
+static COMMANDS: [crab_cell_runtime::registry::OperationDescriptor; 12] = [
     crab_cell_runtime::registry::OperationDescriptor {
         input_limit: 1024 * 1024,
         ..crate::participant::phase_operation(1)
@@ -38,22 +40,44 @@ static COMMANDS: [crab_cell_runtime::registry::OperationDescriptor; 9] = [
     crate::participant::phase_operation(5),
     crate::participant::phase_operation(6),
     crate::participant::phase_operation(7),
-    crate::participant::phase_operation(8),
+    crab_cell_runtime::registry::OperationDescriptor {
+        codec_version: 2,
+        ..crate::participant::phase_operation(8)
+    },
     crate::participant::phase_operation(9),
+    crab_cell_runtime::registry::OperationDescriptor {
+        input_limit: crate::OPERATION_BYTES,
+        ..crate::participant::phase_operation(10)
+    },
+    crab_cell_runtime::registry::OperationDescriptor {
+        input_limit: crate::OPERATION_BYTES,
+        ..crate::participant::phase_operation(11)
+    },
+    crab_cell_runtime::registry::OperationDescriptor {
+        input_limit: crate::OPERATION_BYTES,
+        ..crate::participant::phase_operation(12)
+    },
 ];
-static QUERIES: [crab_cell_runtime::registry::OperationDescriptor; 3] = [
+static QUERIES: [crab_cell_runtime::registry::OperationDescriptor; 6] = [
     crab_cell_runtime::registry::OperationDescriptor {
         codec_version: 2,
         ..crate::participant::phase_operation(1)
     },
     crab_cell_runtime::registry::OperationDescriptor {
         output_limit: 64 * 1024,
+        codec_version: 2,
         ..crate::participant::phase_operation(2)
     },
     crab_cell_runtime::registry::OperationDescriptor {
         output_limit: 128 * 1024,
         ..crate::participant::phase_operation(3)
     },
+    crate::participant::phase_operation(4),
+    crab_cell_runtime::registry::OperationDescriptor {
+        output_limit: crate::OPERATION_BYTES,
+        ..crate::participant::phase_operation(5)
+    },
+    crate::participant::phase_operation(6),
 ];
 
 /// Immutable scope and coverage of one node in a table generation's directory.
@@ -67,6 +91,17 @@ pub struct DirectorySpec {
 }
 
 impl DirectorySpec {
+    /// Address the stable root of one immutable table or index generation.
+    pub fn root(table_id: String) -> Self {
+        Self {
+            table_id,
+            node_id: [0; 16],
+            lower: [0; 16],
+            upper: None,
+            depth: 0,
+        }
+    }
+
     fn valid(&self) -> bool {
         self.depth < 128 && self.upper.is_none_or(|upper| self.lower < upper)
     }
@@ -95,6 +130,7 @@ pub enum DirectoryMode {
     Retiring {
         children: [DirectorySpec; 2],
         acknowledged: u8,
+        published: bool,
     },
     Retired,
 }
@@ -119,6 +155,7 @@ impl crab_cell_runtime::registry::CellModule for DirectoryModule {
             source.update(include_bytes!("directory/changes.rs"));
             source.update(include_bytes!("directory/retirement.rs"));
             source.update(include_bytes!("directory/split.rs"));
+            source.update(include_bytes!("global_index/split_routing.rs"));
             ModuleDescriptor {
                 name: MODULE,
                 source_digest: Digest::from_bytes(*source.finalize().as_bytes()),
@@ -157,7 +194,13 @@ impl crab_cell_runtime::registry::CellModule for DirectoryModule {
         registry.bind_command::<RecordDirectoryRetirement>()?;
         registry.bind_query::<ReadDirectory>()?;
         registry.bind_query::<ReadDirectoryPage>()?;
-        registry.bind_query::<ReadDirectoryChanges>()
+        registry.bind_query::<ReadDirectoryChanges>()?;
+        registry.bind_command::<crate::BeginGlobalIndexSplit>()?;
+        registry.bind_command::<crate::CommitGlobalIndexSplit>()?;
+        registry.bind_command::<crate::FinishGlobalIndexSplit>()?;
+        registry.bind_query::<crate::ReadPublishedGlobalIndexPartition>()?;
+        registry.bind_query::<DirectoryNeedsSplit>()?;
+        registry.bind_query::<crate::ReadGlobalIndexSplitPlan>()
     }
 }
 
@@ -167,7 +210,7 @@ pub(crate) fn cell_type() -> Result<CellType> {
         .with_limits(16 * 1024 * 1024, 4 * 1024 * 1024)
 }
 
-fn target_for_tenant(tenant: TenantId, spec: &DirectorySpec) -> Result<CellTarget> {
+pub(crate) fn target_for_tenant(tenant: TenantId, spec: &DirectorySpec) -> Result<CellTarget> {
     let id = blake3::Hash::from_hex(&spec.table_id)
         .map_err(|_| Error::Identity("invalid directory table ID"))?;
     if id.to_hex().as_str() != spec.table_id || &id.as_bytes()[..16] != tenant.as_bytes() {
@@ -194,7 +237,7 @@ pub fn initialize_directory(transaction: &crab_ltx::rusqlite::Transaction<'_>) -
     Ok(())
 }
 
-fn state(
+pub(crate) fn state(
     sql: impl FnOnce(&SqlBatch) -> Result<Vec<SqlResultSet>>,
 ) -> Result<Option<DirectoryState>> {
     let rows = sql(&statement(
@@ -241,9 +284,10 @@ fn valid_ranges(spec: &DirectorySpec, ranges: &[RoutePagePartition]) -> bool {
 
 fn insert_range(context: &CommandContext<'_, '_>, range: &RoutePagePartition) -> Result<()> {
     context.sql(&statement(
-        "INSERT INTO ddb_directory_ranges (lower_bound, record) VALUES (?1, ?2)",
+        "INSERT INTO ddb_directory_ranges (lower_bound, partition_id, record) VALUES (?1, ?2, ?3)",
         vec![
             SqlValue::Blob(range.lower.to_vec()),
+            SqlValue::Blob(range.partition_id.to_vec()),
             SqlValue::Blob(serde_json::to_vec(range)?),
         ],
     ))?;
@@ -293,7 +337,7 @@ fn all_ranges(context: &CommandContext<'_, '_>) -> Result<Vec<RoutePagePartition
     Ok(result)
 }
 
-fn fingerprint(spec: &DirectorySpec, ranges: &[RoutePagePartition]) -> Result<[u8; 32]> {
+pub(crate) fn fingerprint(spec: &DirectorySpec, ranges: &[RoutePagePartition]) -> Result<[u8; 32]> {
     let mut hash = blake3::Hasher::new();
     hash.update(b"beyonddb.directory-copy.v1\0");
     hash.update(&serde_json::to_vec(spec)?);
@@ -353,7 +397,16 @@ impl Command for InstallDirectory {
         let initial_fingerprint = fingerprint(&input.spec, &input.ranges)?;
         let installed = DirectoryState {
             spec: input.spec,
-            version: 1,
+            // Continuation checks resolve the preceding logical position first.
+            // Descendants must advance beyond every version of that old leaf so
+            // a metadata split cannot masquerade as its unchanged membership.
+            version: match &input.source {
+                Some(source) => source
+                    .version
+                    .checked_add(1)
+                    .ok_or(Error::Command("directory version overflow"))?,
+                None => 1,
+            },
             initial_fingerprint,
             mode,
         };
@@ -404,7 +457,7 @@ pub struct DirectoryPageInput {
 pub enum DirectoryPage {
     Unavailable,
     Changed,
-    Redirect([DirectorySpec; 2]),
+    Redirect(Box<DirectorySplit>),
     Leaf {
         version: u64,
         ranges: Vec<RoutePagePartition>,
@@ -416,7 +469,7 @@ pub struct ReadDirectoryPage;
 impl Query for ReadDirectoryPage {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 2;
-    const CODEC_VERSION: u32 = 1;
+    const CODEC_VERSION: u32 = 2;
     type Input = Json<DirectoryPageInput>;
     type Output = Json<DirectoryPage>;
     fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
@@ -428,7 +481,7 @@ impl Query for ReadDirectoryPage {
         }
         match state.mode {
             DirectoryMode::Branch(split) => {
-                return Ok(Json(DirectoryPage::Redirect(split.children)));
+                return Ok(Json(DirectoryPage::Redirect(Box::new(split))));
             }
             DirectoryMode::Importing | DirectoryMode::Retiring { .. } | DirectoryMode::Retired => {
                 return Ok(Json(DirectoryPage::Unavailable));

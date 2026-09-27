@@ -17,9 +17,9 @@ use crate::split::split_contract;
 use crate::{
     BeginSplit, BeginSplitOutcome, CellSplitController, DescribeTable, Json, ListTables,
     ListTablesInput, ListTablesOutcome, PartitionState, PartitionUsage, PublishedPartitionInput,
-    PublishedPartitionOutcome, ReadGlobalIndexRoutePage, ReadPartitionSplitPlan,
-    ReadPartitionState, ReadPublishedPartition, ReadRoutePage, ReadSplitPlan, ReadSplitRoute,
-    RoutePageInput, RoutePageOutcome, SplitPlan, SplitRouteState, account_target, data_target,
+    PublishedPartitionOutcome, ReadPartitionSplitPlan, ReadPartitionState, ReadPublishedPartition,
+    ReadRoutePage, ReadSplitPlan, ReadSplitRoute, RoutePageInput, RoutePageOutcome, SplitPlan,
+    SplitRouteState, account_target, data_target,
 };
 
 impl CellInitialPartitionProvisioner {
@@ -27,7 +27,8 @@ impl CellInitialPartitionProvisioner {
     ///
     /// `None` starts a new pass. Once a range is selected, the cursor advances
     /// even if its split fails; its durable plan remains for the next pass.
-    /// Discovery failures preserve the cursor. Reads use current owners.
+    /// Account discovery failures preserve the cursor; unavailable index
+    /// directories are revisited next pass. Reads use current owners.
     pub async fn reconcile_account_capacity(
         &self,
         account_id: &str,
@@ -84,14 +85,8 @@ impl CellInitialPartitionProvisioner {
                     index: None,
                 });
                 if let crate::TableLifecycle::Deleting(table) = lifecycle {
-                    client
-                        .command::<crate::ContinueTableDeletion>(
-                            &account,
-                            mutation_identity()?,
-                            Json(table.id),
-                        )
-                        .await
-                        .map_err(cell_error)?;
+                    self.continue_table_deletion(&client, account_id, &table.id)
+                        .await?;
                 }
                 return Ok(false);
             }
@@ -116,16 +111,29 @@ impl CellInitialPartitionProvisioner {
             after_lower,
             expected_epoch: None,
         });
-        let page = if index_record.is_some() {
-            client
-                .query::<ReadGlobalIndexRoutePage>(&account, None, input)
-                .await
+        let page = if let Some(position) = index {
+            match crate::read_global_index_route_page(&client, account_id, input.0).await {
+                Ok(page) => page,
+                Err(error) => {
+                    // Each index has an independent metadata owner. Skip a failed
+                    // path so its outage cannot stop capacity work for peers.
+                    *cursor = Some(CapacityCursor {
+                        table_name: name,
+                        after_lower: None,
+                        index: (position + 1 < table.global_secondary_indexes.len())
+                            .then_some(position + 1),
+                    });
+                    return Err(error);
+                }
+            }
         } else {
-            client.query::<ReadRoutePage>(&account, None, input).await
-        }
-        .map_err(cell_error)?
-        .output
-        .0;
+            client
+                .query::<ReadRoutePage>(&account, None, input)
+                .await
+                .map_err(cell_error)?
+                .output
+                .0
+        };
         let (partitions, has_more) = match page {
             RoutePageOutcome::Page {
                 partitions,
@@ -217,6 +225,7 @@ impl CellInitialPartitionProvisioner {
                 client,
                 &index.id,
                 partition.partition_id,
+                partition.lower,
                 max_database_bytes,
             )
             .await

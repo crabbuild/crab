@@ -47,7 +47,19 @@ impl Fixture {
         Self::with_store(partitions, Arc::new(InMemory::new())).await
     }
 
+    async fn with_capacity(partitions: u16, cell_capacity: usize) -> Self {
+        Self::with_store_capacity(partitions, Arc::new(InMemory::new()), cell_capacity).await
+    }
+
     async fn with_store(partitions: u16, store: Arc<dyn object_store::ObjectStore>) -> Self {
+        Self::with_store_capacity(partitions, store, 8).await
+    }
+
+    async fn with_store_capacity(
+        partitions: u16,
+        store: Arc<dyn object_store::ObjectStore>,
+        cell_capacity: usize,
+    ) -> Self {
         // SDK errors deliberately hide storage details. Retain server warnings
         // in the test output so CI failures identify the underlying boundary.
         let diagnostics = tracing_subscriber::filter::Targets::new()
@@ -91,11 +103,11 @@ impl Fixture {
         let lease = CancellationToken::new();
         let (node, tasks) = start_node(
             Arc::clone(&application),
+            cell_capacity,
             directory.clone(),
             session,
             endpoint.clone(),
-            tls.certificate(),
-            tls.signing_key().clone(),
+            &tls,
             95,
             lease.clone(),
         )

@@ -67,17 +67,24 @@ async fn activation_replay_compares_large_base_and_index_directories() {
         other => panic!("unexpected creation: {other:?}"),
     };
     let width = u128::MAX / 1_024;
+    let partitions = (0_u128..1_024)
+        .map(|position| RoutePagePartition {
+            partition_id: position.to_be_bytes(),
+            lower: (position * width).to_be_bytes(),
+            upper: (position < 1_023).then(|| ((position + 1) * width).to_be_bytes()),
+            epoch: 1,
+        })
+        .collect::<Vec<_>>();
+    let index = table.global_secondary_indexes[0].clone();
+    let receipt = provisioner
+        .provision_global_index_directory(&client, ACCOUNT, &index.id, partitions.clone())
+        .await
+        .unwrap();
     let route = GlobalIndexRoute {
-        index: table.global_secondary_indexes[0].clone(),
         table,
-        partitions: (0_u128..1_024)
-            .map(|position| RoutePagePartition {
-                partition_id: position.to_be_bytes(),
-                lower: (position * width).to_be_bytes(),
-                upper: (position < 1_023).then(|| ((position + 1) * width).to_be_bytes()),
-                epoch: 1,
-            })
-            .collect(),
+        index,
+        partitions,
+        receipt,
     };
     client
         .command::<ActivateGlobalIndexRoute>(&account, mutation(), Json(route.clone()))

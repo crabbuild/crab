@@ -117,10 +117,11 @@ impl BeyonddbPeers {
         ));
         Ok(Self {
             runtime: node.runtime(),
-            layout,
+            layout: layout.clone(),
             registry: node.application().registry(),
             placement: Arc::new(placement::RangePlacement {
                 runtime: node.runtime(),
+                authority: CellAuthority::new(layout),
                 directory,
                 session,
                 signer,

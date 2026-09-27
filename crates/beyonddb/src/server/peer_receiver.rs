@@ -146,6 +146,15 @@ impl LocalCellResolver for LocalResolver {
                         _ => false,
                     }
             });
+            if needs_placement || resolver.bootstrap.is_some() {
+                provisioner
+                    .reclaim_directory_capacity()
+                    .await
+                    .map_err(|source| Error::PeerTransport {
+                        context: "BeyondDB directory residency",
+                        source: Box::new(source),
+                    })?;
+            }
             if (needs_placement || resolver.bootstrap.is_some())
                 && super::placement::is_data_target(&target)
             {
@@ -162,7 +171,13 @@ impl LocalCellResolver for LocalResolver {
                     })?;
             }
             if let Some(nodes) = resolver.bootstrap {
-                return provisioner.admit_range(&target, &nodes).await.map(Some);
+                return provisioner
+                    .admit_range(&target, &nodes)
+                    .await
+                    .inspect_err(|error| {
+                        tracing::warn!(cell = ?target.cell_id(), ?error, "peer bootstrap failed");
+                    })
+                    .map(Some);
             }
             let control = control.ok_or(Error::CellNotActive)?;
             if needs_placement

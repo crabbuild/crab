@@ -38,7 +38,8 @@ impl crab_cell_runtime::client::LocalCellResolver for DeleteDuringInstall {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sdk_creation_recovery_tolerates_concurrent_delete() {
-    let fixture = Fixture::new().await;
+    // One directory owner is additional to the original eight-slot workload.
+    let fixture = Fixture::with_capacity(2, 9).await;
     let sdk = sdk_without_retries(&fixture);
     create(&sdk, "ResidencyFill", false).send().await.unwrap();
     assert!(create(&sdk, "ResidencyPending", true).send().await.is_err());
@@ -71,16 +72,7 @@ async fn sdk_creation_recovery_tolerates_concurrent_delete() {
         }
     }
     assert!(deleted.load(Ordering::SeqCst));
-    assert!(
-        sdk.describe_table()
-            .table_name("ResidencyPending")
-            .send()
-            .await
-            .unwrap_err()
-            .as_service_error()
-            .unwrap()
-            .is_resource_not_found_exception()
-    );
+    super::provisioning::complete_deletion(&fixture, &sdk, "ResidencyPending").await;
     create(&sdk, "ResidencyPending", true).send().await.unwrap();
     assert_ne!(table_id(&fixture, "ResidencyPending").await, original);
     sdk.put_item()
@@ -105,7 +97,8 @@ async fn sdk_creation_recovery_tolerates_concurrent_delete() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sdk_worker_finishes_partial_creation_after_account_restore() {
-    let fixture = Fixture::new().await;
+    // One directory owner is additional to the original eight-slot workload.
+    let fixture = Fixture::with_capacity(2, 9).await;
     let sdk = sdk_without_retries(&fixture);
     create(&sdk, "ResidencyFill", false).send().await.unwrap();
     // Two index owners fit; the base owners do not. The failed public request
@@ -132,22 +125,18 @@ async fn sdk_worker_finishes_partial_creation_after_account_restore() {
         status.table_status(),
         Some(&aws_sdk_dynamodb::types::TableStatus::Creating)
     );
-    let index_before = fixture
-        .client
-        .query::<beyonddb::ReadGlobalIndexRoutePage>(
-            &account,
-            None,
-            Json(beyonddb::RoutePageInput {
-                table_id: pending.global_secondary_indexes[0].id.clone(),
-                start_hash: None,
-                after_lower: None,
-                expected_epoch: None,
-            }),
-        )
-        .await
-        .unwrap()
-        .output
-        .0;
+    let index_before = beyonddb::read_global_index_route_page(
+        &fixture.client,
+        "123456789012",
+        beyonddb::RoutePageInput {
+            table_id: pending.global_secondary_indexes[0].id.clone(),
+            start_hash: None,
+            after_lower: None,
+            expected_epoch: None,
+        },
+    )
+    .await
+    .unwrap();
     assert!(matches!(
         index_before,
         beyonddb::RoutePageOutcome::Page { .. }
@@ -195,22 +184,18 @@ async fn sdk_worker_finishes_partial_creation_after_account_restore() {
     })
     .await
     .unwrap();
-    let index_after = fixture
-        .client
-        .query::<beyonddb::ReadGlobalIndexRoutePage>(
-            &account,
-            None,
-            Json(beyonddb::RoutePageInput {
-                table_id: pending.global_secondary_indexes[0].id.clone(),
-                start_hash: None,
-                after_lower: None,
-                expected_epoch: None,
-            }),
-        )
-        .await
-        .unwrap()
-        .output
-        .0;
+    let index_after = beyonddb::read_global_index_route_page(
+        &fixture.client,
+        "123456789012",
+        beyonddb::RoutePageInput {
+            table_id: pending.global_secondary_indexes[0].id.clone(),
+            start_hash: None,
+            after_lower: None,
+            expected_epoch: None,
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(index_after, index_before);
     assert_eq!(table_id(&fixture, "ResidencyPending").await, pending.id);
     sdk.put_item()
@@ -270,9 +255,10 @@ async fn sdk_worker_finishes_partial_creation_after_account_restore() {
 }
 
 async fn partially_installed_table(base_installed: bool) -> (Fixture, beyonddb::TableRecord) {
-    let fixture = Fixture::new().await;
+    // One directory owner is additional to the original eight-slot workload.
+    let fixture = Fixture::with_capacity(2, 9).await;
     let mut blockers = Vec::new();
-    for ordinal in 0..if base_installed { 1 } else { 3 } {
+    for ordinal in 0..if base_installed { 1 } else { 4 } {
         blockers.push(
             fixture
                 .provisioner
@@ -367,22 +353,18 @@ async fn sdk_creation_resumes_original_partition_count_after_restore() {
             .0
             .unwrap();
         assert_eq!(route.partitions.len(), 2);
-        let index = fixture
-            .client
-            .query::<beyonddb::ReadGlobalIndexRoutePage>(
-                &account_target("123456789012").unwrap(),
-                None,
-                Json(beyonddb::RoutePageInput {
-                    table_id: table.global_secondary_indexes[0].id.clone(),
-                    start_hash: None,
-                    after_lower: None,
-                    expected_epoch: None,
-                }),
-            )
-            .await
-            .unwrap()
-            .output
-            .0;
+        let index = beyonddb::read_global_index_route_page(
+            &fixture.client,
+            "123456789012",
+            beyonddb::RoutePageInput {
+                table_id: table.global_secondary_indexes[0].id.clone(),
+                start_hash: None,
+                after_lower: None,
+                expected_epoch: None,
+            },
+        )
+        .await
+        .unwrap();
         assert!(
             matches!(index, beyonddb::RoutePageOutcome::Page { partitions, .. } if partitions.len() == 2)
         );
@@ -492,4 +474,115 @@ async fn sdk_update_rejects_incomplete_creation() {
         .unwrap();
     assert_eq!(table.deletion_protection_enabled, Some(true));
     fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_delete_fences_unpublished_directory_installers() {
+    const ACCOUNT: &str = "123456789012";
+    const NAME: &str = "ResidencyPending";
+    for copied in [false, true] {
+        let (fixture, table) = partially_installed_table(false).await;
+        let sdk = sdk_without_retries(&fixture);
+        let index = &table.global_secondary_indexes[0];
+        let ranges: Vec<_> = fixture
+            .provisioner
+            .provision_global_index(&fixture.client, ACCOUNT, &table, index)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|range| beyonddb::RoutePagePartition {
+                partition_id: range.partition_id,
+                lower: range.lower.unwrap_or([0; 16]),
+                upper: range.upper,
+                epoch: range.epoch,
+            })
+            .collect();
+        let spec = beyonddb::DirectorySpec::root(index.id.clone());
+        let target = beyonddb::directory_target(ACCOUNT, &spec).unwrap();
+        if copied {
+            fixture
+                .provisioner
+                .provision_global_index_directory(
+                    &fixture.client,
+                    ACCOUNT,
+                    &index.id,
+                    ranges.clone(),
+                )
+                .await
+                .unwrap();
+        }
+        // Interrupt creation before anchor publication, on either side of the
+        // independent root commit. The public generation remains CREATING.
+        assert!(
+            fixture
+                .client
+                .query::<beyonddb::ReadGlobalIndexDirectory>(
+                    &account_target(ACCOUNT).unwrap(),
+                    None,
+                    Json(index.id.clone()),
+                )
+                .await
+                .unwrap()
+                .output
+                .0
+                .is_none()
+        );
+        sdk.delete_table().table_name(NAME).send().await.unwrap();
+        super::provisioning::complete_deletion(&fixture, &sdk, NAME).await;
+        assert_eq!(
+            fixture
+                .client
+                .query::<beyonddb::ReadDirectory>(&target, None, Json(()))
+                .await
+                .unwrap()
+                .output
+                .0
+                .unwrap()
+                .mode,
+            beyonddb::DirectoryMode::Retired
+        );
+        let mutation = crab_cell_runtime::MutationIdentity {
+            request_id: crab_cell_runtime::identity::RequestId::from_bytes(
+                *uuid::Uuid::now_v7().as_bytes(),
+            ),
+            issued_at_ms: now_ms(),
+            expires_at_ms: now_ms() + 60_000,
+        };
+        assert!(matches!(
+            fixture
+                .client
+                .command::<beyonddb::InstallDirectory>(
+                    &target,
+                    mutation,
+                    Json(beyonddb::DirectoryInstall {
+                        spec,
+                        ranges,
+                        source: None,
+                    }),
+                )
+                .await,
+            Err(crab_cell_runtime::client::InvocationError::Rejected(_))
+        ));
+        create(&sdk, NAME, true).send().await.unwrap();
+        assert_ne!(table_id(&fixture, NAME).await, table.id);
+        sdk.put_item()
+            .table_name(NAME)
+            .item("id", AwsAttributeValue::S("new-generation".into()))
+            .item("bucket", AwsAttributeValue::S("new".into()))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            sdk.get_item()
+                .table_name(NAME)
+                .key("id", AwsAttributeValue::S("new-generation".into()))
+                .consistent_read(true)
+                .send()
+                .await
+                .unwrap()
+                .item
+                .is_some()
+        );
+        fixture.shutdown().await;
+    }
 }

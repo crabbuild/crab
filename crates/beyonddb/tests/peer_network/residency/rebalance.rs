@@ -99,22 +99,18 @@ async fn sdk_reads_index_moved_automatically_to_added_capacity() {
         .unwrap()
     {}
     let index = &table.global_secondary_indexes[0];
-    let page = fixture
-        .client
-        .query::<beyonddb::ReadGlobalIndexRoutePage>(
-            &account,
-            None,
-            Json(beyonddb::RoutePageInput {
-                table_id: index.id.clone(),
-                start_hash: None,
-                after_lower: None,
-                expected_epoch: None,
-            }),
-        )
-        .await
-        .unwrap()
-        .output
-        .0;
+    let page = beyonddb::read_global_index_route_page(
+        &fixture.client,
+        "123456789012",
+        beyonddb::RoutePageInput {
+            table_id: index.id.clone(),
+            start_hash: None,
+            after_lower: None,
+            expected_epoch: None,
+        },
+    )
+    .await
+    .unwrap();
     let beyonddb::RoutePageOutcome::Page { partitions, .. } = page else {
         panic!("index route missing")
     };

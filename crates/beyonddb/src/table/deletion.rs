@@ -143,6 +143,17 @@ impl Command for ContinueTableDeletion {
 }
 
 fn cleanup(context: &CommandContext<'_, '_>, id: &str) -> Result<bool> {
+    // The account marker fences new work, but published directory owners must
+    // acknowledge retirement before anchors disappear or the name can be reused.
+    if !context.sql(&statement(
+        "SELECT 1 FROM ddb_global_index_routes WHERE base_table_id = ?1 AND retired = 0 LIMIT 1",
+        vec![SqlValue::Text(id.into())],
+    ))?[0]
+        .rows
+        .is_empty()
+    {
+        return Ok(false);
+    }
     let mut remaining = 64_u64;
     // Remove children before parents, so FK cascades cannot hide unbounded work.
     // Statistics follow item deletion because its triggers decrement the totals.
@@ -166,21 +177,6 @@ fn cleanup(context: &CommandContext<'_, '_>, id: &str) -> Result<bool> {
         ("ddb_table_tags", "rowid", "table_id = ?1"),
         ("ddb_table_ttl", "rowid", "table_id = ?1"),
         ("ddb_table_statistics", "rowid", "table_id = ?1"),
-        (
-            "ddb_global_index_partitions",
-            "rowid",
-            "table_id IN (SELECT table_id FROM ddb_global_index_routes WHERE base_table_id = ?1)",
-        ),
-        (
-            "ddb_global_index_split_members",
-            "rowid",
-            "table_id IN (SELECT table_id FROM ddb_global_index_routes WHERE base_table_id = ?1)",
-        ),
-        (
-            "ddb_global_index_split_plans",
-            "rowid",
-            "table_id IN (SELECT table_id FROM ddb_global_index_routes WHERE base_table_id = ?1)",
-        ),
         ("ddb_global_index_routes", "rowid", "base_table_id = ?1"),
     ] {
         if remaining == 0 {
@@ -203,4 +199,67 @@ fn cleanup(context: &CommandContext<'_, '_>, id: &str) -> Result<bool> {
         vec![SqlValue::Text(id.into())],
     ))?;
     Ok(true)
+}
+
+/// An index root whose lifecycle must finish before its table generation disappears.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PendingDirectoryRetirement {
+    pub spec: crate::DirectorySpec,
+    pub published: bool,
+}
+
+/// Read one index directory that still blocks generation removal.
+pub struct ReadPendingDirectoryRetirement;
+impl Query for ReadPendingDirectoryRetirement {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 39;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<String>;
+    type Output = Json<Option<PendingDirectoryRetirement>>;
+    fn execute(
+        context: &mut QueryContext<'_>,
+        Json(table_id): Self::Input,
+    ) -> Result<Self::Output> {
+        let rows = context.sql(&statement("SELECT r.table_id, r.initial_fingerprint IS NOT NULL FROM ddb_global_index_routes r JOIN ddb_table_deletions d ON d.table_id = r.base_table_id WHERE r.base_table_id = ?1 AND r.retired = 0 ORDER BY r.table_id LIMIT 1", vec![SqlValue::Text(table_id)]))?;
+        match rows[0].rows.first().map(Vec::as_slice) {
+            None => Ok(Json(None)),
+            Some([SqlValue::Text(id), SqlValue::Integer(published)]) => {
+                Ok(Json(Some(PendingDirectoryRetirement {
+                    spec: crate::DirectorySpec::root(id.clone()),
+                    published: *published != 0,
+                })))
+            }
+            _ => Err(Error::Command("invalid pending directory retirement")),
+        }
+    }
+}
+
+/// A terminal directory receipt for one deleting table generation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TableDirectoryRetirement {
+    pub table_id: String,
+    pub index_id: String,
+    pub sequence: u64,
+}
+
+/// Acknowledge the controller's durable retirement of a published directory tree.
+pub struct RecordTableDirectoryRetirement;
+impl Command for RecordTableDirectoryRetirement {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 34;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<TableDirectoryRetirement>;
+    type Output = Json<bool>;
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        if input.sequence == 0 || input.sequence > i64::MAX as u64 {
+            return Ok(CommandResult::Rejected(Json(false)));
+        }
+        // The immutable base/index IDs fence delayed receipts after name reuse.
+        // Missing rows need no work; only a deleting generation can be changed.
+        context.sql(&statement("UPDATE ddb_global_index_routes SET retired = 1 WHERE table_id = ?1 AND base_table_id = ?2 AND EXISTS (SELECT 1 FROM ddb_table_deletions WHERE table_id = ?2)", vec![SqlValue::Text(input.index_id), SqlValue::Text(input.table_id)]))?;
+        Ok(CommandResult::Success(Json(true)))
+    }
 }

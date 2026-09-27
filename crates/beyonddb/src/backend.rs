@@ -57,6 +57,15 @@ pub trait InitialPartitionProvisioner: Send + Sync {
         table: &'a TableRecord,
         index: &'a crate::GlobalIndexRecord,
     ) -> BoxedFuture<'a, Result<Vec<crate::GlobalIndexPartitionSpec>, StorageError>>;
+
+    /// Install the initial index directory before publishing its account anchor.
+    fn provision_global_index_directory<'a>(
+        &'a self,
+        client: &'a CellClient,
+        account_id: &'a str,
+        index_id: &'a str,
+        ranges: Vec<crate::RoutePagePartition>,
+    ) -> BoxedFuture<'a, Result<crate::DirectoryCopyReceipt, StorageError>>;
 }
 
 /// Admits a discoverable coordinator before any transaction record is written.

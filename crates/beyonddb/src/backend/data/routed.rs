@@ -136,21 +136,22 @@ impl CellStorage {
         let mut bytes = 0_usize;
         let mut expected_lower = None;
         loop {
-            let response = if global.is_some() {
-                self.client
-                    .query::<crate::ReadGlobalIndexRoutePage>(
-                        &account,
-                        None,
-                        Json(route_page.clone()),
-                    )
-                    .await
+            let page = if global.is_some() {
+                crate::read_global_index_route_page(
+                    &self.client,
+                    &key_info.account_id,
+                    route_page.clone(),
+                )
+                .await?
             } else {
                 self.client
                     .query::<ReadRoutePage>(&account, None, Json(route_page.clone()))
                     .await
-            }
-            .map_err(cell_error)?;
-            let (epoch, partitions, has_more) = match response.output.0 {
+                    .map_err(cell_error)?
+                    .output
+                    .0
+            };
+            let (epoch, partitions, has_more) = match page {
                 RoutePageOutcome::Unrouted if route_page.expected_epoch.is_none() => {
                     self.require_account_placement(key_info).await?;
                     return Ok(None);

@@ -65,7 +65,10 @@ static COMMANDS: [OperationDescriptor; 16] = [
     operation(12),
     crate::participant::phase_operation(13),
     crate::transaction_transport::upload_operation(14),
-    crate::participant::phase_operation(15),
+    OperationDescriptor {
+        codec_version: 2,
+        ..crate::participant::phase_operation(15)
+    },
     crate::participant::phase_operation(16),
 ];
 static QUERIES: [OperationDescriptor; 13] = [
@@ -160,7 +163,7 @@ impl crab_cell_runtime::registry::CellModule for DataModule {
         registry.bind_command::<PreparePartitionTransaction>()?;
         registry.bind_command::<ResolvePartitionTransaction>()?;
         registry.bind_command::<ReleasePartitionTransactionReads>()?;
-        registry.bind_command::<crate::AckPartitionIndexChange>()?;
+        registry.bind_command::<crate::RecordPartitionIndexDelivery>()?;
         registry.bind_query::<crate::statistics::ReadPartitionStatistics>()?;
         registry.bind_query::<PartitionGet>()?;
         registry.bind_query::<PartitionScan>()?;

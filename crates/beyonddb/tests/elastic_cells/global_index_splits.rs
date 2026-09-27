@@ -6,8 +6,8 @@ use beyonddb::{
     GlobalIndexExport, GlobalIndexFingerprint, GlobalIndexImport, GlobalIndexImportComplete,
     GlobalIndexMutation, GlobalIndexPartitionInput, GlobalIndexQuery, GlobalIndexScan,
     GlobalIndexSplitPlan, GlobalIndexState, ImportGlobalIndexEntry, OpenGlobalIndexImport,
-    PrepareGlobalIndexSplit, ProjectionVersion, ReadGlobalIndexPartition, ReadGlobalIndexRoutePage,
-    ReadGlobalIndexSplitPlan, ReadGlobalIndexState, global_index_target, initialize_global_index,
+    PrepareGlobalIndexSplit, ProjectionVersion, ReadGlobalIndexPartition, ReadGlobalIndexSplitPlan,
+    ReadGlobalIndexState, global_index_target, initialize_global_index,
 };
 
 async fn fenced(
@@ -76,6 +76,11 @@ async fn restored(
 ) {
     let (host, provisioner, client, _) = owner(application, layout, session, directory);
     for (i, target) in targets.iter().enumerate() {
+        let cell_type = application
+            .cell_types()
+            .iter()
+            .find(|cell_type| cell_type.namespace() == target.namespace())
+            .unwrap();
         let proof = CellCatalog::new(layout.clone(), target.tenant())
             .lookup(target.cell_id())
             .await
@@ -90,7 +95,11 @@ async fn restored(
                     layout.clone(),
                     *target.cell_id().as_bytes(),
                     *idle.value().incarnation.as_bytes(),
-                    Limits::default(),
+                    Limits {
+                        max_database_bytes: cell_type.database_limit_bytes(),
+                        max_capture_bytes: cell_type.capture_limit_bytes(),
+                        ..Limits::default()
+                    },
                 )
                 .unwrap(),
                 authority,
@@ -145,23 +154,23 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
         .0
         .unwrap();
     let index = &table.global_secondary_indexes[0];
+    let index_directory =
+        beyonddb::directory_target(ACCOUNT, &beyonddb::DirectorySpec::root(index.id.clone()))
+            .unwrap();
     let RoutePageOutcome::Page {
         partitions, epoch, ..
-    } = client
-        .query::<ReadGlobalIndexRoutePage>(
-            &account,
-            None,
-            Json(RoutePageInput {
-                table_id: index.id.clone(),
-                start_hash: None,
-                after_lower: None,
-                expected_epoch: None,
-            }),
-        )
-        .await
-        .unwrap()
-        .output
-        .0
+    } = beyonddb::read_global_index_route_page(
+        &client,
+        "123456789012",
+        RoutePageInput {
+            table_id: index.id.clone(),
+            start_hash: None,
+            after_lower: None,
+            expected_epoch: None,
+        },
+    )
+    .await
+    .unwrap()
     else {
         panic!("missing index route");
     };
@@ -188,7 +197,7 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
     };
     assert!(
         client
-            .command::<BeginGlobalIndexSplit>(&account, mutation(), Json(plan.clone()))
+            .command::<BeginGlobalIndexSplit>(&index_directory, mutation(), Json(plan.clone()))
             .await
             .unwrap()
             .output
@@ -394,6 +403,7 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
                     targets[1].clone(),
                     source.clone(),
                     account.clone(),
+                    index_directory.clone(),
                 ],
             )
             .await;
@@ -462,7 +472,7 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
     }
     assert!(
         client
-            .command::<CommitGlobalIndexSplit>(&account, mutation(), Json(plan.clone()))
+            .command::<CommitGlobalIndexSplit>(&index_directory, mutation(), Json(plan.clone()))
             .await
             .unwrap()
             .output
@@ -472,7 +482,7 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
         assert_eq!(
             client
                 .query::<ReadGlobalIndexSplitPlan>(
-                    &account,
+                    &index_directory,
                     None,
                     Json(GlobalIndexPartitionInput {
                         index_id: index.id.clone(),
@@ -497,6 +507,7 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
             targets[1].clone(),
             source.clone(),
             account.clone(),
+            index_directory.clone(),
         ],
     )
     .await;
@@ -525,7 +536,7 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
         assert!(
             client
                 .query::<ReadGlobalIndexSplitPlan>(
-                    &account,
+                    &index_directory,
                     None,
                     Json(GlobalIndexPartitionInput {
                         index_id: index.id.clone(),

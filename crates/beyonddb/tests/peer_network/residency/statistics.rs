@@ -39,7 +39,8 @@ async fn description(sdk: &aws_sdk_dynamodb::Client) -> (i64, i64, i64, i64, i64
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sdk_statistics_count_sparse_indexes_and_survive_restore_and_splits() {
-    let fixture = Fixture::with_partition_count(1).await;
+    // One directory owner is additional to the original eight-slot workload.
+    let fixture = Fixture::with_capacity(1, 9).await;
     let sdk = aws_sdk_dynamodb::Client::from_conf(
         fixture
             .sdk
@@ -232,7 +233,7 @@ async fn sdk_statistics_count_sparse_indexes_and_survive_restore_and_splits() {
         .unwrap();
     assert_eq!(deleted.item_count, Some(3));
     assert_eq!(deleted.table_size_bytes, Some(remaining_bytes));
-    assert!(sdk.describe_table().table_name(TABLE).send().await.is_err());
+    super::provisioning::complete_deletion(&fixture, &sdk, TABLE).await;
     sdk.create_table()
         .table_name(TABLE)
         .billing_mode(BillingMode::PayPerRequest)
@@ -292,7 +293,7 @@ impl crab_cell_runtime::client::LocalCellResolver for SplitDuringSample {
             if split {
                 if let Some(index_id) = index_id {
                     provisioner
-                        .split_global_index_partition(ACCOUNT, client, &index_id, [0; 16])
+                        .split_global_index_partition(ACCOUNT, client, &index_id, [0; 16], [0; 16])
                         .await
                         .unwrap();
                 } else {

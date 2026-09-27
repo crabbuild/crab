@@ -9,6 +9,79 @@ use crate::{
 };
 
 impl CellInitialPartitionProvisioner {
+    pub(crate) async fn recover_index_directory_path(
+        &self,
+        client: &CellClient,
+        account_id: &str,
+        index_id: &str,
+        after: Option<[u8; 16]>,
+        nodes: &NodeDirectory,
+    ) -> Result<(), StorageError> {
+        let mut hash = after.unwrap_or([0; 16]);
+        // At a leaf boundary, pagination first checks the previous leaf and then
+        // crosses into its neighbour. Restore only those two bounded paths.
+        for crossing in 0..2 {
+            let mut spec = DirectorySpec::root(index_id.into());
+            for _ in 0..128 {
+                let (target, _) = self.published_directory(account_id, &spec).await?;
+                self.recover_discovered_owner(
+                    &target,
+                    crate::directory::MODULE,
+                    crate::initialize_directory,
+                    nodes,
+                )
+                .await?;
+                let state = client
+                    .query::<ReadDirectory>(&target, None, Json(()))
+                    .await
+                    .map_err(cell_error)?
+                    .output
+                    .0
+                    .ok_or_else(|| StorageError::Transient("directory state is missing".into()))?;
+                match state.mode {
+                    DirectoryMode::Branch(split) => {
+                        spec = split
+                            .children
+                            .into_iter()
+                            .find(|child| {
+                                child.lower <= hash && child.upper.is_none_or(|upper| hash < upper)
+                            })
+                            .ok_or_else(|| {
+                                StorageError::Internal("directory recovery has no child".into())
+                            })?;
+                    }
+                    DirectoryMode::Leaf | DirectoryMode::Frozen(_) | DirectoryMode::Importing => {
+                        break;
+                    }
+                    DirectoryMode::Retiring { .. } | DirectoryMode::Retired => {
+                        return Err(StorageError::Transient(
+                            "index directory is retiring".into(),
+                        ));
+                    }
+                }
+            }
+            let page = crate::read_directory_leaf(
+                client,
+                account_target(account_id)
+                    .map_err(provision_error)?
+                    .tenant(),
+                index_id,
+                hash,
+            )
+            .await?;
+            if crossing == 0
+                && let Some(after) = after
+                && !page.ranges.iter().any(|range| range.lower > after)
+                && let Some(next) = page.spec.upper
+            {
+                hash = next;
+                continue;
+            }
+            return Ok(());
+        }
+        Ok(())
+    }
+
     async fn existing_directory_client(
         &self,
         client: &CellClient,
@@ -174,10 +247,86 @@ impl CellInitialPartitionProvisioner {
 }
 
 impl CellInitialPartitionProvisioner {
+    /// Advance distributed directory retirement before bounded account cleanup.
+    pub async fn continue_table_deletion(
+        &self,
+        client: &CellClient,
+        account_id: &str,
+        table_id: &str,
+    ) -> Result<bool, StorageError> {
+        let account = account_target(account_id).map_err(provision_error)?;
+        let pending = client
+            .query::<crate::ReadPendingDirectoryRetirement>(&account, None, Json(table_id.into()))
+            .await
+            .map_err(cell_error)?
+            .output
+            .0;
+        if let Some(pending) = pending {
+            let spec = pending.spec;
+            if !pending.published {
+                // The account's durable creation intent authorizes this root.
+                // Unlike a published tree, it may never have been installed.
+                let target = directory_target(account_id, &spec).map_err(provision_error)?;
+                self.reclaim_retired_ranges(client, &account, None).await?;
+                let client = self.provision_range(&target, client).await?;
+                client
+                    .command::<crate::RetireDirectory>(
+                        &target,
+                        mutation_identity()?,
+                        Json(spec.clone()),
+                    )
+                    .await
+                    .map_err(cell_error)?;
+            }
+            if !self
+                .retire_directory_step(client, account_id, &spec)
+                .await?
+            {
+                return Ok(false);
+            }
+            let directory = directory_target(account_id, &spec).map_err(provision_error)?;
+            let observed = client
+                .query::<ReadDirectory>(&directory, None, Json(()))
+                .await
+                .map_err(cell_error)?;
+            if !observed
+                .output
+                .0
+                .is_some_and(|state| state.spec == spec && state.mode == DirectoryMode::Retired)
+            {
+                return Err(StorageError::Transient(
+                    "directory retirement is not complete".into(),
+                ));
+            }
+            client
+                .command::<crate::RecordTableDirectoryRetirement>(
+                    &account,
+                    mutation_identity()?,
+                    Json(crate::TableDirectoryRetirement {
+                        table_id: table_id.into(),
+                        index_id: spec.table_id,
+                        sequence: observed.receipt.commit_sequence,
+                    }),
+                )
+                .await
+                .map_err(cell_error)?;
+        }
+        Ok(client
+            .command::<crate::ContinueTableDeletion>(
+                &account,
+                mutation_identity()?,
+                Json(table_id.into()),
+            )
+            .await
+            .map_err(cell_error)?
+            .output
+            .0)
+    }
+
     /// Advance one generation-fenced directory retirement by a bounded path.
     ///
     /// Call only after the table lifecycle authority has fenced the generation.
-    /// Returns true only when every published descendant is durably retired.
+    /// Returns true only when every planned descendant is durably retired.
     pub async fn retire_directory_step(
         &self,
         client: &CellClient,
@@ -186,11 +335,26 @@ impl CellInitialPartitionProvisioner {
     ) -> Result<bool, StorageError> {
         let mut current = root.clone();
         let mut parent = None;
+        let mut published = true;
         for _ in 0..128 {
-            let current_client = self
-                .existing_directory_client(client, account_id, &current)
-                .await?;
             let target = directory_target(account_id, &current).map_err(provision_error)?;
+            let current_client = if published {
+                self.existing_directory_client(client, account_id, &current)
+                    .await?
+            } else {
+                // The retiring parent retains the unpublished split intent. A
+                // missing copy needs a terminal fence against delayed installers.
+                let current_client = self.provision_range(&target, client).await?;
+                current_client
+                    .command::<crate::RetireDirectory>(
+                        &target,
+                        mutation_identity()?,
+                        Json(current.clone()),
+                    )
+                    .await
+                    .map_err(cell_error)?;
+                current_client
+            };
             let observed = current_client
                 .query::<ReadDirectory>(&target, None, Json(()))
                 .await
@@ -250,6 +414,7 @@ impl CellInitialPartitionProvisioner {
                 DirectoryMode::Retiring {
                     children,
                     acknowledged,
+                    published: children_published,
                 } => {
                     let next = children
                         .into_iter()
@@ -263,6 +428,7 @@ impl CellInitialPartitionProvisioner {
                         })?;
                     parent = Some(current);
                     current = next;
+                    published = children_published;
                 }
                 _ => {
                     return Err(StorageError::Internal(

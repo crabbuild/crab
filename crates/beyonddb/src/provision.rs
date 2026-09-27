@@ -268,7 +268,9 @@ impl CellInitialPartitionProvisioner {
                     .map_err(provision_error)?
                     .is_none()
                 {
-                    self.admit_initialized(target, proof, initialize).await?;
+                    self.admit_initialized(target, proof, initialize)
+                        .await
+                        .map_err(provision_error)?;
                 }
             }
             Some((session, endpoint)) => {
@@ -290,7 +292,9 @@ impl CellInitialPartitionProvisioner {
             }
             None if observed.value().root.is_some() => {
                 let proof = self.cataloged(target, module).await?;
-                self.admit_initialized(target, proof, initialize).await?;
+                self.admit_initialized(target, proof, initialize)
+                    .await
+                    .map_err(provision_error)?;
             }
             _ => return Ok(false),
         }
@@ -329,6 +333,7 @@ impl CellInitialPartitionProvisioner {
         &self,
         account_id: &str,
         account_handle: CellHandle,
+        routed_client: &CellClient,
         nodes: &NodeDirectory,
     ) -> Result<(), StorageError> {
         let account = account_target(account_id).map_err(provision_error)?;
@@ -361,13 +366,20 @@ impl CellInitialPartitionProvisioner {
                 else {
                     continue;
                 };
-                self.recover_routed_table(account_id, &account, &client, &table.id, nodes, None)
-                    .await?;
+                self.recover_routed_table(
+                    account_id,
+                    &account,
+                    routed_client,
+                    &table.id,
+                    nodes,
+                    None,
+                )
+                .await?;
                 for index in &table.global_secondary_indexes {
                     self.recover_routed_table(
                         account_id,
                         &account,
-                        &client,
+                        routed_client,
                         &table.id,
                         nodes,
                         Some(index),
@@ -392,9 +404,25 @@ impl CellInitialPartitionProvisioner {
         index: Option<&crate::GlobalIndexRecord>,
     ) -> Result<(), StorageError> {
         let table_id = index.map_or(table_id, |index| index.id.as_str());
+        if index.is_some()
+            && client
+                .query::<crate::ReadGlobalIndexDirectory>(account, None, Json(table_id.into()))
+                .await
+                .map_err(cell_error)?
+                .output
+                .0
+                .is_none()
+        {
+            return Ok(());
+        }
+
         let mut after_lower = None;
         let mut expected_epoch = None;
         loop {
+            if index.is_some() {
+                self.recover_index_directory_path(client, account_id, table_id, after_lower, nodes)
+                    .await?;
+            }
             let input = Json(RoutePageInput {
                 table_id: table_id.to_owned(),
                 start_hash: None,
@@ -402,15 +430,15 @@ impl CellInitialPartitionProvisioner {
                 expected_epoch,
             });
             let page = if index.is_some() {
-                client
-                    .query::<crate::ReadGlobalIndexRoutePage>(account, None, input)
-                    .await
+                crate::read_global_index_route_page(client, account_id, input.0).await?
             } else {
-                client.query::<ReadRoutePage>(account, None, input).await
-            }
-            .map_err(cell_error)?
-            .output
-            .0;
+                client
+                    .query::<ReadRoutePage>(account, None, input)
+                    .await
+                    .map_err(cell_error)?
+                    .output
+                    .0
+            };
             let (epoch, partitions, has_more) = match page {
                 RoutePageOutcome::Unrouted => return Ok(()),
                 RoutePageOutcome::Changed => {
@@ -510,6 +538,7 @@ impl CellInitialPartitionProvisioner {
         let (target, proof) = self.published_directory(account_id, spec).await?;
         self.admit_initialized(&target, proof, crate::initialize_directory)
             .await
+            .map_err(provision_error)
     }
 
     async fn published_directory(
@@ -576,7 +605,7 @@ impl CellInitialPartitionProvisioner {
         initialize: for<'a> fn(&rusqlite::Transaction<'a>) -> crab_cell_runtime::Result<()>,
     ) -> Result<CellHandle, StorageError> {
         let _admission = self.admission.lock().await;
-        self.reclaim_coordinator_capacity().await?;
+        self.reclaim_settled_capacity(target).await?;
         let authority = CellAuthority::new(self.layout.clone());
         let observed = authority
             .load(target.cell_id())
@@ -724,7 +753,9 @@ impl CellInitialPartitionProvisioner {
             )
             .await
             .map_err(provision_error)?;
-        self.admit_initialized(target, proof, initialize).await
+        self.admit_initialized(target, proof, initialize)
+            .await
+            .map_err(provision_error)
     }
 
     async fn admit(
@@ -734,6 +765,7 @@ impl CellInitialPartitionProvisioner {
     ) -> Result<CellHandle, StorageError> {
         self.admit_initialized(target, proof, initialize_partition)
             .await
+            .map_err(provision_error)
     }
 
     async fn admit_initialized(
@@ -741,49 +773,45 @@ impl CellInitialPartitionProvisioner {
         target: &CellTarget,
         proof: CatalogProof,
         initialize: for<'a> fn(&rusqlite::Transaction<'a>) -> crab_cell_runtime::Result<()>,
-    ) -> Result<CellHandle, StorageError> {
+    ) -> crab_cell_runtime::Result<CellHandle> {
         // Serialize local activation/reclamation. Authority CAS still decides
         // ownership against other nodes; this guard never fences peers.
         let _admission = self.admission.lock().await;
         let authority = CellAuthority::new(self.layout.clone());
+        let observed = authority.load(target.cell_id()).await?;
+        if let Some(observed) = &observed
+            && let Some(handle) = self.runtime.local_handle(proof.clone(), observed).await?
+        {
+            self.track_coordinator(target).map_err(admission_error)?;
+            return Ok(handle);
+        }
+        self.reclaim_settled_capacity(target)
+            .await
+            .map_err(admission_error)?;
+        let stats = self.runtime.stats();
+        if stats.active_cells() >= stats.active_cell_capacity() {
+            // A rejected placement must not claim a new Cell. Otherwise its
+            // live but full owner prevents placement on a peer with free slots.
+            return Err(CellError::Capacity("BeyondDB Cell admission"));
+        }
         let owner = Owner {
             session: self.session,
             endpoint: self.endpoint.clone(),
         };
-        let observed = match authority
-            .load(target.cell_id())
-            .await
-            .map_err(provision_error)?
-        {
+        let observed = match observed {
             Some(observed) => observed,
             None => {
                 let incarnation = IncarnationId::from_bytes(*uuid::Uuid::now_v7().as_bytes());
-                match authority
-                    .create_initial(&proof, incarnation, owner.clone())
-                    .await
-                {
+                match authority.create_initial(&proof, incarnation, owner).await {
                     Ok(observed) => observed,
                     Err(CellError::CellAlreadyActive) => authority
                         .load(target.cell_id())
-                        .await
-                        .map_err(provision_error)?
-                        .ok_or_else(|| {
-                            StorageError::Transient("concurrent Cell admission is pending".into())
-                        })?,
-                    Err(error) => return Err(provision_error(error)),
+                        .await?
+                        .ok_or(CellError::CellNotActive)?,
+                    Err(error) => return Err(error),
                 }
             }
         };
-        if let Some(handle) = self
-            .runtime
-            .local_handle(proof.clone(), &observed)
-            .await
-            .map_err(provision_error)?
-        {
-            self.track_coordinator(target)?;
-            return Ok(handle);
-        }
-        self.reclaim_coordinator_capacity().await?;
         let control = observed.value();
         if control.root.is_some()
             && match control.state {
@@ -795,35 +823,28 @@ impl CellInitialPartitionProvisioner {
                 _ => false,
             }
         {
-            return self
-                .activate_published(target, proof, observed)
-                .await
-                .map_err(provision_error);
+            return self.activate_published(target, proof, observed).await;
         }
         let replica = CellReplica::new(
             self.layout.clone(),
             *target.cell_id().as_bytes(),
             *observed.value().incarnation.as_bytes(),
-            self.replica_limits(target).map_err(provision_error)?,
-        )
-        .map_err(|error| StorageError::Transient(error.to_string()))?;
-        let destination = self.activation_destination(target)?;
-        let handle = match observed.value().state {
-            ControlState::Recovering
-                if observed.value().root.is_none()
-                    && observed.value().owner.as_ref().map(|owner| owner.session)
-                        == Some(self.session) =>
-            {
-                self.runtime
-                    .bootstrap(proof, replica, authority, observed, destination, initialize)
-                    .await
-                    .map_err(provision_error)
-            }
-            _ => Err(StorageError::Transient(
-                "Cell has another owner or is still activating".into(),
-            )),
-        }?;
-        self.track_coordinator(target)?;
+            self.replica_limits(target)?,
+        )?;
+        let destination = self
+            .activation_destination(target)
+            .map_err(admission_error)?;
+        if observed.value().state != ControlState::Recovering
+            || observed.value().root.is_some()
+            || observed.value().owner.as_ref().map(|owner| owner.session) != Some(self.session)
+        {
+            return Err(CellError::CellNotActive);
+        }
+        let handle = self
+            .runtime
+            .bootstrap(proof, replica, authority, observed, destination, initialize)
+            .await?;
+        self.track_coordinator(target).map_err(admission_error)?;
         Ok(handle)
     }
 }
@@ -902,6 +923,44 @@ fn split_plan(source: &PartitionSpec, route_epoch: u64) -> Result<SplitPlan, Sto
 }
 
 impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
+    fn provision_global_index_directory<'a>(
+        &'a self,
+        client: &'a CellClient,
+        account_id: &'a str,
+        index_id: &'a str,
+        ranges: Vec<crate::RoutePagePartition>,
+    ) -> BoxedFuture<'a, Result<crate::DirectoryCopyReceipt, StorageError>> {
+        Box::pin(async move {
+            let spec = crate::DirectorySpec::root(index_id.into());
+            let target = crate::directory_target(account_id, &spec).map_err(provision_error)?;
+            let fingerprint =
+                crate::directory::fingerprint(&spec, &ranges).map_err(provision_error)?;
+            let client = self.provision_range(&target, client).await?;
+            let installed = client
+                .command::<crate::InstallDirectory>(
+                    &target,
+                    mutation_identity()?,
+                    Json(crate::DirectoryInstall {
+                        spec,
+                        ranges,
+                        source: None,
+                    }),
+                )
+                .await
+                .map_err(cell_error)?;
+            if !installed.output.0 {
+                return Err(StorageError::Transient(
+                    "index directory installation was rejected".into(),
+                ));
+            }
+            Ok(crate::DirectoryCopyReceipt {
+                cell_id: *target.cell_id().as_bytes(),
+                sequence: installed.receipt.commit_sequence,
+                fingerprint,
+            })
+        })
+    }
+
     fn initial_partition_count(&self) -> u16 {
         self.initial_partition_count
     }
@@ -1041,5 +1100,12 @@ fn provision_error(error: CellError) -> StorageError {
         | CellError::Registry(_)
         | CellError::Release(_) => StorageError::Internal(error.to_string()),
         _ => StorageError::Transient(error.to_string()),
+    }
+}
+
+fn admission_error(source: StorageError) -> CellError {
+    CellError::PeerTransport {
+        context: "BeyondDB Cell admission",
+        source: Box::new(source),
     }
 }

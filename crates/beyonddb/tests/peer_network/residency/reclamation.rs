@@ -47,7 +47,8 @@ pub(super) async fn create(sdk: &aws_sdk_dynamodb::Client, name: &str, index: bo
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sdk_split_sources_release_capacity_and_retain_recoverable_roots() {
-    let fixture = Fixture::with_partition_count(1).await;
+    // One directory owner is additional to the original eight-slot workload.
+    let fixture = Fixture::with_capacity(1, 9).await;
     let sdk = aws_sdk_dynamodb::Client::from_conf(
         fixture
             .sdk
@@ -92,7 +93,7 @@ async fn sdk_split_sources_release_capacity_and_retain_recoverable_roots() {
         )
         .await
         .unwrap();
-    assert_eq!(fixture.node.runtime().stats().active_cells(), 7);
+    assert_eq!(fixture.node.runtime().stats().active_cells(), 8);
     let indexed = &records[1];
     let index = &indexed.global_secondary_indexes[0];
     let index_range = fixture
@@ -128,6 +129,7 @@ async fn sdk_split_sources_release_capacity_and_retain_recoverable_roots() {
             fixture.client.clone(),
             &index.id,
             index_range.partition_id,
+            index_range.lower.unwrap_or([0; 16]),
         )
         .await
         .unwrap();
@@ -137,7 +139,7 @@ async fn sdk_split_sources_release_capacity_and_retain_recoverable_roots() {
     let released = authority.load(source.cell_id()).await.unwrap().unwrap();
     assert!(released.value().owner.is_none());
     assert!(released.value().root.is_some());
-    assert_eq!(fixture.node.runtime().stats().active_cells(), 8);
+    assert_eq!(fixture.node.runtime().stats().active_cells(), 9);
     // Finished-plan replay must not reacquire historical sources when every
     // slot belongs to a live range. Only unfinished transfers need their exports.
     fixture
@@ -249,7 +251,7 @@ async fn sdk_split_sources_release_capacity_and_retain_recoverable_roots() {
     );
     // Every slot is occupied again, including both retired sources. Ordinary
     // reads must reclaim those slots before placement can restore live children.
-    assert_eq!(fixture.node.runtime().stats().active_cells(), 8);
+    assert_eq!(fixture.node.runtime().stats().active_cells(), 9);
     assert_eq!(
         sdk.scan()
             .table_name("Residency")

@@ -224,3 +224,20 @@ impl Query for ReadDirectoryChanges {
         ))
     }
 }
+
+/// Check whether admitting another range replacement requires a metadata split.
+pub struct DirectoryNeedsSplit;
+impl Query for DirectoryNeedsSplit {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 6;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<()>;
+    type Output = Json<bool>;
+    fn execute(context: &mut QueryContext<'_>, _: Self::Input) -> Result<Self::Output> {
+        let rows = context.sql(&statement("SELECT (SELECT COUNT(*) FROM ddb_directory_ranges) + (SELECT COUNT(*) FROM ddb_directory_changes)", vec![]))?;
+        let Some([SqlValue::Integer(count)]) = rows[0].rows.first().map(Vec::as_slice) else {
+            return Err(Error::Command("invalid directory occupancy"));
+        };
+        Ok(Json(*count >= MAX_RANGES as i64))
+    }
+}

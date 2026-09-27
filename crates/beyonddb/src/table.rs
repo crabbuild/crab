@@ -1,8 +1,9 @@
 mod deletion;
 
 pub use deletion::{
-    ContinueTableDeletion, DeleteTable, DeleteTableOutcome, ReadTableLifecycle, TableGeneration,
-    TableLifecycle,
+    ContinueTableDeletion, DeleteTable, DeleteTableOutcome, PendingDirectoryRetirement,
+    ReadPendingDirectoryRetirement, ReadTableLifecycle, RecordTableDirectoryRetirement,
+    TableDirectoryRetirement, TableGeneration, TableLifecycle,
 };
 
 use super::*;
@@ -178,6 +179,19 @@ impl Command for CreateTable {
                 SqlValue::Blob(serde_json::to_vec(&record)?),
             ],
         ))?;
+        if matches!(record.placement, TablePlacement::Routed { .. }) {
+            // Persist lifecycle ownership before provisioning independent roots.
+            // Deletion must fence even an installer that never publishes its copy.
+            for index in &record.global_secondary_indexes {
+                context.sql(&statement(
+                    "INSERT INTO ddb_global_index_routes (table_id, base_table_id) VALUES (?1, ?2)",
+                    vec![
+                        SqlValue::Text(index.id.clone()),
+                        SqlValue::Text(record.id.clone()),
+                    ],
+                ))?;
+            }
+        }
         if let Some(arn) = input.resource_arn {
             for tag in input.initial_tags {
                 context.sql(&statement(

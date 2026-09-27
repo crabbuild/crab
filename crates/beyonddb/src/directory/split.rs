@@ -111,7 +111,7 @@ impl Command for FreezeDirectory {
 }
 
 /// A child-copy receipt supplied by the authenticated directory controller.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DirectoryCopyReceipt {
     pub cell_id: [u8; 32],
     pub sequence: u64,

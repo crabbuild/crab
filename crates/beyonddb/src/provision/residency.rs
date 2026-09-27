@@ -26,6 +26,106 @@ use crate::{
 };
 
 impl CellInitialPartitionProvisioner {
+    // Admission is held. Routing/authentication must be able to restore even
+    // when live ranges occupy every slot and need that metadata to move safely.
+    pub(super) async fn release_range_for_metadata(
+        &self,
+        target: &CellTarget,
+    ) -> Result<(), StorageError> {
+        if ![
+            crate::NAMESPACE,
+            crate::credentials::NAMESPACE,
+            crate::directory::NAMESPACE,
+        ]
+        .contains(&target.namespace())
+        {
+            return Ok(());
+        }
+        let ranges: HashSet<_> = self
+            .runtime
+            .active_cell_targets()
+            .await
+            .map_err(provision_error)?
+            .into_iter()
+            .filter(|target| {
+                [crate::DATA_NAMESPACE, crate::global_index::NAMESPACE]
+                    .contains(&target.namespace())
+            })
+            .map(|target| target.cell_id())
+            .collect();
+        let candidate = self
+            .runtime
+            .idle_transfer_candidates()
+            .await
+            .map_err(provision_error)?
+            .into_iter()
+            .filter(|(cell, _, _, _)| ranges.contains(cell))
+            .min_by_key(|(_, _, last_used, _)| *last_used);
+        if let Some((cell, generation, _, _)) = candidate {
+            // Release changes residency only. Durable items, intents, and range
+            // fences restore through ordinary owner resolution; busy work stays.
+            self.release_capacity(cell, generation).await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn reclaim_directory_capacity(&self) -> Result<(), StorageError> {
+        if self.runtime.stats().active_cells() < self.runtime.stats().active_cell_capacity() {
+            return Ok(());
+        }
+        let _admission = self.admission.lock().await;
+        self.release_retired_directory().await.map(|_| ())
+    }
+
+    // Admission is held. Terminal directory state is irreversible, so release
+    // needs no account lookup that could recursively request another slot.
+    pub(super) async fn release_retired_directory(&self) -> Result<bool, StorageError> {
+        let stats = self.runtime.stats();
+        if stats.active_cells() < stats.active_cell_capacity() {
+            return Ok(false);
+        }
+        let targets: HashMap<_, _> = self
+            .runtime
+            .active_cell_targets()
+            .await
+            .map_err(provision_error)?
+            .into_iter()
+            .filter(|target| target.namespace() == crate::directory::NAMESPACE)
+            .map(|target| (target.cell_id(), target))
+            .collect();
+        let mut candidates = self
+            .runtime
+            .idle_transfer_candidates()
+            .await
+            .map_err(provision_error)?;
+        candidates.sort_by_key(|(_, _, last_used, _)| *last_used);
+        let client = CellClient::local_runtime(
+            self.application.registry(),
+            self.runtime.clone(),
+            self.layout.clone(),
+        );
+        for (cell, generation, _, _) in candidates {
+            let Some(target) = targets.get(&cell) else {
+                continue;
+            };
+            let state = client
+                .query::<crate::ReadDirectory>(target, None, Json(()))
+                .await
+                .map_err(cell_error)?;
+            if state
+                .output
+                .0
+                .is_some_and(|state| state.mode == crate::DirectoryMode::Retired)
+            {
+                // Runtime rechecks residency generation and settled work. The
+                // retained root still fences delayed split/open commands.
+                self.release_capacity(cell, generation).await?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(crate) async fn restore_idle(
         &self,
         target: &CellTarget,
@@ -58,7 +158,7 @@ impl CellInitialPartitionProvisioner {
         if !restorable(observed.value()) {
             return Ok(None);
         }
-        self.reclaim_coordinator_capacity()
+        self.reclaim_settled_capacity(target)
             .await
             .map_err(admission_error)?;
         self.activate_published(target, proof, observed)
@@ -200,7 +300,7 @@ impl CellInitialPartitionProvisioner {
                     (
                         spec.table.id,
                         spec.partition_id,
-                        Some(spec.index.id),
+                        Some((spec.index.id, spec.lower.unwrap_or([0; 16]))),
                         sealed,
                     )
                 };
@@ -222,7 +322,10 @@ impl CellInitialPartitionProvisioner {
                 if !sealed {
                     continue;
                 }
-                let unpublished = if let Some(index_id) = index_id {
+                let unpublished = if let Some((index_id, lower)) = index_id {
+                    let directory =
+                        crate::global_index_directory_target(&client, account, &index_id, lower)
+                            .await?;
                     let input = GlobalIndexPartitionInput {
                         index_id,
                         partition_id,
@@ -230,14 +333,18 @@ impl CellInitialPartitionProvisioner {
                     // Keep the sealed source resident while copying/opening is
                     // pending. Completion removes its durable participant reservation.
                     client
-                        .query::<ReadGlobalIndexSplitPlan>(account, None, Json(input.clone()))
+                        .query::<ReadGlobalIndexSplitPlan>(&directory, None, Json(input.clone()))
                         .await
                         .map_err(cell_error)?
                         .output
                         .0
                         .is_none()
                         && client
-                            .query::<ReadPublishedGlobalIndexPartition>(account, None, Json(input))
+                            .query::<ReadPublishedGlobalIndexPartition>(
+                                &directory,
+                                None,
+                                Json(input),
+                            )
                             .await
                             .map_err(cell_error)?
                             .output
@@ -281,6 +388,20 @@ impl CellInitialPartitionProvisioner {
         // Wait for eligibility; unknown or busy state never authorizes release.
         let candidate = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
+                // Another admission or maintenance sweep can release these
+                // owners while this caller waits for inventory settlement.
+                let stats = self.runtime.stats();
+                if stats.active_cells() < stats.active_cell_capacity()
+                    || !self
+                        .runtime
+                        .active_cell_targets()
+                        .await
+                        .map_err(provision_error)?
+                        .iter()
+                        .any(|target| retired.contains(&target.cell_id()))
+                {
+                    return Ok(None);
+                }
                 let candidates = self
                     .runtime
                     .idle_transfer_candidates()
@@ -291,13 +412,16 @@ impl CellInitialPartitionProvisioner {
                     .filter(|(cell, _, _, _)| retired.contains(cell))
                     .min_by_key(|(_, _, last_used, _)| *last_used)
                 {
-                    return Ok::<_, StorageError>((cell, generation));
+                    return Ok::<_, StorageError>(Some((cell, generation)));
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         })
         .await
         .map_err(|_| StorageError::Transient("retired ranges have not settled".into()))??;
+        let Some(candidate) = candidate else {
+            return Ok(());
+        };
         // Metadata lookup may itself restore an idle account. Hold the local
         // admission gate only for release, avoiding recursive admission waits.
         let _admission = self.admission.lock().await;

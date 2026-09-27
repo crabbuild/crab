@@ -13,8 +13,8 @@ use crate::statistics::{
     ReadTableStatistics, StatisticsSnapshot, TableStatistics,
 };
 use crate::{
-    Json, ListTables, ListTablesInput, ListTablesOutcome, ReadGlobalIndexRoutePage, ReadRoutePage,
-    RoutePageInput, RoutePageOutcome, TableRecord, data_target, global_index_target,
+    Json, ListTables, ListTablesInput, ListTablesOutcome, ReadRoutePage, RoutePageInput,
+    RoutePageOutcome, TableRecord, data_target, global_index_target,
 };
 
 struct Sweep {
@@ -23,6 +23,7 @@ struct Sweep {
     index: Option<usize>,
     after: Option<[u8; 16]>,
     epoch: Option<u64>,
+    index_leaf: Option<(crate::DirectorySpec, u64, crate::statistics::ItemStatistics)>,
 }
 
 impl Sweep {
@@ -32,13 +33,14 @@ impl Sweep {
                 table_id: table.id.clone(),
                 sampled_at: mutation_identity()?.issued_at_ms,
                 base_epoch: None,
-                index_epochs: Default::default(),
+                index_generations: Default::default(),
                 statistics: TableStatistics::default(),
             },
             table,
             index: None,
             after: None,
             epoch: None,
+            index_leaf: None,
         })
     }
 
@@ -48,64 +50,43 @@ impl Sweep {
         account_id: &str,
     ) -> Result<bool, StorageError> {
         let account = target(account_id)?;
-        let index = self
-            .index
-            .map(|index| &self.table.global_secondary_indexes[index]);
-        let input = Json(RoutePageInput {
-            table_id: index.map_or(&self.table.id, |index| &index.id).clone(),
-            start_hash: None,
-            after_lower: self.after,
-            expected_epoch: self.epoch,
-        });
-        let page = if index.is_some() {
-            storage
-                .client
-                .query::<ReadGlobalIndexRoutePage>(&account, None, input)
-                .await
-        } else {
-            storage
-                .client
-                .query::<ReadRoutePage>(&account, None, input)
-                .await
-        }
-        .map_err(cell_error)?
-        .output
-        .0;
-        match page {
-            RoutePageOutcome::Changed => return Err(changed()),
-            RoutePageOutcome::Unrouted if index.is_none() && self.epoch.is_none() => {
-                self.snapshot.statistics = storage
-                    .client
-                    .query::<ReadAccountStatistics>(&account, None, Json(self.table.id.clone()))
-                    .await
-                    .map_err(cell_error)?
-                    .output
-                    .0;
+        if let Some(position) = self.index {
+            if !self.sample_index(storage, account_id, position).await? {
+                return Ok(false);
             }
-            RoutePageOutcome::Unrouted => return Err(changed()),
-            RoutePageOutcome::Page {
-                epoch, partitions, ..
-            } => {
-                let range = partitions.first().ok_or_else(changed)?;
-                if let Some(index) = index {
-                    let owner = global_index_target(account_id, &index.id, &range.partition_id)
-                        .map_err(|error| StorageError::Internal(error.to_string()))?;
-                    let values = storage
+        } else {
+            let page = storage
+                .client
+                .query::<ReadRoutePage>(
+                    &account,
+                    None,
+                    Json(RoutePageInput {
+                        table_id: self.table.id.clone(),
+                        start_hash: None,
+                        after_lower: self.after,
+                        expected_epoch: self.epoch,
+                    }),
+                )
+                .await
+                .map_err(cell_error)?
+                .output
+                .0;
+            match page {
+                RoutePageOutcome::Changed => return Err(changed()),
+                RoutePageOutcome::Unrouted if self.epoch.is_none() => {
+                    self.snapshot.statistics = storage
                         .client
-                        .query::<ReadGlobalIndexStatistics>(&owner, None, Json(()))
+                        .query::<ReadAccountStatistics>(&account, None, Json(self.table.id.clone()))
                         .await
                         .map_err(cell_error)?
                         .output
                         .0;
-                    self.snapshot
-                        .statistics
-                        .global
-                        .entry(index.specification.index_name.clone())
-                        .or_default()
-                        .add(&values)
-                        .map_err(|error| StorageError::Internal(error.to_string()))?;
-                    self.snapshot.index_epochs.insert(index.id.clone(), epoch);
-                } else {
+                }
+                RoutePageOutcome::Unrouted => return Err(changed()),
+                RoutePageOutcome::Page {
+                    epoch, partitions, ..
+                } => {
+                    let range = partitions.first().ok_or_else(changed)?;
                     let owner = data_target(account_id, &self.table.id, &range.partition_id)
                         .map_err(|error| StorageError::Internal(error.to_string()))?;
                     let values = storage
@@ -130,11 +111,11 @@ impl Sweep {
                             .map_err(|error| StorageError::Internal(error.to_string()))?;
                     }
                     self.snapshot.base_epoch = Some(epoch);
-                }
-                self.epoch = Some(epoch);
-                self.after = Some(range.lower);
-                if range.upper.is_some() {
-                    return Ok(false);
+                    self.epoch = Some(epoch);
+                    self.after = Some(range.lower);
+                    if range.upper.is_some() {
+                        return Ok(false);
+                    }
                 }
             }
         }
@@ -158,6 +139,84 @@ impl Sweep {
             Ok(_) | Err(InvocationError::Rejected(_)) => Err(changed()),
             Err(error) => Err(cell_error(error)),
         }
+    }
+    async fn sample_index(
+        &mut self,
+        storage: &CellStorage,
+        account_id: &str,
+        position: usize,
+    ) -> Result<bool, StorageError> {
+        let index = &self.table.global_secondary_indexes[position];
+        let hash = self.after.unwrap_or([0; 16]);
+        let page = crate::read_directory_leaf(
+            &storage.client,
+            target(account_id)?.tenant(),
+            &index.id,
+            hash,
+        )
+        .await?;
+        let (spec, version, values) = self
+            .index_leaf
+            .get_or_insert_with(|| (page.spec.clone(), page.version, Default::default()));
+        if *spec != page.spec || *version != page.version {
+            return Err(changed());
+        }
+        let range = page
+            .ranges
+            .first()
+            .filter(|range| range.lower == hash)
+            .ok_or_else(changed)?;
+        let owner = global_index_target(account_id, &index.id, &range.partition_id)
+            .map_err(|error| StorageError::Internal(error.to_string()))?;
+        let sampled = storage
+            .client
+            .query::<ReadGlobalIndexStatistics>(&owner, None, Json(()))
+            .await
+            .map_err(cell_error)?
+            .output
+            .0;
+        values
+            .add(&sampled)
+            .map_err(|error| StorageError::Internal(error.to_string()))?;
+        self.after = range.upper;
+        if range.upper != spec.upper {
+            return Ok(false);
+        }
+        let leaf = crate::directory_target(account_id, spec)
+            .map_err(|error| StorageError::Internal(error.to_string()))?;
+        let checked = storage
+            .client
+            .query::<crate::ReadDirectoryPage>(
+                &leaf,
+                None,
+                Json(crate::DirectoryPageInput {
+                    hash: spec.lower,
+                    expected_version: Some(*version),
+                }),
+            )
+            .await
+            .map_err(cell_error)?
+            .output
+            .0;
+        if !matches!(checked, crate::DirectoryPage::Leaf { .. }) {
+            return Err(changed());
+        }
+        // Validate the sampled membership at its owning leaf, then leave that
+        // immutable interval permanently. A subsequent metadata/data split there
+        // cannot make this sweep count both its old source and new children.
+        self.snapshot
+            .statistics
+            .global
+            .entry(index.specification.index_name.clone())
+            .or_default()
+            .add(values)
+            .map_err(|error| StorageError::Internal(error.to_string()))?;
+        self.index_leaf = None;
+        if self.after.is_some() {
+            return Ok(false);
+        }
+        self.snapshot.index_generations.insert(index.id.clone());
+        Ok(true)
     }
 }
 

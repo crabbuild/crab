@@ -26,11 +26,11 @@ impl Remote {
         let lease = CancellationToken::new();
         let (remote, _tasks) = start_node(
             fixture.application.clone(),
+            8,
             fixture.directory.clone(),
             session,
             endpoint.clone(),
-            fixture.remote_tls.certificate(),
-            fixture.remote_tls.signing_key().clone(),
+            &fixture.remote_tls,
             98,
             lease.clone(),
         )
@@ -169,22 +169,18 @@ async fn sdk_initial_base_and_index_ranges_use_remote_owners() {
         })
         .collect::<Vec<_>>();
     let index = &record.global_secondary_indexes[0];
-    let page = fixture
-        .client
-        .query::<beyonddb::ReadGlobalIndexRoutePage>(
-            &account,
-            None,
-            Json(beyonddb::RoutePageInput {
-                table_id: index.id.clone(),
-                start_hash: None,
-                after_lower: None,
-                expected_epoch: None,
-            }),
-        )
-        .await
-        .unwrap()
-        .output
-        .0;
+    let page = beyonddb::read_global_index_route_page(
+        &fixture.client,
+        "123456789012",
+        beyonddb::RoutePageInput {
+            table_id: index.id.clone(),
+            start_hash: None,
+            after_lower: None,
+            expected_epoch: None,
+        },
+    )
+    .await
+    .unwrap();
     let beyonddb::RoutePageOutcome::Page { partitions, .. } = page else {
         panic!("missing GSI route")
     };
@@ -224,7 +220,12 @@ async fn sdk_initial_base_and_index_ranges_use_remote_owners() {
         .unwrap();
     fixture
         .provisioner
-        .recover_registered_partitions("123456789012", account_handle, &fixture.directory)
+        .recover_registered_partitions(
+            "123456789012",
+            account_handle,
+            &fixture.client,
+            &fixture.directory,
+        )
         .await
         .unwrap();
     assert_index(&sdk).await;
@@ -611,4 +612,42 @@ fn mutation() -> crab_cell_runtime::MutationIdentity {
         issued_at_ms: now,
         expires_at_ms: now + 60_000,
     }
+}
+
+pub(super) async fn complete_deletion(
+    fixture: &Fixture,
+    sdk: &aws_sdk_dynamodb::Client,
+    name: &str,
+) {
+    fixture
+        .provisioner
+        .install_account_capacity_loop(
+            &fixture.tasks,
+            "123456789012".into(),
+            fixture.client.clone(),
+            u64::MAX,
+            std::time::Duration::from_millis(100),
+        )
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            match sdk.describe_table().table_name(name).send().await {
+                Ok(table) => assert_eq!(
+                    table.table.unwrap().table_status(),
+                    Some(&aws_sdk_dynamodb::types::TableStatus::Deleting)
+                ),
+                Err(error)
+                    if error
+                        .as_service_error()
+                        .is_some_and(|error| error.is_resource_not_found_exception()) =>
+                {
+                    break;
+                }
+                Err(error) => panic!("deletion recovery failed: {error}"),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("directory retirement did not complete");
 }

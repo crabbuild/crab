@@ -1,6 +1,6 @@
 //! Logical item statistics and generation-checked table snapshots.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crab_cell_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
 use extenddb_core::types::Item;
@@ -140,7 +140,7 @@ pub(crate) struct StatisticsSnapshot {
     pub table_id: String,
     pub sampled_at: i64,
     pub base_epoch: Option<u64>,
-    pub index_epochs: BTreeMap<String, u64>,
+    pub index_generations: BTreeSet<String>,
     pub statistics: TableStatistics,
 }
 
@@ -148,7 +148,7 @@ pub(crate) struct PublishStatistics;
 impl Command for PublishStatistics {
     const MODULE: &'static str = crate::MODULE;
     const ID: u32 = 31;
-    const CODEC_VERSION: u32 = 1;
+    const CODEC_VERSION: u32 = 2;
     type Input = Json<StatisticsSnapshot>;
     type Output = Json<bool>;
     fn execute(
@@ -174,21 +174,19 @@ impl Command for PublishStatistics {
         // The sample follows one directory generation. A cutover invalidates
         // the whole sample, preventing old-source and child double counting.
         if epoch != input.base_epoch
-            || table.global_secondary_indexes.len() != input.index_epochs.len()
+            || table.global_secondary_indexes.len() != input.index_generations.len()
         {
             return Ok(CommandResult::Rejected(Json(false)));
         }
         for index in &table.global_secondary_indexes {
             let rows = context.sql(&statement(
-                "SELECT route_epoch FROM ddb_global_index_routes WHERE table_id = ?1",
+                "SELECT 1 FROM ddb_global_index_routes WHERE table_id = ?1 AND retired = 0 AND initial_fingerprint IS NOT NULL",
                 vec![SqlValue::Text(index.id.clone())],
             ))?;
-            let epoch = rows[0]
-                .rows
-                .first()
-                .map(|row| parse_epoch(row))
-                .transpose()?;
-            if epoch.is_none() || epoch != input.index_epochs.get(&index.id).copied() {
+            // Index samples validate membership in each directory leaf and cross
+            // disjoint immutable intervals. This commit checks the live index
+            // generations; it cannot validate remote leaf versions atomically.
+            if rows[0].rows.is_empty() || !input.index_generations.contains(&index.id) {
                 return Ok(CommandResult::Rejected(Json(false)));
             }
         }

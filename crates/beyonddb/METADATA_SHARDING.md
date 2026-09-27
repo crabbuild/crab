@@ -1,11 +1,11 @@
 # BeyondDB metadata ownership
 
-Status: range-directory protocol implemented; serving-path extraction incomplete.
-The current account Cell still owns the table catalog, base/GSI directories and
-their split plans. The new directory module is compiled and has a tested native
-Cell controller, but public DynamoDB requests do not use it yet. This document
-does not claim that the account metadata limit is removed or that 10,000 active
-Cells have been qualified.
+Status: GSI serving-path cutover under verification. GSI membership and split
+intents now live in independently owned directory leaves. The account retains one
+fixed-size publication anchor per index, the table catalog, and base-range
+directories. Public index Query/Scan, projection, splitting, statistics, recovery
+and deletion use the tree. This work does not remove the account metadata limit
+or qualify 10,000 active Cells; catalog and base-directory extraction remain open.
 
 ## Current atomic boundaries
 
@@ -14,11 +14,11 @@ Cells have been qualified.
 | Table name and generation | `table.rs`, `backend.rs`, account `ddb_tables` | Account-unique names; fresh generation after recreation; generation checks must precede mutations of an old table. |
 | Initial publication | `backend.rs`, `routing.rs::ActivateTableRoute`, `global_index/routing.rs::ActivateGlobalIndexRoute` | Publish all GSI owners before admitting base writes. A durable catalog row can precede all of these publications. |
 | Point routing | `backend/data/routed.rs::routed_partition`, `backend/admission.rs` | A full primary-key lookup resolves one current owner. An existing transaction token resolves its original coordinator and participants before reading current routes. |
-| Scan/maintenance pages | `ReadRoutePage`, `ReadGlobalIndexRoutePage`; routed Scan, TTL, projection, capacity, statistics and recovery | Ordered coverage, bounded pages and explicit detection of conflicting directory changes; no full-directory read on the request path. |
+| Scan/maintenance pages | `ReadRoutePage`, `read_global_index_route_page`; routed Scan, TTL, projection, capacity, statistics and recovery | Ordered coverage, bounded pages and explicit detection of conflicting directory changes; no full-directory read on the request path. |
 | Base split | `routing/split_state.rs`, `split.rs`, `provision/capacity.rs` | Source/child reservations and route replacement currently share one account commit. Keep the intent until both children open. Unrelated splits may publish independently. |
 | GSI split | `global_index/split_routing.rs`, `global_index/transfer.rs`, `provision/global_indexes.rs` | Transfer versions and tombstones as well as items; retain unfinished source/child reservations through opening. |
 | Delete | `table/deletion.rs`, account lifecycle marker and cleanup worker | Fence the exact generation before bounded metadata cleanup. Prepared account transactions prevent deletion; name reuse waits for catalog removal. |
-| Statistics | `statistics.rs::PublishStatistics`, `backend/statistics.rs` | The current final publication checks every sampled base/GSI directory epoch in the same account commit, preventing a split from double-counting source and children. |
+| Statistics | `statistics.rs::PublishStatistics`, `backend/statistics.rs` | Base sampling retains its account epoch guard. GSI sampling validates each leaf before leaving its immutable interval; final publication checks the live index generation set. |
 | Residency/recovery | `provision.rs`, `provision/residency.rs`, `provision/transactions.rs` | Metadata absence is authoritative only at the current owner and for the exact generation. Original transaction participants remain recoverable after directory changes. |
 
 Moving SQL tables alone would break these contracts. Increasing the account
@@ -70,24 +70,26 @@ restore. Name reuse waits for catalog removal; delayed delete/cleanup commands
 carry the original generation. See [deletion proof](SCALING.md#bounded-generation-scoped-table-deletion).
 
 Metadata extraction must preserve these lifecycle semantics across independent
-owners, including explicit completion acknowledgements before name reuse. The
-current cleanup is account-local and does not implement that distributed protocol.
-An unavailable metadata owner must never be treated as deletion evidence.
+owners, including explicit completion acknowledgements before name reuse. GSI cleanup now retains each anchor until its whole directory tree acknowledges
+retirement. An unavailable metadata owner leaves deletion pending and cannot be
+treated as deletion evidence. Base-range metadata cleanup remains account-local.
 
 Directory split and data split are distinct operations. A metadata leaf cannot
 move an unfinished data-split reservation without transferring its recovery
 ownership. Either fence directory splitting while those reservations exist or
-supply a checked migration protocol. The current membership lookup by random
-partition ID also needs replacement: hash-directed metadata lookup requires the
-partition's logical boundary or a separately sharded identity index. An account
-Cell must not retain an ever-growing reverse-lookup table.
+supply a checked migration protocol. GSI split and residency callers now supply the partition's logical lower bound
+to find the leaf, then check its exact partition identity. The account no longer
+keeps GSI participant or range rows. Base-range identity lookup still needs the
+same extraction.
 
-The single numeric table-wide route epoch must also change. Keeping an account
-write for every directory mutation would preserve the current writer bottleneck.
-Leaf generations and route versions must support Scan continuity and safe split
-replay. Statistics need publication at a boundary that can atomically validate
-the sample's membership, then bounded aggregation; checking remote versions and
-later writing an account total is not equivalent to today's atomic guard.
+GSI range epochs now advance from their own source; leaf membership versions
+advance independently. Pagination validates the leaf containing its prior logical
+lower bound before crossing to a neighbour. Child versions start above the
+frozen parent version, so resolving an old cursor into a descendant detects the
+change. Statistics accumulate one leaf at a time, validate that leaf version, then
+leave its immutable interval permanently. Subsequent splits behind that bound
+cannot count both old and new owners. Statistics remain asynchronous samples,
+not a cross-Cell snapshot; final publication checks the live generation set.
 
 ## Transaction and recovery requirements
 
@@ -130,20 +132,16 @@ Keeping two authoritative route directories or a reader fallback would require a
 separate migration contract. No such compatibility requirement has been adopted
 for these unreleased schemas.
 
-## Activation comparison prerequisite
+## Initial directory publication
 
-Base and GSI activation replay now compare compact indexed pages of at most 64
-ranges in one Cell snapshot. Base replay compares its epoch and table snapshot
-once; neither replay path reconstructs a full directory result. This removes the
-GSI SQL-result overflow above 1,000 rows and bounds additional comparison memory
-independently of directory growth. A mismatch stops comparison immediately.
-
-The metadata regression installs 1,024 directory entries through native commands,
-restores the account owner, replays both base and GSI activation and rejects
-changed entries across page boundaries. These are directory entries, not 1,024
-active data Cells; public initial placement remains capped at 256. This is a
-prerequisite cleanup, not implementation of the sharded topology above.
-
+Creation records an index intent with the table generation before installing any
+independent owners. Its nullable fingerprint distinguishes an unpublished intent
+from a serving anchor. Creation installs the initial GSI owners and root directory
+before publishing that fingerprint. The anchor stores no growing range inventory. Activation replay compares that fingerprint, preserving later
+leaf mutations. Base activation still compares indexed pages of at most 64 rows.
+The 1,024-entry native activation regression checks replay and corrupted input;
+these are metadata entries, not 1,024 active owners. Public initial placement
+remains capped at 256 ranges per table/index.
 
 ## Native range-directory protocol
 
@@ -188,24 +186,31 @@ and idle restoration. Split and retirement controllers follow live remote owners
 and use the existing expired-session takeover path when required. Published paths
 require cataloged identity and a durable root before restoration; a missing child
 cannot be replaced with an empty node. Account, credential and coordinator targets
-remain outside this admission capability. Directory rebalancing, capacity
-reclamation and background discovery still need integration.
+remain outside this admission capability. Background GSI discovery restores at most the current and next metadata path
+for each page. Terminal directory nodes can release residency under the runtime
+generation and settled-work checks; their durable roots remain. Live directory
+rebalancing and general branch/leaf residency still need qualification.
 
 ### Directory retirement
 
 `directory/retirement.rs` fences an exact node generation before acknowledging
-retirement. A branch retains both published child addresses and an acknowledgement
-bitmap until both descendants finish. Leaves, importing copies and frozen nodes
-become terminal immediately; a frozen parent can no longer publish unfinished
-copies. Installation, opening, membership changes and split discovery all respect
+retirement. Branches and frozen nodes retain both child addresses, their
+publication status and an acknowledgement bitmap until both descendants finish.
+Leaves and importing copies become terminal immediately. A frozen parent can no
+longer publish, but its unfinished copies still require durable retirement fences. Installation, opening, membership changes and split discovery all respect
 the terminal fence. Retained SQL rows and command receipts are not garbage-collected.
 
-`provision/directory.rs::retire_directory_step` advances one bounded path, restores
-existing authority only, and records a child's durable retirement before its parent
-can finish. A lost receipt is recovered from the child's terminal state. Missing
-or unavailable published children leave retirement pending. The caller must fence
-the table generation first; this primitive is not yet wired into public DeleteTable.
-Name reuse must wait for this work when public routing moves to the directory tree.
+`provision/directory.rs::retire_directory_step` advances one bounded path and
+records a child's durable retirement before its parent can finish. Published
+children require existing authority. For unpublished children, the retained
+parent intent authorizes installing a terminal fence even if copying never began. A lost receipt is recovered from the child's terminal state. Missing
+or unavailable published children leave retirement pending. Public DeleteTable first fences the table generation. The capacity worker runs
+this protocol for every index intent, records its terminal receipt against that
+generation, then continues bounded account cleanup. An unpublished creation intent
+also authorizes a missing root's terminal fence, preventing delayed installation
+after deletion. These native commands trust the authenticated lifecycle controller
+to verify the account or parent intent; they do not read other Cells. Name reuse waits for every
+index acknowledgement; delayed receipts cannot affect a replacement generation.
 
 ### Evidence and remaining integration
 
@@ -231,17 +236,114 @@ retirement acknowledgement after its owner stops and its advertisement expires.
 That focused test passed in 18.71 seconds. It exercises native metadata commands
 over the real peer transport; it does not claim public DynamoDB directory routing.
 
-Public creation/routing, data and GSI split controllers, deletion, statistics,
-TTL/projection traversal, distributed residency, and background discovery still
-use account-owned directories. They must switch together with generation/lifecycle
-fences; the new tree must not become a second authoritative copy. Ordered table
-catalog splitting remains separate work. Retained native command receipts also
-still need general history retirement. No account-limit or fleet-scale claim is
-justified until those integration gates pass.
+## Serving cutover verification
 
+The GSI cutover replaces account-owned range and split-plan SQL with one canonical
+directory path. Full transfer plans stay beside compact leaf reservations until
+both data children open; unfinished transfers prevent metadata splitting. The
+controller splits a full metadata leaf before reserving another data split.
+Published-parent traversal can finish opening a copied child after a lost
+controller reply, using the parent's retained immutable split.
 
-The sibling transactional-read cleanup/restart regression also passed (5.05 s)
-with the compiled-limit provisioning path, covering existing 512-MiB account,
-data and coordinator types alongside the directory test's 16-MiB nodes. Strict
-all-target Clippy passed. The new native directory regression is included in the
-SDK/process CI workflow; this protocol revision still needs that CI run.
+Focused GSI transfer/restart and projection recovery tests passed (3 tests,
+31.46 s on the admission revision). All three directory activation, split/restart
+and residency regressions passed together (12.88 s). The terminal-directory
+residency regression also checks that full
+admission creates no ownership claim, waits for the runtime's settled gate, then
+reclaims and restores a retired node without losing its fence (2.07 s).
+
+The signed SDK scenario creates a GSI, splits its metadata root, splits a data
+range in one child, releases the metadata owners, then checks paginated Scan and
+Query after restoration. DeleteTable waits for directory retirement before the
+catalog generation disappears. Three repetitions passed (9.35, 6.27 and 5.29 s).
+Two runs exercised rejection by a full peer followed by successful placement.
+The original scenario exposed stale signed capacity: new admission previously
+claimed ownership before rejecting capacity, and converted the capacity error
+into a generic transport failure. Admission now checks capacity before a new
+claim and preserves its native error; placement excludes each exhausted candidate
+once, and retries only while authority confirms no owner was claimed. A claimed
+owner still requires the existing recovery protocol.
+
+Strict all-target Clippy passed after the final lint fixes (16.74 s).
+The preceding protocol/lifecycle revision passed SDK/process CI (run
+36323580772). This serving cutover still needs broader creation, deletion,
+statistics, recovery and CI qualification; focused SDK proof is not that gate.
+
+Base directories, table-name catalog splitting, live metadata rebalancing,
+coordinator expansion and general retained-history retirement remain open. Public
+base Query/Scan, TTL and transaction admission still use account-owned base
+routes. No account-limit removal or fleet-scale claim follows from GSI cutover.
+
+### Cutover lifecycle and admission qualification
+
+Focused signed SDK regressions passed for deletion before and after an unpublished
+root copy (9.62 s), sparse-index statistics (2.83 s), partial-creation recovery
+(2.14 s), and split-source capacity reclamation (3.62 s). Deletion coverage checks
+rejected delayed installation, a fresh generation on recreation, and subsequent
+SDK writes and reads. These tests precede the unpublished child-retirement change.
+
+The index split/owner-restore regression exposed metadata starvation when live
+ranges occupied a released account owner's slot. Under admission pressure,
+account, credential and directory restoration can now release one settled data
+or GSI owner. The runtime rechecks generation, queued work and publication state;
+release preserves its durable root, items and transaction intents. Ordinary data
+admission does not use this priority. The SDK regression passed after this change
+(16.49 s); fleet throughput and admission fairness remain unqualified.
+
+The native directory-tree regression now also retires a frozen descendant with
+zero, one and two unpublished child copies, restarts during retirement and
+rejects delayed install/open commands for every child. It passed in 10.46 s.
+Published children still require recovery of existing authority; the unavailable
+published-child case remains pending until its owner releases it.
+
+The full-node metadata restoration regression passed in 2.55 s: it fills all
+slots, releases the account, occupies that slot, then restores the account by
+releasing exactly one settled data owner. The released root remains durable and
+SDK reads recover every original item. All five focused creation regressions
+passed together in 10.91 s after reclamation learned to stop waiting when another
+sweep has already freed capacity or released all of its observed retired owners.
+The preceding run reproduced a five-second stale-candidate timeout on immediate
+recreation; the successful rerun alone does not establish fleet admission fairness.
+
+Both signed directory lifecycle regressions passed together after these changes
+(20.56 s): metadata splitting with SDK pagination and deletion, plus remote child
+retirement and expired-owner recovery. One run exercised full-peer rejection and
+successful subsequent placement. Broader SDK/process CI still predates this cutover.
+
+Strict all-target Clippy passed on the lifecycle revision (14.51 s), with format
+and diff checks clean. No dependency pins or lockfiles changed. These focused results do not replace broader SDK/process CI qualification.
+
+### Metadata outage and projection scheduling
+
+The three focused owner-recovery regressions passed together (3.58 s). A new
+signed SDK test injects an unavailable first index directory while leaving the
+second available. Capacity maintenance advances and publishes the healthy index
+split. The same test exposed journal head-of-line blocking: the healthy index
+received the first image but newer writes timed out behind retained failed work.
+
+Projection attempts now durably defer failed entries behind work already queued,
+using source commit sequences for both enqueue and retry order. Payload identity
+and projection versions remain immutable; an entry is deleted only after all
+required index changes succeed. Both account and routed source commands use the
+same implementation. Account-local public GSI creation remains unsupported; the
+public GSI path uses routed data owners. The unreleased outbox schema and delivery
+command codecs change together; no released-root migration is claimed.
+
+The regression passed after the fix (4.59 s), then passed with source-owner release
+and restoration during the outage, recovery of the failed directory, eventual
+acknowledgement of all retained work, and both indexes retaining the newest image
+(7.12 s). This is bounded fault injection through the production projection loop,
+not throughput or fleet fairness qualification.
+
+After durable retry scheduling, all three native GSI regressions passed together
+(24.36 s): journal replay/version fences, serving owner recovery with independent
+indexes, and range transfer preserving versions and tombstones across restart.
+The implementation replaces account-owned GSI range/plan rows with bounded leaf
+ownership and adds traversal, creation-intent and retirement recovery. Those
+distributed lifecycle responsibilities account for the production code growth;
+there is one authoritative GSI route path, with no account-route fallback.
+
+Final pre-push gates passed: strict all-target Clippy (23.69 s), the BeyondDB
+server build (45.21 s), formatting and diff checks. The branch already includes
+latest fetched `origin/main` (`311105eb864`); broader SDK/process CI must verify
+the pushed cutover before it is considered ready to land.

@@ -239,7 +239,7 @@ async fn interrupted_split(installed_children: usize) {
             .unwrap()
             .output
             .0,
-        DirectoryPage::Redirect(split.children.clone())
+        DirectoryPage::Redirect(Box::new(split.clone()))
     );
     assert!(matches!(
         client
@@ -261,7 +261,7 @@ async fn interrupted_split(installed_children: usize) {
         assert!(
             matches!(
                 client
-                    .command::<FreezeDirectory>(child, mutation(), Json(1))
+                    .command::<FreezeDirectory>(child, mutation(), Json(split.version + 1))
                     .await,
                 Err(InvocationError::Rejected(_))
             ),
@@ -282,7 +282,7 @@ async fn interrupted_split(installed_children: usize) {
                     None,
                     Json(DirectoryPageInput {
                         hash: plan.source.lower,
-                        expected_version: Some(1)
+                        expected_version: Some(split.version + 1)
                     })
                 )
                 .await
@@ -297,7 +297,7 @@ async fn interrupted_split(installed_children: usize) {
                 None,
                 Json(DirectoryPageInput {
                     hash: plan.children[1].lower,
-                    expected_version: Some(2),
+                    expected_version: Some(split.version + 2),
                 }),
             )
             .await
@@ -327,7 +327,7 @@ async fn interrupted_split(installed_children: usize) {
         .output
         .0
         .unwrap();
-    assert_eq!(replayed.version, 2);
+    assert_eq!(replayed.version, split.version + 2);
     let grandchildren = provisioner
         .split_directory(&client, ACCOUNT, &split.children[0])
         .await
@@ -359,12 +359,62 @@ async fn interrupted_split(installed_children: usize) {
         .unwrap();
     let grandchild = directory_target(ACCOUNT, &grandchildren.children[0]).unwrap();
     let frozen = client
-        .command::<FreezeDirectory>(&grandchild, mutation(), Json(1))
+        .command::<FreezeDirectory>(&grandchild, mutation(), Json(grandchildren.version + 1))
         .await
         .unwrap()
         .output
         .0
         .unwrap();
+    let mut unfinished_copies = Vec::new();
+    for spec in &frozen.children {
+        let mut rows = Vec::new();
+        let mut hash = spec.lower;
+        loop {
+            let page = client
+                .query::<ReadDirectoryPage>(
+                    &grandchild,
+                    None,
+                    Json(DirectoryPageInput {
+                        hash,
+                        expected_version: Some(frozen.version),
+                    }),
+                )
+                .await
+                .unwrap()
+                .output
+                .0;
+            let DirectoryPage::Leaf { ranges, .. } = page else {
+                panic!("frozen copy lost its readable source");
+            };
+            rows.extend(
+                ranges
+                    .into_iter()
+                    .take_while(|range| spec.upper.is_none_or(|upper| range.lower < upper)),
+            );
+            let next = rows.last().unwrap().upper;
+            if next == spec.upper {
+                break;
+            }
+            hash = next.unwrap();
+        }
+        unfinished_copies.push(DirectoryInstall {
+            spec: spec.clone(),
+            ranges: rows,
+            source: Some(frozen.clone()),
+        });
+    }
+    // Interrupt deletion with zero, one or both unpublished child copies durable.
+    for copy in unfinished_copies.iter().take(installed_children) {
+        provisioner
+            .admit_directory(ACCOUNT, &copy.spec)
+            .await
+            .unwrap();
+        let target = directory_target(ACCOUNT, &copy.spec).unwrap();
+        client
+            .command::<InstallDirectory>(&target, mutation(), Json(copy.clone()))
+            .await
+            .unwrap();
+    }
     let mut other_generation = root.clone();
     other_generation.table_id.replace_range(63..64, "1");
     assert!(matches!(
@@ -488,6 +538,7 @@ async fn interrupted_split(installed_children: usize) {
     for spec in std::iter::once(&root)
         .chain(split.children.iter())
         .chain(grandchildren.children.iter())
+        .chain(frozen.children.iter())
     {
         let target = directory_target(ACCOUNT, spec).unwrap();
         assert_eq!(
@@ -543,6 +594,21 @@ async fn interrupted_split(installed_children: usize) {
             .await,
         Err(InvocationError::Rejected(_))
     ));
+    for copy in unfinished_copies {
+        let target = directory_target(ACCOUNT, &copy.spec).unwrap();
+        assert!(matches!(
+            client
+                .command::<InstallDirectory>(&target, mutation(), Json(copy))
+                .await,
+            Err(InvocationError::Rejected(_))
+        ));
+        assert!(matches!(
+            client
+                .command::<beyonddb::OpenDirectory>(&target, mutation(), Json(frozen.clone()))
+                .await,
+            Err(InvocationError::Rejected(_))
+        ));
+    }
     assert!(
         provisioner
             .split_directory(&client, ACCOUNT, &root)
@@ -573,4 +639,138 @@ fn change(source: &beyonddb::RoutePagePartition, id: u128) -> DirectoryChange {
             },
         ],
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_directories_release_residency_without_losing_retirement_fences() {
+    let application = Arc::new(
+        Beyonddb::compile(BuildDescriptor {
+            source_revision: "directory-residency".into(),
+            cargo_lock_digest: Digest::from_bytes([1; 32]),
+        })
+        .unwrap(),
+    );
+    let account = account_target(ACCOUNT).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let layout = CellStorageLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        object_store::path::Path::from("directory-residency"),
+        *account.application().as_bytes(),
+    );
+    let (host, provisioner, client, _) = owner(
+        &application,
+        &layout,
+        SessionId::from_bytes([85; 16]),
+        directory.path(),
+    );
+    let ranges = vec![beyonddb::RoutePagePartition {
+        partition_id: [0; 16],
+        lower: [0; 16],
+        upper: None,
+        epoch: 1,
+    }];
+    let mut directories = Vec::new();
+    for ordinal in 0..16u8 {
+        let mut id = [ordinal; 32];
+        id[..16].copy_from_slice(account.tenant().as_bytes());
+        let spec = DirectorySpec::root(blake3::Hash::from_bytes(id).to_hex().to_string());
+        let target = directory_target(ACCOUNT, &spec).unwrap();
+        provisioner.admit_directory(ACCOUNT, &spec).await.unwrap();
+        client
+            .command::<InstallDirectory>(
+                &target,
+                mutation(),
+                Json(DirectoryInstall {
+                    spec: spec.clone(),
+                    ranges: ranges.clone(),
+                    source: None,
+                }),
+            )
+            .await
+            .unwrap();
+        directories.push((spec, target));
+    }
+    assert_eq!(host.runtime().stats().active_cells(), 16);
+    let authority = CellAuthority::new(layout);
+    assert!(provisioner.admit_account(ACCOUNT).await.is_err());
+    assert!(
+        authority.load(account.cell_id()).await.unwrap().is_none(),
+        "capacity rejection must precede a new ownership claim"
+    );
+    // Keep one live node at the same capacity boundary. Only an irreversible
+    // terminal fence, never ordinary inactivity, authorizes reclamation.
+    for (spec, target) in &directories[1..] {
+        client
+            .command::<beyonddb::RetireDirectory>(target, mutation(), Json(spec.clone()))
+            .await
+            .unwrap();
+    }
+    // Durable retirement precedes the runtime's settled inventory refresh.
+    // Reclamation may release only candidates that have crossed both gates.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if host
+                .runtime()
+                .idle_transfer_candidates()
+                .await
+                .unwrap()
+                .iter()
+                .any(|(cell, _, _, _)| *cell != directories[0].1.cell_id())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    provisioner.admit_account(ACCOUNT).await.unwrap();
+    let mut released = Vec::new();
+    for (spec, target) in &directories {
+        if authority
+            .load(target.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .owner
+            .is_none()
+        {
+            released.push(spec.clone());
+        }
+    }
+    assert_eq!(released.len(), 1);
+    assert_ne!(released[0], directories[0].0);
+    let spec = &released[0];
+    provisioner
+        .admit_existing_directory(ACCOUNT, spec)
+        .await
+        .unwrap();
+    let target = directory_target(ACCOUNT, spec).unwrap();
+    assert_eq!(
+        client
+            .query::<ReadDirectory>(&target, None, Json(()))
+            .await
+            .unwrap()
+            .output
+            .0
+            .unwrap()
+            .mode,
+        DirectoryMode::Retired
+    );
+    assert!(matches!(
+        client
+            .command::<InstallDirectory>(
+                &target,
+                mutation(),
+                Json(DirectoryInstall {
+                    spec: spec.clone(),
+                    ranges,
+                    source: None,
+                })
+            )
+            .await,
+        Err(InvocationError::Rejected(_))
+    ));
+    host.shutdown().await.unwrap();
 }

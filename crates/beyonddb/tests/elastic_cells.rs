@@ -171,6 +171,17 @@ struct FailOnceProvisioner {
 }
 
 impl InitialPartitionProvisioner for FailOnceProvisioner {
+    fn provision_global_index_directory<'a>(
+        &'a self,
+        client: &'a CellClient,
+        account_id: &'a str,
+        index_id: &'a str,
+        ranges: Vec<beyonddb::RoutePagePartition>,
+    ) -> BoxedFuture<'a, Result<beyonddb::DirectoryCopyReceipt, StorageError>> {
+        self.inner
+            .provision_global_index_directory(client, account_id, index_id, ranges)
+    }
+
     fn initial_partition_count(&self) -> u16 {
         self.inner.initial_partition_count()
     }

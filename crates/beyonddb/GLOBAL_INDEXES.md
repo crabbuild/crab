@@ -55,7 +55,13 @@ image. The source acknowledges the journal entry only after every required
 mutation has a durable successful result. A lost reply, failed index owner, or
 interrupted worker leaves the entry available for retry. A failed index does
 not suppress projection to later healthy indexes; acknowledgement still waits
-for all indexes. Concurrent workers may process the same entry safely.
+for all indexes. Failed delivery durably moves the entry behind work already
+queued on that source. Enqueue and deferral use the same monotonically increasing
+source commit sequence for scheduling, so retries and new changes cannot pin one
+another at the head. The immutable projection version remains unchanged. This
+lets later base writes reach healthy indexes while another index is unavailable.
+Concurrent workers may process the same entry safely; deferral after another
+worker acknowledges it is a no-op.
 
 Each index row retains a lexicographically ordered `(source_epoch, sequence)`
 version, a content digest, and either its projected image or a tombstone.
@@ -89,17 +95,18 @@ image; duplicate imports do not increment its count. Activation requires the
 complete expected fingerprint and still blocks serving traffic. Opening requires
 a trusted controller to observe the replacement directory route first.
 
-The account Cell records a per-source split plan and reserves its source and both
-children before fencing any owner. Independent sources may split concurrently;
-publication compares their exact source/child rows and increments the current
-directory epoch. Administrative metadata changes do not invalidate an immutable
+Each directory leaf records a per-source split plan and reserves its source and
+both children before fencing any owner. Independent leaves may split concurrently;
+publication compares exact source/child rows and advances that leaf's version. Administrative metadata changes do not invalidate an immutable
 key contract. Participant reservations reject overlapping plans.
 
 Publication retains the plan until both children are open. A sweep can discover
 that plan through either routed child after a crash at cutover. The controller
 replays the sealed export, verifies both fingerprints, publishes, opens both
-children, then removes the plan and reservations. Table deletion removes the
-index directory, plans, and reservations atomically through foreign keys.
+children, then removes the plan and reservations. Table deletion fences the
+account generation, retires its directory tree, and acknowledges retirement
+before removing the account anchor. Directory roots retain terminal fences.
+See [metadata ownership](METADATA_SHARDING.md) for cutover qualification.
 
 The serving account capacity loop visits base ranges, then each index's ranges.
 It uses occupied SQLite pages, including tombstones, and the existing configured
@@ -109,8 +116,8 @@ capacity becomes available, pending plans resume through signed placement and
 peer admission. Source/child identities remain fixed across retries.
 
 At local admission pressure, completed sealed sources can release their SQL
-slots after the account owner confirms route removal and no pending split
-reservation. Their durable roots and tombstones remain for recovery; remote
+slots after the current directory leaf confirms route removal and no pending
+split reservation, or after the account confirms generation deletion. Their durable roots and tombstones remain for recovery; remote
 rebalancing and storage collection remain unfinished.
 
 Index reads and projection application can return transient failures between
@@ -160,7 +167,7 @@ qualification.
 | Routed replay and acknowledgement | `src/backend/global_index.rs` |
 | Serving owner recovery | `src/provision.rs` → existing `recover_discovered_owner`, NodeDirectory proof, and runtime authority CAS |
 | Versioned index storage and reads | `src/global_index.rs`, `src/global_index/read.rs`, `src/global_index_schema.sql` |
-| Index directory | `src/global_index/routing.rs`, `src/routing.rs`, `src/schema.sql` |
+| Index directory | `src/global_index/routing.rs`, `src/directory.rs`, `src/directory/`, `src/directory/schema.sql`; fixed-size account anchors in `src/schema.sql` |
 | Server worker and peer reachability | `src/bin/beyonddb.rs`, `src/server/peer_receiver.rs` |
 | Focused recovery fixture | `tests/elastic_cells/global_indexes.rs` |
 | Signed peer-owner recovery | `tests/peer_network/global_indexes.rs`, `tests/peer_network.rs` |
@@ -227,7 +234,7 @@ These results cover selected recovery schedules, not a fleet-scale bound.
 | Boundary | Evidence |
 | --- | --- |
 | Serving caller | `bin/beyonddb.rs` installs the account capacity loop; `provision/capacity.rs` visits base and index ranges; `provision/global_indexes.rs` owns routed transfer orchestration. |
-| Account boundary | `global_index/split_routing.rs` owns per-source plans, source/child reservations, atomic route publication, and completion. The runtime command savepoint protects all account rows together. |
+| Directory leaf boundary | `global_index/split_routing.rs` owns per-source plans, source/child reservations, atomic route publication, and completion. The runtime command savepoint protects all leaf rows together. |
 | Cell entry points | `global_index/transfer.rs` commands and queries registered by `GlobalIndexModule`; `global_index_schema.sql` persists lifecycle state. |
 | Shared projection path | `ApplyGlobalIndexMutation` and `ImportGlobalIndexEntry` call the same key/image validator and versioned row writer; imports require exact replay. |
 | Reader siblings | Both `GlobalIndexQuery` and `GlobalIndexScan` require serving/opened state. `ReadGlobalIndexPartition` remains available for owner recovery and retired-table residency checks. |

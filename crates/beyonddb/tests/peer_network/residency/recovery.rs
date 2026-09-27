@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::*;
 use crab_cell_runtime::{
     cell::catalog::CellCatalog,
@@ -184,7 +186,7 @@ async fn discovered_recovery_resumes_claimed_ranges_before_sdk_requests() {
     let account = fixture.provisioner.admit_account(ACCOUNT).await.unwrap();
     fixture
         .provisioner
-        .recover_registered_partitions(ACCOUNT, account, &fixture.directory)
+        .recover_registered_partitions(ACCOUNT, account, &fixture.client, &fixture.directory)
         .await
         .unwrap();
     // A local-only client cannot rescue a skipped activation through SDK routing.
@@ -229,6 +231,89 @@ async fn discovered_recovery_resumes_claimed_ranges_before_sdk_requests() {
                 .as_ref(),
             Some(item)
         );
+    }
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_restoration_releases_a_settled_range_without_losing_items() {
+    let fixture = Fixture::new().await;
+    let mut blockers = Vec::new();
+    while fixture.node.runtime().stats().active_cells()
+        < fixture.node.runtime().stats().active_cell_capacity()
+    {
+        blockers.push(
+            fixture
+                .provisioner
+                .admit_credential(&format!("AKIAMETADATACAPACITY{}", blockers.len()))
+                .await
+                .unwrap(),
+        );
+    }
+    fixture
+        .provisioner
+        .admit_account(ACCOUNT)
+        .await
+        .unwrap()
+        .drain()
+        .await
+        .unwrap();
+    blockers.push(
+        fixture
+            .provisioner
+            .admit_credential("AKIAMETADATAOCCUPIED")
+            .await
+            .unwrap(),
+    );
+    let ranges: Vec<_> = fixture
+        .data
+        .iter()
+        .map(|(handle, _)| handle.cell_id())
+        .collect();
+    assert!(!ranges.is_empty());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if fixture
+                .node
+                .runtime()
+                .idle_transfer_candidates()
+                .await
+                .unwrap()
+                .iter()
+                .any(|(cell, _, _, _)| ranges.contains(cell))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    fixture.provisioner.admit_account(ACCOUNT).await.unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let mut released = 0;
+    for cell in ranges {
+        let control = authority.load(cell).await.unwrap().unwrap();
+        if control.value().owner.is_none() {
+            assert!(control.value().root.is_some());
+            released += 1;
+        }
+    }
+    assert_eq!(released, 1);
+    for blocker in blockers {
+        blocker.drain().await.unwrap();
+    }
+    for (_, item) in &fixture.data {
+        let restored = fixture
+            .sdk
+            .get_item()
+            .table_name("Residency")
+            .key("id", item["id"].clone())
+            .consistent_read(true)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(restored.item.as_ref(), Some(item));
     }
     fixture.shutdown().await;
 }

@@ -1,7 +1,6 @@
 use crate::*;
 use beyonddb::{
-    ReadGlobalIndexRoutePage, ReadPartitionIndexChange, RoutePageInput, RoutePageOutcome,
-    data_target, global_index_target,
+    ReadPartitionIndexChange, RoutePageInput, RoutePageOutcome, data_target, global_index_target,
 };
 use crab_cell_runtime::identity::CellTarget;
 
@@ -83,21 +82,18 @@ impl IndexRecovery {
         let mut targets =
             vec![data_target(ACCOUNT, &record.id, &route.partitions[0].partition_id).unwrap()];
         let index = &record.global_secondary_indexes[0];
-        let page = client
-            .query::<ReadGlobalIndexRoutePage>(
-                &account,
-                None,
-                Json(RoutePageInput {
-                    table_id: index.id.clone(),
-                    start_hash: None,
-                    after_lower: None,
-                    expected_epoch: None,
-                }),
-            )
-            .await
-            .unwrap()
-            .output
-            .0;
+        let page = beyonddb::read_global_index_route_page(
+            client,
+            "123456789012",
+            RoutePageInput {
+                table_id: index.id.clone(),
+                start_hash: None,
+                after_lower: None,
+                expected_epoch: None,
+            },
+        )
+        .await
+        .unwrap();
         let RoutePageOutcome::Page { partitions, .. } = page else {
             panic!("global index route missing")
         };

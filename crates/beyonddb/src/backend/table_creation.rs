@@ -38,25 +38,16 @@ pub(crate) async fn publish_initial_routes(
     for index in &record.global_secondary_indexes {
         // An earlier attempt may have published this index before base admission
         // failed. Preserve that directory and its independently installed owners.
-        let page = client
-            .query::<crate::ReadGlobalIndexRoutePage>(
-                &target,
-                None,
-                Json(RoutePageInput {
-                    table_id: index.id.clone(),
-                    start_hash: None,
-                    after_lower: None,
-                    expected_epoch: None,
-                }),
-            )
+        let published = client
+            .query::<crate::ReadGlobalIndexDirectory>(&target, None, Json(index.id.clone()))
             .await
             .map_err(cell_error)?
             .output
             .0;
-        if matches!(page, RoutePageOutcome::Page { .. }) {
+        if published.is_some() {
             continue;
         }
-        let partitions = provisioner
+        let partitions: Vec<_> = provisioner
             .provision_global_index(client, account_id, record, index)
             .await?
             .into_iter()
@@ -67,6 +58,9 @@ pub(crate) async fn publish_initial_routes(
                 epoch: range.epoch,
             })
             .collect();
+        let receipt = provisioner
+            .provision_global_index_directory(client, account_id, &index.id, partitions.clone())
+            .await?;
         client
             .command::<crate::ActivateGlobalIndexRoute>(
                 &target,
@@ -75,6 +69,7 @@ pub(crate) async fn publish_initial_routes(
                     table: record.clone(),
                     index: index.clone(),
                     partitions,
+                    receipt,
                 }),
             )
             .await

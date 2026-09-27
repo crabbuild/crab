@@ -6,13 +6,13 @@ use extenddb_core::types::{Item, extract_key};
 use extenddb_storage::error::StorageError;
 
 use super::{CellStorage, cell_error, mutation_identity, target};
-use crate::global_index::outbox::IndexChange;
+use crate::global_index::outbox::{IndexChange, IndexChangeDelivery};
 use crate::{
-    AckAccountIndexChange, AckPartitionIndexChange, ApplyGlobalIndexMutation, DescribeTableById,
-    GlobalIndexApplyOutcome, GlobalIndexMutation, GlobalIndexRecord, IndexChangeChunk, Json,
-    ReadAccountIndexChange, ReadAccountIndexChangeChunk, ReadGlobalIndexRoutePage,
-    ReadPartitionIndexChange, ReadPartitionIndexChangeChunk, RoutePageInput, RoutePageOutcome,
-    TableRecord, global_index_target,
+    ApplyGlobalIndexMutation, DescribeTableById, GlobalIndexApplyOutcome, GlobalIndexMutation,
+    GlobalIndexRecord, IndexChangeChunk, Json, ReadAccountIndexChange, ReadAccountIndexChangeChunk,
+    ReadPartitionIndexChange, ReadPartitionIndexChangeChunk, RecordAccountIndexDelivery,
+    RecordPartitionIndexDelivery, RoutePageInput, RoutePageOutcome, TableRecord,
+    global_index_target,
 };
 
 impl CellStorage {
@@ -111,21 +111,23 @@ impl CellStorage {
         }
         // Indexes propagate independently. A failed owner must not suppress
         // healthy indexes, but the source journal stays until all have applied.
-        if let Some(error) = failure {
-            return Err(error);
-        }
+        let delivery = if failure.is_some() {
+            IndexChangeDelivery::Deferred(header.id)
+        } else {
+            IndexChangeDelivery::Applied(header.id)
+        };
         let identity = mutation_identity()?;
         if source.namespace() == crate::NAMESPACE {
             self.client
-                .command::<AckAccountIndexChange>(source, identity, Json(header.id))
+                .command::<RecordAccountIndexDelivery>(source, identity, Json(delivery))
                 .await
         } else {
             self.client
-                .command::<AckPartitionIndexChange>(source, identity, Json(header.id))
+                .command::<RecordPartitionIndexDelivery>(source, identity, Json(delivery))
                 .await
         }
         .map_err(cell_error)?;
-        Ok(true)
+        failure.map_or(Ok(true), Err)
     }
 
     async fn project_to_index(
@@ -226,22 +228,17 @@ impl CellStorage {
     ) -> Result<(CellTarget, u64), StorageError> {
         let hash = crate::data_key_hash(index_id, key, schema)
             .map_err(|error| StorageError::Validation(error.to_string()))?;
-        let page = self
-            .client
-            .query::<ReadGlobalIndexRoutePage>(
-                &target(account_id)?,
-                None,
-                Json(RoutePageInput {
-                    table_id: index_id.into(),
-                    start_hash: Some(hash),
-                    after_lower: None,
-                    expected_epoch: None,
-                }),
-            )
-            .await
-            .map_err(cell_error)?
-            .output
-            .0;
+        let page = crate::read_global_index_route_page(
+            &self.client,
+            account_id,
+            RoutePageInput {
+                table_id: index_id.into(),
+                start_hash: Some(hash),
+                after_lower: None,
+                expected_epoch: None,
+            },
+        )
+        .await?;
         let RoutePageOutcome::Page { partitions, .. } = page else {
             return Err(StorageError::Transient(
                 "global index route is not ready".into(),
@@ -264,6 +261,18 @@ struct ProjectionCursor {
     after_range: Option<[u8; 16]>,
     epoch: Option<u64>,
     index: Option<usize>,
+}
+
+impl ProjectionCursor {
+    fn next_index(&mut self, count: usize) {
+        self.after_range = None;
+        self.epoch = None;
+        let next = self.index.map_or(0, |position| position + 1);
+        self.index = (next < count).then_some(next);
+        if self.index.is_none() {
+            self.table = None;
+        }
+    }
 }
 
 impl CellStorage {
@@ -355,18 +364,37 @@ impl CellStorage {
             expected_epoch: cursor.epoch,
         });
         let account_target = target(account)?;
-        let page = if index.is_some() {
-            self.client
-                .query::<ReadGlobalIndexRoutePage>(&account_target, None, input)
-                .await
+        let page = if let Some(index_id) = index_id {
+            let page = async {
+                provisioner
+                    .recover_index_directory_path(
+                        &self.client,
+                        account,
+                        index_id,
+                        cursor.after_range,
+                        nodes,
+                    )
+                    .await?;
+                crate::read_global_index_route_page(&self.client, account, input.0).await
+            }
+            .await;
+            match page {
+                Ok(page) => page,
+                Err(error) => {
+                    // An unavailable metadata path cannot pin the account sweep.
+                    // Revisit it on the next pass while other indexes recover.
+                    cursor.next_index(index_count);
+                    return Err(error);
+                }
+            }
         } else {
             self.client
                 .query::<crate::ReadRoutePage>(&account_target, None, input)
                 .await
-        }
-        .map_err(cell_error)?
-        .output
-        .0;
+                .map_err(cell_error)?
+                .output
+                .0
+        };
         let mut sources = Vec::new();
         match page {
             RoutePageOutcome::Changed => {
@@ -404,14 +432,7 @@ impl CellStorage {
         }
         let project = index.is_none();
         if cursor.after_range.is_none() {
-            cursor.epoch = None;
-            let next = cursor.index.map_or(0, |position| position + 1);
-            if next < index_count {
-                cursor.index = Some(next);
-            } else {
-                cursor.index = None;
-                cursor.table = None;
-            }
+            cursor.next_index(index_count);
         }
         // Visit index owners even without pending base writes. Advance before
         // admission so a failed range cannot pin the account's entire sweep.

@@ -77,10 +77,13 @@ weaken table deletion or the existing immediate credential/policy revocation
 contract. Listing and scan continuation must remain correct through directory
 splits; no request may fetch all table routes as its normal path.
 
-Current owners are `src/routing.rs`, `src/routing/split_state.rs`, and the account
-schema. Their callers include keyed routing, Query/Scan, TTL, GSI projection,
-split publication, table deletion, and transaction admission. Each must use the
-new directory contract. Existing transactions continue resolving their original
+Base-route owners remain `src/routing.rs`, `src/routing/split_state.rs`, and the
+account schema. Their callers include keyed routing, Query/Scan, TTL, split
+publication, table deletion, and transaction admission. GSI routes and split
+plans now use independently owned directory leaves; the serving cutover is
+under verification. See [metadata ownership](METADATA_SHARDING.md) for current
+contracts, lifecycle proof and remaining qualification. Base routes and the
+table-name catalog still require extraction. Existing transactions continue resolving their original
 participants rather than rerouting through a changed directory.
 
 ### Large collections and index ranges

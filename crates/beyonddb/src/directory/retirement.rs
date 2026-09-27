@@ -3,19 +3,36 @@
 use super::*;
 
 /// Fence one exact directory generation and expose its pending child retirements.
+///
+/// The controller must authorize missing nodes through durable creation or split intent.
 pub struct RetireDirectory;
 impl Command for RetireDirectory {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 8;
-    const CODEC_VERSION: u32 = 1;
+    const CODEC_VERSION: u32 = 2;
     type Input = Json<DirectorySpec>;
     type Output = Json<Option<DirectoryMode>>;
     fn execute(
         context: &mut CommandContext<'_, '_>,
         Json(spec): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        let Some(mut state) = state(|batch| context.sql(batch))? else {
-            return Ok(CommandResult::Rejected(Json(None)));
+        let mut state = match state(|batch| context.sql(batch))? {
+            Some(state) => state,
+            None if spec.valid()
+                && target_for_tenant(context.target().tenant(), &spec)? == *context.target() =>
+            {
+                // A deleting creation or split intent may precede its installer. Publish
+                // the terminal fence first so a late install cannot resurrect it.
+                let retired = DirectoryState {
+                    initial_fingerprint: fingerprint(&spec, &[])?,
+                    spec,
+                    version: 1,
+                    mode: DirectoryMode::Retired,
+                };
+                save(context, &retired)?;
+                return Ok(CommandResult::Success(Json(Some(DirectoryMode::Retired))));
+            }
+            None => return Ok(CommandResult::Rejected(Json(None))),
         };
         if state.spec != spec {
             return Ok(CommandResult::Rejected(Json(None)));
@@ -27,13 +44,16 @@ impl Command for RetireDirectory {
             DirectoryMode::Branch(split) => DirectoryMode::Retiring {
                 children: split.children,
                 acknowledged: 0,
+                published: true,
             },
-            // An unpublished copy cannot be opened by a correct controller:
-            // publication still requires this parent to be Frozen. Fencing the
-            // parent therefore also invalidates every unfinished copy attempt.
-            DirectoryMode::Leaf | DirectoryMode::Frozen(_) | DirectoryMode::Importing => {
-                DirectoryMode::Retired
-            }
+            // Retain unpublished child addresses until their terminal fences are
+            // durable; otherwise delayed installers can leave orphaned copies.
+            DirectoryMode::Frozen(split) => DirectoryMode::Retiring {
+                children: split.children,
+                acknowledged: 0,
+                published: false,
+            },
+            DirectoryMode::Leaf | DirectoryMode::Importing => DirectoryMode::Retired,
         };
         state.version = state
             .version
@@ -71,11 +91,12 @@ impl Command for RecordDirectoryRetirement {
         if state.spec != input.parent || input.sequence == 0 || input.sequence > i64::MAX as u64 {
             return Ok(CommandResult::Rejected(Json(false)));
         }
-        let (children, mut acknowledged) = match state.mode {
+        let (children, mut acknowledged, published) = match state.mode {
             DirectoryMode::Retiring {
                 children,
                 acknowledged,
-            } => (children, acknowledged),
+                published,
+            } => (children, acknowledged, published),
             DirectoryMode::Retired => return Ok(CommandResult::Success(Json(true))),
             _ => return Ok(CommandResult::Rejected(Json(false))),
         };
@@ -95,6 +116,7 @@ impl Command for RecordDirectoryRetirement {
             DirectoryMode::Retiring {
                 children,
                 acknowledged,
+                published,
             }
         };
         save(context, &state)?;

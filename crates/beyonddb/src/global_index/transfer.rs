@@ -32,7 +32,7 @@ impl GlobalIndexSplitPlan {
             return false;
         };
         source.epoch > 0
-            && source.epoch <= self.expected_epoch
+            && source.epoch == self.expected_epoch
             && source
                 .table
                 .global_secondary_indexes

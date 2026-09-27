@@ -115,7 +115,7 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 30] = [
+static COMMANDS: [OperationDescriptor; 28] = [
     operation(1),
     operation(2),
     operation(3),
@@ -141,17 +141,24 @@ static COMMANDS: [OperationDescriptor; 30] = [
         input_limit: 64 * 1024,
         ..participant::phase_operation(24)
     },
-    operation(25),
-    participant::phase_operation(26),
-    operation(27),
-    operation(28),
-    operation(29),
+    OperationDescriptor {
+        codec_version: 2,
+        ..operation(25)
+    },
+    OperationDescriptor {
+        codec_version: 2,
+        ..participant::phase_operation(26)
+    },
     operation(30),
-    operation(31),
+    OperationDescriptor {
+        codec_version: 2,
+        ..operation(31)
+    },
     operation(32),
     participant::phase_operation(33),
+    participant::phase_operation(34),
 ];
-static QUERIES: [OperationDescriptor; 32] = [
+static QUERIES: [OperationDescriptor; 30] = [
     operation(4),
     operation(7),
     operation(8),
@@ -174,16 +181,17 @@ static QUERIES: [OperationDescriptor; 32] = [
     operation(26),
     operation(27),
     operation(28),
-    operation(29),
+    OperationDescriptor {
+        codec_version: 2,
+        ..operation(29)
+    },
     participant::phase_operation(30),
     global_index::outbox::chunk_operation(31),
     operation(32),
-    operation(33),
-    operation(34),
-    operation(35),
     operation(36),
     operation(37),
     operation(38),
+    participant::phase_operation(39),
 ];
 
 /// Statically linked account application.
@@ -357,6 +365,8 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<ReleaseAccountTransactionReads>()?;
         registry.bind_command::<DeleteTable>()?;
         registry.bind_command::<ContinueTableDeletion>()?;
+        registry.bind_command::<RecordTableDirectoryRetirement>()?;
+        registry.bind_query::<ReadPendingDirectoryRetirement>()?;
         registry.bind_query::<ReadTableLifecycle>()?;
         registry.bind_command::<UpdateTable>()?;
         registry.bind_command::<UpdateItem>()?;
@@ -373,10 +383,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<RegisterCoordinatorShard>()?;
         registry.bind_command::<transaction_coordinator::RecordSettledCoordinators>()?;
         registry.bind_command::<ActivateGlobalIndexRoute>()?;
-        registry.bind_command::<BeginGlobalIndexSplit>()?;
-        registry.bind_command::<CommitGlobalIndexSplit>()?;
-        registry.bind_command::<FinishGlobalIndexSplit>()?;
-        registry.bind_command::<AckAccountIndexChange>()?;
+        registry.bind_command::<RecordAccountIndexDelivery>()?;
         registry.bind_query::<GetItem>()?;
         registry.bind_query::<ReadAccountTransaction>()?;
         registry.bind_query::<ReadAccountTransactionResult>()?;
@@ -399,10 +406,7 @@ impl crab_cell_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<ttl::ReadTtlSweep>()?;
         registry.bind_query::<ttl::ReadTtlSchedule>()?;
         registry.bind_query::<ReadCoordinatorRegistration>()?;
-        registry.bind_query::<ReadGlobalIndexRoutePage>()?;
-        registry.bind_query::<ReadGlobalIndexSplitPlan>()?;
-        registry.bind_query::<ReadGlobalIndexSplitRoute>()?;
-        registry.bind_query::<ReadPublishedGlobalIndexPartition>()?;
+        registry.bind_query::<ReadGlobalIndexDirectory>()?;
         registry.bind_query::<ReadAccountIndexChange>()?;
         registry.bind_query::<ReadAccountIndexChangeChunk>()?;
         registry.bind_query::<ListCoordinatorShards>()

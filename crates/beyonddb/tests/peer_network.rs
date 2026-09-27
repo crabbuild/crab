@@ -42,7 +42,6 @@ use crab_cell_runtime::{
     identity::{Digest, NodeId, SessionId},
 };
 use crab_storage::Store;
-use ed25519_dalek::SigningKey;
 use extenddb_auth::{CredentialStore, StoredCredential};
 use extenddb_core::types::{
     AttributeDefinition, BillingMode, KeySchemaElement, KeyType, ScalarAttributeType,
@@ -140,16 +139,19 @@ fn now_ms() -> i64 {
 
 async fn start_node(
     application: Arc<crab_cell_app::CompiledApplication>,
+    cell_capacity: usize,
     directory: NodeDirectory,
     session: SessionId,
     endpoint: String,
-    certificate: Digest,
-    signing_key: SigningKey,
+    tls: &LoadedPeerTls,
     node_byte: u8,
     node_shutdown: CancellationToken,
 ) -> (CellNode, Arc<CellNodeTaskGroup>) {
     let node = CellNodeBuilder::new(Arc::clone(&application))
-        .with_runtime(SqlWorkerPool::new(1, 8).unwrap(), 16 * 1024 * 1024)
+        .with_runtime(
+            SqlWorkerPool::new(1, cell_capacity).unwrap(),
+            16 * 1024 * 1024,
+        )
         .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
         .with_session(session)
         .build()
@@ -159,6 +161,8 @@ async fn start_node(
     let tasks = node
         .install_task_group(node_shutdown.child_token(), node_shutdown.clone())
         .unwrap();
+    let certificate = tls.certificate();
+    let signing_key = tls.signing_key().clone();
     let fleet = directory.fleet();
     let release = application.registry().release_digest();
     let runtime = node.runtime();
@@ -202,8 +206,6 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     let (owner_certificate, owner_key, remote_certificate, remote_key, ca) =
         tls_files(files.path());
     let tls = LoadedPeerTls::load(&owner_certificate, &owner_key, &ca, "localhost").unwrap();
-    let owner_certificate_digest = tls.certificate();
-    let owner_signing_key = tls.signing_key().clone();
     let client_tls =
         LoadedPeerTls::load(&remote_certificate, &remote_key, &ca, "localhost").unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -231,11 +233,11 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     let owner_lease = CancellationToken::new();
     let (owner, _owner_tasks) = start_node(
         Arc::clone(&application),
+        8,
         peer_directory.clone(),
         owner_session,
         owner_endpoint.clone(),
-        owner_certificate_digest,
-        owner_signing_key,
+        &tls,
         95,
         owner_lease.clone(),
     )
@@ -275,15 +277,14 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     let remote_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote_endpoint = format!("https://{}", remote_listener.local_addr().unwrap());
     let remote_session = SessionId::from_bytes([96; 16]);
-    let remote_signing_key = client_tls.signing_key().clone();
     let remote_lease = CancellationToken::new();
     let (remote, _remote_tasks) = start_node(
         Arc::clone(&application),
+        8,
         peer_directory.clone(),
         remote_session,
         remote_endpoint.clone(),
-        client_tls.certificate(),
-        remote_signing_key,
+        &client_tls,
         98,
         remote_lease.clone(),
     )
@@ -684,11 +685,11 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     let replacement_session = SessionId::from_bytes([100; 16]);
     let (replacement, replacement_tasks) = start_node(
         Arc::clone(&application),
+        8,
         peer_directory.clone(),
         replacement_session,
         replacement_endpoint.clone(),
-        replacement_tls.certificate(),
-        replacement_tls.signing_key().clone(),
+        &replacement_tls,
         101,
         CancellationToken::new(),
     )
@@ -709,7 +710,16 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .await
         .unwrap();
     replacement_provisioner
-        .recover_registered_partitions("123456789012", replacement_account.clone(), &peer_directory)
+        .recover_registered_partitions(
+            "123456789012",
+            replacement_account.clone(),
+            &CellClient::local_runtime(
+                application.registry(),
+                replacement.runtime(),
+                layout.clone(),
+            ),
+            &peer_directory,
+        )
         .await
         .unwrap();
     for partition in &other_partitions {

@@ -4,6 +4,7 @@ CREATE TABLE ddb_directory (
 );
 CREATE TABLE ddb_directory_ranges (
     lower_bound BLOB PRIMARY KEY,
+    partition_id BLOB NOT NULL UNIQUE,
     record BLOB NOT NULL
 );
 CREATE TABLE ddb_directory_changes (
@@ -13,4 +14,8 @@ CREATE TABLE ddb_directory_changes (
 CREATE TABLE ddb_directory_members (
     partition_id BLOB PRIMARY KEY,
     lower_bound BLOB NOT NULL REFERENCES ddb_directory_changes(lower_bound) ON DELETE CASCADE
+);
+CREATE TABLE ddb_directory_index_changes (
+    lower_bound BLOB PRIMARY KEY REFERENCES ddb_directory_changes(lower_bound) ON DELETE CASCADE,
+    plan BLOB NOT NULL
 );
