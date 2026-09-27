@@ -460,23 +460,10 @@ async fn activate_and_mutate(
     let active_path = destination.clone();
     let mutation_id = ACTIVATION_MUTATION.fetch_add(1, Ordering::Relaxed);
     let phase = Instant::now();
-    let (database, capture, open, query, mutation, capture_phase, first_read_us, expected) =
+    let (database, capture, open, mutation, capture_phase, first_mutation_us, expected) =
         tokio::task::spawn_blocking(move || {
             let mut database = prepared.open_writable(&active_path)?;
             let open = worker_reads.finish(phase);
-            let phase = Instant::now();
-            let value: Vec<u8> = database
-                .query_with(|db| {
-                    db.query_row("SELECT value FROM payload WHERE rowid = 1", [], |row| {
-                        row.get(0)
-                    })
-                })
-                .map_err(|error| CrabError::Other(Box::new(error)))?;
-            let query = worker_reads.finish(phase);
-            let first_read_us = started.elapsed().as_micros();
-            if expected.first() != Some(blake3::hash(&value).as_bytes()) {
-                return Err(CrabError::ChecksumMismatch);
-            }
             let mut replacement = vec![root.cell[0]; ROW_BYTES as usize];
             replacement[..8].copy_from_slice(&mutation_id.to_le_bytes());
             let mut expected = expected.as_ref().clone();
@@ -485,6 +472,9 @@ async fn activate_and_mutate(
                 .ok_or(CrabError::InvalidState("activation source is empty"))? =
                 *blake3::hash(&replacement).as_bytes();
             let phase = Instant::now();
+            // Make the first application SQL a write so its page faults are
+            // measured here. Full restored-payload verification follows the
+            // measured burst instead of warming this row with a prior query.
             database.transaction(|transaction| {
                 transaction.execute(
                     "UPDATE payload SET value = ?1 WHERE rowid = 1",
@@ -493,6 +483,7 @@ async fn activate_and_mutate(
                 Ok(())
             })?;
             let mutation = worker_reads.finish(phase);
+            let first_mutation_us = started.elapsed().as_micros();
             let phase = Instant::now();
             let capture = database.capture_deferred()?;
             let capture_phase = worker_reads.finish(phase);
@@ -500,10 +491,9 @@ async fn activate_and_mutate(
                 database,
                 capture,
                 open,
-                query,
                 mutation,
                 capture_phase,
-                first_read_us,
+                first_mutation_us,
                 expected,
             ))
         })
@@ -523,10 +513,11 @@ async fn activate_and_mutate(
         report: serde_json::json!({
             "measurement": "activation_burst", "cell": root.cell, "root": root.digest,
             "root_txid": root.position.txid, "prepared_root": next_root.digest,
-            "mutation_id": mutation_id,
-            "dispatch_delay_us": dispatch_delay.as_micros(), "first_read_us": first_read_us,
+            "mutation_id": mutation_id, "access_order": "write_first",
+            "dispatch_delay_us": dispatch_delay.as_micros(),
+            "first_mutation_us": first_mutation_us,
             "prepared_us": prepared_us, "root_open": root_open, "checksums": checksums,
-            "writable_open": open, "first_payload_query": query, "first_mutation": mutation,
+            "writable_open": open, "first_mutation": mutation,
             "capture": capture_phase, "root_prepare": root_prepare,
             "prepared_objects": publication.objects, "prepared_bytes": publication.bytes,
         }),
