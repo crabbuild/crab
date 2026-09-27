@@ -34,6 +34,7 @@ their separate performance gates.
 | --- | --- | --- |
 | Corrected; GA published-root recovery passes | An inactive-log node claim blocked other successors restoring that node's Cells (30) | Permanent fencing evidence now permits independent Cell CAS; active-tail recovery stays exclusive. The two-Cell RustFS regression and all sixteen later GA published-root recovery points pass. The separate unpublished-tail fault remains unqualified. |
 | High, observed setup race | A newly provisioned repository reached an entry node before its peer's catalog refresh; an earlier fleet stopped with HTTP 403 before timing (32) | The later GA sweep provisions fixtures before serving nodes. Dynamic creation still needs a version-aware readiness contract; do not convert authorization errors into retries. |
+| Corrected local publication race | A delayed import could overwrite a newer catalog snapshot and restore revoked membership (34) | Materialized indexes now retain the durable revision and publish monotonically. Import and polling share Cell-readiness validation. HTTP revocation regresses before the fix and remains denied after it, including on RustFS GA. Cross-node creation readiness remains open. |
 | High, measured application round trip | Covered repository mutations pay an archive-state query before their command; saturated ten-node p99 is 1,448.518 ms (31) | Evaluate checking writable state in the same command transaction. Cover archive/unarchive ordering, retries, all mutation siblings and external-write policy before removing the HTTP check. |
 | Implemented and fixed-load verified | Rounding the receiver margin up prevented donation at a one-Cell target; a batch could also overfill its preferred receiver (26) | Whole-Cell margins and projected receiver room pass both regressions. The latest 3/5/10/20-node run uses every execution owner; skew, sustained load and the combined source remain unqualified. |
 | High, implemented mechanism; latency unqualified | The baseline empty checksum overlay retained its largest allocation and cloned that capacity (25) | Sealed merges now consume the overlay. Compare large-cut → repeated one-page-cut allocation and latency for both bases, retaining failure fencing and recovery-plan clone semantics. |
@@ -3222,6 +3223,45 @@ own object prefix; no dependency or inventory changes are required.
 corrects both live placement callers without relaxing the pure planner or
 extending the qualifier deadline. Exact-source 20-node convergence and load
 remain required before claiming a latency improvement.
+
+### 34. Concurrent catalog publishers can restore revoked access
+
+**Reproduced:** on `63ca7a724f7` (affected sources unchanged on `main`
+`1b3702cbd9e`), import completion and periodic catalog
+refresh both materialize a complete repository index after awaiting Git metadata.
+The index loses the durable document revision, and each writer replaces it
+unconditionally. Holding an older import document while refresh installs a
+membership revocation restores the revoked member when that import finishes.
+The refresh loop's separate version counter can then keep skipping the latest
+durable document, leaving the stale policy installed until another revision.
+
+The regression signs in an administrator and a read member through public HTTP,
+revokes the member through the membership API, and installs the new snapshot.
+The member receives HTTP 404. Completing the older materialization changes the
+same request to HTTP 200 on the original source. Both the in-memory fixture and
+the fixture backed by pinned RustFS 1.0 GA reproduce that transition; the durable
+revocation and session remain unchanged. A separate UUID-lookup regression
+exercises the index used by peer authorization.
+
+**Fix:** `RepositoryIndex` carries its document revision. `RepositorySet`
+compares and publishes the revision, name map, and UUID map under one write lock,
+discarding equal or older completions. Startup installs that same versioned
+shape. Import and periodic refresh call one `Server::install_catalog` path,
+which verifies ready Cells and materializes Git metadata before publication.
+The poller reads the shared installed revision rather than a private counter.
+It still rejects a provider document older than the revision observed before
+the read. A later concurrent installation can supersede an otherwise valid
+in-flight result.
+
+The HTTP and UUID regressions pass after the fix. An additional test rejects a
+new revision containing an uninitialized ready Cell without changing the
+installed revision or exposing that repository. The RustFS HTTP test is part of
+the existing provider CI gate and uses an isolated prefix for each invocation.
+This change adds no request-path provider I/O, polling interval, wire field,
+stored format, or dependency. Membership administration still authorizes against
+the current durable catalog; data, Git, LFS, and peer routes share the protected
+in-memory indexes. Five-second propagation to other nodes and the first-request
+creation race in finding 32 remain separate open work.
 
 ## Safety and proof retained by the audit
 

@@ -474,11 +474,19 @@ pub(crate) struct RepositorySet {
 }
 
 struct RepositoryIndex {
+    version: u64,
     by_name: BTreeMap<(String, String), Arc<Repository>>,
     by_id: HashMap<Uuid, (String, String)>,
 }
 
 impl RepositorySet {
+    fn version(&self) -> u64 {
+        self.current
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .version
+    }
+
     pub(crate) fn get(&self, key: &(String, String)) -> Option<Arc<Repository>> {
         self.current
             .read()
@@ -518,11 +526,20 @@ impl RepositorySet {
             .len()
     }
 
-    pub(crate) fn replace(&self, next: BTreeMap<(String, String), Arc<Repository>>) {
-        *self
+    fn replace(&self, next: RepositoryIndex) {
+        let mut current = self
             .current
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = RepositoryIndex::new(next);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Import and refresh await metadata independently. Publish revision and
+        // both indexes together so a late snapshot cannot restore revoked access.
+        if next.version <= current.version {
+            return;
+        }
+        let version = next.version;
+        *current = next;
+        drop(current);
+        tracing::info!(catalog_version = version, "repository catalog refreshed");
     }
 
     #[cfg(test)]
@@ -536,10 +553,12 @@ impl RepositorySet {
     }
 }
 
+#[cfg(test)]
 impl From<BTreeMap<(String, String), Repository>> for RepositorySet {
     fn from(repositories: BTreeMap<(String, String), Repository>) -> Self {
         Self {
             current: SyncRwLock::new(RepositoryIndex::new(
+                0,
                 repositories
                     .into_iter()
                     .map(|(key, repository)| (key, Arc::new(repository)))
@@ -549,21 +568,34 @@ impl From<BTreeMap<(String, String), Repository>> for RepositorySet {
     }
 }
 
+#[cfg(test)]
 impl From<BTreeMap<(String, String), Arc<Repository>>> for RepositorySet {
     fn from(repositories: BTreeMap<(String, String), Arc<Repository>>) -> Self {
         Self {
-            current: SyncRwLock::new(RepositoryIndex::new(repositories)),
+            current: SyncRwLock::new(RepositoryIndex::new(0, repositories)),
+        }
+    }
+}
+
+impl From<RepositoryIndex> for RepositorySet {
+    fn from(repositories: RepositoryIndex) -> Self {
+        Self {
+            current: SyncRwLock::new(repositories),
         }
     }
 }
 
 impl RepositoryIndex {
-    fn new(by_name: BTreeMap<(String, String), Arc<Repository>>) -> Self {
+    fn new(version: u64, by_name: BTreeMap<(String, String), Arc<Repository>>) -> Self {
         let by_id = by_name
             .iter()
             .map(|(key, repository)| (repository.id, key.clone()))
             .collect();
-        Self { by_name, by_id }
+        Self {
+            version,
+            by_name,
+            by_id,
+        }
     }
 }
 
@@ -878,6 +910,35 @@ impl Server {
             })
     }
 
+    pub(crate) async fn install_catalog(
+        &self,
+        document: crate::catalog::CatalogDocument,
+    ) -> Result<()> {
+        if document.version <= self.repositories.version() {
+            return Ok(());
+        }
+        let catalog = self.catalog().ok_or(crate::Error::Config(
+            "repository catalog installation requires a catalog",
+        ))?;
+        let router = self.repository_cells().ok_or(crate::Error::Config(
+            "repository catalog installation requires Cell routing",
+        ))?;
+        let repositories = document
+            .repositories
+            .iter()
+            .filter(|record| {
+                record.application == crate::catalog::RepositoryApplicationState::CellReady
+            })
+            .map(|record| (record.id, record.application))
+            .collect::<Vec<_>>();
+        // Every publisher validates Cell readiness before advancing the shared
+        // revision; otherwise import could make refresh skip unverified Cells.
+        router.verify_repositories(repositories).await?;
+        let next = materialize_catalog(&catalog, document).await?;
+        self.repositories.replace(next);
+        Ok(())
+    }
+
     fn scheduler_status(&self) -> Option<crate::cells::SchedulerStatus> {
         self.node_component::<crate::cells::SchedulerStatus>(CELL_COMPONENT_SCHEDULER_STATUS)
             .map(|status| status.as_ref().clone())
@@ -1007,7 +1068,6 @@ pub async fn serve(config: Config) -> Result<()> {
         ),
         None => None,
     };
-    let catalog_version = document.version;
     let repository_cells = document
         .repositories
         .iter()
@@ -1410,7 +1470,7 @@ pub async fn serve(config: Config) -> Result<()> {
     })?;
     let refresh_server = Arc::clone(&server);
     cell_tasks.spawn(async move {
-        refresh_catalog(refresh_server, catalog_version).await;
+        refresh_catalog(refresh_server).await;
         Ok::<(), crate::Error>(())
     })?;
     let projection_sweep_server = Arc::clone(&server);
@@ -1602,10 +1662,11 @@ pub async fn probe_storage(config: &Config) -> Result<()> {
     probe_storage_contract(&catalog, &transfer_admission(&catalog)).await
 }
 
-pub(crate) async fn materialize_catalog(
+async fn materialize_catalog(
     catalog: &CatalogStore,
     document: crate::catalog::CatalogDocument,
-) -> Result<BTreeMap<(String, String), Arc<Repository>>> {
+) -> Result<RepositoryIndex> {
+    let version = document.version;
     let mut repositories = BTreeMap::new();
     for record in document.repositories.into_iter().filter(|record| {
         record.application == crate::catalog::RepositoryApplicationState::CellReady
@@ -1645,10 +1706,10 @@ pub(crate) async fn materialize_catalog(
             Arc::new(repository),
         );
     }
-    Ok(repositories)
+    Ok(RepositoryIndex::new(version, repositories))
 }
 
-async fn refresh_catalog(server: Arc<Server>, mut version: u64) {
+async fn refresh_catalog(server: Arc<Server>) {
     let Some(catalog) = server.catalog() else {
         return;
     };
@@ -1657,6 +1718,7 @@ async fn refresh_catalog(server: Arc<Server>, mut version: u64) {
             () = server.cancellation.cancelled() => return,
             () = tokio::time::sleep(Duration::from_secs(5)) => {}
         }
+        let active_version = server.repositories.version();
         let (document, _) = match catalog.load().await {
             Ok(value) => value,
             Err(error) => {
@@ -1669,52 +1731,24 @@ async fn refresh_catalog(server: Arc<Server>, mut version: u64) {
         if let Err(error) = catalog.flush_membership_audit().await {
             tracing::warn!(error = ?error, "membership audit flush failed");
         }
-        if document.version < version {
+        if document.version < active_version {
             server.catalog_healthy.store(false, Ordering::Release);
             server.metrics.record_catalog_refresh_failure();
             tracing::warn!(
                 catalog_version = document.version,
-                active_version = version,
+                active_version,
                 "repository catalog version moved backwards"
             );
             continue;
         }
-        if document.version == version {
-            server.catalog_healthy.store(true, Ordering::Release);
-            continue;
-        }
-        let repository_cells = document
-            .repositories
-            .iter()
-            .filter(|record| {
-                record.application == crate::catalog::RepositoryApplicationState::CellReady
-            })
-            .map(|record| (record.id, record.application))
-            .collect::<Vec<_>>();
-        let verified = match server.repository_cells() {
-            Some(router) => router.verify_repositories(repository_cells).await,
-            None => Err(crate::Error::Config(
-                "repository catalog refresh requires Cell routing",
-            )),
-        };
-        if let Err(error) = verified {
-            server.catalog_healthy.store(false, Ordering::Release);
-            server.metrics.record_catalog_refresh_failure();
-            tracing::warn!(error = ?error, "repository catalog Cell readiness failed");
-            continue;
-        }
-        let next_version = document.version;
-        match materialize_catalog(&catalog, document).await {
-            Ok(repositories) => {
-                server.repositories.replace(repositories);
-                version = next_version;
+        match server.install_catalog(document).await {
+            Ok(()) => {
                 server.catalog_healthy.store(true, Ordering::Release);
-                tracing::info!(catalog_version = version, "repository catalog refreshed");
             }
             Err(error) => {
                 server.catalog_healthy.store(false, Ordering::Release);
                 server.metrics.record_catalog_refresh_failure();
-                tracing::warn!(error = ?error, "repository catalog materialization failed");
+                tracing::warn!(error = ?error, "repository catalog installation failed");
             }
         }
     }
@@ -2459,6 +2493,51 @@ mod tests {
     use crab_cell_host::CellNodeTaskGroup;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn delayed_catalog_materialization_preserves_newer_membership() {
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let catalog = CatalogStore::new(crate::storage_root::StorageRoot::memory(
+            store,
+            "catalog-ordering",
+        ));
+        let member = crate::RepositoryMember {
+            subject: "revoked-member".into(),
+            name: "Member".into(),
+            access: crate::RepositoryAccess::Write,
+        };
+        let record = catalog
+            .create_repository(
+                "team".into(),
+                "project".into(),
+                "team/project".into(),
+                "main".into(),
+                String::new(),
+                vec![member],
+            )
+            .await
+            .unwrap();
+        catalog.mark_cell_ready(record.id).await.unwrap();
+        // Import and periodic refresh both load a document before awaiting Git
+        // metadata. An older import may finish after refresh installs revocation.
+        let (delayed, _) = catalog.load().await.unwrap();
+        catalog
+            .set_members("team", "project", Vec::new(), false)
+            .await
+            .unwrap();
+        let (current, _) = catalog.load().await.unwrap();
+        let repositories =
+            RepositorySet::from(materialize_catalog(&catalog, current).await.unwrap());
+        repositories.replace(materialize_catalog(&catalog, delayed).await.unwrap());
+        assert!(
+            repositories
+                .by_id(record.id)
+                .unwrap()
+                .config
+                .members
+                .is_empty()
+        );
+    }
 
     #[test]
     fn object_proof_requires_recovery_but_no_follower_supervisor() {
