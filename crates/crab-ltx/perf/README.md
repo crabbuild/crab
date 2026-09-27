@@ -938,6 +938,86 @@ immutable proposals without authority CAS or application acknowledgements.
 Public `CellNode` actions, fixed-worker interference, fragmented roots,
 sustained arrivals and failure-domain recovery remain separate qualification.
 
+### One-GiB write-first activation and memory pressure (2026-09-27)
+
+The same probe now has a larger-root diagnostic: four distinct Cells with
+32 MiB, 128 MiB, or 1 GiB of random payload per Cell. Each size used a fresh
+process with one vCPU, 1 GiB memory, and no swap, checked both through Docker
+inspection and the container's cgroup files. The dedicated Colima VM had four
+vCPUs and 8 GiB memory. RustFS 1.0 GA ran separately in that VM. This extends
+the earlier 256 MiB write-first proof; it is not a before/after optimization.
+
+All four successor roots were prepared after these whole-round durations:
+
+| Payload per Cell | Serial, round 0 | Four concurrent, round 1 | Four concurrent, round 2 | Serial, round 3 |
+| --- | ---: | ---: | ---: | ---: |
+| 32 MiB | 198.619 ms | 172.046 ms | 256.476 ms | 716.875 ms |
+| 128 MiB | 193.424 ms | 113.298 ms | 345.851 ms | 558.794 ms |
+| 1 GiB | 2,049.918 ms | 1,609.130 ms | 2,804.233 ms | 789.726 ms |
+
+Checksum preparation remains proportional to the complete authenticated page
+directory, even though the first application statement changes only one 1 MiB
+payload. Across each size's sixteen write-first samples:
+
+| Payload per Cell | Checksum-phase median | Checksum-phase Store reads | Checksum-phase bytes | First-update median |
+| --- | ---: | ---: | ---: | ---: |
+| 32 MiB | 5.094 ms | 33 | 723,272 | 135.438 ms |
+| 128 MiB | 44.315 ms | 129–130 | 2,891,848–2,899,104 | 33.734 ms |
+| 1 GiB | 372.207 ms | 1,031–1,032 | 23,189,568–23,189,880 | 69.434 ms |
+
+At 1 GiB, the first update itself fetched 1,366,714 bytes in eight Store reads
+for every sample. Preparation walks directory leaves to create the verified
+checksum sidecar; it does not fetch the database's page bodies. These measured
+phase costs make checksum preparation a candidate for further work. They do
+not establish the cause of the slower burst rounds: phases overlap across
+Cells, and the source payload and cache state differ between processes.
+
+All 48 first-write results survived deletion of their local database and cut
+files. Independent restores checked 18,944 complete payload digests, including
+16,384 in the 1 GiB case; all mutation IDs and prepared roots were distinct
+within each process. Each process also passed whole-source and compacted-root
+byte comparisons and exited zero. The eighteen separate first-read activation
+samples per process remained enabled.
+
+Whole-process charged-memory peaks were 231.52, 536.97, and 1,026.57 MiB. The
+1 GiB case recorded 134,516 `memory.events:max` events, with zero `oom` and
+`oom_kill` events. The kernel-reported peak is retained exactly despite being
+slightly above the configured limit. It includes filesystem cache, setup,
+full-restore verification, and compaction; it is neither reader RSS nor a
+per-Cell resident-memory requirement. No phase-local memory series was
+collected, so these events cannot be attributed specifically to activation.
+The result proves completion under pressure, not memory headroom. CPU throttle
+time was 4,377 / 183,187 / 506,063 microseconds for the three processes.
+
+Source: `f9d54fc36a6f47eb873b071cd35e04c7885c87bf`; its LTX/runtime production
+sources match main `311105eb864ca90fc08bf62d3bfa6ef5c8991e2a`. The native Linux
+ARM64 release executable has SHA-256
+`4fa48edce05baf50ffc7b9bc804ef149befa1352453650e982b4f75cd396a0b4`.
+The RustFS image ID is
+`sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858`;
+the Rust build/worker image ID is
+`sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97`.
+The isolated VM imported those exact cached images and used `pull_policy: never`.
+
+Reproduce with `qualification/worker-profile.compose.yaml` in
+`crab-cell-runtime`: run the release example with `--activation-cells 4`,
+`CRAB_LTX_WORKLOAD_ROOT=/scratch`, and `CRAB_CELL_LTX_TARGET_BYTES` set to
+`33554432`, `134217728`, then `1073741824`, using a separate worker process
+for each size. Preserve the worker limits and retain its kernel counters,
+container inspection, exit status, source, executable hash, and complete log.
+Raw evidence is retained in the external per-checkout target under
+`activation-profile-f9d54fc-20260927/evidence/`; a small evidence copy is under
+`$HOME/.codex/cell-catalog-guard/activation-profile/`. The log SHA-256 values are:
+
+- 32 MiB: `5d15b302e23d39f90bcb4c2e60bfb167a097170be8505bf04e0f48153d53163f`
+- 128 MiB: `251b54d695130a3582ded135659e82ec95ca4dda2ed8211e313038c4b56689e1`
+- 1 GiB: `54c02312fe0b17db680f4abf8de01bae2d258ff44fd03b9c7ebac2cfec2c6d94`
+
+The roots are immutable proposals, without Cell authority CAS, node SQL-worker
+sharding, HTTP requests, or application acknowledgements. Two serial and two
+concurrent rounds do not qualify tail latency, supported Cell sizes, service
+throughput, or sustained capacity. Those public-host gates remain open.
+
 The runners also use the implementations' pinned bundled SQLite versions:
 Crab currently links SQLite 3.49.1 while the pinned Celld revision links SQLite
 3.45.0. `workload_write_us` and therefore `total_us` include that difference;
