@@ -842,6 +842,10 @@ fn scan_catalog(
 }
 
 pub(crate) fn classify_family(relative: &str) -> &'static str {
+    // Filesystem walkers supply native paths; catalog keys already use '/'.
+    // Keep Unix backslashes literal so unrelated files are not misclassified.
+    #[cfg(windows)]
+    let relative = relative.replace('\\', "/");
     if relative == CATALOG_FILE || relative.starts_with(&format!("{CATALOG_FILE}-")) {
         return "catalog";
     }

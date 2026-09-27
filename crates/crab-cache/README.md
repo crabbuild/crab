@@ -53,6 +53,8 @@ Both stream with bounded copy buffers rather than returning a whole-pack
 catalog; hits verify length and hash using one retained descriptor. The family
 participates in stats, health, prune, verification, and cleanup. Git structure,
 sidecars, visible object closure, and authorization are reader responsibilities.
+Health and catalog inventory share native-path family classification: Windows
+separators are normalized, while backslashes in Unix filenames remain literal.
 
 ## Usage
 
