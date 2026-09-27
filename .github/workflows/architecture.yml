@@ -274,6 +274,10 @@ jobs:
             run_test cargo test -p crab-http-server --locked --lib \
             cells::router::tests::rustfs_rebalance_accepts_heartbeats_published_during_discovery \
             -- --ignored --exact --nocapture
+          CRAB_HTTP_CELL_TEST_PREFIX="${CRAB_HTTP_CELL_TEST_PREFIX}/status-inspection" \
+            run_test cargo test -p crab-http-server --locked --lib \
+            cells::tests::rustfs_selected_release_inspection_does_not_scan_the_cell_inventory \
+            -- --ignored --exact --nocapture
           run_test cargo test -p crab-http-server --release --locked --test public_cell_qualification \
             rustfs_public_cell_node_runs_typed_primitive_workload \
             -- --ignored --exact --nocapture
