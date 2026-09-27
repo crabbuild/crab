@@ -519,11 +519,9 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     }
     drop(peer_bytes);
     assert_eq!(lookup.await.unwrap().unwrap().account_id, "123456789012");
-    let authorization = CellAuthorizationStore::new(CellClient::local_runtime(
-        application.registry(),
-        owner.runtime(),
-        layout.clone(),
-    ));
+    // Admission pressure can move the account away from this host. IAM writes
+    // must use the same owner resolver as the public request path.
+    let authorization = CellAuthorizationStore::new(client.clone());
     authorization
         .put_user_policy(
             "123456789012",
