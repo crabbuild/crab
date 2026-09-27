@@ -176,8 +176,8 @@ resumes after an interrupted setup. The initial count must stay fixed across
 retries. A host-backed controller can resume a recorded split. A cancellable
 account capacity loop can trigger a split, and the serving binary starts that
 loop for locally owned accounts. Inspection and split replay use the routed
-client, so published sources and children can stay on remote owners. New split
-children are still bootstrapped locally. There is no merge controller or complete
+client, so published sources and children can stay on remote owners. New table ranges, GSI ranges, and split
+children use signed fleet placement in the serving binary. There is no merge controller or complete
 `StorageEngine`/`CatalogStore` behavior, or account-management service yet.
 `build_http_state` now assembles ExtendDB's signed request path from a ready,
 leased Cell node. ExtendDB requires a `CatalogStore` even for DynamoDB request
@@ -217,10 +217,12 @@ data Cell without rebuilding the server's routed client. The HTTP state builder
 accepts a caller-supplied `CellClient`. The signed SDK test supplies
 `CellClient::runtime_with_peer` from a separate runtime; signed requests reach
 account, credential, and data Cells through an authenticated loopback peer
-round trip. `peer_router` authenticates incoming requests against live node
+round trip. `BeyonddbPeers::router` authenticates incoming requests against live node
 advertisements, restricts targets to BeyondDB namespaces, and dispatches ordinary
 operations only to the current local owner. A separate Describe-only capability
-can activate published idle data/GSI Cells. `build_peer_client` binds the owner-resolving HTTP
+can activate published idle data/GSI Cells. A distinct provisioning capability
+bootstraps cataloged data/GSI ranges; it cannot create catalog entries or acquire
+account/credential/coordinator Cells. `BeyonddbPeers::client` binds the owner-resolving HTTP
 transport and a fleet-scoped principal to account, credential, and data Cells.
 It takes the matching node provisioner to restore cataloged ownerless Cells on
 demand. An interrupted ownership claim by the same boot session resumes from

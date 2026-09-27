@@ -35,8 +35,8 @@ pub use partition::*;
 pub use provision::*;
 pub use routing::*;
 pub use server::{
-    BeyonddbPeerScope, NodeLeasePublisher, PublishedNodeLease, build_http_state, build_peer_client,
-    measured_node_capacity, peer_router,
+    BeyonddbPeerScope, BeyonddbPeers, NodeLeasePublisher, PublishedNodeLease, build_http_state,
+    measured_node_capacity,
 };
 pub use split::*;
 pub use table::*;

@@ -1,6 +1,7 @@
 //! Initial table data Cell admission through the existing Cell runtime.
 
 mod capacity;
+mod ranges;
 mod residency;
 mod transactions;
 
@@ -10,7 +11,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crab_cell_app::{ApplicationHandle, CompiledApplication};
+use crab_cell_app::CompiledApplication;
 use crab_cell_runtime::Error as CellError;
 use crab_cell_runtime::cell::actor::{CellHandle, CellRuntime};
 use crab_cell_runtime::cell::catalog::{CatalogEntry, CatalogProof, CatalogRole, CellCatalog};
@@ -26,8 +27,8 @@ use extenddb_storage::error::StorageError;
 
 use crate::backend::{InitialPartitionProvisioner, cell_error, mutation_identity};
 use crate::{
-    Beyonddb, DATA_MODULE, DescribeTable, InstallPartition, InstallPartitionOutcome, Json,
-    ListTables, ListTablesInput, ListTablesOutcome, PartitionInstall, PartitionSpec, ReadRoutePage,
+    DATA_MODULE, DescribeTable, InstallPartition, InstallPartitionOutcome, Json, ListTables,
+    ListTablesInput, ListTablesOutcome, PartitionInstall, PartitionSpec, ReadRoutePage,
     RegisterCoordinatorShard, RegisterCoordinatorShardInput, RoutePageInput, RoutePageOutcome,
     SplitPlan, TableRecord, account_target, coordinator_target, credential_target, data_target,
     initialize_account, initialize_coordinator, initialize_credentials, initialize_partition,
@@ -62,6 +63,7 @@ pub struct CellInitialPartitionProvisioner {
     initial_partition_count: u16,
     transaction_recovery: transactions::CoordinatorRecovery,
     admission: tokio::sync::Mutex<()>,
+    peers: Option<Arc<crate::BeyonddbPeers>>,
 }
 
 impl CellInitialPartitionProvisioner {
@@ -89,7 +91,16 @@ impl CellInitialPartitionProvisioner {
             initial_partition_count: 1,
             transaction_recovery: Default::default(),
             admission: Default::default(),
+            peers: None,
         })
+    }
+
+    /// Place new data/index ranges using this node's shared peer context.
+    ///
+    /// The context must use the same runtime, layout, and boot session.
+    pub fn with_peers(mut self, peers: Arc<crate::BeyonddbPeers>) -> Self {
+        self.peers = Some(peers);
+        self
     }
 
     /// Start each new table with a power-of-two number of independently owned ranges.
@@ -218,13 +229,14 @@ impl CellInitialPartitionProvisioner {
             .map_err(provision_error)?;
         if let Some(former) = observed
             .as_ref()
-            .filter(|control| control.value().root.is_some())
             .and_then(|control| control.value().owner.as_ref())
             .filter(|owner| owner.session != self.session)
         {
             wait_for_expired(nodes, former.session).await?;
             let proof = self.cataloged(target, module).await?;
-            return self.takeover_expired(target, proof, nodes).await;
+            return self
+                .takeover_expired(target, proof, nodes, initialize)
+                .await;
         }
         self.admit_module(target, module, initialize).await
     }
@@ -264,7 +276,8 @@ impl CellInitialPartitionProvisioner {
                 // Takeover rechecks the exact session and Cell authority so a
                 // renewal or competing successor cannot be overwritten.
                 let proof = self.cataloged(target, module).await?;
-                self.takeover_expired(target, proof, nodes).await?;
+                self.takeover_expired(target, proof, nodes, initialize)
+                    .await?;
             }
             None if observed.value().root.is_some() => {
                 let proof = self.cataloged(target, module).await?;
@@ -445,7 +458,8 @@ impl CellInitialPartitionProvisioner {
     ) -> Result<CellHandle, StorageError> {
         let target = account_target(account_id).map_err(provision_error)?;
         let proof = self.cataloged(&target, crate::MODULE).await?;
-        self.takeover_expired(&target, proof, nodes).await
+        self.takeover_expired(&target, proof, nodes, initialize_account)
+            .await
     }
 
     /// Recover an access-key shard after its previous node lease expires.
@@ -459,7 +473,8 @@ impl CellInitialPartitionProvisioner {
     ) -> Result<CellHandle, StorageError> {
         let target = credential_target(access_key_id).map_err(provision_error)?;
         let proof = self.cataloged(&target, crate::credentials::MODULE).await?;
-        self.takeover_expired(&target, proof, nodes).await
+        self.takeover_expired(&target, proof, nodes, initialize_credentials)
+            .await
     }
 
     /// Reacquire one cataloged data range after its prior owner released it.
@@ -492,7 +507,8 @@ impl CellInitialPartitionProvisioner {
     ) -> Result<CellHandle, StorageError> {
         let target = data_target(account_id, table_id, partition_id).map_err(provision_error)?;
         let proof = self.cataloged(&target, DATA_MODULE).await?;
-        self.takeover_expired(&target, proof, nodes).await
+        self.takeover_expired(&target, proof, nodes, initialize_partition)
+            .await
     }
 
     async fn takeover_expired(
@@ -500,6 +516,7 @@ impl CellInitialPartitionProvisioner {
         target: &CellTarget,
         proof: CatalogProof,
         nodes: &NodeDirectory,
+        initialize: for<'a> fn(&rusqlite::Transaction<'a>) -> crab_cell_runtime::Result<()>,
     ) -> Result<CellHandle, StorageError> {
         let _admission = self.admission.lock().await;
         self.reclaim_coordinator_capacity().await?;
@@ -514,7 +531,7 @@ impl CellInitialPartitionProvisioner {
             .owner
             .as_ref()
             .ok_or_else(|| StorageError::Transient("Cell has no serving owner".into()))?;
-        if former.session == self.session || observed.value().root.is_none() {
+        if former.session == self.session {
             return Err(StorageError::Transient(
                 "Cell cannot be taken over from this owner state".into(),
             ));
@@ -539,24 +556,39 @@ impl CellInitialPartitionProvisioner {
         )
         .map_err(|error| StorageError::Transient(error.to_string()))?;
         let destination = self.activation_destination(target)?;
-        let handle = self
-            .runtime
-            .takeover_restored(
-                proof,
-                replica,
-                authority,
-                observed,
-                takeover,
-                RecoveryManifestStore::new(self.layout.clone(), Limits::default())
-                    .with_recovery_scratch(self.directory.clone()),
-                destination,
-                Owner {
-                    session: self.session,
-                    endpoint: self.endpoint.clone(),
-                },
-            )
-            .await
-            .map_err(provision_error)?;
+        let owner = Owner {
+            session: self.session,
+            endpoint: self.endpoint.clone(),
+        };
+        let handle = if observed.value().root.is_none() {
+            self.runtime
+                .takeover_unpublished(
+                    proof,
+                    replica,
+                    authority,
+                    observed,
+                    takeover,
+                    destination,
+                    owner,
+                    initialize,
+                )
+                .await
+        } else {
+            self.runtime
+                .takeover_restored(
+                    proof,
+                    replica,
+                    authority,
+                    observed,
+                    takeover,
+                    RecoveryManifestStore::new(self.layout.clone(), Limits::default())
+                        .with_recovery_scratch(self.directory.clone()),
+                    destination,
+                    owner,
+                )
+                .await
+        }
+        .map_err(provision_error)?;
         self.track_coordinator(target)?;
         Ok(handle)
     }
@@ -800,14 +832,7 @@ impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
                 };
                 let target = crate::global_index_target(account_id, &index.id, &spec.partition_id)
                     .map_err(provision_error)?;
-                let handle = self
-                    .admit_module(
-                        &target,
-                        crate::global_index::MODULE,
-                        crate::initialize_global_index,
-                    )
-                    .await?;
-                let client = CellClient::local(self.application.registry(), handle);
+                let client = self.provision_range(&target, client).await?;
                 match client
                     .command::<crate::InstallGlobalIndexPartition>(
                         &target,
@@ -836,34 +861,14 @@ impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
         table: &'a TableRecord,
     ) -> BoxedFuture<'a, Result<Vec<PartitionSpec>, StorageError>> {
         Box::pin(async move {
-            let registry = self.application.registry();
-            let code = registry
-                .module_code(DATA_MODULE)
-                .ok_or_else(|| StorageError::Internal("data Cell module is not compiled".into()))?;
             let mut partitions = Vec::with_capacity(usize::from(self.initial_partition_count));
             for index in 0..self.initial_partition_count {
                 self.reclaim_deleted_ranges(client, account_id).await?;
                 let spec = initial_partition(table, self.initial_partition_count, index)?;
                 let target = data_target(account_id, &table.id, &spec.partition_id)
                     .map_err(provision_error)?;
-                let catalog = CellCatalog::new(self.layout.clone(), target.tenant());
-                let proof = catalog
-                    .provision(
-                        CatalogEntry::new(&target, CatalogRole::Sql, code, 1)
-                            .map_err(provision_error)?,
-                    )
-                    .await
-                    .map_err(provision_error)?;
-                let handle = self.admit(&target, proof).await?;
-                let client = CellClient::local(Arc::clone(&registry), handle);
-                let application = ApplicationHandle::<Beyonddb>::new(
-                    client,
-                    Arc::clone(&self.application),
-                    target.tenant(),
-                    target.application(),
-                )
-                .map_err(provision_error)?;
-                match application
+                let client = self.provision_range(&target, client).await?;
+                match client
                     .command::<InstallPartition>(
                         &target,
                         mutation_identity()?,

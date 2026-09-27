@@ -4,9 +4,8 @@ use std::{sync::Arc, time::Duration};
 
 use crab_cell_host::CellNodeTaskGroup;
 use crab_cell_runtime::{
-    cell::catalog::{CatalogEntry, CatalogRole, CellCatalog},
+    cell::catalog::CellCatalog,
     client::{CellClient, InvocationError, ReadPolicy},
-    control::authority::CellAuthority,
 };
 use extenddb_storage::{BoxedFuture, error::StorageError};
 use tokio::time::MissedTickBehavior;
@@ -18,11 +17,11 @@ use super::{
 use crate::backend::{cell_error, mutation_identity};
 use crate::split::split_contract;
 use crate::{
-    BeginSplit, BeginSplitOutcome, CellSplitController, DATA_MODULE, DescribeTable, Json,
-    ListTables, ListTablesInput, ListTablesOutcome, PartitionState, PartitionUsage,
-    PublishedPartitionInput, PublishedPartitionOutcome, ReadPartitionState, ReadPublishedPartition,
-    ReadRoutePage, ReadSplitPlan, ReadSplitRoute, RoutePageInput, RoutePageOutcome, SplitPlan,
-    SplitRouteState, account_target, data_target,
+    BeginSplit, BeginSplitOutcome, CellSplitController, DescribeTable, Json, ListTables,
+    ListTablesInput, ListTablesOutcome, PartitionState, PartitionUsage, PublishedPartitionInput,
+    PublishedPartitionOutcome, ReadPartitionState, ReadPublishedPartition, ReadRoutePage,
+    ReadSplitPlan, ReadSplitRoute, RoutePageInput, RoutePageOutcome, SplitPlan, SplitRouteState,
+    account_target, data_target,
 };
 
 impl CellInitialPartitionProvisioner {
@@ -580,8 +579,8 @@ impl CellInitialPartitionProvisioner {
     /// Admit both split children and resume a durable table split.
     ///
     /// The client must reach the account, source, and published children,
-    /// restoring idle owners when necessary. New children are bootstrapped
-    /// locally; retries preserve all existing owners and the recorded plan.
+    /// restoring idle owners when necessary. New children use configured fleet
+    /// placement; retries preserve existing owners and the recorded plan.
     pub async fn resume_split(
         &self,
         account_id: &str,
@@ -590,7 +589,6 @@ impl CellInitialPartitionProvisioner {
     ) -> Result<(), StorageError> {
         let (source, children, _) = split_contract(plan)?;
         let account = account_target(account_id).map_err(provision_error)?;
-        let registry = self.application.registry();
         let client = client.with_read_policy(ReadPolicy::CurrentOwner);
         let pending = client
             .query::<ReadSplitPlan>(&account, None, Json(source.table.id.clone()))
@@ -624,33 +622,10 @@ impl CellInitialPartitionProvisioner {
                 "split source is not cataloged".into(),
             ));
         }
-        let code = registry
-            .module_code(DATA_MODULE)
-            .ok_or_else(|| StorageError::Internal("data Cell module is not compiled".into()))?;
-        let authority = CellAuthority::new(self.layout.clone());
         for spec in children {
             let target = data_target(account_id, &spec.table.id, &spec.partition_id)
                 .map_err(provision_error)?;
-            let proof = catalog
-                .provision(
-                    CatalogEntry::new(&target, CatalogRole::Sql, code, 1)
-                        .map_err(provision_error)?,
-                )
-                .await
-                .map_err(provision_error)?;
-            let observed = authority
-                .load(target.cell_id())
-                .await
-                .map_err(provision_error)?;
-            // A published child may have moved after an interrupted split.
-            // Only missing roots need bootstrap; the client routes every later
-            // install/import/open to the authoritative owner.
-            if observed
-                .as_ref()
-                .is_none_or(|control| control.value().root.is_none())
-            {
-                self.admit(&target, proof).await?;
-            }
+            self.provision_range(&target, &client).await?;
         }
         CellSplitController::new(client)
             .resume(account_id, plan)

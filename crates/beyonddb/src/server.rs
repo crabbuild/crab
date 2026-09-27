@@ -7,7 +7,6 @@ mod placement;
 
 pub use capacity::measured_node_capacity;
 pub use node_lease::{NodeLeasePublisher, PublishedNodeLease};
-pub use peer_receiver::peer_router;
 
 use std::sync::Arc;
 
@@ -56,53 +55,104 @@ impl PeerTargetScope for BeyonddbPeerScope {
     }
 }
 
-/// Build the owner-resolving client for a BeyondDB peer node.
+/// Shared peer identity and transport for placement, bootstrap, and invocation.
 ///
-/// The caller retains the node's published lease. The TLS identity's private
-/// key signs peer requests for the same boot session advertised by the node.
-/// The provisioner must belong to this node and layout. Ownerless cataloged
-/// data/index Cells select a live destination from signed capacity, then restore
-/// through that node's admission gate. Other namespaces restore locally; live
-/// owners retain ownership. Missing placement capacity rejects new placement.
-pub fn build_peer_client(
-    node: &CellNode,
+/// Retain the node lease while using this context. It owns no client or
+/// provisioner, so clients can hold provisioners without a reference cycle.
+pub struct BeyonddbPeers {
+    runtime: crab_cell_runtime::cell::actor::CellRuntime,
     layout: CellStorageLayout,
-    directory: NodeDirectory,
-    session: SessionId,
-    tls: &LoadedPeerTls,
-    provisioner: Arc<CellInitialPartitionProvisioner>,
-) -> crab_cell_runtime::Result<CellClient> {
-    if directory.fleet() != tls.fleet() {
-        return Err(crab_cell_runtime::Error::PeerAuthorization(
-            "peer TLS identity belongs to another fleet",
+    registry: Arc<crab_cell_runtime::registry::Registry>,
+    placement: Arc<placement::RangePlacement>,
+}
+
+impl BeyonddbPeers {
+    /// Bind peer transport to this node's advertised boot session and TLS key.
+    pub fn new(
+        node: &CellNode,
+        layout: CellStorageLayout,
+        directory: NodeDirectory,
+        session: SessionId,
+        tls: &LoadedPeerTls,
+    ) -> crab_cell_runtime::Result<Self> {
+        if directory.fleet() != tls.fleet() {
+            return Err(crab_cell_runtime::Error::PeerAuthorization(
+                "peer TLS identity belongs to another fleet",
+            ));
+        }
+        let signer = Arc::new(PeerSigner::new(
+            session,
+            node.application().registry().release_digest(),
+            tls.signing_key().clone(),
         ));
+        let round_trip = Arc::new(PeerHttpRoundTrip::new(
+            Arc::new(BeyonddbPeerScope),
+            CellAuthority::new(layout.clone()),
+            directory.clone(),
+            Arc::new(tls.client_identity()),
+            session,
+        ));
+        Ok(Self {
+            runtime: node.runtime(),
+            layout,
+            registry: node.application().registry(),
+            placement: Arc::new(placement::RangePlacement {
+                directory,
+                session,
+                signer,
+                round_trip,
+            }),
+        })
     }
-    let signer = Arc::new(PeerSigner::new(
-        session,
-        node.application().registry().release_digest(),
-        tls.signing_key().clone(),
-    ));
-    let principal = peer_receiver::peer_principal(directory.fleet(), session);
-    let round_trip = Arc::new(PeerHttpRoundTrip::new(
-        Arc::new(BeyonddbPeerScope),
-        CellAuthority::new(layout.clone()),
-        directory.clone(),
-        Arc::new(tls.client_identity()),
-        session,
-    ));
-    let placement = placement::ColdPlacement {
-        directory,
-        session,
-        signer: signer.clone(),
-        round_trip: round_trip.clone(),
-    };
-    Ok(
-        CellClient::peer(node.application().registry(), signer, principal, round_trip)
-            .with_local_resolver(Arc::new(
-                peer_receiver::LocalResolver::serving(node, layout, provisioner)
-                    .with_placement(placement),
-            )),
-    )
+
+    /// Build an owner-resolving client with placement for idle data/index Cells.
+    pub fn client(&self, provisioner: Arc<CellInitialPartitionProvisioner>) -> CellClient {
+        let principal =
+            peer_receiver::peer_principal(self.placement.directory.fleet(), self.placement.session);
+        CellClient::peer(
+            self.registry.clone(),
+            self.placement.signer.clone(),
+            principal,
+            self.placement.round_trip.clone(),
+        )
+        .with_local_resolver(Arc::new(
+            peer_receiver::LocalResolver::serving(self, provisioner)
+                .with_placement(self.placement.clone()),
+        ))
+    }
+
+    /// Build the authenticated peer route; mount only on this identity's mTLS listener.
+    pub fn router(&self, provisioner: Arc<CellInitialPartitionProvisioner>) -> axum::Router {
+        peer_receiver::peer_router(self, provisioner)
+    }
+
+    pub(crate) fn directory(&self) -> &NodeDirectory {
+        &self.placement.directory
+    }
+
+    pub(crate) async fn provision_local(
+        &self,
+        target: &CellTarget,
+        owner: Option<SessionId>,
+    ) -> crab_cell_runtime::Result<bool> {
+        // A live initial owner must finish its own bootstrap. An expired owner
+        // needs a fresh placement decision followed by runtime takeover proof.
+        let owner = match owner {
+            Some(session)
+                if self
+                    .placement
+                    .directory
+                    .is_live(session, node_lease::unix_time_ms()?)
+                    .await? =>
+            {
+                Some(session)
+            }
+            _ => None,
+        };
+        self.placement
+            .select_local(target, owner, peer_receiver::PROVISION_ACTION)
+            .await
+    }
 }
 
 /// Build the signed DynamoDB request path for an already-ready leased Cell node.

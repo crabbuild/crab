@@ -1,4 +1,5 @@
 mod placement;
+mod provisioning;
 
 use crate::*;
 use crab_cell_runtime::cell::actor::CellHandle;
@@ -65,6 +66,9 @@ impl Fixture {
             lease.clone(),
         )
         .await;
+        let peers = Arc::new(
+            BeyonddbPeers::new(&node, layout.clone(), directory.clone(), session, &tls).unwrap(),
+        );
         let provisioner = Arc::new(
             CellInitialPartitionProvisioner::new(
                 node.runtime(),
@@ -76,7 +80,8 @@ impl Fixture {
             )
             .unwrap()
             .with_initial_partition_count(2)
-            .unwrap(),
+            .unwrap()
+            .with_peers(peers.clone()),
         );
         provisioner.admit_account("123456789012").await.unwrap();
         const ACCESS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
@@ -103,15 +108,7 @@ impl Fixture {
         )
         .await
         .unwrap();
-        let client = build_peer_client(
-            &node,
-            layout.clone(),
-            directory.clone(),
-            session,
-            &tls,
-            provisioner.clone(),
-        )
-        .unwrap();
+        let client = peers.client(provisioner.clone());
         CellAuthorizationStore::new(client.clone())
             .put_user_policy(
                 "123456789012",
@@ -122,19 +119,14 @@ impl Fixture {
                     "Statement": [{
                         "Effect": "Allow",
                         "Action": "dynamodb:*",
-                        "Resource": "arn:aws:dynamodb:us-east-1:123456789012:table/Residency"
+                        "Resource": "arn:aws:dynamodb:us-east-1:123456789012:table/Residency*"
                     }]
                 })
                 .to_string(),
             )
             .await
             .unwrap();
-        let router = peer_router(
-            &node,
-            layout.clone(),
-            directory.clone(),
-            provisioner.clone(),
-        );
+        let router = peers.router(provisioner.clone());
         let peer_server = tokio::spawn(async move {
             axum::serve(
                 tls.listener(listener),

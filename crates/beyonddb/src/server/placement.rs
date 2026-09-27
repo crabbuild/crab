@@ -1,4 +1,4 @@
-//! Advisory placement of existing, ownerless data and index Cells.
+//! Advisory placement and authenticated admission of data and index Cells.
 
 use std::sync::Arc;
 
@@ -11,27 +11,25 @@ use crab_cell_runtime::{
     peer::{PeerOperation, PeerRoundTrip, PeerSigner, decode_peer_reply, wire},
 };
 
-use super::{
-    node_lease::unix_time_ms,
-    peer_receiver::{ACTIVATE_ACTION, peer_principal},
-};
+use super::{node_lease::unix_time_ms, peer_receiver::peer_principal};
 
 pub(super) fn is_data_target(target: &CellTarget) -> bool {
     [crate::DATA_NAMESPACE, crate::global_index::NAMESPACE].contains(&target.namespace())
 }
 
-pub(super) struct ColdPlacement {
+pub(super) struct RangePlacement {
     pub directory: NodeDirectory,
     pub session: SessionId,
     pub signer: Arc<PeerSigner>,
     pub round_trip: Arc<PeerHttpRoundTrip>,
 }
 
-impl ColdPlacement {
+impl RangePlacement {
     pub(super) async fn select_local(
         &self,
         target: &CellTarget,
         recovering: Option<SessionId>,
+        action: &'static str,
     ) -> Result<bool> {
         let observed_at = unix_time_ms()?;
         // Discovery fails on overflow instead of placing from a partial fleet.
@@ -72,9 +70,9 @@ impl ColdPlacement {
         let now_ms = unix_time_ms()?;
         let expires = now_ms
             .checked_add(60_000)
-            .ok_or(Error::Peer("activation deadline overflow"))?;
+            .ok_or(Error::Peer("range admission deadline overflow"))?;
         let mut principal = peer_principal(self.directory.fleet(), self.session);
-        principal.actions = vec![ACTIVATE_ACTION.into()];
+        principal.actions = vec![action.into()];
         let request = self.signer.sign(
             principal,
             now_ms,
@@ -105,20 +103,20 @@ impl ColdPlacement {
                 Ok(false)
             }
             Some(wire::peer_reply::Outcome::Error(error)) => {
-                tracing::debug!(code = error.code, "remote Cell activation rejected");
+                tracing::debug!(code = error.code, "remote range admission rejected");
                 match wire::error::Code::try_from(error.code) {
                     Ok(wire::error::Code::ResourceExhausted) => {
-                        Err(Error::Capacity("remote Cell activation"))
+                        Err(Error::Capacity("remote range admission"))
                     }
                     Ok(wire::error::Code::PermissionDenied) => {
-                        Err(Error::PeerAuthorization("remote activation denied"))
+                        Err(Error::PeerAuthorization("remote admission denied"))
                     }
                     Ok(wire::error::Code::Unavailable) => Err(Error::CellNotActive),
-                    _ => Err(Error::Peer("remote Cell activation rejected")),
+                    _ => Err(Error::Peer("remote range admission rejected")),
                 }
             }
             _ => Err(Error::Peer(
-                "remote activation returned an invalid description",
+                "remote admission returned an invalid description",
             )),
         }
     }

@@ -3,9 +3,9 @@
 use std::{error::Error, io, io::Read, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use beyonddb::{
-    APPLICATION_ID, Beyonddb, CellAuthorizationStore, CellCredentialStore,
+    APPLICATION_ID, Beyonddb, BeyonddbPeers, CellAuthorizationStore, CellCredentialStore,
     CellInitialPartitionProvisioner, CellStorage, NodeLeasePublisher, build_http_state,
-    build_peer_client, measured_node_capacity, peer_router,
+    measured_node_capacity,
 };
 use crab_cell_app::CellApplication;
 use crab_cell_host::{CellNode, CellNodeBuilder, CellNodeTaskGroup};
@@ -294,6 +294,13 @@ async fn serve_ready(
     encryption_key: [u8; 32],
     bootstrap_secret: Option<Zeroizing<String>>,
 ) -> ServerResult<()> {
+    let peers = Arc::new(BeyonddbPeers::new(
+        node,
+        layout.clone(),
+        directory.clone(),
+        session,
+        &tls,
+    )?);
     let provisioner = Arc::new(
         CellInitialPartitionProvisioner::new(
             node.runtime(),
@@ -303,7 +310,8 @@ async fn serve_ready(
             config.peer_endpoint.clone(),
             session_dir,
         )?
-        .with_initial_partition_count(config.initial_partitions)?,
+        .with_initial_partition_count(config.initial_partitions)?
+        .with_peers(peers.clone()),
     );
     let mut owned_accounts = Vec::with_capacity(config.owned_accounts.len());
     for account_id in &config.owned_accounts {
@@ -317,14 +325,7 @@ async fn serve_ready(
             .recover_owned_credential(key_id, &directory)
             .await?;
     }
-    let client = build_peer_client(
-        node,
-        layout.clone(),
-        directory.clone(),
-        session,
-        &tls,
-        provisioner.clone(),
-    )?;
+    let client = peers.client(provisioner.clone());
     if let (Some(bootstrap), Some(secret)) = (config.bootstrap.as_ref(), bootstrap_secret) {
         let policy = std::fs::read_to_string(&bootstrap.policy_file)?;
         CellCredentialStore::new(client.clone(), layout.clone(), encryption_key)
@@ -363,7 +364,7 @@ async fn serve_ready(
     state.tls_enabled = public_tls.is_some();
     let peer_cancel = CancellationToken::new();
     let peer_shutdown = peer_cancel.clone();
-    let peer_router = peer_router(node, layout, directory.clone(), provisioner.clone());
+    let peer_router = peers.router(provisioner.clone());
     // Other recovering nodes may need these local participants. Start private
     // routing before resolving decisions, while public requests remain gated.
     let mut peer_server = tokio::spawn(async move {

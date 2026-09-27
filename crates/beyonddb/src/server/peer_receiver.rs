@@ -8,7 +8,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
-use crab_cell_host::CellNode;
 use crab_cell_peer_http::{PROTOBUF_MEDIA_TYPE, PeerTargetScope, PeerTlsIdentity};
 use crab_cell_runtime::cell::{
     actor::{CellHandle, CellRuntime},
@@ -28,6 +27,8 @@ use crab_cell_runtime::{Error, Result};
 use super::{BeyonddbPeerScope, node_lease::unix_time_ms};
 use crate::{DATA_MODULE, DATA_NAMESPACE, MODULE, NAMESPACE, credentials, transaction_coordinator};
 
+pub(super) const PROVISION_ACTION: &str = "beyonddb.cell.provision";
+
 pub(super) const ACTIVATE_ACTION: &str = "beyonddb.cell.activate";
 
 const INVOKE_ACTION: &str = "beyonddb.cell.invoke";
@@ -38,26 +39,30 @@ pub(super) struct LocalResolver {
     layout: CellStorageLayout,
     registry: Arc<Registry>,
     provisioner: Option<Arc<crate::CellInitialPartitionProvisioner>>,
-    placement: Option<Arc<super::placement::ColdPlacement>>,
+    placement: Option<Arc<super::placement::RangePlacement>>,
+    bootstrap: Option<NodeDirectory>,
 }
 
 impl LocalResolver {
     pub(super) fn serving(
-        node: &CellNode,
-        layout: CellStorageLayout,
+        peers: &super::BeyonddbPeers,
         provisioner: Arc<crate::CellInitialPartitionProvisioner>,
     ) -> Self {
         Self {
-            runtime: node.runtime(),
-            layout,
-            registry: node.application().registry(),
+            runtime: peers.runtime.clone(),
+            layout: peers.layout.clone(),
+            registry: peers.registry.clone(),
             provisioner: Some(provisioner),
             placement: None,
+            bootstrap: None,
         }
     }
 
-    pub(super) fn with_placement(mut self, placement: super::placement::ColdPlacement) -> Self {
-        self.placement = Some(Arc::new(placement));
+    pub(super) fn with_placement(
+        mut self,
+        placement: Arc<super::placement::RangePlacement>,
+    ) -> Self {
+        self.placement = Some(placement);
         self
     }
 }
@@ -98,6 +103,10 @@ impl LocalCellResolver for LocalResolver {
             {
                 return Err(Error::CatalogCollision);
             }
+            if let Some(nodes) = resolver.bootstrap {
+                let provisioner = resolver.provisioner.ok_or(Error::CellNotActive)?;
+                return provisioner.admit_range(&target, &nodes).await.map(Some);
+            }
             let control = CellAuthority::new(resolver.layout)
                 .load(target.cell_id())
                 .await?
@@ -122,7 +131,9 @@ impl LocalCellResolver for LocalResolver {
                 && control.value().root.is_some()
                 && super::placement::is_data_target(&target)
                 && let Some(placement) = resolver.placement
-                && !placement.select_local(&target, owner).await?
+                && !placement
+                    .select_local(&target, owner, ACTIVATE_ACTION)
+                    .await?
             {
                 return Ok(None);
             }
@@ -156,7 +167,7 @@ impl PeerAuthorizer for BeyondPeerAuthorizer {
                 "BeyondDB peer principal is invalid",
             ));
         }
-        if self.action == ACTIVATE_ACTION
+        if [ACTIVATE_ACTION, PROVISION_ACTION].contains(&self.action)
             && (!super::placement::is_data_target(request.target())
                 || !matches!(request.operation(), Some(wire::peer_request::Operation::Read(read))
                     if read.minimum.is_none()
@@ -187,32 +198,27 @@ struct Receiver {
     directory: NodeDirectory,
     dispatcher: Arc<PeerDispatcher>,
     activation: Arc<PeerDispatcher>,
+    bootstrap: Arc<PeerDispatcher>,
     runtime: CellRuntime,
 }
 
-/// Builds BeyondDB's authenticated private peer route for an mTLS listener.
-///
-/// Mount this router only on `LoadedPeerTls::listener`. The caller must keep
-/// the node's advertisement lease and task group alive while serving. The
-/// provisioner must belong to this node and layout; only signed data/index
-/// activation requests may use it to acquire ownerless published Cells.
-pub fn peer_router(
-    node: &CellNode,
-    layout: CellStorageLayout,
-    directory: NodeDirectory,
+pub(super) fn peer_router(
+    peers: &super::BeyonddbPeers,
     provisioner: Arc<crate::CellInitialPartitionProvisioner>,
 ) -> Router {
-    let runtime = node.runtime();
+    let runtime = peers.runtime.clone();
+    let directory = peers.placement.directory.clone();
     let dispatcher = PeerDispatcher::new(
-        node.application().registry(),
+        peers.registry.clone(),
         Arc::new(LocalResolver {
             runtime: runtime.clone(),
-            layout: layout.clone(),
-            registry: node.application().registry(),
+            layout: peers.layout.clone(),
+            registry: peers.registry.clone(),
             // The sender selects ownership before forwarding. A receiver may
             // only dispatch to that active owner; a raced release must reject.
             provisioner: None,
             placement: None,
+            bootstrap: None,
         }),
         Arc::new(BeyondPeerAuthorizer {
             fleet: directory.fleet(),
@@ -221,11 +227,22 @@ pub fn peer_router(
     )
     .with_telemetry(runtime.telemetry_handle());
     let activation = PeerDispatcher::new(
-        node.application().registry(),
-        Arc::new(LocalResolver::serving(node, layout, provisioner)),
+        peers.registry.clone(),
+        Arc::new(LocalResolver::serving(peers, provisioner.clone())),
         Arc::new(BeyondPeerAuthorizer {
             fleet: directory.fleet(),
             action: ACTIVATE_ACTION,
+        }),
+    )
+    .with_telemetry(runtime.telemetry_handle());
+    let mut resolver = LocalResolver::serving(peers, provisioner);
+    resolver.bootstrap = Some(directory.clone());
+    let bootstrap = PeerDispatcher::new(
+        peers.registry.clone(),
+        Arc::new(resolver),
+        Arc::new(BeyondPeerAuthorizer {
+            fleet: directory.fleet(),
+            action: PROVISION_ACTION,
         }),
     )
     .with_telemetry(runtime.telemetry_handle());
@@ -233,6 +250,7 @@ pub fn peer_router(
         directory,
         dispatcher: Arc::new(dispatcher),
         activation: Arc::new(activation),
+        bootstrap: Arc::new(bootstrap),
         runtime,
     };
     Router::new()
@@ -296,12 +314,19 @@ async fn forward(
         Ok(request) => request,
         Err(_) => return error(StatusCode::UNAUTHORIZED),
     };
-    // Each dispatcher authorizes before resolving. Only the narrow activation
-    // capability may restore an idle Cell; forwarded application work cannot.
-    let dispatched = if request.permits(ACTIVATE_ACTION) {
+    // Each dispatcher authorizes before resolving. Only scoped admission
+    // capabilities may acquire a Cell; forwarded application work cannot.
+    let admission = if request.permits(PROVISION_ACTION) {
+        Some(&receiver.bootstrap)
+    } else if request.permits(ACTIVATE_ACTION) {
+        Some(&receiver.activation)
+    } else {
+        None
+    };
+    let dispatched = if let Some(dispatcher) = admission {
         match tokio::time::timeout(
             std::time::Duration::from_millis(u64::from(request.remaining_ms())),
-            receiver.activation.dispatch_bytes(&request, now_ms),
+            dispatcher.dispatch_bytes(&request, now_ms),
         )
         .await
         {

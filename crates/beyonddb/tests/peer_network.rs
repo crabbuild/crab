@@ -23,10 +23,10 @@ use std::{
 use aws_credential_types::Credentials;
 use aws_sdk_dynamodb::types::AttributeValue as AwsAttributeValue;
 use beyonddb::{
-    ActivateTableRoute, Beyonddb, BeyonddbPeerScope, CellAuthorizationStore, CellCredentialStore,
-    CellInitialPartitionProvisioner, CreateTable, CreateTableOutcome, DescribeTable,
-    InitialPartitionProvisioner, Json, NodeLeasePublisher, ReadTableRoute, TableRoute, TableSpec,
-    account_target, build_http_state, build_peer_client, peer_router,
+    ActivateTableRoute, Beyonddb, BeyonddbPeerScope, BeyonddbPeers, CellAuthorizationStore,
+    CellCredentialStore, CellInitialPartitionProvisioner, CreateTable, CreateTableOutcome,
+    DescribeTable, InitialPartitionProvisioner, Json, NodeLeasePublisher, ReadTableRoute,
+    TableRoute, TableSpec, account_target, build_http_state,
 };
 use crab_cell_app::CellApplication;
 use crab_cell_host::{CellNode, CellNodeBuilder, CellNodeTaskGroup};
@@ -253,12 +253,15 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     );
     provisioner.admit_account("123456789012").await.unwrap();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let router = peer_router(
+    let peers = BeyonddbPeers::new(
         &owner,
         layout.clone(),
         peer_directory.clone(),
-        provisioner.clone(),
-    );
+        owner_session,
+        &tls,
+    )
+    .unwrap();
+    let router = peers.router(provisioner.clone());
     let server = tokio::spawn(async move {
         axum::serve(
             tls.listener(listener),
@@ -299,12 +302,15 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     let remote_listener_tls =
         LoadedPeerTls::load(&remote_certificate, &remote_key, &ca, "localhost").unwrap();
     let (remote_shutdown, remote_cancel) = tokio::sync::oneshot::channel();
-    let remote_router = peer_router(
+    let remote_peers = BeyonddbPeers::new(
         &remote,
         layout.clone(),
         peer_directory.clone(),
-        remote_provisioner.clone(),
-    );
+        remote_session,
+        &client_tls,
+    )
+    .unwrap();
+    let remote_router = remote_peers.router(remote_provisioner.clone());
     let remote_server = tokio::spawn(async move {
         axum::serve(
             remote_listener_tls.listener(remote_listener),
@@ -315,15 +321,7 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         })
         .await
     });
-    let client = build_peer_client(
-        &remote,
-        layout.clone(),
-        peer_directory.clone(),
-        remote_session,
-        &client_tls,
-        remote_provisioner.clone(),
-    )
-    .unwrap();
+    let client = remote_peers.client(remote_provisioner.clone());
     let remote_account = remote
         .application_handle::<Beyonddb>(client.clone(), account.tenant(), account.application())
         .unwrap();
@@ -764,21 +762,16 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         .await
         .unwrap();
     let (replacement_shutdown, replacement_cancel) = tokio::sync::oneshot::channel();
-    let replacement_client = build_peer_client(
+    let replacement_peers = BeyonddbPeers::new(
         &replacement,
         layout.clone(),
         peer_directory.clone(),
         replacement_session,
         &replacement_tls,
-        replacement_provisioner.clone(),
     )
     .unwrap();
-    let replacement_router = peer_router(
-        &replacement,
-        layout.clone(),
-        peer_directory.clone(),
-        replacement_provisioner.clone(),
-    );
+    let replacement_client = replacement_peers.client(replacement_provisioner.clone());
+    let replacement_router = replacement_peers.router(replacement_provisioner.clone());
     let replacement_server = tokio::spawn(async move {
         axum::serve(
             replacement_tls.listener(replacement_listener),

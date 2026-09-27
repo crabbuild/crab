@@ -44,12 +44,15 @@ async fn sdk_cold_placement_activates_remote_and_resumes_its_claim() {
         )
         .unwrap(),
     );
-    let router = peer_router(
+    let peers = BeyonddbPeers::new(
         &remote,
         fixture.layout.clone(),
         fixture.directory.clone(),
-        provisioner,
-    );
+        session,
+        &fixture.remote_tls,
+    )
+    .unwrap();
+    let router = peers.router(provisioner.clone());
     let tls = LoadedPeerTls::load(
         &fixture._files.path().join("remote.crt"),
         &fixture._files.path().join("remote.key"),
@@ -174,6 +177,11 @@ async fn sdk_cold_placement_activates_remote_and_resumes_its_claim() {
             wire::error::Code::PermissionDenied,
         ),
         ("cell.activate", true, wire::error::Code::PermissionDenied),
+        (
+            "beyonddb.cell.provision",
+            false,
+            wire::error::Code::PermissionDenied,
+        ),
     ] {
         let reply = send(target.clone(), action, describe).await;
         if code == wire::error::Code::Unavailable {
@@ -203,15 +211,25 @@ async fn sdk_cold_placement_activates_remote_and_resumes_its_claim() {
         .await
         .unwrap();
     account.drain().await.unwrap();
-    let reply = send(
-        account_target("123456789012").unwrap(),
-        "beyonddb.cell.activate",
-        true,
+    for action in ["beyonddb.cell.activate", "beyonddb.cell.provision"] {
+        let reply = send(account_target("123456789012").unwrap(), action, true).await;
+        assert!(
+            matches!(reply.unwrap(), wire::peer_reply::Outcome::Error(error) if error.code == wire::error::Code::PermissionDenied as i32)
+        );
+    }
+    let unknown = CellTarget::new(
+        target.tenant(),
+        target.application(),
+        target.namespace(),
+        b"uncataloged",
     )
-    .await;
-    assert!(
-        matches!(reply.unwrap(), wire::peer_reply::Outcome::Error(error) if error.code == wire::error::Code::PermissionDenied as i32)
-    );
+    .unwrap();
+    let reply = send(unknown.clone(), "beyonddb.cell.provision", true).await;
+    assert!(matches!(
+        reply,
+        Err(crab_cell_runtime::Error::CellNotActive)
+    ));
+    assert!(authority.load(unknown.cell_id()).await.unwrap().is_none());
     assert_eq!(
         authority
             .load(account.cell_id())
@@ -274,11 +292,13 @@ async fn sdk_cold_placement_activates_remote_and_resumes_its_claim() {
         session
     );
     // An activation sent to the old host cannot steal a live remote owner.
-    let reply = send(target.clone(), "beyonddb.cell.activate", true).await;
-    assert!(matches!(
-        reply,
-        Err(crab_cell_runtime::Error::CellNotActive)
-    ));
+    for action in ["beyonddb.cell.activate", "beyonddb.cell.provision"] {
+        let reply = send(target.clone(), action, true).await;
+        assert!(matches!(
+            reply,
+            Err(crab_cell_runtime::Error::CellNotActive)
+        ));
+    }
     assert_eq!(
         authority
             .load(target.cell_id())
@@ -471,7 +491,7 @@ async fn sdk_cold_placement_activates_remote_and_resumes_its_claim() {
     let hash =
         beyonddb::data_key_hash(&split.source.table.id, &key, &split.source.table.key_schema)
             .unwrap();
-    let child = split
+    let mut child = split
         .children
         .iter()
         .find(|child| {
@@ -479,36 +499,62 @@ async fn sdk_cold_placement_activates_remote_and_resumes_its_claim() {
                 && child.upper.is_none_or(|upper| hash < upper)
         })
         .unwrap();
-    fixture
-        .provisioner
-        .admit_existing_partition("123456789012", &child.table.id, &child.partition_id)
-        .await
-        .unwrap()
-        .drain()
-        .await
-        .unwrap();
+    let mut already_remote = false;
+    for candidate in &split.children {
+        let target =
+            beyonddb::data_target("123456789012", &candidate.table.id, &candidate.partition_id)
+                .unwrap();
+        if authority
+            .load(target.cell_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .owner
+            .as_ref()
+            .unwrap()
+            .session
+            == session
+        {
+            child = candidate;
+            already_remote = true;
+            break;
+        }
+    }
     let child_target =
         beyonddb::data_target("123456789012", &child.table.id, &child.partition_id).unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        loop {
-            let selected = fixture
-                .directory
-                .choose_advertised_placement(
-                    &PlacementPlanner::default(),
-                    child_target.cell_id(),
-                    now_ms(),
-                    4,
-                )
-                .await
-                .unwrap();
-            if selected.is_some_and(|selected| selected.session == session) {
-                break;
+    if !already_remote {
+        // If initial placement chose both children locally, moving this one
+        // exercises completed-plan replay after ownership changes as before.
+        fixture
+            .provisioner
+            .admit_existing_partition("123456789012", &child.table.id, &child.partition_id)
+            .await
+            .unwrap()
+            .drain()
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let selected = fixture
+                    .directory
+                    .choose_advertised_placement(
+                        &PlacementPlanner::default(),
+                        child_target.cell_id(),
+                        now_ms(),
+                        4,
+                    )
+                    .await
+                    .unwrap();
+                if selected.is_some_and(|selected| selected.session == session) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap();
+        })
+        .await
+        .unwrap();
+    }
     let read = sdk
         .get_item()
         .table_name("Residency")
@@ -521,8 +567,8 @@ async fn sdk_cold_placement_activates_remote_and_resumes_its_claim() {
         read.item.unwrap()["value"],
         AwsAttributeValue::S("remote transaction".into())
     );
-    // A completed plan can be replayed after a child moves. The source and
-    // child remain on their authoritative remote owner throughout the replay.
+    // A completed plan preserves remote ownership, whether the child was
+    // initially placed there or moved after opening.
     fixture
         .provisioner
         .resume_split("123456789012", fixture.client.clone(), &split)

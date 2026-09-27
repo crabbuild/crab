@@ -223,7 +223,7 @@ through an authenticated peer round trip after reading catalog and authority.
 BeyondDB's HTTP state accepts that client. Its signed SDK test now forwards
 account, credential, and data Cell operations through the peer protocol from
 a separate runtime to the local owner, then verifies recovery. This is a
-loopback transport test. `build_peer_client` now binds the shared HTTP owner
+loopback transport test. `BeyonddbPeers::client` binds the shared HTTP owner
 transport to the BeyondDB application. The product now composes a verified
 peer receiver and a fleet-scoped principal. A two-node test sends signed AWS
 SDK table and item requests through ExtendDB's public listener; its public
@@ -1058,7 +1058,7 @@ The owner-routing audit identifies a separate availability gap that must be
 tested before attributing the SDK failure to it. Runtime
 `CellClient::runtime_with_peer` explicitly does not acquire Idle Cells, and
 `PeerHttpRoundTrip::owner` rejects a control with no owner. BeyondDB's
-`build_peer_client` previously used that transport directly. Foreground coordinator
+The peer client previously used that transport directly. Foreground coordinator
 admission could reacquire an Idle coordinator, but normal keyed reads, Scan,
 credential lookup, and transaction phase requests had no shared admission path.
 Background transaction and index recovery cover subsets of those targets.
@@ -1265,8 +1265,7 @@ exact live session; expired-session takeover remains a separate fenced path.
 Activation handling is bounded by the verified request deadline.
 
 This connects capacity observations to real request routing. It does not
-redistribute serving Cells, place newly provisioned ranges, persist movement
-intents, or shard discovery and controller ownership. Those remain required for
+redistribute serving Cells, persist movement intents, or shard discovery and controller ownership. Those remain required for
 the placement delivery gate and the 10,000-Cell/multi-TB target.
 
 The signed SDK cold-placement scenario passes with SDK retries disabled. It
@@ -1296,14 +1295,14 @@ a live valid owner; retrying local admission could not make progress.
 The capacity controller now accepts the same routed `CellClient` as the serving
 request path. Inspection, source export, completed-plan lookup, and split replay
 reach current owners; a published child is never locally reacquired merely to
-resume a split. Only missing child roots use local bootstrap. The serving
+resume a split. Only missing child roots need bootstrap; the initial placement path below
+selects their destination. The serving
 binary passes its peer client into the supervised sweep. The implementation is
 collected in `src/provision/capacity.rs`, replacing the local-handle composition
 inside `provision.rs`. Metadata route CAS, sealed-source fingerprints, and
 participant transaction barriers remain in their existing Cell commands.
 
-This fixes automatic data-range growth after cold placement. Initial child
-placement, proactive ownership movement, GSI splitting, and distributed capacity
+This fixes automatic data-range growth after cold placement. Proactive ownership movement, GSI splitting, and distributed capacity
 controller ownership remain unfinished.
 
 The pre-fix remote-source regression fails in 1.95 seconds. After routing the
@@ -1318,3 +1317,65 @@ Query/automatic split, and LSI mutation/transaction/split checks pass in 0.43,
 are functional evidence, not fleet performance qualification.
 The standalone server build also passes (5 minutes 8 seconds); a live compiler
 sample observed a directory read on the external build volume.
+
+
+Linux qualification at `f9aecc0c9bc` passed in
+[run 36298007432](https://github.com/crabbuild/crab/actions/runs/36298007432):
+six capacity tests, five signed peer SDK tests (579.65 seconds), and three
+standalone process tests (280.19 seconds). This includes the supervised remote
+split regression. The 70-shard replacement became healthy in 20.87 seconds
+against the unchanged 45-second gate. This run predates initial placement below.
+
+### Initial range placement and unpublished-owner recovery
+
+`BeyonddbPeers` owns one node identity and shared peer transport. The serving
+binary binds it to the initial partition provisioner, the request client, and
+the private listener. It owns no client or provisioner, avoiding reference cycles.
+Embedded runtimes can still explicitly provision locally.
+
+CreateTable provisions GSI and base ranges through the same placement boundary
+as split-child bootstrap. It first persists the validated catalog identity,
+then selects a destination from signed measured capacity. A distinct
+`beyonddb.cell.provision` capability permits Describe only on cataloged data/GSI
+Cells. The receiver derives the initializer from the compiled namespace and
+checks the catalog's role, code, schema, and partition. It cannot catalog an
+arbitrary requested Cell. Ordinary invocation remains lookup-only; cold
+activation still requires a published root.
+
+Placement bootstraps the root; routed commands install the range and perform
+all subsequent work. A retry preserves published roots and live initial owners.
+If bootstrap stopped after its ownership claim, the exact live session resumes.
+If that session expired, a new destination must obtain the runtime's fenced
+node takeover proof. Rootless claims use `takeover_unpublished`; published roots
+use verified restoration, including roots not yet discoverable through table
+routes. Authority CAS protects a racing publication and preserves the incarnation. Active failed-node logs still
+require fleet recovery before takeover. A failed placement never falls back to
+local bootstrap.
+
+This removes the requesting-node affinity for initial ranges. Proactive
+rebalancing, bounded distributed discovery/controllers, GSI range splitting,
+and 10,000-Cell/multi-TB qualification remain open.
+
+
+The initial-placement SDK regressions pass in 35.85 seconds with retries disabled.
+One creates base/GSI ranges remotely, runs the serving projection worker, and
+reads persisted base/index data after owner shutdown. The other resumes a live
+initial claim, refuses to steal a still-live unavailable owner, fences an expired
+rootless claim, and restores a populated root whose table route was never
+published. Rootless and published-root recovery retain incarnation identity; the new range also
+survives release and reacquisition. The scenarios each fit the fixture's
+eight-Cell admission ceiling. Larger recovery demand is still rejected by the
+unchanged resource gate.
+
+
+The final local residency suite passes all six signed SDK scenarios in 56.83
+seconds, including automatic remote-source splitting, authorization boundaries,
+released/interrupted acquisition, and transaction participant restoration.
+Embedded LSI mutation/transaction/split and admission-backpressure regressions
+pass in 0.76 and 0.36 seconds. Strict all-target Clippy passes in 1 minute
+10 seconds; the standalone server build passes in 29.47 seconds. Format,
+Cell/LTX layout, policy-entry, and diff checks pass. These are functional local
+results; current-head Linux and fleet-scale qualification remain separate gates.
+Production Rust grows by 213 net lines for the shared peer composition,
+scoped provisioning capability, and common range admission/recovery boundary.
+No wire shape, storage schema, dependency, or configuration setting changed.
