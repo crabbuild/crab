@@ -367,6 +367,16 @@ earlier 34.830 s. Exact generated reads, owner identity and survivor drain
 remained intact. Refresh still took roughly five seconds, and neither sample
 establishes a supported recovery or freshness limit.
 
+The [publication-notification follow-up](../crates/crab-cell-app/performance/2026-09-27-reader-publication.md)
+passed the same constrained 3/5/10/20-node profile. Second-write readiness was
+110–152 ms, using bounded advisory notifications and the existing signed
+recruitment path. The run also exposed and fixed raw handler time moving behind
+persisted logical time; deterministic local/forwarded Workflow and owner/replica
+query tests now cover that boundary. All 1,002 exact reads passed; reader
+replacement took 14.634 s. Sustained capacity, store-call amplification and
+many-Cell resource slopes remain unqualified. Separate product fleet CI failed
+its bounded 20-node placement gate, leaving arrivals during owner loss unrun.
+
 The ignored `rustfs_replica_reads_exact_root_and_policy_cas` test also passed
 against a local RustFS bucket with an isolated prefix. It exercised real S3
 root reads, atomic snapshot refresh, fencing after release, and a policy
