@@ -173,6 +173,9 @@ available for diagnosis; use `compose stop` after collecting evidence. Remove
 only this project's containers/volumes with `compose down -v` when their
 artifacts are no longer needed.
 
+The [2026-09-27 run](performance/2026-09-27-three-node-compose.md) records source,
+images, resource evidence, and observed timings.
+
 This is an application integration smoke with six closed-loop lanes and seven
 Cells assigned 3/2/2. Ingress counts are even; owner load follows the action
 mix. It does not establish a supported throughput, 5/10/20-node application
