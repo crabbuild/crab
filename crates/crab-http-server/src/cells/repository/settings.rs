@@ -2,6 +2,18 @@ use super::*;
 
 const MAX_PROTECTION_BYTES: u32 = 64 * 1024;
 
+pub(super) fn archived(context: &CommandContext<'_, '_>) -> crab_cell_runtime::Result<bool> {
+    // Read lifecycle in the mutation's transaction so a queued command cannot
+    // write after archive commits. Runtime receipt replay precedes this check.
+    let result = context.sql(&SqlBatch {
+        statements: vec![statement(
+            "SELECT archived FROM repository_settings WHERE singleton = 1",
+            vec![],
+        )],
+    })?;
+    Ok(result_u64(&result, 0, 0)? != 0)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BranchProtectionRecord {
     pub branch: String,

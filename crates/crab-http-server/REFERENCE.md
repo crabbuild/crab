@@ -494,7 +494,7 @@ scheduled fault still waits for publication to drain before killing its owner.
 | Client HTTP latency | Retry-inclusive request through decoded response body; individual attempts retained separately |
 | HTTP response readiness | Entry handler lifetime, excluding later body delivery |
 | Authentication | HTTP principal resolution, including session/token storage when used |
-| Archive check | Pre-handler repository lifecycle policy, including its nested route and query; zero-work branches still record the interval |
+| Archive check | Pre-handler lifecycle policy, including any nested route and query. When `command_checks_archive=true`, this interval records only dispatch; the command checks lifecycle during worker execution. A client-error response can trigger a later policy query outside this interval. |
 | Command route | Issue-create route resolution and activation before client preparation |
 | Client preparation | Description, contract/input validation, wire encoding and request digest before invocation |
 | Typed invocation | Transport invocation and result decoding after request validation |
@@ -518,6 +518,23 @@ their own routes; only `repository.issue.create` supplies `command_route_us`.
 Preparation must match the exact acknowledged Cell, incarnation, mutation
 request, module and stable operation ID. Missing preparation or boundary events
 fail the current join.
+
+Issue, comment and label mutations read archive state inside the same SQLite
+transaction as their writes. Successful requests therefore avoid a separate
+`GetRepositoryLifecycle` invocation. Fresh mutations after archive return a
+durable rejection; an exact runtime request replay returns its recorded outcome
+before running the handler, including after recovery or unarchive. A new request
+after unarchive can proceed. Existing outcome tags retain their bytes; these
+seven commands use tag zero for `Archived`. Their source digest changes, so
+this is a new release descriptor, not proof of mixed-version rollout.
+
+For these routes, HTTP client-error responses still consult lifecycle policy
+to preserve the archive error's precedence over invalid input shipped in
+v1.2.4. Server errors, including unknown mutation outcomes, retain their original
+status. Other mutation families retain their pre-handler checks; Git and other
+external storage effects require separate ordering proof. Removing one routed
+query is verified by the public HTTP/mTLS fixture, but does not establish an
+improved throughput or latency limit.
 
 `action_traces.latency` summarizes each observed phase separately for `all`,
 `local`, `forwarded`, `fleet`, `object` and `recorded` writes. Fault reports add

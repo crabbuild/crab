@@ -262,6 +262,7 @@ async fn create(
             .await,
     )?;
     let issue = match output {
+        CreateIssueOutcome::Archived => return Err(Error::Archived),
         CreateIssueOutcome::Created(issue) => issue,
         CreateIssueOutcome::RequestConflict => return Err(Error::RequestConflict),
     };
@@ -486,6 +487,7 @@ async fn edit(
             .await,
     )?;
     let issue = match output {
+        UpdateIssueOutcome::Archived => return Err(Error::Archived),
         UpdateIssueOutcome::Updated(issue) => issue,
         UpdateIssueOutcome::NotFound => return Err(Error::NotFound),
         UpdateIssueOutcome::Forbidden => return Err(Error::Forbidden),
@@ -587,6 +589,7 @@ async fn comment(
             .await,
     )?;
     let comment = match output {
+        CreateCommentOutcome::Archived => return Err(Error::Archived),
         CreateCommentOutcome::Created(comment) => comment,
         CreateCommentOutcome::IssueNotFound => return Err(Error::NotFound),
         CreateCommentOutcome::RequestConflict => return Err(Error::RequestConflict),
@@ -656,6 +659,7 @@ async fn edit_comment(
             .await,
     )?;
     let comment = match output {
+        UpdateCommentOutcome::Archived => return Err(Error::Archived),
         UpdateCommentOutcome::Updated(comment) => comment,
         UpdateCommentOutcome::NotFound => return Err(Error::NotFound),
         UpdateCommentOutcome::Forbidden => return Err(Error::Forbidden),

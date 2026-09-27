@@ -2304,8 +2304,11 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
             .auth
             .as_ref()
             .is_some_and(|auth| !auth.accepts_mutation(&principal, request.headers()));
+    let check_archive = !denied && !rejected_mutation && unsafe_method && !git_request;
+    let deferred_archive = (check_archive && command_checks_archive(request.uri().path()))
+        .then(|| request.uri().clone());
     let archive_check_started = Instant::now();
-    let archived_response = if !denied && !rejected_mutation && unsafe_method && !git_request {
+    let archived_response = if check_archive && deferred_archive.is_none() {
         archived_mutation_response(&server, &principal, request.uri().path()).await
     } else {
         None
@@ -2313,9 +2316,10 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     tracing::debug!(
         target: "crab_http_server::action",
         event = "http_archive_check_completed",
+        command_checks_archive = deferred_archive.is_some(),
         elapsed_us = archive_check_started.elapsed().as_micros(),
     );
-    request.extensions_mut().insert(principal);
+    request.extensions_mut().insert(principal.clone());
     let mut response = if denied && git_request {
         (
             StatusCode::UNAUTHORIZED,
@@ -2335,6 +2339,15 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     } else {
         next.run(request).await
     };
+    // The shipped archive error takes precedence over invalid mutation input.
+    // Guarded commands need the HTTP lookup only on client errors; never replace
+    // a server error that may represent an ambiguous committed mutation.
+    if let Some(uri) = deferred_archive
+        && response.status().is_client_error()
+        && let Some(archived) = archived_mutation_response(&server, &principal, uri.path()).await
+    {
+        response = archived;
+    }
     response
         .headers_mut()
         .entry("cache-control")
@@ -2364,6 +2377,13 @@ fn is_local_host(host: Option<&str>) -> bool {
         || ip_literal
             .parse::<IpAddr>()
             .is_ok_and(|address| address.is_loopback())
+}
+
+fn command_checks_archive(path: &str) -> bool {
+    // All issue/comment/label mutations check lifecycle inside their command.
+    // Other mutation families retain their existing preflight policy.
+    path.strip_prefix("/api/repos/")
+        .is_some_and(|path| matches!(path.split('/').nth(2), Some("issues" | "labels")))
 }
 
 async fn archived_mutation_response(

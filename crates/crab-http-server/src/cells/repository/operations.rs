@@ -13,6 +13,9 @@ impl Command for UpdateIssue {
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
     ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(CommandResult::Rejected(UpdateIssueOutcome::Archived));
+        }
         validate_number(input.number)?;
         validate_number(input.version)?;
         validate_author(&input.actor)?;
@@ -147,6 +150,9 @@ impl Command for UpdateComment {
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
     ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(CommandResult::Rejected(UpdateCommentOutcome::Archived));
+        }
         validate_number(input.key.issue)?;
         validate_number(input.key.number)?;
         validate_number(input.version)?;
@@ -390,6 +396,9 @@ impl Command for CreateLabel {
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
     ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(CommandResult::Rejected(CreateLabelOutcome::Archived));
+        }
         validate_author(&input.author)?;
         validate_label_fields(&input.name, &input.color, input.description.as_deref())?;
         let payload_digest = label_submission_digest(&input);
@@ -505,6 +514,9 @@ impl Command for UpdateLabel {
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
     ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(CommandResult::Rejected(UpdateLabelOutcome::Archived));
+        }
         if input.number == 0 || input.number > MAX_REPOSITORY_LABELS {
             return Err(crab_cell_runtime::Error::Command(
                 "repository label number is invalid",
@@ -585,6 +597,9 @@ impl Command for DeleteLabel {
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
     ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+        if settings::archived(context)? {
+            return Ok(CommandResult::Rejected(DeleteLabelOutcome::Archived));
+        }
         if input.number == 0 || input.number > MAX_REPOSITORY_LABELS {
             return Err(crab_cell_runtime::Error::Command(
                 "repository label number is invalid",

@@ -548,6 +548,34 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         "title": "Remote Cell",
         "body": "Written on the owner node"
     });
+    let archive_url = format!("{public_origin}/api/repos/team/repo/settings/archive");
+    let archived = json_request(
+        &client,
+        reqwest::Method::PUT,
+        archive_url.clone(),
+        serde_json::json!({"expected_version":0,"archived":true,"repository":"team/repo"}),
+    )
+    .await;
+    assert_eq!(archived.0, StatusCode::OK, "{}", archived.1);
+    let refused = json_request(
+        &client,
+        reqwest::Method::POST,
+        format!("{public_origin}/api/repos/team/repo/issues"),
+        submission.clone(),
+    )
+    .await;
+    assert_eq!(
+        (refused.0, refused.1["error"]["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("repository_archived")),
+    );
+    let unarchived = json_request(
+        &client,
+        reqwest::Method::PUT,
+        archive_url,
+        serde_json::json!({"expected_version":1,"archived":false,"repository":"team/repo"}),
+    )
+    .await;
+    assert_eq!(unarchived.0, StatusCode::OK, "{}", unarchived.1);
     let queries_before = receiver_reads.queries.load(Ordering::Relaxed);
     let create_started = Instant::now();
     let created = client
@@ -574,8 +602,8 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     assert_eq!(created["number"], 1);
     assert_eq!(
         receiver_reads.queries.load(Ordering::Relaxed) - queries_before,
-        1,
-        "an unlabeled create needs the archive check but no label catalog query",
+        0,
+        "an unlabeled create checks archive state inside its command without a routed query",
     );
     eprintln!(
         "action-sample {}",
@@ -618,7 +646,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         assert_eq!(status, StatusCode::OK);
         assert_eq!(issue["labels"], serde_json::json!([]));
         issue_version = issue["version"].as_u64().unwrap();
-        assert_eq!(receiver_reads.queries.load(Ordering::Relaxed) - before, 1);
+        assert_eq!(receiver_reads.queries.load(Ordering::Relaxed) - before, 0);
     }
     let label = client
         .post(format!("{public_origin}/api/repos/team/repo/labels"))
@@ -651,7 +679,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     assert_eq!(assigned["labels"][0]["name"], "remote");
     assert_eq!(
         receiver_reads.queries.load(Ordering::Relaxed) - queries_before,
-        2
+        1
     );
     // Retrying the committed submission must render its current labels, even
     // though the original create had none and its caller might have lost the reply.
@@ -666,7 +694,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     assert_eq!(replay, (StatusCode::CREATED, assigned.clone()));
     assert_eq!(
         receiver_reads.queries.load(Ordering::Relaxed) - queries_before,
-        2
+        1
     );
     let queries_before = receiver_reads.queries.load(Ordering::Relaxed);
     let edited = json_request(
@@ -680,7 +708,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     assert_eq!(edited.1["labels"], assigned["labels"]);
     assert_eq!(
         receiver_reads.queries.load(Ordering::Relaxed) - queries_before,
-        2
+        1
     );
     eprintln!("qualified issue and label mutations");
     let comment = json_request(
@@ -1510,7 +1538,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     assert_eq!(continued["number"], 2);
     assert_eq!(
         ingress_reads.queries.load(Ordering::Relaxed) - queries_before,
-        1
+        0
     );
     for suffix in ["issues/2", "issues?q=Recovered"] {
         let before = ingress_reads.queries.load(Ordering::Relaxed);

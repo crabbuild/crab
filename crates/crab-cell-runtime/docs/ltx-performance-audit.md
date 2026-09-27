@@ -435,7 +435,7 @@ their original baseline and subsequent implementation evidence.
 | Order | Remaining gap | Decision and acceptance gate |
 | --- | --- | --- |
 | 1 | Corrected-source recovery and capacity evidence (12, 16, 23, 29–30) | Repeat full-body readback after process loss with multiple successor nodes; finish all 3/5/10/20-node stages and the follower-only tail fault. Count missed arrivals and actual owners; preserve shared-host limits in the verdict. |
-| 2 | Application preflight adds a serialized Cell query (31) | Evaluate writable-state checks within the command transaction, covering all mutation siblings and archive/retry ordering. Compare identical public actions before removing redundant preflight. |
+| 2 | Application preflight adds a serialized Cell query (31) | Seven issue/comment/label commands now check archive state in their transaction; public RustFS proof confirms the removed query. Compare matched load and cover concurrent archive ordering plus the remaining mutation families. |
 | 3 | Publication delay grows under saturation (4–5, 17) | Split provider GET/HEAD/PUT, root preparation, worker binding and confirmation. Measure logical commit advance and uncovered age/bytes across repeated debt thresholds before selecting metadata reuse or consecutive-root coalescing. |
 | 4 | Replica routing repeats provider work; root refresh loses demand-page reuse (27) | Measure provider operations per response and hot-set bytes fetched after small updates. Compare bounded observation coalescing and verified immutable-frame reuse while retaining fresh response authority. |
 | 5 | Synchronous demand faults, installation and cleanup block a shared SQL worker (9–10, 19) | Run cold and resident Cells on the same worker. Separate origin wait, installation and confirmation; evaluate scheduling changes only after that attribution. |
@@ -2960,15 +2960,15 @@ measurements prioritize round-trip and queue reduction over further small-cut
 checksum tuning for this workload; they do not isolate host CPU or provider
 service time.
 
-[HTTP middleware](../../crab-http-server/src/server.rs) invokes
+At the measured baseline, [HTTP middleware](../../crab-http-server/src/server.rs) invokes
 `archived_mutation_response` before unsafe repository requests. It calls
 [load_lifecycle](../../crab-http-server/src/repository_settings.rs), which routes
 and executes `GetRepositoryLifecycle`; then the handler separately routes its
 mutation. [CreateIssue](../../crab-http-server/src/cells/repository.rs) validates
-and deduplicates its input, but does not check archive state in that transaction.
+and deduplicates its input without checking archive state in that transaction.
 The preflight exists on `origin/main`; action instrumentation only exposes its
 cost. Existing [HTTP/mTLS coverage](../../crab-http-server/src/server_peer_e2e_tests.rs)
-expects this query, so it is not an accidental trace attribution.
+expected this query, so it is not an accidental trace attribution.
 
 **Next experiment:** place writable-state admission at the repository command
 transaction boundary, with an explicit policy for operations allowed while
@@ -2985,7 +2985,37 @@ also perform storage effects outside the collaboration command transaction;
 their current archive checks need their own ordering contract. Count provider
 reads and local/forwarded invocations per action as well as latency. Preserve
 authorization, idempotency, durable rejection behavior and the current public
-error mapping. No archive behavior is changed by this audit.
+error mapping.
+
+**Implemented first slice:** all seven issue/comment/label mutation commands
+read `repository_settings.archived` within their existing SQL transaction and
+return a typed, durable rejection before application writes. Their healthy HTTP
+paths omit the separate lifecycle query. HTTP client errors still perform the
+policy lookup to retain the archive-error precedence shipped in v1.2.4; server
+errors preserve ambiguous outcomes. Other command families keep their current
+pre-handler checks. This is a bounded application change; runtime publication,
+fencing, deadlines and acknowledgement policy are unchanged.
+
+The regression first reproduced an accepted typed mutation after archive and
+the unwanted query on public HTTP create. The command proof now covers all
+seven rejections, exact-root recovery, successful and rejected receipt replay
+while archived, rejection replay after unarchive, and a fresh accepted request
+after unarchive. Existing positive wire tags remain unchanged; `Archived` uses
+tag zero. The repository source digest changes and needs normal release
+admission; this does not establish mixed-version compatibility.
+
+The public fixture requires zero routed queries for an unlabeled create/edit
+and one for label enrichment, while retaining its existing owner-loss and
+durability checks. The complete memory-backed fixture passed in 46.33 seconds;
+the same flow against pinned RustFS 1.0 GA on Colima passed in 36.61 seconds.
+Eight focused HTTP tests also passed, covering all seven archived endpoints,
+invalid-input precedence, authorization, duplicate creation, issue/comment
+edits, labels and recovery. These are single correctness runs on a shared host;
+their elapsed times are not an A/B performance comparison.
+
+Matched offered-load curves for this change, concurrent
+archive/submission stress and policy conversion of other mutation families
+remain open. Do not infer a p99 or throughput improvement from query counts.
 
 ### 32. Catalog propagation can reject a newly created Cell before load starts
 
