@@ -1,4 +1,114 @@
 use super::*;
+use std::sync::atomic::AtomicUsize;
+
+#[tokio::test]
+async fn concurrent_catalog_misses_share_one_installation() {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let observed = reads.clone();
+    let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+        .with_read_request_observer(Arc::new(move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+        }));
+    let h = Harness::new_with_store(false, false, store).await;
+    let id = h.server.repositories.values()[0].id;
+    h.server
+        .catalog()
+        .unwrap()
+        .mark_cell_ready(id)
+        .await
+        .unwrap();
+
+    *h.server.repositories.current.write().unwrap() = RepositoryIndex::new(0, BTreeMap::new());
+    reads.store(0, Ordering::Relaxed);
+    h.server
+        .refresh_catalog_after_repository_miss(id)
+        .await
+        .unwrap();
+    let single_reads = reads.load(Ordering::Relaxed);
+    assert!(single_reads > 0);
+
+    *h.server.repositories.current.write().unwrap() = RepositoryIndex::new(0, BTreeMap::new());
+    reads.store(0, Ordering::Relaxed);
+    let requests = (0..16).map(|_| h.server.refresh_catalog_after_repository_miss(id));
+    for result in futures_util::future::join_all(requests).await {
+        result.unwrap();
+    }
+    let concurrent_reads = reads.load(Ordering::Relaxed);
+    h.server
+        .refresh_catalog_after_repository_miss(id)
+        .await
+        .unwrap();
+    let warm_reads = reads.load(Ordering::Relaxed) - concurrent_reads;
+    h.close().await;
+    assert_eq!((concurrent_reads, warm_reads), (single_reads, 0));
+}
+
+#[tokio::test]
+async fn catalog_miss_refresh_installs_revocation_before_http_access() {
+    let h = Harness::new(false).await;
+    *h.provider.mode.lock().await = "member".into();
+    let cookie = h.login().await;
+    h.json("/api/repos/team/private/labels", &cookie).await;
+    let catalog = h.server.catalog().unwrap();
+    let repository = h.server.repositories.values()[0].clone();
+    catalog.mark_cell_ready(repository.id).await.unwrap();
+    let members = repository
+        .config
+        .members
+        .iter()
+        .filter(|member| member.subject != "bob-id")
+        .cloned()
+        .collect();
+    catalog
+        .set_members("team", "private", members, false)
+        .await
+        .unwrap();
+    // Model an execution node still holding its pre-creation snapshot when a
+    // request signed under the ingress's old membership arrives.
+    *h.server.repositories.current.write().unwrap() = RepositoryIndex::new(0, BTreeMap::new());
+    h.server
+        .refresh_catalog_after_repository_miss(repository.id)
+        .await
+        .unwrap();
+    let response = h
+        .http
+        .get(format!("{}/api/repos/team/private/labels", h.origin))
+        .header(header::COOKIE, cookie)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    h.close().await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn expired_catalog_miss_wait_does_not_block_the_next_refresh() {
+    let h = Harness::new(false).await;
+    let id = h.server.repositories.values()[0].id;
+    h.server
+        .catalog()
+        .unwrap()
+        .mark_cell_ready(id)
+        .await
+        .unwrap();
+    *h.server.repositories.current.write().unwrap() = RepositoryIndex::new(0, BTreeMap::new());
+    let guard = h.server.repositories.refresh.lock().await;
+    let timed_out = tokio::time::timeout(
+        std::time::Duration::from_millis(10),
+        h.server.refresh_catalog_after_repository_miss(id),
+    )
+    .await
+    .is_err();
+    drop(guard);
+    h.server
+        .refresh_catalog_after_repository_miss(id)
+        .await
+        .unwrap();
+    let visible = h.server.repositories.by_id(id).is_some();
+    h.close().await;
+    assert_eq!((timed_out, visible), (true, true));
+}
 
 async fn replace(h: &Harness, cookie: &str, csrf: &str, body: Value) -> reqwest::Response {
     h.http

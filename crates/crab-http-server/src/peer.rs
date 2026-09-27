@@ -792,6 +792,28 @@ impl PeerAuthorizer for Server {
     }
 }
 
+async fn authorize_forwarded_request(
+    server: &Server,
+    request: &VerifiedPeerRequest,
+) -> crate::Result<()> {
+    let Err(error) = server.authorize(request) else {
+        return Ok(());
+    };
+    if request.target().namespace() != crate::cells::REPOSITORY_NAMESPACE {
+        return Err(error.into());
+    }
+    let Ok(partition) = <[u8; 16]>::try_from(request.target().partition()) else {
+        return Err(error.into());
+    };
+    let id = Uuid::from_bytes(partition);
+    if server.repositories.by_id(id).is_none() {
+        // Only a verified peer's missing repository can require discovery.
+        // Refresh never grants access: the current catalog must authorize again.
+        server.refresh_catalog_after_repository_miss(id).await?;
+    }
+    server.authorize(request).map_err(Into::into)
+}
+
 fn authorize_runtime_effect(
     fleet: Digest,
     request: &VerifiedPeerRequest,
@@ -953,9 +975,13 @@ async fn dispatch_forwarded_request(
     started: Instant,
     deadline: Instant,
 ) -> Response {
-    if let Err(error) = server.authorize(&request) {
+    if let Err(error) = authorize_forwarded_request(server, &request).await {
         tracing::warn!(error = %error, "peer request authorization failed");
-        return peer_http_error(StatusCode::UNAUTHORIZED);
+        let status = match error {
+            crate::Error::Cell(CellError::PeerAuthorization(_)) => StatusCode::UNAUTHORIZED,
+            _ => StatusCode::SERVICE_UNAVAILABLE,
+        };
+        return peer_http_error(status);
     }
     if matches!(
         request.operation(),

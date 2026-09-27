@@ -150,7 +150,28 @@ async fn rustfs_public_collaboration_reaches_remote_owner_and_publishes_ltx() {
 
 async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &str) -> String {
     let repository_prefix = format!("{root}/repository");
-    let repository = repository(store.clone(), bucket, repository_prefix).await;
+    let mut repository = repository(store.clone(), bucket, repository_prefix).await;
+    let catalog_reads = Arc::new(AtomicUsize::new(0));
+    let observed_catalog_reads = Arc::clone(&catalog_reads);
+    let catalog = CatalogStore::new(crate::storage_root::StorageRoot {
+        store: store.clone().with_read_request_observer(Arc::new(move |_| {
+            observed_catalog_reads.fetch_add(1, Ordering::Relaxed);
+        })),
+        prefix: root.into(),
+        provider_namespace: format!("test:{bucket}"),
+        bucket_label: bucket.into(),
+    });
+    let record = catalog
+        .adopt_repository(
+            "team".into(),
+            "repo".into(),
+            "repository".into(),
+            String::new(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    Arc::get_mut(&mut repository).unwrap().id = record.id;
     let repository_id = repository.id;
     let identity = ApplicationIdentity::new(
         TenantId::from_bytes([2; 16]),
@@ -201,6 +222,8 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     )
     .await
     .unwrap();
+
+    catalog.mark_cell_ready(repository_id).await.unwrap();
 
     let management_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let management_endpoint = format!(
@@ -350,7 +373,7 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         ObjectPath::from(format!("{root}/cells")),
         *identity.application().as_bytes(),
     );
-    let owner_server = server(
+    let mut owner_server = server(
         Arc::clone(&repository),
         store.clone(),
         owner_runtime.clone(),
@@ -377,6 +400,11 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
             Some(owner_read_replicas.clone()),
         )),
     );
+    // The ingress has observed creation while the execution node still holds
+    // its pre-creation catalog. No polling task repairs this fixture's miss.
+    let lagging = Arc::get_mut(&mut owner_server).unwrap();
+    lagging.catalog = Some(catalog);
+    lagging.repositories = BTreeMap::<(String, String), Arc<Repository>>::new().into();
     let owner_heartbeat_stop = CancellationToken::new();
     let owner_heartbeat_task = tokio::spawn(
         Arc::clone(&owner_publisher)
@@ -523,6 +551,74 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
         .timeout(Duration::from_secs(3 * 60))
         .build()
         .unwrap();
+    let submission = serde_json::json!({
+        "request_id": "00000000-0000-4000-8000-000000000001",
+        "title": "Remote Cell",
+        "body": "Written on the owner node"
+    });
+    let archive_url = format!("{public_origin}/api/repos/team/repo/settings/archive");
+    let archived = json_request(
+        &client,
+        reqwest::Method::PUT,
+        archive_url.clone(),
+        serde_json::json!({"expected_version":0,"archived":true,"repository":"team/repo"}),
+    )
+    .await;
+    assert_eq!(archived.0, StatusCode::OK, "{}", archived.1);
+    assert!(owner_server.repositories.by_id(repository_id).is_some());
+    let reads_after_discovery = catalog_reads.load(Ordering::Relaxed);
+    let queries_before_denial = receiver_reads.queries.load(Ordering::Relaxed);
+    let unauthorized = crab_cell_runtime::CellClient::peer(
+        Arc::clone(&registry),
+        Arc::new(crab_cell_runtime::peer::PeerSigner::new(
+            ingress_session,
+            registry.release_digest(),
+            peer_tls.signing_key().clone(),
+        )),
+        crab_cell_runtime::peer::PeerPrincipal {
+            issuer: local_operator.issuer.clone(),
+            subject: "not-the-local-operator".into(),
+            actions: vec!["repository.read".into()],
+        },
+        sender.clone(),
+    );
+    assert!(matches!(
+        unauthorized
+            .query::<crate::cells::repository::GetIssueDetail>(&target, None, 1)
+            .await,
+        Err(crab_cell_runtime::client::InvocationError::NotStarted(
+            crab_cell_runtime::Error::PeerAuthorization(_)
+        ))
+    ));
+    assert_eq!(
+        (
+            catalog_reads.load(Ordering::Relaxed),
+            receiver_reads.queries.load(Ordering::Relaxed)
+        ),
+        (reads_after_discovery, queries_before_denial),
+        "a known repository denial must not reload its catalog or execute SQL",
+    );
+    let refused = json_request(
+        &client,
+        reqwest::Method::POST,
+        format!("{public_origin}/api/repos/team/repo/issues"),
+        submission.clone(),
+    )
+    .await;
+    assert_eq!(
+        (refused.0, refused.1["error"]["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("repository_archived")),
+    );
+    let unarchived = json_request(
+        &client,
+        reqwest::Method::PUT,
+        archive_url,
+        serde_json::json!({"expected_version":1,"archived":false,"repository":"team/repo"}),
+    )
+    .await;
+    assert_eq!(unarchived.0, StatusCode::OK, "{}", unarchived.1);
+    assert_eq!(catalog_reads.load(Ordering::Relaxed), reads_after_discovery);
+
     let source = tempfile::TempDir::new().unwrap();
     let source_path = source.path();
     let git_url = format!("{public_origin}/git/team/repo.git");
@@ -544,39 +640,6 @@ async fn public_collaboration_remote_owner(store: Store, bucket: &str, root: &st
     crate::server::receive_tests::success(source_path, &["push", &git_url, "feature"]).await;
     eprintln!("qualified native Git main and feature pushes");
 
-    let submission = serde_json::json!({
-        "request_id": "00000000-0000-4000-8000-000000000001",
-        "title": "Remote Cell",
-        "body": "Written on the owner node"
-    });
-    let archive_url = format!("{public_origin}/api/repos/team/repo/settings/archive");
-    let archived = json_request(
-        &client,
-        reqwest::Method::PUT,
-        archive_url.clone(),
-        serde_json::json!({"expected_version":0,"archived":true,"repository":"team/repo"}),
-    )
-    .await;
-    assert_eq!(archived.0, StatusCode::OK, "{}", archived.1);
-    let refused = json_request(
-        &client,
-        reqwest::Method::POST,
-        format!("{public_origin}/api/repos/team/repo/issues"),
-        submission.clone(),
-    )
-    .await;
-    assert_eq!(
-        (refused.0, refused.1["error"]["code"].as_str()),
-        (StatusCode::FORBIDDEN, Some("repository_archived")),
-    );
-    let unarchived = json_request(
-        &client,
-        reqwest::Method::PUT,
-        archive_url,
-        serde_json::json!({"expected_version":1,"archived":false,"repository":"team/repo"}),
-    )
-    .await;
-    assert_eq!(unarchived.0, StatusCode::OK, "{}", unarchived.1);
     let queries_before = receiver_reads.queries.load(Ordering::Relaxed);
     let create_started = Instant::now();
     let created = client
