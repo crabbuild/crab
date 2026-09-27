@@ -507,6 +507,15 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
   cargo test -p crab-http-server --test public_cell_takeover --locked
 ```
 
+The reference application's [Compose smoke](../../crab-cell-app/PERFORMANCE.md#three-constrained-compose-nodes)
+now runs three public hosts as separate 1-CPU/1-GiB containers against GA
+RustFS, with signed peer requests, a round-robin ingress, generated-client
+duplicate/readback proof, and renewable signed sessions withdrawn after drain.
+The source-selected child test and Compose wrapper reject zero-test runs.
+This seven-Cell, six-lane integration check is the starting point for this
+packet; the larger application distribution, fault, and capacity matrix remains
+open.
+
 Run these before the scaled load, then repeat the relevant cases after any
 change to routing, admission, VFS, or durability. Build and broad provider
 proof belong in CI or a dedicated test environment.

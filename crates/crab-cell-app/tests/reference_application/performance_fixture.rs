@@ -506,3 +506,20 @@ impl PeerRoundTrip for Loopback {
         })
     }
 }
+
+// One explicit provider path for the public-host and process qualification lanes.
+pub(super) fn rustfs_store() -> Store {
+    let required = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
+    crab_storage::build_explicit_store(
+        &required("CRAB_CELL_TEST_BUCKET"),
+        crab_storage::ObjectStoreCredentials::Aws {
+            access_key_id: required("AWS_ACCESS_KEY_ID"),
+            secret_access_key: required("AWS_SECRET_ACCESS_KEY"),
+            session_token: None,
+            region: "us-east-1".into(),
+        },
+        Some(&required("CRAB_CELL_TEST_ENDPOINT")),
+        true,
+    )
+    .unwrap()
+}
