@@ -38,7 +38,7 @@ use crate::cell::executor::{
     MigrationOutcome, MutationIdentity, PendingCommit, Resolution, StoredOutcome,
 };
 use crate::cell::worker::{CellReservation, Handler, Initializer, QueryHandler, WorkerState};
-use crate::cell::worker::{HydrationStep, SqlWorkerPool, WorkerExecution};
+use crate::cell::worker::{HydrationStep, SqlDeadline, SqlWorkerPool, WorkerExecution};
 use crate::control::authority::{CellAuthority, VersionedControl};
 use crate::control::{Owner, Transition};
 use crate::coordination::{

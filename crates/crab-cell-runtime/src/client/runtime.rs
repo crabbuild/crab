@@ -5,13 +5,23 @@ use crate::cell::actor::CellRuntime;
 use crate::cell::catalog::CellCatalog;
 use crate::control::authority::CellAuthority;
 use crate::ltx::CellStorageLayout;
-use crate::peer::{PeerClientTransport, PeerPrincipal, PeerRoundTrip, PeerSigner};
+
+/// Selects a local owner before an invocation can be forwarded to a peer.
+///
+/// The product may acquire an idle, cataloged Cell through runtime admission.
+/// Returning `None` delegates to the remote transport; errors stop dispatch.
+pub trait LocalCellResolver: Send + Sync + 'static {
+    /// Returns the authorized local owner, or `None` when routing must continue remotely.
+    fn resolve(
+        &self,
+        target: CellTarget,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<CellHandle>>> + Send + 'static>>;
+}
 
 #[derive(Clone)]
 pub(super) struct RuntimeCellTransport {
     registry: Arc<Registry>,
-    runtime: CellRuntime,
-    layout: CellStorageLayout,
+    resolver: Arc<dyn LocalCellResolver>,
     remote: Option<Arc<dyn CellTransport>>,
 }
 
@@ -23,41 +33,25 @@ impl RuntimeCellTransport {
     ) -> Self {
         Self {
             registry,
-            runtime,
-            layout,
+            resolver: Arc::new(RuntimeLocalResolver { runtime, layout }),
             remote: None,
         }
     }
 
-    pub(super) fn with_peer(
+    pub(super) fn with_resolver(
         registry: Arc<Registry>,
-        runtime: CellRuntime,
-        layout: CellStorageLayout,
-        signer: Arc<PeerSigner>,
-        principal: PeerPrincipal,
-        round_trip: Arc<dyn PeerRoundTrip>,
+        resolver: Arc<dyn LocalCellResolver>,
+        remote: Arc<dyn CellTransport>,
     ) -> Self {
         Self {
             registry,
-            runtime,
-            layout,
-            remote: Some(Arc::new(PeerClientTransport::new(
-                signer, principal, round_trip,
-            ))),
+            resolver,
+            remote: Some(remote),
         }
     }
 
     async fn owner(&self, target: &CellTarget) -> Result<Arc<dyn CellTransport>> {
-        let catalog = CellCatalog::new(self.layout.clone(), target.tenant())
-            .lookup(target.cell_id())
-            .await?
-            .ok_or(Error::Control("target Cell is not cataloged"))?;
-        let authority = CellAuthority::new(self.layout.clone());
-        let control = authority
-            .load(target.cell_id())
-            .await?
-            .ok_or(Error::Control("target Cell has no authority record"))?;
-        let local = self.runtime.local_handle(catalog, &control).await?;
+        let local = self.resolver.resolve(target.clone()).await?;
         let Some(handle) = local else {
             return self
                 .remote
@@ -70,6 +64,32 @@ impl RuntimeCellTransport {
             handle,
             telemetry: CellTelemetryHandle::default(),
         }))
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct RuntimeLocalResolver {
+    pub(super) runtime: CellRuntime,
+    pub(super) layout: CellStorageLayout,
+}
+
+impl LocalCellResolver for RuntimeLocalResolver {
+    fn resolve(
+        &self,
+        target: CellTarget,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<CellHandle>>> + Send + 'static>> {
+        let resolver = self.clone();
+        Box::pin(async move {
+            let catalog = CellCatalog::new(resolver.layout.clone(), target.tenant())
+                .lookup(target.cell_id())
+                .await?
+                .ok_or(Error::Control("target Cell is not cataloged"))?;
+            let control = CellAuthority::new(resolver.layout)
+                .load(target.cell_id())
+                .await?
+                .ok_or(Error::Control("target Cell has no authority record"))?;
+            resolver.runtime.local_handle(catalog, &control).await
+        })
     }
 }
 

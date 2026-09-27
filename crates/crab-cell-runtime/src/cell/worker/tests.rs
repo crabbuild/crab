@@ -175,7 +175,7 @@ async fn sparse_fault_pool_progresses_under_saturated_sql_workers() {
         .query(
             first.cell,
             1024,
-            Instant::now() + Duration::from_secs(5),
+            SqlDeadline::new(Instant::now() + Duration::from_secs(5)),
             Box::new(|connection| {
                 let length: i64 =
                     connection
@@ -253,7 +253,7 @@ async fn background_hydration_leaves_both_workers_query_admission_available() {
             pool.query(
                 cell,
                 8,
-                Instant::now() + Duration::from_secs(10),
+                SqlDeadline::new(Instant::now() + Duration::from_secs(10)),
                 Box::new(|connection| {
                     let length: i64 =
                         connection
@@ -665,5 +665,57 @@ async fn cancelled_hydration_releases_fetch_bytes_without_installing_pages() {
     };
     assert!(after.resolved > before.unwrap().resolved);
     pool.deactivate(cold.cell).await.unwrap();
+    pool.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn expired_worker_deadline_preserves_sparse_cell_for_retry() {
+    let fixture = sparse_activation(7, Store::new(Arc::new(InMemory::new())), 64 * 1024).await;
+    let pool = SqlWorkerPool::new(1, 1).unwrap();
+    pool.activate_restored(
+        fixture.cell,
+        RestoredDatabase::Paged(Box::new(fixture.database)),
+        fixture.destination,
+        fixture.incarnation,
+        1,
+        fixture.root,
+        pool.reserve_activation().unwrap(),
+    )
+    .await
+    .unwrap();
+    let before = pool.hydration(fixture.cell).await.unwrap().unwrap();
+    let deadline = Instant::now();
+    assert!(matches!(
+        pool.hydrate(fixture.cell, 64, deadline).await,
+        Ok(HydrationStep::Deferred(_))
+    ));
+    let after = pool.hydration(fixture.cell).await.unwrap().unwrap();
+    assert_eq!(after.resolved, before.resolved);
+    let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let executed = entered.clone();
+    assert!(matches!(
+        pool.query(
+            fixture.cell,
+            64,
+            SqlDeadline::new(Instant::now()),
+            Box::new(move |_| {
+                executed.store(true, Ordering::SeqCst);
+                Ok(Vec::new())
+            })
+        )
+        .await,
+        Err(Error::Deadline)
+    ));
+    assert!(!entered.load(Ordering::SeqCst));
+    let HydrationStep::Progress(Some(progress)) = pool
+        .hydrate(
+            fixture.cell,
+            64,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap() else { panic!("hydration unexpectedly deferred") };
+    assert!(progress.resolved > before.resolved);
+    pool.deactivate(fixture.cell).await.unwrap();
     pool.shutdown().await.unwrap();
 }

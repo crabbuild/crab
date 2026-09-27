@@ -62,6 +62,14 @@ messages retain their bounded worker queue and do not need a job permit.
 
 Cancellation of a caller doesn't cancel accepted work. The actor still records and publishes the result, so a retry can resolve it.
 
+`CellClient::with_local_resolver` binds product owner selection before the
+underlying transport. Its `LocalCellResolver` returns a local handle, `None` to
+delegate, or an error that stops dispatch. Describe, command, query, and mutation
+resolution share this path. Products may restore an idle cataloged Cell using
+runtime admission and authority CAS; the framework's default runtime resolver
+only looks up existing ownership. Apply admission backpressure after the local
+resolver so the same request budgets cover local and remote invocations.
+
 An embedding service can opt into `CellClient::with_admission_backpressure`
 when its request budget permits waiting for owner capacity. Client clones share
 finite call-count and encoded-input byte budgets; exhausting either still fails
@@ -280,6 +288,16 @@ Native commands and queries receive a five-second wall deadline. The same deadli
 - SQLite progress interruption
 - Sparse page faults
 - Object-store range reads triggered by the sparse VFS
+
+Worker admission and the native queue share an atomic start/cancel boundary.
+If the deadline wins before execution starts, the worker skips the operation;
+commands and queries return a deadline error, and resolution returns Unknown.
+The untouched Cell remains usable. Cancellation of a caller's response future
+alone does not cancel an accepted mutation. Reservations stay held until the
+worker acknowledges deadline cancellation or the running callback exits.
+Background hydration likewise retries a queued expiry without fencing or marking
+hydration complete. Migration is different: it has already closed the old
+capability, so any failure still fences and recovers ownership.
 
 Arbitrary Rust cannot be preempted safely. When a callback exceeds the deadline, admission closes immediately, but the runtime retains worker and byte permits until the callback exits.
 

@@ -21,12 +21,20 @@ pub(super) async fn execute_migration(
 ) -> TaskResult {
     let mut preserve_owner = false;
     let mut unpublished_bytes = 0;
-    let deadline = std::time::Instant::now() + SQL_WALL_DEADLINE;
-    let operation = pool.migrate(migration.cell, migration.plan, migration.now_ms, deadline);
+    let deadline = SqlDeadline::new(std::time::Instant::now() + SQL_WALL_DEADLINE);
+    let operation = pool.migrate(
+        migration.cell,
+        migration.plan,
+        migration.now_ms,
+        deadline.clone(),
+    );
     tokio::pin!(operation);
-    let pending = match tokio::time::timeout_at(deadline.into(), &mut operation).await {
+    let pending = match tokio::time::timeout_at(deadline.at().into(), &mut operation).await {
         Ok(result) => result,
         Err(_) => {
+            deadline.cancel_queued();
+            // Migration has already closed the old capability. Even a queued
+            // timeout must recover ownership before exposing a usable handle.
             interrupt.interrupt();
             fence_admission(&migration.admission);
             send_migration_reply(&mut migration, Err(Error::Deadline));
@@ -144,7 +152,7 @@ pub(super) async fn execute_command(
         event = "cell_execution_started",
         actor_queue_us = command.queued_at.elapsed().as_micros(),
     );
-    let deadline = std::time::Instant::now() + SQL_WALL_DEADLINE;
+    let deadline = SqlDeadline::new(std::time::Instant::now() + SQL_WALL_DEADLINE);
     let execution = match command.handler.take() {
         Some(handler) => {
             let cell = command.cell;
@@ -152,6 +160,7 @@ pub(super) async fn execute_command(
             let now_ms = command.now_ms;
             let max_result_bytes = command.max_result_bytes;
             let worker_pool = pool.clone();
+            let worker_deadline = deadline.clone();
             let operation = async move {
                 match queued_operation {
                     QueuedOperation::Mutation {
@@ -165,7 +174,7 @@ pub(super) async fn execute_command(
                                 operation_digest,
                                 now_ms,
                                 max_result_bytes,
-                                deadline,
+                                worker_deadline,
                                 handler,
                             )
                             .await
@@ -177,7 +186,7 @@ pub(super) async fn execute_command(
                                 delivery,
                                 now_ms,
                                 max_result_bytes,
-                                deadline,
+                                worker_deadline,
                                 handler,
                             )
                             .await
@@ -186,22 +195,32 @@ pub(super) async fn execute_command(
             };
             let operation = operation.instrument(command.trace.clone());
             tokio::pin!(operation);
-            match tokio::time::timeout_at(deadline.into(), &mut operation).await {
+            match tokio::time::timeout_at(deadline.at().into(), &mut operation).await {
                 Ok(result) => result,
                 Err(_) => {
-                    interrupt.interrupt();
-                    fence_admission(&command.admission);
-                    let error = command.operation.unknown(Error::Deadline);
+                    let fenced = !deadline.cancel_queued();
+                    tracing::warn!(cell = ?command.cell, sql_started = fenced, "Cell SQL command deadline expired");
+                    if fenced {
+                        interrupt.interrupt();
+                        fence_admission(&command.admission);
+                    }
+                    let error = if fenced {
+                        command.operation.unknown(Error::Deadline)
+                    } else {
+                        Error::Deadline
+                    };
                     send_command_reply(&mut command, Err(error));
                     let _ = operation.await;
-                    let _ = pool.fence(command.cell).await;
+                    if fenced {
+                        let _ = pool.fence(command.cell).await;
+                    }
                     return TaskResult::Executed {
                         cell: command.cell,
                         generation,
                         effect_id,
                         command,
                         result: Err(Error::Deadline),
-                        fenced: true,
+                        fenced,
                     };
                 }
             }
@@ -243,7 +262,8 @@ pub(super) async fn execute_command(
         }
         Err(error) => (
             Err(error),
-            !matches!(pool.state(command.cell).await, Ok(WorkerState::Ready)),
+            !deadline.cancelled()
+                && !matches!(pool.state(command.cell).await, Ok(WorkerState::Ready)),
         ),
     };
     let fenced = must_fence && result.is_err();
@@ -508,33 +528,46 @@ pub(super) async fn execute_query(
     generation: u64,
     effect_id: u64,
 ) -> TaskResult {
-    let deadline = std::time::Instant::now() + SQL_WALL_DEADLINE;
+    let deadline = SqlDeadline::new(std::time::Instant::now() + SQL_WALL_DEADLINE);
     let result = match query.handler.take() {
         Some(handler) => {
-            let operation = pool.query(query.cell, query.max_result_bytes, deadline, handler);
+            let operation = pool.query(
+                query.cell,
+                query.max_result_bytes,
+                deadline.clone(),
+                handler,
+            );
             tokio::pin!(operation);
-            match tokio::time::timeout_at(deadline.into(), &mut operation).await {
+            match tokio::time::timeout_at(deadline.at().into(), &mut operation).await {
                 Ok(result) => result,
                 Err(_) => {
-                    interrupt.interrupt();
-                    fence_admission(&query.admission);
+                    let fenced = !deadline.cancel_queued();
+                    tracing::warn!(cell = ?query.cell, sql_started = fenced, "Cell SQL query deadline expired");
+                    if fenced {
+                        interrupt.interrupt();
+                        fence_admission(&query.admission);
+                    }
                     send_query_reply(&mut query, Err(Error::Deadline));
                     let _ = operation.await;
-                    let _ = pool.fence(query.cell).await;
+                    if fenced {
+                        let _ = pool.fence(query.cell).await;
+                    }
                     return TaskResult::Queried {
                         cell: query.cell,
                         generation,
                         effect_id,
                         query,
                         result: Err(Error::Deadline),
-                        fenced: true,
+                        fenced,
                     };
                 }
             }
         }
         None => Err(Error::Fenced),
     };
-    let fenced = result.is_err() && !matches!(pool.state(query.cell).await, Ok(WorkerState::Ready));
+    let fenced = result.is_err()
+        && !deadline.cancelled()
+        && !matches!(pool.state(query.cell).await, Ok(WorkerState::Ready));
     if fenced {
         let _ = pool.fence(query.cell).await;
     }
@@ -555,12 +588,13 @@ pub(super) async fn execute_resolve(
     generation: u64,
     effect_id: u64,
 ) -> TaskResult {
-    let deadline = std::time::Instant::now() + SQL_WALL_DEADLINE;
+    let deadline = SqlDeadline::new(std::time::Instant::now() + SQL_WALL_DEADLINE);
     let cell = resolve.cell;
     let resolve_operation = resolve.operation;
     let now_ms = resolve.now_ms;
     let max_result_bytes = resolve.max_result_bytes;
     let worker_pool = pool.clone();
+    let worker_deadline = deadline.clone();
     let operation = async move {
         match resolve_operation {
             ResolveOperation::Mutation {
@@ -574,43 +608,49 @@ pub(super) async fn execute_resolve(
                         operation_digest,
                         now_ms,
                         max_result_bytes,
-                        deadline,
+                        worker_deadline,
                     )
                     .await
             }
             ResolveOperation::Effect { delivery } => {
                 worker_pool
-                    .resolve_effect(cell, delivery, now_ms, max_result_bytes, deadline)
+                    .resolve_effect(cell, delivery, now_ms, max_result_bytes, worker_deadline)
                     .await
             }
         }
     };
     tokio::pin!(operation);
-    let result = match tokio::time::timeout_at(deadline.into(), &mut operation).await {
+    let result = match tokio::time::timeout_at(deadline.at().into(), &mut operation).await {
         Ok(result) => result,
         Err(_) => {
-            interrupt.interrupt();
-            fence_admission(&resolve.admission);
+            let fenced = !deadline.cancel_queued();
+            tracing::warn!(cell = ?resolve.cell, sql_started = fenced, "Cell SQL resolution deadline expired");
+            if fenced {
+                interrupt.interrupt();
+                fence_admission(&resolve.admission);
+            }
             send_resolve_reply(&mut resolve, Ok(Resolution::Unknown));
             let _ = operation.await;
-            let _ = pool.fence(resolve.cell).await;
+            if fenced {
+                let _ = pool.fence(resolve.cell).await;
+            }
             return TaskResult::Resolved {
                 cell: resolve.cell,
                 generation,
                 effect_id,
                 resolve,
                 result: Ok(Resolution::Unknown),
-                fenced: true,
+                fenced,
             };
         }
     };
-    let deadline = matches!(result, Err(Error::Deadline));
-    let result = if deadline {
+    let timed_out = matches!(result, Err(Error::Deadline));
+    let result = if timed_out {
         Ok(Resolution::Unknown)
     } else {
         result
     };
-    let fenced = deadline
+    let fenced = timed_out && !deadline.cancelled()
         || result.is_err() && !matches!(pool.state(resolve.cell).await, Ok(WorkerState::Ready));
     if fenced {
         let _ = pool.fence(resolve.cell).await;

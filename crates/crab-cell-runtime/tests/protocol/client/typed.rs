@@ -1,6 +1,44 @@
 //! Typed client command, query, digest, and conflict semantics.
 
 use super::*;
+use crab_cell_runtime::cell::actor::CellHandle;
+
+#[tokio::test]
+async fn local_resolver_refusal_never_dispatches_to_the_underlying_owner() {
+    struct Refused;
+    impl crab_cell_runtime::client::LocalCellResolver for Refused {
+        fn resolve(
+            &self,
+            _target: CellTarget,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = crab_cell_runtime::Result<Option<CellHandle>>> + Send + 'static,
+            >,
+        > {
+            Box::pin(async { Err(crab_cell_runtime::Error::Capacity("owner admission")) })
+        }
+    }
+    let fixture = fixture().await;
+    let owner = CellClient::local(fixture.registry.clone(), fixture.handle().clone());
+    let client = owner.clone().with_local_resolver(Arc::new(Refused));
+    let refused = client
+        .command::<CreateComment>(&fixture.target, mutation_identity(73), b"rejected".to_vec())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        refused,
+        InvocationError::NotStarted(crab_cell_runtime::Error::Capacity("owner admission"))
+    ));
+    assert_eq!(
+        owner
+            .query::<CountComments>(&fixture.target, None, ())
+            .await
+            .unwrap()
+            .output,
+        0
+    );
+    fixture.handle().drain().await.unwrap();
+}
 
 fn verified_description(target: &CellTarget) -> VerifiedPeerRequest {
     let session = SessionId::from_bytes([12; 16]);

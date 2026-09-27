@@ -51,7 +51,8 @@ pub(crate) use local::{
     receipt, validate_description,
 };
 use local::{decode_output, unix_time_ms, validate_minimum};
-use runtime::RuntimeCellTransport;
+pub use runtime::LocalCellResolver;
+use runtime::{RuntimeCellTransport, RuntimeLocalResolver};
 
 /// Execution policy for typed queries on a client capability.
 ///
@@ -735,15 +736,23 @@ impl CellClient {
         principal: crate::peer::PeerPrincipal,
         round_trip: Arc<dyn crate::peer::PeerRoundTrip>,
     ) -> Self {
-        let transport = Arc::new(RuntimeCellTransport::with_peer(
-            registry.clone(),
-            runtime,
-            layout,
-            signer,
-            principal,
-            round_trip,
+        Self::peer(registry, signer, principal, round_trip)
+            .with_local_resolver(Arc::new(RuntimeLocalResolver { runtime, layout }))
+    }
+
+    /// Resolves a local owner before delegating to this client's transport.
+    ///
+    /// The resolver owns product placement and admission policy. It runs before
+    /// describe, command, query, and resolution; errors never dispatch remotely.
+    /// Configure admission backpressure afterward so it bounds both routes.
+    #[must_use]
+    pub fn with_local_resolver(mut self, resolver: Arc<dyn LocalCellResolver>) -> Self {
+        self.transport = Arc::new(RuntimeCellTransport::with_resolver(
+            self.registry.clone(),
+            resolver,
+            self.transport,
         ));
-        Self::new(registry, transport)
+        self
     }
 
     /// Builds a typed capability over authenticated private peer routing.

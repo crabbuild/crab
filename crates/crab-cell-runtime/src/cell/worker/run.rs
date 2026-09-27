@@ -292,14 +292,10 @@ fn run_worker_command(
             deadline,
             reply,
         } => {
-            let result = crab_ltx::with_paged_io_deadline(deadline, || {
-                cells
-                    .get_mut(&cell)
-                    .ok_or(Error::CellNotActive)
-                    .and_then(|cell| {
-                        cell.executor
-                            .resolve(identity, operation_digest, now_ms, max_result_bytes)
-                    })
+            let result = run_native_callback(cells, cell, deadline, |active| {
+                active
+                    .executor
+                    .resolve(identity, operation_digest, now_ms, max_result_bytes)
             });
             drop(reservation.take());
             let _ = reply.send(result);
@@ -312,14 +308,10 @@ fn run_worker_command(
             deadline,
             reply,
         } => {
-            let result = crab_ltx::with_paged_io_deadline(deadline, || {
-                cells
-                    .get_mut(&cell)
-                    .ok_or(Error::CellNotActive)
-                    .and_then(|cell| {
-                        cell.executor
-                            .resolve_effect(delivery, now_ms, max_result_bytes)
-                    })
+            let result = run_native_callback(cells, cell, deadline, |active| {
+                active
+                    .executor
+                    .resolve_effect(delivery, now_ms, max_result_bytes)
             });
             drop(reservation.take());
             let _ = reply.send(result);
@@ -446,11 +438,12 @@ fn run_worker_command(
 fn run_native_callback<T>(
     cells: &mut HashMap<CellId, ActiveCell>,
     cell: CellId,
-    deadline: Instant,
+    deadline: SqlDeadline,
     callback: impl FnOnce(&mut ActiveCell) -> Result<T>,
 ) -> Result<T> {
+    deadline.start()?;
     let result = catch_unwind(AssertUnwindSafe(|| {
-        crab_ltx::with_paged_io_deadline(deadline, || {
+        crab_ltx::with_paged_io_deadline(deadline.at(), || {
             cells
                 .get_mut(&cell)
                 .ok_or(Error::CellNotActive)
