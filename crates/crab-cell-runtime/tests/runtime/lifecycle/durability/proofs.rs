@@ -687,6 +687,9 @@ async fn exercise_fleet_ack_drain(lose_response: bool) {
         .ltx_root()
         .unwrap();
     assert_eq!(initial_root.commit_sequence, 0);
+    // Finish activation's actor turn before subscribing to command publication.
+    runtime.active_catalog_entries().await.unwrap();
+    let mut publications = runtime.subscribe_publications();
     let request = mutation_identity_window(143, 10, 10_000);
     let digest = Digest::from_bytes([144; 32]);
     let calls = Arc::new(AtomicUsize::new(0));
@@ -720,6 +723,13 @@ async fn exercise_fleet_ack_drain(lose_response: bool) {
         .unwrap()
         .unwrap();
     assert_eq!(outcome.commit_sequence(), 1);
+    assert!(
+        matches!(
+            publications.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "fleet-only acknowledgement emitted an object-publication hint"
+    );
     let (selected_member, first_frame, last_frame) = {
         let tickets = transport.tickets.lock().unwrap();
         assert_eq!(tickets.len(), 1);
@@ -818,6 +828,11 @@ async fn exercise_fleet_ack_drain(lose_response: bool) {
         .unwrap();
     assert_eq!(published_root.position.txid, 2);
     assert_ne!(published_root.digest, initial_root.digest);
+    let notified = tokio::time::timeout(std::time::Duration::from_secs(2), publications.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(notified.cell(), fixture.target.cell_id());
     runtime.shutdown().await.unwrap();
     assert_eq!(
         responses.0.lock().unwrap().as_slice(),

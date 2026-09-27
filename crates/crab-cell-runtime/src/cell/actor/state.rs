@@ -4,6 +4,7 @@ use super::*;
 
 pub(super) struct RuntimeInner {
     pub(super) sender: mpsc::Sender<Message>,
+    pub(super) publications: broadcast::Sender<CatalogEntry>,
     pub(super) resources: ResourceLedger,
     pub(super) primitive_jobs: Arc<Semaphore>,
     pub(super) shutting_down: AtomicBool,

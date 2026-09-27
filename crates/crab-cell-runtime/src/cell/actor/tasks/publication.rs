@@ -69,6 +69,7 @@ pub(super) fn handle_published(
         tasks,
         node_lease,
         unpublished_node_log_bytes,
+        publications,
         ..
     } = context;
     let Some(active) = cells.get_mut(&cell) else {
@@ -109,6 +110,11 @@ pub(super) fn handle_published(
     if matches!(decision, CoordinationDecision::Fence) {
         fence_active(active);
     } else {
+        // Only the completed object path can wake snapshot readers. Fleet proof
+        // may acknowledge earlier; hints never substitute for a published root.
+        if result.is_ok() {
+            let _ = publications.send(active.catalog.entry().clone());
+        }
         start_publication(cell, active, pool, tasks);
     }
     continue_cell(cell, pool, cells, transitioning, tasks, node_lease);
