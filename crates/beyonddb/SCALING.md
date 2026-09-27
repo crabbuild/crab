@@ -2155,3 +2155,40 @@ Scan. The scenario passed in 30.14s with background recovery/capacity warnings;
 this did not reproduce or explain the original failure. The delay was removed.
 CI retains server warnings so a recurrence can distinguish admission, ownership
 and routing failures. The intermittent Scan failure remains open.
+
+## Placement freshness after fleet discovery
+
+The SDK discovery regression on `21a8c0cf763` fails in 4.41s with
+`LimitExceededException: no eligible BeyondDB placement destination`. The fixture
+delays object-store listing by four seconds while both real serving nodes renew
+their signed advertisements every three seconds. BeyondDB previously captured
+the evaluation time before discovery; the planner correctly rejected every
+newer heartbeat as a future observation, despite spare capacity.
+
+`RangePlacement::select_local` now reads the clock after discovery for both
+advertisement conversion and placement ranking. Heartbeats that renewed during
+the read can qualify, while advertisements that expired during the read are
+rejected. Runtime admission, signature validation, future-clock rejection and
+ownership CAS remain authoritative. No retry or freshness window is extended.
+
+| Boundary | Evidence |
+| --- | --- |
+| Entry and callers | `server/placement.rs::select_local`; initial base/GSI and split-child provisioning through `provision_local`, cold restoration through `LocalResolver`. |
+| Discovery contract | `NodeDirectory::live` verifies canonical signed records and rejects directory overflow and duplicate live sessions. It uses the caller's reference time during asynchronous reads. |
+| Placement contract | `PlacementObservation::from_signed_advertisement` rejects expired leases; planner `fresh` rejects samples newer than its evaluation time. |
+| Siblings | `crab-http-server/src/cells/router.rs::placement_snapshot` already reads the clock after discovery. Runtime `choose_advertised_placement` retains its explicit reference-time API; its current callers are tests, not BeyondDB serving paths. Exact-owner recovery still uses its existing authority/session checks. |
+| Main behavior | Current main and the prior PR head evaluate discovery results against the earlier timestamp. |
+| SDK regression | Real heartbeats, delayed discovery, retries disabled, CreateTable, durable PutItem, owner drain, and GetItem restoration. |
+
+The change fixes a demonstrated placement refusal. It does not implement
+automatic rebalancing or establish the cause of the separate intermittent GSI
+Scan 503. Those remain independent work and qualification gates.
+
+The complete SDK regression passes in 13.06s, including delayed discovery during
+both initial provisioning and cold activation. The three base/GSI capacity cases
+pass in 14.04s; existing cold placement, interrupted-claim recovery and capability
+rejection pass in 15.71s. Strict all-target Clippy passes in 11.63s; formatting,
+Cell/LTX layout and policy-entry checks pass. The production change adds one
+clock read and two explanatory comment lines, with no new dependencies,
+configuration, wire formats or persistent state. Full process qualification of
+the latest head is still required.

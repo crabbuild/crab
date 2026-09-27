@@ -49,6 +49,9 @@ impl RangePlacement {
                 .clone()
         } else {
             let nodes = self.directory.live(observed_at, 1_024).await?;
+            // Heartbeats can renew or expire while discovery waits on storage.
+            // Judge the returned samples now, not against the listing's start.
+            let observed_at = unix_time_ms()?;
             let observations = nodes
                 .iter()
                 .filter_map(|node| {

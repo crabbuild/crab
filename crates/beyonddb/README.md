@@ -39,7 +39,9 @@ Configured owned Cells can still serve when placement measurement is unavailable
 Requests for idle, previously published data/GSI Cells now select a destination
 from signed capacity and activate it over pinned mTLS. Missing eligible capacity
 rejects placement. Account, credential, and coordinator residency keep their
-existing policies. Initial data, GSI, and split-child provisioning use the same
+existing policies. Placement evaluates heartbeat freshness after fleet discovery,
+so storage latency does not make a renewed sample appear to come from the future.
+Initial data, GSI, and split-child provisioning use the same
 signed placement measurements with a separate authenticated provisioning
 capability. Automatic rebalancing remains unfinished; adding a node does not
 move already serving Cells.
