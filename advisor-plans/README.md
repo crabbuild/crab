@@ -849,8 +849,9 @@ signed reader reconciliation, administrator readiness status, and explicit
 issue-detail replica reads. Typed and generated application clients can choose
 replica policy through the shared runtime router; primitive lease validation
 retains owner ordering. Generated-client snapshot reads now also pass through
-two non-owner public host processes on GA RustFS, with explicit native-memory
-admission and controlled refresh; protected capacity and fault gates remain open. Warm readers may be preferred after owner death,
+two non-owner public host processes on GA RustFS, including three constrained
+Compose nodes, with explicit native-memory admission and controlled refresh;
+protected capacity and fault gates remain open. Warm readers may be preferred after owner death,
 with existing session fencing, old-log recovery, and ownership CAS intact.
 Local RustFS and multi-container qualification are recorded in the plan;
 the offline fleet-to-object rollout also passes. Read views now fault
