@@ -189,7 +189,7 @@ impl PerfFixture {
         .await
     }
 
-    async fn start_configured(
+    pub(super) async fn start_configured(
         nodes: usize,
         successor: Option<Arc<crab_cell_app::CompiledApplication>>,
         store: Store,
@@ -301,8 +301,14 @@ impl PerfFixture {
             );
             (client, peer, Vec::new(), None)
         } else {
-            let (round_trip, servers) =
-                start_peer_servers(&registry, verifier, owned.clone()).await;
+            // A mixed release fleet must dispatch with each host's executable
+            // registry; sharing the driver's registry would mask rollout bugs.
+            let dispatchers = hosts
+                .iter()
+                .zip(owned.iter())
+                .map(|(host, handles)| (host.application().registry(), handles.clone()))
+                .collect();
+            let (round_trip, servers) = start_peer_servers(verifier, dispatchers).await;
             let client = CellClient::peer(
                 Arc::clone(&registry),
                 Arc::clone(&signer),

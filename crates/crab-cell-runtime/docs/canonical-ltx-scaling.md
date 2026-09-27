@@ -660,6 +660,10 @@ The private server controller runs every 15 seconds, samples signed live nodes
 and actor-approved local candidates, then releases exact generations through
 the actor before sending an authenticated receiver activation hint. If receiver
 activation fails, the exact unowned root remains available for normal routing.
+Residence evidence survives temporary work or renewal while the activation
+remains resident. A changed activation generation resets it; removal or drain
+discards it. Movement still requires the ordinary 60-second idle window and
+the actor's fresh transfer inspection before release.
 Each tick reports confirmed source releases and successful receiver activations
 separately; a started drain is not counted as a completed move.
 The scale-down host state stops new acquisition, paces exact actor releases,

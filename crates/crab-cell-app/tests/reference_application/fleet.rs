@@ -10,10 +10,15 @@ use std::{
 use crab_cell_runtime::identity::CellId;
 use crab_cell_runtime::peer::{
     MAX_PEER_REQUEST_BYTES, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerRoundTrip,
-    PeerVerifier, VerifiedPeerRequest,
+    PeerVerifier, UnverifiedPeerRequest, VerifiedPeerRequest, wire,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+
+type Readers = (
+    Arc<crab_cell_host::read_replicas::ReadReplicaManager>,
+    NodeDirectory,
+);
 
 struct FleetResolver(Arc<HashMap<CellId, CellHandle>>);
 
@@ -38,7 +43,16 @@ impl PeerAuthorizer for FleetAuthorizer {
     fn authorize(&self, request: &VerifiedPeerRequest) -> Result<()> {
         let action = match request.operation_tag() {
             10 | 12 => "cell.write",
-            11 => "cell.read",
+            11 => match request.operation() {
+                Some(wire::peer_request::Operation::Read(read)) => match read.operation {
+                    Some(wire::read_request::Operation::ReplicaActivate(_)) => {
+                        "cell.replica.activate"
+                    }
+                    Some(wire::read_request::Operation::ReplicaStatus(_)) => "cell.replica.status",
+                    _ => "cell.read",
+                },
+                _ => return Err(Error::PeerAuthorization("unsupported read operation")),
+            },
             13 | 14 => "reference.cron.deliver",
             _ => return Err(Error::PeerAuthorization("unsupported fleet operation")),
         };
@@ -54,11 +68,14 @@ struct TcpRoundTrip(Arc<HashMap<CellId, SocketAddr>>);
 
 struct BalancerRoundTrip(SocketAddr);
 
-pub(super) struct BalancerStats([AtomicUsize; 3]);
+pub(super) struct BalancerStats(Vec<AtomicUsize>);
 
 impl BalancerStats {
-    pub(super) fn counts(&self) -> [usize; 3] {
-        std::array::from_fn(|node| self.0[node].load(Ordering::Relaxed))
+    pub(super) fn counts(&self) -> Vec<usize> {
+        self.0
+            .iter()
+            .map(|count| count.load(Ordering::Relaxed))
+            .collect()
     }
 }
 
@@ -112,19 +129,24 @@ impl PeerRoundTrip for BalancerRoundTrip {
 }
 
 pub(super) async fn start_balancer(
-    nodes: [SocketAddr; 3],
+    nodes: impl Into<Vec<SocketAddr>>,
 ) -> (SocketAddr, tokio::task::JoinHandle<()>, Arc<BalancerStats>) {
+    let nodes = nodes.into();
+    assert!(!nodes.is_empty());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let stats = Arc::new(BalancerStats(std::array::from_fn(|_| AtomicUsize::new(0))));
+    let stats = Arc::new(BalancerStats(
+        nodes.iter().map(|_| AtomicUsize::new(0)).collect(),
+    ));
     let counts = Arc::clone(&stats);
     let next = Arc::new(AtomicUsize::new(0));
     let server = tokio::spawn(async move {
         while let Ok((socket, _)) = listener.accept().await {
             let node = next.fetch_add(1, Ordering::Relaxed) % nodes.len();
+            let entry = nodes[node];
             counts.0[node].fetch_add(1, Ordering::Relaxed);
             tokio::spawn(async move {
-                let _ = serve_balancer(socket, nodes[node]).await;
+                let _ = serve_balancer(socket, entry).await;
             });
         }
     });
@@ -151,7 +173,11 @@ async fn serve_balancer(mut socket: TcpStream, entry: SocketAddr) -> Result<()> 
     Ok(())
 }
 
-async fn send_tcp(address: SocketAddr, request: Vec<u8>, remaining_ms: u32) -> Result<Vec<u8>> {
+pub(super) async fn send_tcp(
+    address: SocketAddr,
+    request: Vec<u8>,
+    remaining_ms: u32,
+) -> Result<Vec<u8>> {
     tokio::time::timeout(Duration::from_millis(u64::from(remaining_ms)), async {
         let mut socket =
             TcpStream::connect(address)
@@ -190,15 +216,15 @@ fn peer_io(source: std::io::Error) -> Error {
 }
 
 pub(super) async fn start_peer_servers(
-    registry: &Arc<Registry>,
     verifier: Arc<PeerVerifier>,
-    owned: Vec<Vec<CellHandle>>,
+    owned: Vec<(Arc<Registry>, Vec<CellHandle>)>,
 ) -> (Arc<dyn PeerRoundTrip>, Vec<tokio::task::JoinHandle<()>>) {
     let mut endpoints = HashMap::new();
     let mut servers = Vec::new();
-    for handles in owned {
+    for (registry, handles) in owned {
         let ids = handles.iter().map(CellHandle::cell_id).collect::<Vec<_>>();
-        let (address, server) = start_peer_server(registry, Arc::clone(&verifier), handles).await;
+        let (address, server) =
+            start_peer_server(&registry, Arc::clone(&verifier), handles, None).await;
         // Pin routing for this run; the receiving resolver rejects a target
         // it does not own, so a wrong route cannot pass the action checks.
         for id in ids {
@@ -213,16 +239,37 @@ pub(super) async fn start_peer_server(
     registry: &Arc<Registry>,
     verifier: Arc<PeerVerifier>,
     handles: Vec<CellHandle>,
+    replicas: Option<Readers>,
 ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
-    let dispatcher = dispatcher(registry, handles);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server = serve_listener(listener, verifier, dispatcher, None);
+    let server = start_bound_peer_server(listener, registry, verifier, handles, replicas);
     (address, server)
 }
 
-fn dispatcher(registry: &Arc<Registry>, handles: Vec<CellHandle>) -> Arc<PeerDispatcher> {
-    Arc::new(PeerDispatcher::new(
+pub(super) fn start_bound_peer_server(
+    listener: TcpListener,
+    registry: &Arc<Registry>,
+    verifier: Arc<PeerVerifier>,
+    handles: Vec<CellHandle>,
+    replicas: Option<Readers>,
+) -> tokio::task::JoinHandle<()> {
+    let directory = replicas.as_ref().map(|(_, directory)| directory.clone());
+    serve_listener(
+        listener,
+        verifier,
+        dispatcher(registry, handles, replicas),
+        None,
+        directory,
+    )
+}
+
+fn dispatcher(
+    registry: &Arc<Registry>,
+    handles: Vec<CellHandle>,
+    replicas: Option<Readers>,
+) -> Arc<PeerDispatcher> {
+    let dispatcher = PeerDispatcher::new(
         Arc::clone(registry),
         Arc::new(FleetResolver(Arc::new(
             handles
@@ -231,7 +278,13 @@ fn dispatcher(registry: &Arc<Registry>, handles: Vec<CellHandle>) -> Arc<PeerDis
                 .collect(),
         ))),
         Arc::new(FleetAuthorizer),
-    ))
+    );
+    Arc::new(match replicas {
+        Some((replicas, _)) => dispatcher
+            .with_replica_resolver(replicas.clone())
+            .with_replica_control(replicas),
+        None => dispatcher,
+    })
 }
 
 struct Gateway {
@@ -247,7 +300,9 @@ pub(super) fn start_gateway_peer_server(
     handles: Vec<CellHandle>,
     owners: HashMap<CellId, SocketAddr>,
     stats: Arc<GatewayStats>,
+    replicas: Option<Readers>,
 ) -> tokio::task::JoinHandle<()> {
+    let directory = replicas.as_ref().map(|(_, directory)| directory.clone());
     let gateway = Arc::new(Gateway {
         local: handles.iter().map(CellHandle::cell_id).collect(),
         owners,
@@ -256,8 +311,9 @@ pub(super) fn start_gateway_peer_server(
     serve_listener(
         listener,
         verifier,
-        dispatcher(registry, handles),
+        dispatcher(registry, handles, replicas),
         Some(gateway),
+        directory,
     )
 }
 
@@ -266,14 +322,16 @@ fn serve_listener(
     verifier: Arc<PeerVerifier>,
     dispatcher: Arc<PeerDispatcher>,
     gateway: Option<Arc<Gateway>>,
+    directory: Option<NodeDirectory>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Ok((socket, _)) = listener.accept().await {
             let verifier = Arc::clone(&verifier);
             let dispatcher = Arc::clone(&dispatcher);
             let gateway = gateway.clone();
+            let directory = directory.clone();
             tokio::spawn(async move {
-                let _ = serve_peer(socket, verifier, dispatcher, gateway).await;
+                let _ = serve_peer(socket, verifier, dispatcher, gateway, directory).await;
             });
         }
     })
@@ -284,6 +342,7 @@ async fn serve_peer(
     verifier: Arc<PeerVerifier>,
     dispatcher: Arc<PeerDispatcher>,
     gateway: Option<Arc<Gateway>>,
+    directory: Option<NodeDirectory>,
 ) -> Result<()> {
     let started = Instant::now();
     let mut length = [0; 4];
@@ -295,9 +354,31 @@ async fn serve_peer(
     let mut request = vec![0; length];
     socket.read_exact(&mut request).await.map_err(peer_io)?;
     let now = now_ms();
-    let verified = verifier.verify(&request, now)?;
+    let decoded = UnverifiedPeerRequest::decode(&request)?;
+    let verified = if let Some(directory) = directory
+        .filter(|_| decoded.session() != crab_cell_runtime::SessionId::from_bytes([77; 16]))
+    {
+        let enrolled = tokio::time::timeout(
+            Duration::from_millis(u64::from(decoded.remaining_ms())),
+            directory.load(decoded.session(), now),
+        )
+        .await
+        .map_err(|_| Error::Deadline)??
+        .ok_or(Error::Fenced)?;
+        let node = enrolled.advertisement();
+        PeerVerifier::new(node.session(), node.release(), node.verifying_key()?)
+            .verify_decoded(decoded, now_ms())?
+    } else {
+        verifier.verify_decoded(decoded, now)?
+    };
+    let replica = matches!(verified.operation(), Some(wire::peer_request::Operation::Read(read))
+        if matches!(read.operation, Some(wire::read_request::Operation::ReplicaQuery(_)
+            | wire::read_request::Operation::ReplicaActivate(_)
+            | wire::read_request::Operation::ReplicaStatus(_))));
     let reply = match gateway {
-        Some(gateway) if !gateway.local.contains(&verified.target().cell_id()) => {
+        // A selected secondary must execute its snapshot locally. Forwarding
+        // an explicit replica query would hide missing reader admission.
+        Some(gateway) if !replica && !gateway.local.contains(&verified.target().cell_id()) => {
             let address = gateway
                 .owners
                 .get(&verified.target().cell_id())

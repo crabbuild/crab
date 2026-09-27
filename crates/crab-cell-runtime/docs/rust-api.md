@@ -152,6 +152,13 @@ Decoding rejects trailing bytes, invalid tags, noncanonical floating-point value
 
 `QueryContext` exposes the Cell ID, commit sequence, logical timestamp, and bounded read-only SQL.
 
+Command and query timestamps are at least the logical time persisted in the
+Cell snapshot. This includes forwarded commands, effect delivery, and explicit
+replica queries: a backward clock sample cannot hide already-due work or expose
+values that expired before that committed time. Queries do not advance persisted
+time. Request expiry and owner/session fencing continue to use their own clock
+and lease checks.
+
 Contexts do not expose database paths, raw object storage, control records, HTTP clients, or transaction commit methods.
 
 ## Call a command through CellClient

@@ -62,6 +62,80 @@ fn invocation(occurrence: u64) -> CronInvocation {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn due_workflow_activity_survives_a_clock_rollback() {
+    use crab_cell_runtime::codec::{BoundedEncoder, WireValue};
+    use crab_cell_runtime::primitives::workflow::WorkflowStart;
+    use crab_cell_runtime::registry::CommandInvocation;
+
+    for nodes in [1, 3] {
+        let fixture = PerfFixture::start(nodes).await;
+        let handle = fixture
+            .owned_handles
+            .iter()
+            .flatten()
+            .find(|handle| handle.catalog().entry().namespace() == WORKFLOW_NAMESPACE)
+            .unwrap();
+        let target = CellTarget::new(
+            fixture.sql_target.tenant(),
+            fixture.sql_target.application(),
+            WORKFLOW_NAMESPACE,
+            &partition_for_shard(0),
+        )
+        .unwrap();
+        let identity = identity(8, 0, 0);
+        let mut encoder = BoundedEncoder::new(1024).unwrap();
+        WorkflowStart {
+            workflow_id: b"clock-rollback".to_vec(),
+            request_id: identity.request_id,
+            event: b"activity".to_vec(),
+        }
+        .encode(&mut encoder)
+        .unwrap();
+        let input = encoder.finish();
+        let registry = Arc::clone(&fixture.registry);
+        // Publish at a later clock sample, then let the ordinary application
+        // supervisor use the earlier wall clock without changing global time.
+        let future = now_ms() + 10_000;
+        handle
+            .execute(
+                identity,
+                Digest::from_bytes([89; 32]),
+                future,
+                input.len(),
+                1024,
+                move |tx| {
+                    registry.execute_command(
+                        tx,
+                        CommandInvocation {
+                            module: WORKFLOW_MODULE,
+                            operation_id: ReferenceWorkflow::START_COMMAND_ID,
+                            codec_version: 1,
+                            schema: 1,
+                            target,
+                            sequence: 1,
+                            now_ms: future,
+                            input: &input,
+                        },
+                    )
+                },
+            )
+            .await
+            .unwrap();
+        let supervisor = crab_cell_runtime::primitives::workflow::ActivitySupervisor::new(
+            fixture.typed.activities::<ReferenceWorkflow>().unwrap(),
+            5_000,
+        )
+        .unwrap();
+        let outcome = supervisor.run_once(0, None).await.unwrap();
+        assert!(
+            matches!(outcome, ActivityRunOutcome::Completed { .. }),
+            "{nodes} nodes: {outcome:?}"
+        );
+        fixture.shutdown().await;
+    }
+}
+
 fn signed_client(
     fixture: &PerfFixture,
     round_trip: Arc<dyn PeerRoundTrip>,
@@ -87,6 +161,9 @@ fn signed_client(
         .unwrap();
     ReferenceClient::new(handle).unwrap()
 }
+
+mod replicas;
+mod rollout;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn three_node_host_resolves_ambiguous_result_and_deduplicates_delivery() {
@@ -227,62 +304,6 @@ async fn recover_sql_on_second_node(fixture: &PerfFixture) -> (ReferenceClient, 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn three_node_host_serves_two_release_ids_with_unchanged_module_contracts() {
-    let predecessor = compiled();
-    // The build identity changes while executable module contracts stay fixed.
-    // Both release digests must bind their own clients during an online overlap.
-    let successor = Arc::new(
-        ReferenceApplication::compile(BuildDescriptor {
-            source_revision: "reference-compatible-successor".into(),
-            cargo_lock_digest: Digest::from_bytes([42; 32]),
-        })
-        .unwrap(),
-    );
-    assert_ne!(
-        predecessor.registry().release_digest(),
-        successor.registry().release_digest()
-    );
-    successor
-        .registry()
-        .verify_rolling_from(predecessor.registry().release_bytes())
-        .unwrap();
-    let fixture = PerfFixture::start_with_successor(3, Some(Arc::clone(&successor))).await;
-    let sql_handle = fixture.owned_handles[0]
-        .iter()
-        .find(|handle| handle.cell_id() == fixture.sql_target.cell_id())
-        .unwrap()
-        .clone();
-    let successor_client = CellClient::local(successor.registry(), sql_handle);
-    let successor_handle = fixture.nodes[0]
-        .application_handle::<ReferenceApplication>(
-            successor_client,
-            fixture.sql_target.tenant(),
-            fixture.sql_target.application(),
-        )
-        .unwrap();
-    let successor_client = ReferenceClient::new(successor_handle).unwrap();
-    let order = successor_client
-        .orders(&OrderId(b"rollout-order".to_vec()))
-        .unwrap();
-    order
-        .receive_cron(reference_identity(76, now_ms()), invocation(1))
-        .await
-        .unwrap();
-
-    let predecessor_client = ReferenceClient::new(fixture.typed.clone()).unwrap();
-    let old_order = predecessor_client
-        .orders(&OrderId(b"rollout-order".to_vec()))
-        .unwrap();
-    assert_eq!(old_order.receipt_count(None, ()).await.unwrap().output, 1);
-    old_order
-        .receive_cron(reference_identity(77, now_ms()), invocation(2))
-        .await
-        .unwrap();
-    assert_eq!(order.receipt_count(None, ()).await.unwrap().output, 2);
-    fixture.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "manual action-level latency and recovery qualification"]
 async fn reference_public_host_action_performance() {
     run_public_host_action_performance(PerfFixture::start(3).await).await;
@@ -335,8 +356,13 @@ async fn run_public_host_action_performance(fixture: PerfFixture) {
         fixture.registry.release_digest(),
         signer.verifying_key(),
     ));
-    let (owner_address, owner_server) =
-        start_peer_server(&fixture.registry, Arc::clone(&verifier), vec![sql_handle]).await;
+    let (owner_address, owner_server) = start_peer_server(
+        &fixture.registry,
+        Arc::clone(&verifier),
+        vec![sql_handle],
+        None,
+    )
+    .await;
     let gateway_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let gateway_address = gateway_listener.local_addr().unwrap();
     let gateway_stats = Arc::new(GatewayStats::default());
@@ -347,6 +373,7 @@ async fn run_public_host_action_performance(fixture: PerfFixture) {
         fixture.owned_handles[1].clone(),
         HashMap::from([(fixture.sql_target.cell_id(), owner_address)]),
         Arc::clone(&gateway_stats),
+        None,
     );
     let forwarded = signed_client(
         &fixture,

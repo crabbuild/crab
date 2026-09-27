@@ -257,6 +257,14 @@ revision, serving session and endpoint, exact LTX root, code/schema pair, and
 next scheduler deadline. It reads object-store authority directly; it does not
 open SQLite, acquire ownership, or extend a lease.
 
+`cells status` and `cells node` validate the selected release descriptor and
+inspect only the requested control/session. They do not scan the fleet's Cell
+inventory on every observation. Full inventory compatibility remains a startup
+and release-activation gate; an unrelated incompatible Cell cannot prevent
+these status commands from inspecting a deployment whose release matches the
+binary. Status still reads fresh authority and signed session state, so this
+does not introduce cached ownership or relax placement qualification.
+
 `cells capacity --json --live` is a read-only mTLS request to the running
 process. It reports that process's retained startup memory limit, free Cell
 volume bytes, configured Cell-volume limit, available file descriptors,
@@ -417,9 +425,15 @@ readiness unhealthy; it swaps in ready changes without a restart.
 Catalog snapshots retain their durable revision. Import completion and periodic
 refresh validate Cell readiness through the same installation path and publish
 only newer revisions, so a delayed import cannot restore revoked membership or
-hide repositories installed by a newer refresh. This prevents local regression;
-new repositories and membership changes still propagate through the existing
-five-second catalog poll on other nodes.
+hide repositories installed by a newer refresh. When an authenticated peer
+request targets a repository missing from the execution node's snapshot, that
+node loads and installs the current catalog within the signed request deadline,
+then checks repository membership and the requested action again. Concurrent
+misses share an installation; warm requests and denials for known repositories
+do not reload the catalog. Storage or readiness failures return HTTP 503;
+an unresolved repository or unauthorized principal still receives HTTP 401 on
+the private peer route. Public ingress discovery and membership changes for
+already known repositories still use the five-second poll on other nodes.
 
 The binary's `healthcheck` command calls `/readyz` on the management listener.
 `SIGTERM` and Ctrl-C start the same graceful drain. Repository, catalog,

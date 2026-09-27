@@ -279,7 +279,8 @@ impl CellReadReplica {
             let connection = view.connection()?;
             view.take_io_error();
             crab_ltx::with_paged_io_deadline(deadline, || {
-                if local::current_sequence(&connection)? != sequence {
+                let (observed_sequence, now_ms) = local::current_metadata(&connection, now_ms)?;
+                if observed_sequence != sequence {
                     return Err(Error::Fenced);
                 }
                 registry.execute_query(

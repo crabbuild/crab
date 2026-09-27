@@ -48,7 +48,6 @@ use uuid::Uuid;
 use crate::{Config, Error, Result, storage_root::StorageRoot};
 
 mod initializer;
-mod read_replicas;
 pub(crate) mod repository;
 mod router;
 mod scheduler;
@@ -59,7 +58,6 @@ pub(crate) use initializer::initialize_repository_at;
 #[cfg(test)]
 pub(super) use initializer::provision_repository;
 pub(crate) use initializer::{initialize_repository, verify_repository_cells};
-pub(crate) use read_replicas::ReadReplicaManager;
 pub(crate) use router::{
     ReadReplicaStatus, RepositoryCell, RepositoryCellPeer, RepositoryCellRouter,
 };
@@ -310,7 +308,7 @@ pub(crate) fn compiled_application() -> crab_cell_runtime::Result<Arc<CompiledAp
     })?))
 }
 
-pub(crate) struct VerifiedStartupCells {
+pub(crate) struct VerifiedCellRelease {
     pub(crate) identity: ApplicationIdentity,
     pub(crate) layout: CellStorageLayout,
     pub(crate) registry: Registry,
@@ -545,14 +543,14 @@ pub(crate) async fn repository_status(config: &Config, owner: &str, name: &str) 
         .into_iter()
         .find(|repository| repository.owner == owner && repository.name == name)
         .ok_or(crate::catalog::CatalogError::NotFound)?;
-    let startup = verify_startup_release(config).await?;
+    let release = load_selected_release(config).await?;
     let target = CellTarget::new(
-        startup.identity.tenant(),
-        startup.identity.application(),
+        release.identity.tenant(),
+        release.identity.application(),
         REPOSITORY_NAMESPACE,
         repository.id.as_bytes(),
     )?;
-    let control = CellAuthority::new(startup.layout.clone())
+    let control = CellAuthority::new(release.layout.clone())
         .load(target.cell_id())
         .await?
         .ok_or(Error::Config("cataloged repository Cell has no control"))?;
@@ -560,10 +558,10 @@ pub(crate) async fn repository_status(config: &Config, owner: &str, name: &str) 
     let observed_at_ms = unix_now_ms()?;
     let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
     let directory = NodeDirectory::new(
-        startup.layout,
+        release.layout,
         peer_tls.fleet(),
-        startup.image,
-        startup.registry.release_digest(),
+        release.image,
+        release.registry.release_digest(),
     );
     let owner_lease = match control.owner.as_ref() {
         Some(owner) => {
@@ -675,13 +673,13 @@ struct NodeRecoveryStatus {
 
 pub(crate) async fn node_status(config: &Config, session: &str) -> Result<Vec<u8>> {
     let session = decode_session(session)?;
-    let startup = verify_startup_release(config).await?;
+    let release = load_selected_release(config).await?;
     let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
     let directory = NodeDirectory::new(
-        startup.layout,
+        release.layout,
         peer_tls.fleet(),
-        startup.image,
-        startup.registry.release_digest(),
+        release.image,
+        release.registry.release_digest(),
     );
     let observed_at_ms = unix_now_ms()?;
     let live = directory.is_live(session, observed_at_ms).await?;
@@ -950,7 +948,7 @@ async fn snapshot_backup_inventory(
 
 fn backup_store(
     config: &Config,
-    startup: &VerifiedStartupCells,
+    startup: &VerifiedCellRelease,
 ) -> Result<(BackupPinStore, tempfile::TempDir)> {
     std::fs::create_dir_all(&config.cells.data_dir)?;
     let scratch = tempfile::Builder::new()
@@ -1261,7 +1259,16 @@ fn status_hex(bytes: &[u8]) -> String {
     encoded
 }
 
-pub(crate) async fn verify_startup_release(config: &Config) -> Result<VerifiedStartupCells> {
+pub(crate) async fn verify_startup_release(config: &Config) -> Result<VerifiedCellRelease> {
+    let release = load_selected_release(config).await?;
+    verify_compatible_cells(&release.layout, release.identity, &release.registry).await?;
+    Ok(release)
+}
+
+// Status reads verify the selected descriptor and then inspect their target's
+// authority. Scanning every Cell here makes fleet observation grow quadratically
+// and lets an unrelated incompatible Cell prevent diagnostics.
+async fn load_selected_release(config: &Config) -> Result<VerifiedCellRelease> {
     let root = StorageRoot::build(&config.storage)?;
     let identities =
         ApplicationIdentityStore::new(root.store.clone(), Path::from(root.prefix.clone()));
@@ -1272,8 +1279,8 @@ pub(crate) async fn verify_startup_release(config: &Config) -> Result<VerifiedSt
     let layout = identities.layout(identity).await?;
     let application = compiled_application()?;
     let registry = (*application.registry()).clone();
-    let image = verify_startup_release_at(&layout, identity, &registry).await?;
-    Ok(VerifiedStartupCells {
+    let image = verify_selected_release_at(&layout, identity, &registry).await?;
+    Ok(VerifiedCellRelease {
         identity,
         layout,
         registry,
@@ -1283,6 +1290,16 @@ pub(crate) async fn verify_startup_release(config: &Config) -> Result<VerifiedSt
 }
 
 async fn verify_startup_release_at(
+    layout: &CellStorageLayout,
+    identity: ApplicationIdentity,
+    registry: &Registry,
+) -> Result<Digest> {
+    let image = verify_selected_release_at(layout, identity, registry).await?;
+    verify_compatible_cells(layout, identity, registry).await?;
+    Ok(image)
+}
+
+async fn verify_selected_release_at(
     layout: &CellStorageLayout,
     identity: ApplicationIdentity,
     registry: &Registry,
@@ -1308,7 +1325,6 @@ async fn verify_startup_release_at(
         ));
     }
     verify_rolling_predecessor(&releases, observed.record(), registry).await?;
-    verify_compatible_cells(layout, identity, registry).await?;
     image_digest(observed.record().desired_image())
 }
 
@@ -3065,7 +3081,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn release_inventory_accepts_exact_cells_and_rejects_unsupported_code() {
+    async fn startup_checks_cell_compatibility_beyond_selected_release_inspection() {
         let identity = ApplicationIdentity::new(
             TenantId::from_bytes([1; 16]),
             ApplicationId::from_bytes([2; 16]),
@@ -3076,7 +3092,15 @@ mod tests {
             *identity.application().as_bytes(),
         );
         let registry = compiled_registry().unwrap();
-        verify_compatible_cells(&layout, identity, &registry)
+        bootstrap_release_at(
+            &layout,
+            identity,
+            &registry,
+            &format!("sha256:{}", "a".repeat(64)),
+        )
+        .await
+        .unwrap();
+        verify_startup_release_at(&layout, identity, &registry)
             .await
             .unwrap();
         let catalog = CellCatalog::new(layout.clone(), identity.tenant());
@@ -3099,7 +3123,7 @@ mod tests {
             )
             .await
             .unwrap();
-        verify_compatible_cells(&layout, identity, &registry)
+        verify_startup_release_at(&layout, identity, &registry)
             .await
             .unwrap();
 
@@ -3122,11 +3146,15 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(
-            verify_compatible_cells(&layout, identity, &registry)
-                .await
-                .is_err()
-        );
+        verify_selected_release_at(&layout, identity, &registry)
+            .await
+            .unwrap();
+        assert!(matches!(
+            verify_startup_release_at(&layout, identity, &registry).await,
+            Err(Error::Config(
+                "compiled release cannot execute every cataloged Cell"
+            ))
+        ));
     }
 
     #[tokio::test]
@@ -3296,6 +3324,117 @@ mod tests {
         assert_eq!(second["entries"][0]["state"], "pending");
         assert_eq!(second["entries"][0]["attempts"], 0);
         assert_eq!(second["has_more"], false);
+    }
+
+    #[tokio::test]
+    async fn selected_release_inspection_does_not_scan_the_cell_inventory() {
+        assert_bounded_release_inspection(
+            Store::new(Arc::new(InMemory::new())),
+            "selected-release-inspection",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an isolated RustFS prefix and test credentials"]
+    async fn rustfs_selected_release_inspection_does_not_scan_the_cell_inventory() {
+        let required = |name| std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
+        let store = crab_storage::build_explicit_store(
+            &required("CRAB_HTTP_CELL_TEST_BUCKET"),
+            crab_storage::ObjectStoreCredentials::Aws {
+                access_key_id: required("AWS_ACCESS_KEY_ID"),
+                secret_access_key: required("AWS_SECRET_ACCESS_KEY"),
+                session_token: None,
+                region: "us-east-1".into(),
+            },
+            Some(&required("CRAB_HTTP_CELL_TEST_ENDPOINT")),
+            true,
+        )
+        .unwrap();
+        assert_bounded_release_inspection(store, &required("CRAB_HTTP_CELL_TEST_PREFIX")).await;
+    }
+
+    async fn assert_bounded_release_inspection(store: Store, prefix: &str) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let observed_reads = Arc::clone(&reads);
+        let store = store.with_read_request_observer(Arc::new(move |_| {
+            observed_reads.fetch_add(1, Ordering::Relaxed);
+        }));
+        let identity = ApplicationIdentity::new(
+            TenantId::from_bytes([1; 16]),
+            ApplicationId::from_bytes([2; 16]),
+        );
+        let layout = CellStorageLayout::new(
+            store,
+            Path::from(prefix),
+            *identity.application().as_bytes(),
+        );
+        let registry = compiled_registry().unwrap();
+        bootstrap_release_at(
+            &layout,
+            identity,
+            &registry,
+            &format!("sha256:{}", "a".repeat(64)),
+        )
+        .await
+        .unwrap();
+        reads.store(0, Ordering::Relaxed);
+        let started = std::time::Instant::now();
+        verify_selected_release_at(&layout, identity, &registry)
+            .await
+            .unwrap();
+        let empty_reads = reads.load(Ordering::Relaxed);
+        eprintln!(
+            "release_inspection cells=0 reads={empty_reads} elapsed={:?}",
+            started.elapsed()
+        );
+        assert!(
+            empty_reads <= 4,
+            "empty-fleet inspection made {empty_reads} reads"
+        );
+
+        let catalog = CellCatalog::new(layout.clone(), identity.tenant());
+        let (code, schema) = registry
+            .current_cell_version(REPOSITORY_NAMESPACE, CatalogRole::Repository)
+            .unwrap();
+        for index in 0_u32..64 {
+            let target = CellTarget::new(
+                identity.tenant(),
+                identity.application(),
+                REPOSITORY_NAMESPACE,
+                &index.to_be_bytes(),
+            )
+            .unwrap();
+            catalog
+                .provision(
+                    CatalogEntry::new(&target, CatalogRole::Repository, code, schema).unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        reads.store(0, Ordering::Relaxed);
+        let started = std::time::Instant::now();
+        verify_selected_release_at(&layout, identity, &registry)
+            .await
+            .unwrap();
+        assert_eq!(reads.load(Ordering::Relaxed), empty_reads);
+        eprintln!(
+            "release_inspection cells=64 reads={empty_reads} elapsed={:?}",
+            started.elapsed()
+        );
+        reads.store(0, Ordering::Relaxed);
+        let started = std::time::Instant::now();
+        verify_startup_release_at(&layout, identity, &registry)
+            .await
+            .unwrap();
+        let startup_reads = reads.load(Ordering::Relaxed);
+        assert!(startup_reads > 64);
+        eprintln!(
+            "startup_inspection cells=64 reads={startup_reads} elapsed={:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]

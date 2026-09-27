@@ -50,7 +50,7 @@ impl CellTransport for LocalCellTransport {
                     input_bytes,
                     output_limit,
                     move |transaction| {
-                        let sequence = next_sequence(transaction)?;
+                        let (sequence, now_ms) = next_metadata(transaction, command.now_ms)?;
                         let started = Instant::now();
                         let result = registry.execute_command_with_issue_time(
                             transaction,
@@ -61,7 +61,7 @@ impl CellTransport for LocalCellTransport {
                                 schema,
                                 target: command.target.clone(),
                                 sequence,
-                                now_ms: command.now_ms,
+                                now_ms,
                                 input: &command.input,
                             },
                             command.identity.issued_at_ms,
@@ -102,7 +102,7 @@ impl CellTransport for LocalCellTransport {
             let output_limit = query.output_limit as usize;
             let output = handle
                 .query(input_bytes, output_limit, move |connection| {
-                    let commit_sequence = current_sequence(connection)?;
+                    let (commit_sequence, now_ms) = current_metadata(connection, query.now_ms)?;
                     observed_sequence.store(commit_sequence, Ordering::Release);
                     let started = Instant::now();
                     let result = registry.execute_query(
@@ -114,7 +114,7 @@ impl CellTransport for LocalCellTransport {
                             schema,
                             cell,
                             commit_sequence,
-                            now_ms: query.now_ms,
+                            now_ms,
                             input: &query.input,
                         },
                     );
@@ -316,22 +316,39 @@ pub(crate) fn local_description(handle: &CellHandle) -> CellDescription {
     }
 }
 
-fn next_sequence(transaction: &crab_ltx::rusqlite::Transaction<'_>) -> Result<u64> {
-    current_sequence(transaction)?
+pub(crate) fn next_metadata(
+    transaction: &crab_ltx::rusqlite::Transaction<'_>,
+    now_ms: i64,
+) -> Result<(u64, i64)> {
+    let (sequence, now_ms) = current_metadata(transaction, now_ms)?;
+    let sequence = sequence
         .checked_add(1)
-        .ok_or(Error::Command("commit sequence overflow"))
+        .filter(|sequence| *sequence <= i64::MAX as u64)
+        .ok_or(Error::Command("commit sequence overflow"))?;
+    Ok((sequence, now_ms))
 }
 
-pub(crate) fn current_sequence(connection: &crab_ltx::rusqlite::Connection) -> Result<u64> {
-    let sequence = connection
+pub(crate) fn current_metadata(
+    connection: &crab_ltx::rusqlite::Connection,
+    now_ms: i64,
+) -> Result<(u64, i64)> {
+    if now_ms < 0 {
+        return Err(Error::Command("invalid runtime time"));
+    }
+    let (sequence, logical_time_ms) = connection
         .query_row(
-            "SELECT commit_sequence FROM sys_meta WHERE singleton = 1",
+            "SELECT commit_sequence, logical_time_ms FROM sys_meta WHERE singleton = 1",
             [],
-            |row| row.get::<_, i64>(0),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         )
         .optional()?
         .ok_or(Error::Command("runtime metadata row missing"))?;
-    u64::try_from(sequence).map_err(|_| Error::Command("invalid commit sequence"))
+    let sequence =
+        u64::try_from(sequence).map_err(|_| Error::Command("invalid commit sequence"))?;
+    // A queued request, clock rollback or owner change can carry an earlier
+    // sample. All handlers must observe at least this snapshot's committed
+    // time, or due work disappears and expired values become visible again.
+    Ok((sequence, now_ms.max(logical_time_ms)))
 }
 
 pub(crate) fn receipt(description: CellDescription, commit_sequence: u64) -> Receipt {

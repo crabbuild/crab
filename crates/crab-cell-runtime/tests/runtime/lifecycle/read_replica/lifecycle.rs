@@ -2,6 +2,75 @@
 
 use super::*;
 
+pub(super) struct ReadLogicalTime;
+
+impl Query for ReadLogicalTime {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 2;
+    const CODEC_VERSION: u32 = 1;
+    type Input = ();
+    type Output = i64;
+
+    fn execute(context: &mut QueryContext<'_>, _: ()) -> crab_cell_runtime::Result<i64> {
+        Ok(context.now_ms())
+    }
+}
+
+#[tokio::test]
+async fn owner_and_replica_queries_do_not_precede_committed_time() {
+    let fixture = fixture();
+    let owner = SessionId::from_bytes([44; 16]);
+    let runtime = CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 << 20, owner).unwrap();
+    let handle = bootstrap_on(&runtime, &fixture, owner).await;
+    let committed_time = now_ms() + 10_000;
+    handle
+        .execute(
+            crate::support::fixtures::mutation_identity(46),
+            Digest::from_bytes([47; 32]),
+            committed_time,
+            64,
+            64,
+            |_| Ok(HandlerOutcome::Success(Vec::new())),
+        )
+        .await
+        .unwrap();
+    let registry = compiled_reader_registry();
+    let directory = owner_directory(&fixture, owner, &registry).await;
+    let reader_runtime = CellRuntime::new(
+        SqlWorkerPool::new(2, 512).unwrap(),
+        8 << 20,
+        SessionId::from_bytes([45; 16]),
+    )
+    .unwrap();
+    let reader = CellReadReplica::open(
+        reader_runtime.clone(),
+        Arc::clone(&registry),
+        CellAuthority::new(fixture.layout.clone()),
+        directory,
+        fixture.replica.clone(),
+        fixture.target.clone(),
+        &fixture._directory.path().join("clock-reader.sqlite"),
+    )
+    .await
+    .unwrap();
+    let local = CellClient::local(registry, handle.clone());
+    let local_time = local
+        .query::<ReadLogicalTime>(&fixture.target, None, ())
+        .await
+        .unwrap()
+        .output;
+    let replica_time = reader
+        .query::<ReadLogicalTime>(None, ())
+        .await
+        .unwrap()
+        .output;
+    assert_eq!((local_time, replica_time), (committed_time, committed_time));
+    drop(reader);
+    reader_runtime.shutdown().await.unwrap();
+    handle.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn reader_routing_overlaps_independent_control_and_policy_reads() {
     let store = Arc::new(PausingStore::new(Arc::new(InMemory::new())));

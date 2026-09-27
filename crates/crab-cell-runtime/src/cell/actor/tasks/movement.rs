@@ -132,6 +132,7 @@ pub(super) fn handle_migrated(
         tasks,
         node_lease,
         unpublished_node_log_bytes,
+        publications,
         ..
     } = context;
     let Some(active) = cells.get_mut(&cell) else {
@@ -173,6 +174,7 @@ pub(super) fn handle_migrated(
         Ok(outcome) if !matches!(completion, CoordinationDecision::Fence) => {
             active.code = outcome.code;
             active.schema = outcome.schema;
+            let _ = publications.send(active.catalog.entry().clone());
             let admission = Arc::clone(&migration.successor_admission);
             send_migration_reply(&mut migration, Ok(MigratedAdmission { admission, outcome }));
         }

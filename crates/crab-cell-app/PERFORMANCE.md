@@ -1,5 +1,72 @@
 # Cell primitive end-to-end performance
 
+## Additive application release correctness
+
+The public-host rollout test compiles a successor SQL module with a new typed
+receipt-payload query and retains the predecessor code. An old generated client
+uses TCP to invoke the successor host while the successor client writes the
+same retained Cell locally. After both writes acknowledge, an operator publishes
+the code-only migration. A prepared old capability and a predecessor client
+must fail before execution. The upgraded generated client then reads the added
+query over signed TCP, replays an old request with its original receipt, and
+writes another receipt. A fresh host restores the published root in a separate
+SQLite directory, replays the request again without duplication, and writes
+successfully. Four visible receipts must remain.
+
+Run the real-provider version against an existing isolated RustFS bucket and a
+fresh prefix:
+
+```sh
+AWS_ACCESS_KEY_ID=crab AWS_SECRET_ACCESS_KEY=crab \
+CRAB_CELL_TEST_ENDPOINT=http://127.0.0.1:9000 \
+CRAB_CELL_TEST_BUCKET=crab-reference-app \
+CRAB_CELL_PERF_PROCESS_ROOT=additive-rollout-unique-run \
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/<checkout>" \
+  cargo test -p crab-cell-app --locked --test reference_application \
+  three_node_host_rustfs_additive_code_rollout -- --ignored --nocapture
+```
+
+The Compose smoke runs this same gate in a separate constrained driver container
+before stopping RustFS, retaining `rollout.log`, its binary hash, and kernel
+resource counters. The three initial hosts share that process; one host is
+retired before its replacement starts. The schema stays at version one, and
+traffic pauses for code publication and recovery. This gate does not establish
+rolling-container availability, sustained throughput, or a migration latency
+bound. Independent-process scale and fault qualification remain separate.
+
+### Local GA RustFS receipt, 2026-09-27
+
+Source `ea51218b45c7401fac600f2e35aaa75aff30dc35` passed with the digest-pinned
+Rust 1.97 and RustFS 1.0.0 images in `qualification/compose.yaml`. A fresh Linux
+release build took 3m43s. The binary SHA-256 was
+`0dfdedef7b47a28833ba608915149e3f2f7f915b7a1a8227efaf58ef0130fd52`.
+Colima supplied four CPUs and 8,307,101,696 bytes of VM memory; each of the
+three node containers and both successive driver containers enforced one CPU,
+1,073,741,824 bytes of memory and no swap. RustFS shared that VM.
+
+The ordinary three-node smoke passed in 14.93s: 180 complete primitive actions,
+one duplicate generated command, twelve replica reads split six per reader,
+automatic recruitment/refresh and target-zero eviction. Balancer ingress was
+524/524/524; every node performed local and forwarded work. The separately
+invoked rollout gate passed in 0.48s with four visible application receipts,
+two exact duplicate replays and fresh-host recovery. This short smoke is not
+an offered-rate capacity or availability result.
+
+All three node processes withdrew their sessions. Nodes, drivers and bucket
+initialization exited zero; RustFS was stopped after evidence capture. Kernel
+counters recorded no OOM or CPU throttling. Node memory peaks were
+12,853,248–29,618,176 bytes; rollout driver peak was 27,291,648 bytes. Raw logs,
+kernel samples, image/container inspections and source/binary identities are
+retained under `additive-rollout-ea51218-20260927/evidence` in the external
+qualification state directory. Evidence SHA-256 values:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `driver.log` | `23bb78bfed1311c8af57e9775af6e743e0f0d35f990058b8c064d5cb2bfd17de` |
+| `rollout.log` | `ac481febb24d076295fed3c8582ed35ec917a3de3475ac210ef07481cba5a2b0` |
+| `containers.json` | `ed656bffd21f614cc83ffe14f56f3b4b6941a09791eab99c9968beb6d4d1d4ef` |
+| `verification.json` | `9ad897b570edca4ea05e3a2573431cd94ee3c8a0af46e35f91f1687ab47eac7c` |
+
 ## Generated client action and recovery slices
 
 The ignored `reference_public_host_action_performance` test runs the generated
@@ -105,6 +172,25 @@ application handles; generated stable-ID commands additionally prove that
 repeating a committed mutation preserves its receipt and creates one visible
 effect. Every primitive lane checks its visible result.
 
+After the measured action lanes, the generated-client proof admits two SQL
+snapshot readers on the other node processes through the host-owned
+`ReadReplicaManager`. It verifies missing readers do not fall back to the owner,
+then issues a new owner mutation twice. The supervisor must discover its exact
+newer receipt without a fixture refresh hint; both readers return one additional effect.
+Changing the desired-reader policy to zero must evict both views automatically.
+Each node proves its retained manager rejects activation and resolution after
+host shutdown. Initial admission uses signed owner hints from the host-owned
+recruiter; marker files only observe readiness.
+
+Successful direct peer replies are counted by selected physical node: six
+per reader, zero on the writer. Each receiver executes the explicit query
+against its local admitted snapshot, including gateway receivers. The fixture
+observes each reader's receipt before testing the new position, so background
+refresh timing cannot make a stale-position assertion flaky. Deterministic
+stale/minimum-receipt checks remain in the runtime suite and the earlier
+source-bound Compose report. These steps are outside the action timer and do
+not establish replica throughput.
+
 Provide an isolated bucket, a prefix, and explicit credentials:
 
 ```bash
@@ -132,7 +218,29 @@ The historical September 21 filesystem measurements remain in
 and [`performance/2026-09-21-balanced-three-process-local.md`](performance/2026-09-21-balanced-three-process-local.md).
 They do not describe the current RustFS path.
 
-### Three constrained Compose nodes
+### Reader recruitment and process loss
+
+The ignored `owner_replaces_killed_reader_through_public_hosts` case uses the
+same GA RustFS environment as the process runs. It starts three public hosts,
+exercises the reference primitives, admits two readers through signed owner
+hints, then starts two more independent processes. It kills one selected
+reader, waits for two current readers, and verifies twelve generated queries
+against the acknowledged receipt. Writer session, epoch, and incarnation must
+remain unchanged. The four survivors must drain successfully.
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/<checkout>" \
+  CRAB_CELL_PERF_ITERATIONS=5 cargo test -p crab-cell-app --locked \
+  --test reference_application owner_replaces_killed_reader_through_public_hosts \
+  -- --ignored --nocapture
+```
+
+This native fault run does not impose container CPU or memory limits. The
+three-node Compose proof below independently verifies the shared recruitment
+path under those limits. Neither run establishes sustained capacity or a
+recovery SLO.
+
+## Three constrained Compose nodes
 
 [`qualification/compose.yaml`](qualification/compose.yaml) pins GA RustFS 1.0.0
 and the build image by digest. It runs three independent nodes plus a driver
@@ -145,6 +253,11 @@ The disposable evidence directory is shared and writable by the host and all
 fixture containers; its sticky bit protects entries owned by another UID.
 This also permits capability-free container root to create logs on a Linux
 runner-owned bind mount. Source and binary mounts remain read-only.
+
+The worker pool retains its 32-writer ceiling and explicitly reserves 32 MiB
+for native admission, covering a reader's overlapping refresh snapshots.
+The default 32-writer budget alone is 2 MiB and correctly refuses a 12 MiB
+snapshot; raising the writer count is not required to provision reader memory.
 
 Use a fresh Compose project and state directory per run. The source archive
 must contain the committed change being measured. The selected Docker/Colima
@@ -178,15 +291,104 @@ available for diagnosis; use `compose stop` after collecting evidence. Remove
 only this project's containers/volumes with `compose down -v` when their
 artifacts are no longer needed.
 
-The [2026-09-27 run](performance/2026-09-27-three-node-compose.md) records source,
-images, resource evidence, and observed timings.
+The [initial 2026-09-27 run](performance/2026-09-27-three-node-compose.md)
+records the owner action path. The
+[generated replica-read follow-up](performance/2026-09-27-replica-compose.md)
+records two non-owner readers, stale/minimum-receipt checks, controlled refresh,
+source and binary identity, and container resource evidence on GA RustFS.
+The [host-owned reader run](performance/2026-09-27-host-readers-compose.md)
+then proves automatic refresh, target-zero eviction, and terminal drain through
+the manager shared with the product server.
+The [public-host recruitment run](performance/2026-09-27-reader-recruitment.md)
+adds automatic signed placement on three constrained nodes and a separate
+native three-to-five-process test that replaces a killed reader. The latter
+does not impose per-process resource limits.
 
 This is an application integration smoke with six closed-loop lanes and seven
 Cells assigned 3/2/2. Ingress counts are even; owner load follows the action
 mix. It does not establish a supported throughput, 5/10/20-node application
-capacity, automatic placement, mTLS, failure-domain isolation, follower SQL
-reads, or recovery during arrivals. The issue-service fleet qualification
+capacity, mTLS, failure-domain isolation, replica-query throughput, or recovery
+during arrivals. The issue-service fleet qualification
 covers its separate product ingress and scaling paths.
+
+### Constrained reader scaling and loss
+
+After building the archived source with the procedure above, run the controller
+from that same archive with a fresh Compose project:
+
+```bash
+python3 "$CRAB_REFERENCE_STATE/source/crates/crab-cell-app/qualification/scale.py" \
+  --state "$CRAB_REFERENCE_STATE" --project "$CRAB_REFERENCE_PROJECT-scale"
+```
+
+The controller writes a resolved Compose configuration into
+`evidence/scaling/`, starts the driver, and follows its bounded scale/fault
+requests. Every node and the driver inherit the one CPU / 1 GiB / zero-swap
+profile. The driver grows one fleet through 3, 5, 10 and 20 live nodes. The
+seven writer Cells remain on the original three owners; new nodes participate
+as gateways and admitted readers for the reference SQL Cell.
+
+At each size, generated commands publish two new receipts with duplicate
+delivery checks. Both initial recruitment and a later refresh must become
+ready automatically. The driver verifies 30 exact queries per selected reader,
+records serial read latency, and separately sends owner reads through a TCP
+balancer whose entry counts must differ by at most one. Replica requests go
+directly to the selected readers through the signed peer transport; this
+profile does not place a second balancer in that path.
+
+Each stage also measures sixty seconds of concurrent refresh and queries.
+One generated writer schedules five unique mutations per second through the
+balancer. It records missed arrivals instead of issuing a catch-up burst.
+Eight closed-loop readers run concurrently: four require the latest
+acknowledged receipt and four permit older snapshots. Typed `ReplicaBehind`
+responses are counted separately; other query errors fail the run. Every
+successful snapshot count must match the acknowledged command history at its
+actual receipt. All selected readers must serve queries, and the writer must
+remain excluded. The final owner read and all selected readers must cover the
+last acknowledgement before the next stage.
+
+Raw per-command and per-reader TSV files live in `evidence/scaling/control/`.
+The controller independently checks their scheduled arrivals, exact counts,
+minimum receipts, lag, and completeness, and binds them by SHA-256 in
+`verification.json`. `fully_served_writes` is false when any scheduled write
+was missed, even if all admitted work remains correct. Query latency excludes
+typed behind responses; their count remains visible. This is a fixed mixed
+workload, not a saturation curve or a freshness guarantee.
+
+At five nodes, three readers and one spare are eligible. The controller kills
+one selected reader-only container, proves exit 137 without an OOM event, and
+the driver requires a newly selected reader plus twelve exact query results.
+The fleet temporarily has four survivors before growing to ten. The killed
+boot is never restarted with the fixture's deterministic identity: growth
+creates a new node/session, yielding twenty live nodes out of twenty-one
+created containers. Writer ownership must remain unchanged. Target zero then
+evicts every view, and all surviving hosts must withdraw and drain.
+
+The controller requires successful exact tests, distinct scratch volumes,
+matching binary hashes, actual Docker/cgroup limits and no OOM events. It
+retains logs, fault events, resource counters and `verification.json`, then
+stops only its project. Failed runs retain their containers and evidence.
+An optional repeated `--compose-file` supplies explicit image/cache overrides
+to the same source configuration; the resolved result is retained.
+
+This combines a scaling/failure smoke and bounded mixed-workload measurements.
+One replicated SQL Cell and one killed reader do not establish many-Cell
+capacity, continuous fault availability or an owner-loss SLO. A one-CPU cap
+does not reserve a physical core; record Docker VM resources and contention
+before comparing latency across sizes. The Compose CI runs this profile after
+the three-node lifecycle smoke using the same compiled binary.
+The [2026-09-27 run](performance/2026-09-27-reader-scaling.md) records all four
+sizes, 990 measured generated reads, a 34.830-second reader replacement sample,
+roughly five-second refresh observations, and successful drain of all twenty
+survivors. Query latency and freshness are reported separately.
+The [mixed-read/write run](performance/2026-09-27-mixed-readers.md) records
+691,427 correct replica reads across four sixty-second windows, with explicit
+behind responses and 144 missed scheduled writes. It establishes concurrent
+snapshot correctness for that workload, not a supported mixed-load capacity.
+The same report records a fresh current-main integration run with 703,981
+exact reads, 1,172 acknowledged writes and 28 missed arrivals. Only its
+twenty-node window fully served the offered writes; the capacity limit remains
+unqualified.
 
 ## Native RustFS sanity check
 

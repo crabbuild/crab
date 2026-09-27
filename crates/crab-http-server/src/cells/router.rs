@@ -38,7 +38,6 @@ use crab_cell_runtime::peer::{
 };
 use crab_cell_runtime::primitives::maintenance::PersistedWorkInventory;
 use crab_cell_runtime::primitives::workflow::MAX_ACTIVITY_PAYLOAD_BYTES;
-use crab_cell_runtime::read_policy::ReadPolicyStore;
 use crab_cell_runtime::recovery::release::{ReleaseState, ReleaseStore};
 use crab_cell_runtime::registry::Query;
 use crab_cell_runtime::registry::Registry;
@@ -93,7 +92,7 @@ pub(crate) struct RepositoryCellRouter {
     // fleet view is discarded until every member samples again.
     rebalance_settled_at_ms: Arc<AtomicI64>,
     replica_routing: ReplicaReadRouter,
-    read_replicas: Option<super::ReadReplicaManager>,
+    read_replicas: Option<crab_cell_host::read_replicas::ReadReplicaManager>,
 }
 
 #[derive(Clone)]
@@ -247,11 +246,16 @@ impl RepositoryCellRouter {
         else {
             return Ok(RebalanceProgress::default());
         };
-        let candidates = self.runtime.idle_transfer_candidates().await?;
-        let active = candidates
-            .iter()
-            .map(|(cell, _, _, _)| *cell)
+        // Keep residence across work and renewal on the same activation. Final
+        // candidate and generation checks still gate release after the idle window.
+        let active = self
+            .runtime
+            .active_catalog_entries()
+            .await?
+            .into_iter()
+            .map(|entry| entry.cell())
             .collect::<HashSet<_>>();
+        let candidates = self.runtime.idle_transfer_candidates().await?;
         let mut evidence = self.rebalance_evidence.lock().await;
         evidence.retain(|cell, _| active.contains(cell));
         let demands = candidates
@@ -1208,55 +1212,6 @@ impl RepositoryCellRouter {
 }
 
 impl RepositoryCellPeer {
-    async fn activate_read_replica(
-        &self,
-        target: CellTarget,
-        node: crab_cell_runtime::node::NodeAdvertisement,
-    ) -> crate::Result<()> {
-        // A bounded fanout can queue longer than the discovery lease. Reload
-        // the exact session before dispatch; another boot cannot inherit it.
-        let observed = self
-            .directory
-            .load(node.session(), super::unix_now_ms()?)
-            .await?
-            .ok_or(crab_cell_runtime::Error::CellNotActive)?;
-        let node = observed.advertisement().clone();
-        let now_ms = super::unix_now_ms()?;
-        let principal = PeerPrincipal {
-            issuer: format!(
-                "crab-runtime:{}",
-                encode_hex(self.directory.fleet().as_bytes())
-            ),
-            subject: encode_hex(self.owner.session.as_bytes()),
-            actions: vec!["cell.replica.activate".to_owned()],
-        };
-        let request = self.signer.sign(
-            principal,
-            now_ms,
-            now_ms.saturating_add(60_000),
-            30_000,
-            PeerOperation::Read(peer_wire::ReadRequest {
-                target: Some(peer_target(&target)),
-                timeout_ms: 30_000,
-                minimum: None,
-                expected: None,
-                operation: Some(peer_wire::read_request::Operation::ReplicaActivate(true)),
-            }),
-        )?;
-        let reply = self
-            .round_trip
-            .send_to_node(target.clone(), node, request, 30_000)
-            .await?;
-        let reply = crab_cell_runtime::peer::decode_peer_reply(&reply)?;
-        match reply.outcome {
-            Some(peer_wire::peer_reply::Outcome::Read(peer_wire::ReadReply {
-                receipt: Some(receipt),
-                result: Some(peer_wire::read_reply::Result::ReplicaReady(true)),
-            })) if receipt.cell_id == target.cell_id().as_bytes() => Ok(()),
-            _ => Err(crab_cell_runtime::Error::Peer("read replica did not become ready").into()),
-        }
-    }
-
     pub(crate) fn new(
         owner_hints: crate::peer::PeerOwnerHints,
         directory: NodeDirectory,
@@ -2418,8 +2373,8 @@ mod tests {
         source_runtime.shutdown().await.unwrap();
     }
 
-    #[tokio::test]
-    async fn fleet_rebalance_releases_settled_cell_and_restores_its_result() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fleet_rebalance_preserves_residence_across_busy_work_and_restores_result() {
         let identity = ApplicationIdentity::new(
             TenantId::from_bytes([41; 16]),
             ApplicationId::from_bytes([42; 16]),
@@ -2612,6 +2567,40 @@ mod tests {
                 samples: 2,
             },
         );
+        let (started, entered) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let querying = handle.clone();
+        let query = tokio::spawn(async move {
+            querying
+                .query(1, 1, move |_| {
+                    let _ = started.send(());
+                    released
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|_| crab_cell_runtime::Error::Control("test query timed out"))?;
+                    Ok(Vec::new())
+                })
+                .await
+        });
+        entered.await.unwrap();
+        let busy = source_router.rebalance_once(|| Ok(now_ms)).await;
+        release.send(()).unwrap();
+        query.await.unwrap().unwrap();
+        let busy = busy.unwrap();
+        assert_eq!((busy.released, busy.activated), (0, 0));
+        // The actor's work timestamp has now aged past the idle window on the
+        // planner clock. The same activation must retain its residence history.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while source_runtime
+                .idle_transfer_candidates()
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         let progress = source_router.rebalance_once(|| Ok(now_ms)).await.unwrap();
         assert_eq!((progress.released, progress.activated), (1, 1));
         assert_eq!(source_runtime.stats().active_cells(), 0);

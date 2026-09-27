@@ -285,10 +285,11 @@ pub(super) async fn run_reference_primitive_performance(
                 } => run_id,
                 other => panic!("unexpected Workflow start: {other:?}"),
             };
-            assert!(matches!(
-                activity.run_once(0, None).await.unwrap(),
-                ActivityRunOutcome::Completed { .. }
-            ));
+            let outcome = activity.run_once(0, None).await.unwrap();
+            assert!(
+                matches!(outcome, ActivityRunOutcome::Completed { .. }),
+                "{outcome:?}"
+            );
             let observed = workflow
                 .state(workflow_id, None)
                 .await

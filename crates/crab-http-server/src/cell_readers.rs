@@ -100,7 +100,7 @@ fn resolve(
     key: &(String, String),
 ) -> Result<
     (
-        crate::cells::ReadReplicaManager,
+        crab_cell_host::read_replicas::ReadReplicaManager,
         crab_cell_runtime::CellTarget,
     ),
     Error,

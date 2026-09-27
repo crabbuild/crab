@@ -202,6 +202,17 @@ impl SqlWorkerPool {
         })
     }
 
+    /// Sets the shared native-memory admission ceiling for writers and read snapshots.
+    ///
+    /// The default covers the configured writer count. Hosts admitting read
+    /// replicas must also budget their snapshots, including overlapping refreshes.
+    /// This is reserved native memory, not an RSS limit; retained cuts are separate.
+    /// Zero or a ceiling below existing reservations returns a capacity error.
+    pub fn with_native_memory_limit(self, bytes: usize) -> Result<Self> {
+        self.inner.resources.set_resident_limit(bytes)?;
+        Ok(self)
+    }
+
     /// Uses the design's CPU-derived worker count, capped at sixteen.
     pub fn for_system(max_active_cells: usize) -> Result<Self> {
         let workers = std::thread::available_parallelism()

@@ -15,24 +15,31 @@ use crab_cell_runtime::{
     client::{CellReadReplica, Receipt},
     control::{Control, ControlState, authority::CellAuthority},
     identity::{CellId, CellTarget, IncarnationId, SessionId},
-    ltx::{CellReplica, CellStorageLayout},
+    ltx::{CellReplica, CellStorageLayout, Limits},
     node::NodeDirectory,
-    peer::PeerReplicaResolver,
+    peer::{PeerReplicaControl, PeerReplicaResolver},
     read_policy::{ReadPolicy, ReadPolicyStore},
     registry::Registry,
 };
+use futures_util::future::BoxFuture;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::repository_replica_limits;
+mod recruitment;
+pub use recruitment::ReadReplicaRecruiter;
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 const RECONCILE_BATCH: usize = 64;
+const RECONCILE_DEADLINE: Duration = Duration::from_secs(30);
 const MAX_LIVE_NODES: usize = 10_000;
 
+/// Admitted immutable readers sharing one node runtime and current placement policy.
+///
+/// Product adapters authorize activation hints and policy changes before calling
+/// this manager; selection never grants write ownership.
 #[derive(Clone)]
-pub(crate) struct ReadReplicaManager {
+pub struct ReadReplicaManager {
     runtime: CellRuntime,
     registry: Arc<Registry>,
     layout: CellStorageLayout,
@@ -41,18 +48,26 @@ pub(crate) struct ReadReplicaManager {
     policy: ReadPolicyStore,
     session: SessionId,
     root: PathBuf,
+    limits: Limits,
+    closed: CancellationToken,
     activation: Arc<Mutex<()>>,
     active: Arc<RwLock<HashMap<CellId, CellReadReplica>>>,
 }
 
 impl ReadReplicaManager {
-    pub(crate) fn new(
+    /// Creates a reader manager for an existing node runtime.
+    ///
+    /// The caller must supervise `run` and invoke `shutdown` before runtime drain.
+    /// Prefer `CellNode::install_read_replicas` for automatic lifecycle ownership.
+    #[must_use]
+    pub fn new(
         runtime: CellRuntime,
         registry: Arc<Registry>,
         layout: CellStorageLayout,
         directory: NodeDirectory,
         session: SessionId,
         root: PathBuf,
+        limits: Limits,
     ) -> Self {
         let authority = CellAuthority::with_telemetry(layout.clone(), runtime.telemetry_handle());
         Self {
@@ -64,15 +79,15 @@ impl ReadReplicaManager {
             directory,
             session,
             root,
+            limits,
+            closed: CancellationToken::new(),
             activation: Arc::new(Mutex::new(())),
             active: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    pub(crate) async fn target(
-        &self,
-        target: &CellTarget,
-    ) -> Result<(IncarnationId, Option<ReadPolicy>)> {
+    /// Loads the current Cell incarnation and advisory desired-reader policy.
+    pub async fn target(&self, target: &CellTarget) -> Result<(IncarnationId, Option<ReadPolicy>)> {
         let control = self
             .authority
             .load(target.cell_id())
@@ -89,7 +104,8 @@ impl ReadReplicaManager {
         Ok((control.value().incarnation, policy))
     }
 
-    pub(crate) async fn set_target(
+    /// Conditionally updates the reader target after caller authorization.
+    pub async fn set_target(
         &self,
         target: &CellTarget,
         expected_revision: u64,
@@ -139,8 +155,17 @@ impl ReadReplicaManager {
         Ok(Some(updated.value()))
     }
 
-    pub(crate) async fn activate(&self, target: CellTarget, origin: SessionId) -> Result<Receipt> {
+    /// Admits or refreshes a selected snapshot after an authenticated owner hint.
+    pub async fn activate(&self, target: CellTarget, origin: SessionId) -> Result<Receipt> {
+        tokio::select! {
+            () = self.closed.cancelled() => Err(Error::RuntimeClosed),
+            result = self.activate_open(target, origin) => result,
+        }
+    }
+
+    async fn activate_open(&self, target: CellTarget, origin: SessionId) -> Result<Receipt> {
         let _activation = self.activation.lock().await;
+        self.ensure_open()?;
         let cell = target.cell_id();
         let control = self
             .authority
@@ -177,7 +202,7 @@ impl ReadReplicaManager {
             self.layout.clone(),
             *cell.as_bytes(),
             *control.incarnation.as_bytes(),
-            repository_replica_limits(),
+            self.limits,
         )?;
         let reader = CellReadReplica::open(
             self.runtime.clone(),
@@ -197,7 +222,8 @@ impl ReadReplicaManager {
         Ok(receipt)
     }
 
-    pub(crate) async fn status(&self, target: CellTarget) -> Result<(Receipt, bool)> {
+    /// Returns the selected snapshot receipt and live-owner readiness.
+    pub async fn status(&self, target: CellTarget) -> Result<(Receipt, bool)> {
         if !self.still_selected(target.cell_id()).await? {
             return Err(Error::ReplicaUnavailable);
         }
@@ -253,52 +279,84 @@ impl ReadReplicaManager {
         self.selected(control, owner.session).await
     }
 
-    pub(crate) async fn run(&self, cancellation: CancellationToken) -> Result<()> {
+    /// Refreshes admitted snapshots and evicts readers removed from placement.
+    ///
+    /// This loop does not discover new Cells; authenticated owner hints call
+    /// `activate`. Cancellation interrupts provider waits and bounded batches.
+    pub async fn run(&self, cancellation: CancellationToken) -> Result<()> {
         let mut tick = tokio::time::interval(RECONCILE_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut cursor = 0_usize;
         loop {
             tokio::select! {
                 () = cancellation.cancelled() => return Ok(()),
-                _ = tick.tick() => {
-                    let mut readers = self.active.read().await.keys().copied().collect::<Vec<_>>();
-                    readers.sort_by_key(|cell| cell.as_bytes().to_owned());
-                    let count = readers.len().min(RECONCILE_BATCH);
-                    for offset in 0..count {
-                        if cancellation.is_cancelled() { return Ok(()); }
-                        let cell = readers[(cursor + offset) % readers.len()];
-                        let current = self.active.read().await.get(&cell).cloned();
-                        if let Some(reader) = current {
-                            match self.still_selected(cell).await {
-                                Ok(true) => {},
-                                Ok(false) => {
-                                    self.remove(cell).await;
-                                    continue;
-                                },
-                                Err(error) => {
-                                    tracing::warn!(?cell, error = %error, "read replica selection check failed");
-                                    continue;
-                                },
-                            }
-                            let path = self.destination(cell).await?;
-                            match reader.refresh(&path).await {
-                                Ok(_) => {},
-                                Err(Error::Fenced) => {
-                                    // Keep verified warm bytes after owner death. Queries
-                                    // still require a live owner; changed authority evicts.
-                                    if reader.readiness().await.is_err() { self.remove(cell).await; }
-                                },
-                                Err(error) => tracing::warn!(?cell, error = %error, "read replica refresh failed"),
-                            }
+                () = self.closed.cancelled() => return Ok(()),
+                _ = tick.tick() => {}
+            }
+            if self.closed.is_cancelled() {
+                return Ok(());
+            }
+            let mut readers = self.active.read().await.keys().copied().collect::<Vec<_>>();
+            readers.sort_by_key(|cell| cell.as_bytes().to_owned());
+            let count = readers.len().min(RECONCILE_BATCH);
+            for _ in 0..count {
+                let index = cursor % readers.len();
+                let cell = readers[index];
+                // Advance before I/O so an unavailable Cell cannot starve the
+                // rest of the bounded batch after cancellation or timeout.
+                cursor = (index + 1) % readers.len();
+                tokio::select! {
+                    () = cancellation.cancelled() => return Ok(()),
+                    () = self.closed.cancelled() => return Ok(()),
+                    result = tokio::time::timeout(RECONCILE_DEADLINE, self.refresh_selected(cell)) => {
+                        match result {
+                            Ok(Ok(())) => {},
+                            Ok(Err(error)) => tracing::warn!(?cell, error = %error, "read replica refresh failed"),
+                            Err(_) => tracing::warn!(?cell, "read replica refresh deadline exceeded"),
                         }
                     }
-                    cursor = if readers.is_empty() { 0 } else { (cursor + count) % readers.len() };
                 }
             }
         }
     }
 
-    pub(crate) async fn remove(&self, cell: CellId) {
+    async fn refresh_selected(&self, cell: CellId) -> Result<()> {
+        // Share activation's lane so an old view cannot evict a replacement
+        // installed concurrently for the same Cell after an epoch change.
+        let _activation = self.activation.lock().await;
+        self.ensure_open()?;
+        let current = self.active.read().await.get(&cell).cloned();
+        let Some(reader) = current else {
+            return Ok(());
+        };
+        if !self.still_selected(cell).await? {
+            self.remove_locked(cell).await;
+            return Ok(());
+        }
+        let path = self.destination(cell).await?;
+        match reader.refresh(&path).await {
+            Ok(_) => Ok(()),
+            Err(Error::Fenced) => {
+                // Keep verified warm bytes after owner death. Queries still
+                // require a live owner; changed authority evicts the view.
+                if reader.readiness().await.is_err() {
+                    self.remove_locked(cell).await;
+                }
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn ensure_open(&self) -> Result<()> {
+        if self.closed.is_cancelled() {
+            return Err(Error::RuntimeClosed);
+        }
+        Ok(())
+    }
+
+    /// Closes and removes one read view before eviction or writable activation.
+    pub async fn remove(&self, cell: CellId) {
         let _activation = self.activation.lock().await;
         self.remove_locked(cell).await;
     }
@@ -309,7 +367,11 @@ impl ReadReplicaManager {
         }
     }
 
-    pub(crate) async fn shutdown(&self) {
+    /// Permanently closes activation and every retained read view.
+    pub async fn shutdown(&self) {
+        // Cancel provider waits before joining activation's lane; retained peer
+        // adapters must neither strand drain nor reopen snapshots afterward.
+        self.closed.cancel();
         let _activation = self.activation.lock().await;
         for (_, reader) in self.active.write().await.drain() {
             reader.close();
@@ -329,14 +391,32 @@ impl PeerReplicaResolver for ReadReplicaManager {
         &self,
         target: CellTarget,
     ) -> Pin<Box<dyn Future<Output = Result<CellReadReplica>> + Send + 'static>> {
-        let active = Arc::clone(&self.active);
+        let manager = self.clone();
         Box::pin(async move {
-            active
+            manager.ensure_open()?;
+            manager
+                .active
                 .read()
                 .await
                 .get(&target.cell_id())
                 .cloned()
-                .ok_or(Error::CellNotActive)
+                .ok_or(Error::ReplicaUnavailable)
         })
+    }
+}
+
+impl PeerReplicaControl for ReadReplicaManager {
+    fn activate(
+        &self,
+        target: CellTarget,
+        origin: SessionId,
+    ) -> BoxFuture<'static, Result<Receipt>> {
+        let manager = self.clone();
+        Box::pin(async move { manager.activate(target, origin).await })
+    }
+
+    fn status(&self, target: CellTarget) -> BoxFuture<'static, Result<(Receipt, bool)>> {
+        let manager = self.clone();
+        Box::pin(async move { manager.status(target).await })
     }
 }

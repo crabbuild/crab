@@ -27,6 +27,7 @@ struct TaskContext<'a> {
     shutdown: &'a mut Option<ShutdownState>,
     node_lease: &'a RuntimeNodeLease,
     unpublished_node_log_bytes: &'a AtomicU64,
+    publications: &'a broadcast::Sender<CatalogEntry>,
     movement: &'a mut MovementBudget,
     movement_permits: &'a mut HashMap<CellId, MovementPermit>,
 }
@@ -44,6 +45,7 @@ pub(super) fn handle_task(
     shutdown: &mut Option<ShutdownState>,
     node_lease: &RuntimeNodeLease,
     unpublished_node_log_bytes: &AtomicU64,
+    publications: &broadcast::Sender<CatalogEntry>,
     movement: &mut MovementBudget,
     movement_permits: &mut HashMap<CellId, MovementPermit>,
 ) {
@@ -55,6 +57,7 @@ pub(super) fn handle_task(
         shutdown,
         node_lease,
         unpublished_node_log_bytes,
+        publications,
         movement,
         movement_permits,
     };

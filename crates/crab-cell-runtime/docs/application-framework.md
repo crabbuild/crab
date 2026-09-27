@@ -307,6 +307,14 @@ validation still use the owner. Replica queries
 report their actual snapshot receipt, reject a newer minimum with
 `ReplicaBehind`, and never fall back when readers are unavailable.
 
+The public host installs `ReadReplicaManager` for admitted-view refresh and
+drain, and `CellNode::install_read_replica_recruitment` for owner recruitment
+across the application's compiled namespaces. Products supply scope, signed
+membership, and an authenticated activation client. Both the reference app
+and repository service use this host loop and the shared peer activation/status
+dispatch. Reader selection remains advisory; each recipient rechecks owner,
+policy, membership, and resource admission before opening a snapshot.
+
 Host code supplies `CellClient::with_read_replicas` with the shared runtime
 `ReplicaReadRouter` built from its existing instrumented `CellAuthority` and
 live directory, an authenticated peer client, and an optional local
@@ -348,9 +356,13 @@ traits; each accessor accepts a declared `CellKey` whose canonical bytes feed
 the compiled `CellType` shard contract. The
 reference application's independent descriptor-byte test, compile-fail
 examples, and three-node `CellNode` suite cover this initial binding. The
-rollout test overlaps two release identities with unchanged module contracts;
-additive code rollout remains unqualified. A general schema-driven generator
-and generated transport adapters remain open.
+rollout test adds a generated query and retains predecessor code while old and
+new clients overlap. It then publishes a code-only migration, rejects stale
+capabilities and predecessor clients, and recovers exact receipts on a fresh
+host. The RustFS variant uses the same path with real object storage. This is
+a correctness gate with one process hosting the nodes; additive schema changes
+and continuous traffic during rolling container replacement remain unqualified.
+A general schema-driven generator and generated transport adapters remain open.
 
 ```rust,ignore
 let commerce = CommerceClient::new(node.application::<Commerce>()?);

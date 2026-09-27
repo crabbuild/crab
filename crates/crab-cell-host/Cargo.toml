@@ -11,8 +11,11 @@ description = "Provider-neutral Cell node lifecycle facade"
 [dependencies]
 crab-cell-app.workspace = true
 crab-cell-runtime.workspace = true
-tokio = { workspace = true, features = ["rt", "sync", "time"] }
+futures-util.workspace = true
+tokio = { workspace = true, features = ["fs", "rt", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
+tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

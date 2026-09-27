@@ -7,32 +7,48 @@ use crab_cell_runtime::node::lease::NodeLeaseGuard;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+pub(super) fn directory(layout: &CellStorageLayout, registry: &Registry) -> NodeDirectory {
+    NodeDirectory::new(
+        layout.clone(),
+        Digest::from_bytes([90; 32]),
+        Digest::from_bytes([91; 32]),
+        registry.release_digest(),
+    )
+}
+
 pub(super) async fn start(
     node: usize,
     application: Arc<crab_cell_app::CompiledApplication>,
     layout: &CellStorageLayout,
-) -> (CellNode, Arc<DurabilityRecorder>) {
+    root: &std::path::Path,
+    endpoint: String,
+) -> (
+    CellNode,
+    Arc<DurabilityRecorder>,
+    crab_cell_host::read_replicas::ReadReplicaManager,
+) {
     let registry = application.registry();
+    // Keep writer admission at 32 Cells while charging both the old and new
+    // immutable snapshots during a refresh under the same node ledger.
+    let pool = SqlWorkerPool::new(4, 32)
+        .unwrap()
+        .with_native_memory_limit(32 << 20)
+        .unwrap();
     let host = CellNodeBuilder::new(application)
-        .with_runtime(SqlWorkerPool::new(4, 32).unwrap(), 64 * 1024 * 1024)
+        .with_runtime(pool, 64 * 1024 * 1024)
         .with_session(node_session(node))
         .with_replica_host(reference_host())
         .build()
         .unwrap();
     let durability = Arc::new(DurabilityRecorder::default());
     host.install_telemetry(durability.clone()).unwrap();
-    let directory = NodeDirectory::new(
-        layout.clone(),
-        Digest::from_bytes([90; 32]),
-        Digest::from_bytes([91; 32]),
-        registry.release_digest(),
-    );
+    let directory = directory(layout, &registry);
     let signer = SigningKey::from_bytes(&[93; 32]);
     let advertisement = move |now: i64, progress| {
         NodeAdvertisement::sign(
             NodeId::from_bytes(*node_session(node).as_bytes()),
             node_session(node),
-            format!("https://reference-{node}.internal:8081"),
+            endpoint.clone(),
             Digest::from_bytes([90; 32]),
             Digest::from_bytes([94; 32]),
             Digest::from_bytes([91; 32]),
@@ -108,6 +124,66 @@ pub(super) async fn start(
     // Even a short smoke must exercise provider-backed renewal before it can
     // report readiness; successful drain then proves withdrawal of that version.
     first_renewal.await.unwrap();
+    let readers = host
+        .install_read_replicas(
+            layout.clone(),
+            self::directory(layout, &host.application().registry()),
+            root.join("readers"),
+            Limits::default(),
+        )
+        .unwrap();
+    host.install_read_replica_recruitment(
+        crab_cell_runtime::cell::application::ApplicationIdentity::new(
+            TenantId::from_bytes([81; 16]),
+            ApplicationId::from_bytes([82; 16]),
+        ),
+        crab_cell_runtime::peer::ReplicaPeerClient::new(
+            host.application().registry(),
+            Arc::new(crab_cell_runtime::peer::PeerSigner::new(
+                node_session(node),
+                host.application().registry().release_digest(),
+                SigningKey::from_bytes(&[93; 32]),
+            )),
+            crab_cell_runtime::peer::PeerPrincipal {
+                issuer: "reference-runtime".into(),
+                subject: format!("node-{node}"),
+                actions: vec!["cell.replica.activate".into()],
+            },
+            Arc::new(EnrolledReplicaTransport),
+        ),
+    )
+    .unwrap();
     host.start().unwrap();
-    (host, durability)
+    (host, durability, readers)
+}
+
+pub(super) struct EnrolledReplicaTransport;
+
+impl crab_cell_runtime::peer::PeerRoundTrip for EnrolledReplicaTransport {
+    fn send(
+        &self,
+        _: CellTarget,
+        _: Vec<u8>,
+        _: u32,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'static>> {
+        Box::pin(async { Err(Error::Peer("reader activation requires an enrolled node")) })
+    }
+
+    fn send_to_node(
+        &self,
+        _: CellTarget,
+        node: NodeAdvertisement,
+        request: Vec<u8>,
+        remaining_ms: u32,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'static>> {
+        let endpoint = node.endpoint().to_owned();
+        Box::pin(async move {
+            let address = endpoint
+                .strip_prefix("https://")
+                .ok_or(Error::Peer("reader endpoint is invalid"))?
+                .parse()
+                .map_err(|_| Error::Peer("reader endpoint has no socket address"))?;
+            super::fleet::send_tcp(address, request, remaining_ms).await
+        })
+    }
 }

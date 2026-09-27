@@ -296,6 +296,87 @@ authority outage, and a separately isolated reader during takeover; broader capa
 and production fault qualification remain open. Private peer replica requests are accepted only in
 the object-durability server profile.
 
+The reference application's direct and balanced three-process RustFS tests now
+exercise generated snapshot queries on two non-owner `CellNode` processes.
+Both local GA RustFS runs passed: thirteen successful queries were attributed
+7/6 to the two selected readers and zero to the writer. Missing readers return
+unavailability, a new owner command leaves the old snapshot readable, its
+minimum receipt is rejected until refresh, and duplicate command delivery
+preserves one receipt and effect. Refresh is test-controlled; this proof does
+not establish automatic placement, replacement, or production throughput.
+The run exposed that a 32-writer pool's default native admission budget is only
+2 MiB, below one 12 MiB read snapshot. Hosts can now explicitly set the pool's
+native-memory ceiling without increasing writer or descriptor capacity. The
+reference host uses 32 MiB so old and replacement snapshots remain charged
+during refresh. The same generated proof also passed on three constrained
+Compose nodes with GA RustFS: each node had 1 CPU, 1 GiB, and zero swap; all
+exited zero and withdrew renewed sessions. The
+[source-bound receipt](../crates/crab-cell-app/performance/2026-09-27-replica-compose.md)
+records the 7/6 successful reader split and cgroup evidence. Protected capacity
+and fault gates remain open. See the reference application's `PERFORMANCE.md`
+commands.
+
+The admitted-view manager now belongs to `crab-cell-host`; the issue service
+and reference processes use the same implementation. `CellNode` owns its
+refresh task and drain callback. The reference proof now observes automatic
+root refresh and eviction after target zero, with six generated queries served
+by each reader. In that measured revision, admission began with an explicit
+fixture owner hint; general application-host recruitment was separate work.
+Shutdown cancels provider waits before joining the activation lane, and a
+retained manager cannot reopen after drain. A stalled-store regression covers
+this ordering. Product authentication stays in the server.
+The [three-container GA RustFS receipt](../crates/crab-cell-app/performance/2026-09-27-host-readers-compose.md)
+binds these automatic lifecycle checks to source and binary hashes, one CPU /
+1 GiB / zero swap per node, and successful renewed-session withdrawal. It does
+not qualify performance improvement or a supported capacity.
+
+Owner recruitment now also belongs to the public host. The issue service and
+reference hosts install one bounded, cancellable loop across their compiled
+application namespaces. Activation and status share the signed runtime peer
+client/dispatcher; receiver admission still checks current owner, policy,
+membership and resources. The
+[recruitment receipt](../crates/crab-cell-app/performance/2026-09-27-reader-recruitment.md)
+proves automatic placement, refresh, eviction and drain on three constrained
+Compose nodes. A separate native three-to-five-process run killed a selected
+reader, automatically replaced it, and verified twelve generated reads at the
+acknowledged receipt without changing writer ownership. Its observed 14.777 s
+replacement time is one sample. Native processes had no individual CPU/memory
+limits; constrained application capacity at 5/10/20 nodes, sustained freshness
+and throughput, owner loss during arrivals, and protected gates remain open.
+
+The reference application now also has a constrained
+[3/5/10/20-node reader run](../crates/crab-cell-app/performance/2026-09-27-reader-scaling.md).
+It verifies thirty generated queries per selected reader, two acknowledged
+writes per stage, automatic refresh, an actual reader-container kill at five
+nodes, replacement without changing writer ownership, target-zero eviction,
+and drain of all twenty surviving hosts. Each node had one CPU / 1 GiB / zero
+swap; the complete Colima VM had four CPUs. The seven writer Cells remained
+on three owners, so this is reader scaling rather than writer redistribution.
+Ready-query p99 ranged from 1.802 to 4.781 ms in short serial samples, while
+the second write took about five seconds to reach all readers. Replacement
+took 34.830 s in one sample and needs latency investigation. Sustained
+capacity/freshness, many-Cell admission, arrivals during faults and protected
+qualification remain open.
+
+The [activation-expiry follow-up](../crates/crab-cell-app/performance/2026-09-27-reader-expiry.md)
+reproduced a pending hint holding recruitment after its selected boot expired.
+The shared peer client now rechecks that session at its observed expiry while
+preserving the same request across valid renewal. The unchanged constrained
+3/5/10/20-node profile passed; replacement took 10.983 s in one run, versus the
+earlier 34.830 s. Exact generated reads, owner identity and survivor drain
+remained intact. Refresh still took roughly five seconds, and neither sample
+establishes a supported recovery or freshness limit.
+
+The [publication-notification follow-up](../crates/crab-cell-app/performance/2026-09-27-reader-publication.md)
+passed the same constrained 3/5/10/20-node profile. Second-write readiness was
+110–152 ms, using bounded advisory notifications and the existing signed
+recruitment path. The run also exposed and fixed raw handler time moving behind
+persisted logical time; deterministic local/forwarded Workflow and owner/replica
+query tests now cover that boundary. All 1,002 exact reads passed; reader
+replacement took 14.634 s. Sustained capacity, store-call amplification and
+many-Cell resource slopes remain unqualified. Separate product fleet CI failed
+its bounded 20-node placement gate, leaving arrivals during owner loss unrun.
+
 The ignored `rustfs_replica_reads_exact_root_and_policy_cas` test also passed
 against a local RustFS bucket with an isolated prefix. It exercised real S3
 root reads, atomic snapshot refresh, fencing after release, and a policy

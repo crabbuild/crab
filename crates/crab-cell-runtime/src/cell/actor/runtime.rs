@@ -147,6 +147,7 @@ impl CellRuntime {
             .install_disk_admission(Arc::new(LedgerDiskAdmission::new(session, &resources)))?;
         let runtime = tokio::runtime::Handle::try_current().map_err(Error::RuntimeStart)?;
         let (sender, receiver) = mpsc::channel(INGRESS_REQUESTS);
+        let publications = broadcast::Sender::new(PUBLICATION_NOTIFICATIONS);
         let node_lease = Arc::new(node_lease);
         let unpublished_node_log_bytes = Arc::new(AtomicU64::new(0));
         runtime.spawn(run(
@@ -155,10 +156,12 @@ impl CellRuntime {
             Arc::clone(&node_lease),
             Arc::clone(&unpublished_node_log_bytes),
             telemetry.clone(),
+            publications.clone(),
         ));
         Ok(Self {
             inner: Arc::new(RuntimeInner {
                 sender,
+                publications,
                 resources,
                 primitive_jobs,
                 shutting_down: AtomicBool::new(false),
@@ -173,6 +176,16 @@ impl CellRuntime {
                 unpublished_node_log_bytes,
             }),
         })
+    }
+
+    /// Subscribes to bounded advisory hints after Cell activation or object publication.
+    ///
+    /// Hints grant no read or ownership capability. Receivers must reload authority
+    /// and periodically reconcile missed hints, including broadcast lag. Command
+    /// acknowledgement never waits for receivers; fleet-only proofs send no hint.
+    #[must_use]
+    pub fn subscribe_publications(&self) -> broadcast::Receiver<CatalogEntry> {
+        self.inner.publications.subscribe()
     }
 
     /// Binds declared per-namespace LTX limits before a compiled application starts Cell work.

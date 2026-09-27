@@ -210,14 +210,24 @@ impl CellModule for CounterModule {
                 },
             ])),
             commands: &[],
-            queries: &[OperationDescriptor {
-                id: 1,
-                codec_version: 1,
-                schema_min: 1,
-                schema_max: 2,
-                input_limit: 16,
-                output_limit: 16,
-            }],
+            queries: &[
+                OperationDescriptor {
+                    id: 1,
+                    codec_version: 1,
+                    schema_min: 1,
+                    schema_max: 2,
+                    input_limit: 16,
+                    output_limit: 16,
+                },
+                OperationDescriptor {
+                    id: 2,
+                    codec_version: 1,
+                    schema_min: 1,
+                    schema_max: 2,
+                    input_limit: 1,
+                    output_limit: 8,
+                },
+            ],
             workflow_definitions: &[],
             activity_types: &[],
             namespaces: &[NamespaceDescriptor {
@@ -232,7 +242,8 @@ impl CellModule for CounterModule {
     }
 
     fn register(self, registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
-        registry.bind_query::<ReadCounter>()
+        registry.bind_query::<ReadCounter>()?;
+        registry.bind_query::<lifecycle::ReadLogicalTime>()
     }
 }
 
@@ -397,7 +408,10 @@ async fn exercise_replica_read(fixture: &Fixture) {
     let runtime = CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 8 << 20, session).unwrap();
     // Hold one old-view query while a second admitted SQL job opens its replacement.
     let reader_runtime = CellRuntime::new_with_replica_host(
-        SqlWorkerPool::new(2, 512).unwrap(),
+        SqlWorkerPool::new(2, 2)
+            .unwrap()
+            .with_native_memory_limit(32 << 20)
+            .unwrap(),
         8 << 20,
         SessionId::from_bytes([14; 16]),
         crab_ltx::Host::default().with_local_disk_budget(crab_ltx::DiskBudget::new(8 << 20)),
