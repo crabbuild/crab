@@ -3,6 +3,7 @@
 mod capacity;
 mod node_lease;
 mod peer_receiver;
+mod placement;
 
 pub use capacity::measured_node_capacity;
 pub use node_lease::{NodeLeasePublisher, PublishedNodeLease};
@@ -60,7 +61,9 @@ impl PeerTargetScope for BeyonddbPeerScope {
 /// The caller retains the node's published lease. The TLS identity's private
 /// key signs peer requests for the same boot session advertised by the node.
 /// The provisioner must belong to this node and layout. Ownerless cataloged
-/// Cells are restored through its admission gate; live peers retain ownership.
+/// data/index Cells select a live destination from signed capacity, then restore
+/// through that node's admission gate. Other namespaces restore locally; live
+/// owners retain ownership. Missing placement capacity rejects new placement.
 pub fn build_peer_client(
     node: &CellNode,
     layout: CellStorageLayout,
@@ -83,17 +86,22 @@ pub fn build_peer_client(
     let round_trip = Arc::new(PeerHttpRoundTrip::new(
         Arc::new(BeyonddbPeerScope),
         CellAuthority::new(layout.clone()),
-        directory,
+        directory.clone(),
         Arc::new(tls.client_identity()),
         session,
     ));
+    let placement = placement::ColdPlacement {
+        directory,
+        session,
+        signer: signer.clone(),
+        round_trip: round_trip.clone(),
+    };
     Ok(
         CellClient::peer(node.application().registry(), signer, principal, round_trip)
-            .with_local_resolver(Arc::new(peer_receiver::LocalResolver::serving(
-                node,
-                layout,
-                provisioner,
-            ))),
+            .with_local_resolver(Arc::new(
+                peer_receiver::LocalResolver::serving(node, layout, provisioner)
+                    .with_placement(placement),
+            )),
     )
 }
 

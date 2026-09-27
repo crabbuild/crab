@@ -363,7 +363,7 @@ async fn serve_ready(
     state.tls_enabled = public_tls.is_some();
     let peer_cancel = CancellationToken::new();
     let peer_shutdown = peer_cancel.clone();
-    let peer_router = peer_router(node, layout, directory.clone());
+    let peer_router = peer_router(node, layout, directory.clone(), provisioner.clone());
     // Other recovering nodes may need these local participants. Start private
     // routing before resolving decisions, while public requests remain gated.
     let mut peer_server = tokio::spawn(async move {

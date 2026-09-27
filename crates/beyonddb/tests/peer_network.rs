@@ -34,7 +34,7 @@ use crab_cell_peer_http::{LoadedPeerTls, PeerHttpRoundTrip, PeerTlsIdentity};
 use crab_cell_runtime::client::CellClient;
 use crab_cell_runtime::control::authority::CellAuthority;
 use crab_cell_runtime::ltx::{CellStorageLayout, DiskBudget, Host};
-use crab_cell_runtime::node::{NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain};
+use crab_cell_runtime::node::{NodeAdvertisement, NodeDirectory, NodeFailureDomain};
 use crab_cell_runtime::peer::{PeerPrincipal, PeerRoundTrip, PeerSigner};
 use crab_cell_runtime::registry::BuildDescriptor;
 use crab_cell_runtime::{
@@ -161,7 +161,10 @@ async fn start_node(
         .unwrap();
     let fleet = directory.fleet();
     let release = application.registry().release_digest();
+    let runtime = node.runtime();
     let published = NodeLeasePublisher::new(directory, move |now, expires| {
+        let (capacity, placement) =
+            beyonddb::measured_node_capacity(&std::env::temp_dir(), runtime.stats())?;
         NodeAdvertisement::sign(
             NodeId::from_bytes([node_byte; 16]),
             session,
@@ -177,13 +180,9 @@ async fn start_node(
             vec![Digest::from_bytes([91; 32])],
             vec![1],
             NodeFailureDomain::default(),
-            NodeCapacity {
-                free_memory_bytes: 16 * 1024 * 1024,
-                free_disk_bytes: 1 << 30,
-                job_credits: 8,
-                ..NodeCapacity::default()
-            },
-        )
+            capacity,
+        )?
+        .with_placement_capacity(placement, &signing_key)
     })
     .publish()
     .await
@@ -254,7 +253,12 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     );
     provisioner.admit_account("123456789012").await.unwrap();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let router = peer_router(&owner, layout.clone(), peer_directory.clone());
+    let router = peer_router(
+        &owner,
+        layout.clone(),
+        peer_directory.clone(),
+        provisioner.clone(),
+    );
     let server = tokio::spawn(async move {
         axum::serve(
             tls.listener(listener),
@@ -295,7 +299,12 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
     let remote_listener_tls =
         LoadedPeerTls::load(&remote_certificate, &remote_key, &ca, "localhost").unwrap();
     let (remote_shutdown, remote_cancel) = tokio::sync::oneshot::channel();
-    let remote_router = peer_router(&remote, layout.clone(), peer_directory.clone());
+    let remote_router = peer_router(
+        &remote,
+        layout.clone(),
+        peer_directory.clone(),
+        remote_provisioner.clone(),
+    );
     let remote_server = tokio::spawn(async move {
         axum::serve(
             remote_listener_tls.listener(remote_listener),
@@ -764,7 +773,12 @@ async fn signed_sdk_request_routes_across_two_owners_and_survives_restart() {
         replacement_provisioner.clone(),
     )
     .unwrap();
-    let replacement_router = peer_router(&replacement, layout.clone(), peer_directory.clone());
+    let replacement_router = peer_router(
+        &replacement,
+        layout.clone(),
+        peer_directory.clone(),
+        replacement_provisioner.clone(),
+    );
     let replacement_server = tokio::spawn(async move {
         axum::serve(
             replacement_tls.listener(replacement_listener),

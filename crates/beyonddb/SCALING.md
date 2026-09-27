@@ -30,8 +30,9 @@ duplicating a placement algorithm inside its table adapter is unnecessary.
 The binary now signs fresh memory, disk, Cell/job, and backlog observations on
 each lease renewal. OS availability is capped by runtime admission and current
 reservations. Probe failures and shutdown advertise no placement capacity; old
-samples are never re-signed with a fresh timestamp. These observations supply
-planner input; a distributed movement controller remains unimplemented.
+samples are never re-signed with a fresh timestamp. These observations now select destinations for request-driven restoration of
+idle, published data/GSI Cells. A distributed movement controller remains
+unimplemented.
 Reservations also reduce OS-available bytes because they can include future
 allocation. This conservatively counts already materialized reservations twice
 and protects unallocated bytes already held by accepted work.
@@ -1243,3 +1244,39 @@ code owns host probing, cgroup parsing, and admission intersection; it supplies
 measured inputs without introducing another scheduler or admission ledger.
 The lockfile adds only BeyondDB edges to already locked `fs4` 0.13.1 and
 `sysinfo` 0.38.4, with no package-version or source changes.
+
+
+### Request-driven cold placement
+
+Idle published data/GSI Cells use the runtime planner's signed capacity ranking
+before restoration. Discovery accepts at most 1,024 live nodes and fails on
+overflow; it never treats a partial scan as a fleet view. Missing placement
+blocks are ineligible. Selected destinations still reserve runtime resources
+and claim ownership through the existing control CAS. A failed destination
+request does not silently place locally.
+
+A separate `beyonddb.cell.activate` capability permits only Describe on data/GSI
+Cells, over the existing pinned mTLS route. Session/fleet identity and operation
+scope are checked before restoration. Ordinary invocation remains lookup-only
+at the receiving peer. Activation cannot create catalog records, bootstrap a
+root, steal a live owner, or acquire account/credential/coordinator Cells. If an
+activation stops after claiming ownership, a later ingress resumes it on that
+exact live session; expired-session takeover remains a separate fenced path.
+Activation handling is bounded by the verified request deadline.
+
+This connects capacity observations to real request routing. It does not
+redistribute serving Cells, place newly provisioned ranges, persist movement
+intents, or shard discovery and controller ownership. Those remain required for
+the placement delivery gate and the 10,000-Cell/multi-TB target.
+
+The signed SDK cold-placement scenario passes with SDK retries disabled. It
+checks ordinary invocation against an idle Cell, invalid activation principals,
+a query presented as activation, account activation denial, live-owner
+protection, and remote recovery after a claimed-but-unopened boundary. It commits
+a transaction across the two restored Cells, drains that owner, waits for its
+lease to expire, and reads both changed items through the remaining node.
+The final residency run passes all four SDK cases in 26.22 seconds, including
+existing local restoration and released-participant transaction regressions.
+Strict all-target BeyondDB Clippy passes in 32.54 seconds; format, layout,
+policy-entry, and diff checks pass. These are local macOS results; current-head
+Linux qualification remains pending. No fleet-scale throughput is claimed.

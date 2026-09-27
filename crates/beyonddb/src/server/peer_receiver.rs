@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin, sync::Arc, time::SystemTime};
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use axum::{
     Router,
@@ -15,18 +15,20 @@ use crab_cell_runtime::cell::{
     catalog::{CatalogRole, CellCatalog},
 };
 use crab_cell_runtime::client::LocalCellResolver;
-use crab_cell_runtime::control::authority::CellAuthority;
+use crab_cell_runtime::control::{ControlState, authority::CellAuthority};
 use crab_cell_runtime::identity::{CellTarget, Digest, SessionId};
 use crab_cell_runtime::ltx::CellStorageLayout;
 use crab_cell_runtime::node::NodeDirectory;
 use crab_cell_runtime::peer::{
-    PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerPrincipal, VerifiedPeerRequest,
+    PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerPrincipal, VerifiedPeerRequest, wire,
 };
 use crab_cell_runtime::registry::Registry;
 use crab_cell_runtime::{Error, Result};
 
-use super::BeyonddbPeerScope;
+use super::{BeyonddbPeerScope, node_lease::unix_time_ms};
 use crate::{DATA_MODULE, DATA_NAMESPACE, MODULE, NAMESPACE, credentials, transaction_coordinator};
+
+pub(super) const ACTIVATE_ACTION: &str = "beyonddb.cell.activate";
 
 const INVOKE_ACTION: &str = "beyonddb.cell.invoke";
 
@@ -36,6 +38,7 @@ pub(super) struct LocalResolver {
     layout: CellStorageLayout,
     registry: Arc<Registry>,
     provisioner: Option<Arc<crate::CellInitialPartitionProvisioner>>,
+    placement: Option<Arc<super::placement::ColdPlacement>>,
 }
 
 impl LocalResolver {
@@ -49,7 +52,13 @@ impl LocalResolver {
             layout,
             registry: node.application().registry(),
             provisioner: Some(provisioner),
+            placement: None,
         }
+    }
+
+    pub(super) fn with_placement(mut self, placement: super::placement::ColdPlacement) -> Self {
+        self.placement = Some(Arc::new(placement));
+        self
     }
 }
 
@@ -103,6 +112,20 @@ impl LocalCellResolver for LocalResolver {
             let Some(provisioner) = resolver.provisioner else {
                 return Ok(None);
             };
+            let owner = control.value().owner.as_ref().map(|owner| owner.session);
+            let needs_placement = match control.value().state {
+                ControlState::Idle => owner.is_none(),
+                ControlState::Recovering => owner.is_some(),
+                _ => false,
+            };
+            if needs_placement
+                && control.value().root.is_some()
+                && super::placement::is_data_target(&target)
+                && let Some(placement) = resolver.placement
+                && !placement.select_local(&target, owner).await?
+            {
+                return Ok(None);
+            }
             provisioner.restore_idle(&target, proof, control).await
         })
     }
@@ -120,15 +143,27 @@ impl PeerCellResolver for LocalResolver {
 
 struct BeyondPeerAuthorizer {
     fleet: Digest,
+    action: &'static str,
 }
 
 impl PeerAuthorizer for BeyondPeerAuthorizer {
     fn authorize(&self, request: &VerifiedPeerRequest) -> Result<()> {
         BeyonddbPeerScope.check_target(request.target())?;
-        let expected = peer_principal(self.fleet, request.origin_session());
-        if request.principal() != &expected || !request.permits(INVOKE_ACTION) {
+        let mut expected = peer_principal(self.fleet, request.origin_session());
+        expected.actions = vec![self.action.into()];
+        if request.principal() != &expected {
             return Err(Error::PeerAuthorization(
                 "BeyondDB peer principal is invalid",
+            ));
+        }
+        if self.action == ACTIVATE_ACTION
+            && (!super::placement::is_data_target(request.target())
+                || !matches!(request.operation(), Some(wire::peer_request::Operation::Read(read))
+                    if read.minimum.is_none()
+                        && matches!(read.operation, Some(wire::read_request::Operation::Describe(true)))))
+        {
+            return Err(Error::PeerAuthorization(
+                "activation requires a data Cell description",
             ));
         }
         Ok(())
@@ -151,33 +186,53 @@ fn hex(bytes: &[u8]) -> String {
 struct Receiver {
     directory: NodeDirectory,
     dispatcher: Arc<PeerDispatcher>,
+    activation: Arc<PeerDispatcher>,
     runtime: CellRuntime,
 }
 
 /// Builds BeyondDB's authenticated private peer route for an mTLS listener.
 ///
 /// Mount this router only on `LoadedPeerTls::listener`. The caller must keep
-/// the node's advertisement lease and task group alive while serving.
-pub fn peer_router(node: &CellNode, layout: CellStorageLayout, directory: NodeDirectory) -> Router {
+/// the node's advertisement lease and task group alive while serving. The
+/// provisioner must belong to this node and layout; only signed data/index
+/// activation requests may use it to acquire ownerless published Cells.
+pub fn peer_router(
+    node: &CellNode,
+    layout: CellStorageLayout,
+    directory: NodeDirectory,
+    provisioner: Arc<crate::CellInitialPartitionProvisioner>,
+) -> Router {
     let runtime = node.runtime();
     let dispatcher = PeerDispatcher::new(
         node.application().registry(),
         Arc::new(LocalResolver {
             runtime: runtime.clone(),
-            layout,
+            layout: layout.clone(),
             registry: node.application().registry(),
             // The sender selects ownership before forwarding. A receiver may
             // only dispatch to that active owner; a raced release must reject.
             provisioner: None,
+            placement: None,
         }),
         Arc::new(BeyondPeerAuthorizer {
             fleet: directory.fleet(),
+            action: INVOKE_ACTION,
+        }),
+    )
+    .with_telemetry(runtime.telemetry_handle());
+    let activation = PeerDispatcher::new(
+        node.application().registry(),
+        Arc::new(LocalResolver::serving(node, layout, provisioner)),
+        Arc::new(BeyondPeerAuthorizer {
+            fleet: directory.fleet(),
+            action: ACTIVATE_ACTION,
         }),
     )
     .with_telemetry(runtime.telemetry_handle());
     let receiver = Receiver {
         directory,
         dispatcher: Arc::new(dispatcher),
+        activation: Arc::new(activation),
         runtime,
     };
     Router::new()
@@ -210,11 +265,8 @@ async fn forward(
             Err(_) => return error(StatusCode::UNAUTHORIZED),
         }
     };
-    let now_ms = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
-        Ok(duration) => match i64::try_from(duration.as_millis()) {
-            Ok(now_ms) => now_ms,
-            Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
-        },
+    let now_ms = match unix_time_ms() {
+        Ok(now_ms) => now_ms,
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
     };
     // Session enrollment reads object storage. Release the codec reservation
@@ -235,11 +287,31 @@ async fn forward(
     let Some(_reservation) = receiver.runtime.try_reserve_worker_job().ok().flatten() else {
         return busy();
     };
+    // Enrollment I/O consumes the signed request lifetime too.
+    let now_ms = match unix_time_ms() {
+        Ok(now_ms) => now_ms,
+        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
+    };
     let request = match verifier.verify(&body, now_ms) {
         Ok(request) => request,
         Err(_) => return error(StatusCode::UNAUTHORIZED),
     };
-    let reply = match receiver.dispatcher.dispatch_bytes(&request, now_ms).await {
+    // Each dispatcher authorizes before resolving. Only the narrow activation
+    // capability may restore an idle Cell; forwarded application work cannot.
+    let dispatched = if request.permits(ACTIVATE_ACTION) {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(u64::from(request.remaining_ms())),
+            receiver.activation.dispatch_bytes(&request, now_ms),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => return error(StatusCode::GATEWAY_TIMEOUT),
+        }
+    } else {
+        receiver.dispatcher.dispatch_bytes(&request, now_ms).await
+    };
+    let reply = match dispatched {
         Ok(reply) => reply,
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR),
     };

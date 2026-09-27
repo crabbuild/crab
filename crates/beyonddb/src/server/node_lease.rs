@@ -154,7 +154,7 @@ impl Drop for PublishedNodeLease {
     }
 }
 
-fn unix_time_ms() -> Result<i64> {
+pub(super) fn unix_time_ms() -> Result<i64> {
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

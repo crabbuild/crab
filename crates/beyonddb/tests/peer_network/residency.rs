@@ -1,3 +1,5 @@
+mod placement;
+
 use crate::*;
 use crab_cell_runtime::cell::actor::CellHandle;
 use extenddb_core::types::{AttributeValue, Item};
@@ -7,9 +9,12 @@ type SdkItem = HashMap<String, AwsAttributeValue>;
 struct Fixture {
     _files: tempfile::TempDir,
     node: CellNode,
+    application: Arc<crab_cell_app::CompiledApplication>,
     provisioner: Arc<CellInitialPartitionProvisioner>,
     layout: CellStorageLayout,
     session: SessionId,
+    directory: NodeDirectory,
+    remote_tls: LoadedPeerTls,
     endpoint: String,
     sdk: aws_sdk_dynamodb::Client,
     data: Vec<(CellHandle, SdkItem)>,
@@ -20,7 +25,9 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let files = tempfile::tempdir().unwrap();
-        let (certificate, key, _, _, ca) = tls_files(files.path());
+        let (certificate, key, remote_certificate, remote_key, ca) = tls_files(files.path());
+        let remote_tls =
+            LoadedPeerTls::load(&remote_certificate, &remote_key, &ca, "localhost").unwrap();
         let tls = LoadedPeerTls::load(&certificate, &key, &ca, "localhost").unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("https://{}", listener.local_addr().unwrap());
@@ -120,7 +127,12 @@ impl Fixture {
             )
             .await
             .unwrap();
-        let router = peer_router(&node, layout.clone(), directory);
+        let router = peer_router(
+            &node,
+            layout.clone(),
+            directory.clone(),
+            provisioner.clone(),
+        );
         let peer_server = tokio::spawn(async move {
             axum::serve(
                 tls.listener(listener),
@@ -228,9 +240,12 @@ impl Fixture {
         Self {
             _files: files,
             node,
+            application,
             provisioner,
             layout,
             session,
+            directory,
+            remote_tls,
             endpoint,
             sdk,
             data,

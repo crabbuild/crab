@@ -30,8 +30,12 @@ Linux placement measurement requires a readable, complete cgroup-v2 memory
 hierarchy; it checks ancestor limits and usage, including usage above a limit.
 Cgroup-v1, hidden ancestors in a container namespace, and unsupported platforms
 are ineligible instead of advertising host-wide RAM. Native macOS uses host RAM.
-Configured owned Cells can still serve when placement measurement is unavailable;
-automatic fleet placement and rebalancing are not yet composed into this server.
+Configured owned Cells can still serve when placement measurement is unavailable.
+Requests for idle, previously published data/GSI Cells now select a destination
+from signed capacity and activate it over pinned mTLS. Missing eligible capacity
+rejects placement. Account, credential, and coordinator residency keep their
+existing policies. Initial range provisioning and automatic rebalancing remain
+unfinished; adding a node does not move already serving Cells.
 
 `cargo run -p beyonddb --bin beyonddb -- config.json --bootstrap` starts one
 leased Cell node, a private mTLS peer listener, and ExtendDB's public DynamoDB
@@ -120,7 +124,7 @@ capacity for its recovered ranges. While serving, it also discovers expired
 coordinator owners through configured accounts and restores their original
 participants. Data-only-node discovery and general fleet placement still need
 a recovery scheduler.
-Automatic placement, fleet-wide unattended takeover, multi-node capacity loops,
+Initial fleet placement, proactive rebalancing, unattended takeover, multi-node capacity loops,
 management APIs, and the remaining DynamoDB operations are still required
 before this is a complete service. A public node with no locally owned account
 or credential Cells can forward signed requests to live owners through mTLS.
@@ -212,15 +216,17 @@ accepts a caller-supplied `CellClient`. The signed SDK test supplies
 `CellClient::runtime_with_peer` from a separate runtime; signed requests reach
 account, credential, and data Cells through an authenticated loopback peer
 round trip. `peer_router` authenticates incoming requests against live node
-advertisements, restricts targets to BeyondDB namespaces, and dispatches only
-to the current local owner. `build_peer_client` binds the owner-resolving HTTP
+advertisements, restricts targets to BeyondDB namespaces, and dispatches ordinary
+operations only to the current local owner. A separate Describe-only capability
+can activate published idle data/GSI Cells. `build_peer_client` binds the owner-resolving HTTP
 transport and a fleet-scoped principal to account, credential, and data Cells.
 It takes the matching node provisioner to restore cataloged ownerless Cells on
 demand. An interrupted ownership claim by the same boot session resumes from
 its published root; existing remote owners retain authority. SDK regressions
 release data, account, and credential Cells and read the persisted item again,
-including the claimed-but-not-yet-restored state. This restores availability
-after release; fleet placement and automatic rebalancing remain separate work.
+including the claimed-but-not-yet-restored state. Data/GSI restoration selects
+a destination from signed capacity; account, credential, and coordinator
+restoration retains its existing policy. Proactive rebalancing remains open.
 `tests/peer_network.rs` uses separate mTLS identities on two leased nodes,
 denies a wrong peer principal, and sends signed AWS SDK CreateTable, PutItem,
 and GetItem requests through ExtendDB's public listener and the private peer
@@ -232,8 +238,8 @@ apply and before its receipt. Both Cells restore from object storage.
 Both public endpoints then read the committed item, including a read that
 forwards to the data owner. The replacement refuses data takeover while that
 owner is live, then fences its expired node session after lease renewal stops,
-restores the data Cell from object storage, and reads the item again. Automatic
-placement and fleet-wide unattended takeover remain unfinished.
+restores the data Cell from object storage, and reads the item again. Initial
+fleet placement and unattended takeover remain unfinished.
 
 ## Cell ownership
 
@@ -346,8 +352,9 @@ Recovery reactivates released coordinators; startup resolves shards one at a
 time. A participant admission failure no longer prevents a published decision
 from resolving healthy Cells. Startup continues through the shard's pending
 records but retains errors and fails readiness until recovery completes. Serving
-recovery keeps undecided transactions behind successful admission. General Cell
-placement/activation, bounded transaction/read-image retention, and fleet qualification remain incomplete. Production admits 64
+recovery keeps undecided transactions behind successful admission. Initial fleet
+placement, proactive rebalancing, bounded transaction/read-image retention, and
+fleet qualification remain incomplete. Production admits 64
 active Cells per node; busy coordinators apply retryable backpressure. See
 SCALING.md for the unqualified 10,000-Cell, multi-TB target.
 
