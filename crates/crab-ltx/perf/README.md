@@ -229,7 +229,7 @@ the Cell object store when it publishes an immutable root. Each measured command
 commits one SQLite transaction, captures one LTX cut, and prepares one successor
 root through `CellReplica` over an in-memory `object_store`, which reports the
 objects and bytes a provider would receive. Supply `--endpoint` and the bucket
-arguments below to measure real RustFS requests. Both fresh and sparse modes
+arguments below to measure real RustFS requests. All activation modes
 use the same measured host, deferred capture and exact-cut pruning. The runner
 restores the final root from the provider into a fresh destination and verifies
 every committed payload byte before emitting a report.
@@ -241,9 +241,104 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-ltx-replica-cost" \
   --payload-bytes 4096 --commands 32 --warmup 4
 ```
 
+### Activation histories and the first mutation
+
+`--activation fresh|sparse|hydrated|resumed` selects one writer history. All
+histories start with the same bootstrap SQL, root, deferred capture policy and
+mutation sequence. `--churn-rows` fixes the initial working set. Churn now
+starts at the last row and walks backward; this keeps the first update outside
+the header read-ahead window for sufficiently large databases. Historical
+churn reports walked forward from row one. The old
+`--sparse` switch is removed; unsupported options fail before creating data.
+
+| Mode | Setup before the first measured mutation |
+| --- | --- |
+| `fresh` (default) | Continue the writer that produced the bootstrap root |
+| `sparse` | Close that writer and open a fresh writable VFS from the exact root |
+| `hydrated` | Open the sparse VFS, then fetch and install all inherited pages in batches of at most 64 |
+| `resumed` | Hydrate, persist the drained continuation, close, and reopen on a fresh path with local checksum verification |
+
+Every mode must retain the bootstrap TXID/checksum before it can run a command.
+`activation` records the selected mode, initial database page count/size,
+elapsed setup time and storage observations. Resumed setup includes hydration,
+continuation persistence and reopen; it is not isolated reopen latency.
+`activation.first_command` always retains command zero, even when `--warmup`
+excludes it from the existing steady-state `samples` and percentile summaries.
+Use `--warmup 0` to include every command in those summaries too.
+
+Each command separates `commit_io`, `capture_io`, `preparation_io` and
+`prune_io`; activation and final restore are outside these phase counters.
+These are observed storage operations, outcomes and bytes, not a count of
+provider-internal retry attempts. The timing field `elapsed_us` still measures
+root preparation only. Add commit, capture, preparation and prune durations
+for their measured total; it excludes fixture bookkeeping and is not public
+response latency. Resident mutations can have zero commit/capture origin reads
+while root preparation still reads and writes the provider.
+
+Run each mode in a separate process against a private RustFS bucket, alternating
+mode order between repeats. This example seeds about 32 MiB of payload, then
+updates, deletes and reinserts one 4-KiB row per command:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
+TMPDIR="$HOME/Workspace/crabbuild-target/crab-8bc8/tmp" RUSTC_WRAPPER= \
+  cargo run --release --locked \
+  --manifest-path crates/crab-ltx/perf/replica-cost/Cargo.toml -- \
+  --activation resumed --churn-rows 8192 --random-payload \
+  --payload-bytes 4096 --commands 30 --warmup 3 \
+  --endpoint http://127.0.0.1:44010 --bucket crab-cell-issue-fleet \
+  --access-key crab --secret-key crab
+```
+
+Hold initial page count, payload, command sequence and changed pages constant
+before comparing histories. Check each report's exact provider restore and
+`restored_rows`. This library fixture does not measure actor queues, ownership
+CAS, eviction policy, multi-Cell interference, power-loss durability, or a
+one-vCPU/one-GiB node's capacity.
+
+#### RustFS GA verification (2026-09-27)
+
+Twelve release processes passed: three per history, using the command above
+with alternating mode order. Every initial database had 9,222 pages of 4 KiB,
+every first mutation updated row 8,192, and every final provider restore
+verified all 8,192 expected rows byte for byte. Each run retained 27 commands
+after three warmup commands, plus the first command separately.
+
+| History | First commit ms, min–max | First capture ms, min–max | First commit/capture origin bytes, each run | Later update commit median ms, min–max across runs |
+| --- | ---: | ---: | ---: | ---: |
+| Fresh | 0.457–18.668 | 0.307–2.002 | 0 | 0.526–9.893 |
+| Sparse | 9.009–26.437 | 0.507–0.935 | 507,531 | 1.570–6.754 |
+| Hydrated | 28.691–99.794 | 0.557–0.579 | 0 | 0.824–30.463 |
+| Resumed | 1.260–59.712 | 0.529–0.660 | 0 | 0.614–7.006 |
+
+The deterministic result is that only sparse first mutations fetched inherited
+pages from the provider. Hydrated and resumed writers still incurred local
+SQLite work, and every history still performed provider work to prepare roots.
+These noisy timing ranges do not establish a latency ranking or a performance
+improvement. The benchmark exposed a clean-resume checksum mismatch: opening
+a restored database wrote a synthetic sequence frame that SQLite checkpointed
+on close. The capture-boundary fix and repeated no-write resume regression
+are included with this runner.
+
+The native macOS ARM64 process used Rust 1.98.0 and SQLite 3.49.1. RustFS ran
+in a private 4-vCPU/8-GiB Colima VM, pinned to
+`ghcr.io/rustfs/rustfs:1.0.0-glibc@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858`.
+Provider connections/caches persisted between processes, each process used a
+fresh object prefix, and other host builds could compete for resources. There
+was no separate provider CPU/memory cap. This is library correctness and I/O
+attribution evidence; public-action and independent-host limits remain open.
+
+Retained evidence directory: `activation-histories-ga-20260927` under the
+checkout's external Cargo target. It contains all twelve JSON reports and a
+manifest with source hashes, report hashes, order and timing. Parent revision:
+`58f370537887932dee3ada482b9077cdaccc4c9b`, plus this clean-resume and runner
+change. All recorded source hashes matched the tested files at closeout.
+Binary SHA-256: `e967ff4a8dd9c07597618f8d638bcbb9277b9c77ea2bce28d160ae18599485db`.
+Manifest SHA-256: `536563484e6bf0e366958f4a38ae573623689139c3a83ded4694dd996ab55f23`.
+
 ### Sparse activation baseline (2026-09-25)
 
-Pass `--sparse` to bootstrap a root, close the source writer, and activate a
+Pass `--activation sparse` to bootstrap a root, close the source writer, and activate a
 real sparse writer through `open_root().paged().prepare_writable()` and
 `open_writable()`. This mode uses deferred capture, prepares an immutable
 successor, and prunes its local cut after preparation. It reports SQLite commit,
@@ -292,7 +387,7 @@ are separate from the deferred LTX barrier.
 Retained evidence is under the external per-checkout target's
 `matched-capture-20260926/`: six JSON reports, stderr, source diff, and source
 and binary SHA-256 values. Reproduce each history with a fresh process; add
-`--sparse` for the restored history:
+`--activation sparse` for the restored history:
 
 ```sh
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
@@ -323,7 +418,7 @@ immediately after deletion must also restore that absence. These checks run
 outside measured phases. In append mode, `restored_rows` still equals commands;
 in churn mode, it equals the surviving working set.
 
-Reproduce on an existing isolated RustFS bucket; use `--sparse` for the restored
+Reproduce on an existing isolated RustFS bucket; use `--activation sparse` for the restored
 writer history and a target directory belonging to this checkout:
 
 ```sh
@@ -399,7 +494,7 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
 TMPDIR="$HOME/Workspace/crabbuild-target/crab-8bc8/tmp" \
   cargo run --release --locked \
   --manifest-path crates/crab-ltx/perf/replica-cost/Cargo.toml -- \
-  --sparse --random-payload --payload-bytes 4194304 \
+  --activation sparse --random-payload --payload-bytes 4194304 \
   --max-capture-bytes 1048576 --commands 6 --warmup 1 \
   --endpoint http://127.0.0.1:19010 --bucket crab-cell-issue-fleet \
   --access-key crab --secret-key crab
@@ -445,7 +540,7 @@ Use the preceding command to reproduce the workload.
 
 ### Large sparse checkpoint capture (2026-09-25)
 
-With `--sparse --payload-bytes 4194304 --max-capture-bytes 1048576
+With `--activation sparse --payload-bytes 4194304 --max-capture-bytes 1048576
 --commands 3 --warmup 1`, seven independent release processes measured two
 commands each. Each row below is the p50 / nearest-rank p95 of the seven
 per-process medians, in microseconds. The before and after binaries ran on the
@@ -507,12 +602,12 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-<checkout>" \
   cargo build --release --locked \
   --manifest-path crates/crab-ltx/perf/replica-cost/Cargo.toml
 /usr/bin/time -l "$HOME/Workspace/crabbuild-target/crab-<checkout>/release/crab-ltx-replica-cost" \
-  --sparse --payload-bytes 4096 --commands 12 --warmup 5
+  --activation sparse --payload-bytes 4096 --commands 12 --warmup 5
 ```
 
 Replace the payload with `16384` for the middle row. For 4 MiB, use
 `--payload-bytes 4194304 --max-capture-bytes 1048576 --commands 3 --warmup 1`.
-Omit `--sparse` for fresh rows. The published RustFS loopback measurements
+Use `--activation fresh` (the default) for fresh rows. The published RustFS loopback measurements
 below are provider preparation cost; runtime fleet or exact-root response
 latency needs a separate qualification receipt.
 
@@ -596,7 +691,7 @@ records source-backed optimization candidates and their acceptance gates.
 
 On 2026-09-25, seven independent release processes before (`a7091fd7138`)
 and after (`85a3bf684d3`) the bounded single-PUT change used the same loopback
-RustFS container. Each process ran `--sparse --payload-bytes 4096 --commands 32
+RustFS container. Each process ran `--activation sparse --payload-bytes 4096 --commands 32
 --warmup 4`: 28 measured preparations of the historical periodic payload.
 Values below are the median of the seven per-run statistics, in microseconds:
 
@@ -649,7 +744,7 @@ TMPDIR="$HOME/Workspace/crabbuild-target/crab-8bc8/tmp" \
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-8bc8" \
   cargo run --release --locked --manifest-path \
   crates/crab-ltx/perf/replica-cost/Cargo.toml -- \
-  --sparse --random-payload --payload-bytes 300000 --commands 12 --warmup 4 \
+  --activation sparse --random-payload --payload-bytes 300000 --commands 12 --warmup 4 \
   --endpoint http://127.0.0.1:19010 --bucket crab-cell-issue-fleet \
   --access-key crab --secret-key crab
 ```

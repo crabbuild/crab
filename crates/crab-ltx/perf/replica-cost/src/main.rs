@@ -10,9 +10,11 @@
 //! same workload at an S3-compatible provider such as RustFS. Object and byte
 //! counts are provider independent; only latency changes.
 
+mod activation;
 mod filesystem;
 mod storage;
 
+use activation::Activation;
 use crab_ltx::{CellReplica, CellStorageLayout, Host, Limits};
 use crab_storage::{ObjectStoreCredentials, Store};
 use object_store::{memory::InMemory, path::Path, ObjectStore};
@@ -26,7 +28,7 @@ struct Config {
     payload_bytes: usize,
     commands: usize,
     warmup: usize,
-    sparse: bool,
+    activation: Activation,
     random_payload: bool,
     churn_rows: Option<usize>,
     max_capture_bytes: Option<u64>,
@@ -71,7 +73,20 @@ struct Sample {
     elapsed_us: u64,
     prune_us: u64,
     captured_bytes: u64,
+    commit_io: Vec<storage::BackendCost>,
+    capture_io: Vec<storage::BackendCost>,
     preparation_io: Vec<storage::BackendCost>,
+    prune_io: Vec<storage::BackendCost>,
+}
+
+#[derive(Debug, Serialize)]
+struct ActivationSample {
+    mode: Activation,
+    elapsed_us: u64,
+    io: Vec<storage::BackendCost>,
+    initial_database_pages: u32,
+    initial_page_size: u32,
+    first_command: Sample,
 }
 
 #[derive(Debug, Serialize)]
@@ -79,7 +94,7 @@ struct Report {
     implementation: &'static str,
     store: &'static str,
     object_prefix: String,
-    workload: &'static str,
+    activation: ActivationSample,
     churn_rows: Option<usize>,
     sqlite_version: &'static str,
     payload_bytes: usize,
@@ -155,30 +170,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let first = database.capture()?;
     let bootstrap_capture_us = bootstrap_started.elapsed().as_micros() as u64;
     let bootstrap_parent_sync_us = first.timing.parent_sync_nanos / 1_000;
-    let mut root = Some(replica.prepare(None, &first, 1, 1).await?.root());
+    let initial = first
+        .segments
+        .last()
+        .ok_or("bootstrap capture missing")?
+        .info();
+    let initial_database_pages = initial.database_pages;
+    let initial_page_size = initial.page_size;
+    let initial_root = replica.prepare(None, &first, 1, 1).await?.root();
+    let mut root = Some(initial_root);
     database.prune_captured(&first)?;
     let _bootstrap = replica.take_publication_cost();
 
-    let mut database = if config.sparse {
-        database.close()?;
-        let active = directory.path().join("sparse.sqlite");
-        let writable = replica
-            .open_root(root.as_ref().ok_or("bootstrap root missing")?)
-            .await?
-            .paged()
-            .prepare_writable(&active)
-            .await?;
-        tokio::task::spawn_blocking(move || writable.open_writable(&active)).await??
-    } else {
-        database
-    };
+    let _bootstrap_io = backend.take();
+    let activation_started = Instant::now();
+    let mut database = config
+        .activation
+        .open(&replica, &initial_root, database, directory.path())
+        .await?;
+    let activation_us = activation_started.elapsed().as_micros() as u64;
+    let activation_io = backend.take();
+    if database.position() != first.position {
+        return Err("activation changed the selected root position".into());
+    }
     let _activation_syncs = syncs.take();
 
+    let mut first_command = None;
     let mut samples = Vec::with_capacity(config.commands);
     for command in 0..config.commands {
         let (mutation, row, sql) = match config.churn_rows {
             Some(rows) => {
-                let row = command / 3 % rows + 1;
+                // Start at the tail so activation's header read-ahead cannot
+                // prefetch the first mutation's target in a large working set.
+                let row = rows - command / 3 % rows;
                 match command % 3 {
                     0 => ("update", row, "UPDATE payload SET value = ?2 WHERE id = ?1"),
                     1 => ("delete", row, "DELETE FROM payload WHERE id = ?1"),
@@ -211,6 +235,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("workload must change exactly one row".into());
         }
         let commit_us = commit_started.elapsed().as_micros() as u64;
+        let commit_io = backend.take();
         if mutation == "delete" {
             expected.remove(&row);
         } else {
@@ -222,8 +247,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let batch = database.capture_deferred()?;
         let capture_us = capture_started.elapsed().as_micros() as u64;
         let (checksum_sync_calls, checksum_sync_us) = syncs.take();
-        // Exclude bootstrap, activation, and sparse reads during commit/capture.
-        let _prior_io = backend.take();
+        let capture_io = backend.take();
         let started = Instant::now();
         let prepared = replica
             .prepare(root.as_ref(), &batch, command as u64 + 2, 1)
@@ -235,47 +259,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let started = Instant::now();
         database.prune_captured(&batch)?;
         let prune_us = started.elapsed().as_micros() as u64;
+        let prune_io = backend.take();
+        let sample = Sample {
+            command,
+            mutation,
+            row,
+            live_rows: expected.len(),
+            objects: cost.objects,
+            bytes: cost.bytes,
+            commit_us,
+            capture_us,
+            capture_preparation_us: batch.timing.preparation_nanos / 1_000,
+            capture_schema_check_us: batch.timing.schema_check_nanos / 1_000,
+            capture_wal_existence_us: batch.timing.wal_existence_nanos / 1_000,
+            capture_position_resolution_us: batch.timing.position_resolution_nanos / 1_000,
+            capture_wal_read_us: batch.timing.wal_read_nanos / 1_000,
+            capture_page_collection_us: batch.timing.page_collection_nanos / 1_000,
+            capture_verification_us: batch.timing.verification_nanos / 1_000,
+            capture_encode_us: batch.timing.encode_nanos / 1_000,
+            capture_local_write_us: batch.timing.local_write_nanos / 1_000,
+            capture_fsync_us: batch.timing.fsync_nanos / 1_000,
+            capture_parent_sync_us: batch.timing.parent_sync_nanos / 1_000,
+            capture_checkpoint_us: batch.timing.checkpoint_nanos / 1_000,
+            checkpoint_runs: batch.timing.checkpoint_runs,
+            checkpoint_busy: batch.timing.checkpoint_busy,
+            checkpoint_frames: batch.timing.checkpoint_frames,
+            checkpoint_backfilled: batch.timing.checkpoint_backfilled,
+            checksum_sync_calls,
+            checksum_sync_us,
+            wal_read_bytes: batch.timing.wal_read_bytes,
+            wal_image_bytes: batch.timing.wal_image_bytes,
+            wal_snapshot_reads: batch.timing.wal_snapshot_reads,
+            wal_full_reads: batch.timing.wal_full_reads,
+            elapsed_us: elapsed.as_micros() as u64,
+            prune_us,
+            captured_bytes: batch
+                .segments
+                .iter()
+                .map(|segment| segment.info().size_bytes)
+                .sum(),
+            commit_io,
+            capture_io,
+            preparation_io,
+            prune_io,
+        };
+        if command == 0 {
+            first_command = Some(sample.clone());
+        }
         if command >= config.warmup {
-            samples.push(Sample {
-                command,
-                mutation,
-                row,
-                live_rows: expected.len(),
-                objects: cost.objects,
-                bytes: cost.bytes,
-                commit_us,
-                capture_us,
-                capture_preparation_us: batch.timing.preparation_nanos / 1_000,
-                capture_schema_check_us: batch.timing.schema_check_nanos / 1_000,
-                capture_wal_existence_us: batch.timing.wal_existence_nanos / 1_000,
-                capture_position_resolution_us: batch.timing.position_resolution_nanos / 1_000,
-                capture_wal_read_us: batch.timing.wal_read_nanos / 1_000,
-                capture_page_collection_us: batch.timing.page_collection_nanos / 1_000,
-                capture_verification_us: batch.timing.verification_nanos / 1_000,
-                capture_encode_us: batch.timing.encode_nanos / 1_000,
-                capture_local_write_us: batch.timing.local_write_nanos / 1_000,
-                capture_fsync_us: batch.timing.fsync_nanos / 1_000,
-                capture_parent_sync_us: batch.timing.parent_sync_nanos / 1_000,
-                capture_checkpoint_us: batch.timing.checkpoint_nanos / 1_000,
-                checkpoint_runs: batch.timing.checkpoint_runs,
-                checkpoint_busy: batch.timing.checkpoint_busy,
-                checkpoint_frames: batch.timing.checkpoint_frames,
-                checkpoint_backfilled: batch.timing.checkpoint_backfilled,
-                checksum_sync_calls,
-                checksum_sync_us,
-                wal_read_bytes: batch.timing.wal_read_bytes,
-                wal_image_bytes: batch.timing.wal_image_bytes,
-                wal_snapshot_reads: batch.timing.wal_snapshot_reads,
-                wal_full_reads: batch.timing.wal_full_reads,
-                elapsed_us: elapsed.as_micros() as u64,
-                prune_us,
-                captured_bytes: batch
-                    .segments
-                    .iter()
-                    .map(|segment| segment.info().size_bytes)
-                    .sum(),
-                preparation_io,
-            });
+            samples.push(sample);
         }
     }
     database.close()?;
@@ -313,14 +345,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if samples.is_empty() {
         return Err("at least one measured command is required".into());
     }
+    let activation = ActivationSample {
+        mode: config.activation,
+        elapsed_us: activation_us,
+        io: activation_io,
+        initial_database_pages,
+        initial_page_size,
+        first_command: first_command.ok_or("first command missing")?,
+    };
+    let bootstrap = (bootstrap_capture_us, bootstrap_parent_sync_us);
     let report = summarize(
         config,
         store_label,
         prefix,
         &samples,
-        bootstrap_capture_us,
-        bootstrap_parent_sync_us,
+        bootstrap,
         restored_rows,
+        activation,
     );
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
@@ -394,9 +435,9 @@ fn summarize(
     store: &'static str,
     object_prefix: String,
     samples: &[Sample],
-    bootstrap_capture_us: u64,
-    bootstrap_parent_sync_us: u64,
+    bootstrap: (u64, u64),
     restored_rows: usize,
+    activation: ActivationSample,
 ) -> Report {
     let objects: Vec<u64> = samples.iter().map(|sample| sample.objects).collect();
     let bytes: Vec<u64> = samples.iter().map(|sample| sample.bytes).collect();
@@ -414,11 +455,7 @@ fn summarize(
         store,
         object_prefix,
         sqlite_version: crab_ltx::rusqlite::version(),
-        workload: if config.sparse {
-            "sparse deferred capture"
-        } else {
-            "fresh deferred capture"
-        },
+        activation,
         churn_rows: config.churn_rows,
         payload_bytes: config.payload_bytes,
         payload_pattern: if config.random_payload {
@@ -428,8 +465,8 @@ fn summarize(
         },
         measured_commands: samples.len(),
         restored_rows,
-        bootstrap_capture_us,
-        bootstrap_parent_sync_us,
+        bootstrap_capture_us: bootstrap.0,
+        bootstrap_parent_sync_us: bootstrap.1,
         objects_per_command: total_objects / samples.len() as u64,
         bytes_per_command: total_bytes / samples.len() as u64,
         objects_p95: percentile(&objects, 95),
@@ -474,7 +511,11 @@ impl Config {
         let payload_bytes = option(&args, "--payload-bytes")?.unwrap_or(4096);
         let commands = option(&args, "--commands")?.unwrap_or(64);
         let warmup = option(&args, "--warmup")?.unwrap_or(4);
-        let sparse = args.iter().any(|arg| arg == "--sparse");
+        validate_options(&args)?;
+        let activation = value(&args, "--activation")?
+            .map(|value| value.parse())
+            .transpose()?
+            .unwrap_or_default();
         let random_payload = args.iter().any(|arg| arg == "--random-payload");
         let churn_rows = option(&args, "--churn-rows")?;
         if churn_rows.is_some_and(|rows| !(1..=100_000).contains(&rows)) {
@@ -494,7 +535,7 @@ impl Config {
             payload_bytes,
             commands,
             warmup,
-            sparse,
+            activation,
             random_payload,
             churn_rows,
             max_capture_bytes,
@@ -504,6 +545,31 @@ impl Config {
             secret_key,
         })
     }
+}
+
+fn validate_options(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut args = args.iter();
+    while let Some(option) = args.next() {
+        match option.as_str() {
+            "--random-payload" => {}
+            "--activation"
+            | "--payload-bytes"
+            | "--commands"
+            | "--warmup"
+            | "--churn-rows"
+            | "--max-capture-bytes"
+            | "--endpoint"
+            | "--bucket"
+            | "--access-key"
+            | "--secret-key" => {
+                if args.next().is_none_or(|value| value.starts_with("--")) {
+                    return Err(format!("{option} needs a value").into());
+                }
+            }
+            _ => return Err("unknown option; select writer history with --activation".into()),
+        }
+    }
+    Ok(())
 }
 
 fn value(args: &[String], name: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
