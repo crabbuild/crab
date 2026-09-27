@@ -358,6 +358,15 @@ took 34.830 s in one sample and needs latency investigation. Sustained
 capacity/freshness, many-Cell admission, arrivals during faults and protected
 qualification remain open.
 
+The [activation-expiry follow-up](../crates/crab-cell-app/performance/2026-09-27-reader-expiry.md)
+reproduced a pending hint holding recruitment after its selected boot expired.
+The shared peer client now rechecks that session at its observed expiry while
+preserving the same request across valid renewal. The unchanged constrained
+3/5/10/20-node profile passed; replacement took 10.983 s in one run, versus the
+earlier 34.830 s. Exact generated reads, owner identity and survivor drain
+remained intact. Refresh still took roughly five seconds, and neither sample
+establishes a supported recovery or freshness limit.
+
 The ignored `rustfs_replica_reads_exact_root_and_policy_cas` test also passed
 against a local RustFS bucket with an isolated prefix. It exercised real S3
 root reads, atomic snapshot refresh, fencing after release, and a policy
