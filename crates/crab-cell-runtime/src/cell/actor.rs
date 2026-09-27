@@ -400,7 +400,7 @@ impl CellRuntime {
             incarnation: local.incarnation,
             code: local.code,
             schema: local.schema,
-            catalog: CatalogProof::local(entry),
+            catalog: CatalogProof::local(entry, target),
             inner: self.inner.clone(),
             admission: local.admission,
         }))

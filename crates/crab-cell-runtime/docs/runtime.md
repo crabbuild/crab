@@ -434,6 +434,14 @@ The hysteretic classifier enters shedding at 80 percent on any dimension and ret
 
 ## Drain in ownership order
 
+`CellRuntime::active_cell_targets` returns tenant-scoped identities from the
+actor's verified activation proofs. It includes active owners even if a caller
+cancelled after activation, excludes draining owners, and refuses a fenced node.
+The inventory is bounded by local residency and is advisory: movement still needs
+`idle_transfer_candidates` and the exact-generation `release_idle_cell` preflight.
+Catalog proofs retain their original tenant/application in memory; catalog
+serialization and root formats do not change.
+
 A clean per-Cell drain closes SQLite before releasing control to `Idle`. Releasing control first would allow a successor to open while the previous writer still owns local mutable state.
 
 Node shutdown follows this order:

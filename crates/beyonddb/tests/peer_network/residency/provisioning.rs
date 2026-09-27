@@ -89,6 +89,10 @@ impl Remote {
         self.server.abort();
         let _ = self.server.await;
     }
+
+    pub(super) fn stop_listener(&self) {
+        self.server.abort();
+    }
 }
 
 pub(super) fn sdk_without_retries(fixture: &Fixture) -> aws_sdk_dynamodb::Client {

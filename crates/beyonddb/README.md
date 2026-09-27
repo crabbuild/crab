@@ -43,8 +43,12 @@ existing policies. Placement evaluates heartbeat freshness after fleet discovery
 so storage latency does not make a renewed sample appear to come from the future.
 Initial data, GSI, and split-child provisioning use the same
 signed placement measurements with a separate authenticated provisioning
-capability. Automatic rebalancing remains unfinished; adding a node does not
-move already serving Cells.
+capability. A serving-node loop now uses the runtime's transfer planner to move
+settled data/GSI owners to available capacity. It samples every 15 seconds,
+retains the planner's residence and settlement gates, and releases at most two
+ranges per pass. Account, credential and coordinator Cells retain their existing
+ownership policies. Fleet load and failure qualification remain open; see
+[range movement](SCALING.md#automatic-movement-of-settled-ranges).
 When the local Cell pool is full, request restoration and authenticated range
 admission can release retired base/GSI sources before placement. Current-owner
 account metadata must prove the table generation is deleted, or that the sealed
@@ -141,7 +145,7 @@ capacity for its recovered ranges. While serving, it also discovers expired
 coordinator owners through configured accounts and restores their original
 participants. Data-only-node discovery and general fleet placement still need
 a recovery scheduler.
-Initial fleet placement, proactive rebalancing, unattended takeover, multi-node capacity loops,
+Unattended takeover, distributed recovery scheduling, fleet qualification,
 management APIs, and the remaining DynamoDB operations are still required
 before this is a complete service. A public node with no locally owned account
 or credential Cells can forward signed requests to live owners through mTLS.
@@ -265,7 +269,8 @@ its published root; existing remote owners retain authority. SDK regressions
 release data, account, and credential Cells and read the persisted item again,
 including the claimed-but-not-yet-restored state. Data/GSI restoration selects
 a destination from signed capacity; account, credential, and coordinator
-restoration retains its existing policy. Proactive rebalancing remains open.
+restoration retains its existing policy. The range rebalancer uses the same
+authenticated activation path after generation-fenced source release.
 `tests/peer_network.rs` uses separate mTLS identities on two leased nodes,
 denies a wrong peer principal, and sends signed AWS SDK CreateTable, PutItem,
 and GetItem requests through ExtendDB's public listener and the private peer
@@ -277,8 +282,8 @@ apply and before its receipt. Both Cells restore from object storage.
 Both public endpoints then read the committed item, including a read that
 forwards to the data owner. The replacement refuses data takeover while that
 owner is live, then fences its expired node session after lease renewal stops,
-restores the data Cell from object storage, and reads the item again. Initial
-fleet placement and unattended takeover remain unfinished.
+restores the data Cell from object storage, and reads the item again. General
+unattended takeover and fleet qualification remain unfinished.
 
 ## Cell ownership
 
@@ -411,8 +416,8 @@ Recovery reactivates released coordinators; startup resolves shards one at a
 time. A participant admission failure no longer prevents a published decision
 from resolving healthy Cells. Startup continues through the shard's pending
 records but retains errors and fails readiness until recovery completes. Serving
-recovery keeps undecided transactions behind successful admission. Initial fleet
-placement, proactive rebalancing, bounded transaction/read-image retention, and
+recovery keeps undecided transactions behind successful admission. Distributed
+recovery scheduling, bounded transaction/read-image retention, and
 fleet qualification remain incomplete. Production admits 64
 active Cells per node; busy coordinators apply retryable backpressure. See
 SCALING.md for the unqualified 10,000-Cell, multi-TB target.

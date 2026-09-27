@@ -153,6 +153,16 @@ impl BeyonddbPeers {
         &self.placement.directory
     }
 
+    pub(crate) async fn activate_remote_range(
+        &self,
+        target: &CellTarget,
+        node: crab_cell_runtime::node::NodeAdvertisement,
+    ) -> crab_cell_runtime::Result<()> {
+        self.placement
+            .admit_remote(target, node, peer_receiver::ACTIVATE_ACTION)
+            .await
+    }
+
     pub(crate) async fn provision_local(
         &self,
         target: &CellTarget,

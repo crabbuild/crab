@@ -655,6 +655,16 @@ pub(super) fn handle_message(
                 .collect();
             let _ = reply.send(Ok(entries));
         }
+        Message::ActiveCellTargets { reply } => {
+            let result = node_lease.check().and_then(|()| {
+                cells
+                    .values()
+                    .filter(|active| !active.draining())
+                    .map(|active| active.catalog.target())
+                    .collect()
+            });
+            let _ = reply.send(result);
+        }
         Message::UnreleasedCellCount { reply } => {
             let _ = reply.send(Ok(cells.len().saturating_add(transitioning.len())));
         }
@@ -800,6 +810,9 @@ pub(super) fn reject_fenced_message(message: Message) {
             let _ = reply.send(Err(Error::Fenced));
         }
         Message::ActiveCatalogEntries { reply } => {
+            let _ = reply.send(Err(Error::Fenced));
+        }
+        Message::ActiveCellTargets { reply } => {
             let _ = reply.send(Err(Error::Fenced));
         }
         Message::UnreleasedCellCount { reply } => {

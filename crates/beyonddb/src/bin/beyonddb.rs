@@ -409,6 +409,7 @@ async fn serve_ready(
             directory.clone(),
             config.owned_accounts.clone(),
         )?;
+        provisioner.install_range_rebalance_loop(&tasks)?;
         if !config.owned_accounts.is_empty() {
             let storage = CellStorage::new(client.clone(), config.region.clone());
             let accounts = config.owned_accounts.clone();

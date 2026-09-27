@@ -2192,3 +2192,78 @@ Cell/LTX layout and policy-entry checks pass. The production change adds one
 clock read and two explanatory comment lines, with no new dependencies,
 configuration, wire formats or persistent state. Full process qualification of
 the latest head is still required.
+
+## Automatic movement of settled ranges
+
+The serving binary installs one range-rebalance task per node, including nodes
+without configured account ownership. Every 15 seconds it reads the bounded
+signed fleet directory, evaluates freshness after discovery, and passes settled
+local data/GSI candidates to the runtime's placement planner. Account, credential
+and coordinator ownership are excluded from this movement policy.
+
+The planner retains its measured-resource, stable-sample, 60-second residence,
+weighted ownership balance and projected destination-capacity gates. A pass can
+release at most two Cells, subject to the planner's 8-GiB restore budget. The
+product conservatively budgets each destination for the database/capture limits,
+native/page-cache memory and two job credits; actual receiver admission still
+uses runtime ledgers. Balancing by Cell count requires a complete signed fleet
+view. Subsequent count-based moves wait for samples newer than the last release.
+
+The actor rechecks settlement and the exact local generation before closing the
+source and publishing Idle authority. The selected receiver then handles the
+existing authenticated ACTIVATE request and restores the same root. Table and
+index directory entries do not change, nor do partition epochs or transaction
+participant addresses. A rejected activation leaves a discoverable Idle root;
+an uncertain response may leave the receiver's claim or serving owner instead.
+The existing request/recovery paths handle those authority states. The worker
+never manufactures a replacement root or bootstraps missing authority.
+
+Receiver activation has no reservation or reachability handshake before release.
+An unreachable receiver that continues advertising capacity can therefore delay
+access to a released range. The failure test retires that receiver's session and
+advertisement before the SDK restores the range; it proves retained data and
+recovery after retirement, not uninterrupted availability during a partition.
+
+Maintenance obtains tenant-scoped targets from the runtime's active-owner
+inventory. Catalog proofs now retain tenant/application scope in memory; their
+serialized pages are unchanged. This avoids a product registry that could miss
+an owner between completed activation and cancelled caller bookkeeping. The
+loop keeps only generation/sample evidence for currently active ranges and
+resets settled-sample evidence when a candidate becomes busy. Restart discards
+this advisory evidence and requires a fresh residence window.
+
+| Boundary | Evidence |
+| --- | --- |
+| Entry | `src/bin/beyonddb.rs` installs `install_range_rebalance_loop` after recovery; the host work-task phase cancels it before runtime drain. |
+| Identity owner | Runtime catalog provision, lookup, pinned scan and resident proofs retain tenant/application scope; `active_cell_targets` reads actor-owned proofs and refuses fenced nodes. |
+| Placement | Runtime `PlacementPlanner::{fleet_balance, plan_transfers}`; the same resource and movement policy used by repository serving. |
+| Release | `CellRuntime::release_idle_cell` rechecks generation, persisted work, actor admission and worker close before authoritative release. Local admission serialization covers restoration and reclamation. |
+| Receiver | `RangePlacement::admit_remote` is shared by initial provisioning, cold activation and rebalancing. Capabilities and actual capacity remain receiver-enforced. |
+| Failure | A lost receiver cannot erase the published root. Ordinary resolution reloads authority and either restores Idle state or resumes its claimed owner. |
+| Prior behavior | Current main and `48416adec32` place new/cold ranges but have no automatic range movement worker. |
+| Focused proof | All three signed SDK cases pass in 76.27s: automatic data movement, automatic GSI movement, reads after owner restoration, and recovery after a receiver becomes unreachable. Runtime inventory across two tenants and cancellation after activation passes in 0.36s. |
+
+This is bounded serving-node range movement. The 1,024-node directory limit,
+account metadata sharding, hot-key subdivision, distributed failover scheduling,
+coordinator/history bounds and 10,000-Cell/multi-TB qualification remain open.
+Full binary qualification must also exercise this newly installed worker.
+
+Existing catalog tests pass (11 cases, 3.51s), as do all five exact-release
+regressions (0.76s), including persisted-work refusal and admission races.
+Strict all-target Clippy for BeyondDB and the runtime passes (1.94s).
+The standalone server builds successfully (21.91s).
+Formatting, diff, Cell/LTX layout and policy checks pass; runtime documentation
+validation passes 28 schema/protocol assertions and 240 local links.
+
+This increment adds 286 net production lines. The new worker reuses the runtime
+planner, exact-generation release and authenticated activation rather than
+adding a transfer protocol. Actor-owned scoped identity replaces the need for a
+second product owner registry. No dependencies, persistent formats or
+configuration options change.
+
+[Qualification run 36316016159](https://github.com/crabbuild/crab/actions/runs/36316016159)
+completed successfully on `e2daa9c3bdb`: six capacity unit cases, 23 peer-network
+cases (678.16s), and all three standalone process cases (288.38s). This qualifies
+the graceful node-session retirement fix on that head. It predates the codec,
+discovery-timing and range-rebalance increments and does not qualify those changes
+or establish the cause of the intermittent Scan failure.

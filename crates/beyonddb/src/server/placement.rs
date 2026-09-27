@@ -7,7 +7,7 @@ use crab_cell_runtime::{
     Error, Result,
     fleet::placement::{PlacementObservation, PlacementPlanner},
     identity::{CellTarget, SessionId},
-    node::NodeDirectory,
+    node::{NodeAdvertisement, NodeDirectory},
     peer::{PeerOperation, PeerRoundTrip, PeerSigner, decode_peer_reply, wire},
 };
 
@@ -80,6 +80,16 @@ impl RangePlacement {
                 .find(|node| node.session() == selected.session)
                 .ok_or(Error::Node("selected placement session disappeared"))?
         };
+        self.admit_remote(target, node, action).await?;
+        Ok(false)
+    }
+
+    pub(super) async fn admit_remote(
+        &self,
+        target: &CellTarget,
+        node: NodeAdvertisement,
+        action: &'static str,
+    ) -> Result<()> {
         let now_ms = unix_time_ms()?;
         let expires = now_ms
             .checked_add(60_000)
@@ -114,7 +124,7 @@ impl RangePlacement {
                 Some(wire::read_reply::Result::Description(description))
                     if description.cell_id.as_slice() == target.cell_id().as_bytes()) =>
             {
-                Ok(false)
+                Ok(())
             }
             Some(wire::peer_reply::Outcome::Error(error)) => {
                 tracing::debug!(code = error.code, "remote range admission rejected");

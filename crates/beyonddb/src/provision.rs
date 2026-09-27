@@ -3,6 +3,7 @@
 mod capacity;
 mod global_indexes;
 mod ranges;
+mod rebalance;
 mod residency;
 mod transactions;
 

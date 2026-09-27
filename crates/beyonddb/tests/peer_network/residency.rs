@@ -5,6 +5,7 @@ mod discovery;
 mod index_splits;
 mod placement;
 mod provisioning;
+mod rebalance;
 mod reclamation;
 mod recovery;
 mod splits;

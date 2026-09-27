@@ -421,6 +421,21 @@ impl CellRuntime {
         response.await.map_err(|_| Error::RuntimeClosed)?
     }
 
+    /// Lists tenant-scoped targets of active, non-draining owners for maintenance.
+    ///
+    /// Targets come from verified activation proofs, including owners whose
+    /// callers cancelled after activation. This advisory snapshot cannot authorize release.
+    pub async fn active_cell_targets(&self) -> crate::Result<Vec<crate::identity::CellTarget>> {
+        self.ensure_running()?;
+        let (reply, response) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Message::ActiveCellTargets { reply })
+            .await
+            .map_err(|_| Error::RuntimeClosed)?;
+        response.await.map_err(|_| Error::RuntimeClosed)?
+    }
+
     /// Counts live and transitioning Cells until their release has completed.
     pub async fn unreleased_cell_count(&self) -> crate::Result<usize> {
         self.ensure_running()?;
