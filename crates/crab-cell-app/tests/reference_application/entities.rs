@@ -5,6 +5,8 @@ use crate::*;
 use crab_cell_runtime::peer::{PeerPrincipal, PeerRoundTrip, PeerSigner};
 use std::collections::HashMap;
 
+const ENTITIES_PER_NODE: usize = 4;
+
 pub(crate) struct EntityReferenceApplication;
 
 impl CellApplication for EntityReferenceApplication {
@@ -38,6 +40,86 @@ pub(super) fn compiled_entities() -> Arc<crab_cell_app::CompiledApplication> {
         })
         .unwrap(),
     )
+}
+
+fn entity_key(entity: usize) -> OrderId {
+    OrderId(format!("order-{entity}").into_bytes())
+}
+
+fn entity_target(application: &crab_cell_app::CompiledApplication, entity: usize) -> CellTarget {
+    let partition = application.cell_types()[0]
+        .entity_partition(&entity_key(entity).0)
+        .unwrap();
+    CellTarget::new(
+        TenantId::from_bytes([81; 16]),
+        ApplicationId::from_bytes([82; 16]),
+        SQL_NAMESPACE,
+        &partition,
+    )
+    .unwrap()
+}
+
+async fn provision_entity(
+    host: &crab_cell_host::CellNode,
+    layout: &CellStorageLayout,
+    directory: &std::path::Path,
+    node: usize,
+    entity: usize,
+    endpoint: String,
+) -> CellHandle {
+    let application = host.application();
+    let registry = application.registry();
+    let cell_type = application.cell_types()[0];
+    let target = entity_target(application, entity);
+    let catalog =
+        crab_cell_runtime::cell::catalog::CellCatalog::new(layout.clone(), target.tenant());
+    let proof = catalog
+        .provision(
+            CatalogEntry::new(
+                &target,
+                cell_type.role(),
+                registry.module_code(cell_type.module()).unwrap(),
+                1,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let authority = CellAuthority::new(layout.clone());
+    let incarnation = IncarnationId::from_bytes([u8::try_from(entity + 1).unwrap(); 16]);
+    let observed = authority
+        .create_initial(
+            &proof,
+            incarnation,
+            Owner {
+                session: super::performance_fixture::node_session(node),
+                endpoint,
+            },
+        )
+        .await
+        .unwrap();
+    let replica = CellReplica::new(
+        layout.clone(),
+        *target.cell_id().as_bytes(),
+        *incarnation.as_bytes(),
+        Limits {
+            max_database_bytes: cell_type.database_limit_bytes(),
+            max_capture_bytes: cell_type.capture_limit_bytes(),
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    host.runtime()
+        .bootstrap(
+            proof,
+            replica,
+            authority,
+            observed,
+            directory.join(format!("order-{entity}.sqlite")),
+            super::performance_fixture::install_sql_tables,
+        )
+        .await
+        .unwrap()
 }
 
 fn application_handle<A: CellApplication>(
@@ -180,3 +262,4 @@ fn explicit_sql_and_effect_capabilities_accept_entity_targets() {
 }
 
 mod hosts;
+mod process;

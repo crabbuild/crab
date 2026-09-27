@@ -136,6 +136,7 @@ async fn fleet_process_role() {
             owners.push(std::fs::read_to_string(ready).unwrap().parse().unwrap());
         }
         let routes = owner_routes(tenant, application_id, [owners[0], owners[1], owners[2]]);
+        let routes = Arc::new(std::sync::RwLock::new(routes));
         let server = start_gateway_peer_server(
             listener,
             &registry,
@@ -241,7 +242,7 @@ async fn fleet_process_role() {
     std::fs::write(Path::new(&sync).join(format!("node-{node}.done")), []).unwrap();
 }
 
-fn publish_address(marker: &Path, address: SocketAddr) {
+pub(super) fn publish_address(marker: &Path, address: SocketAddr) {
     let temporary = marker.with_extension("tmp");
     std::fs::write(&temporary, address.to_string()).unwrap();
     std::fs::rename(temporary, marker).unwrap();
@@ -478,4 +479,30 @@ async fn generated_action(fixture: &PerfFixture) {
         before + 1
     );
     println!("PERF generated_action: committed=1 duplicate_deliveries=1 visible_effects=1");
+}
+
+pub(super) struct Controller<'a> {
+    sync: &'a Path,
+    sequence: usize,
+}
+
+impl<'a> Controller<'a> {
+    pub(super) fn new(sync: &'a Path) -> Self {
+        Self { sync, sequence: 0 }
+    }
+
+    pub(super) async fn command(&mut self, action: &str, count: usize) -> Vec<usize> {
+        let path = self.sync.join(format!("fleet-{}.request", self.sequence));
+        let temporary = path.with_extension("tmp");
+        std::fs::write(&temporary, format!("{action} {count}")).unwrap();
+        std::fs::rename(temporary, &path).unwrap();
+        let done = path.with_extension("done");
+        wait_for_marker(&done).await;
+        self.sequence += 1;
+        std::fs::read_to_string(done)
+            .unwrap()
+            .split_whitespace()
+            .map(|node| node.parse().unwrap())
+            .collect()
+    }
 }

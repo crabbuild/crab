@@ -366,12 +366,16 @@ async fn run_public_host_action_performance(fixture: PerfFixture) {
     let gateway_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let gateway_address = gateway_listener.local_addr().unwrap();
     let gateway_stats = Arc::new(GatewayStats::default());
+    let routes = Arc::new(std::sync::RwLock::new(HashMap::from([(
+        fixture.sql_target.cell_id(),
+        owner_address,
+    )])));
     let gateway_server = start_gateway_peer_server(
         gateway_listener,
         &fixture.registry,
         verifier,
         fixture.owned_handles[1].clone(),
-        HashMap::from([(fixture.sql_target.cell_id(), owner_address)]),
+        routes,
         Arc::clone(&gateway_stats),
         None,
     );

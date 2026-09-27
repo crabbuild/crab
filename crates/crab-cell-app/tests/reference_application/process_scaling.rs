@@ -4,7 +4,7 @@ use super::fleet::start_balancer;
 use super::performance::{report_samples, run_reference_primitive_performance};
 use super::performance_fixture::{PerfFixture, identity, node_session, now_ms, rustfs_store};
 use super::process_node::directory;
-use super::process_performance::wait_for_marker;
+use super::process_performance::{Controller, wait_for_marker};
 use super::process_recruitment::{ObservedReads, ready_readers};
 use crate::*;
 use crab_cell_runtime::{
@@ -29,34 +29,12 @@ struct LoadWindow<'a> {
     started: Instant,
 }
 
-struct Controller<'a> {
-    sync: &'a Path,
-    sequence: usize,
-}
-
-impl Controller<'_> {
-    async fn command(&mut self, action: &str, count: usize) -> Vec<usize> {
-        let path = self.sync.join(format!("fleet-{}.request", self.sequence));
-        let temporary = path.with_extension("tmp");
-        std::fs::write(&temporary, format!("{action} {count}")).unwrap();
-        std::fs::rename(temporary, &path).unwrap();
-        let done = path.with_extension("done");
-        wait_for_marker(&done).await;
-        self.sequence += 1;
-        std::fs::read_to_string(done)
-            .unwrap()
-            .split_whitespace()
-            .map(|node| node.parse().unwrap())
-            .collect()
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "Compose controller required: 3/5/10/20 constrained nodes and reader SIGKILL"]
 async fn reference_compose_reader_scaling() {
     let sync = env::var("CRAB_CELL_PERF_PROCESS_SYNC").unwrap();
     let sync = Path::new(&sync);
-    let mut controller = Controller { sync, sequence: 0 };
+    let mut controller = Controller::new(sync);
     let application = Arc::new(compiled());
     let registry = application.registry();
     let layout = CellStorageLayout::new(

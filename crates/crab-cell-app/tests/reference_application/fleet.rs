@@ -3,7 +3,10 @@ use crate::*;
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        RwLock,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -289,7 +292,7 @@ fn dispatcher(
 
 struct Gateway {
     local: HashSet<CellId>,
-    owners: HashMap<CellId, SocketAddr>,
+    owners: Arc<RwLock<HashMap<CellId, SocketAddr>>>,
     stats: Arc<GatewayStats>,
 }
 
@@ -298,7 +301,7 @@ pub(super) fn start_gateway_peer_server(
     registry: &Arc<Registry>,
     verifier: Arc<PeerVerifier>,
     handles: Vec<CellHandle>,
-    owners: HashMap<CellId, SocketAddr>,
+    owners: Arc<RwLock<HashMap<CellId, SocketAddr>>>,
     stats: Arc<GatewayStats>,
     replicas: Option<Readers>,
 ) -> tokio::task::JoinHandle<()> {
@@ -381,6 +384,8 @@ async fn serve_peer(
         Some(gateway) if !replica && !gateway.local.contains(&verified.target().cell_id()) => {
             let address = gateway
                 .owners
+                .read()
+                .unwrap()
                 .get(&verified.target().cell_id())
                 .copied()
                 .ok_or(Error::CellNotActive)?;

@@ -6,7 +6,9 @@ case "${1:-}" in
   scale) role=driver; selected=process_scaling::reference_compose_reader_scaling ;;
   rollout) role=rollout; selected=public_host::rollout::three_node_host_rustfs_additive_code_rollout ;;
   entities) role=entities; selected=entities::hosts::entity_ledgers_are_isolated_across_three_rustfs_hosts ;;
-  *) printf 'usage: run.sh node|driver|scale|rollout|entities\n' >&2; exit 2 ;;
+  entity-node) role="node-${CRAB_CELL_PERF_PROCESS_NODE:?}"; selected=entities::process::entity_process_node ;;
+  entity-scale) role=driver; selected=entities::process::driver::entity_process_scaling ;;
+  *) printf 'usage: run.sh node|driver|scale|rollout|entities|entity-node|entity-scale\n' >&2; exit 2 ;;
 esac
 binary=
 for candidate in /target/release/deps/reference_application-*; do

@@ -27,6 +27,84 @@ The Compose workflow runs this gate as `driver entities`, retaining
 one process and have separate SQLite/cache directories. This is a correctness
 check, not a throughput measurement or the many-Cell 3/5/10/20 process profile.
 
+## Scheduled writable entity processes
+
+After preparing the source archive and Linux binary as described under
+[three constrained Compose nodes](#three-constrained-compose-nodes), run:
+
+```sh
+python3 "$CRAB_REFERENCE_STATE/source/crates/crab-cell-app/qualification/scale.py" \
+  --state "$CRAB_REFERENCE_STATE" --project entity-fleet-unique-run \
+  --workload entities
+```
+
+Every node has four writable entity Cells and a private SQLite/WAL/cache volume.
+The fleet grows from 3 to 5, 10, and 20 constrained containers; its workload grows
+from 12 to 20, 40, and 80 Cells. Existing Cells retain their owners. This measures
+adding owners and workload, not automatic redistribution of a fixed dataset.
+Gateways publish the expanded routing table before each stage starts, and the
+driver independently checks each stored owner, epoch, incarnation, and target.
+
+Each stage runs three shapes at 1, 4, and 16 scheduled actions per node per second,
+with global client concurrency bounded at 4, 16, and 64 respectively. Each point
+offers ten seconds of arrivals, then drains admitted calls. A write action
+includes its receipt-bound readback; a read action queries the current owner.
+Uniform traffic cycles through all Cells. Hot traffic directs 80% of writes to
+one Cell and distributes the rest across the other Cells. Skewed traffic sends
+80% reads to four Cells and distributes 20% writes across the fleet.
+
+The driver records every scheduled arrival, including late starts, client
+saturation, pre-dispatch failures, ambiguous outcomes and resolution, write
+receipts, query receipts, and values. Completed samples flush as they arrive so
+an interrupted run retains partial evidence. The independent Python verifier
+checks exact per-Cell read prefixes and final counts against all acknowledged
+write sequences. It reports service and arrival latency, achieved throughput
+including drain time, and whether each point served every planned arrival.
+An integrity pass does not turn an overloaded point into supported capacity.
+
+`evidence/entity-scaling/control` retains raw TSVs for all 36 points and one-second
+node samples: cgroup CPU/throttling and memory, logical local file bytes, active
+Cells, admitted SQL/primitive/hydration jobs, retained/disk reservations, gateway
+calls, and cumulative object-store operations/bytes. Object counts are logical
+backend operations; provider-internal retries are not counted separately.
+Per-window resource deltas state their actual sample bounds. Admitted job counts
+are not queue-depth measurements. Raw object durability waits are retained per
+node. The current host profile uses object durability and owner reads; it does
+not measure follower durability or sparse replica-query capacity.
+
+Action durations use `Instant`. Resource samples and windows align using the
+shared Linux boot clock from [`/proc/uptime`](https://github.com/torvalds/linux/blob/master/fs/proc/uptime.c),
+whose centisecond precision is sufficient for one-second resource samples.
+Wall timestamps are retained with their observed adjustment, but do not govern
+duration or resource-window validation. Node logs retain runtime warnings,
+including SQL deadlines and the error that causes publication, compaction,
+renewal, or post-commit execution to fence a Cell.
+
+The Compose workflow runs this profile after reader qualification. Its resource
+limits remain 1 CPU/1 GiB per node, while all containers share the recorded Docker
+host. Owner-loss recovery, continuous container/schema rollout, workflow and
+read-model traffic, actual queue depth, repeated capacity runs, and isolated
+multi-host fault domains remain separate qualification gates.
+
+### Qualification status (2026-09-27)
+
+The first Colima/RustFS run used source
+`0d4bc19e1c19e63eb226d68e8bed18361d37fef5`. All nine three-node windows
+completed, including receipt readback and published-root checks for twelve
+Cells. The run then failed during the five-node hot workload at 16 scheduled
+actions per node per second: a mutation for entity 13 remained unresolved and
+its owner's active Cell count fell from four to three. Ten- and twenty-node
+entity stages were not reached. The fencing cause remains unproven.
+
+The same run exposed an independent verifier error: its ten-second duration
+check used wall time during a clock correction. A regression now checks the
+monotonic window while retaining the wall-clock adjustment. Source
+`62e45a44caed99e4ddf9500f4c41a230de9b6f2a` also adds fencing-cause warnings
+and retains RustFS file logs. That source passed 23 native reference tests,
+16 Python verifier tests, strict app/runtime Clippy and the Linux release build.
+Its diagnostic Compose repeat has not been run. These results do not establish
+a passing 3/5/10/20 writable-entity profile or supported throughput limits.
+
 ## Additive application release correctness
 
 The public-host rollout test compiles a successor SQL module with a new typed

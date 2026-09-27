@@ -3,17 +3,15 @@
 use super::super::fleet::{
     GatewayStats, balancer_round_trip, start_balancer, start_gateway_peer_server,
 };
-use super::super::performance_fixture::{install_sql_tables, node_session, now_ms, rustfs_store};
+use super::super::performance_fixture::{node_session, now_ms, rustfs_store};
 use super::super::process_node;
 use super::*;
-use crab_cell_runtime::cell::catalog::CellCatalog;
 use crab_cell_runtime::cell::executor::Resolution;
 use crab_cell_runtime::peer::PeerVerifier;
 use futures_util::future::join_all;
 use tokio::net::TcpListener;
 
 const NODES: usize = 3;
-const ENTITIES_PER_NODE: usize = 4;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn entity_ledgers_are_isolated_across_three_public_hosts() {
@@ -33,7 +31,6 @@ async fn run(store: Store, root: object_store::path::Path) {
     let tenant = TenantId::from_bytes([81; 16]);
     let application_id = ApplicationId::from_bytes([82; 16]);
     let layout = CellStorageLayout::new(store, root, *application_id.as_bytes());
-    let catalog = CellCatalog::new(layout.clone(), tenant);
     let authority = CellAuthority::new(layout.clone());
     let directory = tempfile::TempDir::new().unwrap();
     let node_directories = (0..NODES)
@@ -64,69 +61,22 @@ async fn run(store: Store, root: object_store::path::Path) {
 
     // Provision from the descriptor independently of the generated accessor:
     // otherwise a shared routing error could make both sides agree on one Cell.
-    let cell_type = application.cell_types()[0];
     let mut owned = vec![Vec::new(); NODES];
     let mut targets = Vec::new();
     let mut routes = HashMap::new();
     for entity in 0..NODES * ENTITIES_PER_NODE {
         let node = entity % NODES;
-        let key = format!("order-{entity}");
-        let target = CellTarget::new(
-            tenant,
-            application_id,
-            SQL_NAMESPACE,
-            &cell_type.entity_partition(key.as_bytes()).unwrap(),
+        let target = entity_target(&application, entity);
+        let endpoint = format!("https://{}", addresses[node]);
+        let handle = provision_entity(
+            &nodes[node].0,
+            &layout,
+            &node_directories[node],
+            node,
+            entity,
+            endpoint,
         )
-        .unwrap();
-        let proof = catalog
-            .provision(
-                CatalogEntry::new(
-                    &target,
-                    cell_type.role(),
-                    registry.module_code(cell_type.module()).unwrap(),
-                    1,
-                )
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        let incarnation = IncarnationId::from_bytes([entity as u8 + 1; 16]);
-        let observed = authority
-            .create_initial(
-                &proof,
-                incarnation,
-                Owner {
-                    session: node_session(node),
-                    endpoint: format!("https://{}", addresses[node]),
-                },
-            )
-            .await
-            .unwrap();
-        let replica = CellReplica::new(
-            layout.clone(),
-            *target.cell_id().as_bytes(),
-            *incarnation.as_bytes(),
-            Limits {
-                max_database_bytes: cell_type.database_limit_bytes(),
-                max_capture_bytes: cell_type.capture_limit_bytes(),
-                ..Limits::default()
-            },
-        )
-        .unwrap();
-        let path = node_directories[node].join(format!("order-{entity}.sqlite"));
-        let handle = nodes[node]
-            .0
-            .runtime()
-            .bootstrap(
-                proof,
-                replica,
-                authority.clone(),
-                observed,
-                path,
-                install_sql_tables,
-            )
-            .await
-            .unwrap();
+        .await;
         owned[node].push(handle);
         routes.insert(target.cell_id(), addresses[node]);
         targets.push(target);
@@ -144,6 +94,7 @@ async fn run(store: Store, root: object_store::path::Path) {
     let stats = (0..NODES)
         .map(|_| Arc::new(GatewayStats::default()))
         .collect::<Vec<_>>();
+    let routes = Arc::new(std::sync::RwLock::new(routes));
     let mut servers = Vec::new();
     for (node, listener) in listeners.into_iter().enumerate() {
         servers.push(start_gateway_peer_server(
@@ -188,9 +139,7 @@ async fn run(store: Store, root: object_store::path::Path) {
     let mut receipts = Vec::new();
     for (entity, target) in targets.iter().enumerate() {
         let client = &clients[entity % NODES];
-        let order = client
-            .orders(&OrderId(format!("order-{entity}").into_bytes()))
-            .unwrap();
+        let order = client.orders(&entity_key(entity)).unwrap();
         assert_eq!(order.target(), target);
         let prepared = order
             .prepare_receive_cron(mutation, input.clone())
@@ -209,9 +158,7 @@ async fn run(store: Store, root: object_store::path::Path) {
     // Every host-bound author client must see every entity's independent state.
     for client in &clients {
         for (entity, receipt) in receipts.iter().enumerate() {
-            let order = client
-                .orders(&OrderId(format!("order-{entity}").into_bytes()))
-                .unwrap();
+            let order = client.orders(&entity_key(entity)).unwrap();
             assert_eq!(
                 order
                     .receipt_count(Some(*receipt), ())

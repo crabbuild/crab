@@ -64,6 +64,9 @@ pub(super) fn handle_renewed(
         return;
     }
     active.finish_task(effect_id, CoordinationEffect::Renewal);
+    if let Err(error) = &result {
+        tracing::warn!(cell = ?cell, error = ?error, "Cell renewal fenced its owner");
+    }
     if node_lease.check().is_err() {
         result = Err(Error::Fenced);
     }
