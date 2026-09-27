@@ -12,7 +12,6 @@ use crab_cell_runtime::control::{
     authority::{CellAuthority, VersionedControl},
 };
 use crab_cell_runtime::identity::{CellId, CellTarget};
-use crab_cell_runtime::ltx::Limits;
 use crab_cell_runtime::recovery::manifest::RecoveryManifestStore;
 use crab_ltx::CellReplica;
 use extenddb_storage::error::StorageError;
@@ -80,7 +79,7 @@ impl CellInitialPartitionProvisioner {
             self.layout.clone(),
             *target.cell_id().as_bytes(),
             *observed.value().incarnation.as_bytes(),
-            Limits::default(),
+            self.replica_limits(target)?,
         )?;
         let destination = self
             .activation_destination(target)
@@ -96,7 +95,7 @@ impl CellInitialPartitionProvisioner {
                     replica,
                     authority,
                     observed,
-                    RecoveryManifestStore::new(self.layout.clone(), Limits::default())
+                    RecoveryManifestStore::new(self.layout.clone(), self.replica_limits(target)?)
                         .with_recovery_scratch(self.directory.clone()),
                     destination,
                 )

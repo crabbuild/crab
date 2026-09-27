@@ -98,6 +98,7 @@ impl LocalCellResolver for LocalResolver {
             let module = match target.namespace() {
                 NAMESPACE => MODULE,
                 DATA_NAMESPACE => DATA_MODULE,
+                namespace if namespace == crate::directory::NAMESPACE => crate::directory::MODULE,
                 namespace if namespace == crate::global_index::NAMESPACE => {
                     crate::global_index::MODULE
                 }

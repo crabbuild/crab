@@ -1,9 +1,11 @@
 # BeyondDB metadata ownership
 
-Status: implementation design. The current account Cell still owns the table
-catalog, base/GSI directories and their split plans. This document defines the
-ownership changes required to remove that limit; it does not claim that metadata
-has already been sharded or that 10,000 active Cells have been qualified.
+Status: range-directory protocol implemented; serving-path extraction incomplete.
+The current account Cell still owns the table catalog, base/GSI directories and
+their split plans. The new directory module is compiled and has a tested native
+Cell controller, but public DynamoDB requests do not use it yet. This document
+does not claim that the account metadata limit is removed or that 10,000 active
+Cells have been qualified.
 
 ## Current atomic boundaries
 
@@ -141,3 +143,72 @@ restores the account owner, replays both base and GSI activation and rejects
 changed entries across page boundaries. These are directory entries, not 1,024
 active data Cells; public initial placement remains capped at 256. This is a
 prerequisite cleanup, not implementation of the sharded topology above.
+
+
+## Native range-directory protocol
+
+`src/directory.rs` now registers an entity-scoped directory Cell type. Each node
+stores at most 1,024 compact range records, serves at most 64 records per page,
+and has a 16-MiB database / 4-MiB capture ceiling. A node's table generation,
+identity and interval are immutable. Root and child installation verify contiguous
+coverage, distinct local range identities and nonzero range epochs. An immutable
+installation fingerprint permits a delayed install to acknowledge the original
+copy without overwriting later membership.
+
+`directory/changes.rs` reserves a source and both data/GSI children in one leaf
+before a range transfer. Publication replaces exactly that source and advances
+only that leaf's version. Reservations remain through child opening. A metadata
+split cannot freeze a leaf with an unfinished range plan, so migration cannot
+lose that plan's recovery owner. Independent leaves can publish independently;
+there is no ancestor write for a descendant's data-range change.
+
+`directory/split.rs` freezes an exact leaf version and records deterministic child
+identities, bounds and copy fingerprints. Children install in a non-serving state.
+The controller captures their durable installation receipts before publishing
+child references in the parent. That commit removes the parent's bounded copy;
+its immutable split remains available to finish opening children after restart.
+A former leaf now returns redirects and rejects stale writes. Opening children
+is an authenticated controller operation, like data-range opening: the controller
+must observe parent publication first. A participant command does not perform a
+remote read of the parent.
+
+`provision/directory.rs::split_directory` resumes frozen, partially copied and
+published splits. It restores published children from existing authority and
+never creates an empty child behind an already-published branch. A later split
+of a child uses the same protocol without rewriting its ancestors. The current
+depth ceiling is 127; adversarial depth/rebalancing qualification remains open.
+This is a bounded primitive, not a literal unlimited-capacity promise.
+
+Provisioning now constructs replica limits from the compiled Cell type instead
+of assuming every type uses 512/64 MiB. Initial bootstrap, idle restoration and
+expired-owner restoration use the same declared limits. Existing account, data,
+index, coordinator and credential declarations retain their existing ceilings.
+The directory namespace is accepted by the signed peer scope and local resolver;
+fleet placement and discovery integration still remain.
+
+### Evidence and remaining integration
+
+`tests/elastic_cells/directory_tree.rs` runs the native client through the real
+Cell app, host, SQL runtime and object-store recovery. It installs 1,024 route
+entries, rejects a full-leaf reservation and a corrupt child copy, then replaces
+the owner before any child copy, after one copy, and after parent publication.
+The controller restores every case. Tests also check stale-parent writes,
+leaf-version conflicts, reservations blocking metadata movement, independent
+child writers, install replay after mutation, recursive splitting and an unchanged
+ancestor. These are metadata entries, not 1,024 active data owners. Focused test:
+passed in 2.60 seconds. This is native protocol proof, not DynamoDB SDK cutover.
+
+Public creation/routing, data and GSI split controllers, deletion, statistics,
+TTL/projection traversal, distributed residency, and background discovery still
+use account-owned directories. They must switch together with generation/lifecycle
+fences; the new tree must not become a second authoritative copy. Ordered table
+catalog splitting remains separate work. Retained native command receipts also
+still need general history retirement. No account-limit or fleet-scale claim is
+justified until those integration gates pass.
+
+
+The sibling transactional-read cleanup/restart regression also passed (5.05 s)
+with the compiled-limit provisioning path, covering existing 512-MiB account,
+data and coordinator types alongside the directory test's 16-MiB nodes. Strict
+all-target Clippy passed. The new native directory regression is included in the
+SDK/process CI workflow; this protocol revision still needs that CI run.

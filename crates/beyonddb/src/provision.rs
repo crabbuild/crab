@@ -1,6 +1,7 @@
 //! Initial table data Cell admission through the existing Cell runtime.
 
 mod capacity;
+mod directory;
 mod global_indexes;
 mod ranges;
 mod rebalance;
@@ -485,6 +486,45 @@ impl CellInitialPartitionProvisioner {
             .await
     }
 
+    /// Admit a directory root or child whose creation is authorized by durable metadata.
+    pub async fn admit_directory(
+        &self,
+        account_id: &str,
+        spec: &crate::DirectorySpec,
+    ) -> Result<CellHandle, StorageError> {
+        let target = crate::directory_target(account_id, spec).map_err(provision_error)?;
+        self.admit_module(
+            &target,
+            crate::directory::MODULE,
+            crate::initialize_directory,
+        )
+        .await
+    }
+
+    /// Restore an existing directory without creating missing authority or an empty node.
+    pub async fn admit_existing_directory(
+        &self,
+        account_id: &str,
+        spec: &crate::DirectorySpec,
+    ) -> Result<CellHandle, StorageError> {
+        let target = crate::directory_target(account_id, spec).map_err(provision_error)?;
+        let proof = self.cataloged(&target, crate::directory::MODULE).await?;
+        let observed = CellAuthority::new(self.layout.clone())
+            .load(target.cell_id())
+            .await
+            .map_err(provision_error)?;
+        if observed
+            .as_ref()
+            .is_none_or(|record| record.value().root.is_none())
+        {
+            return Err(StorageError::Transient(
+                "published directory root is missing".into(),
+            ));
+        }
+        self.admit_initialized(&target, proof, crate::initialize_directory)
+            .await
+    }
+
     /// Reacquire one cataloged data range after its prior owner released it.
     ///
     /// The caller must first select this node as the new owner from the
@@ -560,7 +600,7 @@ impl CellInitialPartitionProvisioner {
             self.layout.clone(),
             *target.cell_id().as_bytes(),
             *observed.value().incarnation.as_bytes(),
-            Limits::default(),
+            self.replica_limits(target).map_err(provision_error)?,
         )
         .map_err(|error| StorageError::Transient(error.to_string()))?;
         let destination = self.activation_destination(target)?;
@@ -589,8 +629,11 @@ impl CellInitialPartitionProvisioner {
                     authority,
                     observed,
                     takeover,
-                    RecoveryManifestStore::new(self.layout.clone(), Limits::default())
-                        .with_recovery_scratch(self.directory.clone()),
+                    RecoveryManifestStore::new(
+                        self.layout.clone(),
+                        self.replica_limits(target).map_err(provision_error)?,
+                    )
+                    .with_recovery_scratch(self.directory.clone()),
                     destination,
                     owner,
                 )
@@ -599,6 +642,20 @@ impl CellInitialPartitionProvisioner {
         .map_err(provision_error)?;
         self.track_coordinator(target)?;
         Ok(handle)
+    }
+
+    fn replica_limits(&self, target: &CellTarget) -> crab_cell_runtime::Result<Limits> {
+        let cell_type = self
+            .application
+            .cell_types()
+            .iter()
+            .find(|cell_type| cell_type.namespace() == target.namespace())
+            .ok_or(CellError::Registry("Cell namespace is not compiled"))?;
+        Ok(Limits {
+            max_database_bytes: cell_type.database_limit_bytes(),
+            max_capture_bytes: cell_type.capture_limit_bytes(),
+            ..Limits::default()
+        })
     }
 
     fn activation_destination(&self, target: &CellTarget) -> Result<PathBuf, StorageError> {
@@ -738,7 +795,7 @@ impl CellInitialPartitionProvisioner {
             self.layout.clone(),
             *target.cell_id().as_bytes(),
             *observed.value().incarnation.as_bytes(),
-            Limits::default(),
+            self.replica_limits(target).map_err(provision_error)?,
         )
         .map_err(|error| StorageError::Transient(error.to_string()))?;
         let destination = self.activation_destination(target)?;

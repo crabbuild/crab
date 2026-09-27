@@ -4,6 +4,7 @@ mod authorization;
 mod backend;
 mod catalog;
 mod credentials;
+mod directory;
 mod expression_wire;
 mod global_index;
 mod item_storage;
@@ -23,6 +24,7 @@ mod transaction_payload;
 mod transaction_token;
 mod transaction_transport;
 mod ttl;
+pub use directory::*;
 
 pub use expression_wire::WireCondition;
 pub use global_index::*;
@@ -192,6 +194,7 @@ impl CellApplication for Beyonddb {
 
     fn register(builder: &mut ApplicationBuilder) -> Result<()> {
         builder.register(AccountModule)?;
+        builder.register(directory::DirectoryModule)?;
         builder.register(partition::DataModule)?;
         builder.register(global_index::GlobalIndexModule)?;
         builder.register(transaction_coordinator::CoordinatorModule)?;
@@ -201,6 +204,7 @@ impl CellApplication for Beyonddb {
                 .with_limits(512 * 1024 * 1024, 64 * 1024 * 1024)?,
         )?;
         builder.cell_type(data_cell_type()?)?;
+        builder.cell_type(directory::cell_type()?)?;
         builder.cell_type(global_index::cell_type()?)?;
         builder.cell_type(transaction_coordinator::cell_type()?)?;
         builder.cell_type(credentials::cell_type()?)

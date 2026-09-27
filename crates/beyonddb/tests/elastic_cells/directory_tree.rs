@@ -1,0 +1,377 @@
+use super::global_indexes::{ACCOUNT, mutation, owner};
+use crate::*;
+use beyonddb::{
+    BeginDirectoryChange, DirectoryChange, DirectoryCopyReceipt, DirectoryInstall, DirectoryMode,
+    DirectoryPage, DirectoryPageInput, DirectorySpec, DirectorySplitPublication,
+    FinishDirectoryChange, FreezeDirectory, InstallDirectory, PublishDirectoryChange,
+    PublishDirectorySplit, ReadDirectory, ReadDirectoryPage, directory_target,
+};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn directory_tree_fences_copy_cutover_and_stale_leaf_writers() {
+    for installed_children in 0..=2 {
+        interrupted_split(installed_children).await;
+    }
+}
+
+async fn interrupted_split(installed_children: usize) {
+    let application = Arc::new(
+        Beyonddb::compile(BuildDescriptor {
+            source_revision: "directory-tree".into(),
+            cargo_lock_digest: Digest::from_bytes([1; 32]),
+        })
+        .unwrap(),
+    );
+    let account = account_target(ACCOUNT).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let layout = CellStorageLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        object_store::path::Path::from("directory-tree"),
+        *account.application().as_bytes(),
+    );
+    let (host, provisioner, client, _) = owner(
+        &application,
+        &layout,
+        SessionId::from_bytes([86; 16]),
+        &directory.path().join("first"),
+    );
+    let mut table = [0; 32];
+    table[..16].copy_from_slice(account.tenant().as_bytes());
+    let root = DirectorySpec {
+        table_id: blake3::Hash::from_bytes(table).to_hex().to_string(),
+        node_id: [0; 16],
+        lower: [0; 16],
+        upper: None,
+        depth: 0,
+    };
+    let target = directory_target(ACCOUNT, &root).unwrap();
+    assert!(
+        provisioner
+            .admit_existing_directory(ACCOUNT, &root)
+            .await
+            .is_err()
+    );
+    provisioner.admit_directory(ACCOUNT, &root).await.unwrap();
+    let width = u128::MAX / 1024;
+    let ranges: Vec<_> = (0_u128..1024)
+        .map(|position| beyonddb::RoutePagePartition {
+            partition_id: position.to_be_bytes(),
+            lower: (position * width).to_be_bytes(),
+            upper: (position < 1023).then(|| ((position + 1) * width).to_be_bytes()),
+            epoch: 1,
+        })
+        .collect();
+    client
+        .command::<InstallDirectory>(
+            &target,
+            mutation(),
+            Json(DirectoryInstall {
+                spec: root.clone(),
+                ranges: ranges.clone(),
+                source: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let page = client
+        .query::<ReadDirectoryPage>(
+            &target,
+            None,
+            Json(DirectoryPageInput {
+                hash: [0; 16],
+                expected_version: Some(1),
+            }),
+        )
+        .await
+        .unwrap()
+        .output
+        .0;
+    assert!(matches!(page,DirectoryPage::Leaf {ranges, ..} if ranges.len()==64));
+    let plan = change(&ranges[0], 9000);
+    assert!(
+        matches!(
+            client
+                .command::<BeginDirectoryChange>(&target, mutation(), Json(plan.clone()))
+                .await,
+            Err(InvocationError::Rejected(_))
+        ),
+        "a full leaf must split before accepting another range reservation"
+    );
+    let split = client
+        .command::<FreezeDirectory>(&target, mutation(), Json(1))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    assert!(matches!(
+        client
+            .command::<BeginDirectoryChange>(&target, mutation(), Json(plan.clone()))
+            .await,
+        Err(InvocationError::Rejected(_))
+    ));
+    let mut copies = Vec::new();
+    let mut receipts = Vec::new();
+    for (index, spec) in split.children.iter().enumerate() {
+        let child = directory_target(ACCOUNT, spec).unwrap();
+        let rows = ranges[index * 512..(index + 1) * 512].to_vec();
+        copies.push((child.clone(), rows.clone()));
+        if index >= installed_children {
+            continue;
+        }
+        provisioner.admit_directory(ACCOUNT, spec).await.unwrap();
+        let mut corrupt = rows.clone();
+        corrupt[4].partition_id = [200; 16];
+        assert!(matches!(
+            client
+                .command::<InstallDirectory>(
+                    &child,
+                    mutation(),
+                    Json(DirectoryInstall {
+                        spec: spec.clone(),
+                        ranges: corrupt,
+                        source: Some(split.clone()),
+                    })
+                )
+                .await,
+            Err(InvocationError::Rejected(_))
+        ));
+        let installed = client
+            .command::<InstallDirectory>(
+                &child,
+                mutation(),
+                Json(DirectoryInstall {
+                    spec: spec.clone(),
+                    ranges: rows.clone(),
+                    source: Some(split.clone()),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            client
+                .query::<ReadDirectoryPage>(
+                    &child,
+                    None,
+                    Json(DirectoryPageInput {
+                        hash: spec.lower,
+                        expected_version: None
+                    })
+                )
+                .await
+                .unwrap()
+                .output
+                .0,
+            DirectoryPage::Unavailable
+        );
+        receipts.push(DirectoryCopyReceipt {
+            cell_id: *child.cell_id().as_bytes(),
+            sequence: installed.receipt.commit_sequence,
+            fingerprint: split.fingerprints[index],
+        });
+    }
+    if installed_children == 2 {
+        client
+            .command::<PublishDirectorySplit>(
+                &target,
+                mutation(),
+                Json(DirectorySplitPublication {
+                    split: split.clone(),
+                    receipts: receipts.try_into().unwrap(),
+                }),
+            )
+            .await
+            .unwrap();
+    }
+    host.shutdown().await.unwrap();
+    // A new owner discovers the children from the durable parent after cutover;
+    // copies remain closed until recovery completes their opening protocol.
+    let (host, provisioner, client, _) = owner(
+        &application,
+        &layout,
+        SessionId::from_bytes([87; 16]),
+        &directory.path().join("restored"),
+    );
+    provisioner
+        .admit_existing_directory(ACCOUNT, &root)
+        .await
+        .unwrap();
+    let restored = client
+        .query::<ReadDirectory>(&target, None, Json(()))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    assert_eq!(
+        restored.mode,
+        if installed_children == 2 {
+            DirectoryMode::Branch(split.clone())
+        } else {
+            DirectoryMode::Frozen(split.clone())
+        }
+    );
+    assert_eq!(
+        provisioner
+            .split_directory(&client, ACCOUNT, &root)
+            .await
+            .unwrap(),
+        split
+    );
+    let state = client
+        .query::<ReadDirectory>(&target, None, Json(()))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    assert_eq!(
+        client
+            .query::<ReadDirectoryPage>(
+                &target,
+                None,
+                Json(DirectoryPageInput {
+                    hash: [0; 16],
+                    expected_version: Some(1)
+                })
+            )
+            .await
+            .unwrap()
+            .output
+            .0,
+        DirectoryPage::Redirect(split.children.clone())
+    );
+    assert!(matches!(
+        client
+            .command::<PublishDirectoryChange>(&target, mutation(), Json(plan))
+            .await,
+        Err(InvocationError::Rejected(_))
+    ));
+    // Different metadata leaves now accept independent changes; the parent
+    // version is unchanged and no account metadata writer participates.
+    let plans = [change(&copies[0].1[0], 9100), change(&copies[1].1[0], 9200)];
+    let (left, right) = tokio::join!(
+        client.command::<BeginDirectoryChange>(&copies[0].0, mutation(), Json(plans[0].clone())),
+        client.command::<BeginDirectoryChange>(&copies[1].0, mutation(), Json(plans[1].clone()))
+    );
+    left.unwrap();
+    right.unwrap();
+    for (index, plan) in plans.iter().enumerate() {
+        let child = &copies[index].0;
+        assert!(
+            matches!(
+                client
+                    .command::<FreezeDirectory>(child, mutation(), Json(1))
+                    .await,
+                Err(InvocationError::Rejected(_))
+            ),
+            "pending data split must keep its recovery owner"
+        );
+        client
+            .command::<PublishDirectoryChange>(child, mutation(), Json(plan.clone()))
+            .await
+            .unwrap();
+        client
+            .command::<FinishDirectoryChange>(child, mutation(), Json(plan.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            client
+                .query::<ReadDirectoryPage>(
+                    child,
+                    None,
+                    Json(DirectoryPageInput {
+                        hash: plan.source.lower,
+                        expected_version: Some(1)
+                    })
+                )
+                .await
+                .unwrap()
+                .output
+                .0,
+            DirectoryPage::Changed
+        );
+        let page = client
+            .query::<ReadDirectoryPage>(
+                child,
+                None,
+                Json(DirectoryPageInput {
+                    hash: plan.children[1].lower,
+                    expected_version: Some(2),
+                }),
+            )
+            .await
+            .unwrap()
+            .output
+            .0;
+        assert!(matches!(page,DirectoryPage::Leaf {ranges, ..} if ranges[0]==plan.children[1]));
+    }
+    // A replayed install after writes must acknowledge the original copy without
+    // rolling membership back. Its immutable birth digest authenticates replay.
+    client
+        .command::<InstallDirectory>(
+            &copies[0].0,
+            mutation(),
+            Json(DirectoryInstall {
+                spec: split.children[0].clone(),
+                ranges: copies[0].1.clone(),
+                source: Some(split.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+    let replayed = client
+        .query::<ReadDirectory>(&copies[0].0, None, Json(()))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    assert_eq!(replayed.version, 2);
+    let grandchildren = provisioner
+        .split_directory(&client, ACCOUNT, &split.children[0])
+        .await
+        .unwrap();
+    assert_eq!(grandchildren.children[0].depth, 2);
+    assert_eq!(
+        provisioner
+            .split_directory(&client, ACCOUNT, &split.children[0])
+            .await
+            .unwrap(),
+        grandchildren
+    );
+    assert_eq!(
+        client
+            .query::<ReadDirectory>(&target, None, Json(()))
+            .await
+            .unwrap()
+            .output
+            .0
+            .unwrap(),
+        state
+    );
+    host.shutdown().await.unwrap();
+}
+
+fn change(source: &beyonddb::RoutePagePartition, id: u128) -> DirectoryChange {
+    let lower = u128::from_be_bytes(source.lower);
+    let upper = source.upper.map(u128::from_be_bytes).unwrap_or(u128::MAX);
+    let boundary = (lower + (upper - lower) / 2).to_be_bytes();
+    DirectoryChange {
+        source: source.clone(),
+        children: [
+            beyonddb::RoutePagePartition {
+                partition_id: id.to_be_bytes(),
+                lower: source.lower,
+                upper: Some(boundary),
+                epoch: source.epoch + 1,
+            },
+            beyonddb::RoutePagePartition {
+                partition_id: (id + 1).to_be_bytes(),
+                lower: boundary,
+                upper: source.upper,
+                epoch: source.epoch + 1,
+            },
+        ],
+    }
+}
