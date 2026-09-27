@@ -2375,7 +2375,9 @@ Clippy, layout, policy-entry, documentation, YAML parsing, and diff checks pass.
 
 The peer fixture now separates simulated process loss from graceful shutdown:
 crash drops renewal without writing a tombstone, preserving expiry-based
-takeover. Its long peer recovery scenario is still being verified. Current-main
-architecture checks independently fail on the catalog-head marker and the
+takeover. Its signed SDK peer recovery scenario passes in 256.76 seconds,
+including changed peer addresses, abandoned transaction recovery, and restored
+index reads. The host lease-maintenance ordering regression also passes.
+Current-main architecture checks independently fail on the catalog-head marker and the
 BeyondDB dev-dependency inventory; this change does not edit either inventory
 or weaken the checks. Linux CI and the remaining fleet gates are still open.
