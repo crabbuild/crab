@@ -68,11 +68,14 @@ struct TcpRoundTrip(Arc<HashMap<CellId, SocketAddr>>);
 
 struct BalancerRoundTrip(SocketAddr);
 
-pub(super) struct BalancerStats([AtomicUsize; 3]);
+pub(super) struct BalancerStats(Vec<AtomicUsize>);
 
 impl BalancerStats {
-    pub(super) fn counts(&self) -> [usize; 3] {
-        std::array::from_fn(|node| self.0[node].load(Ordering::Relaxed))
+    pub(super) fn counts(&self) -> Vec<usize> {
+        self.0
+            .iter()
+            .map(|count| count.load(Ordering::Relaxed))
+            .collect()
     }
 }
 
@@ -126,19 +129,24 @@ impl PeerRoundTrip for BalancerRoundTrip {
 }
 
 pub(super) async fn start_balancer(
-    nodes: [SocketAddr; 3],
+    nodes: impl Into<Vec<SocketAddr>>,
 ) -> (SocketAddr, tokio::task::JoinHandle<()>, Arc<BalancerStats>) {
+    let nodes = nodes.into();
+    assert!(!nodes.is_empty());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let stats = Arc::new(BalancerStats(std::array::from_fn(|_| AtomicUsize::new(0))));
+    let stats = Arc::new(BalancerStats(
+        nodes.iter().map(|_| AtomicUsize::new(0)).collect(),
+    ));
     let counts = Arc::clone(&stats);
     let next = Arc::new(AtomicUsize::new(0));
     let server = tokio::spawn(async move {
         while let Ok((socket, _)) = listener.accept().await {
             let node = next.fetch_add(1, Ordering::Relaxed) % nodes.len();
+            let entry = nodes[node];
             counts.0[node].fetch_add(1, Ordering::Relaxed);
             tokio::spawn(async move {
-                let _ = serve_balancer(socket, nodes[node]).await;
+                let _ = serve_balancer(socket, entry).await;
             });
         }
     });

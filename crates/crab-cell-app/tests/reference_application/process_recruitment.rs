@@ -10,7 +10,7 @@ use crab_cell_runtime::{
     read_policy::ReadPolicyStore,
 };
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env,
     net::SocketAddr,
     path::Path,
@@ -19,7 +19,9 @@ use std::{
     time::Duration,
 };
 
-struct ObservedReads(Arc<Mutex<HashSet<crab_cell_runtime::SessionId>>>);
+pub(super) struct ObservedReads(
+    pub(super) Arc<Mutex<HashMap<crab_cell_runtime::SessionId, usize>>>,
+);
 
 impl PeerRoundTrip for ObservedReads {
     fn send(
@@ -51,7 +53,7 @@ impl PeerRoundTrip for ObservedReads {
             if matches!(decode_peer_reply(&reply)?.outcome, Some(wire::peer_reply::Outcome::Read(read))
                 if matches!(read.result, Some(wire::read_reply::Result::CommandOutput(_))))
             {
-                observed.lock().unwrap().insert(session);
+                *observed.lock().unwrap().entry(session).or_default() += 1;
             }
             Ok(reply)
         })
@@ -83,11 +85,12 @@ async fn spawn(node: usize, root: &str, sync: &Path) -> (ChildGuard, SocketAddr)
     (child, address)
 }
 
-async fn ready_readers(
+pub(super) async fn ready_readers(
     router: &ReplicaReadRouter,
     peer: &ReplicaPeerClient,
     target: &CellTarget,
     minimum: Receipt,
+    desired: usize,
     excluded: Option<crab_cell_runtime::SessionId>,
 ) -> HashSet<crab_cell_runtime::SessionId> {
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -105,14 +108,14 @@ async fn ready_readers(
                     ready.insert(session);
                 }
             }
-            if ready.len() == 2 {
+            if ready.len() == desired {
                 return ready;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
     .await
-    .expect("owner did not automatically recruit two current readers")
+    .expect("owner did not automatically recruit the desired current readers")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -173,7 +176,7 @@ async fn owner_replaces_killed_reader_through_public_hosts() {
         .receipt_count(Some(written.receipt), ())
         .await
         .unwrap();
-    let observed = Arc::new(Mutex::new(HashSet::new()));
+    let observed = Arc::new(Mutex::new(HashMap::new()));
     let peer = ReplicaPeerClient::new(
         Arc::clone(&fixture.registry),
         Arc::new(PeerSigner::new(
@@ -208,7 +211,7 @@ async fn owner_replaces_killed_reader_through_public_hosts() {
         .create(target.cell_id(), before.value().incarnation, 2)
         .await
         .unwrap();
-    let initial = ready_readers(&router, &peer, target, written.receipt, None).await;
+    let initial = ready_readers(&router, &peer, target, written.receipt, 2, None).await;
     assert_eq!(initial, HashSet::from([node_session(1), node_session(2)]));
     let (expected, selected) = router.selected(target).await.unwrap();
     assert!(
@@ -234,7 +237,15 @@ async fn owner_replaces_killed_reader_through_public_hosts() {
             expected_output
         );
     }
-    assert_eq!(*observed.lock().unwrap(), initial);
+    assert_eq!(
+        observed
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect::<HashSet<_>>(),
+        initial
+    );
 
     for node in 3..5 {
         let (child, _) = spawn(node, &root, sync.path()).await;
@@ -248,7 +259,7 @@ async fn owner_replaces_killed_reader_through_public_hosts() {
             .len(),
         5
     );
-    let selected = ready_readers(&router, &peer, target, written.receipt, None).await;
+    let selected = ready_readers(&router, &peer, target, written.receipt, 2, None).await;
     let lost = *selected
         .iter()
         .min_by_key(|session| *session.as_bytes())
@@ -258,7 +269,7 @@ async fn owner_replaces_killed_reader_through_public_hosts() {
     let exit = children[lost_node].0.wait().unwrap();
     assert!(!exit.success(), "reader fault did not kill the process");
     let started = std::time::Instant::now();
-    let replacement = ready_readers(&router, &peer, target, written.receipt, Some(lost)).await;
+    let replacement = ready_readers(&router, &peer, target, written.receipt, 2, Some(lost)).await;
     let recovery_ms = started.elapsed().as_millis();
     assert!(
         replacement
@@ -275,7 +286,15 @@ async fn owner_replaces_killed_reader_through_public_hosts() {
             expected_output
         );
     }
-    assert_eq!(*observed.lock().unwrap(), replacement);
+    assert_eq!(
+        observed
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect::<HashSet<_>>(),
+        replacement
+    );
     let after = authority.load(target.cell_id()).await.unwrap().unwrap();
     assert_eq!(after.value().owner, before.value().owner);
     assert_eq!(after.value().epoch, before.value().epoch);
