@@ -1278,8 +1278,12 @@ lease to expire, and reads both changed items through the remaining node.
 The final residency run passes all four SDK cases in 26.22 seconds, including
 existing local restoration and released-participant transaction regressions.
 Strict all-target BeyondDB Clippy passes in 32.54 seconds; format, layout,
-policy-entry, and diff checks pass. These are local macOS results; current-head
-Linux qualification remains pending. No fleet-scale throughput is claimed.
+policy-entry, and diff checks pass. These were local macOS results; Linux qualification subsequently passed at
+`24d46a6b2a4` in [run 36296894016](https://github.com/crabbuild/crab/actions/runs/36296894016).
+That run passed six capacity tests, five signed peer SDK tests (575.88 seconds),
+and all three standalone process tests (293.97 seconds), including measured
+Linux placement publication and fresh process-loss recovery. It predates the
+routed capacity-controller change below. No fleet-scale throughput is claimed.
 
 
 ### Splitting ranges after remote placement
